@@ -1,0 +1,29 @@
+[package]
+name = "genzo-raw"
+description = "GenzoParis の RAW 展開（LibRaw の FFI）と、展開結果の型"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# LibRaw の FFI を有効にする（システムの LibRaw を pkg-config で探す）。
+libraw = []
+
+[dependencies]
+genzo-model.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+pkg-config.workspace = true
+
+[lints]
+workspace = true

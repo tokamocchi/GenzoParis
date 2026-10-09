@@ -1,0 +1,19 @@
+[package]
+name = "genzo-pipeline"
+description = "GenzoParis の現像パイプライン（処理ステージと CPU 基準実装、段階 A0〜C、タイル処理）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+genzo-model.workspace = true
+genzo-color.workspace = true
+genzo-raw.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "genzo-gpu"
+description = "GenzoParis の現像パイプラインの GPU 版（wgpu・WGSL）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+genzo-pipeline.workspace = true
+genzo-model.workspace = true
+genzo-color.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

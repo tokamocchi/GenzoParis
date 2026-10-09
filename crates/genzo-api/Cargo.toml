@@ -1,0 +1,37 @@
+[package]
+name = "genzo-api"
+description = "GenzoParis のコア API（コマンド・イベント）と各サービス"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# ワーカー経由の LibRaw による RAW の展開を有効にする。LibRaw の関数を呼ぶのはワーカープロセスだけ
+# （04 の 1.2 節）。
+# 注意: Cargo の機能フラグは同じビルドの中で共通になるため、これを有効にすると、本体の実行ファイルが
+# 使う genzo-raw でも libraw が有効になる（OS とリンカーによっては、本体の実行ファイルも LibRaw の
+# 共有ライブラリに依存しうる）。本体に LibRaw を入れない構成は、LibRaw の FFI の作業で確認する。
+libraw = ["genzo-worker/libraw"]
+
+[dependencies]
+genzo-model.workspace = true
+genzo-catalog.workspace = true
+genzo-pipeline.workspace = true
+genzo-gpu.workspace = true
+genzo-jobs.workspace = true
+genzo-worker.workspace = true
+genzo-media.workspace = true
+genzo-color.workspace = true
+genzo-raw.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+trash.workspace = true
+blake3.workspace = true
+
+[lints]
+workspace = true

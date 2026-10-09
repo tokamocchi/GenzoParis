@@ -1,0 +1,12 @@
+# Cargo のビルド出力
+/target
+
+# rustfmt のバックアップ
+**/*.rs.bk
+
+# エディタ・OS が作るファイル
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

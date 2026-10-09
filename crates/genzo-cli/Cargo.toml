@@ -1,0 +1,30 @@
+[package]
+name = "genzo-cli"
+description = "GenzoParis の検証用 CLI（登録・検索・現像・書き出し・計測。ORG-05）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# LibRaw による RAW の展開を有効にする。
+libraw = ["genzo-worker/libraw", "genzo-api/libraw"]
+
+[[bin]]
+name = "genzo"
+path = "src/main.rs"
+
+[dependencies]
+genzo-api.workspace = true
+genzo-worker.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

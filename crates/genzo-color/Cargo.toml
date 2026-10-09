@@ -1,0 +1,16 @@
+[package]
+name = "genzo-color"
+description = "GenzoParis の色空間・行列・伝達関数・色差と、lcms2 による ICC・3D LUT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+lcms2.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
