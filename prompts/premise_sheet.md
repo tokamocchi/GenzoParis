@@ -11,7 +11,7 @@
 - 配布形態: 限られたメンバーへの配布（インストーラーで配布できれば十分。ストア配布は不要）
 - ライセンス方針: OSS として公開する。GPL のライブラリも使用可
 - 対象 OS: Windows 11 / macOS（Apple Silicon）。Linux・Intel Mac・Windows 10 は対象外
-- 開発者の PC: Windows 11（メモリ 32GB、RTX 3080）／ M1 Mac（2021 年頃購入）
+- 開発者の PC: Windows 11（メモリ 32GB、RTX 3080 VRAM 10GB）／ M1 Mac（2021 年頃購入、メモリ 16GB）
 - 想定ライブラリ規模: 1 人あたり写真 10万〜50万枚（動画を含む）
 - 主な撮影機材 / ファイル形式:
   - 写真: Sony α7 IV（約 33MP）、α7C（約 24MP）／ ARW
