@@ -147,7 +147,9 @@ impl ExifData {
     ///
     /// 補正後の UTC を、推定に使ったオフセットの現地時刻にして書く。オフセット
     /// （OffsetTimeOriginal）は、ファイルに記録されていたか、ユーザーが設定した場合だけ書く
-    /// （既定のタイムゾーンで推定しただけのオフセットは、事実として書かない）。
+    /// （既定のタイムゾーンで推定しただけのオフセットは、事実として書かない）。UTC の印（`Z`）だけが
+    /// 記録されていた場合（`tz_source = utc_only`）は、撮影した瞬間（UTC）は分かっているので、表示の
+    /// オフセット（既定のタイムゾーン）と、その現地時刻を書く（日時とオフセットの組で UTC を正しく表す）。
     /// 日時が分からなければ、撮影日時を書かない。
     pub fn with_capture_time(mut self, ct: &CaptureTime) -> Self {
         match ct.local() {
@@ -957,6 +959,22 @@ mod tests {
         let data = ExifData::default().with_capture_time(&ct);
         assert!(data.datetime_original.is_some());
         assert_eq!(data.offset_time_original, None);
+        // UTC の印（Z）だけなら、表示のオフセット（既定のタイムゾーン）とその現地時刻を書く（No.32）。
+        let utc_only = CaptureInfo {
+            datetime: Some("2024-05-01T03:34:56Z".to_owned()),
+            offset: None,
+        };
+        let ct =
+            CaptureTime::from_capture_info(&utc_only, FixedOffset::east_opt(9 * 3600).unwrap());
+        assert_eq!(ct.tz_source, TzSource::UtcOnly);
+        let data = ExifData::default().with_capture_time(&ct);
+        assert_eq!(
+            data.datetime_original,
+            NaiveDate::from_ymd_opt(2024, 5, 1)
+                .unwrap()
+                .and_hms_opt(12, 34, 56)
+        );
+        assert_eq!(data.offset_time_original, FixedOffset::east_opt(9 * 3600));
         // 日時が分からなければ書かない。
         let data = ExifData::from_photo_metadata(&meta).with_capture_time(&CaptureTime::unknown());
         assert_eq!(data.datetime_original, None);

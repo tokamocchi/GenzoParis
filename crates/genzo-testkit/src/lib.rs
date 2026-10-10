@@ -16,8 +16,9 @@
 //! | [`env`](mod@env) | 計測の環境の情報（OS・CPU・ビルドの設定・GPU・ライブラリ） | 05 の 1.8 節「環境」 |
 //! | [`stats`] | 平均・パーセンタイル（最近接順位法）の定義 | 05 の 1.8 節「報告する値」 |
 //! | [`record`] | 入力の ID とハッシュ、使った現像設定の記録、ファイルの安全な書き込み | 05 の 1.8 節「入力」 |
-//! | [`resample`] | 比較のための縮小（面積平均。IQ-07b の仮の基準） | 02 の IQ-07b、レビュー R-02 |
+//! | [`resample`] | 比較のための縮小（面積平均。IQ-07b の基準: プレビューの各画素が覆う範囲の面積平均 `downscale_footprints`。人の判断の表 No.8） | 02 の IQ-07b、レビュー R-02 |
 //! | [`preview`] | 確認用の PNG（16bit の画像、差分画像） | — |
+//! | [`private_samples`] | 実機のサンプル（私的な写真の RAW。リポジトリに入れない）の回帰テストの部品: 環境変数・ハッシュでの照合・期待値の形とプライバシーの検査・端の帯の指標 | 02 の MAINT-03 |
 //!
 //! # 例: 合成画像を基準画像と比べる
 //!
@@ -54,6 +55,7 @@ pub mod env;
 pub mod golden;
 pub mod image;
 pub mod preview;
+pub mod private_samples;
 pub mod record;
 pub mod resample;
 pub mod stats;

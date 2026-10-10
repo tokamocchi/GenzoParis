@@ -132,6 +132,8 @@ pub fn mosaic_with_clip_counts(
         data: Vec::new(),
         black_level: params.black_level,
         white_level: params.white_level,
+        saturation_level: params.white_level,
+        default_crop: None,
         as_shot_wb: params.wb,
         cam_xyz: params.cam_xyz,
         metadata,
