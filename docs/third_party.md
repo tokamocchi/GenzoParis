@@ -68,10 +68,10 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - Ubuntu の `libraw.so.23` は、lcms2・libjpeg・libgomp（OpenMP）に動的リンクしています（`ldd` で確認）。Homebrew の LibRaw の依存と、Windows で使う LibRaw のビルドの設定（OpenMP や lcms2 を使うか）を記録してください。同梱する場合は、これらの依存ライブラリも台帳に追加します。
   - LibRaw とアプリ（`genzo-color`）の両方が lcms2 を使うため、ワーカーのプロセスに 2 つの版の lcms2 が入る可能性があります（3.2 節）。シンボルの衝突や、どちらの版が使われるかを PoC-2 で確認してください。
   - Windows / macOS の配布物に LibRaw を同梱する場合、LGPL の条件（利用者がライブラリを差し替えられること、対応するソースの提供）を満たす方法を決めてください。
-  - **本体の実行ファイルに LibRaw が入るか。** Cargo の機能フラグは同じビルドの中で共通になるため、`genzo-cli/libraw` を有効にすると本体の実行ファイル（`genzo`）が使う `genzo-raw` でも `libraw` が有効になります。LibRaw の関数を呼ぶのはワーカーだけですが、OS とリンカーによっては本体の実行ファイルも LibRaw の共有ライブラリに依存する可能性があります。配布物の構成と LGPL の条件に関わります。
-    - Linux（Ubuntu 24.04）: `--features genzo-cli/libraw` でビルドした `genzo` と `genzo-worker`（どちらも現時点では LibRaw の関数を呼ばない）が `libraw_r.so` に依存しないことを、`ldd` で確認しました（2026-10-10）。Linux では rustc（と Ubuntu の gcc）がリンカーに `--as-needed` を渡し、使わない共有ライブラリを記録しないためと考えています。
-    - macOS: ld64 は既定では、指定したライブラリ（dylib）を使われなくても実行ファイルに記録するとされるため、本体も LibRaw に依存する可能性があります（未確認）。`otool -L` で確認し、必要なら本体の crate のリンクの引数に `-Wl,-dead_strip_dylibs` を加えることを検討してください。
-    - Windows: 未確認（LibRaw の入手方法が未定）。
+  - **本体の実行ファイルに LibRaw が入るか。** CLI の `genzo` は、自分自身を `genzo __worker` で起動してワーカーを兼ねる構成（`genzo-api` の `WorkerLaunch::current_exe`。ワーカーの実行ファイルを別に配布しない）になったため、`libraw` を有効にした `genzo` は LibRaw の共有ライブラリに依存します。LibRaw の関数を呼ぶのはワーカーとして動くプロセスだけですが、本体として動くプロセスにも LibRaw（と、その依存ライブラリ）が読み込まれます。配布物の構成と LGPL の条件に関わります。
+    - Linux（Ubuntu 24.04）: `--features genzo-cli/libraw` でビルドした `genzo` が `libraw_r.so.23` に依存することを、`ldd` で確認しました（2026-10-10、第 3 波の統合の確認）。以前の記録（同日、第 1 波の時点で `genzo` と `genzo-worker` が依存しない）は、どちらもまだ LibRaw の関数を呼んでいなかったときのものです。
+    - 本体を LibRaw に依存させない場合は、ワーカーを別の実行ファイル（`genzo-worker`。`genzo-api` の `WorkerLaunch::Executable`）にする必要があります。UI のアプリでどちらにするかは未定です（[implementation_status](implementation_status.md) の「人の判断・確認が必要な事項」の No.4）。
+    - macOS・Windows: 未確認（Windows は LibRaw の入手方法が未定）。
   - **スレッドセーフな版（`libraw_r`）を使うこと。** autotools でビルドした `libraw`（`_r` なし）は `LIBRAW_NOTHREADS` 付きで、展開の関数が静的変数を使うため、別のインスタンスでも並行して展開するとデータが壊れます。`genzo-raw` は `libraw_r` が見つからず `libraw` にリンクする場合、ビルド時に警告を出し、LibRaw の使用をプロセスの中で 1 つずつに制限します（`crates/genzo-raw/build.rs`）。Windows の LibRaw（`Makefile.msvc` のビルド）は `LIBRAW_NOTHREADS` を使わないとみなしていますが、未確認です。
 - **CI**: macOS では Homebrew の `libraw` を入れて、機能フラグ `libraw` を有効にしたビルドとテスト（合成 DNG を LibRaw で展開するテストを含む）も実行します。Windows の CI は LibRaw なしの構成だけです。
 

@@ -2,7 +2,7 @@
 
 Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカタログ管理を行う、Windows / macOS 向けのデスクトップアプリです。
 
-現在は開発の初期段階です（コアの crate を実装中。アプリとしてはまだ使えません）。進捗は [docs/implementation_status.md](docs/implementation_status.md) にあります。
+現在は開発の初期段階です。コアの crate（現像エンジン・カタログ・ワーカー・コア API）と検証用の CLI（`genzo`）を実装しましたが、UI はまだなく、アプリとしてはまだ使えません。Windows / macOS の実機での確認と PoC の計測もこれからです。進捗は [docs/implementation_status.md](docs/implementation_status.md) にあります。
 
 ## 設計資料
 
@@ -17,6 +17,9 @@ Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカ�
 | [docs/06_design_review.md](docs/06_design_review.md) | 設計レビュー |
 | [docs/07_review_response.md](docs/07_review_response.md) | 設計レビューへの対応 |
 | [docs/decision_log.md](docs/decision_log.md) | 決定事項ログ |
+| [docs/implementation_status.md](docs/implementation_status.md) | 実装の進め方と進捗、人の判断・確認が必要な事項 |
+| [docs/third_party.md](docs/third_party.md) | 第三者のコード・データ・同梱物の台帳 |
+| [docs/poc/README.md](docs/poc/README.md) | PoC の記録（計測と記録のルール、PoC-1〜7 の記録欄） |
 
 ## 開発
 
@@ -47,7 +50,26 @@ cargo test --workspace --features genzo-cli/libraw
 
 `genzo-cli/libraw` を指定すると、`genzo-api`・`genzo-worker`・`genzo-raw` の `libraw` も有効になります。LibRaw は pkg-config で `libraw_r` を探し、なければ `libraw` を使います（`libraw` はスレッドセーフでないため、LibRaw の使用をプロセスの中で 1 つずつに制限します）。
 
-Cargo の機能フラグは同じビルドの中で共通になるため、`libraw` を有効にすると、本体の実行ファイル（`genzo`）が使う `genzo-raw` でも `libraw` が有効になります。Linux では本体の実行ファイルが LibRaw の共有ライブラリに依存しないことを確認しましたが、macOS・Windows は未確認です（[docs/third_party.md](docs/third_party.md) の 3.1 節）。
+CLI の `genzo` は、自分自身を `genzo __worker` で起動してワーカーを兼ねます（ワーカーの実行ファイルを別に配布しない）。そのため、`libraw` を有効にした `genzo` は LibRaw の共有ライブラリに依存します（Linux の `ldd` で確認）。LibRaw の関数を呼ぶのは、ワーカーとして動くプロセスだけです。配布物の構成とライセンスの扱いは未定です（[docs/third_party.md](docs/third_party.md) の 3.1 節、[docs/implementation_status.md](docs/implementation_status.md) の「人の判断・確認が必要な事項」の No.4）。
+
+### CLI（`genzo`）
+
+検証用の CLI です（ORG-05。UI なしで登録・検索・現像・書き出し・計測を行う）。結果は表か `--json`、進捗と警告は標準エラー、終了コードは 0（成功）・1（エラー）・2（使い方の誤り）です。詳しくは `genzo --help` と `crates/genzo-cli/src/lib.rs` の doc を見てください。
+
+```sh
+export GENZO_CATALOG=/path/to/catalog.db      # または --catalog
+cargo run -p genzo-cli -- catalog init
+cargo run -p genzo-cli -- import ~/Pictures/2024-05-01
+cargo run -p genzo-cli -- search --min-rating 3 --json
+echo '{"exposure_ev": 0.5}' | cargo run -p genzo-cli -- develop set 12 --json -
+cargo run -p genzo-cli -- export 12 --out ./out --long-edge 2048 --remove-gps
+cargo run -p genzo-cli --features libraw -- render DSC00001.ARW --out out.tif   # カタログなしで 1 枚（RAW は LibRaw が必要）
+cargo run --release -p genzo-cli -- bench preview --synthetic 7008x4672 --out bench-results
+```
+
+- `--json` のときは、失敗（使い方の誤りを含む）も標準出力に `{"error": {"kind": ...}}` の JSON で出します。
+- Windows: 現像設定の JSON は、引数に直接書かずにファイル（`--json settings.json`）で渡すことをおすすめします（PowerShell・cmd.exe では引用符の扱いが違うため）。ファイルは UTF-8（BOM 付きも可）か BOM 付きの UTF-16 で読めます。PowerShell で `--json` の出力を受け取るときに日本語が化ける場合は、`[Console]::OutputEncoding = [Text.Encoding]::UTF8` を先に実行してください（出力は UTF-8）。
+- `bench` は release ビルドで実行してください（debug ビルドの時間は記録に「debug」と残り、参考値になります）。
 
 ### 依存ライブラリのライセンスと脆弱性の確認
 
