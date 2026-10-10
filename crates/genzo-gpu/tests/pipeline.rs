@@ -149,6 +149,30 @@ fn preview_of_a_working_image_matches_the_cpu_version() {
 }
 
 #[test]
+fn preview_of_a_raw_with_default_crop_matches_the_cpu_version() {
+    let g = gpu_or_skip!();
+    let engine = engine(90, 64);
+    let source = raw_source_with_id(
+        raw_with_crop_and_plateau(&camera_scene(180, 124), CfaPattern::RGGB),
+        101,
+    );
+    let mut s = rotated_strong();
+    custom_wb(&mut s, 5200.0, -6.0);
+    for quality in [RenderQuality::Final, RenderQuality::Draft] {
+        let p = compare_preview(
+            g,
+            &engine,
+            &source,
+            &s,
+            quality,
+            90,
+            OutputTarget::Export(OutputColorSpace::Srgb),
+        );
+        assert_eq!(p.quality, quality);
+    }
+}
+
+#[test]
 fn preview_of_a_raw_matches_the_cpu_version_in_both_qualities() {
     let g = gpu_or_skip!();
     let engine = engine(90, 64);
@@ -176,10 +200,18 @@ fn draft_a1_on_the_gpu_matches_the_cpu_version() {
     let g = gpu_or_skip!();
     // 奇数の寸法（2 × 2 の格子で最後の列・行を使わない）、4 つの CFA の並び、縮小あり・なし。
     for (w, h, long_edge) in [(67u32, 51u32, 24u32), (64, 48, 64), (90, 61, 40)] {
-        for cfa in CfaPattern::ALL {
+        for (cfa, crop) in CfaPattern::ALL
+            .into_iter()
+            .flat_map(|c| [(c, false), (c, true)])
+        {
             // エンジンの A1 のキャッシュのキーは元ファイルの ID なので、RAW ごとにエンジンを作る。
             let engine = engine(64, 64);
-            let raw = raw_from(&camera_scene(w, h), cfa, true);
+            // 既定の切り抜き・閾値が白レベルより低い飽和の閾値（A-2・A-3）のある RAW も比べる。
+            let raw = if crop {
+                raw_with_crop_and_plateau(&camera_scene(w, h), cfa)
+            } else {
+                raw_from(&camera_scene(w, h), cfa, true)
+            };
             let source = raw_source(raw);
             let mut s = DevelopSettings::default();
             custom_wb(&mut s, 3800.0, 4.0);
@@ -196,6 +228,8 @@ fn draft_a1_on_the_gpu_matches_the_cpu_version() {
             assert_eq!(gpu.sensor_extent, cpu.sensor_extent);
             assert_eq!(gpu.sensor_size, cpu.sensor_size);
             assert_eq!(gpu.orientation, cpu.orientation);
+            assert_eq!(gpu.default_crop, cpu.default_crop);
+            assert_eq!(gpu.frames(), cpu.frames());
             assert_eq!(gpu.quality, RenderQuality::Draft);
             assert_eq!(gpu.warnings, cpu.warnings);
             let r = compare_pixels(cpu.image.data(), gpu.image.data(), A1_TOLERANCE);
@@ -287,7 +321,10 @@ fn stages_without_a_gpu_version_run_on_the_cpu() {
         &["finish.tone", "finish.color"][..],
         &["finish.geometry", "finish.tone_curve"][..],
     ] {
-        let ctx = genzo_gpu::GpuContext::from_env().unwrap().unwrap();
+        let ctx =
+            genzo_gpu::GpuContext::new(&genzo_gpu::GpuContextOptions::from_env_allowing_software())
+                .unwrap()
+                .unwrap();
         let mut registry = GpuStageRegistry::builtin();
         for id in cpu_only {
             registry = registry.without(id);
@@ -423,6 +460,12 @@ fn export_matches_the_cpu_version() {
     let sources = [
         working_source(scene_b2(150, 100), Orientation::Rotate180),
         raw_source(raw_from(&camera_scene(140, 96), CfaPattern::BGGR, true)),
+        // 既定の切り抜き・向き 8・閾値が白レベルより低い飽和の閾値（A-2・A-3）。エンジンのキャッシュの
+        // キーは元ファイルの ID なので、上の RAW と別の ID にする。
+        raw_source_with_id(
+            raw_with_crop_and_plateau(&camera_scene(140, 96), CfaPattern::GRBG),
+            102,
+        ),
     ];
     let exports = [
         ExportSettings::default(),
@@ -573,13 +616,19 @@ fn export_falls_back_to_the_cpu_version() {
     let opts = ExportOptions::default();
     let cpu =
         export_with_fallback(None, &engine, &source, &s, &export, &opts, &NeverCancel).unwrap();
-    assert_eq!(cpu.backend, ExportBackend::Cpu { gpu_error: None });
+    assert_eq!(
+        cpu.backend,
+        ExportBackend::Cpu {
+            gpu_error: None,
+            gpu_failure: false
+        }
+    );
     let gpu =
         export_with_fallback(Some(g), &engine, &source, &s, &export, &opts, &NeverCancel).unwrap();
     assert_eq!(gpu.backend, ExportBackend::Gpu);
     assert!(export_diff_8bit(&cpu.image.pixels, &gpu.image.pixels) <= FINAL_OUTPUT_MAX_DIFF_8BIT);
     // デバイスを失った GPU（6.3 節）: CPU 版で書き出し、理由を返す。
-    let lost = GpuRenderer::from_env().unwrap().unwrap();
+    let lost = common::renderer().unwrap().unwrap();
     lost.context().destroy();
     assert!(lost.context().is_lost());
     let out = export_with_fallback(
@@ -593,7 +642,10 @@ fn export_falls_back_to_the_cpu_version() {
     )
     .unwrap();
     match &out.backend {
-        ExportBackend::Cpu { gpu_error: Some(e) } => assert!(e.contains("失われ"), "{e}"),
+        ExportBackend::Cpu {
+            gpu_error: Some(e),
+            gpu_failure: true,
+        } => assert!(e.contains("失われ"), "{e}"),
         b => panic!("{b:?}"),
     }
     assert_eq!(out.image.pixels, cpu.image.pixels);
@@ -602,7 +654,7 @@ fn export_falls_back_to_the_cpu_version() {
 #[test]
 fn a_lost_device_returns_errors_instead_of_panicking() {
     let _ = gpu_or_skip!();
-    let r = GpuRenderer::from_env().unwrap().unwrap();
+    let r = common::renderer().unwrap().unwrap();
     let engine = engine(40, 64);
     let source = working_source(scene_b2(40, 30), Orientation::Normal);
     let s = strong_settings();
@@ -641,7 +693,7 @@ fn display_profiles_with_unknown_matrices_run_on_the_cpu() {
     // 17a: 行列のわからないモニターの色域は CPU 版で処理し（混在）、プロファイルを登録すれば GPU 版で
     // 処理する。
     let _ = gpu_or_skip!();
-    let r = GpuRenderer::from_env().unwrap().unwrap();
+    let r = common::renderer().unwrap().unwrap();
     let engine = engine(64, 64);
     let source = working_source(scene_b2(64, 48), Orientation::Normal);
     let s = strong_settings();

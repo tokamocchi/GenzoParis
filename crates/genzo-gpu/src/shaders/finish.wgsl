@@ -1,7 +1,7 @@
 // 段階 C の画素ごとのステージ（docs/04_architecture.md の 2.1 節のステージ 10・11・13・15・16）。
 // 式と演算の順序は genzo-pipeline の finish の各モジュールの doc と同じ。
 //
-// binding 4（aux）: ステージ 11 はガイド（G 座標の log2 の輝度。行優先）、ステージ 16 は 1D LUT の表。
+// binding 4（aux）: ステージ 11 はガイド（G 座標の log2 の輝度。行優先）、ステージ 15・16 は 1D LUT の表。
 
 @group(0) @binding(4) var<storage, read> aux: array<f32>;
 
@@ -24,15 +24,27 @@ fn contrast_log2(gamma: f32, l: f32) -> f32 {
     return min(LOG2_MIDDLE_GRAY + gamma * (l - LOG2_MIDDLE_GRAY), LOG2_CEILING);
 }
 
+// ContrastParams::apply: 輝度の倍率 r と、色の成分の倍率 k（中間グレーより暗い部分は
+// CONTRAST_CHROMA_GAIN_MAX まで）。k = r なら RGB × r、それ以外は Y·r + k·(RGB − Y)。
 @compute @workgroup_size(8, 8)
 fn contrast_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!in_output(gid)) {
         return;
     }
     let c = load_global(out_global(gid));
-    let l = safe_log2(luminance(c));
+    let y = luminance(c);
+    let l = safe_log2(y);
     let r = exp2(contrast_log2(pf(P_GAMMA), l) - l);
-    store_out(gid, sanitize3(vec3<f32>(c.x * r, c.y * r, c.z * r)));
+    var k = r;
+    if (y < MIDDLE_GRAY) {
+        k = min(r, CONTRAST_CHROMA_GAIN_MAX);
+    }
+    if (k == r) {
+        store_out(gid, sanitize3(vec3<f32>(c.x * r, c.y * r, c.z * r)));
+        return;
+    }
+    let y2 = y * r;
+    store_out(gid, sanitize3(vec3<f32>(y2 + k * (c.x - y), y2 + k * (c.y - y), y2 + k * (c.z - y))));
 }
 
 // ---------------------------------------------------------------------------
@@ -152,30 +164,32 @@ fn color_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ---------------------------------------------------------------------------
 // ステージ 15: シーン → ディスプレイ（finish::scene_to_display）
+// P_S2D_MODE = 1: RAW（輝度のカーブ。対数の軸の 1D LUT を aux の表 0 で引く。2^-16 より暗い輝度は
+// 一定の比率 P_S2D_FLOOR_RATIO）。0: RAW 以外（恒等。輝度 1 を超える画素だけ 1 にする）。
 // ---------------------------------------------------------------------------
-
-fn s2d_curve(y: f32, k: f32) -> f32 {
-    if (y <= k) {
-        return y;
-    }
-    let t = min((y - k) / (1.0 - k), S2D_T_MAX);
-    return k + (1.0 - k) * (t / (1.0 + t));
-}
 
 @compute @workgroup_size(8, 8)
 fn scene_to_display_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!in_output(gid)) {
         return;
     }
-    let knee = pf(P_KNEE);
     var c = load_global(out_global(gid));
     let y = luminance(c);
     var y2 = y;
-    if (y > knee) {
-        y2 = s2d_curve(y, knee);
-        let r = y2 / y;
-        c = vec3<f32>(c.x * r, c.y * r, c.z * r);
+    var r = 1.0;
+    if (pu(P_S2D_MODE) == 1u) {
+        if (y >= LOG_FLOOR) {
+            y2 = lut_eval(0u, log2(y));
+            r = y2 / y;
+        } else {
+            r = pf(P_S2D_FLOOR_RATIO);
+            y2 = y * r;
+        }
+    } else if (y > 1.0) {
+        y2 = 1.0;
+        r = 1.0 / y;
     }
+    c = vec3<f32>(c.x * r, c.y * r, c.z * r);
     let m = max(max(c.x, c.y), c.z);
     if (m > 1.0) {
         let s = (1.0 - y2) / (m - y2);

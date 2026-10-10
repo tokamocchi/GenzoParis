@@ -78,6 +78,23 @@ impl GpuError {
     pub fn is_cancelled(&self) -> bool {
         matches!(self, GpuError::Pipeline(PipelineError::Cancelled))
     }
+
+    /// GPU 版で扱えない入力・設定か（[`GpuError::TooLarge`]・[`GpuError::Unsupported`]）。CPU 版で処理すれば
+    /// よく、GPU が壊れたわけではない。
+    pub fn is_unsupported_input(&self) -> bool {
+        matches!(
+            self,
+            GpuError::TooLarge { .. } | GpuError::Unsupported { .. }
+        )
+    }
+
+    /// GPU の失敗として数えるか（6.3 節「失敗が続く場合は CPU 版に切り替え」の回数。決定 No.26）。
+    ///
+    /// CPU 版で処理し直す失敗（[`Self::should_fall_back_to_cpu`]）のうち、GPU 版で扱えない入力・設定
+    /// （[`Self::is_unsupported_input`]）は数えない（大きな画像を開くたびに GPU を使わなくなるのを避ける）。
+    pub fn counts_as_gpu_failure(&self) -> bool {
+        self.should_fall_back_to_cpu() && !self.is_unsupported_input()
+    }
 }
 
 impl From<wgpu::Error> for GpuError {
@@ -110,6 +127,23 @@ mod tests {
         let cancelled = GpuError::from(PipelineError::Cancelled);
         assert!(cancelled.is_cancelled());
         assert!(!cancelled.should_fall_back_to_cpu());
+        // GPU の失敗として数えるか（決定 No.26）: 扱えない入力（TooLarge・Unsupported）は数えない。
+        assert!(GpuError::DeviceLost("x".into()).counts_as_gpu_failure());
+        assert!(GpuError::Timeout(Duration::from_secs(1)).counts_as_gpu_failure());
+        assert!(GpuError::OutOfMemory("x".into()).counts_as_gpu_failure());
+        assert!(GpuError::Validation("x".into()).counts_as_gpu_failure());
+        let too_large = GpuError::TooLarge {
+            what: "画像".into(),
+            bytes: 10,
+            limit: 5,
+        };
+        assert!(too_large.is_unsupported_input() && !too_large.counts_as_gpu_failure());
+        let unsupported = GpuError::Unsupported {
+            stage: "output.display",
+            reason: "行列".into(),
+        };
+        assert!(unsupported.is_unsupported_input() && !unsupported.counts_as_gpu_failure());
+        assert!(!cancelled.counts_as_gpu_failure());
         assert!(!GpuError::Validation("v".into()).is_device_lost());
         // 表示は日本語。
         let msg = GpuError::Unsupported {

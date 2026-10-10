@@ -46,6 +46,9 @@ pub enum ExportBackend {
     Cpu {
         /// GPU 版のエラーの表示。
         gpu_error: Option<String>,
+        /// GPU の失敗として数えるか（[`GpuError::counts_as_gpu_failure`]。GPU がない場合と、GPU 版で
+        /// 扱えない入力（`TooLarge`・`Unsupported`）の場合は `false`。決定 No.26）。
+        gpu_failure: bool,
     },
 }
 
@@ -82,17 +85,28 @@ pub fn export_with_fallback(
                 });
             }
             Err(GpuError::Pipeline(e)) => return Err(e),
+            Err(e) if e.is_unsupported_input() => {
+                tracing::info!(error = %e, "GPU 版で扱えないので CPU 版で書き出す");
+                Some((e.to_string(), false))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "GPU 版の書き出しに失敗したので CPU 版で書き出す");
-                Some(e.to_string())
+                Some((e.to_string(), e.counts_as_gpu_failure()))
             }
         },
         None => None,
     };
     let image = engine.export(source, settings, export, options, control)?;
+    let (gpu_error, gpu_failure) = match gpu_error {
+        Some((e, counts)) => (Some(e), counts),
+        None => (None, false),
+    };
     Ok(GpuExportOutcome {
         image,
-        backend: ExportBackend::Cpu { gpu_error },
+        backend: ExportBackend::Cpu {
+            gpu_error,
+            gpu_failure,
+        },
     })
 }
 

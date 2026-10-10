@@ -19,9 +19,9 @@
 //! | `finish.contrast` | 1e−6 | 2e−5 | `log2`・`exp2` の精度 |
 //! | `finish.tone` | 1e−6 | 1e−4 | `exp2` を何度も使う（シグモイド）、ガイドの双線形 |
 //! | `finish.color` | 1e−5 | 1e−4 | 立方根（WGSL にないので `pow` とニュートン法）、OKLab の行列の打ち消し |
-//! | `finish.scene_to_display` | 1e−6 | 1e−5 | 割り算の精度（2.5 ULP） |
+//! | `finish.scene_to_display` | 1e−6 | 1e−5 | 割り算の精度（2.5 ULP）、`log2` の精度による 1D LUT の位置の差（対数の軸。llvmpipe で差の最大 8.3e−7、許容に対する比 0.08） |
 //! | `finish.tone_curve` | 1e−5 | 1e−4 | `pow`（IEC 61966-2-1）、LUT の位置の差 |
-//! | `output.display` | 1e−4 | 0 | 色域の圧縮の `pow`、3D LUT の位置の差（0〜1 の値） |
+//! | `output.display` | 1e−4 | 0 | 符号化（IEC 61966-2-1）の `pow`、色域の圧縮の割り算、3D LUT の位置の差（0〜1 の値） |
 //! | `output.export.*`・`output.cache.*` | 1e−4 | 0 | 同上（0〜1 の値） |
 //! | `sensor.normalize`・`sensor.demosaic.half2x2` | 1e−7 | 1e−6 | 引き算と掛け算だけ |
 //! | `sensor.white_balance` | 1e−7 | 1e−6 | 掛け算だけ |

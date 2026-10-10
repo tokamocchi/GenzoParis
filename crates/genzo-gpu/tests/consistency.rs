@@ -18,8 +18,8 @@ use genzo_pipeline::engine::StageBackend;
 use genzo_pipeline::guide::{GuideSpec, compute_guide};
 use genzo_pipeline::sensor::{SensorData, SensorPlan, run_sensor_stage};
 use genzo_pipeline::{
-    ColorContract, ImageTile, ProcessVersion, RgbImage, Roi, SaturationClip, SensorOptions, Stage,
-    StageContext, StageRegistry, render_a1, run_stage_cpu,
+    ColorContract, ImageTile, InputKind, ProcessVersion, RgbImage, Roi, SaturationClip,
+    SensorOptions, Stage, StageContext, StageRegistry, render_a1, run_stage_cpu,
 };
 use genzo_raw::CfaPattern;
 
@@ -41,14 +41,21 @@ fn settings_for_all_stages() -> DevelopSettings {
     s
 }
 
-/// 段階 C の文脈（96 × 64 の B2 の画像を A1 とし、ガイドを付ける）を作って `f` を呼ぶ。
-fn with_context(settings: &DevelopSettings, f: impl FnOnce(&StageContext<'_>, &RgbImage)) {
+/// 段階 C の文脈（96 × 64 の B2 の画像を A1 とし、ガイドを付ける）を作って `f` を呼ぶ。入力の種類
+/// （RAW のシーン参照・RAW 以外のディスプレイ参照。ステージ 15 の 2 つの分岐）ごとに 1 回ずつ呼ぶ。
+fn with_context(settings: &DevelopSettings, mut f: impl FnMut(&StageContext<'_>, &RgbImage)) {
     let image = scene_b2(96, 64);
     let source = working_source(image, Orientation::Rotate90Cw).image;
     let a1 = render_a1(&source, settings, &SensorOptions::default(), 96).unwrap();
     let guide = compute_guide(&a1, &GuideSpec::from_settings(settings).unwrap()).unwrap();
-    let ctx = a1.finish_context(settings).unwrap().with_guide(&guide);
-    f(&ctx, &a1.image);
+    for kind in [InputKind::SceneReferred, InputKind::DisplayReferred] {
+        let ctx = a1
+            .finish_context(settings)
+            .unwrap()
+            .with_guide(&guide)
+            .with_input_kind(kind);
+        f(&ctx, &a1.image);
+    }
 }
 
 /// 画像全体のタイルから範囲 `roi`（外は鏡映）を取り出す。
@@ -190,7 +197,7 @@ fn all_triples(values: &[f32], contract: ColorContract) -> RgbImage {
     .unwrap()
 }
 
-/// 境界の値（B2: ゼロ・負の値・2^−16（対数の下限）の前後・IEC 61966-2-1 の境目・膝（0.5）・1 の前後・
+/// 境界の値（B2: ゼロ・負の値・2^−16（対数の下限）の前後・IEC 61966-2-1 の境目・0.5・1 の前後・
 /// 大きな値）。
 const B2_BOUNDARY_VALUES: [f32; 19] = [
     0.0,
@@ -319,8 +326,8 @@ fn pixel_stages_match_on_boundary_values_and_other_settings() {
             }
         });
     }
-    // 4 つの設定で 12 ステージ前後ずつ（設定によっては無効になるステージがある）。
-    assert!(compared >= 40, "{compared}");
+    // 4 つの設定 × 2 つの入力の種類で 12 ステージ前後ずつ（設定によっては無効になるステージがある）。
+    assert!(compared >= 80, "{compared}");
 }
 
 #[test]
@@ -582,6 +589,9 @@ fn every_registered_sensor_stage_matches_the_cpu_version() {
     let scene = camera_scene(66, 50);
     let mut settings = DevelopSettings::default();
     custom_wb(&mut settings, 4300.0, 8.0);
+    // 極端な WB（R の係数が 1 未満。飽和の切りそろえの値が緑の係数で決まる。人の判断 No.19）。
+    let mut extreme = DevelopSettings::default();
+    custom_wb(&mut extreme, 2000.0, 0.0);
     let mut tested = Vec::new();
     for stage in registry.sensor_stages() {
         let has_gpu = stage
@@ -591,19 +601,32 @@ fn every_registered_sensor_stage_matches_the_cpu_version() {
             continue;
         }
         for cfa in CfaPattern::ALL {
-            let raw = raw_from(&scene, cfa, true);
-            for clip in [
-                SaturationClip::default(),
-                SaturationClip::Off,
-                SaturationClip::Global,
+            // 飽和の閾値 = 白レベル の RAW と、閾値が白レベルより低い RAW（A-3）。
+            for raw in [
+                raw_from(&scene, cfa, true),
+                raw_with_crop_and_plateau(&scene, cfa),
             ] {
-                // 半分の格子の範囲（画像の外にはみ出す範囲と、内側の範囲）。
-                for roi in [
-                    Roi::new(-3, -2, 20, 15),
-                    Roi::new(5, 4, 16, 12),
-                    Roi::full(33, 25),
+                for clip in [
+                    SaturationClip::default(),
+                    SaturationClip::Off,
+                    SaturationClip::Global,
                 ] {
-                    compare_sensor_stage(g, stage.id(), &raw, &settings, clip, roi);
+                    // 半分の格子の範囲（画像の外にはみ出す範囲と、内側の範囲）。
+                    for roi in [
+                        Roi::new(-3, -2, 20, 15),
+                        Roi::new(5, 4, 16, 12),
+                        Roi::full(33, 25),
+                    ] {
+                        compare_sensor_stage(g, stage.id(), &raw, &settings, clip, roi);
+                    }
+                    compare_sensor_stage(
+                        g,
+                        stage.id(),
+                        &raw,
+                        &extreme,
+                        clip,
+                        Roi::new(-3, -2, 20, 15),
+                    );
                 }
             }
         }

@@ -61,12 +61,18 @@ pub fn gpu() -> Option<&'static GpuRenderer> {
     adapter()
 }
 
+/// 新しい GPU（テストでは、ソフトウェアの実装（llvmpipe など）も使う。環境変数
+/// `GENZO_GPU_ALLOW_SOFTWARE=0` なら使わない。決定 No.20）。
+pub fn renderer() -> genzo_gpu::Result<Option<GpuRenderer>> {
+    GpuRenderer::from_options(&genzo_gpu::GpuContextOptions::from_env_allowing_software())
+}
+
 /// アダプターがあれば GPU（CI のランナーでも返す。シェーダーのコンパイルだけを確かめるテスト用）。
 /// なければ `None`（スキップ）。
 pub fn adapter() -> Option<&'static GpuRenderer> {
     static GPU: OnceLock<Option<GpuRenderer>> = OnceLock::new();
     GPU.get_or_init(|| {
-        let r = GpuRenderer::from_env();
+        let r = renderer();
         match r {
             Ok(Some(g)) => {
                 eprintln!("GPU: {}", g.context().summary());
@@ -230,6 +236,45 @@ pub fn raw_from(scene: &FloatImage, cfa: CfaPattern, saturate: bool) -> RawImage
         }
     }
     raw
+}
+
+/// 実機の ARW の形を真似た合成の RAW（A-2・A-3）: 飽和の閾値が白レベルより低く、閾値と白レベルの
+/// 間の値に張り付いた画素（Sony の圧縮 ARW の緑の 16372 と同じ形）があり、有効画素の端の外側に
+/// 既定の切り抜きの外の帯（詰め物の値）がある。向きは 8（反時計回りに 90 度。α7 IV の縦位置）。
+pub fn raw_with_crop_and_plateau(scene: &FloatImage, cfa: CfaPattern) -> RawImage {
+    let mut raw = raw_from(scene, cfa, false);
+    raw.saturation_level = genzo_raw::saturation_level_for(raw.black_level, raw.white_level);
+    let plateau = (raw.white_level - 8.0) as u16;
+    assert!(f32::from(plateau) >= raw.saturation_level);
+    let (w, h) = (raw.width, raw.height);
+    // 既定の切り抜き: 左 3・上 2・右 6・下 4 の外側（原点は奇数）。
+    let crop = genzo_raw::PixelRect::new(3, 2, w - 9, h - 6);
+    for (i, v) in raw.data.iter_mut().enumerate() {
+        let (x, y) = ((i as u32) % w, (i as u32) / w);
+        if (x / 7 + y / 5) % 6 == 0 && x % 2 == 0 {
+            *v = plateau;
+        }
+        // 既定の切り抜きの外の右端の列は、実機の詰め物のように極端な値にする（使われないこと）。
+        if x >= w - 2 {
+            *v = raw.white_level as u16;
+        }
+    }
+    raw.default_crop = Some(crop);
+    raw.metadata.orientation = Orientation::Rotate270Cw;
+    raw.metadata.width = Some(crop.width);
+    raw.metadata.height = Some(crop.height);
+    raw.validate().unwrap();
+    raw
+}
+
+/// RAW の入力（元ファイルの ID を指定する。GPU 版のキャッシュは同じプロセスのテストで共有するので、
+/// 寸法などが違う RAW には別の ID を使う）。
+pub fn raw_source_with_id(raw: RawImage, file_id: i64) -> PhotoSource {
+    PhotoSource::new(
+        SourceId::new(FileId::new(file_id), 1),
+        SourceImage::Raw(Arc::new(raw)),
+    )
+    .unwrap()
 }
 
 /// RAW の入力。

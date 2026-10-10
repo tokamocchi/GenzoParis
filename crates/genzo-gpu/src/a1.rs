@@ -20,7 +20,8 @@ use std::sync::{Arc, PoisonError};
 use genzo_model::{DevelopSettings, RenderQuality};
 use genzo_pipeline::resample::AreaWeights;
 use genzo_pipeline::{
-    A1Image, ColorContract, DemosaicMethod, RgbImage, Roi, SensorOptions, SensorPlan, preview_size,
+    A1Image, ColorContract, DemosaicMethod, InputKind, RgbImage, Roi, SensorOptions, SensorPlan,
+    preview_size,
 };
 use genzo_raw::RawImage;
 
@@ -239,10 +240,12 @@ impl GpuRenderer {
             image,
             sensor_size: (raw.width, raw.height),
             sensor_extent: (f64::from(gw) * px, f64::from(gh) * px),
+            default_crop: plan.default_crop(),
             orientation: plan.frames().orientation,
             quality: RenderQuality::Draft,
             warnings: plan.warnings().to_vec(),
             non_finite_replaced: replaced,
+            input_kind: InputKind::SceneReferred,
         })
     }
 

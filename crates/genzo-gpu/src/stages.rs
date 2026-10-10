@@ -13,7 +13,7 @@
 //! | `finish.exposure`・`finish.contrast` | ステージ 10 | `finish.wgsl` |
 //! | `finish.tone` | ステージ 11（ガイドの双線形） | `finish.wgsl` |
 //! | `finish.color` | ステージ 13（OKLab） | `finish.wgsl` |
-//! | `finish.scene_to_display` | ステージ 15 | `finish.wgsl` |
+//! | `finish.scene_to_display` | ステージ 15（1D LUT） | `finish.wgsl` |
 //! | `finish.tone_curve` | ステージ 16（1D LUT） | `finish.wgsl` |
 //! | `output.display` | ステージ 17a（3D LUT の四面体補間） | `output.wgsl` |
 //! | `output.export.*`・`output.cache.display_p3` | ステージ 17b | `output.wgsl` |
@@ -336,9 +336,7 @@ pub(crate) fn prepare_rgb(
         }
         GpuStageKind::SceneToDisplay => {
             let s = params.expect::<SceneToDisplayParams>(id)?;
-            let mut p = Params::new(Kernel::SceneToDisplay, input, output);
-            p.f32("KNEE", s.knee);
-            (Kernel::SceneToDisplay, p, None)
+            prepare_scene_to_display(s, input, output)
         }
         GpuStageKind::ToneCurve => {
             let t = params.expect::<ToneCurveParams>(id)?;
@@ -368,9 +366,6 @@ pub(crate) fn prepare_rgb(
             p.mat("W2D", m.to_display.rows())
                 .mat("D2W", m.to_working.rows())
                 .f32s("GC_LUMA", &c.luminance_coefficients())
-                .f32("GC_THR", c.threshold())
-                .f32("GC_POW", c.power())
-                .f32("GC_INV_POW", 1.0 / c.power())
                 .u32("LUT_N", n as u32);
             (Kernel::Display, p, Some(f32_bytes(t.lut.as_flat())))
         }
@@ -385,9 +380,6 @@ pub(crate) fn prepare_rgb(
             let mut p = Params::new(Kernel::Export, input, output);
             p.mat("MAT", t.matrix.rows())
                 .f32s("GC_LUMA", &c.luminance_coefficients())
-                .f32("GC_THR", c.threshold())
-                .f32("GC_POW", c.power())
-                .f32("GC_INV_POW", 1.0 / c.power())
                 .u32("TRANSFER", transfer);
             (Kernel::Export, p, None)
         }
@@ -410,6 +402,28 @@ pub(crate) fn prepare_rgb(
 
 /// カーネル・パラメータ・補助の入力の組。
 type KernelSetup = (Kernel, Params, Option<Arc<Vec<u8>>>);
+
+/// ステージ 15 のパラメータ（RAW は輝度のカーブの表を aux の表 0 に入れる。RAW 以外は表なし）。
+fn prepare_scene_to_display(s: &SceneToDisplayParams, input: Roi, output: Roi) -> KernelSetup {
+    let mut p = Params::new(Kernel::SceneToDisplay, input, output);
+    let (mode, values, len, lo, inv) = match &s.lut {
+        Some(l) => (
+            1u32,
+            l.values().to_vec(),
+            l.values().len() as u32,
+            l.lo(),
+            l.inv_step(),
+        ),
+        None => (0, vec![0.0, 0.0], 2, 0.0, 1.0),
+    };
+    p.u32("S2D_MODE", mode)
+        .f32("S2D_FLOOR_RATIO", s.floor_ratio)
+        .u32s("LUT_OFF", &[0; 4])
+        .u32s("LUT_LEN", &[len, 2, 2, 2])
+        .f32s("LUT_LO", &[lo, 0.0, 0.0, 0.0])
+        .f32s("LUT_INV", &[inv, 1.0, 1.0, 1.0]);
+    (Kernel::SceneToDisplay, p, Some(f32_bytes(&values)))
+}
 
 /// ステージ 16 のパラメータ（1D LUT を 1 つの表につなぐ。輝度、R、G、B の順）。
 fn prepare_tone_curve(t: &ToneCurveParams, input: Roi, output: Roi) -> Result<KernelSetup> {

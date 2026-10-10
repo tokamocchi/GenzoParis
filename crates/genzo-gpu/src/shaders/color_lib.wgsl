@@ -101,9 +101,9 @@ fn gamut_dist(di: f32, y: f32) -> f32 {
     return 0.0;
 }
 
-// 色域の圧縮（genzo-color の GamutCompressor::compress と同じ式。w は輝度の係数、inv_power は
-// CPU 版が求めた 1 / power）。
-fn gamut_compress(rgb: vec3<f32>, w: vec3<f32>, threshold: f32, power: f32, inv_power: f32) -> vec3<f32> {
+// 色域の圧縮（genzo-color の GamutCompressor::compress と同じ式。w は輝度の係数）。色域内の色
+// （t ≤ 1）は変えず、色域外の色だけを輝度に向かって境界まで寄せる。
+fn gamut_compress(rgb: vec3<f32>, w: vec3<f32>) -> vec3<f32> {
     let c = vec3<f32>(
         select(0.0, rgb.x, is_finite_f32(rgb.x)),
         select(0.0, rgb.y, is_finite_f32(rgb.y)),
@@ -118,21 +118,12 @@ fn gamut_compress(rgb: vec3<f32>, w: vec3<f32>, threshold: f32, power: f32, inv_
     }
     let d = vec3<f32>(c.x - y, c.y - y, c.z - y);
     let t = max(max(max(0.0, gamut_dist(d.x, y)), gamut_dist(d.y, y)), gamut_dist(d.z, y));
-    if (t <= threshold) {
+    if (t <= 1.0) {
         return c;
     }
-    let k = threshold;
-    let x = (t - k) / (1.0 - k);
-    var f: f32;
-    if (x <= 1.0) {
-        f = x / pow(1.0 + pow(x, power), inv_power);
-    } else {
-        f = 1.0 / pow(pow(x, -power) + 1.0, inv_power);
-    }
-    let t_new = k + (1.0 - k) * f;
     var scale = 0.0;
     if (is_finite_f32(t)) {
-        scale = t_new / t;
+        scale = 1.0 / t;
     }
     return vec3<f32>(
         clamp(y + scale * d.x, 0.0, 1.0),

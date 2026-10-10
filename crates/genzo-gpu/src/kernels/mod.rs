@@ -36,13 +36,13 @@ use genzo_color::transfer::{
 };
 use genzo_pipeline::Roi;
 use genzo_pipeline::finish::color::{SKIN_PROTECTION, VIBRANCE_CHROMA_REF, VIBRANCE_MAX};
-use genzo_pipeline::finish::scene_to_display::SCENE_TO_DISPLAY_T_MAX;
+use genzo_pipeline::finish::exposure::CONTRAST_CHROMA_GAIN_MAX;
 use genzo_pipeline::finish::tone::{
     BLACKS_CENTER_EV, BLACKS_MAX_EV, BLACKS_WIDTH_EV, HIGHLIGHTS_CENTER_EV, HIGHLIGHTS_MAX_EV,
     HIGHLIGHTS_WIDTH_EV, SHADOWS_CENTER_EV, SHADOWS_MAX_EV, SHADOWS_WIDTH_EV, WHITES_CENTER_EV,
     WHITES_MAX_EV, WHITES_WIDTH_EV,
 };
-use genzo_pipeline::finish::{BT2020_LUMINANCE, LOG2_CEILING, LOG2_MIDDLE_GRAY};
+use genzo_pipeline::finish::{BT2020_LUMINANCE, LOG2_CEILING, LOG2_MIDDLE_GRAY, MIDDLE_GRAY};
 use genzo_pipeline::sanitize::LOG_FLOOR;
 
 use crate::context::GpuContext;
@@ -58,9 +58,6 @@ const HISTOGRAM: &str = include_str!("../shaders/histogram.wgsl");
 const QUANTIZE: &str = include_str!("../shaders/quantize.wgsl");
 const SENSOR: &str = include_str!("../shaders/sensor.wgsl");
 const RESAMPLE: &str = include_str!("../shaders/resample.wgsl");
-
-/// ステージ 15 の `t` の上限（genzo-pipeline の定数をそのまま使う）。
-pub(crate) const S2D_T_MAX: f32 = SCENE_TO_DISPLAY_T_MAX;
 
 /// 座標を i32 にするときの切り詰めの範囲（2^30。CPU 版は i64 で 2^40。極端な座標でだけ結果が違う）。
 pub(crate) const COORD_LIMIT: f32 = (1u32 << 30) as f32;
@@ -151,7 +148,8 @@ impl Module {
                 ("SKIN_COS_W", 1),
                 ("NEUTRAL_A", 1),
                 ("NEUTRAL_B", 1),
-                ("KNEE", 1),
+                ("S2D_MODE", 1),
+                ("S2D_FLOOR_RATIO", 1),
                 ("CURVE_FLAGS", 1),
                 ("LUT_OFF", 4),
                 ("LUT_LEN", 4),
@@ -164,9 +162,6 @@ impl Module {
                 ("W2D", 9),
                 ("D2W", 9),
                 ("GC_LUMA", 3),
-                ("GC_THR", 1),
-                ("GC_POW", 1),
-                ("GC_INV_POW", 1),
                 ("LUT_N", 1),
                 ("MAT", 9),
                 ("TRANSFER", 1),
@@ -193,7 +188,7 @@ impl Module {
                 ("RAW_H", 1),
                 ("BLACK", 4),
                 ("INV", 4),
-                ("WHITE", 1),
+                ("SAT_LEVEL", 1),
                 ("MULT", 4),
                 ("CLIP_LEVEL", 1),
                 ("CLIP_MODE", 1),
@@ -350,7 +345,14 @@ impl Kernel {
                 "NEUTRAL_A",
                 "NEUTRAL_B",
             ],
-            Kernel::SceneToDisplay => &["KNEE"],
+            Kernel::SceneToDisplay => &[
+                "S2D_MODE",
+                "S2D_FLOOR_RATIO",
+                "LUT_OFF",
+                "LUT_LEN",
+                "LUT_LO",
+                "LUT_INV",
+            ],
             Kernel::ToneCurve => &[
                 "CURVE_FLAGS",
                 "LUT_OFF",
@@ -360,23 +362,8 @@ impl Kernel {
                 "BLACK_LIFT",
                 "RATIO_MIN",
             ],
-            Kernel::Display => &[
-                "W2D",
-                "D2W",
-                "GC_LUMA",
-                "GC_THR",
-                "GC_POW",
-                "GC_INV_POW",
-                "LUT_N",
-            ],
-            Kernel::Export => &[
-                "MAT",
-                "GC_LUMA",
-                "GC_THR",
-                "GC_POW",
-                "GC_INV_POW",
-                "TRANSFER",
-            ],
+            Kernel::Display => &["W2D", "D2W", "GC_LUMA", "LUT_N"],
+            Kernel::Export => &["MAT", "GC_LUMA", "TRANSFER"],
             Kernel::Geometry => &["AFF", "CROP_X", "CROP_Y", "GRID_W", "GRID_H"],
             Kernel::Histogram => &["HLUMA"],
             Kernel::Quantize => &[
@@ -387,7 +374,7 @@ impl Kernel {
                 "QSEED",
                 "QSTRIDE",
             ],
-            Kernel::Normalize => &["CFA", "RAW_W", "RAW_H", "BLACK", "INV", "WHITE"],
+            Kernel::Normalize => &["CFA", "RAW_W", "RAW_H", "BLACK", "INV", "SAT_LEVEL"],
             Kernel::WhiteBalance => &[
                 "CFA",
                 "MULT",
@@ -440,6 +427,8 @@ pub(crate) fn shared_constants() -> Vec<(&'static str, f32)> {
         ("LUMA_B", BT2020_LUMINANCE[2]),
         ("LOG_FLOOR", LOG_FLOOR),
         ("LOG2_MIDDLE_GRAY", LOG2_MIDDLE_GRAY),
+        ("MIDDLE_GRAY", MIDDLE_GRAY),
+        ("CONTRAST_CHROMA_GAIN_MAX", CONTRAST_CHROMA_GAIN_MAX),
         ("LOG2_CEILING", LOG2_CEILING),
         ("SRGB_DECODE_THRESHOLD", SRGB_DECODE_THRESHOLD_F32),
         ("SRGB_ENCODE_THRESHOLD", SRGB_ENCODE_THRESHOLD_F32),
@@ -467,7 +456,6 @@ pub(crate) fn shared_constants() -> Vec<(&'static str, f32)> {
         ("VIBRANCE_MAX", VIBRANCE_MAX),
         ("VIBRANCE_CHROMA_REF", VIBRANCE_CHROMA_REF),
         ("SKIN_PROTECTION", SKIN_PROTECTION),
-        ("S2D_T_MAX", S2D_T_MAX),
         ("COORD_LIMIT", COORD_LIMIT),
         ("DITHER_SCALE", DITHER_SCALE),
     ]

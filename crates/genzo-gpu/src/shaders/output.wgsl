@@ -119,7 +119,7 @@ fn display_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c = load_global(out_global(gid));
     // DisplayGamut::compress_working: 表示先のリニア RGB → 圧縮 → 作業色空間。
     let d = mat_apply(P_W2D, c);
-    let comp = gamut_compress(d, pf3(P_GC_LUMA), pf(P_GC_THR), pf(P_GC_POW), pf(P_GC_INV_POW));
+    let comp = gamut_compress(d, pf3(P_GC_LUMA));
     let g = mat_apply(P_D2W, comp);
     let e = vec3<f32>(srgb_encode(g.x), srgb_encode(g.y), srgb_encode(g.z));
     let o = lut3d_apply(e);
@@ -133,7 +133,7 @@ fn export_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let c = load_global(out_global(gid));
-    let l = gamut_compress(mat_apply(P_MAT, c), pf3(P_GC_LUMA), pf(P_GC_THR), pf(P_GC_POW), pf(P_GC_INV_POW));
+    let l = gamut_compress(mat_apply(P_MAT, c), pf3(P_GC_LUMA));
     let k = pu(P_TRANSFER);
     store_out(gid, sanitize3(vec3<f32>(
         clamp(transfer_encode(k, l.x), 0.0, 1.0),

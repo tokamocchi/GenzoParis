@@ -11,10 +11,17 @@
 //! | `WGPU_BACKEND` | 使うバックエンド（`vulkan`・`metal`・`dx12`・`gl` のカンマ区切り。wgpu の書式） | Vulkan・Metal・DX12 |
 //! | `WGPU_ADAPTER_NAME` | アダプターの名前に含まれる文字列（大文字・小文字を区別しない） | 指定なし |
 //! | `WGPU_POWER_PREF` | `high`・`low`・`none` | `high` |
-//! | `GENZO_GPU_ALLOW_SOFTWARE` | `0`・`off`・`false` ならソフトウェアの実装（Mesa の llvmpipe・WARP など）を使わない | 使う |
+//! | `GENZO_GPU_ALLOW_SOFTWARE` | `1`・`on`・`true` など（`0`・`off`・`false`・`no` 以外）なら、ソフトウェアの実装（Mesa の llvmpipe・Windows の WARP など）も使う | 使わない |
 //!
 //! アダプターが見つからない環境（GPU のない CI など）では [`GpuContext::new`] が `Ok(None)` を返す
 //! （呼び出し側は CPU 版で処理する。04 の 1.4 節）。任意機能（shader-f16 など）は要求しない。
+//!
+//! **ソフトウェアの実装は既定では使わない**（決定 No.20）: CPU で動くので速くならず、CPU 版との差（実装の
+//! 違い）を持ち込むだけのため、アダプターがソフトウェアの実装（wgpu の `DeviceType::Cpu`）しかなければ
+//! `Ok(None)` を返し、CPU 版で処理する。開発・テストで llvmpipe を使うときは、環境変数
+//! `GENZO_GPU_ALLOW_SOFTWARE=1`、[`GpuContextOptions::allow_software`]、またはテスト用の
+//! [`GpuContextOptions::from_env_allowing_software`] で許可する。アダプターの名前（`WGPU_ADAPTER_NAME`）で
+//! ソフトウェアの実装を選んだ場合も、許可がなければ使わない。
 //!
 //! # エラーの扱い
 //!
@@ -57,7 +64,7 @@ pub struct GpuContextOptions {
     pub power_preference: wgpu::PowerPreference,
     /// アダプターの名前に含まれる文字列（大文字・小文字を区別しない）。`None` なら wgpu に選ばせる。
     pub adapter_name: Option<String>,
-    /// ソフトウェアの実装（llvmpipe・WARP など）を使ってよいか。
+    /// ソフトウェアの実装（llvmpipe・WARP など）を使ってよいか（既定は `false`。決定 No.20）。
     pub allow_software: bool,
     /// 投入した処理の完了を待つ時間。
     pub wait_timeout: Duration,
@@ -70,7 +77,7 @@ impl Default for GpuContextOptions {
             backends: wgpu::Backends::PRIMARY,
             power_preference: wgpu::PowerPreference::HighPerformance,
             adapter_name: None,
-            allow_software: true,
+            allow_software: false,
             wait_timeout: DEFAULT_WAIT_TIMEOUT,
         }
     }
@@ -86,7 +93,21 @@ fn env_flag(name: &str) -> Option<bool> {
 impl GpuContextOptions {
     /// 環境変数から作る（モジュールの doc の表。指定がなければ既定値）。
     pub fn from_env() -> Self {
-        let d = Self::default();
+        Self::from_env_with(Self::default())
+    }
+
+    /// テスト・開発用: [`Self::from_env`] と同じだが、ソフトウェアの実装（llvmpipe など）を既定で使う
+    /// （環境変数 `GENZO_GPU_ALLOW_SOFTWARE=0` なら使わない）。GPU のない開発環境・CI で、GPU 版と
+    /// CPU 版の一致テストを llvmpipe で行うため。
+    pub fn from_env_allowing_software() -> Self {
+        Self::from_env_with(Self {
+            allow_software: true,
+            ..Self::default()
+        })
+    }
+
+    /// 環境変数の指定がない項目は `d` の値にする。
+    fn from_env_with(d: Self) -> Self {
         Self {
             enabled: env_flag("GENZO_GPU").unwrap_or(d.enabled),
             backends: wgpu::Backends::from_env().unwrap_or(d.backends),
@@ -505,6 +526,29 @@ mod tests {
             ..Default::default()
         };
         assert!(GpuContext::new(&o).unwrap().is_none());
+    }
+
+    /// ソフトウェアの実装（llvmpipe・WARP など）は、許可しなければ使わない（決定 No.20）。
+    #[test]
+    fn software_adapters_are_used_only_when_allowed() {
+        assert!(!GpuContextOptions::default().allow_software);
+        let by_default = GpuContext::new(&GpuContextOptions::default()).unwrap_or(None);
+        if let Some(ctx) = &by_default {
+            assert!(!ctx.summary().is_software, "{}", ctx.summary());
+        }
+        let allowed = GpuContextOptions {
+            allow_software: true,
+            ..Default::default()
+        };
+        match GpuContext::new(&allowed) {
+            // ソフトウェアの実装しかない環境（この開発環境の llvmpipe など）では、許可したときだけ使える。
+            Ok(Some(ctx)) if ctx.summary().is_software => {
+                eprintln!("ソフトウェアの実装: {}", ctx.summary());
+                assert!(by_default.is_none(), "既定ではソフトウェアの実装を使わない");
+            }
+            Ok(Some(ctx)) => eprintln!("GPU: {}", ctx.summary()),
+            Ok(None) | Err(_) => eprintln!("GPU のアダプターがないので、確かめられる範囲だけ"),
+        }
     }
 
     #[test]

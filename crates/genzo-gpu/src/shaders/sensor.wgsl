@@ -26,6 +26,7 @@ fn sensor_in_output(gid: vec3<u32>) -> bool {
 
 // ---------------------------------------------------------------------------
 // ステージ 2: 正規化（sensor::normalize）。入力は RAW 全体、出力は CFA（f32）と飽和の印（aux_out）。
+// 飽和の判定は白レベルと分けた閾値（P_SAT_LEVEL = SensorLevels::saturation_level。DN ≥ 閾値で飽和）。
 // ---------------------------------------------------------------------------
 
 fn raw_at(sx: u32, sy: u32) -> u32 {
@@ -47,7 +48,7 @@ fn normalize_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let d = f32(raw_at(sx, sy));
     var v = 1.0;
     var s = 1u;
-    if (d < pf(P_WHITE)) {
+    if (d < pf(P_SAT_LEVEL)) {
         v = clamp((d - pf(P_BLACK + k)) * pf(P_INV + k), 0.0, 1.0);
         s = 0u;
     }

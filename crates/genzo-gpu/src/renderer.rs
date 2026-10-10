@@ -34,7 +34,7 @@ use genzo_pipeline::{
 };
 use genzo_raw::{CfaPattern, RawImage};
 
-use crate::context::GpuContext;
+use crate::context::{GpuContext, GpuContextOptions};
 use crate::error::{GpuError, Result};
 use crate::kernels::{Batch, Dispatch, Kernel, KernelCache, Params};
 use crate::stages::{DisplayMatrices, GpuStageKind, GpuStageRegistry, kind_of, prepare_rgb};
@@ -330,7 +330,12 @@ impl GpuRenderer {
 
     /// 環境変数の設定で作る（[`GpuContext::from_env`]）。アダプターがなければ `Ok(None)`。
     pub fn from_env() -> Result<Option<Self>> {
-        match GpuContext::from_env()? {
+        Self::from_options(&GpuContextOptions::from_env())
+    }
+
+    /// `options` で作る（[`GpuContext::new`]）。アダプターがなければ `Ok(None)`。
+    pub fn from_options(options: &GpuContextOptions) -> Result<Option<Self>> {
+        match GpuContext::new(options)? {
             Some(gpu) => Ok(Some(Self::new(gpu)?)),
             None => Ok(None),
         }
@@ -896,7 +901,7 @@ pub(crate) fn record_normalize(
         .u32("RAW_H", raw.height)
         .f32s("BLACK", &levels.black_level)
         .f32s("INV", &levels.inv_range)
-        .f32("WHITE", levels.white_level);
+        .f32("SAT_LEVEL", levels.saturation_level);
     batch.dispatch(Dispatch {
         kernel: Kernel::Normalize,
         params: p.finish()?,
@@ -986,6 +991,8 @@ mod tests {
             data: vec![0x0102, 0x0304, 0x0506],
             black_level: [0.0; 4],
             white_level: 4095.0,
+            saturation_level: 4095.0,
+            default_crop: None,
             as_shot_wb: [1.0; 4],
             cam_xyz: None,
             metadata: genzo_model::PhotoMetadata::default(),
