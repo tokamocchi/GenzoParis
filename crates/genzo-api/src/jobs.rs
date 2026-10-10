@@ -135,14 +135,18 @@ impl JobRegistry {
     }
 
     /// ジョブを取り消す。見つからなければ `false`。
+    ///
+    /// キューで待っているジョブは、取り消しのコールバックの中でスケジューラが実行せずに終える（クロージャが
+    /// 呼ばれないので、記録と `JobFinished` はここでは送られない）。呼び出し側は続けて
+    /// [`JobRegistry::reap_unrun`] を呼ぶこと（[`crate::Core::cancel_job`]）。
     pub(crate) fn cancel(&self, id: u64) -> bool {
-        match self.entries.lock().get(&id) {
-            Some(e) => {
-                e.token.cancel();
-                true
-            }
-            None => false,
-        }
+        // 取り消しのコールバックは同期的に実行されるので、記録のロックの外で取り消す。
+        let token = match self.entries.lock().get(&id) {
+            Some(e) => e.token.clone(),
+            None => return false,
+        };
+        token.cancel();
+        true
     }
 
     /// 実行中のすべてのジョブを取り消す。
@@ -163,8 +167,9 @@ impl JobRegistry {
             .count()
     }
 
-    /// 実行されずに終わったジョブ（スケジューラの終了など）を見つけて、取り消しとして記録する。
-    fn reap_unrun(&self, inner: &Inner) {
+    /// 実行されずに終わったジョブ（キューで待っている間の取り消し、スケジューラの終了など）を見つけて、
+    /// 取り消しとして記録し、`JobFinished` を送る。
+    pub(crate) fn reap_unrun(&self, inner: &Inner) {
         let mut lost = Vec::new();
         {
             let entries = self.entries.lock();
@@ -322,6 +327,10 @@ where
         },
     );
     inner.jobs.set_handle(id, handle);
+    // 記録してからハンドルを入れるまでの間に取り消された（キューから実行されずに外れた）場合。
+    if token.is_cancelled() {
+        inner.jobs.reap_unrun(inner);
+    }
     id
 }
 

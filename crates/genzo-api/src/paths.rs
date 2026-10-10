@@ -4,7 +4,9 @@
 //! **設計からの逸脱（仮置き）**: OS のボリューム ID の取得（外付けドライブの識別。FILE-03、v1）はまだ
 //! ない。MVP では、パスの先頭（Unix の `/`、Windows のドライブ `C:\` や UNC の `\\server\share\`）を
 //! ボリュームとし、その文字列から ID（`path:/`、`path:C:\` など）を作る。ドライブ文字やマウント先が
-//! 変わると別のボリュームになる（FILE-03 で OS のボリューム ID に置き換える）。
+//! 変わると別のボリュームになる（FILE-03 で OS のボリューム ID に置き換える）。ドライブ文字は大文字に、
+//! UNC のサーバー名・共有名は小文字にそろえる（書き方の大文字・小文字の違いでは分かれない）が、同じ共有を
+//! 別の名前（FQDN と短い名前、IP アドレス、割り当てたドライブ `Z:` と UNC）で指定すると別のボリュームになる。
 
 use std::path::{Component, Path, PathBuf, Prefix};
 
@@ -76,7 +78,8 @@ pub(crate) fn split_volume(abs: &Path) -> Result<VolumePath, ApiError> {
     })
 }
 
-/// Windows のパスの先頭を、ボリュームのキーにする（ドライブ文字は大文字、`\\?\` の形は普通の形に）。
+/// Windows のパスの先頭を、ボリュームのキーにする（ドライブ文字は大文字、UNC のサーバー名・共有名は小文字
+/// （SMB では大文字・小文字を区別しないため。書き方の違いで別のボリュームにしない）、`\\?\` の形は普通の形に）。
 fn prefix_key(kind: Prefix<'_>, raw: &std::ffi::OsStr) -> Result<String, ApiError> {
     let s = |o: &std::ffi::OsStr| -> Result<String, ApiError> {
         o.to_str()
@@ -88,7 +91,11 @@ fn prefix_key(kind: Prefix<'_>, raw: &std::ffi::OsStr) -> Result<String, ApiErro
             format!("{}:", char::from(d).to_ascii_uppercase())
         }
         Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
-            format!(r"\\{}\{}", s(server)?, s(share)?)
+            format!(
+                r"\\{}\{}",
+                s(server)?.to_lowercase(),
+                s(share)?.to_lowercase()
+            )
         }
         _ => s(raw)?,
     })
@@ -162,6 +169,41 @@ mod tests {
         let unc = split_volume(Path::new(r"\\nas\photos\2024")).unwrap();
         assert_eq!(unc.uuid, r"path:\\nas\photos\");
         assert_eq!(unc.rel, "2024");
+        let upper = split_volume(Path::new(r"\\NAS\Photos\2024")).unwrap();
+        assert_eq!(upper.uuid, unc.uuid);
+        let verbatim = split_volume(Path::new(r"\\?\UNC\Nas\PHOTOS\2024")).unwrap();
+        assert_eq!(verbatim.uuid, unc.uuid);
+    }
+
+    /// UNC のサーバー名・共有名は大文字・小文字を区別しない（SMB）ので、書き方の違いで別のボリュームに
+    /// しない（同じ NAS の写真が二重に登録されないように。指摘 F18）。`Prefix` を直接作るので、Windows
+    /// 以外でも確かめられる。
+    #[test]
+    fn unc_server_and_share_names_ignore_case() {
+        use std::ffi::OsStr;
+        let a = prefix_key(
+            Prefix::UNC(OsStr::new("NAS"), OsStr::new("Photos")),
+            OsStr::new(r"\\NAS\Photos"),
+        )
+        .unwrap();
+        let b = prefix_key(
+            Prefix::UNC(OsStr::new("nas"), OsStr::new("photos")),
+            OsStr::new(r"\\nas\photos"),
+        )
+        .unwrap();
+        let c = prefix_key(
+            Prefix::VerbatimUNC(OsStr::new("Nas"), OsStr::new("PHOTOS")),
+            OsStr::new(r"\\?\UNC\Nas\PHOTOS"),
+        )
+        .unwrap();
+        assert_eq!(a, r"\\nas\photos");
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        // ドライブ文字は大文字にそろえる（従来どおり）。
+        let d = prefix_key(Prefix::Disk(b'c'), OsStr::new("c:")).unwrap();
+        let e = prefix_key(Prefix::VerbatimDisk(b'C'), OsStr::new(r"\\?\C:")).unwrap();
+        assert_eq!(d, "C:");
+        assert_eq!(d, e);
     }
 
     #[test]

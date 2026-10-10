@@ -41,6 +41,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 trash.workspace = true
 blake3.workspace = true
+# render_deps のカメラ行列の内容のハッシュ（SHA-256。04 の 2.5 節）。
+sha2.workspace = true
 # 撮影日時・バックアップの日時。
 chrono.workspace = true
 # イベントのチャネル（コア → UI。04 の 1.5 節）。
@@ -49,6 +51,8 @@ crossbeam-channel.workspace = true
 parking_lot.workspace = true
 # GPU から CPU への切り替えなどの記録。
 tracing.workspace = true
+# 取り込みで、大文字・小文字だけが違う名前のフォルダが同じものかを確かめる（ファイルの識別子で比べる。F08）。
+same-file.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

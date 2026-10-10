@@ -1,7 +1,9 @@
 //! 設定（SYS-05）: キャッシュの場所と上限、書き出しの既定の色空間、既定のタイムゾーン。
 //!
 //! カタログの設定テーブル（`setting`）に保存する。カタログに値がなければ [`CoreConfig`] の初期値、
-//! それもなければ組み込みの既定値を使う。
+//! それもなければ組み込みの既定値を使う。既定のタイムゾーンは、カタログに値がなければ、開いたときに
+//! 決めた値（初期値、なければその時点の OS のオフセット）を保存し、以後はその値を使う
+//! （[`persist_default_offset`]）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,6 +92,57 @@ pub(crate) fn load(
         default_export_color_space,
         default_utc_offset_minutes,
     })
+}
+
+/// 既定のタイムゾーンがカタログに保存されていなければ、決めた値（[`CoreConfig`] の初期値、なければ OS の
+/// オフセット）を保存する。以後はその値だけを使う（開くたびに OS のオフセットが変わっても、オフセットの
+/// ない写真の推定が取り込んだ時期ごとに混ざらないように）。新しく保存したら `true`。
+///
+/// 保存した値が今の OS のオフセットと違えば、警告を出す（自動では変えない）。初期値を [`CoreConfig`] で
+/// 指定しているとき（OS のオフセットに頼っていないとき）は警告しない。
+pub(crate) fn persist_default_offset(
+    catalog: &mut Catalog,
+    settings: &CoreSettings,
+    config: &CoreConfig,
+    events: &EventHub,
+) -> Result<bool, ApiError> {
+    let stored = catalog.setting(KEY_DEFAULT_UTC_OFFSET_MINUTES)?.is_some();
+    if !stored {
+        catalog.set_setting(
+            KEY_DEFAULT_UTC_OFFSET_MINUTES,
+            &settings.default_utc_offset_minutes.to_string(),
+        )?;
+    }
+    if config.default_utc_offset_minutes.is_none()
+        && let Some(message) =
+            offset_mismatch_message(settings.default_utc_offset_minutes, os_offset_minutes())
+    {
+        events.emit_sticky(Event::Warning {
+            code: WarningCode::DefaultTimeZoneDiffers,
+            message,
+            variant_id: None,
+            path: None,
+        });
+    }
+    Ok(!stored)
+}
+
+/// 既定のタイムゾーンと OS のオフセットが違うときの警告の文（同じなら `None`）。
+fn offset_mismatch_message(saved_minutes: i32, os_minutes: i32) -> Option<String> {
+    (saved_minutes != os_minutes).then(|| {
+        format!(
+            "既定のタイムゾーン（{}）が、今の OS のオフセット（{}）と違います。オフセットのない写真の撮影日時は既定のタイムゾーンで推定します（設定で変えられます）",
+            offset_label(saved_minutes),
+            offset_label(os_minutes)
+        )
+    })
+}
+
+/// オフセットの表示（`UTC+09:00` など）。
+fn offset_label(minutes: i32) -> String {
+    let sign = if minutes < 0 { '-' } else { '+' };
+    let m = minutes.unsigned_abs();
+    format!("UTC{sign}{:02}:{:02}", m / 60, m % 60)
 }
 
 fn default_preview_bytes(config: &CoreConfig) -> u64 {
@@ -183,14 +236,23 @@ impl Core {
 }
 
 /// 既定のタイムゾーンを変えたときに、既定のオフセットで推定していた撮影日時を推定し直すジョブ。
-fn spawn_reresolve(inner: &Arc<Inner>) -> u64 {
-    spawn_job(
+///
+/// 続けて変えたときに、古いオフセットのジョブが後から書いて上書きしないよう、(1) オフセットはジョブの
+/// 開始時ではなく、チャンクごとにカタログのロックの中で今の設定から読む（後から同じチャンクを書くジョブは
+/// 必ず最新の設定を読むので、どの順で走っても最後に残る値は今の設定になる）、(2) 前のジョブは取り消す
+/// （無駄な処理を省くため）。
+pub(crate) fn spawn_reresolve(inner: &Arc<Inner>) -> u64 {
+    let mut last = inner.reresolve_job.lock();
+    if let Some(previous) = last.take() {
+        inner.jobs.cancel(previous);
+        inner.jobs.reap_unrun(inner);
+    }
+    let id = spawn_job(
         inner,
         JobKind::ReresolveCaptureTimes,
         "撮影日時の推定し直し",
         |ctx| {
             let inner = ctx.inner;
-            let offset = inner.default_offset();
             let assets = inner.with_catalog(|c| {
                 let variants = c.all_variant_ids()?;
                 c.assets_of_variants(&variants)
@@ -202,6 +264,8 @@ fn spawn_reresolve(inner: &Arc<Inner>) -> u64 {
                     return Err(ApiError::Cancelled);
                 }
                 updated += inner.with_catalog_api(|c| {
+                    // 今の設定（このチャンクを書く直前）のオフセット。
+                    let offset = inner.default_offset();
                     let mut n = 0;
                     for &a in chunk {
                         let current = c.capture_time(a)?;
@@ -227,5 +291,21 @@ fn spawn_reresolve(inner: &Arc<Inner>) -> u64 {
             }
             Ok(JobResult::ReresolveCaptureTimes { updated })
         },
-    )
+    );
+    *last = Some(id);
+    id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_mismatch_is_reported_with_both_offsets() {
+        assert_eq!(offset_mismatch_message(540, 540), None);
+        let m = offset_mismatch_message(540, 60).unwrap();
+        assert!(m.contains("UTC+09:00") && m.contains("UTC+01:00"), "{m}");
+        assert_eq!(offset_label(-210), "UTC-03:30");
+        assert_eq!(offset_label(0), "UTC+00:00");
+    }
 }

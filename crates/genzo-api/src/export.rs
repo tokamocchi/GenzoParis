@@ -123,6 +123,31 @@ fn output_name(file_name: &str, variant_name: Option<&str>, ext: &str) -> String
     format!("{name}.{ext}")
 }
 
+/// 同じ書き出しの中で書いたファイルを覚えるときのキー（書き出し先のフォルダは 1 回の書き出しで共通なので、
+/// ファイル名だけで照合する）。
+///
+/// Windows（NTFS）・macOS（APFS）の既定のファイルシステムは、大文字・小文字と正規化（NFC / NFD）の違いを
+/// 区別しないので、カタログのパスの比較キーと同じ正規化（NFC ＋ 小文字化。3.5 節）で照合する。区別する
+/// ファイルシステムで誤って一致しても、連番が付くだけで害はない。
+fn written_key(name: &str) -> String {
+    genzo_catalog::text::path_key(name)
+}
+
+/// 衝突の扱い: 上書きの設定でも、同じ書き出しの中で書いたファイルは上書きしない（連番にする）。
+fn conflict_policy_for(
+    settings: &ExportSettings,
+    written: &HashSet<String>,
+    desired_name: &str,
+) -> ConflictPolicy {
+    if settings.on_conflict == ConflictPolicy::Overwrite
+        && written.contains(&written_key(desired_name))
+    {
+        ConflictPolicy::Sequence
+    } else {
+        settings.on_conflict
+    }
+}
+
 /// 1 件を書き出す。
 fn export_one(
     ctx: &JobCtx<'_>,
@@ -130,7 +155,7 @@ fn export_one(
     settings: &ExportSettings,
     dest_dir: &Path,
     protected: &ProtectedFiles,
-    written: &mut HashSet<PathBuf>,
+    written: &mut HashSet<String>,
 ) -> Result<ExportOutcome, ApiError> {
     let inner = ctx.inner;
     let (file, develop, capture) = inner.with_catalog_api(|c| {
@@ -146,36 +171,59 @@ fn export_one(
         });
     }
     let loaded = load_source(inner, &file, Lane::Batch, ctx.token())?;
+    // 保存された設定の外部データ（render_deps）を、実際に使う値に置き換えて描き、使った値を結果に記録する
+    // （`deps` の doc）。保存された値と違えば警告する。
+    let render_deps = loaded.render_deps.clone();
+    if crate::deps::recorded_deps_differ(&develop.render_deps, &render_deps) {
+        inner.events.warn(
+            crate::events::WarningCode::RenderDepsChanged,
+            crate::deps::deps_changed_message(&develop.render_deps, &render_deps),
+            Some(variant_id),
+            None,
+        );
+    }
+    let develop = crate::deps::with_render_deps(&develop, &render_deps);
     let token = ctx.token().clone();
     let control = move || token.is_cancelled();
     let (image, backend) =
         inner.render_export(&loaded.source, &develop, settings, &control, variant_id)?;
     let (w, h) = (image.width, image.height);
+    let warnings = crate::render::warning_texts(&image.warnings, &image.unimplemented);
     let pixels = match image.pixels {
         ExportPixels::Rgb8(v) => DynRgbImage::Rgb8(RgbImage8::from_raw(w, h, v)?),
         ExportPixels::Rgb16(v) => DynRgbImage::Rgb16(RgbImage16::from_raw(w, h, v)?),
     };
     // Exif（撮影情報と、利用者が補正した撮影日時）。GPS は export_image が設定に従って除く。
     let exif = ExifData::from_photo_metadata(&loaded.metadata).with_capture_time(&capture);
-    let desired = dest_dir.join(output_name(
+    let desired_name = output_name(
         &file.name,
         (!file.is_master)
             .then_some(file.variant_name.as_deref())
             .flatten(),
         settings.format.extension(),
-    ));
+    );
+    let desired = dest_dir.join(&desired_name);
     // 同じ書き出しの中で書いたファイルは上書きしない（同じ名前の写真が別のフォルダにある場合など）。
     let mut effective = *settings;
-    if effective.on_conflict == ConflictPolicy::Overwrite && written.contains(&desired) {
-        effective.on_conflict = ConflictPolicy::Sequence;
-    }
+    effective.on_conflict = conflict_policy_for(settings, written, &desired_name);
     match genzo_media::export_image(&pixels, &effective, Some(&exif), &desired, protected)? {
         WriteOutcome::Written { path, replaced } => {
-            written.insert(path.clone());
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                written.insert(written_key(name));
+            }
+            crate::render::emit_render_warnings(
+                inner,
+                variant_id,
+                &format!("書き出し（{}）", path.display()),
+                &warnings,
+            );
             Ok(ExportOutcome::Written {
                 path,
                 replaced,
                 backend,
+                warnings,
+                render_deps: (render_deps != genzo_model::RenderDeps::default())
+                    .then_some(render_deps),
             })
         }
         WriteOutcome::Skipped { existing } => Ok(ExportOutcome::Skipped {
@@ -283,6 +331,40 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 同じ書き出しの中で書いたファイルの照合は、大文字・小文字と正規化（NFC / NFD）の違いを区別しない
+    /// （Windows / macOS の既定のファイルシステムでは同じファイルになり、先の出力が置き換えられるため。
+    /// 指摘 F17）。
+    #[test]
+    fn files_written_in_the_same_export_are_matched_like_the_file_system() {
+        let settings = ExportSettings {
+            on_conflict: ConflictPolicy::Overwrite,
+            ..ExportSettings::default()
+        };
+        let mut written = HashSet::new();
+        written.insert(written_key("IMG_0001.jpg"));
+        written.insert(written_key("\u{30AB}\u{3099}.jpg")); // NFD の「ガ」
+        assert_eq!(
+            conflict_policy_for(&settings, &written, "img_0001.jpg"),
+            ConflictPolicy::Sequence
+        );
+        assert_eq!(
+            conflict_policy_for(&settings, &written, "\u{30AC}.JPG"), // NFC の「ガ」
+            ConflictPolicy::Sequence
+        );
+        assert_eq!(
+            conflict_policy_for(&settings, &written, "IMG_0002.jpg"),
+            ConflictPolicy::Overwrite
+        );
+        let skip = ExportSettings {
+            on_conflict: ConflictPolicy::Skip,
+            ..settings
+        };
+        assert_eq!(
+            conflict_policy_for(&skip, &written, "img_0001.jpg"),
+            ConflictPolicy::Skip
+        );
+    }
 
     #[test]
     fn output_names() {

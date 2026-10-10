@@ -146,6 +146,16 @@ pub enum WarningCode {
     FileMissing,
     /// カタログに保存された設定の値を読めないので、既定値を使った（SYS-05）。
     InvalidSetting,
+    /// 既定のタイムゾーン（カタログに保存した値）が、今の OS のオフセットと違う（自動では変えない）。
+    DefaultTimeZoneDiffers,
+    /// 作り直せるキャッシュ（サムネイル DB・プレビューのフォルダ）を使えないため、退避して作り直した、
+    /// または既定の場所に切り替えた（DATA-03b）。
+    CacheRebuilt,
+    /// カタログのボリュームでファイルロックが使えないため、同時に開くことを防げない。
+    CatalogLockUnavailable,
+    /// 現像設定に記録したカメラ行列・RAW デコーダ（render_deps）が、今の値と違う（LibRaw を更新したなど。
+    /// 同じ設定でも色が変わりうる）。
+    RenderDepsChanged,
 }
 
 /// イベントの購読者の一覧。

@@ -8,8 +8,8 @@
 //! 1. [`prepare_restore`]: バックアップを検証して、カタログの隣の **別のファイル** に復元する（既存の
 //!    カタログは変えない）。差し替えの手順（[`RestorePlan::steps`]）を返す。
 //! 2. アプリ（[`Core`]）を終了する。
-//! 3. [`apply_restore`]: 今のカタログ（と `-wal`・`-shm`）を退避用の名前に変え、復元したファイルを
-//!    カタログの名前に変える。CLI からも呼べる。
+//! 3. [`apply_restore`]: 今のカタログ（と `-wal`・`-shm`・`-journal`。本体がなくても付随するファイルが
+//!    残っていれば）を退避用の名前に変え、復元したファイルをカタログの名前に変える。CLI からも呼べる。
 //! 4. もう一度開く。
 
 use std::path::{Path, PathBuf};
@@ -34,15 +34,17 @@ impl Core {
             .ok_or_else(|| ApiError::InvalidArgument("バックアップの世代数が 0 です".to_owned()))
     }
 
-    /// バックアップの一覧（新しい順）。
+    /// バックアップの一覧（新しい順）。このカタログのものと、カタログの印のない古い形式の名前のもの
+    /// （どのカタログのものか分からない）を返す。
     pub fn list_backups(&self) -> Result<Vec<BackupEntry>, ApiError> {
         self.inner.check_open()?;
         let dir = self.inner.config.backup_dir();
         if !dir.is_dir() {
             return Ok(Vec::new());
         }
-        let stem = self.inner.with_catalog(|c| Ok(c.backup_stem()))?;
-        let mut list: Vec<BackupEntry> = genzo_catalog::list_backups(&dir, &stem)?
+        // このカタログのものだけ（同じファイル名の別のカタログのものは出さない。F10）。
+        let owner = self.inner.with_catalog(|c| c.backup_owner())?;
+        let mut list: Vec<BackupEntry> = genzo_catalog::list_backups(&dir, &owner)?
             .into_iter()
             .map(BackupEntry::from)
             .collect();
@@ -68,8 +70,9 @@ impl Core {
                     return Err(ApiError::Cancelled);
                 }
                 // テキスト検索の索引の確認は書き込み用の接続で行う（読み取り専用では実行できない）。
-                let full: IntegrityReport = ctx.inner.with_catalog(|c| c.check_integrity())?.into();
-                report.fts_error = full.fts_error;
+                // カタログのロックの中では FTS の確認だけを行う（integrity_check をもう一度行うと、その間
+                // カタログを使う操作がすべて止まるため）。
+                report.fts_error = ctx.inner.with_catalog(|c| c.check_text_index())?;
                 report.ok = report.integrity_errors.is_empty()
                     && report.foreign_key_violations.is_empty()
                     && report.fts_error.is_none();
@@ -89,20 +92,35 @@ impl Core {
             "キャッシュの回収",
             |ctx| {
                 let inner = ctx.inner;
-                // 回収の間に variant が増えて、そのサムネイルを消さないよう、カタログのロックを持ったまま行う。
-                inner.with_catalog_api(|c| {
+                // 1. L0: 回収の間に variant が増えて、そのサムネイルを消さないよう、カタログのロックを持ったまま
+                //    行う（DB の操作だけ）。
+                let (thumbnails_removed, root) = inner.with_catalog_api(|c| {
                     let alive: std::collections::HashSet<_> =
                         c.all_variant_ids()?.into_iter().collect();
                     inner.with_cache(|cache| {
-                        let thumbnails_removed = cache.thumbs.collect_garbage(&alive)? as u64;
-                        let reconcile = cache.previews.reconcile()?;
-                        let capacity = cache.previews.capacity_bytes();
-                        let evicted = cache.previews.evict_to(capacity, None)?;
-                        Ok(JobResult::CollectGarbage {
-                            thumbnails_removed,
-                            previews_removed: (reconcile.dropped + evicted.removed) as u64,
-                            temp_files_removed: reconcile.temp_files_removed as u64,
-                        })
+                        let removed = cache.thumbs.collect_garbage(&alive)? as u64;
+                        Ok((removed, cache.previews.root().to_path_buf()))
+                    })
+                })?;
+                if ctx.is_cancelled() {
+                    return Err(ApiError::Cancelled);
+                }
+                // 2. L1: フォルダの走査（時間がかかる）は、カタログとキャッシュのロックの外で行う（その間も
+                //    評価・現像の保存・サムネイルの表示を止めない。指摘 F24）。索引の更新と上限容量を超えた
+                //    分の削除は、キャッシュのロックの中で短く行う。
+                let scan =
+                    genzo_catalog::scan_preview_dir(&root).map_err(|source| ApiError::Cache {
+                        path: root.clone(),
+                        source: Box::new(source),
+                    })?;
+                inner.with_cache(|cache| {
+                    let reconcile = cache.previews.apply_scan(scan)?;
+                    let capacity = cache.previews.capacity_bytes();
+                    let evicted = cache.previews.evict_to(capacity, None)?;
+                    Ok(JobResult::CollectGarbage {
+                        thumbnails_removed,
+                        previews_removed: (reconcile.dropped + evicted.removed) as u64,
+                        temp_files_removed: reconcile.temp_files_removed as u64,
                     })
                 })
             },
@@ -111,6 +129,7 @@ impl Core {
 
     /// ジョブの情報（終わったジョブも、しばらく覚えている）。
     pub fn job(&self, job_id: u64) -> Result<JobInfo, ApiError> {
+        self.inner.jobs.reap_unrun(&self.inner);
         self.inner
             .jobs
             .info(job_id)
@@ -128,6 +147,8 @@ impl Core {
     /// ジョブを取り消す（処理の区切りでやめる。実行中のワーカーの処理は強制終了する）。
     pub fn cancel_job(&self, job_id: u64) -> Result<(), ApiError> {
         if self.inner.jobs.cancel(job_id) {
+            // キューで待っていたジョブは実行されずに終わったので、ここで記録して JobFinished を送る。
+            self.inner.jobs.reap_unrun(&self.inner);
             Ok(())
         } else {
             Err(ApiError::NotFound(format!("ジョブ {job_id}")))
@@ -136,6 +157,7 @@ impl Core {
 
     /// 実行中のジョブの数。
     pub fn running_jobs(&self) -> usize {
+        self.inner.jobs.reap_unrun(&self.inner);
         self.inner.jobs.running_count()
     }
 
@@ -226,12 +248,21 @@ pub fn prepare_restore(backup: &Path, catalog_path: &Path) -> Result<RestorePlan
     })
 }
 
-/// 復元の手順の 3: 今のカタログを退避し、復元したファイルをカタログの名前に変える。
+/// 復元の手順の 3: 今のカタログを退避し、復元したファイルをカタログの名前に変える。退避したファイル
+/// （退避先のパス）を返す。
 ///
-/// カタログを開いているアプリを終了してから呼ぶこと。退避したファイルは消さない（利用者が確かめてから
-/// 消す）。途中で名前の変更に失敗したら、変えた名前を元に戻してからエラーを返す（今のカタログを
+/// カタログを開いているアプリを終了してから呼ぶこと（開いていれば [`ApiError::CatalogInUse`]）。
+/// 退避したファイルは消さない（利用者が確かめてから消す）。途中で名前の変更に失敗したら、変えた名前を元に戻してからエラーを返す（今のカタログを
 /// 失わないため）。
-pub fn apply_restore(plan: &RestorePlan) -> Result<(), ApiError> {
+///
+/// カタログの本体がなくても、`-wal`・`-shm`・`-journal` が残っていれば退避する（異常終了の後に本体だけを
+/// 失った場合。残すと、次に開いたときに古い `-wal` が復元したカタログに適用されて壊れる）。差し替えた後に
+/// 付随するファイルが残っていないことを確かめる。
+pub fn apply_restore(plan: &RestorePlan) -> Result<Vec<PathBuf>, ApiError> {
+    // カタログを開いているアプリがあれば差し替えない（差し替えの間はロックを持つ）。
+    let _lock = match crate::lock::acquire(&plan.catalog_path)? {
+        crate::lock::Acquired::Locked(l) | crate::lock::Acquired::Unsupported(l, _) => l,
+    };
     if !plan.restored_path.is_file() {
         return Err(ApiError::NotFound(format!(
             "復元したファイル {}",
@@ -244,6 +275,8 @@ pub fn apply_restore(plan: &RestorePlan) -> Result<(), ApiError> {
             plan.displaced_path.display()
         )));
     }
+    // 付随するファイル（SQLite の `-wal`・`-shm` と、ロールバックジャーナル）。
+    const SIDE_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
     let side = |p: &Path, suffix: &str| {
         let mut s = p.as_os_str().to_owned();
         s.push(suffix);
@@ -253,33 +286,59 @@ pub fn apply_restore(plan: &RestorePlan) -> Result<(), ApiError> {
     // `-wal` だけが残ると、次に開いたときに新しい空のカタログへ古い `-wal` が適用されうるため）。
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut steps: Vec<(PathBuf, PathBuf)> = Vec::new();
-    if plan.catalog_path.exists() {
+    // symlink_metadata: リンクの先ではなく、その名前の項目があるか（壊れたリンクも退避する）。
+    let present = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    if present(&plan.catalog_path) {
         steps.push((plan.catalog_path.clone(), plan.displaced_path.clone()));
-        for suffix in ["-wal", "-shm"] {
-            let from = side(&plan.catalog_path, suffix);
-            if from.exists() {
-                steps.push((from, side(&plan.displaced_path, suffix)));
+    }
+    // 本体の有無によらず、付随するファイルは退避する。
+    for suffix in SIDE_SUFFIXES {
+        let from = side(&plan.catalog_path, suffix);
+        if present(&from) {
+            let to = side(&plan.displaced_path, suffix);
+            if present(&to) {
+                return Err(ApiError::InvalidArgument(format!(
+                    "退避先 {} が既にあります",
+                    to.display()
+                )));
             }
+            steps.push((from, to));
         }
     }
     steps.push((plan.restored_path.clone(), plan.catalog_path.clone()));
+    let undo = |moved: &[(PathBuf, PathBuf)]| {
+        for (back_from, back_to) in moved.iter().rev() {
+            if let Err(re) = std::fs::rename(back_to, back_from) {
+                tracing::error!(
+                    error = %re,
+                    from = %back_to.display(),
+                    to = %back_from.display(),
+                    "復元の取り消しで、ファイルの名前を元に戻せない"
+                );
+            }
+        }
+    };
     for (from, to) in steps {
         if let Err(e) = std::fs::rename(&from, &to) {
-            for (back_from, back_to) in moved.iter().rev() {
-                if let Err(re) = std::fs::rename(back_to, back_from) {
-                    tracing::error!(
-                        error = %re,
-                        from = %back_to.display(),
-                        to = %back_from.display(),
-                        "復元の取り消しで、ファイルの名前を元に戻せない"
-                    );
-                }
-            }
+            undo(&moved);
             return Err(ApiError::io(&from, e));
         }
         moved.push((from, to));
     }
-    Ok(())
+    // 差し替えた後に、付随するファイルが残っていないこと（別のプロセスが作り直したなど）を確かめる。
+    for suffix in SIDE_SUFFIXES {
+        let leftover = side(&plan.catalog_path, suffix);
+        if present(&leftover) {
+            undo(&moved);
+            return Err(ApiError::InvalidArgument(format!(
+                "復元先に {} が残っています（カタログを開いているアプリを終了してから、やり直してください）",
+                leftover.display()
+            )));
+        }
+    }
+    // 退避したファイル（最後の手順は復元したファイルの名前の変更なので除く）。
+    moved.pop();
+    Ok(moved.into_iter().map(|(_, to)| to).collect())
 }
 
 #[cfg(test)]
@@ -316,6 +375,41 @@ mod tests {
             "current-wal"
         );
         assert!(!plan.restored_path.exists());
+    }
+
+    /// 復元先にカタログの本体がなく `-wal`・`-shm` だけが残っている（異常終了の後に本体だけを失った）
+    /// 場合も、`-wal`・`-shm` を退避する（残すと、次に開いたときに古い `-wal` が復元したカタログに
+    /// 適用されて壊れる。指摘 F01）。
+    #[test]
+    fn restore_without_catalog_moves_leftover_wal_aside() {
+        let d = tempfile::tempdir().unwrap();
+        let plan = plan_in(d.path());
+        std::fs::write(d.path().join("catalog.db-wal"), "stale-wal").unwrap();
+        std::fs::write(d.path().join("catalog.db-shm"), "stale-shm").unwrap();
+        std::fs::write(d.path().join("catalog.db-journal"), "stale-journal").unwrap();
+        std::fs::write(&plan.restored_path, "restored").unwrap();
+        let moved = apply_restore(&plan).unwrap();
+        assert_eq!(read(&plan.catalog_path), "restored");
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert!(
+                !d.path().join(format!("catalog.db{suffix}")).exists(),
+                "{suffix} が残っている"
+            );
+        }
+        assert!(!plan.displaced_path.exists(), "本体はなかった");
+        assert_eq!(
+            read(&d.path().join("catalog-before-restore.db-wal")),
+            "stale-wal"
+        );
+        assert_eq!(
+            read(&d.path().join("catalog-before-restore.db-shm")),
+            "stale-shm"
+        );
+        assert_eq!(
+            read(&d.path().join("catalog-before-restore.db-journal")),
+            "stale-journal"
+        );
+        assert_eq!(moved.len(), 3, "退避したファイルを返す: {moved:?}");
     }
 
     /// 退避の途中で失敗したら（`-wal` を移せないなど）、今のカタログを元の名前に戻す（カタログの本体が

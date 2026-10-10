@@ -91,9 +91,17 @@ pub(crate) struct Inner {
     pub plans: Mutex<PlanStore>,
     pub trash: Arc<dyn TrashBackend>,
     pub settings: Mutex<CoreSettings>,
+    /// 最後に投入した撮影日時の推定し直しのジョブ（続けて設定を変えたときに、前のジョブを取り消す）。
+    pub reresolve_job: Mutex<Option<u64>>,
+    /// キャッシュの世代（カタログの `cache_generation`。キャッシュキーの材料。復元の後に変わる）。
+    pub cache_generation: String,
+    /// ワーカーの RAW デコーダの識別子（起動時に確かめる。L0 / L1 のキャッシュキーの材料。`deps` の doc）。
+    pub raw_decoder: Option<String>,
     pub startup: StartupReport,
     pub closed: AtomicBool,
     pub saver: Mutex<Option<JoinHandle<()>>>,
+    /// カタログのロック（閉じたら解放する）。
+    pub lock: Mutex<Option<crate::lock::CatalogLock>>,
 }
 
 impl Inner {
@@ -126,14 +134,25 @@ impl Inner {
         f(cat)
     }
 
-    /// キャッシュ（thumbs.db・previews）を使う。
+    /// キャッシュ（thumbs.db・previews）を使う（エラーは [`ApiError::Cache`]。作り直せるので、カタログの
+    /// 復元は案内しない）。
     pub(crate) fn with_cache<T>(
         &self,
         f: impl FnOnce(&mut CacheDb) -> genzo_catalog::Result<T>,
     ) -> Result<T, ApiError> {
         let mut guard = self.cache.lock();
         let cache = guard.as_mut().ok_or(ApiError::Closed)?;
-        Ok(f(cache)?)
+        f(cache).map_err(|source| ApiError::Cache {
+            path: self.config.thumbs_path(),
+            source: Box::new(source),
+        })
+    }
+
+    /// ファイル名 `name` の写真の L0 / L1 のキャッシュキーに入れる RAW デコーダの識別子（RAW 以外は `None`）。
+    pub(crate) fn raw_decoder_for(&self, name: &str) -> Option<&str> {
+        (genzo_catalog::pair_class(name) == genzo_catalog::PairClass::Raw)
+            .then_some(self.raw_decoder.as_deref())
+            .flatten()
     }
 
     /// ワーカーの組。
@@ -155,22 +174,30 @@ impl Inner {
             return Ok(None);
         }
         let dir = self.config.backup_dir();
-        let stem = self.with_catalog(|c| Ok(c.backup_stem()))?;
+        let owner = self.with_catalog(|c| c.backup_owner())?;
         if !force {
             let list = if dir.is_dir() {
-                genzo_catalog::list_backups(&dir, &stem)?
+                genzo_catalog::list_backups(&dir, &owner)?
             } else {
                 Vec::new()
             };
-            let newest = list.iter().map(|b| b.created_at).max();
-            if let Some(newest) = newest {
-                let elapsed = Utc::now().signed_duration_since(newest);
-                // 時計が戻った（未来の日時のバックアップ）場合は作る。
-                if elapsed >= chrono::TimeDelta::zero()
-                    && elapsed.to_std().is_ok_and(|e| e < AUTO_BACKUP_INTERVAL)
-                {
-                    return Ok(None);
-                }
+            // このカタログのバックアップ（同じファイル名の別のカタログのもの・印のない古い形式のものは
+            // 数えない。F10）のうち、今より前の日時で最も新しいもの。未来の日時のもの（時計が戻った・時計の
+            // 進んだ機器で作った）は数えないので、今の状態のバックアップがなければ作る。作ったものは世代の
+            // 管理で消さないので、次に開いたときは作り直さない（F09）。
+            let now = Utc::now();
+            let newest = list
+                .iter()
+                .filter(|b| owner.owns(b) && b.created_at <= now)
+                .map(|b| b.created_at)
+                .max();
+            if let Some(newest) = newest
+                && now
+                    .signed_duration_since(newest)
+                    .to_std()
+                    .is_ok_and(|e| e < AUTO_BACKUP_INTERVAL)
+            {
+                return Ok(None);
             }
         }
         std::fs::create_dir_all(&dir).map_err(|e| ApiError::io(&dir, e))?;
@@ -198,6 +225,10 @@ impl std::fmt::Debug for Core {
 
 impl Core {
     /// カタログを開き、起動時の確認（DATA-05・DATA-07・DATA-04）をして、ワーカーを起動する。
+    ///
+    /// 同じカタログを別の [`Core`]（別のアプリ・CLI・同じプロセスを含む）が開いていれば
+    /// [`ApiError::CatalogInUse`]（`lock` の doc）。作り直せるキャッシュ（thumbs.db・プレビューのフォルダ）
+    /// を開けなくても、退避して作り直すか既定の場所に切り替えて開く（警告 [`WarningCode::CacheRebuilt`]）。
     pub fn open(config: CoreConfig) -> Result<Self, ApiError> {
         Self::open_with(config, CoreHooks::default())
     }
@@ -211,6 +242,22 @@ impl Core {
             std::fs::create_dir_all(parent).map_err(|e| ApiError::io(parent, e))?;
         }
         let events = EventHub::default();
+
+        // カタログの排他（1 つのカタログは 1 つのアプリだけが開く。`lock` の doc）。
+        let lock = match crate::lock::acquire(&config.catalog_path)? {
+            crate::lock::Acquired::Locked(l) => l,
+            crate::lock::Acquired::Unsupported(l, reason) => {
+                events.emit_sticky(Event::Warning {
+                    code: WarningCode::CatalogLockUnavailable,
+                    message: format!(
+                        "このボリュームではファイルロックが使えないため、カタログを同時に開くことを防げません（{reason}）"
+                    ),
+                    variant_id: None,
+                    path: Some(config.catalog_path.clone()),
+                });
+                l
+            }
+        };
 
         // カタログ（マイグレーションの前のバックアップは、自動バックアップと同じ場所に置く）。
         let backup_dir = config.backup_dir();
@@ -263,6 +310,9 @@ impl Core {
         };
         let Parts {
             recovered,
+            reresolve_capture_times,
+            cache_generation,
+            raw_decoder,
             settings,
             thumbs,
             previews,
@@ -290,6 +340,9 @@ impl Core {
             plans: Mutex::new(PlanStore::default()),
             trash: hooks.trash,
             settings: Mutex::new(settings),
+            reresolve_job: Mutex::new(None),
+            cache_generation,
+            raw_decoder,
             startup: StartupReport {
                 previous_shutdown,
                 migrated_from,
@@ -298,6 +351,7 @@ impl Core {
             },
             closed: AtomicBool::new(false),
             saver: Mutex::new(None),
+            lock: Mutex::new(Some(lock)),
         });
 
         // 自動バックアップ（DATA-04。前回から 1 日以上たっていれば）。失敗しても起動は続ける。
@@ -327,6 +381,11 @@ impl Core {
                 return Err(e);
             }
         }
+        if reresolve_capture_times {
+            crate::settings::spawn_reresolve(&inner);
+        }
+        // 前回作り直せなかった L0 / L1（編集の直後に終了したなど）を作り直す。
+        crate::previews::regenerate_pending(&inner);
         Ok(Self { inner })
     }
 
@@ -412,6 +471,8 @@ fn close_inner(inner: &Arc<Inner>) -> Result<(), ApiError> {
     inner.jobs.cancel_all();
     inner.background.shutdown_now();
     inner.interactive.shutdown_now();
+    // キューから実行されずに外れたジョブも、取り消しとして記録して知らせる。
+    inner.jobs.reap_unrun(inner);
     // 3. ワーカーを終了させる（他に参照が残っていれば drop で強制終了する）。
     if let Some(pool) = inner.workers.lock().take()
         && let Ok(pool) = Arc::try_unwrap(pool)
@@ -438,6 +499,8 @@ fn close_inner(inner: &Arc<Inner>) -> Result<(), ApiError> {
     if let Some(cat) = inner.catalog.lock().take() {
         keep(cat.close().map_err(ApiError::from));
     }
+    // カタログを閉じてから、ロックを解放する。
+    inner.lock.lock().take();
     *inner.gpu.lock() = GpuState::closed();
     match first_err {
         Some(e) => Err(e),
@@ -448,6 +511,9 @@ fn close_inner(inner: &Arc<Inner>) -> Result<(), ApiError> {
 /// カタログを開いた後に用意する部品。
 struct Parts {
     recovered: u64,
+    reresolve_capture_times: bool,
+    cache_generation: String,
+    raw_decoder: Option<String>,
     settings: CoreSettings,
     thumbs: ThumbStore,
     previews: PreviewCache,
@@ -466,17 +532,32 @@ fn build_parts(
 ) -> Result<Parts, ApiError> {
     // 終わっていないファイル操作の確定（6.4 節。DATA-07）。
     let recovered = recover_file_ops(catalog, events)?;
-    // 設定（SYS-05）。
+    // 設定（SYS-05）。既定のタイムゾーンは、まだ保存していなければ保存する。
     let settings = crate::settings::load(catalog, config, events)?;
-    // キャッシュ。
-    let thumbs = ThumbStore::open(config.thumbs_path())?;
-    let previews = PreviewCache::open(
-        &settings.preview_cache_dir,
-        config.thumbs_path(),
-        settings.preview_cache_bytes,
+    let offset_newly_saved =
+        crate::settings::persist_default_offset(catalog, &settings, config, events)?;
+    // 保存していなかった既存のカタログでは、取り込んだ時期ごとに推定のオフセットが混ざっていうるので、
+    // 保存した値で推定し直す（写真がなければ不要）。
+    let reresolve_capture_times = offset_newly_saved && catalog.counts()?.assets > 0;
+    // キャッシュ（作り直せるので、開けなくてもカタログは開く。DATA-03b）。
+    let (mut thumbs, mut previews) = open_caches(config, &settings, events)?;
+    // キャッシュがこのカタログ（の今の世代）のものでなければ捨てる（復元の後・別のカタログ・データの
+    // フォルダを残したままの catalog init。ID が再利用されるため）。
+    let cache_generation = catalog.cache_generation()?;
+    adopt_caches(
+        &mut thumbs,
+        &mut previews,
+        &cache_generation,
+        &config.thumbs_path(),
+        events,
     )?;
-    // ワーカー。
+    // ワーカー。RAW デコーダの識別子を確かめる（L0 / L1 のキャッシュキーの材料。確かめられなければ、
+    // 本体の識別子（同じ build のワーカーなら同じ）を使う）。
     let pool = WorkerPool::new(pool_config(config)?)?;
+    let raw_decoder = pool
+        .ping(genzo_worker::Lane::Batch)
+        .map(|p| p.raw_decoder)
+        .unwrap_or_else(|_| genzo_raw::decoder_id());
     // スケジューラ（P3 と P0 で 1 つのメモリの予算を分け合う。6.1 節）。
     let budget = MemoryBudget::new(genzo_jobs::DEFAULT_NORMAL_BUDGET_BYTES);
     let background = Scheduler::with_budget(
@@ -494,6 +575,9 @@ fn build_parts(
     let display = DisplayState::assumed_srgb()?;
     Ok(Parts {
         recovered,
+        reresolve_capture_times,
+        cache_generation,
+        raw_decoder,
         settings,
         thumbs,
         previews,
@@ -503,6 +587,140 @@ fn build_parts(
         engine,
         display,
     })
+}
+
+/// サムネイル DB（thumbs.db）とプレビューのキャッシュを開く。
+///
+/// - thumbs.db が壊れている・別のファイル・版が合わない場合は、`-wal`・`-shm` とともに
+///   `thumbs.db.broken-<UTC の時刻>` の名前に変えて退避し（削除しない）、作り直す。ディスクの容量不足・
+///   権限などのエラーでは退避しない（[`ApiError::Cache`] を返す）。
+/// - 設定したプレビューのフォルダを使えない（外付けのドライブを外したなど）場合は、既定の場所
+///   （`data_dir/previews`）に切り替える（起動した後に設定を変えられるように）。
+/// - どちらも警告（[`WarningCode::CacheRebuilt`]）を出す。
+fn open_caches(
+    config: &CoreConfig,
+    settings: &CoreSettings,
+    events: &EventHub,
+) -> Result<(ThumbStore, PreviewCache), ApiError> {
+    let thumbs_path = config.thumbs_path();
+    let cache_err = |path: &Path, source| ApiError::Cache {
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    };
+    let thumbs = match ThumbStore::open(&thumbs_path) {
+        Ok(t) => t,
+        Err(e) if e.indicates_broken_database() => {
+            let moved_to = move_cache_db_aside(&thumbs_path)?;
+            events.emit_sticky(Event::Warning {
+                code: WarningCode::CacheRebuilt,
+                message: format!(
+                    "サムネイルのキャッシュ（{}）を開けないため、{} に退避して作り直します（{e}）",
+                    thumbs_path.display(),
+                    moved_to.display()
+                ),
+                variant_id: None,
+                path: Some(moved_to),
+            });
+            ThumbStore::open(&thumbs_path).map_err(|e| cache_err(&thumbs_path, e))?
+        }
+        Err(e) => return Err(cache_err(&thumbs_path, e)),
+    };
+    let previews = match PreviewCache::open(
+        &settings.preview_cache_dir,
+        &thumbs_path,
+        settings.preview_cache_bytes,
+    ) {
+        Ok(p) => p,
+        Err(e @ genzo_catalog::CatalogError::Io { .. })
+            if settings.preview_cache_dir != config.default_preview_dir() =>
+        {
+            let fallback = config.default_preview_dir();
+            events.emit_sticky(Event::Warning {
+                code: WarningCode::CacheRebuilt,
+                message: format!(
+                    "プレビューのフォルダ {} を使えないため、既定の場所 {} を使います（設定で変えられます。{e}）",
+                    settings.preview_cache_dir.display(),
+                    fallback.display()
+                ),
+                variant_id: None,
+                path: Some(settings.preview_cache_dir.clone()),
+            });
+            PreviewCache::open(&fallback, &thumbs_path, settings.preview_cache_bytes)
+                .map_err(|e| cache_err(&fallback, e))?
+        }
+        Err(e) => return Err(cache_err(&settings.preview_cache_dir, e)),
+    };
+    Ok((thumbs, previews))
+}
+
+/// thumbs.db に記録する、キャッシュを作ったカタログの世代のキー。
+const CACHE_META_CATALOG_GENERATION: &str = "catalog_generation";
+
+/// キャッシュ（L0・L1・作り直し待ちの印）が、カタログの世代 `generation` のものか確かめ、違えば捨てて
+/// 世代を記録する。
+fn adopt_caches(
+    thumbs: &mut ThumbStore,
+    previews: &mut PreviewCache,
+    generation: &str,
+    thumbs_path: &Path,
+    events: &EventHub,
+) -> Result<(), ApiError> {
+    let cache_err = |source| ApiError::Cache {
+        path: thumbs_path.to_path_buf(),
+        source: Box::new(source),
+    };
+    let owner = thumbs
+        .meta(CACHE_META_CATALOG_GENERATION)
+        .map_err(cache_err)?;
+    if owner.as_deref() == Some(generation) {
+        return Ok(());
+    }
+    let removed = thumbs.clear().map_err(cache_err)?;
+    previews.reconcile().map_err(cache_err)?;
+    let evicted = previews.evict_to(0, None).map_err(cache_err)?;
+    thumbs
+        .set_meta(CACHE_META_CATALOG_GENERATION, generation)
+        .map_err(cache_err)?;
+    if owner.is_some() && (removed > 0 || evicted.removed > 0) {
+        events.emit_sticky(Event::Warning {
+            code: WarningCode::CacheRebuilt,
+            message: format!(
+                "サムネイル・プレビューのキャッシュは別のカタログ（または復元の前のカタログ）のものだったため、捨てて作り直します（サムネイル {removed} 件・プレビュー {} 件）",
+                evicted.removed
+            ),
+            variant_id: None,
+            path: Some(thumbs_path.to_path_buf()),
+        });
+    }
+    Ok(())
+}
+
+/// 壊れたキャッシュの DB（と `-wal`・`-shm`）を、`<名前>.broken-<UTC の時刻>` に変えて退避する（削除・
+/// 上書きはしない）。本体の退避先を返す。
+fn move_cache_db_aside(path: &Path) -> Result<std::path::PathBuf, ApiError> {
+    let ts = Utc::now().format("%Y%m%dT%H%M%S%3fZ");
+    let with_suffix = |p: &Path, suffix: &str| {
+        let mut s = p.as_os_str().to_owned();
+        s.push(suffix);
+        std::path::PathBuf::from(s)
+    };
+    let target = with_suffix(path, &format!(".broken-{ts}"));
+    if target.exists() {
+        return Err(ApiError::InvalidArgument(format!(
+            "退避先 {} が既にあります",
+            target.display()
+        )));
+    }
+    // 付随するファイルを先に移す（本体だけを移して `-wal` が残ると、新しい DB に適用されうるため）。
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let from = with_suffix(path, suffix);
+        if std::fs::symlink_metadata(&from).is_ok() {
+            let to = with_suffix(&target, suffix);
+            std::fs::rename(&from, &to).map_err(|e| ApiError::io(&from, e))?;
+        }
+    }
+    std::fs::rename(path, &target).map_err(|e| ApiError::io(path, e))?;
+    Ok(target)
 }
 
 /// ワーカーの組の設定（[`WorkerLaunch`] から）。

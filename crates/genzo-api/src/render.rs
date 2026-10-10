@@ -269,16 +269,34 @@ impl Inner {
     }
 }
 
-/// センサー処理の警告と、適用しなかった項目を表示用の文字列にする。
-fn warning_texts(
+/// センサー処理の警告と、適用しなかった項目を表示用の文字列（それぞれの Display。日本語の説明）にする。
+pub(crate) fn warning_texts(
     warnings: &[genzo_pipeline::SensorWarning],
     unimplemented: &[genzo_pipeline::finish::UnimplementedSetting],
 ) -> Vec<String> {
     warnings
         .iter()
-        .map(|w| format!("{w:?}"))
-        .chain(unimplemented.iter().map(|u| format!("{u:?}")))
+        .map(ToString::to_string)
+        .chain(unimplemented.iter().map(ToString::to_string))
         .collect()
+}
+
+/// 現像の警告（カメラ行列がないなど）を、警告のイベントで知らせる（書き出し・キャッシュの作り直しの
+/// 結果に載せるのとあわせて。6.3 節）。
+pub(crate) fn emit_render_warnings(
+    inner: &Inner,
+    variant_id: VariantId,
+    what: &str,
+    warnings: &[String],
+) {
+    for w in warnings {
+        inner.events.warn(
+            WarningCode::Render,
+            format!("{what}: {w}"),
+            Some(variant_id),
+            None,
+        );
+    }
 }
 
 /// 現像のプレビューの出力先（17a 画面）。
@@ -327,5 +345,27 @@ impl Core {
     /// GPU を使っているか（使っていれば、アダプターの説明）。初期化していなければ初期化する。
     pub fn gpu_adapter(&self) -> Option<String> {
         self.inner.gpu().map(|r| r.context().summary().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 警告は表示用の説明（Display。日本語）にする（Debug の名前を UI に渡さない。指摘 F27）。
+    #[test]
+    fn warnings_use_the_display_texts() {
+        let texts = warning_texts(
+            &[genzo_pipeline::SensorWarning::MissingCameraMatrix],
+            &[genzo_pipeline::finish::UnimplementedSetting::Sharpening],
+        );
+        assert_eq!(
+            texts,
+            vec![
+                genzo_pipeline::SensorWarning::MissingCameraMatrix.to_string(),
+                genzo_pipeline::finish::UnimplementedSetting::Sharpening.to_string(),
+            ]
+        );
+        assert!(texts[0].contains("カメラ行列"), "{texts:?}");
     }
 }

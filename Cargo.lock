@@ -383,6 +383,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctrlc"
+version = "3.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0b1fab2ae45819af2d0731d60f2afe17227ebb1a1538a236da84c93e9a60162"
+dependencies = [
+ "dispatch2",
+ "nix",
+ "windows-sys",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -400,6 +411,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags",
+ "block2",
+ "libc",
  "objc2",
 ]
 
@@ -582,8 +595,10 @@ dependencies = [
  "image",
  "kamadak-exif",
  "parking_lot",
+ "same-file",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tracing",
@@ -612,6 +627,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-channel",
+ "ctrlc",
  "genzo-api",
  "genzo-catalog",
  "genzo-gpu",
@@ -624,6 +640,7 @@ dependencies = [
  "genzo-worker",
  "image",
  "kamadak-exif",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -678,6 +695,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "png",
+ "rustix",
  "same-file",
  "serde",
  "serde_json",
@@ -693,9 +711,11 @@ dependencies = [
  "chrono",
  "hex",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
 ]
 
@@ -1223,6 +1243,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]

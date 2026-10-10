@@ -237,6 +237,32 @@ fn filters_generations_and_marks() {
     };
     let r = core.search(&videos, SearchSort::default()).unwrap();
     assert_eq!(r.count, u64::from(fx.has_video));
+    // 動画の長さ・fps・コーデック（VID-03。F40。テスト用の動画は mpeg4・1 秒・10 fps・96×64）。
+    let video_by = |f: SearchFilter| core.search(&f, SearchSort::default()).unwrap().count;
+    assert_eq!(
+        video_by(SearchFilter {
+            codecs: Some(vec!["MPEG4".to_owned()]),
+            duration_max_s: Some(5.0),
+            fps_max: Some(10.5),
+            ..Default::default()
+        }),
+        u64::from(fx.has_video)
+    );
+    assert_eq!(
+        video_by(SearchFilter {
+            duration_min_s: Some(5.0),
+            ..Default::default()
+        }),
+        0
+    );
+    assert_eq!(
+        video_by(SearchFilter {
+            kind: Some(AssetKind::Video),
+            long_edge_max: Some(96),
+            ..Default::default()
+        }),
+        u64::from(fx.has_video)
+    );
 
     // テキスト（ファイル名とキャプション。3.6 節）。
     let text = |t: &str| SearchFilter {

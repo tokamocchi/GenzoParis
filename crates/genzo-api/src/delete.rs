@@ -28,6 +28,11 @@ pub trait TrashBackend: Send + Sync + 'static {
 
 /// OS のゴミ箱（trash crate。Windows のごみ箱、macOS の Finder のゴミ箱、Linux の freedesktop.org の
 /// ゴミ箱）。
+///
+/// macOS では trash crate の既定（Finder を osascript で操作する方法）を使う: 初回に「Finder を制御する」
+/// 許可を求められ、拒否されると移動は失敗する。1 ファイルごとに osascript を起動し、Finder の効果音が
+/// 鳴る。NSFileManager の方法（許可が要らないが、Finder の「戻す」が使えないことがある）に変えるか、
+/// asset ごとにまとめて移すかは、M4 の前に人が判断する（implementation_status の表）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsTrash;
 
@@ -196,8 +201,9 @@ impl Core {
                     let files: Vec<&PlannedFile> =
                         plan.files.iter().filter(|f| f.asset_id == asset).collect();
                     match self.trash_asset(asset, &files) {
-                        Ok(trashed) => {
+                        Ok((trashed, missing)) => {
                             report.trashed_files.extend(trashed);
+                            report.skipped_missing.extend(missing);
                             report.removed_assets.push(asset);
                             report.removed_variants.extend(
                                 plan.variants
@@ -230,18 +236,75 @@ impl Core {
         Ok(report)
     }
 
-    /// 1 つの asset のファイルをゴミ箱へ移し、カタログから除く（file_op の状態遷移）。
+    /// 1 つの asset のファイルをゴミ箱へ移し、カタログから除く（file_op の状態遷移）。移したファイルと、
+    /// 元の場所になかった（フォルダはあり、アプリの外で削除された）ファイルを返す。
     /// 失敗したら、失敗したファイルとエラーを返す（asset はカタログに残る）。
+    ///
+    /// 移し始める前に、すべてのファイルを確かめる（6.4 節「失敗したら元の状態のまま知らせる」）:
+    /// - 元の場所が見えない（フォルダごと見えない・権限・入出力のエラー。ドライブを外した場合など）
+    ///   ファイルがあれば、移さずに失敗にする（「移した」扱いにして写真を除かない）。
+    /// - 登録したファイルと内容（サイズとクイックハッシュ）が違えば、移さずに失敗にする（同じ名前の別の
+    ///   ファイルを移さない。更新日時は比べない（exFAT・ネットワークのボリュームで変わりうるため））。
     fn trash_asset(
         &self,
         asset: AssetId,
         files: &[&PlannedFile],
-    ) -> Result<Vec<PathBuf>, (PathBuf, ApiError)> {
+    ) -> Result<(Vec<PathBuf>, Vec<PathBuf>), (PathBuf, ApiError)> {
         let inner = &self.inner;
         let first = files
             .first()
             .and_then(|f| f.path.clone())
             .unwrap_or_default();
+        // 1. 確かめる（まだ何も変えない）。
+        let mut to_move: Vec<(genzo_model::FileId, PathBuf)> = Vec::new();
+        let mut missing: Vec<PathBuf> = Vec::new();
+        for f in files {
+            let Some(path) = f.path.clone() else {
+                return Err((
+                    PathBuf::new(),
+                    ApiError::FileAccess {
+                        path: PathBuf::new(),
+                        message: "ボリュームのマウント先が分かりません".to_owned(),
+                    },
+                ));
+            };
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {}
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        && path.parent().is_some_and(Path::is_dir) =>
+                {
+                    // もう元の場所にない（アプリの外で削除・移動された）。移すものはない。
+                    missing.push(path);
+                    continue;
+                }
+                Err(e) => {
+                    let message = if e.kind() == std::io::ErrorKind::NotFound {
+                        "ファイルのフォルダが見つかりません（ドライブが外れている可能性があります）。移していません".to_owned()
+                    } else {
+                        format!("ファイルの場所を確かめられません（移していません）: {e}")
+                    };
+                    return Err((path.clone(), ApiError::FileAccess { path, message }));
+                }
+            }
+            let registered = inner
+                .with_catalog(|c| c.file(f.file_id))
+                .map_err(|e| (path.clone(), e))?;
+            let same = genzo_catalog::FileFacts::read(&path).is_ok_and(|now| {
+                now.size == registered.facts.size && now.quick_hash == registered.facts.quick_hash
+            });
+            if !same {
+                return Err((
+                    path.clone(),
+                    ApiError::FileAccess {
+                        path,
+                        message: "ファイルが登録の後に変わっています（同じ名前の別のファイルの可能性があります）。移していません。ファイルの確認（check_files）の後にやり直してください".to_owned(),
+                    },
+                ));
+            }
+            to_move.push((f.file_id, path));
+        }
+        // 2. 移す。
         let (op, _) = inner
             .with_catalog(|c| c.plan_trash(&[asset]))
             .map_err(|e| (first.clone(), e))?;
@@ -249,19 +312,7 @@ impl Core {
             .with_catalog(|c| c.start_file_op(op))
             .map_err(|e| (first.clone(), e))?;
         let mut moved: Vec<(genzo_model::FileId, PathBuf)> = Vec::new();
-        for f in files {
-            let Some(path) = f.path.clone() else {
-                let e = ApiError::FileAccess {
-                    path: PathBuf::new(),
-                    message: "ボリュームのマウント先が分かりません".to_owned(),
-                };
-                self.fail_trash(op, &moved, &e.to_string());
-                return Err((PathBuf::new(), e));
-            };
-            if std::fs::symlink_metadata(&path).is_err() {
-                // もう元の場所にない（アプリの外で削除・移動された）。移すものはないので続ける。
-                continue;
-            }
+        for (file_id, path) in to_move {
             if let Err(message) = inner.trash.move_to_trash(&path) {
                 let e = ApiError::Trash {
                     path: path.clone(),
@@ -270,12 +321,12 @@ impl Core {
                 self.fail_trash(op, &moved, &e.to_string());
                 return Err((path, e));
             }
-            moved.push((f.file_id, path));
+            moved.push((file_id, path));
         }
         inner
             .with_catalog(|c| c.complete_file_op(op))
             .map_err(|e| (first, e))?;
-        Ok(moved.into_iter().map(|(_, p)| p).collect())
+        Ok((moved.into_iter().map(|(_, p)| p).collect(), missing))
     }
 
     /// ゴミ箱への移動が途中で失敗した: 記録を failed にし、すでに移したファイルを missing にする。
@@ -303,12 +354,27 @@ impl Core {
 }
 
 /// 起動時に、planned / executing のままのファイル操作を、実際のファイルの場所を見て done / failed に
-/// 確定させる（6.4 節。DATA-07）。確定させた数を返す。
+/// 確定させる（6.4 節。DATA-07）。確定させた数を返す。ゴミ箱への移動で、元のフォルダごと見えない
+/// （ドライブを外した）ファイルがあれば、確定を保留して次の起動で判断し直す（写真を「移した」として
+/// カタログから除かない）。
 pub(crate) fn recover_file_ops(catalog: &mut Catalog, events: &EventHub) -> Result<u64, ApiError> {
     let ops = catalog.unfinished_file_ops()?;
     let mut n = 0;
     for op in ops {
         let (state, note) = decide(&op);
+        if !matches!(state, FileOpState::Done | FileOpState::Failed) {
+            // 元の場所が見えない（ドライブを外したなど）: 確定せずに残し、次の起動で判断し直す。
+            events.emit_sticky(Event::Warning {
+                code: WarningCode::FileOperationRecovered,
+                message: format!(
+                    "終わっていなかったファイル操作 {}（{}）の確定を保留しました: {note}",
+                    op.id, op.kind
+                ),
+                variant_id: None,
+                path: None,
+            });
+            continue;
+        }
         match state {
             FileOpState::Done => catalog.complete_file_op(op.id)?,
             _ => {
@@ -349,13 +415,37 @@ fn exists(p: &FileOpPath) -> bool {
         .is_some_and(|s| std::fs::symlink_metadata(s).is_ok())
 }
 
-/// 終わっていないファイル操作をどう確定させるか。
+/// ファイルが見えない理由が「元の場所にない」と言えるか（フォルダは見えて、ファイルだけがない）。
+/// フォルダごと見えない（ドライブを外した・ドライブ文字が変わった）・マウント先が分からない場合は
+/// `false`（移したかどうか判断できない）。
+fn known_absent(p: &FileOpPath) -> bool {
+    p.absolute_path.as_deref().is_some_and(|s| {
+        let path = Path::new(s);
+        matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+            && path.parent().is_some_and(Path::is_dir)
+    })
+}
+
+/// 終わっていないファイル操作をどう確定させるか（done / failed。確定を保留するなら executing）。
 fn decide(op: &FileOpRecord) -> (FileOpState, String) {
     let entries = &op.payload.entries;
     match op.kind {
         FileOpKind::Trash => {
             let remaining = entries.iter().filter(|e| exists(&e.from)).count();
-            if remaining == 0 {
+            // 見えないファイルのうち、元の場所にないと言えないもの（フォルダごと見えない）があれば保留する。
+            let unknown = entries
+                .iter()
+                .filter(|e| !exists(&e.from) && !known_absent(&e.from))
+                .count();
+            if unknown > 0 {
+                (
+                    FileOpState::Executing,
+                    format!(
+                        "{} 件のうち {unknown} 件の元の場所（フォルダ）が見えません（ドライブが外れている可能性があります）。ボリュームがつながった後の起動で確定します",
+                        entries.len()
+                    ),
+                )
+            } else if remaining == 0 {
                 (
                     FileOpState::Done,
                     "すべてのファイルが元の場所にない（ゴミ箱へ移した）".to_owned(),

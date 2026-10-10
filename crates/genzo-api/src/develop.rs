@@ -13,7 +13,8 @@
 //!   IQ-05）・ヒストグラムとクリッピングの情報（17c。DEV-26）。
 //! - 保存（DATA-03・DEV-27）: ドラッグの終了（[`Core::end_drag`]）で履歴に 1 件記録して保存する。
 //!   ドラッグでない変更は、最後の操作から [`DEVELOP_SAVE_DELAY`]（1 秒）後にまとめて保存する（自動保存の
-//!   スレッド）。[`Core::close_develop`]・[`Core::close`] で保存待ちの変更を保存する。
+//!   スレッド）。変更が続いても、最初の未保存の変更から [`DEVELOP_SAVE_MAX_DELAY`] がたてば保存する。
+//!   [`Core::close_develop`]・[`Core::close`] で保存待ちの変更を保存する。
 //! - Undo / Redo（DEV-27）はカタログの履歴で行うので、再起動の後もできる。
 //! - 設定のコピーと複数の variant への一括適用（DEV-30。[`Core::paste_settings`]）、仮想コピーの作成
 //!   （LIB-13。[`Core::create_virtual_copy`]）。
@@ -28,9 +29,9 @@ use genzo_model::{DevelopSettings, Phase, RenderQuality, VariantId};
 use genzo_pipeline::finish::output::{Dither, quantize_u8};
 use genzo_pipeline::{PhotoSource, PreviewRequest};
 use genzo_worker::Lane;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, MutexGuard};
 
-use crate::config::DEVELOP_SAVE_DELAY;
+use crate::config::{DEVELOP_SAVE_DELAY, DEVELOP_SAVE_MAX_DELAY};
 use crate::core::{Core, Inner};
 use crate::error::ApiError;
 use crate::events::{CatalogChange, Event, WarningCode};
@@ -58,16 +59,23 @@ pub(crate) struct Session {
     file_revision: u32,
     source: PhotoSource,
     source_info: SourceInfo,
+    /// 実際に使う外部データ（RAW のカメラ行列・デコーダ。`deps` の doc）。設定の `render_deps` は常にこの値
+    /// にする（利用者の設定では変えない）。
+    render_deps: genzo_model::RenderDeps,
     /// 現在の設定（最新の要求）。
     settings: DevelopSettings,
     /// 最後に保存した設定。
     saved: DevelopSettings,
+    /// `saved` の写しの番号（[`DevelopShared::next_save_seq`]。古い写しの保存の結果で上書きしない）。
+    saved_seq: u64,
     /// 設定の世代（変えるたびに増える。コアの中で通しの番号で、開き直しても 1 に戻らない）。
     generation: u64,
     /// このセッションを開いたときの世代（これより前の世代の描画は、前のセッションのもの）。
     first_generation: u64,
     /// 最後の変更の時刻（自動保存の起点）。
     last_change: Instant,
+    /// 最初の未保存の変更の時刻（自動保存の最大の待ち時間の起点。保存したら `None`）。
+    first_unsaved_change: Option<Instant>,
     /// 自動保存に失敗したときの、次に試す時刻（新しい変更があれば消す）。
     retry_after: Option<Instant>,
     /// ドラッグ中か。
@@ -94,8 +102,38 @@ pub(crate) struct DevelopShared {
     pub stop: AtomicBool,
     /// 写真を開く操作を 1 つずつにする（展開の間は state のロックを持たないため）。
     open_lock: Mutex<()>,
+    /// 写真を開く要求の通しの番号（新しい要求が来たら、古い要求は展開をやめる。6.1 節の P0）。
+    open_seq: AtomicU64,
+    /// 展開中の要求の取り消しトークン（新しい要求が取り消す）。
+    opening: Mutex<Option<genzo_jobs::CancellationToken>>,
     /// 最後に割り当てた設定の世代（セッションをまたいだ通しの番号。[`DevelopShared::next_generation`]）。
     last_generation: AtomicU64,
+    /// 現像中の写真の現像設定をカタログに書く操作を 1 つずつにし、最後に書いた写しを覚える
+    /// （[`save_unlocked`] は state のロックの外で書くため。ロックの順序は state → save → カタログ）。
+    save: Mutex<SaveRecord>,
+    /// 保存する設定の写しの通しの番号（大きいほど新しい）。
+    save_seq: AtomicU64,
+}
+
+/// 現像中の写真の現像設定を最後に書いた写し（[`DevelopShared::save`]）。
+#[derive(Default)]
+struct SaveRecord {
+    /// 書いた variant。
+    variant: Option<VariantId>,
+    /// 書いた写しの番号。
+    seq: u64,
+}
+
+impl SaveRecord {
+    /// `seq` より新しい写しを `variant` に書いた後か。
+    fn has_newer(&self, variant: VariantId, seq: u64) -> bool {
+        self.variant == Some(variant) && self.seq > seq
+    }
+
+    fn record(&mut self, variant: VariantId, seq: u64) {
+        self.variant = Some(variant);
+        self.seq = seq;
+    }
 }
 
 impl DevelopShared {
@@ -107,6 +145,11 @@ impl DevelopShared {
     /// 取り違えない。
     fn next_generation(&self) -> u64 {
         self.last_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// 保存する設定の写しの新しい番号。
+    fn next_save_seq(&self) -> u64 {
+        self.save_seq.fetch_add(1, Ordering::AcqRel) + 1
     }
 }
 
@@ -186,7 +229,8 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     }
 }
 
-/// 保存待ちの変更を保存する（呼び出し側が state のロックを持つ）。保存したら `true`。
+/// 保存待ちの変更を保存する（呼び出し側が state のロックを持つ。写真を開く・一括適用・Undo / Redo・
+/// 閉じるなど、カタログの読み書きとまとめて行う操作用）。保存したら `true`。
 fn save_locked(inner: &Arc<Inner>, s: &mut Session, label: Option<&str>) -> Result<bool, ApiError> {
     if !s.dirty() {
         return Ok(false);
@@ -196,10 +240,71 @@ fn save_locked(inner: &Arc<Inner>, s: &mut Session, label: Option<&str>) -> Resu
         .unwrap_or_else(|| describe_change(&s.saved, &s.settings));
     let v = s.variant_id;
     let settings = s.settings.clone();
-    inner.with_catalog(|c| c.save_develop(v, &settings, &label))?;
+    let seq = inner.develop.next_save_seq();
+    {
+        let mut record = inner.develop.save.lock();
+        inner.with_catalog(|c| c.save_develop(v, &settings, &label))?;
+        record.record(v, seq);
+    }
     s.saved = settings;
+    s.saved_seq = seq;
+    s.first_unsaved_change = None;
     after_develop_saved(inner, &[v]);
     Ok(true)
+}
+
+/// 保存待ちの変更を、state のロックを外してから保存する（自動保存・ドラッグの終了・書き出しの前など）。
+/// 保存したら `true`。
+///
+/// 現像のロックを持ったままカタログのロックを待つと、カタログを長く使う処理の間、スライダーの操作・
+/// プレビューの描画の受け取り（P0）・UI のプレビューの取得まで止まるため（PERF-13。指摘 F24）。写しを
+/// 取ってからロックを外して書き、ロックを取り直して `saved` を更新する。書く前に、より新しい写しが
+/// 書かれていれば（ロックを外している間に、一括適用・Undo などが書いた）書かない（保存待ちのまま残り、
+/// 次の保存で書く）。
+fn save_unlocked(
+    inner: &Arc<Inner>,
+    state: &mut MutexGuard<'_, Option<Session>>,
+    label: Option<&str>,
+) -> Result<bool, ApiError> {
+    let Some(s) = state.as_mut() else {
+        return Ok(false);
+    };
+    if !s.dirty() {
+        return Ok(false);
+    }
+    let label = label
+        .map(str::to_owned)
+        .unwrap_or_else(|| describe_change(&s.saved, &s.settings));
+    let (v, first) = (s.variant_id, s.first_generation);
+    let settings = s.settings.clone();
+    let seq = inner.develop.next_save_seq();
+    let written = MutexGuard::unlocked(state, || -> Result<bool, ApiError> {
+        let mut record = inner.develop.save.lock();
+        if record.has_newer(v, seq) {
+            return Ok(false);
+        }
+        inner.with_catalog(|c| c.save_develop(v, &settings, &label))?;
+        record.record(v, seq);
+        drop(record);
+        after_develop_saved(inner, &[v]);
+        Ok(true)
+    })?;
+    if written
+        && let Some(s) = state
+            .as_mut()
+            .filter(|s| s.variant_id == v && s.first_generation == first)
+        && seq > s.saved_seq
+    {
+        s.saved = settings;
+        s.saved_seq = seq;
+        s.first_unsaved_change = if s.dirty() {
+            // 書いている間に変わった分は、これから保存する。
+            Some(Instant::now())
+        } else {
+            None
+        };
+    }
+    Ok(written)
 }
 
 /// 現像設定を保存した後: カタログの変更を知らせ、L0 / L1 の作り直しを予約する（PRV-02）。
@@ -217,10 +322,8 @@ fn after_develop_saved(inner: &Arc<Inner>, variants: &[VariantId]) {
 /// 書き出しの前に、保存待ちの変更を保存する（ドラッグ中の値は保存しない）。
 pub(crate) fn flush_for_export(inner: &Arc<Inner>) -> Result<(), ApiError> {
     let mut state = inner.develop.state.lock();
-    if let Some(s) = state.as_mut()
-        && !s.dragging
-    {
-        save_locked(inner, s, None)?;
+    if state.as_ref().is_some_and(|s| !s.dragging) {
+        save_unlocked(inner, &mut state, None)?;
     }
     Ok(())
 }
@@ -237,17 +340,18 @@ pub(crate) fn close_if_removed(inner: &Inner, removed: &[VariantId]) {
     }
 }
 
-/// 現像中の写真の展開済みの入力（`variant_id` の写真を開いていて、リビジョンが同じとき）。
+/// 現像中の写真の展開済みの入力と、実際に使う外部データ（`variant_id` の写真を開いていて、リビジョンが
+/// 同じとき）。
 pub(crate) fn session_source(
     inner: &Inner,
     variant_id: VariantId,
     revision: u32,
-) -> Option<PhotoSource> {
+) -> Option<(PhotoSource, genzo_model::RenderDeps)> {
     let state = inner.develop.state.lock();
     state
         .as_ref()
         .filter(|s| s.variant_id == variant_id && s.file_revision == revision)
-        .map(|s| s.source.clone())
+        .map(|s| (s.source.clone(), s.render_deps.clone()))
 }
 
 /// 描画を投入する（「最新の 1 件だけ」）。
@@ -382,13 +486,35 @@ pub(crate) fn spawn_saver(inner: &Arc<Inner>) -> Result<JoinHandle<()>, ApiError
         .config
         .develop_save_delay
         .unwrap_or(DEVELOP_SAVE_DELAY);
+    let max_delay = inner
+        .config
+        .develop_save_max_delay
+        .unwrap_or(DEVELOP_SAVE_MAX_DELAY)
+        .max(delay);
     std::thread::Builder::new()
         .name("genzo-develop-saver".to_owned())
-        .spawn(move || saver_loop(&shared, &weak, delay))
+        .spawn(move || saver_loop(&shared, &weak, delay, max_delay))
         .map_err(|e| ApiError::Internal(format!("自動保存のスレッドを作れません: {e}")))
 }
 
-fn saver_loop(shared: &DevelopShared, weak: &std::sync::Weak<Inner>, delay: Duration) {
+/// 自動保存の期限: 最後の変更から `delay` 後か、最初の未保存の変更から `max_delay` 後の早い方（保存に
+/// 失敗していれば、次に試す時刻）。
+fn save_deadline(s: &Session, delay: Duration, max_delay: Duration) -> Instant {
+    s.retry_after.unwrap_or_else(|| {
+        let after_pause = s.last_change + delay;
+        match s.first_unsaved_change {
+            Some(first) => after_pause.min(first + max_delay),
+            None => after_pause,
+        }
+    })
+}
+
+fn saver_loop(
+    shared: &DevelopShared,
+    weak: &std::sync::Weak<Inner>,
+    delay: Duration,
+    max_delay: Duration,
+) {
     let mut state = shared.state.lock();
     loop {
         if shared.stop.load(Ordering::Acquire) {
@@ -397,7 +523,7 @@ fn saver_loop(shared: &DevelopShared, weak: &std::sync::Weak<Inner>, delay: Dura
         let deadline = state
             .as_ref()
             .filter(|s| s.dirty() && !s.dragging)
-            .map(|s| s.retry_after.unwrap_or(s.last_change + delay));
+            .map(|s| save_deadline(s, delay, max_delay));
         match deadline {
             None => shared.cv.wait(&mut state),
             Some(d) if Instant::now() < d => {
@@ -407,8 +533,10 @@ fn saver_loop(shared: &DevelopShared, weak: &std::sync::Weak<Inner>, delay: Dura
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
+                // 書く間は state のロックを外す（save_unlocked）。
+                let saved = save_unlocked(&inner, &mut state, None);
                 if let Some(s) = state.as_mut() {
-                    match save_locked(&inner, s, None) {
+                    match saved {
                         Ok(_) => s.retry_after = None,
                         Err(e) => {
                             inner.events.warn(
@@ -463,10 +591,26 @@ impl Core {
     ///
     /// 別の写真を開いていれば、保存待ちの変更を保存してから閉じる。最終品質のプレビューの描画を投入する。
     /// 動画は開けない（[`ApiError::InvalidArgument`]）。
+    ///
+    /// **最新の要求だけを処理する**（04 の 6.1 節の P0）: 写真を次々に開くと、途中の要求は展開を取り消して
+    /// [`ApiError::Cancelled`]（[`ApiError::is_cancelled`] が真）で戻る。UI はこの取り消しを誤りとして
+    /// 表示しないこと（最後に要求した写真が開く）。
     pub fn open_develop(&self, variant_id: VariantId) -> Result<DevelopState, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
-        let _open = inner.develop.open_lock.lock();
+        let shared = &inner.develop;
+        // 最新の要求だけを処理する（6.1 節の P0「古い要求は捨てる」）: 自分の番号を取り、展開中の古い要求を
+        // 取り消す（対話用のワーカーは強制終了・再起動される）。
+        let my_seq = shared.open_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Some(previous) = shared.opening.lock().take() {
+            previous.cancel();
+        }
+        let is_stale = || shared.open_seq.load(Ordering::Acquire) != my_seq;
+        let _open = shared.open_lock.lock();
+        // 待っている間に新しい要求が来ていれば、展開せずにやめる（新しい要求が処理する）。
+        if is_stale() {
+            return Err(ApiError::Cancelled);
+        }
         // 開いている写真を閉じる（同じ写真なら、そのまま状態を返す）。
         {
             let mut state = inner.develop.state.lock();
@@ -487,22 +631,53 @@ impl Core {
             ));
         }
         let token = genzo_jobs::CancellationToken::new();
-        let loaded = load_source(inner, &file, Lane::Interactive, &token)?;
+        *shared.opening.lock() = Some(token.clone());
+        if is_stale() {
+            // 番号を取ってから展開のトークンを置くまでの間に、新しい要求が来た。
+            token.cancel();
+        }
+        let loaded = load_source(inner, &file, Lane::Interactive, &token);
+        {
+            let mut opening = shared.opening.lock();
+            if opening.as_ref().is_some_and(|t| t.same_as(&token)) {
+                *opening = None;
+            }
+        }
+        let loaded = loaded?;
         let mut state = inner.develop.state.lock();
+        // 展開の間に新しい要求が来ていれば、セッションを置かない。
+        if is_stale() {
+            return Err(ApiError::Cancelled);
+        }
         // 現像設定は、展開の後に state のロックを持ってから読む（展開の間に一括適用（[`Core::paste_settings`]。
         // state のロックを持ってカタログに書く）や削除があっても、古い設定で開かないため）。
         let dstate = inner.with_catalog(|c| c.develop_state(variant_id))?;
+        // 外部データ（render_deps）は実際に使う値にする。保存された値が空なら、ここで埋める（メモリの中だけ。
+        // 次に保存したときに記録する）。違えば警告する（`deps` の doc）。
+        let deps = loaded.render_deps;
+        if crate::deps::recorded_deps_differ(&dstate.settings.render_deps, &deps) {
+            inner.events.warn(
+                WarningCode::RenderDepsChanged,
+                crate::deps::deps_changed_message(&dstate.settings.render_deps, &deps),
+                Some(variant_id),
+                None,
+            );
+        }
+        let settings = crate::deps::with_render_deps(&dstate.settings, &deps);
         let generation = inner.develop.next_generation();
         let mut session = Session {
             variant_id,
-            file_revision: file.revision,
+            file_revision: loaded.file.revision,
             source: loaded.source,
             source_info: loaded.info,
-            settings: dstate.settings.clone(),
-            saved: dstate.settings,
+            render_deps: deps,
+            settings: settings.clone(),
+            saved: settings,
+            saved_seq: inner.develop.next_save_seq(),
             generation,
             first_generation: generation,
             last_change: Instant::now(),
+            first_unsaved_change: None,
             retry_after: None,
             dragging: false,
             drag_base_a1: None,
@@ -524,12 +699,16 @@ impl Core {
     /// 現像中の写真の状態（開いていなければ `None`）。
     pub fn develop_state(&self) -> Result<Option<DevelopState>, ApiError> {
         let inner = &self.inner;
-        let state = inner.develop.state.lock();
-        let Some(s) = state.as_ref() else {
+        let mut state = inner.develop.state.lock();
+        let Some(v) = state.as_ref().map(|s| s.variant_id) else {
             return Ok(None);
         };
-        let d = inner.with_catalog(|c| c.develop_state(s.variant_id))?;
-        Ok(Some(state_of(s, d.can_undo, d.can_redo)))
+        // カタログ（履歴の有無）は、state のロックを外して読む。
+        let d = MutexGuard::unlocked(&mut state, || inner.with_catalog(|c| c.develop_state(v)))?;
+        Ok(state
+            .as_ref()
+            .filter(|s| s.variant_id == v)
+            .map(|s| state_of(s, d.can_undo, d.can_redo)))
     }
 
     /// 現像設定を変える（6.2 節）。描画を投入して、すぐに設定の世代を返す（応答を待たずに次の値を
@@ -555,10 +734,17 @@ impl Core {
             s.dragging = true;
             s.drag_base_a1 = Some(s.settings.hash_for_phase(Phase::A1));
         }
-        s.settings = settings.clone();
+        let was_dirty = s.dirty();
+        // 外部データ（render_deps）はセッションの値のまま（利用者の設定では変えない。`deps` の doc）。
+        s.settings = crate::deps::with_render_deps(settings, &s.render_deps);
         s.generation = inner.develop.next_generation();
         s.last_change = Instant::now();
         s.retry_after = None;
+        if !s.dirty() {
+            s.first_unsaved_change = None;
+        } else if !was_dirty || s.first_unsaved_change.is_none() {
+            s.first_unsaved_change = Some(s.last_change);
+        }
         // WB など段階 A1 の項目をドラッグしている間は簡易処理（RAW 以外は常に最終品質）。
         let requested = if dragging && s.drag_base_a1 != Some(s.settings.hash_for_phase(Phase::A1))
         {
@@ -567,15 +753,18 @@ impl Core {
             RenderQuality::Final
         };
         let quality = s.source.effective_quality(requested);
-        if !dragging && s.dragging {
-            // ドラッグの終了の知らせがないまま、ドラッグでない変更が来た。
+        // ドラッグの終了の知らせがないまま、ドラッグでない変更が来た: ドラッグを終えたものとして保存する。
+        let ends_drag = !dragging && s.dragging;
+        if ends_drag {
             s.dragging = false;
             s.drag_base_a1 = None;
-            save_locked(inner, s, None)?;
         }
         submit_render(inner, s, quality);
         let generation = s.generation;
         inner.develop.cv.notify_all();
+        if ends_drag {
+            save_unlocked(inner, &mut state, None)?;
+        }
         Ok(generation)
     }
 
@@ -588,16 +777,22 @@ impl Core {
         let s = state.as_mut().ok_or(ApiError::NoDevelopSession)?;
         let was_dragging = std::mem::replace(&mut s.dragging, false);
         s.drag_base_a1 = None;
+        let v = s.variant_id;
         if was_dragging {
-            save_locked(inner, s, None)?;
             if s.requested_quality == RenderQuality::Draft {
                 s.generation = inner.develop.next_generation();
                 submit_render(inner, s, RenderQuality::Final);
             }
+            // 書く間は state のロックを外す（save_unlocked）。
+            save_unlocked(inner, &mut state, None)?;
         }
-        let v = s.variant_id;
-        let d = inner.with_catalog(|c| c.develop_state(v))?;
+        // カタログ（履歴の有無）も、state のロックを外して読む。
+        let d = MutexGuard::unlocked(&mut state, || inner.with_catalog(|c| c.develop_state(v)))?;
         inner.develop.cv.notify_all();
+        let s = state
+            .as_ref()
+            .filter(|s| s.variant_id == v)
+            .ok_or(ApiError::NoDevelopSession)?;
         Ok(state_of(s, d.can_undo, d.can_redo))
     }
 
@@ -605,9 +800,10 @@ impl Core {
     pub fn flush_develop(&self) -> Result<bool, ApiError> {
         let inner = &self.inner;
         let mut state = inner.develop.state.lock();
-        match state.as_mut() {
-            Some(s) if !s.dragging => save_locked(inner, s, None),
-            _ => Ok(false),
+        if state.as_ref().is_some_and(|s| !s.dragging) {
+            save_unlocked(inner, &mut state, None)
+        } else {
+            Ok(false)
         }
     }
 
@@ -701,17 +897,27 @@ impl Core {
             s.drag_base_a1 = None;
             save_locked(inner, s, None)?;
         }
-        let result = inner.with_catalog(|c| {
-            if forward {
-                c.redo_develop(variant_id)
-            } else {
-                c.undo_develop(variant_id)
+        let seq = inner.develop.next_save_seq();
+        let result = {
+            let mut record = inner.develop.save.lock();
+            let result = inner.with_catalog(|c| {
+                if forward {
+                    c.redo_develop(variant_id)
+                } else {
+                    c.undo_develop(variant_id)
+                }
+            })?;
+            if result.is_some() {
+                record.record(variant_id, seq);
             }
-        })?;
+            result
+        };
         if let Some(settings) = &result {
             if let Some(s) = state.as_mut().filter(|s| s.variant_id == variant_id) {
+                let settings = crate::deps::with_render_deps(settings, &s.render_deps);
                 s.settings = settings.clone();
-                s.saved = settings.clone();
+                s.saved = settings;
+                s.saved_seq = seq;
                 s.generation = inner.develop.next_generation();
                 submit_render(inner, s, RenderQuality::Final);
             }
@@ -779,30 +985,47 @@ impl Core {
             s.dragging = false;
             save_locked(inner, s, None)?;
         }
+        let seq = inner.develop.next_save_seq();
+        let mut record = inner.develop.save.lock();
+        // 外部データ（render_deps）は貼り付けない（写真ごとに違う。`deps` の doc）: 貼り付け先の値のままにし、
+        // 現像中の写真なら、実際に使っている値にする。
+        let session_deps = state
+            .as_ref()
+            .map(|s| (s.variant_id, s.render_deps.clone()));
         let applied: Vec<(VariantId, DevelopSettings)> = inner.with_catalog_api(|c| {
-            if groups.is_all() {
-                c.apply_develop_to_many(targets, source, label)?;
-                return Ok(targets.iter().map(|&v| (v, source.clone())).collect());
-            }
             let mut items = Vec::with_capacity(targets.len());
             for &v in targets {
                 let current = c.develop_settings(v)?;
-                if current.process_version != source.process_version {
+                if !groups.is_all() && current.process_version != source.process_version {
                     return Err(ApiError::InvalidArgument(format!(
                         "処理バージョンが違う variant {v} には、一部の項目だけを貼り付けられません（{} と {}）",
                         current.process_version, source.process_version
                     )));
                 }
-                items.push((v, groups.merge(source, &current)));
+                let deps = match &session_deps {
+                    Some((sv, d)) if *sv == v => d.clone(),
+                    _ => current.render_deps.clone(),
+                };
+                items.push((
+                    v,
+                    crate::deps::with_render_deps(&groups.merge(source, &current), &deps),
+                ));
             }
             c.save_develop_batch(&items, label)?;
             Ok(items)
         })?;
+        if let Some(s) = state.as_ref()
+            && targets.contains(&s.variant_id)
+        {
+            record.record(s.variant_id, seq);
+        }
+        drop(record);
         if let Some(s) = state.as_mut()
             && let Some((_, settings)) = applied.iter().find(|(v, _)| *v == s.variant_id)
         {
             s.settings = settings.clone();
             s.saved = settings.clone();
+            s.saved_seq = seq;
             s.generation = inner.develop.next_generation();
             submit_render(inner, s, RenderQuality::Final);
         }
@@ -859,6 +1082,86 @@ mod tests {
         assert!(!accepts_frame((a, 10, Some(14)), a, 13));
         assert!(accepts_frame((a, 10, Some(14)), a, 14));
         assert!(accepts_frame((a, 10, Some(14)), a, 15));
+    }
+
+    /// 自動保存の期限は、最後の変更からの待ち時間と、最初の未保存の変更からの最大の待ち時間の早い方
+    /// （指摘 F35）。
+    #[test]
+    fn save_deadline_is_capped_by_the_first_unsaved_change() {
+        let t0 = Instant::now();
+        let session = |last: Duration, first: Option<Duration>, retry: Option<Duration>| Session {
+            variant_id: VariantId::new(1),
+            file_revision: 1,
+            source: PhotoSource::new(
+                genzo_pipeline::SourceId::new(genzo_model::FileId::new(1), 1),
+                genzo_pipeline::SourceImage::Working {
+                    image: Arc::new(
+                        genzo_pipeline::RgbImage::from_vec(
+                            1,
+                            1,
+                            genzo_pipeline::ColorContract::B2Working,
+                            vec![[0.0; 3]],
+                        )
+                        .unwrap(),
+                    ),
+                    orientation: genzo_model::Orientation::Normal,
+                },
+            )
+            .unwrap(),
+            source_info: SourceInfo {
+                is_raw: false,
+                width: 1,
+                height: 1,
+                decoder: None,
+                as_shot_white_balance: None,
+            },
+            render_deps: genzo_model::RenderDeps::default(),
+            settings: DevelopSettings::default(),
+            saved: DevelopSettings::default(),
+            saved_seq: 0,
+            generation: 1,
+            first_generation: 1,
+            last_change: t0 + last,
+            first_unsaved_change: first.map(|f| t0 + f),
+            retry_after: retry.map(|r| t0 + r),
+            dragging: false,
+            drag_base_a1: None,
+            requested_quality: RenderQuality::Final,
+            frame: None,
+        };
+        let (delay, max) = (Duration::from_secs(1), Duration::from_secs(3));
+        let ms = Duration::from_millis;
+        // 休みがあれば、最後の変更から 1 秒後。
+        assert_eq!(
+            save_deadline(&session(ms(500), Some(ms(0)), None), delay, max),
+            t0 + ms(1500)
+        );
+        // 変更が続いていても、最初の未保存の変更から 3 秒後には保存する。
+        assert_eq!(
+            save_deadline(&session(ms(2900), Some(ms(0)), None), delay, max),
+            t0 + ms(3000)
+        );
+        // 保存に失敗した後は、次に試す時刻。
+        assert_eq!(
+            save_deadline(
+                &session(ms(2900), Some(ms(0)), Some(ms(10_000))),
+                delay,
+                max
+            ),
+            t0 + ms(10_000)
+        );
+    }
+
+    /// state のロックを外して書く保存は、より新しい写しが書かれた後なら書かない（古い設定で上書きしない）。
+    #[test]
+    fn older_snapshots_are_not_written_after_newer_ones() {
+        let (a, b) = (VariantId::new(1), VariantId::new(2));
+        let mut r = SaveRecord::default();
+        assert!(!r.has_newer(a, 1));
+        r.record(a, 5);
+        assert!(r.has_newer(a, 4), "a に 5 を書いた後の 4 は古い");
+        assert!(!r.has_newer(a, 6));
+        assert!(!r.has_newer(b, 1), "別の写真には関係しない");
     }
 
     #[test]

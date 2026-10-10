@@ -142,7 +142,8 @@ pub struct ImportReport {
     pub unchanged: u64,
     /// メタデータを読めず `status = error` で登録したファイル（6.3 節）。
     pub errors: Vec<FileIssue>,
-    /// 読めない（ハッシュを求められない）ため、登録しなかったファイル。
+    /// 読めない（ハッシュを求められない）・ワーカーを起動できないなどのため、登録しなかったファイル
+    /// （もう一度取り込むと処理する）。
     pub not_registered: Vec<FileIssue>,
     /// たどらなかったシンボリックリンク・ジャンクションの数（3.5 節）。
     pub skipped_links: u64,
@@ -180,6 +181,21 @@ pub struct SearchFilter {
     pub lenses: Option<Vec<String>>,
     /// 種別（写真 / 動画）。
     pub kind: Option<AssetKind>,
+    /// 長辺の画素数（幅と高さの大きいほう。向きによらない）の下限（含む）。写真にも動画にも効く。
+    pub long_edge_min: Option<u32>,
+    /// 長辺の画素数の上限（含む）。
+    pub long_edge_max: Option<u32>,
+    /// 動画の長さ（秒）の下限（含む。VID-03）。動画の条件（長さ・fps・コーデック）を指定すると、写真と、
+    /// その値の分からない動画は除く。
+    pub duration_min_s: Option<f64>,
+    /// 動画の長さ（秒）の上限（含む）。
+    pub duration_max_s: Option<f64>,
+    /// 動画のフレームレートの下限（含む）。
+    pub fps_min: Option<f64>,
+    /// 動画のフレームレートの上限（含む）。
+    pub fps_max: Option<f64>,
+    /// 動画のコーデック（`hevc`・`h264` など。大文字・小文字を区別しない。いずれかに一致）。
+    pub codecs: Option<Vec<String>>,
     /// テキスト（ファイル名とキャプション。3.6 節）。
     pub text: Option<String>,
     /// フォルダ。
@@ -207,6 +223,13 @@ impl SearchFilter {
             cameras: self.cameras.clone(),
             lenses: self.lenses.clone(),
             kind: self.kind,
+            long_edge_min: self.long_edge_min,
+            long_edge_max: self.long_edge_max,
+            duration_min_s: self.duration_min_s,
+            duration_max_s: self.duration_max_s,
+            fps_min: self.fps_min,
+            fps_max: self.fps_max,
+            codecs: self.codecs.clone(),
             text: self.text.clone().filter(|t| !t.trim().is_empty()),
             folder: self.folder_id.map(|folder_id| genzo_catalog::FolderFilter {
                 folder_id,
@@ -488,6 +511,9 @@ pub struct RegenerateReport {
     pub skipped: u64,
     /// 失敗した variant。
     pub failed: Vec<VariantIssue>,
+    /// 作ったが、現像の警告があった variant（カメラ行列がないなど。`reason` は警告の説明）。
+    #[serde(default)]
+    pub warnings: Vec<VariantIssue>,
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +531,7 @@ pub enum RenderBackend {
 }
 
 /// 現像する写真の入力の情報。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceInfo {
     /// RAW か。
     pub is_raw: bool,
@@ -515,6 +541,21 @@ pub struct SourceInfo {
     pub height: u32,
     /// RAW のデコーダの識別子。
     pub decoder: Option<String>,
+    /// 撮影時の WB を色温度と tint で表したもの（RAW だけ。WB を「撮影時の値」から「カスタム」に切り替える
+    /// ときのスライダーの初期値。DEV-03）。現像で使うのと同じカメラ行列（行列がなければ BT.2020 とみなす）と
+    /// 撮影時の係数から求める。求められない・設定できる範囲（2000〜50000 K、tint ±150）の外なら `None`。
+    #[serde(default)]
+    pub as_shot_white_balance: Option<AsShotWhiteBalance>,
+}
+
+/// 撮影時の WB の色温度と tint（[`SourceInfo::as_shot_white_balance`]。`WhiteBalance::Custom` に
+/// そのまま使える）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AsShotWhiteBalance {
+    /// 色温度（K）。
+    pub temperature_k: f32,
+    /// 色かぶり補正（tint）。
+    pub tint: f32,
 }
 
 /// 現像のセッションの状態（[`crate::Core::open_develop`] など）。
@@ -756,6 +797,13 @@ pub enum ExportOutcome {
         replaced: bool,
         /// 現像を処理した側。
         backend: RenderBackend,
+        /// 現像の警告（カメラ行列がないため色が正確でない、この処理バージョンでは適用しない項目など。
+        /// 表示用の説明）。
+        #[serde(default)]
+        warnings: Vec<String>,
+        /// 実際に使った外部データ（RAW のカメラ行列・デコーダ。04 の 2.5 節。RAW 以外は `None`）。
+        #[serde(default)]
+        render_deps: Option<genzo_model::RenderDeps>,
     },
     /// 書き出さなかった（衝突時の「スキップ」・動画など）。
     Skipped {
@@ -863,7 +911,12 @@ pub struct DeleteReport {
     pub removed_assets: Vec<AssetId>,
     /// ゴミ箱へ移したファイル。
     pub trashed_files: Vec<PathBuf>,
-    /// 失敗（ゴミ箱へ移せなかった asset のファイルなど。その asset はカタログに残る）。
+    /// ゴミ箱へ移す対象だったが、元の場所になかった（フォルダはあり、アプリの外で削除・移動された）
+    /// ため、移さなかったファイル（その asset はカタログから除いた）。
+    #[serde(default)]
+    pub skipped_missing: Vec<PathBuf>,
+    /// 失敗（ゴミ箱へ移せなかった asset のファイル、元の場所が見えない（ドライブが外れているなど）
+    /// ファイル、登録の後に別の内容に置き換わったファイルなど。その asset はカタログに残る）。
     pub failed: Vec<FileIssue>,
 }
 

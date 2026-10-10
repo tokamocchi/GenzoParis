@@ -41,7 +41,9 @@
 //!
 //! | モジュール | 内容 | 設計書 |
 //! |---|---|---|
-//! | [`Core`]（`core`） | 起動（カタログ・前回の終了の確認・ファイル操作の確定・自動バックアップ）と終了、実行モデル、ロックの順序 | 1.2 節・1.3 節、DATA-04・05・07 |
+//! | [`Core`]（`core`） | 起動（カタログ・前回の終了の確認・ファイル操作の確定・自動バックアップ・キャッシュの持ち主の確認と作り直し）と終了、実行モデル、ロックの順序 | 1.2 節・1.3 節、DATA-03b・04・05・07 |
+//! | `lock` | カタログの排他（1 つのカタログは 1 つのアプリだけが開く。[`ApiError::CatalogInUse`]） | 3 章 |
+//! | `deps` | 現像設定の外部データ（`render_deps`: カメラ行列の出どころとハッシュ・RAW デコーダ）の記録 | 2.5 節、R-08 |
 //! | [`config`] | [`CoreConfig`]（ワーカーの起動方法 [`WorkerLaunch`]、GPU の使用 [`GpuMode`]）と仮置きの値 | 1.2 節 |
 //! | [`command`] | [`Command`]・[`Response`]・[`Core::execute`] | 1.5 節 |
 //! | [`events`] | [`Event`]（ジョブの進捗・カタログの変更・プレビューの更新・検索結果の世代・警告） | 1.5 節 |
@@ -70,11 +72,23 @@
 //!   ファイル、上書きの設定では書き出すファイルと同じ名前のカタログのファイルを保護の対象にする
 //!   （`export` の doc）。
 //! - **型の生成**: TypeScript の型の生成（ts-rs など）はまだ入れていない。型は serde の素直な形にした。
+//! - **L0 / L1 のキャッシュキーの外部データ**: 4.1 節の `render_deps_hash` は、保存された `render_deps` の
+//!   ハッシュではなく、RAW デコーダの識別子だけを入れた値のハッシュにする（写真を展開せずにキーを求める
+//!   ため。カメラ行列は機種とデコーダの版、またはファイルの内容で決まる。`deps` の doc）。キーには
+//!   キャッシュの世代（カタログの `cache_generation`。復元の後に変わる）も入れる（`previews` の doc）。
+//!
+//! # まだないもの（implementation_status の進捗表 No.12）
+//!
+//! - ルーペの等倍表示（PRV-03）・拡大とパン（LIB-02）の表示範囲を描く入口（genzo-pipeline の
+//!   `Engine::render_region` をコア API から使うもの。P0 の「最新の 1 件だけ」で描き、取り消せるもの）。
+//! - WB のスポイト（DEV-03。指定した点を中立にする WB を求めるコマンド）。撮影時の WB の色温度・tint は
+//!   [`SourceInfo::as_shot_white_balance`] で返す。
 
 pub mod command;
 pub mod config;
 mod core;
 mod delete;
+mod deps;
 mod develop;
 pub mod error;
 pub mod events;
@@ -82,6 +96,7 @@ mod export;
 mod import;
 mod jobs;
 mod library;
+mod lock;
 pub mod maintenance;
 mod paths;
 mod previews;

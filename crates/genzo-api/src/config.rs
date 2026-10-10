@@ -22,6 +22,15 @@ pub const IMPORT_BATCH_FILES: usize = 64;
 /// 現像設定の自動保存の待ち時間（DATA-03: ドラッグでない変更は最後の操作から 1 秒後に保存する）。
 pub const DEVELOP_SAVE_DELAY: Duration = Duration::from_secs(1);
 
+/// 現像設定の自動保存の最大の待ち時間: 最初の未保存の変更からこの時間がたったら、ドラッグでない変更が
+/// 続いていても保存する（DATA-03a: 失ってよいのは最後の操作から 1 秒以内の操作。変更が 1 秒未満の間隔で
+/// 続くと、[`DEVELOP_SAVE_DELAY`] だけでは保存がいつまでも延びるため）。
+///
+/// **仮置き**: 1 秒（DATA-03a の文面に合わせた値）。長く変え続けると履歴が 1 秒ごとに分かれる。履歴の
+/// まとめ方（DEV-27）との釣り合いで 2〜3 秒にするかは人が決める（implementation_status の表）。
+/// 実際の待ち時間は、[`DEVELOP_SAVE_DELAY`]（または設定した待ち時間）より短くはしない。
+pub const DEVELOP_SAVE_MAX_DELAY: Duration = Duration::from_secs(1);
+
 /// 自動バックアップの間隔（DATA-04「既定では 1 日 1 回」）。
 pub const AUTO_BACKUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -113,9 +122,11 @@ pub struct CoreConfig {
     /// ワーカーの起動方法。
     #[serde(default)]
     pub worker: WorkerLaunch,
-    /// 既定のタイムゾーンのオフセット（分。UTC より東が正）の初期値。カタログに設定がなければ使う
-    /// （[`crate::CoreSettings::default_utc_offset_minutes`]）。`None` なら起動した時点の OS の
-    /// オフセット（**仮置き**。夏時間のある地域の扱いは genzo-model の `CaptureTime` の doc）。
+    /// 既定のタイムゾーンのオフセット（分。UTC より東が正）の初期値。カタログに設定がなければ使い、
+    /// 最初に開いたときにカタログに保存する（以後はカタログの値を使う。
+    /// [`crate::CoreSettings::default_utc_offset_minutes`]）。`None` なら最初に開いた時点の OS の
+    /// オフセット（**仮置き**。夏時間のある地域の扱いは genzo-model の `CaptureTime` の doc）で、保存した
+    /// 値と開いた時点の OS のオフセットが違えば警告する（自動では変えない）。
     #[serde(default)]
     pub default_utc_offset_minutes: Option<i32>,
     /// L1 プレビューのキャッシュの上限（バイト）の初期値。カタログに設定がなければ使う。`None` なら
@@ -164,6 +175,10 @@ pub struct CoreConfig {
     /// 時間によらずに「まとめて 1 件」を確かめられる）。
     #[serde(skip)]
     pub develop_save_delay: Option<Duration>,
+    /// 現像設定の自動保存の最大の待ち時間（`None` なら [`DEVELOP_SAVE_MAX_DELAY`]。待ち時間より短くは
+    /// しない。テスト用）。
+    #[serde(skip)]
+    pub develop_save_max_delay: Option<Duration>,
 }
 
 impl CoreConfig {
@@ -188,6 +203,7 @@ impl CoreConfig {
             worker_startup_timeout: None,
             worker_env: Vec::new(),
             develop_save_delay: None,
+            develop_save_max_delay: None,
         }
     }
 

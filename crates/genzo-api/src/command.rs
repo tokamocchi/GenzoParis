@@ -59,9 +59,10 @@ pub enum Command {
     // --- 検索・選別 ---
     /// 検索する。→ [`Response::Search`]
     Search {
-        /// 条件。
+        /// 条件（JSON の形は `SearchFilter` と同じ。条件が多く大きいので、コマンドの大きさをそろえるため箱に
+        /// 入れる）。
         #[serde(default)]
-        filter: SearchFilter,
+        filter: Box<SearchFilter>,
         /// 並べ替え。
         #[serde(default)]
         sort: SearchSort,
@@ -552,7 +553,7 @@ mod tests {
         assert_eq!(
             c,
             Command::Search {
-                filter: SearchFilter::default(),
+                filter: Box::default(),
                 sort: SearchSort::default()
             }
         );
