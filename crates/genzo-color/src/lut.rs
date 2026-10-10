@@ -86,8 +86,11 @@ fn sanitize(v: [f32; 3]) -> [f32; 3] {
 
 impl Lut3d {
     /// 格子点 (r, g, b) の入力の値（`index / (n − 1)`）。
+    ///
+    /// LUT として使えない格子数（0・1）でもパニックや NaN にならないよう、`n − 1` は 1 以上に
+    /// して計算する（格子数 1 なら index 0 は 0）。
     pub fn grid_input(size: usize, r: usize, g: usize, b: usize) -> [f32; 3] {
-        let n1 = (size - 1) as f32;
+        let n1 = size.saturating_sub(1).max(1) as f32;
         [r as f32 / n1, g as f32 / n1, b as f32 / n1]
     }
 
@@ -299,6 +302,18 @@ mod tests {
         }
         add(&mut out, prev, pos);
         out.map(|v| v as f32)
+    }
+
+    #[test]
+    fn grid_input_with_degenerate_size_is_finite() {
+        // 格子数 1 では 0 / 0 で NaN、格子数 0 では usize の桁あふれ（デバッグビルドではパニック）に
+        // なっていた。公開の関数なので、どの格子数でも有限の値を返す。
+        assert_eq!(Lut3d::grid_input(1, 0, 0, 0), [0.0; 3]);
+        let v = Lut3d::grid_input(0, 0, 0, 0);
+        assert!(v.iter().all(|x| x.is_finite()), "{v:?}");
+        // 通常の格子数は index / (n − 1)。
+        assert_eq!(Lut3d::grid_input(2, 1, 0, 1), [1.0, 0.0, 1.0]);
+        assert_eq!(Lut3d::grid_input(33, 32, 16, 0), [1.0, 0.5, 0.0]);
     }
 
     #[test]

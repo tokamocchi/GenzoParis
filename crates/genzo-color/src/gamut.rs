@@ -265,6 +265,35 @@ mod tests {
     }
 
     #[test]
+    fn knee_is_soft() {
+        // 膝 k のすぐ外側（t = k + ε）では、圧縮による変化は ε に比べて十分小さい
+        // （f'(0) = 1 で、膝で傾きが連続。単純な切り捨てのような折れ曲がりがない）。
+        let c = GamutCompressor::for_space(RgbColorSpace::Srgb);
+        let w = c.luminance_coefficients();
+        let y = 0.3_f32;
+        // 輝度 0 の向き。
+        let dir = [0.5_f32, -0.1, -0.3];
+        let dl = w[0] * dir[0] + w[1] * dir[1] + w[2] * dir[2];
+        let dir = dir.map(|v| v - dl);
+        // この向きで t = 1 になる倍率 s1（R が 1 に届く、または G/B が 0 に届く）。
+        let s1 = dir
+            .iter()
+            .map(|&d| if d > 0.0 { (1.0 - y) / d } else { y / -d })
+            .fold(f32::INFINITY, f32::min);
+        for eps in [1e-3_f32, 1e-2] {
+            let s = s1 * (DEFAULT_GAMUT_THRESHOLD + eps);
+            let rgb = [y + s * dir[0], y + s * dir[1], y + s * dir[2]];
+            let out = c.compress(rgb);
+            let change = (0..3).map(|k| (out[k] - rgb[k]).abs()).fold(0.0, f32::max);
+            let dist = (0..3)
+                .map(|k| (s1 * eps * dir[k]).abs())
+                .fold(0.0, f32::max);
+            // 2 次の微小量（f(x) ≒ x − x^(1+p)/p）なので、ε が 1e-2 でも数 % 以下。
+            assert!(change < 0.05 * dist + 1e-6, "ε = {eps}: {change} vs {dist}");
+        }
+    }
+
+    #[test]
     fn extreme_luminance_and_non_finite() {
         let c = GamutCompressor::for_space(RgbColorSpace::Srgb);
         assert_eq!(c.compress([2.0, 2.0, 2.0]), [1.0; 3]);

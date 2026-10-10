@@ -351,6 +351,15 @@ mod tests {
             (d50.x - D50.x).abs() < 2e-4 && (d50.y - D50.y).abs() < 2e-4,
             "{d50:?}"
         );
+        // CIE 15 の D55（5503 K）と D75（7504 K）の色度（小数 5 桁の公表値）。式は分光分布からの
+        // 計算値と y で 1e-4 程度ずれる（式の近似）。
+        for (t, x, y) in [(5503.0, 0.33242, 0.34743), (7504.0, 0.29902, 0.31485)] {
+            let d = daylight_locus_xy(t);
+            assert!(
+                (d.x - x).abs() < 2e-4 && (d.y - y).abs() < 2e-4,
+                "{t}: {d:?}"
+            );
+        }
         // 7000 K の式の切り替わりで連続。
         let a = daylight_locus_xy(7000.0);
         let b = daylight_locus_xy(7000.0 + 1e-9);
@@ -370,6 +379,35 @@ mod tests {
         let tt = temperature_tint_from_white_point(D65).unwrap();
         assert!((tt.temperature_k - 6504.0).abs() < 15.0, "{tt:?}");
         assert!(tt.tint.abs() < 1.0, "{tt:?}");
+    }
+
+    /// 白の色度の、プランク軌跡からの Duv（法線方向の符号付きの距離）。
+    fn duv_of(white: Xy, temperature_k: f64) -> f64 {
+        let w = white.to_uv();
+        let (p, n) = planckian_frame(temperature_k);
+        (w.u - p.u) * n[0] + (w.v - p.v) * n[1]
+    }
+
+    #[test]
+    fn cct_and_duv_match_published_values() {
+        // よく引用される相関色温度と Duv の値（例: Ohno 2014, LEUKOS 10(1)）:
+        // D65 は 6504 K・Duv +0.0032、標準イルミナント A は 2856 K・Duv 0（黒体放射）。
+        // D50 は 5003 K（c2 の改定による。Duv は照合しない）。Krystek の近似式の誤差を見込んで、
+        // 色温度は ±10 K、Duv は ±3e-4 とする。
+        let a = Xy::new(0.44757, 0.40745);
+        for (name, white, cct, duv) in [
+            ("D65", D65, 6504.0, Some(0.0032)),
+            ("D50", D50, 5003.0, None),
+            ("A", a, 2856.0, Some(0.0)),
+        ] {
+            // tint の範囲内（A は 4000 K 未満、D50・D65 は昼光の基準に近い）なので推定できる。
+            let tt = temperature_tint_from_white_point(white).unwrap();
+            assert!((tt.temperature_k - cct).abs() < 10.0, "{name}: {tt:?}");
+            if let Some(duv) = duv {
+                let d = duv_of(white, tt.temperature_k);
+                assert!((d - duv).abs() < 3e-4, "{name}: Duv {d}");
+            }
+        }
     }
 
     #[test]

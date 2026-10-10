@@ -10,6 +10,12 @@
 //! 1. B3（リニア BT.2020）→ モニターの色域へ色域の圧縮（[`DisplayGamut::compress_working`]）。
 //! 2. IEC 61966-2-1 の伝達関数で符号化（[`crate::transfer::srgb_encode_f32`]）。
 //! 3. 3D LUT を適用（[`DisplayProfile::build_lut`] で作った [`Lut3d`]）。
+//!
+//! 注意（PoC-1 で確認する点）: LUT の入力は BT.2020 の 0〜1 に収めてから引く（[`Lut3d::apply`]）。
+//! モニターの色域が BT.2020 の外にわずかにはみ出す場合（Display P3 の赤の角は BT.2020 の
+//! リニア値で B ≒ −0.0012）、その部分は LUT の手前で切られる。P3 の色域内の色で見積もると
+//! ΔE2000 で最大 0.6 程度（P3 の赤の角）。既定の膝つきの色域の圧縮を通すと、境界の色は内側に
+//! 寄せられるため、実際に切られるのは極端に鮮やかな入力だけになる。
 
 use crate::error::{ColorError, Result};
 use crate::gamut::{DEFAULT_GAMUT_POWER, DEFAULT_GAMUT_THRESHOLD, GamutCompressor};
@@ -134,6 +140,10 @@ impl DisplayProfile {
     /// matrix-shaper のプロファイルならその原色を使う。LUT で表されたプロファイルなど、原色を
     /// 行列として取り出せない場合は `None`（そのときの扱いは PoC-1 で決める。暫定としては
     /// `DisplayGamut::for_space(RgbColorSpace::Srgb)` を使う）。
+    ///
+    /// 行列・トーンカーブのタグと LUT のタグ（A2B0・B2A0）の両方を持つプロファイルでは、lcms2 の
+    /// 変換（[`DisplayProfile::build_lut`]）は LUT のタグを使うが、ここでは行列のタグから色域を
+    /// 求める。両者がずれていると、圧縮の目標の色域と実際の表示の色域が少し違う。
     pub fn gamut(&self) -> Option<DisplayGamut> {
         let m = self.profile.working_to_linear_rgb_matrix()?;
         DisplayGamut::from_working_to_display(&m, DEFAULT_GAMUT_THRESHOLD, DEFAULT_GAMUT_POWER).ok()
@@ -220,6 +230,45 @@ mod tests {
             d.source(),
             DisplayProfileSource::AssumedSrgb(DisplayProfileFallbackReason::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn truncated_or_corrupted_profile_is_assumed_srgb() {
+        // lcms2 はタグを必要になったときに読むため、ヘッダーとタグの一覧が正しければ
+        // 読み込み（from_bytes）自体は通ることがある。変換を作る段階で失敗するものも、パニック
+        // せずに sRGB とみなす（IQ-05・SEC-05）。
+        let good = IccProfile::standard(StandardProfile::DisplayP3).unwrap();
+        let bytes = good.as_bytes();
+        // 必要なタグ（原色・トーンカーブ）が欠けるところで切ったもの。
+        for cut in [132, 200, bytes.len() / 2] {
+            let d = DisplayProfile::resolve(Some(&bytes[..cut])).unwrap();
+            assert!(
+                d.is_assumed_srgb(),
+                "{cut} バイトで切ったもの: {:?}",
+                d.source()
+            );
+        }
+        // 末尾の 1 バイトだけ欠けたもの: 最後のタグ（'chrm'。変換には使わない）だけが lcms2 に
+        // 読み飛ばされ、プロファイルとしては使える。使う場合も LUT の値は有限。
+        let d = DisplayProfile::resolve(Some(&bytes[..bytes.len() - 1])).unwrap();
+        if !d.is_assumed_srgb() {
+            let lut = d.build_lut(DisplayLutSource::Working, 9).unwrap();
+            assert!(lut.as_flat().iter().all(|v| v.is_finite()));
+        }
+        // タグの中身（ヘッダー以降）を壊したもの。
+        for seed in 0..8_u32 {
+            let mut b = bytes.to_vec();
+            for (i, v) in b.iter_mut().enumerate().skip(132 + 12 * 11) {
+                *v = ((i as u32).wrapping_mul(2654435761).wrapping_add(seed) >> 24) as u8;
+            }
+            let d = DisplayProfile::resolve(Some(&b)).unwrap();
+            // 壊れ方によっては lcms2 が読めてしまうこともあるが、その場合も LUT を作れて、
+            // 値は有限（非有限は 0 に置き換える）。
+            if !d.is_assumed_srgb() {
+                let lut = d.build_lut(DisplayLutSource::Working, 9).unwrap();
+                assert!(lut.as_flat().iter().all(|v| v.is_finite()));
+            }
+        }
     }
 
     #[test]

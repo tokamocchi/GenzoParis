@@ -299,6 +299,8 @@ pub const BRADFORD: Mat3 = Mat3::from_rows([
 const BRADFORD_INV: Mat3 = expect_const(BRADFORD.checked_inverse());
 
 /// Bradford 法の色順応の行列（const fn 版。導出できなければ `None`）。
+///
+/// 白の錐体応答が 0、または比が有限にならない（極端に小さい白など）ときは `None`。
 pub const fn bradford_adaptation_const(src_white: [f64; 3], dst_white: [f64; 3]) -> Option<Mat3> {
     let s = BRADFORD.apply(src_white);
     let d = BRADFORD.apply(dst_white);
@@ -310,7 +312,9 @@ pub const fn bradford_adaptation_const(src_white: [f64; 3], dst_white: [f64; 3])
         i += 1;
     }
     let scale = Mat3::diagonal([d[0] / s[0], d[1] / s[1], d[2] / s[2]]);
-    Some(BRADFORD_INV.mul_mat(&scale.mul_mat(&BRADFORD)))
+    let m = BRADFORD_INV.mul_mat(&scale.mul_mat(&BRADFORD));
+    // 錐体応答が非正規化数のように極端に小さいと、比があふれて無限大・NaN の行列になる。
+    if m.is_finite() { Some(m) } else { None }
 }
 
 /// Bradford 法の色順応の行列（XYZ → XYZ）。白 `src_white`（XYZ）を `dst_white`（XYZ）に写す。
@@ -327,7 +331,7 @@ pub fn bradford_adaptation(src_white: [f64; 3], dst_white: [f64; 3]) -> Result<M
         });
     }
     bradford_adaptation_const(src_white, dst_white).ok_or(ColorError::InvalidArgument {
-        reason: "白色点の錐体応答が 0 になるため色順応の行列を作れない",
+        reason: "白色点の錐体応答が 0（または極端に小さい）ため色順応の行列を作れない",
     })
 }
 
@@ -508,6 +512,20 @@ mod tests {
     fn bradford_rejects_invalid_white() {
         assert!(bradford_adaptation([f64::NAN, 1.0, 1.0], [1.0, 1.0, 1.0]).is_err());
         assert!(bradford_adaptation([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).is_err());
+    }
+
+    #[test]
+    fn bradford_rejects_white_that_gives_non_finite_matrix() {
+        // 錐体応答が 0 ではないが極端に小さい白（非正規化数）だと、比が無限大になり、行列に
+        // 無限大・NaN が入る。エラーにする（以前は Ok で NaN の行列を返していた）。
+        let tiny = [1e-310, 1e-310, 1e-310];
+        let d65 = D65.to_xyz(1.0).unwrap();
+        let r = bradford_adaptation(tiny, d65);
+        assert!(r.is_err(), "{r:?}");
+        assert!(bradford_adaptation_const(tiny, d65).is_none());
+        // 逆向き（変換先が極端に小さい）は、比が 0 に近いだけで有限なので計算できる。
+        let m = bradford_adaptation(d65, tiny).unwrap();
+        assert!(m.is_finite());
     }
 
     #[test]

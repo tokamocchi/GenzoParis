@@ -303,6 +303,34 @@ mod tests {
     }
 
     #[test]
+    fn srgb_primaries_match_published_lab_d65() {
+        // sRGB の原色（IEC 61966-2-1 の行列の列。Lindbloom の 7 桁の値）を、白 D65 =
+        // (0.95047, 1, 1.08883) で Lab にした値。Lindbloom・EasyRGB などで公表されている値
+        // （小数 4 桁）と一致する。
+        let white = [0.95047, 1.0, 1.08883];
+        let cases = [
+            (
+                [0.4124564, 0.2126729, 0.0193339],
+                [53.2408, 80.0925, 67.2032],
+            ),
+            (
+                [0.3575761, 0.7151522, 0.1191920],
+                [87.7347, -86.1827, 83.1793],
+            ),
+            (
+                [0.1804375, 0.0721750, 0.9503041],
+                [32.2970, 79.1875, -107.8602],
+            ),
+        ];
+        for (xyz, expected) in cases {
+            let lab = xyz_to_lab(xyz, white);
+            for (v, e) in [lab.l, lab.a, lab.b].iter().zip(expected) {
+                assert!((v - e).abs() < 0.5e-4 + 1e-9, "{xyz:?} → {lab:?}");
+            }
+        }
+    }
+
+    #[test]
     fn lab_roundtrip_including_negative_and_dark() {
         let w = D65.to_xyz(1.0).unwrap();
         let samples = [

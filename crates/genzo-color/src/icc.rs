@@ -53,6 +53,14 @@ const MIN_ICC_PROFILE_BYTES: usize = 132;
 /// 変えたときは、この日付も更新する（同じ日付で中身が違うプロファイルを作らないため）。
 pub const PROFILE_HEADER_DATE: [u16; 6] = [2026, 10, 9, 0, 0, 0];
 
+/// 生成するプロファイルの著作権のタグ（'cprt'）の文字列（仮置き。**法的な表現のため要確認**）。
+///
+/// 書き出した画像に埋め込まれるため、lcms2 の既定の文字列に任せず、ここで明示する（lcms2 の
+/// 版によって既定が変わると、生成するバイト列が黙って変わるため。IQ-08）。値は現時点では
+/// lcms2 の既定と同じ文字列で、生成されるバイト列は変わらない。文言を変えるときは
+/// [`PROFILE_HEADER_DATE`] も更新する。
+pub const PROFILE_COPYRIGHT: &str = "No copyright, use freely";
+
 /// genzo-color が作る標準のプロファイル。白色点はすべて D65。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StandardProfile {
@@ -315,16 +323,25 @@ fn build_standard_bytes(kind: StandardProfile, version: IccVersion) -> Result<Ve
     // 3 チャンネルに同じカーブを渡すと、lcms2 はタグを共有して小さく保存する。
     let mut profile = Profile::new_rgb(&white, &primaries, &[&curve, &curve, &curve])
         .map_err(|e| lcms_err("RGB プロファイルの作成", e))?;
-    let mut mlu = MLU::new(1);
-    if !mlu.set_text_ascii(kind.description(), Locale::new("en_US")) {
-        return Err(ColorError::Lcms {
-            reason: "説明の文字列を設定できない".to_owned(),
-        });
-    }
-    if !profile.write_tag(TagSignature::ProfileDescriptionTag, Tag::MLU(&mlu)) {
-        return Err(ColorError::Lcms {
-            reason: "説明のタグを書けない".to_owned(),
-        });
+    for (sig, text, what) in [
+        (
+            TagSignature::ProfileDescriptionTag,
+            kind.description(),
+            "説明",
+        ),
+        (TagSignature::CopyrightTag, PROFILE_COPYRIGHT, "著作権"),
+    ] {
+        let mut mlu = MLU::new(1);
+        if !mlu.set_text_ascii(text, Locale::new("en_US")) {
+            return Err(ColorError::Lcms {
+                reason: format!("{what}の文字列を設定できない"),
+            });
+        }
+        if !profile.write_tag(sig, Tag::MLU(&mlu)) {
+            return Err(ColorError::Lcms {
+                reason: format!("{what}のタグを書けない"),
+            });
+        }
     }
     profile.set_version(version.as_f64());
     let mut bytes = profile
@@ -485,7 +502,18 @@ impl From<RenderingIntent> for Intent {
 /// 浮動小数点の RGB → RGB の色変換（lcms2）。
 ///
 /// 値は 0〜1 を基準とする（lcms2 の浮動小数点の RGB の約束）。行列とトーンカーブのプロファイル
-/// どうしでは、0〜1 の外の値もそのまま計算される（lcms2 の unbounded な浮動小数点の変換）。
+/// どうしでは、行列の部分は 0〜1 の外の値もそのまま計算する（lcms2 の unbounded な浮動小数点の
+/// 変換）。ただし 0〜1 の外の値の扱いは **トーンカーブの種類で違う**（このコンテナの lcms2 で
+/// 確認した挙動。テスト `out_of_range_values_depend_on_tone_curve_type` で固定している）:
+///
+/// - ガンマ 1（リニア）: 負の値も 1 超えもそのまま（[`StandardProfile::LinearBt2020`] への変換で
+///   色域外の色が負の値として保たれる。IQ-02）。
+/// - IEC 61966-2-1 の区分関数（v4 の 'para'）: 負の値は線形の区間を延長（符号を保って |x| に
+///   適用する [`crate::transfer`] の関数とは値が違う）、1 超えは冪の区間を延長。
+/// - 純粋なべき乗（Adobe RGB のガンマなど）: 負の値は 0、1 超えは延長。
+/// - 表のカーブ（v2 の 2 点以上の 'curv'。IEC 61966-2-1 は v2 ではこの形になる）: 0〜1 に収める。
+///   1 点の 'curv'（ガンマ値）は上のガンマ 1・純粋なべき乗と同じ扱い。
+///
 /// 黒点の補正は使わない。スレッド間で共有できる（lcms2 のキャッシュを無効にしている）。
 pub struct IccTransform {
     inner: Transform<[f32; 3], [f32; 3], GlobalContext, DisallowCache>,
@@ -618,6 +646,129 @@ mod tests {
             assert_eq!(&bytes[40..44], &[0; 4]);
             // v4 はプロファイル ID（MD5）が入っている。
             assert_ne!(&bytes[84..100], &[0; 16]);
+        }
+    }
+
+    #[test]
+    fn v2_header_is_fixed_and_v4_id_matches_final_bytes() {
+        for kind in StandardProfile::ALL {
+            // v2: 作成日時とプラットフォームが固定され、プロファイル ID は 0（v2 には ID がない）。
+            let v2 = IccProfile::standard_with_version(kind, IccVersion::V2_4).unwrap();
+            let again = IccProfile::standard_with_version(kind, IccVersion::V2_4).unwrap();
+            assert_eq!(v2.as_bytes(), again.as_bytes(), "{kind:?}");
+            let b = v2.as_bytes();
+            assert_eq!(&b[24..26], &2026_u16.to_be_bytes());
+            assert_eq!(&b[30..36], &[0; 6]);
+            assert_eq!(&b[40..44], &[0; 4], "{kind:?}: プラットフォーム");
+            assert_eq!(&b[84..100], &[0; 16], "{kind:?}: v2 の ID");
+            // ヘッダーの大きさの欄が実際の長さと一致する。
+            assert_eq!(
+                u32::from_be_bytes(b[0..4].try_into().unwrap()) as usize,
+                b.len()
+            );
+
+            // v4: ID（MD5）は最終のバイト列から計算されている。もう一度計算し直しても変わらない
+            // （ID を計算した後にヘッダーを書き換えていない）。
+            let v4 = IccProfile::standard(kind).unwrap();
+            let mut p = Profile::new_icc(v4.as_bytes()).unwrap();
+            p.set_default_profile_id();
+            assert_eq!(p.icc().unwrap(), v4.as_bytes(), "{kind:?}");
+            let b = v4.as_bytes();
+            assert_eq!(
+                u32::from_be_bytes(b[0..4].try_into().unwrap()) as usize,
+                b.len()
+            );
+        }
+    }
+
+    #[test]
+    fn copyright_tag_is_the_explicit_constant() {
+        for kind in StandardProfile::ALL {
+            for version in [IccVersion::V2_4, IccVersion::V4_3] {
+                let p = IccProfile::standard_with_version(kind, version).unwrap();
+                let lcms = p.to_lcms().unwrap();
+                let text = match lcms.read_tag(TagSignature::CopyrightTag) {
+                    Tag::MLU(mlu) => mlu.text(Locale::none()).unwrap(),
+                    _ => panic!("{kind:?} {version:?}: 著作権のタグがない"),
+                };
+                assert_eq!(text, PROFILE_COPYRIGHT, "{kind:?} {version:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_range_values_depend_on_tone_curve_type() {
+        // IccTransform の doc に書いた、0〜1 の外の値の扱い（lcms2 の挙動）を固定する。
+        // 変換元はリニア BT.2020 で、無彩色を使う（どの変換先でも RGB の 3 成分が同じ値になる）。
+        let lin = IccProfile::standard(StandardProfile::LinearBt2020).unwrap();
+        let src = [[-0.2_f32; 3], [-0.001; 3], [2.0; 3], [0.5; 3]];
+        let run = |kind: StandardProfile, version: IccVersion| -> [f32; 4] {
+            let dst = IccProfile::standard_with_version(kind, version).unwrap();
+            let t = IccTransform::new(&lin, &dst, RenderingIntent::RelativeColorimetric).unwrap();
+            let mut out = [[0.0_f32; 3]; 4];
+            t.transform(&src, &mut out).unwrap();
+            // ICC の行列の量子化で 3 成分はわずかに違うので、平均を見る。
+            out.map(|v| (v[0] + v[1] + v[2]) / 3.0)
+        };
+        let close = |a: f32, b: f64, tol: f64| (f64::from(a) - b).abs() < tol;
+
+        // ガンマ 1: そのまま（v2 の 1 点の 'curv' もガンマ 1 として扱われる）。
+        for version in [IccVersion::V2_4, IccVersion::V4_3] {
+            let o = run(StandardProfile::LinearBt2020, version);
+            for (v, e) in o.iter().zip([-0.2, -0.001, 2.0, 0.5]) {
+                assert!(close(*v, e, 1e-4), "{version:?}: {o:?}");
+            }
+        }
+        // IEC 61966-2-1（v4 の 'para'）: 負の値は線形の区間を延長、1 超えは冪の区間を延長。
+        let o = run(StandardProfile::Srgb, IccVersion::V4_3);
+        assert!(close(o[0], -0.2 * 12.92, 1e-3), "{o:?}");
+        assert!(close(o[1], -0.001 * 12.92, 1e-4), "{o:?}");
+        assert!(
+            close(o[2], 1.055 * 2.0_f64.powf(1.0 / 2.4) - 0.055, 1e-3),
+            "{o:?}"
+        );
+        assert!(
+            close(o[3], crate::transfer::srgb_encode(0.5), 1e-4),
+            "{o:?}"
+        );
+        // v2 の表のカーブ: 0〜1 に収める。
+        let o = run(StandardProfile::Srgb, IccVersion::V2_4);
+        assert!(close(o[0], 0.0, 1e-6) && close(o[1], 0.0, 1e-6), "{o:?}");
+        assert!(close(o[2], 1.0, 1e-6), "{o:?}");
+        // 純粋なべき乗: 負の値は 0、1 超えは延長。
+        let o = run(StandardProfile::AdobeRgb1998, IccVersion::V4_3);
+        assert!(close(o[0], 0.0, 1e-6) && close(o[1], 0.0, 1e-6), "{o:?}");
+        assert!(close(o[2], 2.0_f64.powf(256.0 / 563.0), 1e-3), "{o:?}");
+    }
+
+    #[test]
+    fn device_classes_for_transform() {
+        // RGB でも、デバイスリンク・抽象・名前付きの色のクラスは変換に使わない。ディスプレイの
+        // プロファイルとして渡されたら sRGB とみなす（IQ-05）。入力機器・出力機器・色空間の
+        // クラスの RGB の matrix-shaper は変換を作れる。
+        let srgb = IccProfile::standard(StandardProfile::Srgb).unwrap();
+        for (sig, ok) in [
+            (b"link", false),
+            (b"abst", false),
+            (b"nmcl", false),
+            (b"spac", true),
+            (b"scnr", true),
+            (b"prtr", true),
+        ] {
+            let mut b = srgb.as_bytes().to_vec();
+            b[12..16].copy_from_slice(sig);
+            let p = IccProfile::from_bytes(&b).unwrap();
+            assert_eq!(p.device_class(), IccDeviceClass::from_signature(*sig));
+            let t = IccTransform::new(&srgb, &p, RenderingIntent::RelativeColorimetric);
+            assert_eq!(t.is_ok(), ok, "{}: {t:?}", String::from_utf8_lossy(sig));
+            if !ok {
+                assert!(matches!(t, Err(ColorError::IccUnsupported { .. })));
+                assert!(
+                    IccTransform::new(&p, &srgb, RenderingIntent::RelativeColorimetric).is_err()
+                );
+            }
+            let d = crate::display::DisplayProfile::resolve(Some(&b)).unwrap();
+            assert_eq!(d.is_assumed_srgb(), !ok, "{}", String::from_utf8_lossy(sig));
         }
     }
 
