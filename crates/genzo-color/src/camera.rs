@@ -27,6 +27,10 @@ pub const MIN_NEUTRAL_RESPONSE_RATIO: f64 = 1e-6;
 
 /// 「BT.2020 → カメラ RGB」の行列を作り、中立色が (1, 1, 1) になるよう行ごとに正規化する
 /// （2.6 節の手順 2〜3）。
+///
+/// エラー: 有限でない要素、中立色に反応しない行（[`MIN_NEUTRAL_RESPONSE_RATIO`]）、正規化した
+/// 行列が特異（逆行列を取れない）。特異な行列は手順 4（[`camera_to_working_matrix`]）に使えない
+/// ため、この関数でも拒否する（合成のテストデータを作る側と現像する側で、使える行列をそろえる）。
 pub fn working_to_camera_normalized(cam_xyz: &Mat3) -> Result<Mat3> {
     if !cam_xyz.is_finite() {
         return Err(ColorError::NonFinite {
@@ -49,8 +53,17 @@ pub fn working_to_camera_normalized(cam_xyz: &Mat3) -> Result<Mat3> {
             *v /= sum;
         }
     }
-    Ok(Mat3::from_rows(rows))
+    let normalized = Mat3::from_rows(rows);
+    if normalized.checked_inverse().is_none() {
+        return Err(ColorError::InvalidCameraMatrix {
+            reason: SINGULAR_REASON,
+        });
+    }
+    Ok(normalized)
 }
+
+/// 正規化した行列が特異なときのエラーの理由。
+const SINGULAR_REASON: &str = "正規化した「BT.2020 → カメラ RGB」の行列が特異で、逆行列を取れない";
 
 /// カメラ RGB（WB 適用済み、B1）→ 作業色空間（リニア BT.2020、B2）の行列（2.6 節の手順 1〜4）。
 ///
@@ -63,7 +76,7 @@ pub fn camera_to_working_matrix(cam_xyz: &Mat3) -> Result<Mat3> {
     let normalized = working_to_camera_normalized(cam_xyz)?;
     normalized.inverse().map_err(|e| match e {
         ColorError::SingularMatrix { .. } => ColorError::InvalidCameraMatrix {
-            reason: "正規化した「BT.2020 → カメラ RGB」の行列が特異で、逆行列を取れない",
+            reason: SINGULAR_REASON,
         },
         other => other,
     })
@@ -195,5 +208,32 @@ mod tests {
             camera_to_working_matrix(&singular),
             Err(ColorError::InvalidCameraMatrix { .. })
         ));
+    }
+
+    #[test]
+    fn forward_matrix_rejects_what_the_inverse_rejects() {
+        // 「BT.2020 → カメラ RGB」の正規化でも、手順 4 で逆行列を取れない行列は拒否する
+        // （genzo-testkit の合成データの作成と、ステージ 8 で使える行列をそろえる）。
+        let r = XYZ_TO_BT2020.rows();
+        // 2 行が同じ（行の和は正なので、行の和の判定は通る）。
+        let singular = Mat3::from_rows([r[0], r[0], r[2]]);
+        assert!(matches!(
+            working_to_camera_normalized(&singular),
+            Err(ColorError::InvalidCameraMatrix { .. })
+        ));
+        // 3 行目が 1 行目と 2 行目の和（線形従属）。
+        let dependent = Mat3::from_rows([
+            r[0],
+            r[1],
+            [r[0][0] + r[1][0], r[0][1] + r[1][1], r[0][2] + r[1][2]],
+        ]);
+        assert!(matches!(
+            working_to_camera_normalized(&dependent),
+            Err(ColorError::InvalidCameraMatrix { .. })
+        ));
+        assert!(camera_to_working_matrix(&dependent).is_err());
+        // 正常な行列は、どちらの関数でも受け付ける。
+        assert!(working_to_camera_normalized(&typical_cam_xyz()).is_ok());
+        assert!(camera_to_working_matrix(&typical_cam_xyz()).is_ok());
     }
 }

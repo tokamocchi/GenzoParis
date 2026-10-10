@@ -252,6 +252,10 @@ unsafe extern "C" {
     pub(crate) safe fn genzo_lr_new() -> *mut GenzoLr;
     pub(crate) fn genzo_lr_free(h: *mut GenzoLr);
 
+    // Windows はワイド文字の版（genzo_lr_open_wfile）を使い、Unix 以外・Windows 以外の OS では
+    // Rust で読み込んでメモリから開く（libraw/mod.rs の open_path_native）。使わない OS で
+    // 宣言すると dead_code の警告になるため、Unix だけで宣言する。
+    #[cfg(unix)]
     pub(crate) fn genzo_lr_open_file(h: *mut GenzoLr, path: *const c_char) -> i32;
     #[cfg(windows)]
     pub(crate) fn genzo_lr_open_wfile(h: *mut GenzoLr, path: *const u16) -> i32;
