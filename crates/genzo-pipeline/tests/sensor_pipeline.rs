@@ -484,6 +484,32 @@ fn results_do_not_depend_on_the_number_of_threads() {
 }
 
 #[test]
+fn unbuildable_white_balance_is_clamped_with_a_warning() {
+    // 人の判断 No.17: 係数を作れない WB（低い色温度で tint を大きく正に）は、エラーにせず作れる範囲に
+    // 丸めて現像し、警告で知らせる。
+    let scene = FloatImage::filled(24, 20, &[0.5, 0.25, 0.125]).unwrap();
+    let raw = raw_from(&scene, CfaPattern::RGGB, Some(typical_camera()));
+    let s = DevelopSettings {
+        white_balance: WhiteBalance::Custom {
+            temperature_k: 2000.0,
+            tint: 150.0,
+        },
+        ..Default::default()
+    };
+    let plan = SensorPlan::new(&raw, &s, &SensorOptions::default()).unwrap();
+    let [SensorWarning::WhiteBalanceClamped(c)] = plan.warnings() else {
+        panic!("{:?}", plan.warnings());
+    };
+    assert_eq!((c.requested_k, c.requested_tint_x10), (2000, 1500));
+    assert!(c.used_tint_x10 < 1500, "{c:?}");
+    let text = plan.warnings()[0].to_string();
+    assert!(text.contains("2000 K") && text.contains("150.0"), "{text}");
+    let a1 = plan.render_preview(&raw, 64).unwrap();
+    assert_eq!(a1.non_finite_replaced, 0);
+    assert!(a1.image.data().iter().flatten().all(|v| v.is_finite()));
+}
+
+#[test]
 fn missing_camera_matrix_falls_back_to_bt2020_with_a_warning() {
     let scene = FloatImage::filled(24, 20, &[0.5, 0.25, 0.125]).unwrap();
     let raw = raw_from(&scene, CfaPattern::RGGB, None);
@@ -757,6 +783,8 @@ fn physical_raw(w: u32, h: u32, cam: &Mat3, xyz: impl Fn(u32, u32) -> [f64; 3]) 
         data,
         black_level: [black as f32; 4],
         white_level: white as f32,
+        saturation_level: white as f32,
+        default_crop: None,
         as_shot_wb: [(wc[1] / wc[0]) as f32, 1.0, (wc[1] / wc[2]) as f32, 1.0],
         cam_xyz: Some(cam.rows().map(|r| r.map(|v| v as f32))),
         metadata: PhotoMetadata::default(),

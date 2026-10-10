@@ -309,7 +309,8 @@ fn check_crop(a: &ImageTile, ca: Roi, b: &ImageTile, cb: Roi) {
     }
 }
 
-/// フル解像度を縮小した結果とプレビューの ΔE2000（B3、リニア BT.2020。IQ-07b）。
+/// IQ-07b の比較の基準（プレビューの各画素が覆うフル解像度の範囲の面積平均。人の判断 No.8。
+/// common の `iq07b_reference`）とプレビューの ΔE2000（B3、リニア BT.2020）。
 fn iq07b_stats(
     scene: &genzo_testkit::image::FloatImage,
     s: &DevelopSettings,
@@ -319,22 +320,18 @@ fn iq07b_stats(
     let e = engine(long_edge, 256);
     let preview = e
         .render_preview(&source, s, RenderQuality::Final, long_edge)
-        .unwrap()
-        .b3;
-    let (pw, ph) = preview.image.dimensions();
-    let (full, n) = e
-        .render_downscaled(&source, s, (pw, ph), &NeverCancel)
         .unwrap();
-    assert_eq!(n, 0);
+    let reference = iq07b_reference(&e, &source, s, &preview);
     delta_e2000_stats(
-        &to_float(&full.image),
-        &to_float(&preview.image),
+        &reference,
+        &to_float(&preview.b3.image),
         LabConversion::linear(RgbColorSpace::Bt2020),
     )
     .unwrap()
 }
 
-/// IQ-07b を測る場合（シーン × 設定）。
+/// IQ-07b を測る場合（シーン × 設定）。設定は既定・強い補正・切り抜きと回転（人の判断 No.8 の基準で
+/// 測る）。
 fn iq07b_cases() -> Vec<(String, genzo_testkit::image::FloatImage, DevelopSettings)> {
     let (w, h) = (768, 512);
     let scenes = [
@@ -343,11 +340,23 @@ fn iq07b_cases() -> Vec<(String, genzo_testkit::image::FloatImage, DevelopSettin
         ("color_edges", color_edges_scene(w, h)),
         ("high_contrast", high_contrast_scene(w, h)),
     ];
+    let mut cropped = DevelopSettings::default();
+    rotate_and_crop(
+        &mut cropped,
+        7.0,
+        CropRect {
+            left: 0.13,
+            top: 0.21,
+            right: 0.81,
+            bottom: 0.77,
+        },
+    );
     let mut out = Vec::new();
     for (sn, scene) in scenes {
         for (tn, s) in [
             ("default", DevelopSettings::default()),
             ("strong", strong_settings()),
+            ("crop_rotate", cropped.clone()),
         ] {
             out.push((format!("{sn}/{tn}"), scene.clone(), s));
         }
@@ -356,11 +365,13 @@ fn iq07b_cases() -> Vec<(String, genzo_testkit::image::FloatImage, DevelopSettin
 }
 
 #[test]
-#[ignore = "IQ-07b は現在の仮実装（ステージ 11・15）では満たせない（細線と強い補正）。PoC-5 で処理順序か目標を見直す。数値は iq07b_measured_values_do_not_regress の表"]
+#[ignore = "IQ-07b は現在の実装（縮小してからステージ 11・15 をかけるプレビュー）では満たせない（細線・色の境界と、既定の S 字のカーブ・強い補正・回転）。PoC-5 で処理順序か目標を見直す。数値は iq07b_measured_values_do_not_regress の表"]
 fn preview_matches_downscaled_full_resolution_iq07b() {
-    // IQ-07b: フル解像度の結果を面積平均でプレビューと同じ大きさに縮小したものと、プレビューとの差が
+    // IQ-07b: フル解像度の結果を、プレビューの各画素が覆うフル解像度の範囲で面積平均したもの（人の判断
+    // No.8。回転・切り抜きがなければ、四隅を合わせた面積平均の縮小と同じ）と、プレビューとの差が
     // ΔE2000 の 95 パーセンタイルで 2 以下、最大で 5 以下（仮置き）。合成の画像（細線・色の境界・
-    // 明暗差）に強い補正をかけて測る。縮小は 3 倍（768 × 512 → 256 × 171）。基準は緩めない。
+    // 明暗差）に既定・強い補正・回転と切り抜きをかけて測る。縮小は 3 倍（768 × 512 → 256 × 171）。
+    // 基準は緩めない。
     let mut failures = Vec::new();
     for (name, scene, s) in iq07b_cases() {
         let st = iq07b_stats(&scene, &s, 256);
@@ -380,16 +391,27 @@ fn iq07b_measured_values_do_not_regress() {
     // IQ-07b の計測値の回帰の検出（IQ-07b の基準ではない。基準の判定は上の #[ignore] のテスト）。
     // 表は、このコンテナで測った値（95 パーセンタイル, 最大）に 10% と 0.1 の余裕を足した上限。
     // 基準（95 パーセンタイル 2・最大 5）を満たす場合は、基準そのものでも確かめる。
-    let limits: [(&str, f64, f64); 8] = [
-        ("busy/default", 2.937, 6.748),
-        ("busy/strong", 10.493, 39.866),
-        ("thin_lines/default", 3.671, 4.042),
-        ("thin_lines/strong", 9.551, 10.104),
-        ("color_edges/default", 1.431, 4.068),
-        ("color_edges/strong", 6.017, 28.440),
-        ("high_contrast/default", 0.000, 4.101),
-        ("high_contrast/strong", 1.296, 11.526),
+    //
+    // 2026-10-10: ステージ 15 の基本カーブ（人の判断 No.1。強い S 字）にしたため、既定の設定でも値が
+    // 大きくなった（busy/default の p95 は 2.94 → 17.9）。プレビューは縮小してからステージ 15 をかけ、
+    // 書き出しはフル解像度でかけてから縮小するので、細かい模様（1 画素の線・色の境界）では非線形の
+    // カーブの差が大きく出る（ステージ 15 を恒等にすると busy/default は p95 1.85）。回転・切り抜きの
+    // 値は、比較の基準を「プレビューの各画素が覆うフル解像度の範囲の面積平均」にしたもの（No.8）。
+    let limits: [(&str, f64, f64); 12] = [
+        ("busy/default", 17.931, 70.726),
+        ("busy/strong", 26.424, 84.626),
+        ("busy/crop_rotate", 29.953, 72.470),
+        ("thin_lines/default", 15.131, 16.093),
+        ("thin_lines/strong", 24.692, 27.651),
+        ("thin_lines/crop_rotate", 40.241, 87.463),
+        ("color_edges/default", 14.067, 46.784),
+        ("color_edges/strong", 17.379, 59.354),
+        ("color_edges/crop_rotate", 17.365, 72.520),
+        ("high_contrast/default", 1.850, 24.519),
+        ("high_contrast/strong", 6.311, 32.947),
+        ("high_contrast/crop_rotate", 8.083, 64.698),
     ];
+    let mut failures = Vec::new();
     for (name, scene, s) in iq07b_cases() {
         let st = iq07b_stats(&scene, &s, 256);
         let (_, p95, max) = limits
@@ -401,15 +423,17 @@ fn iq07b_measured_values_do_not_regress() {
             "IQ-07b {name}: 平均 {:.3}、p95 {:.3}、最大 {:.3}",
             st.mean, st.p95, st.max
         );
-        assert!(st.p95 <= p95 * 1.1 + 0.1, "{name}: p95 {} > {p95}", st.p95);
-        assert!(st.max <= max * 1.1 + 0.1, "{name}: 最大 {} > {max}", st.max);
-        if p95 <= 2.0 && max <= 5.0 {
-            assert!(
-                st.p95 <= 2.0 && st.max <= 5.0,
-                "{name}: IQ-07b の基準を満たさなくなった"
-            );
+        if st.p95 > p95 * 1.1 + 0.1 {
+            failures.push(format!("{name}: p95 {} > {p95}", st.p95));
+        }
+        if st.max > max * 1.1 + 0.1 {
+            failures.push(format!("{name}: 最大 {} > {max}", st.max));
+        }
+        if p95 <= 2.0 && max <= 5.0 && (st.p95 > 2.0 || st.max > 5.0) {
+            failures.push(format!("{name}: IQ-07b の基準を満たさなくなった"));
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 #[test]
@@ -453,13 +477,14 @@ fn neutral_gray_stays_neutral_in_srgb_export() {
             "{mean:?}"
         );
     }
-    // B3 でも中立（プレビュー）。
+    // B3 でも中立（プレビュー）。差は合成の RAW の 14bit の量子化による（暗いパッチ 0.02 では
+    // 相対 0.4% 程度。ステージ 15 は比率を保つので、相対の差で比べる）。
     let p = e
         .render_preview(&source, &s, RenderQuality::Final, 96)
         .unwrap();
     let c = p.b3.image.pixel(8, 10).unwrap();
     assert!(
-        (c[0] - c[1]).abs() < 1e-4 && (c[2] - c[1]).abs() < 1e-4,
+        (c[0] - c[1]).abs() < 6e-3 * c[1] && (c[2] - c[1]).abs() < 6e-3 * c[1],
         "{c:?}"
     );
 }
@@ -880,6 +905,64 @@ fn unknown_process_versions_and_bad_settings_are_rejected() {
 }
 
 #[test]
+fn non_raw_input_keeps_its_appearance_with_default_settings() {
+    // 人の判断 No.2・No.3: RAW 以外の入力（ディスプレイ参照の画像）は、既定の設定ではステージ 15 を
+    // 恒等にし、色域の圧縮は色域内の色を変えないので、sRGB の 8bit の画素を sRGB の 8bit に書き出すと
+    // 元の値に戻る（白 255 → 255、中間グレー 118 → 118、原色・二次色もそのまま。以前は白 255 → 約
+    // 225、(255, 0, 0) → 約 (247, 37, 37) だった）。差は ICC の変換の往復の丸めだけ（±1）。
+    let colors: [[u8; 3]; 12] = [
+        [255, 255, 255],
+        [118, 118, 118],
+        [0, 0, 0],
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 0, 255],
+        [255, 255, 0],
+        [0, 255, 255],
+        [255, 0, 255],
+        [250, 128, 20],
+        [30, 60, 200],
+        [200, 180, 160],
+    ];
+    let (w, h) = (24u32, 16u32);
+    let mut bytes = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            bytes.extend_from_slice(&colors[((x / 4 + y / 8 * 6) % 12) as usize]);
+        }
+    }
+    let enc = genzo_pipeline::input::encoded_from_u8(&bytes).unwrap();
+    let image = working_image_from_encoded(w, h, &enc, None).unwrap();
+    let source = PhotoSource::new(
+        SourceId::new(FileId::new(6), 1),
+        SourceImage::Working {
+            image: Arc::new(image),
+            orientation: Orientation::Normal,
+        },
+    )
+    .unwrap();
+    let e = engine(24, 16);
+    let ex = e
+        .export(
+            &source,
+            &DevelopSettings::default(),
+            &srgb8(),
+            &ExportOptions {
+                dither_8bit: Dither::None,
+                ..Default::default()
+            },
+            &NeverCancel,
+        )
+        .unwrap();
+    let px = rgb8(&ex.pixels);
+    for (i, (a, b)) in px.chunks_exact(3).zip(bytes.chunks_exact(3)).enumerate() {
+        for k in 0..3 {
+            assert!(a[k].abs_diff(b[k]) <= 1, "画素 {i}: {a:?}（元 {b:?}）");
+        }
+    }
+}
+
+#[test]
 fn non_raw_input_starts_at_b2() {
     // RAW 以外の入力（2.6 節）: sRGB の 8bit の画素 → ICC で B2 → ステージ 9〜17（1〜8 は飛ばす）。
     // 向き（Exif）はステージ 9 で反映する。
@@ -1226,12 +1309,16 @@ fn tiny_and_thin_inputs_work_through_every_entry_point() {
 
 #[test]
 fn preview_and_full_resolution_registration_is_within_half_a_preview_pixel() {
-    // プレビューの画素と、フル解像度をプレビューの大きさに縮小した画素（四隅を合わせる。IQ-07b の比較）
-    // の G 座標での位置の差。
-    // - 回転・切り抜きがなければ（向きだけなら）位置は完全に一致し、滑らかなシーンでは差はほぼ 0。
+    // プレビューの画素と、フル解像度をプレビューの大きさに縮小した画素（四隅を合わせる）の G 座標での
+    // 位置の差。
+    // - 回転・切り抜きがなければ（向きだけなら）位置は完全に一致する。
     // - 回転・切り抜きがあると、切り抜きの端をそれぞれの格子（プレビューの密度 d と 1）に丸めるので、
     //   位置が最大で「プレビューの 0.5 画素＋フル解像度の 0.5 画素」ずれる（決めごと。lib.rs の
     //   「残りの担当」）。これを超えるずれ（座標の取り違え）を検出する。
+    // - そのため IQ-07b の比較の基準は、プレビューの各画素が覆うフル解像度の範囲の面積平均
+    //   （common の iq07b_reference。人の判断 No.8 の (b)）にした。回転・切り抜きがなければ、四隅を
+    //   合わせた縮小と同じ値。回転・切り抜きがあっても位置のずれを含まないので、差は回転・切り抜きの
+    //   ない場合と同じ程度になる（ずれを含む四隅を合わせた縮小との比較では大きくなる）。
     let scene = wavy_scene(300, 201);
     let crop = CropRect {
         left: 0.13,
@@ -1239,6 +1326,8 @@ fn preview_and_full_resolution_registration_is_within_half_a_preview_pixel() {
         right: 0.81,
         bottom: 0.77,
     };
+    let lab = LabConversion::linear(RgbColorSpace::Bt2020);
+    let mut means = Vec::new();
     for (o, deg, crop) in [
         (Orientation::Rotate90Cw, 0.0f32, CropRect::FULL),
         (Orientation::Transverse, 0.0, CropRect::FULL),
@@ -1275,23 +1364,40 @@ fn preview_and_full_resolution_registration_is_within_half_a_preview_pixel() {
                 "{o:?} {deg}° crop={} 長辺 {long_edge}",
                 crop != CropRect::FULL
             );
+            let reference = iq07b_reference(&e, &source, &s, &p);
+            let (corners, _) = e
+                .render_downscaled(&source, &s, (wp, hp), &NeverCancel)
+                .unwrap();
+            let preview = to_float(&p.b3.image);
+            let st = delta_e2000_stats(&reference, &preview, lab).unwrap();
+            let st_corners = delta_e2000_stats(&to_float(&corners.image), &preview, lab).unwrap();
+            eprintln!(
+                "{what}: 位置の差 {worst:.3}、面積平均の基準 平均 {:.3} p95 {:.3} 最大 {:.3}、四隅を合わせた縮小 平均 {:.3} p95 {:.3} 最大 {:.3}",
+                st.mean, st.p95, st.max, st_corners.mean, st_corners.p95, st_corners.max
+            );
             if deg == 0.0 && crop == CropRect::FULL {
                 assert!(worst < 1e-9, "{what}: {worst}");
-                // 位置が一致すれば、滑らかなシーンの差はごく小さい（RCD と面積平均の順序の差だけ）。
-                let (full, _) = e
-                    .render_downscaled(&source, &s, (wp, hp), &NeverCancel)
-                    .unwrap();
-                let st = delta_e2000_stats(
-                    &to_float(&full.image),
-                    &to_float(&p.b3.image),
-                    LabConversion::linear(RgbColorSpace::Bt2020),
-                )
-                .unwrap();
-                assert!(st.p95 < 0.05 && st.max < 0.5, "{what}: {st:?}");
+                // 回転・切り抜きがなければ、2 つの基準は同じ格子の対応（足し込みの精度の差だけ）。
+                for (a, b) in reference.data().iter().zip(corners.image.as_flat()) {
+                    assert!((a - b).abs() <= 1e-5 + 1e-5 * b.abs(), "{what}: {a} {b}");
+                }
             } else {
                 let bound = 0.5 + 0.5 * d.0.max(d.1) + 1e-6;
                 assert!(worst <= bound, "{what}: {worst} > {bound}");
             }
+            means.push((what, st.mean, st_corners.mean));
         }
+    }
+    // 面積平均の基準では、回転・切り抜きのある場合の差の平均は、ない場合（向きだけ）の差の平均の 3 倍以内
+    // （残りは、縮小した A1 を補間するプレビューと、フル解像度で補間してから縮小する書き出しの補間の
+    // 違いと、ステージ 15 の非線形性。このコンテナの計測で 0.19〜0.52 に対し、向きだけの場合は最大 0.21）。
+    // 四隅を合わせた縮小との差（位置のずれを含む。0.68〜5.66）より小さい。
+    let base = means[..4].iter().map(|m| m.1).fold(0.0f64, f64::max);
+    for (what, mean, corners) in &means[4..] {
+        assert!(*mean <= 3.0 * base + 0.05, "{what}: {mean} > 3 × {base}");
+        assert!(
+            mean < corners,
+            "{what}: 面積平均の基準 {mean} ≥ 四隅 {corners}"
+        );
     }
 }

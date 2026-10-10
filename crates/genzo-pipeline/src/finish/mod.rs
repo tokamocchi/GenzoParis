@@ -155,7 +155,8 @@ pub fn scene_stages() -> [&'static dyn Stage; 9] {
 /// - `frames`（S の寸法と向き）に、設定の角度補正（丸めた値）を回転として加える。
 /// - `grid` はステージ 9 の入力の格子。`resolution_scale` は格子の長辺の倍率
 ///   （[`SensorGrid::resolution_scale`]）。
-/// - ガイドは [`StageContext::with_guide`] で別に付ける。
+/// - ガイドは [`StageContext::with_guide`] で、入力の種類（RAW 以外か）は
+///   [`StageContext::with_input_kind`] で別に付ける（既定は RAW）。
 pub fn finish_context<'a>(
     settings: &DevelopSettings,
     frames: CoordinateFrames,
@@ -173,9 +174,13 @@ pub fn finish_context<'a>(
 }
 
 impl A1Image {
-    /// この画像を入力にした段階 C の文脈（[`finish_context`]）。
+    /// この画像を入力にした段階 C の文脈（[`finish_context`]。入力の種類 [`A1Image::input_kind`] も
+    /// 付ける）。
     pub fn finish_context<'a>(&self, settings: &DevelopSettings) -> Result<StageContext<'a>> {
-        finish_context(settings, self.frames(), self.sensor_grid(), self.quality)
+        Ok(
+            finish_context(settings, self.frames(), self.sensor_grid(), self.quality)?
+                .with_input_kind(self.input_kind),
+        )
     }
 }
 

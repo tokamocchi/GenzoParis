@@ -212,10 +212,11 @@ impl PhotoSource {
         }
     }
 
-    /// 座標系（S の寸法・向き。回転なし）。
+    /// 座標系（S の寸法・既定の切り抜き・向き。回転なし）。
     pub fn frames(&self) -> Result<CoordinateFrames> {
         let (w, h) = self.image.sensor_size();
-        CoordinateFrames::new(w, h, self.image.orientation())
+        CoordinateFrames::new(w, h, self.image.orientation())?
+            .with_default_crop(self.image.default_crop())
     }
 }
 

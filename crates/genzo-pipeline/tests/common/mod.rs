@@ -8,12 +8,14 @@
 use std::sync::Arc;
 
 use genzo_model::{CropRect, CurvePoint, DevelopSettings, FileId, Orientation, WhiteBalance};
+use genzo_pipeline::engine::PreviewRender;
 use genzo_pipeline::{
-    Engine, EngineConfig, PhotoSource, RgbImage, SensorOptions, SourceId, SourceImage,
+    Engine, EngineConfig, NeverCancel, PhotoSource, RgbImage, SensorOptions, SourceId, SourceImage,
 };
 use genzo_raw::{CfaPattern, RawImage};
 use genzo_testkit::bayer::{BayerParams, mosaic};
 use genzo_testkit::image::FloatImage;
+use genzo_testkit::resample::downscale_footprints;
 
 /// テスト用の典型的な形のカメラ行列（XYZ → カメラ RGB。実在の機種の値ではない。
 /// tests/sensor_pipeline.rs と同じ）。
@@ -232,6 +234,36 @@ pub fn custom_wb(s: &mut DevelopSettings, temperature_k: f32, tint: f32) {
         temperature_k,
         tint,
     };
+}
+
+/// IQ-07b の比較の基準（人の判断の表 No.8 の (b)）: フル解像度の B3 を、プレビューの各画素が覆う
+/// フル解像度の範囲で面積平均したもの（プレビューと同じ大きさ。B3、リニア BT.2020）。
+///
+/// プレビューの C の画素 `[i, i + 1) × [j, j + 1)` を G に写し（`c_to_g_px`）、フル解像度の C に写した
+/// 矩形（`g_px_to_c`。どちらの C の格子も G の軸にそろっているので軸にそろった矩形）で平均する。回転・
+/// 切り抜きがなければ、四隅を合わせた面積平均の縮小（`Engine::render_downscaled`）と同じ格子の対応。
+pub fn iq07b_reference(
+    e: &Engine,
+    source: &PhotoSource,
+    s: &DevelopSettings,
+    preview: &PreviewRender,
+) -> FloatImage {
+    let job = e.full_resolution(source, s).unwrap();
+    let full = e
+        .render_full_resolution(source, s, None, &NeverCancel)
+        .unwrap();
+    assert_eq!(full.non_finite_replaced, 0);
+    let (gp, gf) = (&preview.geometry, job.geometry());
+    let (wp, hp) = gp.output_size();
+    assert_eq!(preview.b3.image.dimensions(), (wp, hp));
+    downscale_footprints(&to_float(&full.b3.image), wp, hp, |i, j| {
+        let (gx0, gy0) = gp.c_to_g_px(f64::from(i), f64::from(j));
+        let (gx1, gy1) = gp.c_to_g_px(f64::from(i + 1), f64::from(j + 1));
+        let (x0, y0) = gf.g_px_to_c(gx0, gy0);
+        let (x1, y1) = gf.g_px_to_c(gx1, gy1);
+        [x0, y0, x1, y1]
+    })
+    .unwrap()
 }
 
 /// RgbImage を testkit の画像にする。

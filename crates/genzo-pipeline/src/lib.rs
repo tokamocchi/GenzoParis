@@ -138,6 +138,8 @@
 //!     data,
 //!     black_level: [black; 4],
 //!     white_level: white,
+//!     saturation_level: white,
+//!     default_crop: None,
 //!     as_shot_wb: wb,
 //!     cam_xyz: None,
 //!     metadata: PhotoMetadata::default(),
@@ -160,6 +162,14 @@
 //! - **向き**: センサー処理（段階 A1）の出力は **S の向き**（RAW の向きを反映しない）。向きは
 //!   [`A1Image::orientation`] で渡し、ステージ 9 が G 座標の最初の変換（S → O）として、回転・歪曲補正・
 //!   切り抜きと 1 回のリサンプリングで反映する（[`coords`]）。
+//! - **既定の切り抜き**: センサー処理は RAW の有効画素の全体で行い、O・G（ステージ 9 の基準の枠、
+//!   利用者の切り抜きの割合・ガイド・空間的なパラメータの基準）は RAW の既定の切り抜き
+//!   （genzo-raw の `RawImage::default_crop`。DNG の DefaultCrop と Sony の ARW の同じタグ）の範囲にする
+//!   （[`CoordinateFrames::default_crop`]。実機の α7 IV の APS-C の ARW の端の詰め物の列を出力に出さない
+//!   ため）。段階 A1 のプレビュー（[`A1Image`]）は有効画素の全体を覆い、出力の寸法は既定の切り抜きを
+//!   同じ密度で標本化したもの（プレビューの長辺は、要求した長辺より既定の切り抜きの分だけ短くなる）。
+//! - **飽和**: ステージ 2 の飽和の印は、白レベルと分けた閾値（genzo-raw の `RawImage::saturation_level`）
+//!   で付ける（[`sensor::normalize`]）。
 //! - **色の契約**: センサー処理の出力は B2（[`ColorContract::B2Working`]）。ステージは入力の契約を
 //!   [`Stage::input_contract`] で宣言し、[`run_stage_cpu`] が確かめる。
 //! - **端の外**: 各ステージの入力の端の外は鏡映（[`border::mirror_index`]。端の画素を重複させない反射）。
@@ -206,20 +216,22 @@
 //! 12・14、HSL・カラーグレーディング、トーンカーブの効果（周辺光量・粒子）。仮置きの式と定数
 //! （コントラスト・トーン・ガイド・自然な彩度・ステージ 15・パラメトリックのカーブ）は PoC-4 / PoC-5
 //! で見直す（各モジュールの doc に「仮置き」と書いた）。IQ-07b（縮小プレビューとフル解像度の一致）は、
-//! 細線と強い補正の合成画像で満たせていない（tests/engine.rs の計測値。PoC-5 で処理の順序か目標を
-//! 見直す）。タイルの大きさ・キャッシュの件数（[`engine`] の仮置きの定数）は PoC-3 で決める。
+//! 細線・色の境界の合成画像で満たせていない（tests/engine.rs の計測値。プレビューは縮小してから
+//! ステージ 11・15 をかけるので、非線形の処理の差が細かい模様で大きく出る。2026-10-10 のステージ 15 の
+//! 基本カーブ（人の判断 No.1）で、既定の設定でも大きくなった。PoC-5 で処理の順序か目標を見直す）。タイルの大きさ・キャッシュの件数（[`engine`] の仮置きの定数）は PoC-3 で決める。
 //!
-//! **IQ-07b と切り抜き・回転の位置合わせ（PoC-5 で決める）**: C の格子は「G の格子（密度は入力の格子と
-//! 同じ）のうち切り抜きの範囲」で、切り抜きの端をそれぞれの格子に丸める（[`finish::geometry`]）。この
-//! ため、回転か切り抜きがあると、プレビューの画素と「フル解像度を四隅を合わせてプレビューの大きさに
-//! 縮小した画素」（IQ-07b の比較）の位置が、最大で **プレビューの 0.5 画素＋フル解像度の 0.5 画素**
-//! ずれる（向きだけなら一致する。tests/engine.rs の
-//! `preview_and_full_resolution_registration_is_within_half_a_preview_pixel`）。見た目の差は小さいが、
-//! 細線・境界では ΔE2000 が大きくなる（滑らかな三角波のシーン 300 × 201 → 長辺 100 でも、切り抜きだけで
-//! 平均 約 2、回転 7° で平均 約 5。回転・切り抜きなしでは 0。このコンテナでの参考値）。IQ-07b を回転・
-//! 切り抜きのある画像で測る前に、(a) プレビューの C の格子を書き出しの切り抜きの端（フル解像度の格子に
-//! 丸めた端）に合わせる（プレビューでは「切り抜きを変えても範囲内の画素がビット単位で同じ」でなくなる）か、
-//! (b) 比較の基準を、プレビューの画素が覆う G の範囲で平均したものにするかを決める。
+//! **IQ-07b と切り抜き・回転の位置合わせ（人の判断の表 No.8 の (b) で決定）**: C の格子は「G の格子
+//! （密度は入力の格子と同じ）のうち切り抜きの範囲」で、切り抜きの端をそれぞれの格子に丸める
+//! （[`finish::geometry`]）。このため、回転か切り抜きがあると、プレビューの画素と「フル解像度を四隅を
+//! 合わせてプレビューの大きさに縮小した画素」の位置が、最大で **プレビューの 0.5 画素＋フル解像度の
+//! 0.5 画素** ずれる（向きだけなら一致する。tests/engine.rs の
+//! `preview_and_full_resolution_registration_is_within_half_a_preview_pixel`）。そこで IQ-07b の比較の
+//! 基準は、**プレビューの各画素が覆うフル解像度の範囲（G を介して求めた軸にそろった矩形）で面積平均
+//! したもの** にした（[`finish::GeometryPlan::g_px_to_c`]、テストの `iq07b_reference`。回転・切り抜きが
+//! なければ四隅を合わせた面積平均の縮小と同じ）。プレビューの格子は変えない（切り抜きを変えても範囲内の
+//! 画素がビット単位で同じ、という 2.7 節の決めごとを保つ）。滑らかな三角波のシーン（300 × 201 → 長辺
+//! 100）では、四隅を合わせた縮小との差の平均が回転 7° で約 5.7 だったのに対し、この基準では約 0.5
+//! （回転・切り抜きなしでは約 0.2。このコンテナでの参考値）。
 
 pub mod border;
 pub mod contract;
@@ -256,6 +268,7 @@ pub use sensor::demosaic::DemosaicMethod;
 pub use sensor::wb::SaturationClip;
 pub use sensor::{A1Image, SensorOptions, SensorPlan, SensorWarning, SourceImage, render_a1};
 pub use stage::{
-    GpuStage, GpuStageLookup, Guide, NoGpu, Stage, StageContext, StageParams, run_stage_cpu,
+    GpuStage, GpuStageLookup, Guide, InputKind, NoGpu, Stage, StageContext, StageParams,
+    run_stage_cpu,
 };
 pub use version::ProcessVersion;

@@ -2,10 +2,27 @@
 //!
 //! | 名前 | 内容 |
 //! |---|---|
-//! | S：センサー座標 | CFA の画素の座標（フル解像度）。**センサー処理（ステージ 2〜8、段階 A1）の出力はこの向き** |
-//! | O：向きを反映した座標 | S に RAW の向き（[`Orientation`]）を反映した画素の座標。画素の並べ替えだけ（補間なし） |
+//! | S：センサー座標 | CFA の画素の座標（フル解像度。RAW の有効画素の全体）。**センサー処理（ステージ 2〜8、段階 A1）の出力はこの向き**。デモザイクは有効画素の全体で行う |
+//! | 既定の切り抜き | S の中の矩形（[`CoordinateFrames::default_crop`]。RAW の DefaultCrop。genzo-raw の `RawImage::default_crop`）。カメラの JPEG と同じ範囲で、O・G の基準の枠（「画像全体」）になる。ない場合は S の全体 |
+//! | O：向きを反映した座標 | S の既定の切り抜きの範囲に RAW の向き（[`Orientation`]）を反映した画素の座標（左上は既定の切り抜きの左上の画素）。画素の並べ替えと平行移動だけ（補間なし） |
 //! | G：ジオメトリ補正後の全体 | O にレンズの歪曲補正と回転（ステージ 9）を適用した、切り抜く前の画像全体。G の外接矩形の長辺を 1 とした値 |
 //! | C：出力座標 | 切り抜いた後の画像。C → G（切り抜き）→ O → S の順にたどる |
+//!
+//! # 既定の切り抜き（実機の ARW の不具合 A-2）
+//!
+//! α7 IV の APS-C の ARW では、LibRaw の有効画素の右端 40 列が詰め物（2 列左の値の繰り返し）で、
+//! 下から 3 行目の B が異常な値になっている。どちらもカメラが記録した既定の切り抜き（DefaultCrop）の
+//! 外にある。そこで、S（センサー処理の範囲）は有効画素の全体のまま、O・G を既定の切り抜きの範囲に
+//! する。
+//!
+//! - 利用者の切り抜き（genzo-model の `CropRect`）・回転の中心・空間的なパラメータの長さ
+//!   （[`CoordinateFrames::g_long_side_px`]）・ガイド（[`crate::guide`]）は、既定の切り抜きの範囲を
+//!   基準にする。書き出しの「元の寸法」も既定の切り抜きの寸法になる。
+//! - 既定の切り抜きのすぐ外の画素（補間のタップ）は、S の実際の画素を使う（鏡映で埋めるのは S の
+//!   外だけ）。α7 IV の APS-C では、既定の切り抜きと詰め物の列の間に実際の画像が 44 列、異常な行
+//!   との間に 27 行あるので、デモザイク（RCD）とバイキュービックの近傍に入らない。
+//! - 回転したときの切り抜きの制限（[`crate::finish::geometry::constrain_crop`]）も、既定の切り抜きの
+//!   範囲（O）の内側に制限する。
 //!
 //! # G の定義
 //!
@@ -37,6 +54,7 @@
 //! 連続座標では、画素 (x, y) は `[x, x + 1) × [y, y + 1)` を覆い、中心は `(x + 0.5, y + 0.5)`。
 
 use genzo_model::Orientation;
+use genzo_raw::PixelRect;
 
 use crate::error::{PipelineError, Result};
 use crate::image::Roi;
@@ -84,16 +102,22 @@ impl OrientationMap {
     }
 }
 
-/// 画像の座標系の情報（S の寸法・向きと、G を作る回転）。[`crate::stage::StageContext`] が持つ。
+/// 画像の座標系の情報（S の寸法・既定の切り抜き・向きと、G を作る回転）。
+/// [`crate::stage::StageContext`] が持つ。
 ///
-/// 回転は [`with_rotation`](Self::with_rotation) で加える（既定は 0。モジュールの doc の「G の定義」）。
-/// 歪曲補正（v1）はまだ持たない。
+/// 既定の切り抜きは [`with_default_crop`](Self::with_default_crop)、回転は
+/// [`with_rotation`](Self::with_rotation) で加える（既定は S の全体と 0。モジュールの doc の
+/// 「G の定義」「既定の切り抜き」）。歪曲補正（v1）はまだ持たない。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CoordinateFrames {
     /// S の幅（センサーのフル解像度。RAW 以外の入力では元の画像の幅）。
     pub sensor_width: u32,
     /// S の高さ。
     pub sensor_height: u32,
+    /// 既定の切り抜き（S の画素の範囲。O・G の基準の枠）。S の中に収まること
+    /// （[`with_default_crop`](Self::with_default_crop) で確かめる）。既定の切り抜きのない RAW・
+    /// RAW 以外の入力では S の全体。
+    pub default_crop: PixelRect,
     /// RAW の向き（S → O）。
     pub orientation: Orientation,
     /// 角度補正（度。genzo-model の `Geometry::angle_deg`）。正の値で画面上の反時計回り。
@@ -102,7 +126,7 @@ pub struct CoordinateFrames {
 }
 
 impl CoordinateFrames {
-    /// 作る。寸法が 0 ならエラー。
+    /// 作る（既定の切り抜きは S の全体）。寸法が 0 ならエラー。
     pub fn new(sensor_width: u32, sensor_height: u32, orientation: Orientation) -> Result<Self> {
         if sensor_width == 0 || sensor_height == 0 {
             return Err(PipelineError::InvalidDimensions {
@@ -113,9 +137,24 @@ impl CoordinateFrames {
         Ok(Self {
             sensor_width,
             sensor_height,
+            default_crop: PixelRect::full(sensor_width, sensor_height),
             orientation,
             rotation_deg: 0.0,
         })
+    }
+
+    /// 既定の切り抜き（S の画素の範囲）を設定したもの。`None` は S の全体。S からはみ出す・幅か
+    /// 高さが 0 ならエラー。
+    pub fn with_default_crop(mut self, crop: Option<PixelRect>) -> Result<Self> {
+        let crop = crop.unwrap_or(PixelRect::full(self.sensor_width, self.sensor_height));
+        if !crop.fits_within(self.sensor_width, self.sensor_height) {
+            return Err(PipelineError::InvalidArgument(format!(
+                "既定の切り抜き {crop:?} が S（{} × {}）からはみ出しています",
+                self.sensor_width, self.sensor_height
+            )));
+        }
+        self.default_crop = crop;
+        Ok(self)
     }
 
     /// 回転（度）を設定したもの。有限でなければエラー。−0 は 0 にそろえる。
@@ -142,20 +181,22 @@ impl CoordinateFrames {
         (c, s)
     }
 
+    /// O → S の変換（既定の切り抜きの寸法で向きを反映し、切り抜きの左上だけ平行移動する）。
     fn map(&self) -> OrientationMap {
-        orientation_map(
-            self.orientation,
-            f64::from(self.sensor_width),
-            f64::from(self.sensor_height),
-        )
+        let c = self.default_crop;
+        let mut map = orientation_map(self.orientation, f64::from(c.width), f64::from(c.height));
+        map.t[0] += f64::from(c.x);
+        map.t[1] += f64::from(c.y);
+        map
     }
 
-    /// O の寸法（向きが 90 度・270 度の回転を含むなら幅と高さが入れ替わる）。
+    /// O の寸法（既定の切り抜きの寸法。向きが 90 度・270 度の回転を含むなら幅と高さが入れ替わる）。
     pub fn oriented_size(&self) -> (u32, u32) {
+        let c = self.default_crop;
         if self.orientation.swaps_dimensions() {
-            (self.sensor_height, self.sensor_width)
+            (c.height, c.width)
         } else {
-            (self.sensor_width, self.sensor_height)
+            (c.width, c.height)
         }
     }
 
@@ -179,8 +220,8 @@ impl CoordinateFrames {
         Some((x.floor() as u32, y.floor() as u32))
     }
 
-    /// O の画素の範囲を、それが覆う S の画素の範囲に変換する（向きは画素の並べ替えなので、範囲は
-    /// 過不足なく対応する）。画像の外にはみ出した範囲もそのまま変換する。
+    /// O の画素の範囲を、それが覆う S の画素の範囲に変換する（向きは画素の並べ替えと平行移動なので、
+    /// 範囲は過不足なく対応する）。画像の外にはみ出した範囲もそのまま変換する。
     pub fn oriented_roi_to_sensor(&self, roi: Roi) -> Roi {
         let map = self.map();
         let (u0, v0) = (f64::from(roi.x), f64::from(roi.y));
@@ -195,7 +236,8 @@ impl CoordinateFrames {
     /// G の外接矩形の長辺の長さ（S の画素の単位）。空間的なパラメータ（ぼかしの半径など）は
     /// この長さに対する割合で定義する（04 の 1.1 節の 5、2.7 節）。
     ///
-    /// 回転した O の外接矩形の長辺（回転が 0 なら O の長辺）。歪曲補正（v1）は含まない。
+    /// 回転した O の外接矩形の長辺（回転が 0 なら O、つまり既定の切り抜きの長辺）。歪曲補正（v1）は
+    /// 含まない。
     pub fn g_long_side_px(&self) -> f64 {
         let (w, h) = self.g_size_px();
         w.max(h)
@@ -255,7 +297,7 @@ impl CoordinateFrames {
     /// G → S の変換をアフィン変換 `[x, y] = m · [gx, gy] + t` として返す（`[m, t]` を行ごとに
     /// `[[m00, m01, t0], [m10, m11, t1]]`）。歪曲補正がない間は G → S はアフィン変換。
     ///
-    /// 行列は記号的に合成する（回転が 0 で向きが通常なら、厳密に単位行列と 0）。
+    /// 行列は記号的に合成する（回転が 0 で向きが通常なら、厳密に単位行列と既定の切り抜きの左上）。
     pub fn g_to_sensor_affine(&self) -> [[f64; 3]; 2] {
         let (c, s) = self.rotation_cos_sin();
         let (ow, oh) = self.oriented_size();
@@ -552,6 +594,75 @@ mod tests {
         assert!(SensorGrid::new(0, 1, (1.0, 1.0)).is_err());
         assert!(SensorGrid::new(1, 1, (0.0, 1.0)).is_err());
         assert!(SensorGrid::new(1, 1, (f64::NAN, 1.0)).is_err());
+    }
+
+    /// 既定の切り抜き（A-2）: O・G は S の中の既定の切り抜きの範囲で、O → S は平行移動を含む。
+    #[test]
+    fn default_crop_is_the_frame_of_o_and_g() {
+        let crop = PixelRect::new(44, 30, 4608, 3072);
+        for o in ALL {
+            let f = CoordinateFrames::new(4736, 3132, o)
+                .unwrap()
+                .with_default_crop(Some(crop))
+                .unwrap();
+            let (ow, oh) = f.oriented_size();
+            if o.swaps_dimensions() {
+                assert_eq!((ow, oh), (3072, 4608));
+            } else {
+                assert_eq!((ow, oh), (4608, 3072));
+            }
+            assert_eq!(f.g_long_side_px(), 4608.0);
+            // O の全体は S の既定の切り抜きの範囲をちょうど覆う。
+            assert_eq!(
+                f.oriented_roi_to_sensor(Roi::full(ow, oh)),
+                Roi::new(44, 30, 4608, 3072),
+                "{o:?}"
+            );
+            // O の四隅の画素は、既定の切り抜きの四隅の画素のどれか。
+            let corners = [
+                (44, 30),
+                (44 + 4607, 30),
+                (44, 30 + 3071),
+                (44 + 4607, 30 + 3071),
+            ];
+            for (u, v) in [(0, 0), (ow - 1, 0), (0, oh - 1), (ow - 1, oh - 1)] {
+                let p = f.oriented_pixel_to_sensor(u, v).unwrap();
+                assert!(corners.contains(&p), "{o:?} ({u}, {v}) → {p:?}");
+            }
+            // 連続座標の往復と、アフィン変換の形の一致。
+            let r = f.with_rotation(7.5).unwrap();
+            let a = r.g_to_sensor_affine();
+            let (gw, gh) = r.g_size_px();
+            for (gx, gy) in [(0.0, 0.0), (gw * 0.3, gh * 0.8), (gw, gh)] {
+                let (x, y) = r.g_to_sensor(gx, gy);
+                let xa = a[0][0] * gx + a[0][1] * gy + a[0][2];
+                let ya = a[1][0] * gx + a[1][1] * gy + a[1][2];
+                assert!((x - xa).abs() < 1e-7 && (y - ya).abs() < 1e-7);
+                let (gx2, gy2) = r.sensor_to_g(x, y);
+                assert!((gx - gx2).abs() < 1e-7 && (gy - gy2).abs() < 1e-7);
+            }
+            // G の中心は既定の切り抜きの中心。
+            let (cx, cy) = r.g_to_sensor(gw * 0.5, gh * 0.5);
+            assert!((cx - (44.0 + 2304.0)).abs() < 1e-7 && (cy - (30.0 + 1536.0)).abs() < 1e-7);
+        }
+        // 回転 0・向きが通常なら、G → S は平行移動だけ。
+        let f = CoordinateFrames::new(4736, 3132, Orientation::Normal)
+            .unwrap()
+            .with_default_crop(Some(crop))
+            .unwrap();
+        assert_eq!(f.g_to_sensor_affine(), [[1.0, 0.0, 44.0], [0.0, 1.0, 30.0]]);
+        // None は全体。はみ出す範囲はエラー。
+        let full = CoordinateFrames::new(10, 8, Orientation::Normal).unwrap();
+        assert_eq!(full.with_default_crop(None).unwrap(), full);
+        assert_eq!(full.default_crop, PixelRect::full(10, 8));
+        assert!(
+            full.with_default_crop(Some(PixelRect::new(5, 0, 6, 8)))
+                .is_err()
+        );
+        assert!(
+            full.with_default_crop(Some(PixelRect::new(0, 0, 0, 8)))
+                .is_err()
+        );
     }
 
     #[test]

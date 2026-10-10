@@ -9,7 +9,7 @@
 //! |---|---|
 //! | `AsShot` | RAW の撮影時の係数（`RawImage::as_shot_wb`。R, G1, B, G2）を G1 で割ったもの |
 //! | `Preset` | プリセットの色温度・tint（genzo-model の `WbPreset::temperature_tint`）から下と同じ方法で |
-//! | `Custom` | genzo-color の `wb_multipliers_from_temperature_tint`（カメラ行列で白の XYZ → カメラ RGB）で R・B を求め、G1 = 1 |
+//! | `Custom` | genzo-color の `wb_multipliers_from_temperature_tint_clamped`（カメラ行列で白の XYZ → カメラ RGB）で R・B を求め、G1 = 1。係数を作れない設定は作れる範囲に丸める（[`resolve_white_balance`]） |
 //!
 //! G2（B と同じ行の緑）の係数は、どの設定でも撮影時の係数の G2 / G1 とする（**仮置き**: G1 と
 //! G2 の感度の差はセンサーの性質で、光源によらないとみなす。実機の値は PoC-2 で確認する）。
@@ -20,7 +20,15 @@
 //!
 //! ハイライト復元（ステージ 4）は v1 で実装する。MVP でも、飽和した部分がマゼンタに色かぶりする
 //! のを避けるため、WB を掛けた後に、**飽和した画素とその近傍の値を「すべてのチャンネルが飽和する
-//! 値」（共通の白 = 係数の最小値 × 1）で切りそろえる**（`v = min(v, 共通の白)`）。
+//! 値」（共通の白 = 係数の最小値 × 1）で切りそろえる**（`v = min(v, 切りそろえの値)`）。
+//!
+//! **切りそろえの値は、緑が飽和する値（G1・G2 の係数の小さい方。G1 = 1 なのでふつうは 1）より下に
+//! しない**（`max(係数の最小値, min(G1 の係数, G2 の係数))`。人の判断の表 No.19 の決定）。極端な WB
+//! （低い色温度の設定などで R の係数が 1 未満）では係数の最小値が 1 未満になり、そのまま切りそろえると、
+//! 飽和の中心の G が、切りそろえの範囲の外の飽和していない G（1 近くまである）より暗くなり、白飛びの
+//! 中心が周りより暗く見えた。緑の値で切りそろえると、係数が緑より小さいチャンネル（飽和しても係数の
+//! 値までしか上がらない）だけが低いまま残り、中心はその WB の色かぶり（周りと同じ向き）を帯びた明るい
+//! 色になる。係数の最小値が緑の係数（ふつうの撮影時の WB）なら、これまでと同じ共通の白。
 //!
 //! - 理由: 白レベルで切れたチャンネルは WB を掛けると係数の分だけ違う値になる（例: G は 1、R は
 //!   2）。さらに、G が飽和して R・B が飽和していない明るい部分では、R・B だけが 1 を超えて残り、
@@ -35,7 +43,9 @@
 //! 計算の順序（GPU 版も同じ）: `v = v × 係数[位置]`、近傍に飽和した画素があれば `v = min(v, 共通の白)`。
 
 use genzo_color::Mat3;
-use genzo_color::white_balance::wb_multipliers_from_temperature_tint;
+use genzo_color::white_balance::{
+    ClampedWhiteBalance, wb_multipliers_from_temperature_tint_clamped,
+};
 use genzo_model::WhiteBalance;
 use rayon::prelude::*;
 
@@ -90,7 +100,8 @@ impl SaturationClip {
 pub struct WbCoefficients {
     /// CFA の位置ごとの係数（R, G1, B, G2 の順。genzo-raw の `CfaColor::index`）。G1 = 1。
     pub multipliers: [f32; 4],
-    /// 共通の白（すべてのチャンネルが飽和する値 = 係数の最小値）。
+    /// 飽和の切りそろえの値 `max(係数の最小値, min(G1 の係数, G2 の係数))`（モジュールの doc）。
+    /// 係数の最小値が緑の係数なら、共通の白（すべてのチャンネルが飽和する値）。
     pub clip_level: f32,
 }
 
@@ -105,7 +116,11 @@ impl WbCoefficients {
                 "WB の係数が不正です（{multipliers:?}。0 より大きく {MAX_WB_MULTIPLIER} 以下が必要）"
             )));
         }
-        let clip_level = multipliers.iter().copied().fold(f32::INFINITY, f32::min);
+        let clip_level = multipliers
+            .iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min)
+            .max(multipliers[1].min(multipliers[3]));
         Ok(Self {
             multipliers,
             clip_level,
@@ -113,16 +128,67 @@ impl WbCoefficients {
     }
 }
 
-/// 現像設定の WB から、CFA の位置ごとの係数（R, G1, B, G2。G1 = 1）を求める。
-///
-/// `as_shot` は RAW の撮影時の係数（[`genzo_raw::RawImage::as_shot_wb`]。検証済みであること）、
-/// `cam_xyz` は「XYZ（D65）→ カメラ RGB」の行列（カメラ行列がないときは呼び出し側が代わりの行列を
-/// 渡す）。色温度・tint は [`genzo_model::DevelopSettings::normalized`] で範囲に丸めておくこと。
+/// 作れない WB を作れる範囲に丸めたときの、指定の値と実際に使った値（警告の表示用。色温度は K の
+/// 整数、tint は 0.1 単位の整数に丸めた値）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WbClamp {
+    /// 指定された色温度（K）。
+    pub requested_k: u32,
+    /// 指定された tint × 10。
+    pub requested_tint_x10: i32,
+    /// 実際に使った色温度（K）。
+    pub used_k: u32,
+    /// 実際に使った tint × 10。
+    pub used_tint_x10: i32,
+}
+
+impl WbClamp {
+    fn new(r: &ClampedWhiteBalance) -> Self {
+        let k = |v: f64| v.round().clamp(0.0, f64::from(u32::MAX)) as u32;
+        let t = |v: f64| (v * 10.0).round() as i32;
+        Self {
+            requested_k: k(r.requested.temperature_k),
+            requested_tint_x10: t(r.requested.tint),
+            used_k: k(r.used.temperature_k),
+            used_tint_x10: t(r.used.tint),
+        }
+    }
+}
+
+/// [`resolve_white_balance`] の結果。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedWhiteBalance {
+    /// CFA の位置ごとの係数（R, G1, B, G2。G1 = 1）。
+    pub multipliers: [f32; 4],
+    /// 色温度・tint の設定を、係数を作れる範囲に丸めたか（丸めたなら指定の値と使った値）。
+    pub clamped: Option<WbClamp>,
+}
+
+/// 現像設定の WB から、CFA の位置ごとの係数（R, G1, B, G2。G1 = 1）を求める
+/// （[`resolve_white_balance`] の係数だけ）。
 pub fn resolve_multipliers(
     wb: &WhiteBalance,
     as_shot: [f32; 4],
     cam_xyz: &Mat3,
 ) -> Result<[f32; 4]> {
+    resolve_white_balance(wb, as_shot, cam_xyz).map(|r| r.multipliers)
+}
+
+/// 現像設定の WB から、CFA の位置ごとの係数（R, G1, B, G2。G1 = 1）を求める。
+///
+/// `as_shot` は RAW の撮影時の係数（[`genzo_raw::RawImage::as_shot_wb`]。検証済みであること）、
+/// `cam_xyz` は「XYZ（D65）→ カメラ RGB」の行列（カメラ行列がないときは呼び出し側が代わりの行列を
+/// 渡す）。色温度・tint は [`genzo_model::DevelopSettings::normalized`] で範囲に丸めておくこと。
+///
+/// 色温度・tint の設定で係数を作れない（白のカメラ RGB が 0 以下になる、または係数が
+/// [`MAX_WB_MULTIPLIER`] を超える）場合は、作れる範囲に丸め（genzo-color の
+/// `wb_multipliers_from_temperature_tint_clamped`。人の判断の表 No.17）、結果の `clamped` で知らせる
+/// （[`super::SensorPlan`] が警告にする）。
+pub fn resolve_white_balance(
+    wb: &WhiteBalance,
+    as_shot: [f32; 4],
+    cam_xyz: &Mat3,
+) -> Result<ResolvedWhiteBalance> {
     let g1 = f64::from(as_shot[1]);
     if !(g1.is_finite() && g1 > 0.0) {
         return Err(PipelineError::InvalidArgument(format!(
@@ -133,7 +199,10 @@ pub fn resolve_multipliers(
     let (temperature_k, tint) = match *wb {
         WhiteBalance::AsShot => {
             let m = as_shot.map(|v| (f64::from(v) / g1) as f32);
-            return Ok([m[0], 1.0, m[2], m[3]]);
+            return Ok(ResolvedWhiteBalance {
+                multipliers: [m[0], 1.0, m[2], m[3]],
+                clamped: None,
+            });
         }
         WhiteBalance::Preset(p) => p.temperature_tint(),
         WhiteBalance::Custom {
@@ -141,9 +210,17 @@ pub fn resolve_multipliers(
             tint,
         } => (temperature_k, tint),
     };
-    let m =
-        wb_multipliers_from_temperature_tint(cam_xyz, f64::from(temperature_k), f64::from(tint))?;
-    Ok([m[0] as f32, 1.0, m[2] as f32, g2])
+    let r = wb_multipliers_from_temperature_tint_clamped(
+        cam_xyz,
+        f64::from(temperature_k),
+        f64::from(tint),
+        f64::from(MAX_WB_MULTIPLIER),
+    )?;
+    let m = r.multipliers;
+    Ok(ResolvedWhiteBalance {
+        multipliers: [m[0] as f32, 1.0, m[2] as f32, g2],
+        clamped: r.was_clamped().then(|| WbClamp::new(&r)),
+    })
 }
 
 /// 近傍（半径 `r`。チェビシェフ距離）に飽和した画素があるかの表（`w × h`）。
@@ -308,6 +385,40 @@ mod tests {
     }
 
     #[test]
+    fn unbuildable_white_balance_is_clamped_and_reported() {
+        // 人の判断 No.17: 低い色温度で tint を大きく正にした設定（係数を作れない）は、エラーにせず
+        // 作れる範囲に丸め、丸めたことを返す。
+        let wb = WhiteBalance::Custom {
+            temperature_k: 2000.0,
+            tint: 150.0,
+        };
+        let r = resolve_white_balance(&wb, AS_SHOT, &XYZ_TO_SRGB).unwrap();
+        let c = r.clamped.expect("丸めた");
+        assert_eq!((c.requested_k, c.requested_tint_x10), (2000, 1500));
+        assert_eq!(c.used_k, 2000);
+        assert!(c.used_tint_x10 < 1500 && c.used_tint_x10 > 0, "{c:?}");
+        assert_eq!(r.multipliers[1], 1.0);
+        assert!(WbCoefficients::new(r.multipliers).is_ok(), "{r:?}");
+        // 作れる設定・撮影時の値は丸めない。
+        let ok = WhiteBalance::Custom {
+            temperature_k: 5000.0,
+            tint: 10.0,
+        };
+        assert!(
+            resolve_white_balance(&ok, AS_SHOT, &XYZ_TO_SRGB)
+                .unwrap()
+                .clamped
+                .is_none()
+        );
+        assert!(
+            resolve_white_balance(&WhiteBalance::AsShot, AS_SHOT, &XYZ_TO_SRGB)
+                .unwrap()
+                .clamped
+                .is_none()
+        );
+    }
+
+    #[test]
     fn coefficients_are_validated() {
         let c = WbCoefficients::new([2.0, 1.0, 1.5, 0.98]).unwrap();
         assert_eq!(c.clip_level, 0.98);
@@ -404,6 +515,59 @@ mod tests {
         assert!((red(&near) - 1.8).abs() < 1e-6);
         let global = apply_white_balance(&img, &coeffs, SaturationClip::Global, roi).unwrap();
         assert_eq!(red(&global), coeffs.clip_level);
+    }
+
+    #[test]
+    fn saturated_center_is_not_darker_than_its_surroundings_with_extreme_wb() {
+        // 人の判断 No.19 の再現: 撮影時の WB（R 2.4・B 1.9）で中立の明るい部分を、極端な WB（R の係数が
+        // 1 未満。低い色温度の設定など）で現像すると、共通の白（係数の最小 0.6）で切りそろえた飽和の
+        // 中心の G が、切りそろえの範囲の外の飽和していない G（0.95）より暗くなっていた。
+        let coeffs = WbCoefficients::new([0.6, 1.0, 3.5, 1.0]).unwrap();
+        let (w, h) = (24u32, 8u32);
+        let roi = Roi::full(w, h);
+        let mut img = CfaImage::from_fn(roi, CfaPattern::RGGB, |x, _| {
+            // 左の 8 列は飽和（正規化した値 1）、右は撮影時の WB で中立の 0.95 の明るさ。
+            if x < 8 {
+                1.0
+            } else {
+                [0.95 / 2.4, 0.95, 0.95 / 1.9, 0.95]
+                    [CfaPattern::RGGB.color_at(x as usize, 0).index()]
+            }
+        })
+        .unwrap();
+        {
+            let (_, sat) = img.parts_mut();
+            for (i, s) in sat.iter_mut().enumerate() {
+                *s = (i as u32 % w) < 8;
+            }
+        }
+        let out = apply_white_balance(
+            &img,
+            &coeffs,
+            SaturationClip::default(),
+            Roi::new(2, 2, 20, 4),
+        )
+        .unwrap();
+        let green = |x: u32| {
+            (0..4)
+                .filter(|&y| out.color_at(x, y).is_green())
+                .map(|y| out.value(x, y).unwrap())
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let center = green(0);
+        let far = green(19);
+        assert!((far - 0.95).abs() < 1e-6, "{far}");
+        assert!(center >= far, "飽和の中心の G {center} < 周りの G {far}");
+        // 切りそろえの値は G の飽和の値（1）より下にならない。
+        assert_eq!(coeffs.clip_level, 1.0);
+        // 係数の最小が 1 以上なら、これまでどおり係数の最小（共通の白）。
+        assert_eq!(WbCoefficients::new(AS_SHOT).unwrap().clip_level, 1.0);
+        assert_eq!(
+            WbCoefficients::new([2.0, 1.2, 1.5, 1.1])
+                .unwrap()
+                .clip_level,
+            1.1
+        );
     }
 
     #[test]

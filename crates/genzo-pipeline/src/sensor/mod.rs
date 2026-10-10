@@ -60,7 +60,7 @@ use genzo_color::Mat3;
 use genzo_color::Mat3F32;
 use genzo_color::space::XYZ_TO_BT2020;
 use genzo_model::{DevelopSettings, Orientation, RenderQuality};
-use genzo_raw::{CfaPattern, RawImage};
+use genzo_raw::{CfaPattern, PixelRect, RawImage};
 use rayon::prelude::*;
 
 use crate::border::mirror_cover;
@@ -71,7 +71,7 @@ use crate::image::{CfaImage, ImageTile, RgbImage, Roi};
 use crate::resample::{
     AreaWeights, downscale_area, downscale_column_row, downscale_row, preview_size,
 };
-use crate::stage::{GpuStage, GpuStageLookup, StageContext};
+use crate::stage::{GpuStage, GpuStageLookup, InputKind, StageContext};
 use crate::version::ProcessVersion;
 
 use self::demosaic::DemosaicMethod;
@@ -88,11 +88,14 @@ pub const FALLBACK_CAM_XYZ: Mat3 = XYZ_TO_BT2020;
 /// 結果には影響しない。
 pub const PREVIEW_BAND_ROWS: u32 = 32;
 
-/// センサー処理の警告（処理は続けるが、結果が正確でないことを示す）。
+/// センサー処理の警告（処理は続けるが、結果が正確でない・設定どおりでないことを示す）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SensorWarning {
     /// カメラ行列がないため、カメラ RGB を BT.2020 の原色とみなした（色は正確ではない）。
     MissingCameraMatrix,
+    /// 色温度・tint の設定ではカメラの WB の係数を作れないため、作れる範囲に丸めた（人の判断の表
+    /// No.17。[`wb::resolve_white_balance`]）。
+    WhiteBalanceClamped(wb::WbClamp),
 }
 
 impl fmt::Display for SensorWarning {
@@ -101,6 +104,18 @@ impl fmt::Display for SensorWarning {
             SensorWarning::MissingCameraMatrix => f.write_str(
                 "カメラ行列がないため、色は正確ではありません（カメラ RGB を BT.2020 とみなしました）",
             ),
+            SensorWarning::WhiteBalanceClamped(c) => {
+                let tint = |x10: i32| format!("{:.1}", f64::from(x10) / 10.0);
+                write!(
+                    f,
+                    "指定したホワイトバランス（{} K、色かぶり補正 {}）はこのカメラでは作れないため、\
+                     作れる範囲（{} K、色かぶり補正 {}）に丸めました",
+                    c.requested_k,
+                    tint(c.requested_tint_x10),
+                    c.used_k,
+                    tint(c.used_tint_x10)
+                )
+            }
         }
     }
 }
@@ -502,6 +517,7 @@ pub struct SensorPlan {
     quality: RenderQuality,
     sensor_width: u32,
     sensor_height: u32,
+    default_crop: Option<PixelRect>,
     cfa: CfaPattern,
     orientation: Orientation,
     levels: SensorLevels,
@@ -517,8 +533,9 @@ impl SensorPlan {
     /// RAW のメタデータ・現像設定・設定から作る。
     ///
     /// エラー: 対応していない処理バージョン（`settings.process_version` を丸める前に確認する）、
-    /// RAW の検証の失敗、2 × 2 画素より小さい RAW、カメラ行列が不正（非有限・特異など）、WB の係数を
-    /// 計算できない（色温度・tint の白がカメラの色域の外など）。
+    /// RAW の検証の失敗、2 × 2 画素より小さい RAW、カメラ行列が不正（非有限・特異、6504 K でも WB の
+    /// 係数を作れないなど）。色温度・tint の白がカメラの色域の外で係数を作れない設定は、エラーにせず
+    /// 作れる範囲に丸めて [`SensorWarning::WhiteBalanceClamped`] を返す。
     pub fn new(
         raw: &RawImage,
         settings: &DevelopSettings,
@@ -545,9 +562,12 @@ impl SensorPlan {
             }
         };
         let camera_to_working = color_matrix::camera_to_working(&cam_xyz)?;
-        let multipliers =
-            wb::resolve_multipliers(&settings.white_balance, raw.as_shot_wb, &cam_xyz)?;
-        let wb = WbCoefficients::new(multipliers)?;
+        let resolved =
+            wb::resolve_white_balance(&settings.white_balance, raw.as_shot_wb, &cam_xyz)?;
+        if let Some(c) = resolved.clamped {
+            warnings.push(SensorWarning::WhiteBalanceClamped(c));
+        }
+        let wb = WbCoefficients::new(resolved.multipliers)?;
         let demosaic = options.demosaic.unwrap_or(DemosaicMethod::for_quality(
             process_version,
             options.quality,
@@ -557,6 +577,7 @@ impl SensorPlan {
             quality: options.quality,
             sensor_width: raw.width,
             sensor_height: raw.height,
+            default_crop: raw.default_crop,
             cfa: raw.cfa,
             orientation: raw.metadata.orientation,
             levels: SensorLevels::from_raw(raw)?,
@@ -619,15 +640,24 @@ impl SensorPlan {
         &self.warnings
     }
 
-    /// 座標系（S の寸法と RAW の向き）。
+    /// 座標系（S の寸法・RAW の既定の切り抜き・RAW の向き）。
     pub fn frames(&self) -> CoordinateFrames {
         CoordinateFrames {
             sensor_width: self.sensor_width,
             sensor_height: self.sensor_height,
+            // RawImage::validate で S の中に収まることを確かめてある。
+            default_crop: self
+                .default_crop
+                .unwrap_or(PixelRect::full(self.sensor_width, self.sensor_height)),
             orientation: self.orientation,
             // 段階 A1 は回転を知らない（coords の doc）。
             rotation_deg: 0.0,
         }
+    }
+
+    /// RAW の既定の切り抜き（S の画素の範囲。なければ `None`）。
+    pub fn default_crop(&self) -> Option<PixelRect> {
+        self.default_crop
     }
 
     /// 出力の格子（[`output_grid`](Self::output_grid)）を、ステージ 9 の入力の格子として表したもの。
@@ -752,10 +782,12 @@ impl SensorPlan {
             image,
             sensor_size: (self.sensor_width, self.sensor_height),
             sensor_extent: extent,
+            default_crop: self.default_crop,
             orientation: self.orientation,
             quality: self.quality,
             warnings: self.warnings.clone(),
             non_finite_replaced: replaced,
+            input_kind: InputKind::SceneReferred,
         })
     }
 
@@ -816,6 +848,9 @@ pub struct A1Image {
     /// この画像が覆う S の範囲の幅・高さ（左上は S の (0, 0)）。画像の四隅をこの範囲の四隅に合わせて
     /// 対応させる。2 × 2 の簡易処理で S の幅・高さが奇数なら、最後の列・行の分だけ小さい。
     pub sensor_extent: (f64, f64),
+    /// RAW の既定の切り抜き（S の画素の範囲。O・G の基準の枠。[`crate::coords`]）。`None` は S の
+    /// 全体。画像はこの範囲の外も含む S の全体を覆う（ステージ 9 とガイドがこの範囲を切り出す）。
+    pub default_crop: Option<PixelRect>,
     /// RAW の向き（G 座標の最初の変換。[`crate::coords`]）。
     pub orientation: Orientation,
     /// 品質（簡易か最終か）。
@@ -824,6 +859,8 @@ pub struct A1Image {
     pub warnings: Vec<SensorWarning>,
     /// 置き換えた NaN・無限大の数（2.6 節。ログ用）。
     pub non_finite_replaced: u64,
+    /// 入力の種類（RAW はシーン参照、RAW 以外はディスプレイ参照。ステージ 15 の扱いを決める）。
+    pub input_kind: InputKind,
 }
 
 impl A1Image {
@@ -835,11 +872,18 @@ impl A1Image {
         )
     }
 
-    /// 座標系（S の寸法と向き）。
+    /// 座標系（S の寸法・既定の切り抜き・向き）。
+    ///
+    /// 既定の切り抜きが S からはみ出す（この型を直接作った場合の誤り）なら、S の全体を使う。
     pub fn frames(&self) -> CoordinateFrames {
+        let (w, h) = self.sensor_size;
         CoordinateFrames {
-            sensor_width: self.sensor_size.0,
-            sensor_height: self.sensor_size.1,
+            sensor_width: w,
+            sensor_height: h,
+            default_crop: self
+                .default_crop
+                .filter(|c| c.fits_within(w, h))
+                .unwrap_or(PixelRect::full(w, h)),
             orientation: self.orientation,
             // 段階 A1 は回転を知らない（coords の doc）。回転は段階 B・C の文脈で加える。
             rotation_deg: 0.0,
@@ -881,11 +925,35 @@ impl SourceImage {
         }
     }
 
+    /// 入力の種類（RAW はシーン参照、RAW 以外はディスプレイ参照）。
+    pub fn input_kind(&self) -> InputKind {
+        match self {
+            SourceImage::Raw(_) => InputKind::SceneReferred,
+            SourceImage::Working { .. } => InputKind::DisplayReferred,
+        }
+    }
+
     /// 向き。
     pub fn orientation(&self) -> Orientation {
         match self {
             SourceImage::Raw(r) => r.metadata.orientation,
             SourceImage::Working { orientation, .. } => *orientation,
+        }
+    }
+
+    /// 既定の切り抜き（S の画素の範囲。RAW の DefaultCrop。RAW 以外・ない場合は `None`）。
+    pub fn default_crop(&self) -> Option<PixelRect> {
+        match self {
+            SourceImage::Raw(r) => r.default_crop,
+            SourceImage::Working { .. } => None,
+        }
+    }
+
+    /// 見える範囲の寸法（既定の切り抜き、なければ S の寸法。向きを反映する前）。
+    pub fn visible_size(&self) -> (u32, u32) {
+        match self.default_crop() {
+            Some(c) => (c.width, c.height),
+            None => self.sensor_size(),
         }
     }
 }
@@ -930,10 +998,12 @@ pub fn render_a1(
                 image,
                 sensor_size: (w, h),
                 sensor_extent: (f64::from(w), f64::from(h)),
+                default_crop: None,
                 orientation: *orientation,
                 quality: RenderQuality::Final,
                 warnings: Vec::new(),
                 non_finite_replaced: replaced,
+                input_kind: InputKind::DisplayReferred,
             })
         }
     }

@@ -126,6 +126,23 @@ impl Guide {
     }
 }
 
+/// 入力の種類（シーン参照か、ディスプレイ参照か）。ステージ 15 の扱いを決める（04 の 2.6 節
+/// 「RAW 以外の入力」、人の判断の表 No.2）。
+///
+/// - [`InputKind::SceneReferred`]: RAW（ステージ 2〜8 を通したシーンリニアの値）。ステージ 15 の基本
+///   カーブでシーンの値をディスプレイの範囲に収める。
+/// - [`InputKind::DisplayReferred`]: RAW 以外（JPEG / TIFF / PNG。[`crate::sensor::SourceImage::Working`]）。
+///   すでにディスプレイ向けに作られた画像なので、既定ではステージ 15 を恒等にして元の見た目を変えない
+///   （[`crate::finish::scene_to_display`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InputKind {
+    /// シーン参照（RAW）。
+    #[default]
+    SceneReferred,
+    /// ディスプレイ参照（RAW 以外）。
+    DisplayReferred,
+}
+
 /// ステージの実行の文脈（7.1 節の `StageContext`）。
 #[derive(Debug, Clone, Copy)]
 pub struct StageContext<'a> {
@@ -145,10 +162,12 @@ pub struct StageContext<'a> {
     /// ステージ 9 は、この格子から C の格子（[`crate::finish::geometry::GeometryPlan`]）へ
     /// リサンプリングする。既定はフル解像度（[`SensorGrid::full_resolution`]）。
     pub sensor_grid: SensorGrid,
+    /// 入力の種類（RAW か、RAW 以外か）。既定は [`InputKind::SceneReferred`]。ステージ 15 が使う。
+    pub input_kind: InputKind,
 }
 
 impl<'a> StageContext<'a> {
-    /// フル解像度・最終品質・ガイドなしの文脈。
+    /// フル解像度・最終品質・ガイドなし・シーン参照（RAW）の入力の文脈。
     pub fn new(process_version: ProcessVersion, frames: CoordinateFrames) -> Self {
         Self {
             process_version,
@@ -157,7 +176,14 @@ impl<'a> StageContext<'a> {
             quality: RenderQuality::Final,
             guide: None,
             sensor_grid: SensorGrid::full_resolution(&frames),
+            input_kind: InputKind::SceneReferred,
         }
+    }
+
+    /// 入力の種類を変えたもの。
+    pub fn with_input_kind(mut self, kind: InputKind) -> Self {
+        self.input_kind = kind;
+        self
     }
 
     /// ステージ 9 の入力の格子を変えたもの。

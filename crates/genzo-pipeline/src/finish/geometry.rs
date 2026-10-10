@@ -226,6 +226,18 @@ impl GeometryPlan {
         )
     }
 
+    /// G の画素の座標（S の画素の単位）→ C の連続座標（[`c_to_g_px`](Self::c_to_g_px) の逆）。
+    ///
+    /// プレビューの画素が覆うフル解像度の範囲（IQ-07b の比較の基準。人の判断の表 No.8）を求めるのに
+    /// 使う: プレビューの C の画素 `[i, i + 1)` を `c_to_g_px` で G に写し、フル解像度のプランの
+    /// `g_px_to_c` で C に写す（どちらの C の格子も G の軸にそろっているので、範囲は軸にそろった矩形）。
+    pub fn g_px_to_c(&self, gx: f64, gy: f64) -> (f64, f64) {
+        (
+            gx * self.density.0 - f64::from(self.crop_lattice.x),
+            gy * self.density.1 - f64::from(self.crop_lattice.y),
+        )
+    }
+
     /// C の連続座標 → 入力の格子の連続座標（f64）。
     pub fn c_to_input(&self, cx: f64, cy: f64) -> (f64, f64) {
         let x = cx + f64::from(self.crop_lattice.x);

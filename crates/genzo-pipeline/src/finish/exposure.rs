@@ -13,16 +13,28 @@
 //! ```text
 //! L  = log2(max(Y, 2^−16))
 //! L' = min(L0 + γ·(L − L0), 64)          L0 = log2(0.18)、γ = 1 + CONTRAST_STRENGTH × contrast / 100
-//! RGB' = RGB × exp2(L' − L)               （RGB の比率を保つ。負の値は符号を保ったまま倍率がかかる）
+//! r  = exp2(L' − L)                       （輝度の倍率）
+//! k  = Y < 0.18 なら min(r, CONTRAST_CHROMA_GAIN_MAX)、それ以外は r   （色の成分の倍率）
+//! k = r なら RGB' = RGB × r               （RGB の比率を保つ。負の値は符号を保ったまま倍率がかかる）
+//! それ以外は RGB' = Y·r + k·(RGB − Y)     （輝度は Y·r、色の成分（無彩色からの差）は k 倍）
 //! ```
 //!
 //! 中間グレーは動かず、+100 で中間グレーから 1 段離れた値が `CONTRAST_STRENGTH` 段だけさらに離れる。
+//!
+//! **暗部の色の成分の倍率の上限（人の判断の表 No.18 の決定）**: 負のコントラストでは暗いほど輝度の
+//! 倍率 `r` が大きい（−100 で 2^−16 以下は約 42 倍）。比率を保って RGB 全体に掛けると、暗部の雑音の
+//! 色の成分（カメラ行列の後は、輝度が 0 に近くてもチャンネルの値が正負に散らばる）も同じ倍率で増え、
+//! 持ち上げた暗部に鮮やかな点が出る。そこで、トーンカーブの黒の持ち上げ（ステージ 16。No.14）と同じ
+//! 考え方で、輝度と色の成分の倍率を分け、中間グレーより暗い部分の色の成分の倍率を
+//! [`CONTRAST_CHROMA_GAIN_MAX`]（仮置き）で止める。倍率が上限より小さい部分（正のコントラストの暗部、
+//! 中間グレーの近く）と、中間グレーより明るい部分は、これまでどおり比率を保つ（`k = r`。上限は 1 以上
+//! なので中間グレーで連続）。
 //! `2^64` を超える結果は抑える（[`super::LOG2_CEILING`]。あふれによる無限大を防ぐ）。
 //! ステージ 11 のガイド（局所の明るさ）にも同じ変換をかける（[`ContrastParams::apply_log2`]）。
 
 use genzo_model::{DevelopSettings, Phase};
 
-use super::{LOG2_CEILING, LOG2_MIDDLE_GRAY, luminance, map_pixels};
+use super::{LOG2_CEILING, LOG2_MIDDLE_GRAY, MIDDLE_GRAY, luminance, map_pixels};
 use crate::contract::ColorContract;
 use crate::error::Result;
 use crate::image::{ImageTile, Roi};
@@ -35,6 +47,11 @@ use crate::version::ProcessVersion;
 /// 根拠: Lightroom のコントラスト +100 が中間調の傾きを 1.3〜1.5 倍程度にする見た目に近い値として
 /// 置いた（実測ではない）。PoC-4 / PoC-5 で見直す。
 pub const CONTRAST_STRENGTH: f32 = 0.4;
+
+/// コントラストで、中間グレーより暗い部分の色の成分（無彩色からの差）に掛ける倍率の上限
+/// （**仮置き**: 2 段。コントラスト −100 では中間グレーから 5 段暗い輝度（約 0.0056）で輝度の倍率が
+/// 4 に達し、それより暗い部分では輝度だけが持ち上がる。人の判断の表 No.18。PoC-4 / PoC-5 で見直す）。
+pub const CONTRAST_CHROMA_GAIN_MAX: f32 = 4.0;
 
 /// 露光量のパラメータ。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -137,12 +154,26 @@ impl ContrastParams {
         (LOG2_MIDDLE_GRAY + self.gamma * (l - LOG2_MIDDLE_GRAY)).min(LOG2_CEILING)
     }
 
-    /// 1 画素に適用する。
+    /// 1 画素に適用する（モジュールの doc の式）。
     #[inline]
     pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
-        let l = safe_log2(luminance(c));
+        let y = luminance(c);
+        let l = safe_log2(y);
         let r = (self.apply_log2(l) - l).exp2();
-        [c[0] * r, c[1] * r, c[2] * r]
+        let k = if y < MIDDLE_GRAY {
+            r.min(CONTRAST_CHROMA_GAIN_MAX)
+        } else {
+            r
+        };
+        if k == r {
+            return [c[0] * r, c[1] * r, c[2] * r];
+        }
+        let y2 = y * r;
+        [
+            y2 + k * (c[0] - y),
+            y2 + k * (c[1] - y),
+            y2 + k * (c[2] - y),
+        ]
     }
 }
 
@@ -225,6 +256,41 @@ mod tests {
         let d = q.apply([0.09; 3]);
         assert!((d[0] / 0.18 - 2f32.powf(-0.6)).abs() < 1e-4, "{d:?}");
         assert!(ContrastParams::from_slider(0.0).is_identity());
+    }
+
+    #[test]
+    fn negative_contrast_does_not_amplify_dark_noise_colors_by_the_luminance_gain() {
+        // 人の判断 No.18 の再現: コントラスト −100 では暗いほど輝度の倍率が大きく（2^−16 以下で約 42 倍）、
+        // 比率を保って RGB に掛けると、暗部の雑音の色の成分（無彩色からの差）も同じ倍率で増えていた。
+        let p = ContrastParams::from_slider(-100.0);
+        let noise = [1.0e-3f32, -4.0e-4, 1.0e-3];
+        let y = luminance(noise);
+        let out = p.apply(noise);
+        let gain = (p.apply_log2(safe_log2(y)) - safe_log2(y)).exp2();
+        assert!(gain > 20.0, "{gain}");
+        // 輝度は輝度の倍率どおり。
+        assert!(
+            (luminance(out) - y * gain).abs() <= 1e-6 * gain * y.abs().max(1e-6),
+            "{out:?}"
+        );
+        // 色の成分の倍率は上限（CONTRAST_CHROMA_GAIN_MAX）まで。
+        let chroma_in = (noise[0] - y).abs();
+        let chroma_out = (out[0] - luminance(out)).abs();
+        let k = chroma_out / chroma_in;
+        assert!(
+            (k - CONTRAST_CHROMA_GAIN_MAX).abs() < 1e-3,
+            "色の成分の倍率 {k}"
+        );
+        // 中間グレーより明るい部分と、倍率が上限より小さい暗部では、これまでどおり比率を保つ。
+        let bright = p.apply([0.6, 0.4, 0.3]);
+        assert!((bright[0] / bright[1] - 1.5).abs() < 1e-5, "{bright:?}");
+        let mid_dark = [0.06, 0.04, 0.03];
+        let out = p.apply(mid_dark);
+        assert!((out[0] / out[1] - 1.5).abs() < 1e-5, "{out:?}");
+        // 正のコントラストの暗部（倍率 < 1）も比率を保つ。
+        let q = ContrastParams::from_slider(100.0);
+        let out = q.apply([0.006, 0.004, 0.003]);
+        assert!((out[0] / out[1] - 1.5).abs() < 1e-5, "{out:?}");
     }
 
     #[test]

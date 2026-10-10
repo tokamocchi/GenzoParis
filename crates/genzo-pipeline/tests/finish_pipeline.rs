@@ -14,6 +14,7 @@ use genzo_model::{
     CropRect, CurvePoint, DevelopSettings, Orientation, OutputColorSpace, RenderQuality,
 };
 use genzo_pipeline::finish::output::{Dither, Histogram, quantize_u8};
+use genzo_pipeline::finish::scene_to_display::SceneToDisplayParams;
 use genzo_pipeline::finish::{
     ColorStage, DisplayStage, ExportStage, ExposureStage, FinishPlan, GeometryStage,
     SceneToDisplayStage, ToneStage, finish_context,
@@ -21,8 +22,9 @@ use genzo_pipeline::finish::{
 use genzo_pipeline::guide::{GuideSpec, compute_guide, compute_guide_from};
 use genzo_pipeline::stage::Guide;
 use genzo_pipeline::{
-    ColorContract, CoordinateFrames, ImageTile, PipelineError, RgbImage, Roi, SensorGrid,
-    SensorOptions, SourceImage, Stage, StageContext, StageRegistry, render_a1, run_stage_cpu,
+    ColorContract, CoordinateFrames, ImageTile, InputKind, PipelineError, RgbImage, Roi,
+    SensorGrid, SensorOptions, SourceImage, Stage, StageContext, StageRegistry, render_a1,
+    run_stage_cpu,
 };
 
 /// 整数の演算だけで作る、なめらかでない B2 の模様（暗部〜明部、色付き）。右下の 4 分の 1 は 4 倍明るい
@@ -178,8 +180,9 @@ fn exposure_round_trip_iq02() {
 
 #[test]
 fn neutral_settings_do_almost_nothing() {
-    // 既定の設定では、ステージ 9〜16 のうち有効なのはステージ 15 だけで、膝（0.5）より暗い色は
-    // ビット単位で変わらない。
+    // 既定の設定では、ステージ 9〜16 のうち有効なのはステージ 15 だけ。RAW の入力（シーン参照）では
+    // 基本カーブ（SceneToDisplayParams::scene_referred）を画素ごとにかけた値とビット単位で同じ。
+    // RAW 以外の入力（ディスプレイ参照）では、輝度 1 以下の色はビット単位で変わらない（人の判断 No.2）。
     let img = RgbImage::from_fn(31, 17, ColorContract::B2Working, |x, y| {
         let k = ((x * 13 + y * 7) % 41) as f32 / 41.0;
         [
@@ -193,7 +196,22 @@ fn neutral_settings_do_almost_nothing() {
     let (out, plan) = render(&s, &img, Orientation::Normal);
     assert_eq!(plan.active_stage_ids(), [SceneToDisplayStage::ID]);
     assert_eq!(plan.output_size(), (31, 17));
-    assert_bitwise_eq(&out, &img);
+    let curve = SceneToDisplayParams::scene_referred();
+    let expected = RgbImage::from_fn(31, 17, ColorContract::B3DisplayReferred, |x, y| {
+        curve.apply(img.pixel(x, y).unwrap())
+    })
+    .unwrap();
+    assert_bitwise_eq(&out, &expected);
+
+    let guide = guide_for(&s, &img, Orientation::Normal);
+    let ctx = context(&s, &img, Orientation::Normal)
+        .with_guide(&guide)
+        .with_input_kind(InputKind::DisplayReferred);
+    let plan = FinishPlan::new(&s, &ctx).unwrap();
+    let (out, replaced) = plan.render_full(&ctx, &tile(&img)).unwrap();
+    assert_eq!(replaced, 0);
+    assert_eq!(plan.active_stage_ids(), [SceneToDisplayStage::ID]);
+    assert_bitwise_eq(&out.image, &img);
 }
 
 #[test]
@@ -539,7 +557,7 @@ fn negative_and_extreme_values_flow_without_nan() {
 #[test]
 fn export_matches_the_icc_profiles() {
     // 書き出した値を、その色空間の ICC プロファイル（lcms2）で作業色空間に戻すと元の色になる
-    // （色域の圧縮の膝より内側の色。IQ-06 の前提）。
+    // （出力の色域内の色。色域の圧縮は色域内の色を変えない。IQ-06 の前提）。
     let linear = RgbColorSpace::Bt2020;
     let back_profile = IccProfile::standard(StandardProfile::LinearBt2020).unwrap();
     for (space, profile, stage) in [
@@ -602,37 +620,57 @@ fn export_matches_the_icc_profiles() {
 
 #[test]
 fn srgb_middle_gray_is_118() {
-    // シーンの 18% グレーは、既定の設定でディスプレイの 0.18 になり（ステージ 15 の中間グレーの
-    // 対応）、sRGB の 8bit で 118（IEC 61966-2-1: 0.18 → 0.4614 → 117.65 → 118）。
-    let img = RgbImage::filled(16, 16, ColorContract::B2Working, [0.18; 3]).unwrap();
-    let s = DevelopSettings::default();
-    let (b3, _) = render(&s, &img, Orientation::Normal);
-    let ctx = context(&s, &img, Orientation::Normal);
-    let stage = ExportStage::for_space(OutputColorSpace::Srgb);
-    let p = stage.params(&s, &ctx).unwrap().unwrap();
-    let (enc, _) = run_stage_cpu(stage, &ctx, &tile(&b3), Roi::full(16, 16), &p).unwrap();
-    let q = quantize_u8(&enc.image, (0, 0), Dither::None).unwrap();
-    assert!(q.iter().all(|&v| v == 118), "{:?}", &q[..6]);
-    let d = quantize_u8(&enc.image, (0, 0), Dither::DEFAULT_8BIT).unwrap();
-    assert!(d.iter().all(|&v| (117..=119).contains(&v)));
-    let mean = d.iter().map(|&v| f64::from(v)).sum::<f64>() / d.len() as f64;
-    assert!((mean - 117.65).abs() < 0.2, "{mean}");
-    // 同じ入力なら同じ結果（IQ-08）。
-    assert_eq!(
-        d,
-        quantize_u8(&enc.image, (0, 0), Dither::DEFAULT_8BIT).unwrap()
-    );
-    // ヒストグラムの合計は画素数。
-    let h = Histogram::compute(
-        &enc.image,
-        Histogram::luma_coefficients(RgbColorSpace::Srgb),
-    )
-    .unwrap();
-    assert_eq!(h.pixel_count, 256);
-    assert_eq!(h.red[118], 256);
-    assert_eq!(h.luma.iter().sum::<u64>(), 256);
-    assert_eq!(h.clipped_high.any, 0);
-    assert_eq!(h.clipped_low.any, 0);
+    // 既定の設定で、RAW のシーンの Sm = 0.18 / 2^1.3（≒ 0.0731）はディスプレイの 0.18 になり
+    // （ステージ 15 の中間グレーの対応。人の判断 No.1）、sRGB の 8bit で 118（IEC 61966-2-1:
+    // 0.18 → 0.4614 → 117.65 → 118）。RAW 以外の入力（ディスプレイ参照）では、0.18 がそのまま 118。
+    let sm = (0.18f64 / 1.3f64.exp2()) as f32;
+    for (value, kind) in [
+        (sm, InputKind::SceneReferred),
+        (0.18, InputKind::DisplayReferred),
+    ] {
+        let img = RgbImage::filled(16, 16, ColorContract::B2Working, [value; 3]).unwrap();
+        let s = DevelopSettings::default();
+        let guide = guide_for(&s, &img, Orientation::Normal);
+        let ctx = context(&s, &img, Orientation::Normal)
+            .with_guide(&guide)
+            .with_input_kind(kind);
+        let plan = FinishPlan::new(&s, &ctx).unwrap();
+        let (b3, _) = plan.render_full(&ctx, &tile(&img)).unwrap();
+        assert!(
+            b3.image
+                .data()
+                .iter()
+                .flatten()
+                .all(|v| (v - 0.18).abs() < 1e-5),
+            "{kind:?}: {:?}",
+            b3.image.pixel(0, 0)
+        );
+        let stage = ExportStage::for_space(OutputColorSpace::Srgb);
+        let p = stage.params(&s, &ctx).unwrap().unwrap();
+        let (enc, _) = run_stage_cpu(stage, &ctx, &b3, Roi::full(16, 16), &p).unwrap();
+        let q = quantize_u8(&enc.image, (0, 0), Dither::None).unwrap();
+        assert!(q.iter().all(|&v| v == 118), "{kind:?}: {:?}", &q[..6]);
+        let d = quantize_u8(&enc.image, (0, 0), Dither::DEFAULT_8BIT).unwrap();
+        assert!(d.iter().all(|&v| (117..=119).contains(&v)));
+        let mean = d.iter().map(|&v| f64::from(v)).sum::<f64>() / d.len() as f64;
+        assert!((mean - 117.65).abs() < 0.2, "{kind:?}: {mean}");
+        // 同じ入力なら同じ結果（IQ-08）。
+        assert_eq!(
+            d,
+            quantize_u8(&enc.image, (0, 0), Dither::DEFAULT_8BIT).unwrap()
+        );
+        // ヒストグラムの合計は画素数。中間グレーは白飛び・黒つぶれにならない。
+        let h = Histogram::compute(
+            &enc.image,
+            Histogram::luma_coefficients(RgbColorSpace::Srgb),
+        )
+        .unwrap();
+        assert_eq!(h.pixel_count, 256);
+        assert_eq!(h.red[118], 256, "{kind:?}");
+        assert_eq!(h.luma.iter().sum::<u64>(), 256);
+        assert_eq!(h.clipped_high.any, 0);
+        assert_eq!(h.clipped_low.any, 0);
+    }
 }
 
 #[test]

@@ -5,7 +5,7 @@
 //! ```text
 //! v = (DN − 黒レベル[位置]) × inv_range[位置]      （inv_range = 1 / (白レベル − 黒レベル)。f64 で計算して f32 に丸めた値）
 //! v = min(max(v, 0), 1)
-//! DN ≥ 白レベル なら v = 1 とし、飽和の印を付ける
+//! DN ≥ 飽和の閾値 なら v = 1 とし、飽和の印を付ける
 //! ```
 //!
 //! - 割り算の代わりに逆数を掛けるのは、GPU（WGSL）の割り算が正しく丸められる保証がないため
@@ -13,8 +13,11 @@
 //! - **負の値は 0 に切り詰める**（仮置き）。B1 は「0 以上」（2.6 節）で、RCD の比の計算は負の値を
 //!   扱えないため。黒の付近の雑音の平均がわずかに持ち上がる。負の値を残すかは PoC-3 で実写を見て
 //!   決める。
-//! - 飽和の判定は整数の値で行う（`DN ≥ 白レベル`）。センサーが白レベルより少し低い値で飽和する
-//!   機種への対応（閾値を下げるか）は PoC-2 で確認する。
+//! - 飽和の判定は白レベルと分けた閾値（genzo-raw の `RawImage::saturation_level`）で行う
+//!   （`DN ≥ 飽和の閾値`）。実機の α7 IV（Sony の圧縮 ARW）では緑が 16372 に張り付き、白レベル
+//!   16380 での判定では飽和した画素の約 9 割に印が付かず、白飛びがピンクになった（実機の ARW の
+//!   不具合 A-3）。閾値の値は genzo-raw の仮置きの式（`saturation_level_for`）で、PoC-2 で確定する。
+//!   正規化の範囲（白レベル − 黒レベル）は変えない。
 //! - 範囲が RAW の外にはみ出す部分は、RAW の画素を鏡映で折り返して作る（[`crate::border`]。偶奇を
 //!   保つので CFA の色の並びは崩れない）。
 
@@ -30,8 +33,10 @@ use crate::image::{CfaImage, Roi, checked_len};
 pub struct SensorLevels {
     /// 黒レベル（CFA の位置ごと。R, G1, B, G2 の順。genzo-raw の `CfaColor::index`）。
     pub black_level: [f32; 4],
-    /// 白レベル（この値以上を飽和とする）。
+    /// 白レベル（正規化で 1 にする値）。
     pub white_level: f32,
+    /// 飽和の閾値（この値以上を飽和とする。黒レベルの最大より大きく、白レベル以下）。
+    pub saturation_level: f32,
     /// `1 / (白レベル − 黒レベル)`（f64 で計算して f32 に丸めた値）。
     pub inv_range: [f32; 4],
 }
@@ -51,9 +56,25 @@ impl SensorLevels {
             }
             inv_range[k] = (1.0 / (f64::from(white) - f64::from(black))) as f32;
         }
+        let sat = raw.saturation_level;
+        let max_black = raw
+            .black_level
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !(sat.is_finite() && sat > max_black && sat <= white) {
+            return Err(PipelineError::Raw(
+                genzo_raw::RawError::InvalidSaturationLevel {
+                    value: sat,
+                    max_black,
+                    white_level: white,
+                },
+            ));
+        }
         Ok(Self {
             black_level: raw.black_level,
             white_level: white,
+            saturation_level: sat,
             inv_range,
         })
     }
@@ -62,7 +83,7 @@ impl SensorLevels {
     #[inline]
     pub fn normalize(&self, dn: u16, k: usize) -> (f32, bool) {
         let d = f32::from(dn);
-        if d >= self.white_level {
+        if d >= self.saturation_level {
             return (1.0, true);
         }
         let v = (d - self.black_level[k]) * self.inv_range[k];
@@ -138,6 +159,8 @@ mod tests {
             data,
             black_level: [512.0, 500.0, 520.0, 510.0],
             white_level: 16383.0,
+            saturation_level: 16383.0,
+            default_crop: None,
             as_shot_wb: [2.0, 1.0, 1.5, 1.0],
             cam_xyz: None,
             metadata: PhotoMetadata::default(),
@@ -166,6 +189,37 @@ mod tests {
         let (v, _) = lv.normalize(8447, CfaColor::Blue.index());
         let expect = (8447.0 - 520.0) / (16383.0 - 520.0);
         assert!((f64::from(v) - expect).abs() < 1e-7);
+    }
+
+    /// 飽和の閾値を白レベルと分ける（A-3）。閾値と白レベルの間の値にも印が付き、値は 1 になる。
+    /// 正規化の範囲（白 − 黒）は変わらない。
+    #[test]
+    fn saturation_level_below_white_marks_the_plateau() {
+        let mut r = raw(4, 4, CfaPattern::RGGB, |_, _| 0);
+        r.black_level = [512.0; 4];
+        r.white_level = 16380.0;
+        r.saturation_level = genzo_raw::saturation_level_for(r.black_level, r.white_level);
+        let lv = SensorLevels::from_raw(&r).unwrap();
+        for k in 0..4 {
+            // 実機の α7 IV の緑の張り付いた値（16372）は印が付く。
+            assert_eq!(lv.normalize(16372, k), (1.0, true));
+            assert!(!lv.normalize(16300, k).1);
+            assert_eq!(lv.normalize(16301, k), (1.0, true));
+            // 閾値より下は従来どおり（範囲は白レベルまで）。
+            let (v, s) = lv.normalize(8446, k);
+            assert!(!s);
+            assert!((f64::from(v) - (8446.0 - 512.0) / (16380.0 - 512.0)).abs() < 1e-7);
+        }
+        // 閾値 = 白レベル なら従来の判定と同じ。
+        r.saturation_level = r.white_level;
+        let lv = SensorLevels::from_raw(&r).unwrap();
+        assert!(!lv.normalize(16372, 1).1);
+        assert_eq!(lv.normalize(16380, 1), (1.0, true));
+        // 範囲外の閾値はエラー。
+        for bad in [512.0, 16381.0, f32::NAN] {
+            r.saturation_level = bad;
+            assert!(SensorLevels::from_raw(&r).is_err(), "{bad}");
+        }
     }
 
     #[test]

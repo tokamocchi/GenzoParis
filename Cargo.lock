@@ -603,6 +603,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "trash",
+ "windows-sys",
 ]
 
 [[package]]
@@ -728,6 +729,7 @@ dependencies = [
  "genzo-raw",
  "genzo-testkit",
  "rayon",
+ "tempfile",
  "thiserror",
 ]
 
@@ -779,6 +781,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "windows-sys",
 ]
 
 [[package]]

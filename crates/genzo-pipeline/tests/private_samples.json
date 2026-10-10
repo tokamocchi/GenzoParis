@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "samples": [
+    {
+      "id": "a7c-cmp-01",
+      "sha256": "3d7f703cc1114eb994834b8d837f5b9eeb39d35a845cff375da177afe7c1504d",
+      "camera_model": "ILCE-7C",
+      "decode": {
+        "unpack_function": "sony_arw2_load_raw()",
+        "raw_size": [
+          6048,
+          4024
+        ],
+        "active_size": [
+          6024,
+          4024
+        ],
+        "default_crop": [
+          12,
+          12,
+          6000,
+          4000
+        ],
+        "orientation": 1,
+        "cfa": "RGGB",
+        "black_level": [
+          512.0,
+          512.0,
+          512.0,
+          512.0
+        ],
+        "white_level": 16383.0,
+        "saturation_level": 16303.6455,
+        "sony_raw_file_type": 2,
+        "data_end": 24955648
+      },
+      "render": {
+        "long_edge": 1616,
+        "lstar_mean": 32.36,
+        "lstar_width": 59.75,
+        "chroma_mean": 7.41,
+        "camera_lstar_mean": 32.9,
+        "camera_lstar_width": 59.57,
+        "max_lstar_mean_gap": 2.0,
+        "tolerance": 0.5
+      }
+    },
+    {
+      "id": "a7iv-apsc-cmp-01",
+      "sha256": "7f140505d0ea7734fc34f8a95e639ad86e8f42afcde80a7f0728f37dcb1f79b8",
+      "camera_model": "ILCE-7M4",
+      "decode": {
+        "unpack_function": "sony_arw2_load_raw()",
+        "raw_size": [
+          4736,
+          3132
+        ],
+        "active_size": [
+          4736,
+          3132
+        ],
+        "default_crop": [
+          44,
+          30,
+          4608,
+          3072
+        ],
+        "orientation": 8,
+        "cfa": "RGGB",
+        "black_level": [
+          512.0,
+          512.0,
+          512.0,
+          512.0
+        ],
+        "white_level": 16380.0,
+        "saturation_level": 16300.66,
+        "sony_raw_file_type": 2,
+        "data_end": 17643008
+      },
+      "saturation": {
+        "plateau_dn": 16372,
+        "min_marked_fraction": 1.0,
+        "marked_pixels": [
+          2178,
+          2224
+        ]
+      },
+      "render": {
+        "long_edge": 1616,
+        "lstar_mean": 55.1,
+        "lstar_width": 68.79,
+        "chroma_mean": 15.9,
+        "camera_lstar_mean": 53.06,
+        "camera_lstar_width": 70.29,
+        "max_lstar_mean_gap": 4.0,
+        "tolerance": 0.5
+      }
+    }
+  ]
+}

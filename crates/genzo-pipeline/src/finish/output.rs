@@ -8,7 +8,8 @@
 //! | 17b の量子化 | [`quantize_u8`]・[`quantize_u16`] | B4b / B5 → 8bit / 16bit | 決定的なディザリング（[`Dither`]）と量子化 |
 //! | 17c ヒストグラム | [`Histogram::compute`] | B4a / B4b / B5 → 度数 | R・G・B・輝度の 256 階級と、白飛び・黒つぶれの画素数 |
 //!
-//! 色域の圧縮は genzo-color の [`GamutCompressor`]・[`DisplayGamut`]（仮実装。方式は PoC-4）。
+//! 色域の圧縮は genzo-color の [`GamutCompressor`]・[`DisplayGamut`]（色域内の色は変えず、色域外の
+//! 色だけを輝度に向かって境界まで寄せる。人の判断の表 No.3）。
 //! 3D LUT は genzo-color の [`Lut3d`]（lcms2 で作り、四面体補間を自前で適用）。
 //!
 //! CPU 版と GPU 版の比較（IQ-07a）は、量子化の前の f32 のバッファ（B4a / B4b）で行う。量子化と
@@ -32,7 +33,7 @@ use crate::image::{ImageTile, RgbImage, Roi};
 use crate::stage::{Stage, StageContext, StageParams};
 use crate::version::ProcessVersion;
 
-/// 画面用の 3D LUT の格子数（genzo-color の既定 33³。2.6 節）。
+/// 画面用の 3D LUT の格子数（genzo-color の既定 65³。2.6 節、人の判断の表 No.13）。
 pub const DISPLAY_LUT_SIZE: usize = DEFAULT_LUT_SIZE;
 
 /// 書き出しの色空間に対応する genzo-color の色空間。

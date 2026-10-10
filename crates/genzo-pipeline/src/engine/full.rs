@@ -596,7 +596,8 @@ impl Engine {
             }
         };
         let base: StageContext<'static> =
-            finish_context(settings, frames, grid, RenderQuality::Final)?;
+            finish_context(settings, frames, grid, RenderQuality::Final)?
+                .with_input_kind(source.image.input_kind());
         let (plan, guide) = plan_with_guide(settings, &base, || {
             self.guide(
                 source,
