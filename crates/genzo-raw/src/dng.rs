@@ -8,7 +8,7 @@
 //!
 //! | IFD | タグ |
 //! |---|---|
-//! | IFD0（RAW） | NewSubFileType = 0、ImageWidth / ImageLength、BitsPerSample = 16、Compression = 1、PhotometricInterpretation = 32803（CFA）、Make / Model、StripOffsets / RowsPerStrip / StripByteCounts、Orientation、SamplesPerPixel = 1、PlanarConfiguration = 1、Software、SubIFDs（プレビューがあるとき）、CFARepeatPatternDim = 2 × 2、CFAPattern、ExifIFD、GPSInfo、DNGVersion = 1.4.0.0、DNGBackwardVersion = 1.1.0.0、UniqueCameraModel、CFAPlaneColor、CFALayout = 1、BlackLevelRepeatDim = 2 × 2、BlackLevel（4 位置）、WhiteLevel、ColorMatrix1（/2）、AsShotNeutral、CalibrationIlluminant1（/2）、ActiveArea（余白があるとき） |
+//! | IFD0（RAW） | NewSubFileType = 0、ImageWidth / ImageLength、BitsPerSample = 16、Compression = 1、PhotometricInterpretation = 32803（CFA）、Make / Model、StripOffsets / RowsPerStrip / StripByteCounts、Orientation、SamplesPerPixel = 1、PlanarConfiguration = 1、Software、SubIFDs（プレビューがあるとき）、CFARepeatPatternDim = 2 × 2、CFAPattern、ExifIFD、GPSInfo、DNGVersion = 1.4.0.0、DNGBackwardVersion = 1.1.0.0、UniqueCameraModel、CFAPlaneColor、CFALayout = 1、BlackLevelRepeatDim = 2 × 2、BlackLevel（4 位置）、WhiteLevel、DefaultCropOrigin / DefaultCropSize（[`RawImage::default_crop`] があるとき。ActiveArea の左上からの位置）、ColorMatrix1（/2）、AsShotNeutral、CalibrationIlluminant1（/2）、ActiveArea（余白があるとき） |
 //! | EXIF IFD | ExposureTime、FNumber、ISOSpeedRatings（65535 を超えるときは RecommendedExposureIndex も）、ExifVersion、DateTimeOriginal、OffsetTimeOriginal、FocalLength、SubSecTimeOriginal、LensModel |
 //! | GPS IFD | GPSVersionID、GPSLatitudeRef / GPSLatitude、GPSLongitudeRef / GPSLongitude |
 //! | SubIFD（プレビュー） | NewSubFileType = 1、8bit の RGB（非圧縮）または JPEG（Compression = 7） |
@@ -24,6 +24,10 @@
 //! - LibRaw で読む場合、幅と高さは 22 画素以上にする（LibRaw はそれ未満を RAW として扱わない）。
 //! - 余白（[`DngOptions::margins`]）の左・上を奇数にすると、LibRaw は有効画素を 1 画素ずらして
 //!   読む（`crate::decode` の「制限・注意」）。
+//! - [`RawImage::saturation_level`] は書かない（DNG に対応するタグがない。読むときは白レベルから
+//!   決める）。
+//! - LibRaw 0.21 は DefaultCrop を `原点 + 大きさ < 有効画素の寸法 + 余白` の厳密な不等号で検査し、
+//!   満たさない（右端・下端にちょうど接するなど）場合は使わない（`crate::convert` の `default_crop`）。
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -53,6 +57,9 @@ pub struct DngOptions {
     pub color_matrix_2: Option<([[f32; 3]; 3], u16)>,
     /// 埋め込みのプレビュー（SubIFD。任意）。
     pub preview: Option<DngPreview>,
+    /// DefaultCropOrigin / DefaultCropSize に書く値（左, 上, 幅, 高さ。ActiveArea の左上からの
+    /// 位置）を、[`RawImage::default_crop`] の代わりに指定する（範囲外の値のテスト用。検証しない）。
+    pub default_crop_tag: Option<[u32; 4]>,
 }
 
 impl Default for DngOptions {
@@ -64,6 +71,7 @@ impl Default for DngOptions {
             illuminant_1: ILLUMINANT_D65,
             color_matrix_2: None,
             preview: None,
+            default_crop_tag: None,
         }
     }
 }
@@ -169,6 +177,8 @@ mod tag {
     pub const BLACK_LEVEL_REPEAT_DIM: u16 = 50713;
     pub const BLACK_LEVEL: u16 = 50714;
     pub const WHITE_LEVEL: u16 = 50717;
+    pub const DEFAULT_CROP_ORIGIN: u16 = 50719;
+    pub const DEFAULT_CROP_SIZE: u16 = 50720;
     pub const COLOR_MATRIX_1: u16 = 50721;
     pub const COLOR_MATRIX_2: u16 = 50722;
     pub const AS_SHOT_NEUTRAL: u16 = 50728;
@@ -674,6 +684,13 @@ pub fn encode(image: &RawImage, options: &DngOptions) -> Result<Vec<u8>, DngErro
         tag::WHITE_LEVEL,
         Value::Long(vec![image.white_level.round() as u32]),
     );
+    let crop = options
+        .default_crop_tag
+        .or_else(|| image.default_crop.map(|c| [c.x, c.y, c.width, c.height]));
+    if let Some([x, y, w, h]) = crop {
+        main.set(tag::DEFAULT_CROP_ORIGIN, Value::Long(vec![x, y]));
+        main.set(tag::DEFAULT_CROP_SIZE, Value::Long(vec![w, h]));
+    }
     if let Some(cm) = &image.cam_xyz {
         main.set(tag::COLOR_MATRIX_1, matrix_srational(cm)?);
         main.set(

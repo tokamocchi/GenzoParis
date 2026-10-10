@@ -63,7 +63,28 @@ typedef struct genzo_lr_sizes {
   /* COLOR(row, col)（有効画素の左上を原点とする座標）。filters < 1000 のときは -1。 */
   int32_t cfa[GENZO_LR_CFA_ROWS][GENZO_LR_CFA_COLS];
   char cdesc[8];
+  /* 既定の切り抜き（imgdata.sizes.raw_inset_crops[0]。LibRaw の値そのまま。なければ
+   * cleft・ctop が 65535、cwidth・cheight が 0）。DNG では DefaultCropOrigin に余白を足した
+   * RAW のバッファの座標、Sony の ARW ではタグの値そのもの（LibRaw 0.21 のソース）。 */
+  uint32_t crop_left;
+  uint32_t crop_top;
+  uint32_t crop_width;
+  uint32_t crop_height;
 } genzo_lr_sizes;
+
+/* RAW のデータの位置と、記録方式の値（open の後で有効。途中で切れたファイルの検出と記録用）。 */
+typedef struct genzo_lr_data_info {
+  /* RAW のデータの開始位置（LibRaw の内部の unpacker_data.data_offset）。 */
+  int64_t data_offset;
+  /* RAW のデータの大きさ（unpacker_data.data_size。展開の関数によって意味が違う。タイルの
+   * ある形式では大きさではなく表の位置が入る）。 */
+  uint64_t data_size;
+  /* 入力の大きさ（ファイル・メモリ上のデータのバイト数。分からなければ -1）。 */
+  int64_t input_size;
+  /* Sony の SonyRawFileType（makernotes.sony。0xffff は未設定）。 */
+  uint32_t sony_raw_file_type;
+  uint32_t reserved;
+} genzo_lr_data_info;
 
 /* DNG の色の情報（imgdata.color.dng_color[i]）。 */
 typedef struct genzo_lr_dng_color {
@@ -140,7 +161,7 @@ int32_t genzo_lr_version_number(void);
 int32_t genzo_lr_header_version_number(void);
 /* 構造体の大きさを照合する。一致すれば 0、違えば GENZO_LR_E_ABI_MISMATCH。 */
 int32_t genzo_lr_abi_check(size_t sizes_size, size_t color_size, size_t meta_size,
-                           size_t thumb_size);
+                           size_t thumb_size, size_t data_info_size);
 /* LibRaw のエラーコードの説明（LibRaw::strerror）。 */
 const char *genzo_lr_strerror(int32_t code);
 
@@ -164,6 +185,8 @@ int32_t genzo_lr_unpack(genzo_lr *h);
 int32_t genzo_lr_get_sizes(genzo_lr *h, genzo_lr_sizes *out);
 int32_t genzo_lr_get_color(genzo_lr *h, genzo_lr_color *out);
 int32_t genzo_lr_get_meta(genzo_lr *h, genzo_lr_meta *out);
+/* RAW のデータの位置と入力の大きさ（genzo_lr_data_info）。open の後、unpack の前に呼べる。 */
+int32_t genzo_lr_get_data_info(genzo_lr *h, genzo_lr_data_info *out);
 /* 有効画素の範囲（width × height）の u16 データを行優先でコピーする。dst_len は画素数。 */
 int32_t genzo_lr_copy_raw(genzo_lr *h, uint16_t *dst, size_t dst_len);
 /* unpack() で検出した、致命的でないデータの誤りの数（LibRaw::error_count）。 */

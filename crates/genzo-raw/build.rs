@@ -17,6 +17,31 @@
 //!    - `LIBRAW_STATIC`（任意）: `1` なら静的ライブラリとしてリンクし、シムを `LIBRAW_NODLL`
 //!      付きでコンパイルする（Windows の LibRaw の静的ビルド用。未確認）。
 //!
+//! # Windows での指定方法（決定 No.4。**実機で未確認**）
+//!
+//! Windows には pkg-config の LibRaw がないので、LibRaw（0.21 以降。スレッドセーフな版）を別に入手し、
+//! 上の環境変数で場所を指定する。CI の Windows は LibRaw なし（既定の機能フラグ）だけで確かめる。
+//!
+//! 1. 入手する: パッケージ管理の vcpkg（`vcpkg install libraw:x64-windows`）など。上流のソースを
+//!    `nmake -f Makefile.msvc` でビルドしてもよい。
+//! 2. 環境変数を設定する（PowerShell の例。vcpkg を `C:\vcpkg` に置いた場合）:
+//!    ```text
+//!    $env:LIBRAW_INCLUDE_DIR = "C:\vcpkg\installed\x64-windows\include"
+//!    $env:LIBRAW_LIB_DIR     = "C:\vcpkg\installed\x64-windows\lib"
+//!    $env:LIBRAW_LIB_NAME    = "<リンクする .lib のファイル名から .lib を除いたもの>"
+//!    ```
+//!    `LIBRAW_LIB_NAME` の既定は `libraw`（`libraw.lib`）。vcpkg・上流の `Makefile.msvc` が作る
+//!    ライブラリのファイル名は、入手したものを見て確かめる（要確認）。スレッドセーフでない版しかない
+//!    場合でも、Windows ではスレッドセーフとみなす（下の「スレッドセーフでない LibRaw」）ので、版の
+//!    ビルドの設定を確かめること。
+//! 3. ビルドする: `cargo build -p genzo-cli --features libraw`。
+//! 4. 実行する: LibRaw の DLL（と、その依存の DLL）を、ワーカーとして動く実行ファイル（配布するアプリでは
+//!    `genzo-worker.exe`、開発用の CLI では `genzo.exe`）と同じフォルダか `PATH` の通ったフォルダに置く。
+//!
+//! 配布するアプリでは、ワーカーを別の実行ファイル（`genzo-worker`）にし、本体の実行ファイルは LibRaw に
+//! 依存しない（決定 No.4。`genzo-api` の `WorkerLaunch`）。ライセンスは LGPL-2.1 を選ぶ方針で、人・専門家の
+//! 確認待ち（docs/third_party.md の 3.1 節）。
+//!
 //! # リンクするライブラリ
 //!
 //! pkg-config の結果のうち、LibRaw 自身（`raw_r` / `raw`）とライブラリの検索パスだけを

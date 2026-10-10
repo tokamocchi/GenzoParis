@@ -24,7 +24,8 @@ use genzo_model::PhotoMetadata;
 
 use crate::RawError;
 use crate::convert::{
-    self, ColorSnapshot, DecoderInfo, DngColorSnapshot, GpsSnapshot, MetaSnapshot, SizesSnapshot,
+    self, ColorSnapshot, DataSnapshot, DecoderInfo, DngColorSnapshot, GpsSnapshot, MetaSnapshot,
+    SizesSnapshot,
 };
 use crate::decode::{DecodedRaw, Source};
 use crate::thumbnail::{EmbeddedThumbnail, MAX_THUMBNAIL_BYTES};
@@ -92,6 +93,7 @@ fn check_abi() -> Result<(), RawError> {
                 size_of::<ffi::Color>(),
                 size_of::<ffi::Meta>(),
                 size_of::<ffi::Thumb>(),
+                size_of::<ffi::DataInfo>(),
             );
             if rc != 0 {
                 return Err(
@@ -384,6 +386,21 @@ impl<'a> Processor<'a> {
             fuji_rotated: s.fuji_rotated != 0,
             cfa: s.cfa,
             cdesc: c_string(&s.cdesc).unwrap_or_default(),
+            inset_crop: [s.crop_left, s.crop_top, s.crop_width, s.crop_height],
+        })
+    }
+
+    /// RAW のデータの位置と入力の大きさ（open の後、unpack の前に使える）。
+    fn data_info(&mut self) -> Result<DataSnapshot, RawError> {
+        let mut d = ffi::DataInfo::default();
+        // SAFETY: d はシムの genzo_lr_data_info と同じレイアウト（check_abi で大きさを確認済み）。
+        let rc = unsafe { ffi::genzo_lr_get_data_info(self.ptr(), &mut d) };
+        check(rc, "RAW のデータの位置を取得できません")?;
+        Ok(DataSnapshot {
+            data_offset: d.data_offset,
+            data_size: d.data_size,
+            input_size: d.input_size,
+            sony_raw_file_type: (d.sony_raw_file_type != 0xffff).then_some(d.sony_raw_file_type),
         })
     }
 
@@ -482,13 +499,28 @@ impl<'a> Processor<'a> {
                 "埋め込みサムネイルの大きさ {len} バイトが不正です（上限 {MAX_THUMBNAIL_BYTES}）"
             )));
         }
-        let mut data = vec![0u8; len];
+        let mut data = try_zeroed_vec::<u8>(len, "埋め込みサムネイル")?;
         // SAFETY: data は len バイトの領域。シムは len が LibRaw のサムネイルの長さと
         // 一致することを確かめてからコピーする。
         let rc = unsafe { ffi::genzo_lr_copy_thumb(self.ptr(), data.as_mut_ptr(), len) };
         check(rc, "埋め込みサムネイルを取り出せません")?;
         Ok((t, data))
     }
+}
+
+/// `len` 個の 0 の `Vec` を確保する。確保に失敗したら（メモリの上限など）中断せずに
+/// [`RawError::Decode`] にする（A-4。`vec![0; len]` は確保の失敗でプロセスを中断し、ワーカーの
+/// 異常終了として扱われるため）。
+fn try_zeroed_vec<T: Copy + Default>(len: usize, what: &str) -> Result<Vec<T>, RawError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len).map_err(|_| {
+        RawError::Decode(format!(
+            "メモリが足りないため{what}を読み込めません（{len} 個 × {} バイト）",
+            size_of::<T>()
+        ))
+    })?;
+    v.resize(len, T::default());
+    Ok(v)
 }
 
 /// RAW を展開する（[`crate::decode_file_with_details`] の実体）。
@@ -500,6 +532,11 @@ pub(crate) fn decode(source: Source<'_>) -> Result<DecodedRaw, RawError> {
     let before = p.sizes()?;
     convert::check_dimensions(&before)?;
     convert::cfa_from_libraw(&before)?;
+    // 展開の前に、RAW のデータが入力の終わりを超えていないかを確かめる（A-1。LibRaw 0.21.2 の
+    // sony_arw2_load_raw は読み込みの不足を検出しない。convert::TRUNCATION_CHECKED_DECODERS）。
+    // 展開の関数は open の解析で決まるので、unpack の前に名前を取れる。
+    let range = p.data_info()?;
+    let data_range_checked = convert::check_data_range(&p.decoder_name(), &range)?;
     p.unpack()?;
     let sizes = p.sizes()?;
     convert::check_dimensions(&sizes)?;
@@ -507,23 +544,32 @@ pub(crate) fn decode(source: Source<'_>) -> Result<DecodedRaw, RawError> {
     let color = p.color()?;
     let meta = p.meta()?;
     let pixels = sizes.width as usize * sizes.height as usize;
-    let mut data = vec![0u16; pixels];
+    let mut data = try_zeroed_vec::<u16>(pixels, " RAW のデータ")?;
     p.copy_raw(&mut data)?;
     let decoder = DecoderInfo {
         decoder_id: decoder_id(),
         unpack_function: p.decoder_name(),
         data_error_count: p.error_count(),
+        data_range_checked,
     };
-    convert::build_decoded(&sizes, &color, &meta, data, decoder)
+    convert::build_decoded(&sizes, &color, &meta, data, decoder, &range)
 }
 
 /// 撮影情報を読む（[`crate::read_metadata`] の実体）。
+///
+/// 寸法は見える範囲（既定の切り抜きがあればその寸法。[`convert::apply_visible_size`]）。
 pub(crate) fn metadata(source: Source<'_>) -> Result<PhotoMetadata, RawError> {
     // p より先に作り、p を破棄した後に解放する（ローカル変数は作った順の逆に破棄される）。
     let _guard = lock_libraw();
     let mut p = Processor::open(source)?;
     let meta = p.meta()?;
-    Ok(convert::photo_metadata(&meta).0)
+    let sizes = p.sizes()?;
+    let mut out = convert::photo_metadata(&meta).0;
+    convert::apply_visible_size(
+        &mut out,
+        convert::default_crop(&sizes, meta.make.as_deref()).crop,
+    );
+    Ok(out)
 }
 
 /// 埋め込みサムネイルを取り出す（[`crate::extract_thumbnail`] の実体）。
@@ -580,10 +626,26 @@ mod tests {
             check(code::THUMB_TRUNCATED, "x"),
             Err(RawError::Decode(_))
         ));
+        assert!(matches!(
+            check(code::BAD_ALLOC, "x"),
+            Err(RawError::Decode(_))
+        ));
         let msg = check(libraw_code::DATA_ERROR, "展開")
             .unwrap_err()
             .to_string();
         assert!(msg.contains("展開") && msg.contains("-100008"), "{msg}");
+    }
+
+    /// 確保の失敗はプロセスを中断せず、通常のエラーになる（A-4）。
+    #[test]
+    fn allocation_failure_is_an_error() {
+        let v = try_zeroed_vec::<u16>(16, "x").unwrap();
+        assert_eq!(v, vec![0u16; 16]);
+        // usize::MAX 個の u16 は確保できない（容量の計算があふれる）。
+        match try_zeroed_vec::<u16>(usize::MAX, " RAW のデータ") {
+            Err(RawError::Decode(msg)) => assert!(msg.contains("メモリが足りない"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

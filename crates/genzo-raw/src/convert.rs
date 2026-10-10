@@ -13,7 +13,9 @@ use crate::decode::{
 };
 use crate::thumbnail::{EmbeddedThumbnail, ThumbnailFormat, jpeg_dimensions};
 use crate::types::{MAX_WB_COEFF, validate_matrix};
-use crate::{CfaColor, CfaPattern, MAX_PIXELS, RawError, RawImage};
+use crate::{
+    CfaColor, CfaPattern, MAX_PIXELS, PixelRect, RawError, RawImage, saturation_level_for,
+};
 
 /// DNG の CalibrationIlluminant の D65（EXIF の LightSource の 21。LibRaw の `LIBRAW_WBI_D65`）。
 pub(crate) const ILLUMINANT_D65: u32 = 21;
@@ -47,6 +49,154 @@ pub(crate) struct SizesSnapshot {
     /// `COLOR(row, col)`（有効画素の座標。8 行 × 2 列）。
     pub cfa: [[i32; 2]; 8],
     pub cdesc: String,
+    /// LibRaw の `raw_inset_crops[0]`（cleft, ctop, cwidth, cheight。LibRaw の値そのまま）。
+    pub inset_crop: [u32; 4],
+}
+
+/// RAW のデータの位置と入力の大きさ（シムの `genzo_lr_data_info`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct DataSnapshot {
+    /// RAW のデータの開始位置（LibRaw の `data_offset`）。
+    pub data_offset: i64,
+    /// RAW のデータの大きさ（LibRaw の `data_size`）。
+    pub data_size: u64,
+    /// 入力（ファイル・メモリ上のデータ）の大きさ（分からなければ負）。
+    pub input_size: i64,
+    /// Sony の SonyRawFileType（0xffff・Sony 以外は `None`）。
+    pub sony_raw_file_type: Option<u32>,
+}
+
+/// LibRaw の `raw_inset_crops` の「なし」を表す値（cleft・ctop）。
+const INSET_CROP_NONE: u32 = 0xffff;
+
+/// 途中で切れたファイルの検出（[`check_data_range`]）を行う展開の関数（LibRaw の
+/// `unpack_function_name()`）。
+///
+/// LibRaw 0.21.2 の `sony_arw2_load_raw`（Sony の圧縮 ARW）は `fread` の戻り値を見ないため、途中で
+/// 切れたファイルやデータの位置がファイルの外のファイルでも、エラーも「データの誤り」も返さずに
+/// 展開する（読めなかった行は直前の行の値、1 行も読めなければ初期化していないメモリが画素になる）。
+/// LibRaw はこの関数を `data_size == raw_width × raw_height` のときだけ選ぶ（`apply_tiff`）ので、
+/// `data_offset + data_size` がデータの終わりになる。
+///
+/// ほかの関数には広げない: タイルのある形式（ロスレス圧縮の DNG・ARW など）では `data_offset`・
+/// `data_size` にタイルの表の位置が入り（`parse_tiff_ifd` のタグ 324・325）、正しいファイルを誤って
+/// エラーにしうるため。ほかの関数の読み込みの扱いを LibRaw のソースで確かめてから足す。
+pub(crate) const TRUNCATION_CHECKED_DECODERS: &[&str] = &["sony_arw2_load_raw()"];
+
+/// RAW のデータ（`offset` から `size` バイト）が入力（`input_size` バイト）の終わりを超えるか。
+///
+/// `size` が 0 なら読むデータがないので超えない。`offset` が負、`input_size` が負（大きさが分からない）
+/// の場合は確かめられないので「超える」とする（呼び出し側は対象の展開の関数のときだけ呼ぶ）。
+pub(crate) fn data_exceeds_input(offset: i64, size: u64, input_size: i64) -> bool {
+    if size == 0 {
+        return false;
+    }
+    if offset < 0 || input_size < 0 {
+        return true;
+    }
+    // i128 で足すので桁あふれしない。
+    i128::from(offset) + i128::from(size) > i128::from(input_size)
+}
+
+/// 展開の関数が [`TRUNCATION_CHECKED_DECODERS`] のどれかなら、RAW のデータが入力の終わりを超えて
+/// いないかを確かめる（展開の前に呼ぶ。A-1）。確かめたかを返す。
+pub(crate) fn check_data_range(decoder: &str, d: &DataSnapshot) -> Result<bool, RawError> {
+    if !TRUNCATION_CHECKED_DECODERS.contains(&decoder) {
+        return Ok(false);
+    }
+    if data_exceeds_input(d.data_offset, d.data_size, d.input_size) {
+        return Err(RawError::Decode(format!(
+            "RAW のデータがファイルの終わりを超えています（途中で切れている可能性があります。\
+             データの位置 {}、大きさ {} バイト、ファイルの大きさ {} バイト、展開の関数 {decoder}）",
+            d.data_offset, d.data_size, d.input_size
+        )));
+    }
+    Ok(true)
+}
+
+/// 既定の切り抜きを決めた結果（[`default_crop`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct DefaultCropDecision {
+    /// LibRaw の値（なければ `None`）。
+    pub libraw: Option<[u32; 4]>,
+    /// 採用した範囲（有効画素の座標）。
+    pub crop: Option<PixelRect>,
+    /// LibRaw の値があるのに採用しなかった理由。
+    pub note: Option<String>,
+}
+
+/// LibRaw の `raw_inset_crops[0]` から、既定の切り抜き（有効画素の座標）を決める（A-2）。
+///
+/// LibRaw 0.21.2 のソースでの値の意味:
+/// - DNG: DefaultCropOrigin に **余白（ActiveArea の左・上）を足した** RAW のバッファの座標
+///   （`identify` の「Promote DNG Crops」。`lm + ww < raw_width + left_margin` の厳密な不等号で
+///   検査し、満たさなければ設定しない）。ここでは余白（LibRaw が偶数にそろえた後の値）を引いて
+///   有効画素の座標にする。
+/// - Sony の ARW: RAW の SubIFD の DefaultCropOrigin / DefaultCropSize（Sony のタグ 0x74c7 /
+///   0x74c8 も同じ値）を **そのまま** 入れる（`parse_tiff_ifd`）。余白が 0 の機種（α7 IV・α7C は
+///   どちらも 0）では、バッファの座標と有効画素の座標が同じなので、そのまま使う。余白のある Sony の
+///   機種は原点が確認できていないため使わない。
+/// - そのほかのメーカー: LibRaw がメーカーの独自の値から設定する場合があるが、意味を確かめていない
+///   ため使わない（記録だけ）。
+///
+/// 範囲が有効画素からはみ出す・幅か高さが 0 の場合も使わない（有効画素の全体にする）。
+pub(crate) fn default_crop(s: &SizesSnapshot, make: Option<&str>) -> DefaultCropDecision {
+    let [l, t, w, h] = s.inset_crop;
+    if w == 0 || h == 0 || l == INSET_CROP_NONE || t == INSET_CROP_NONE {
+        return DefaultCropDecision::default();
+    }
+    let libraw = Some([l, t, w, h]);
+    let skip = |note: String| DefaultCropDecision {
+        libraw,
+        crop: None,
+        note: Some(note),
+    };
+    let is_dng = s.dng_version != 0;
+    let is_sony = make.is_some_and(|m| m.trim().to_ascii_lowercase().starts_with("sony"));
+    let origin = if is_dng {
+        match (l.checked_sub(s.left_margin), t.checked_sub(s.top_margin)) {
+            (Some(x), Some(y)) => (x, y),
+            _ => {
+                return skip(format!(
+                    "既定の切り抜きの原点（{l}, {t}）が有効画素の左上（{}, {}）より外にあります",
+                    s.left_margin, s.top_margin
+                ));
+            }
+        }
+    } else if is_sony {
+        if s.left_margin != 0 || s.top_margin != 0 {
+            return skip(format!(
+                "余白（左 {}・上 {}）のある Sony の RAW の既定の切り抜きは、原点が未確認のため使いません",
+                s.left_margin, s.top_margin
+            ));
+        }
+        (l, t)
+    } else {
+        return skip(
+            "DNG・Sony 以外の RAW の既定の切り抜き（LibRaw の raw_inset_crops）は、意味が未確認のため使いません"
+                .to_owned(),
+        );
+    };
+    let crop = PixelRect::new(origin.0, origin.1, w, h);
+    if !crop.fits_within(s.width, s.height) {
+        return skip(format!(
+            "既定の切り抜き（{crop:?}）が有効画素（{} × {}）からはみ出しています",
+            s.width, s.height
+        ));
+    }
+    DefaultCropDecision {
+        libraw,
+        crop: Some(crop),
+        note: None,
+    }
+}
+
+/// 撮影情報の寸法を、見える範囲（既定の切り抜き。なければ有効画素の全体）の寸法にする。
+pub(crate) fn apply_visible_size(meta: &mut PhotoMetadata, crop: Option<PixelRect>) {
+    if let Some(c) = crop {
+        meta.width = Some(c.width);
+        meta.height = Some(c.height);
+    }
 }
 
 /// DNG の色の情報（`imgdata.color.dng_color[i]`）。
@@ -115,6 +265,8 @@ pub(crate) struct DecoderInfo {
     pub decoder_id: String,
     pub unpack_function: String,
     pub data_error_count: i32,
+    /// 途中で切れていないかを確かめたか（[`check_data_range`]）。
+    pub data_range_checked: bool,
 }
 
 /// 有効画素と RAW のバッファの寸法を検証する（展開の前後で使う）。
@@ -526,7 +678,8 @@ fn positive(v: f32) -> Option<f32> {
 /// - メーカー・機種: IFD の Make / Model の元の文字列（例: `"SONY"`）。なければ LibRaw が
 ///   正規化した名前（例: `"Sony"`）。
 /// - レンズ: LibRaw の `lens.Lens`（EXIF の LensModel など）、なければメーカーノートのレンズ名。
-/// - 寸法: LibRaw の有効画素（`sizes.width`・`height`。向きを適用する前）。
+/// - 寸法: LibRaw の有効画素（`sizes.width`・`height`。向きを適用する前）。既定の切り抜きがある
+///   場合は、呼び出し側が [`apply_visible_size`] でその寸法にする。
 pub(crate) fn photo_metadata(m: &MetaSnapshot) -> (PhotoMetadata, CaptureTimeSource) {
     let (capture, source) = capture_info(m);
     let iso = positive(m.iso_speed).map(|v| v.round().min(u32::MAX as f32) as u32);
@@ -554,6 +707,7 @@ pub(crate) fn build_decoded(
     m: &MetaSnapshot,
     data: Vec<u16>,
     decoder: DecoderInfo,
+    range: &DataSnapshot,
 ) -> Result<DecodedRaw, RawError> {
     check_dimensions(s)?;
     let cfa = cfa_from_libraw(s)?;
@@ -562,14 +716,20 @@ pub(crate) fn build_decoded(
     let (as_shot_wb, wb_source) = as_shot_wb(c, cfa_idx, cfa);
     let is_dng = s.dng_version != 0;
     let (cam_xyz, cam_xyz_source) = select_cam_xyz(is_dng, c);
-    let (metadata, capture_time_source) = photo_metadata(m);
+    let (mut metadata, capture_time_source) = photo_metadata(m);
+    let crop = default_crop(s, m.make.as_deref());
+    apply_visible_size(&mut metadata, crop.crop);
+    let white_level = c.maximum as f32;
+    let saturation_level = saturation_level_for(black_level, white_level);
     let image = RawImage {
         width: s.width,
         height: s.height,
         cfa,
         data,
         black_level,
-        white_level: c.maximum as f32,
+        white_level,
+        saturation_level,
+        default_crop: crop.crop,
         as_shot_wb,
         cam_xyz,
         metadata,
@@ -612,6 +772,15 @@ pub(crate) fn build_decoded(
         capture_time_source,
         libraw_make: m.make.clone(),
         libraw_model: m.model.clone(),
+        libraw_inset_crop: crop.libraw,
+        default_crop: crop.crop,
+        default_crop_note: crop.note,
+        sony_raw_file_type: range.sony_raw_file_type,
+        data_offset: range.data_offset,
+        data_size: range.data_size,
+        input_size: range.input_size,
+        data_range_checked: decoder.data_range_checked,
+        saturation_level,
     };
     Ok(DecodedRaw { image, details })
 }
@@ -715,6 +884,7 @@ mod tests {
             fuji_rotated: false,
             cfa,
             cdesc: "RGBG".to_owned(),
+            inset_crop: [INSET_CROP_NONE, INSET_CROP_NONE, 0, 0],
         }
     }
 
@@ -1134,7 +1304,15 @@ mod tests {
         let c = color();
         let m = MetaSnapshot::default();
         let data = vec![600u16; 100 * 60];
-        let d = build_decoded(&s, &c, &m, data, DecoderInfo::default()).unwrap();
+        let d = build_decoded(
+            &s,
+            &c,
+            &m,
+            data,
+            DecoderInfo::default(),
+            &DataSnapshot::default(),
+        )
+        .unwrap();
         assert_eq!(d.image.cfa, CfaPattern::RGGB);
         assert_eq!(d.image.black_level, [512.0; 4]);
         assert_eq!(d.image.white_level, 16383.0);
@@ -1142,19 +1320,210 @@ mod tests {
         assert_eq!(d.details.left_margin, 20);
         assert_eq!(d.details.cam_xyz_source, CamXyzSource::LibRawTable);
         assert!(d.details.dng_color_matrices.is_empty());
+        // 飽和の閾値は仮置きの式（黒 512・白 16383）。既定の切り抜きはない。
+        assert_eq!(
+            d.image.saturation_level,
+            saturation_level_for([512.0; 4], 16383.0)
+        );
+        assert_eq!(d.details.saturation_level, d.image.saturation_level);
+        assert!(d.image.saturation_level < d.image.white_level);
+        assert_eq!(
+            (d.image.default_crop, d.details.libraw_inset_crop),
+            (None, None)
+        );
         // 長さが合わない。
-        let r = build_decoded(&s, &c, &m, vec![0; 10], DecoderInfo::default());
+        let r = build_decoded(
+            &s,
+            &c,
+            &m,
+            vec![0; 10],
+            DecoderInfo::default(),
+            &DataSnapshot::default(),
+        );
         assert!(matches!(r, Err(RawError::DataLengthMismatch { .. })));
         // 白レベルが 0。
         let mut c0 = c.clone();
         c0.maximum = 0;
-        let r = build_decoded(&s, &c0, &m, vec![0; 6000], DecoderInfo::default());
+        let r = build_decoded(
+            &s,
+            &c0,
+            &m,
+            vec![0; 6000],
+            DecoderInfo::default(),
+            &DataSnapshot::default(),
+        );
         assert!(matches!(r, Err(RawError::InvalidWhiteLevel(_))));
         // 黒レベルが白レベル以上。
         let mut c1 = c;
         c1.black = 20_000;
-        let r = build_decoded(&s, &c1, &m, vec![0; 6000], DecoderInfo::default());
+        let r = build_decoded(
+            &s,
+            &c1,
+            &m,
+            vec![0; 6000],
+            DecoderInfo::default(),
+            &DataSnapshot::default(),
+        );
         assert!(matches!(r, Err(RawError::InvalidBlackLevel { .. })));
+    }
+
+    /// 途中で切れた ARW の判定（A-1）の境界。
+    #[test]
+    fn data_range_boundaries() {
+        // ちょうどファイルの終わりまで: 超えない。1 バイト不足: 超える。
+        assert!(!data_exceeds_input(100, 900, 1000));
+        assert!(data_exceeds_input(100, 901, 1000));
+        assert!(data_exceeds_input(100, 900, 999));
+        // 後ろに詰め物がある（実機の α7 IV は 2,560 バイト）: 超えない。
+        assert!(!data_exceeds_input(2_809_856, 14_833_152, 17_645_568));
+        // α7 IV の最後の 1 KiB を削っても、データの終わり（17,643,008）より後なので超えない。
+        assert!(!data_exceeds_input(
+            2_809_856,
+            14_833_152,
+            17_645_568 - 1024
+        ));
+        // α7C はデータの終わりがファイルの終わり（24,955,648）。最後の 1 KiB を削ると超える。
+        assert!(!data_exceeds_input(618_496, 24_337_152, 24_955_648));
+        assert!(data_exceeds_input(618_496, 24_337_152, 24_955_648 - 1024));
+        // 大きさ 0 は読むものがない。位置が負・入力の大きさが分からない場合は超えるとする。
+        assert!(!data_exceeds_input(5000, 0, 1000));
+        assert!(data_exceeds_input(-1, 10, 1000));
+        assert!(data_exceeds_input(0, 10, -1));
+        // 桁あふれしない。
+        assert!(data_exceeds_input(i64::MAX, u64::MAX, i64::MAX));
+        // 位置がファイルの外。
+        assert!(data_exceeds_input(2000, 10, 1000));
+    }
+
+    #[test]
+    fn data_range_is_checked_only_for_listed_decoders() {
+        let short = DataSnapshot {
+            data_offset: 100,
+            data_size: 1000,
+            input_size: 500,
+            sony_raw_file_type: Some(2),
+        };
+        let r = check_data_range("sony_arw2_load_raw()", &short);
+        match r {
+            Err(RawError::Decode(msg)) => {
+                assert!(msg.contains("途中で切れて"), "{msg}");
+                assert!(msg.contains("sony_arw2_load_raw()"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // タイルのある形式などでは値の意味が違うため確かめない。
+        assert!(!check_data_range("lossless_dng_load_raw()", &short).unwrap());
+        assert!(!check_data_range("", &short).unwrap());
+        let ok = DataSnapshot {
+            input_size: 1100,
+            ..short
+        };
+        assert!(check_data_range("sony_arw2_load_raw()", &ok).unwrap());
+    }
+
+    /// 既定の切り抜き（A-2）。LibRaw の値の意味は DNG と Sony で違う。
+    #[test]
+    fn default_crop_by_maker_and_margins() {
+        let mut s = sizes(colors_from_filters(0x9494_9494));
+        // なし（LibRaw の初期値）。
+        assert_eq!(
+            default_crop(&s, Some("Sony")),
+            DefaultCropDecision::default()
+        );
+        // Sony（余白 0）: タグの値そのまま。
+        s.left_margin = 0;
+        s.top_margin = 0;
+        s.inset_crop = [12, 10, 76, 40];
+        let d = default_crop(&s, Some("Sony"));
+        assert_eq!(d.crop, Some(PixelRect::new(12, 10, 76, 40)));
+        assert_eq!((d.libraw, d.note), (Some([12, 10, 76, 40]), None));
+        // ちょうど右下に接する範囲も使う。
+        s.inset_crop = [24, 20, 76, 40];
+        assert_eq!(
+            default_crop(&s, Some("SONY")).crop,
+            Some(PixelRect::new(24, 20, 76, 40))
+        );
+        // はみ出す範囲は使わない（理由を残す）。
+        s.inset_crop = [25, 20, 76, 40];
+        let d = default_crop(&s, Some("Sony"));
+        assert_eq!(d.crop, None);
+        assert!(d.note.unwrap().contains("はみ出し"));
+        // 余白のある Sony: 原点が未確認なので使わない。
+        s.left_margin = 2;
+        s.inset_crop = [12, 10, 76, 40];
+        let d = default_crop(&s, Some("Sony"));
+        assert_eq!(d.crop, None);
+        assert!(d.note.unwrap().contains("未確認"));
+        // DNG: バッファの座標から余白を引く。
+        s.dng_version = 0x0104_0000;
+        s.left_margin = 20;
+        s.top_margin = 10;
+        s.inset_crop = [22, 13, 50, 30];
+        let d = default_crop(&s, Some("GenzoTest"));
+        assert_eq!(d.crop, Some(PixelRect::new(2, 3, 50, 30)));
+        // 余白より左上は使わない。
+        s.inset_crop = [19, 13, 50, 30];
+        assert_eq!(default_crop(&s, None).crop, None);
+        // DNG・Sony 以外は使わない。
+        s.dng_version = 0;
+        s.left_margin = 0;
+        s.top_margin = 0;
+        s.inset_crop = [0, 0, 50, 30];
+        let d = default_crop(&s, Some("Canon"));
+        assert_eq!((d.crop, d.libraw), (None, Some([0, 0, 50, 30])));
+        assert!(d.note.is_some());
+        // 幅・高さが 0 はなしと同じ。
+        s.inset_crop = [0, 0, 0, 30];
+        assert_eq!(
+            default_crop(&s, Some("Sony")),
+            DefaultCropDecision::default()
+        );
+    }
+
+    #[test]
+    fn build_decoded_uses_the_default_crop_for_metadata_size() {
+        let mut s = sizes(colors_from_filters(0x9494_9494));
+        s.left_margin = 0;
+        s.top_margin = 0;
+        s.inset_crop = [4, 2, 90, 56];
+        let m = MetaSnapshot {
+            make: Some("Sony".to_owned()),
+            width: 100,
+            height: 60,
+            ..Default::default()
+        };
+        let range = DataSnapshot {
+            data_offset: 10,
+            data_size: 20,
+            input_size: 40,
+            sony_raw_file_type: Some(2),
+        };
+        let d = build_decoded(
+            &s,
+            &color(),
+            &m,
+            vec![600; 6000],
+            DecoderInfo::default(),
+            &range,
+        )
+        .unwrap();
+        // 画素は有効画素の全体（デモザイクは全体で行う）。撮影情報の寸法は見える範囲。
+        assert_eq!((d.image.width, d.image.height), (100, 60));
+        assert_eq!(d.image.default_crop, Some(PixelRect::new(4, 2, 90, 56)));
+        assert_eq!(d.image.visible_area(), PixelRect::new(4, 2, 90, 56));
+        assert_eq!(
+            (d.image.metadata.width, d.image.metadata.height),
+            (Some(90), Some(56))
+        );
+        assert_eq!(d.details.sony_raw_file_type, Some(2));
+        assert_eq!(
+            (
+                d.details.data_offset,
+                d.details.data_size,
+                d.details.input_size
+            ),
+            (10, 20, 40)
+        );
     }
 
     #[test]

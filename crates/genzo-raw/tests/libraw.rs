@@ -12,9 +12,10 @@ use genzo_raw::dng::{
     self, DngMargins, DngOptions, DngPreview, ILLUMINANT_D65, ILLUMINANT_STANDARD_A,
 };
 use genzo_raw::{
-    CamXyzSource, CaptureTimeSource, CfaPattern, RawError, RawImage, ThumbnailFormat, WbSource,
-    decode_bytes, decode_file, decode_file_with_details, decoder_id, extract_thumbnail,
+    CamXyzSource, CaptureTimeSource, CfaPattern, PixelRect, RawError, RawImage, ThumbnailFormat,
+    WbSource, decode_bytes, decode_file, decode_file_with_details, decoder_id, extract_thumbnail,
     extract_thumbnail_bytes, libraw_version, read_metadata, read_metadata_bytes,
+    saturation_level_for,
 };
 
 /// 決まった種から作る疑似乱数（xorshift32）。
@@ -72,6 +73,8 @@ fn sample(cfa: CfaPattern, width: u32, height: u32, seed: u32) -> RawImage {
         data,
         black_level: [510.0, 512.0, 514.0, 516.0],
         white_level: 16383.0,
+        saturation_level: 16383.0,
+        default_crop: None,
         as_shot_wb: [2.25, 1.0, 1.625, 1.0],
         cam_xyz: Some(CAM_XYZ),
         metadata,
@@ -879,4 +882,293 @@ fn libraw_derived_matrices_follow_cam_xyz_coeff() {
             assert!((v - expected).abs() < 1e-4, "({i}, {j}): {v}");
         }
     }
+}
+
+/// 合成の Sony の圧縮 ARW（ARW2）の形の TIFF を作る（A-1・A-2 の再現用）。
+///
+/// LibRaw 0.21 は、DNG でなく Compression = 32767 で StripByteCounts = 幅 × 高さ の IFD を
+/// `sony_arw2_load_raw` で展開する（`apply_tiff`）。データは 16 バイトのブロック（max・min・imax・
+/// imin と 7bit の差分 14 個）の並びで、ここでは各ブロックの max = min = v（16 画素がすべて同じ値）に
+/// する。展開した値は `curve[v << 1] >> 2` で、Sony のトーンカーブのタグ（0x7010）がないこの形では
+/// `2 × v` になる（LibRaw 0.21.2 で確かめた値。[`arw2_pixel`]）。ブロックは行ごとに、32 列の偶数列
+/// 16 個 → 奇数列 16 個の順。
+///
+/// `crop` を指定すると DefaultCropOrigin / DefaultCropSize（左, 上, 幅, 高さ）を書く（Sony の ARW の
+/// RAW の SubIFD と同じタグ）。戻り値は (ファイル, RAW のデータの開始位置)。
+fn synthetic_arw2(width: u32, height: u32, crop: Option<[u32; 4]>) -> (Vec<u8>, usize) {
+    assert!(width.is_multiple_of(32), "幅は 32 の倍数");
+    let make = b"SONY\0\0";
+    let model = b"ILCE-SYNTH\0\0";
+    // (タグ, 型, 数, 値または位置)。値の位置は後で決める。
+    let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+        (254, 4, 1, 0),
+        (256, 4, 1, width),
+        (257, 4, 1, height),
+        (258, 3, 1, 8),
+        (259, 3, 1, 32767),
+        (262, 3, 1, 32803),
+        (271, 2, 5, 0),
+        (272, 2, 11, 0),
+        (273, 4, 1, 0),
+        (277, 3, 1, 1),
+        (279, 4, 1, width * height),
+    ];
+    if crop.is_some() {
+        entries.push((50719, 4, 2, 0));
+        entries.push((50720, 4, 2, 0));
+    }
+    let ifd_len = 2 + 12 * entries.len() + 4;
+    let make_off = 8 + ifd_len;
+    let model_off = make_off + make.len();
+    let crop_off = model_off + model.len();
+    let data_off = (crop_off + 16).div_ceil(16) * 16;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"II*\0");
+    out.extend_from_slice(&8u32.to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for (tag, typ, count, value) in &entries {
+        let value = match tag {
+            271 => make_off as u32,
+            272 => model_off as u32,
+            273 => data_off as u32,
+            50719 => crop_off as u32,
+            50720 => crop_off as u32 + 8,
+            _ => *value,
+        };
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&typ.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        if *typ == 3 {
+            out.extend_from_slice(&(value as u16).to_le_bytes());
+            out.extend_from_slice(&[0, 0]);
+        } else {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(make);
+    out.extend_from_slice(model);
+    if let Some(c) = crop {
+        for v in c {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    out.resize(data_off, 0);
+    for row in 0..height {
+        for block in 0..width / 16 {
+            let v = arw2_block_value(row, block);
+            let word = v | (v << 11) | (1 << 26);
+            out.extend_from_slice(&word.to_le_bytes());
+            out.extend_from_slice(&[0u8; 12]);
+        }
+    }
+    (out, data_off)
+}
+
+/// [`synthetic_arw2`] のブロックの値（11bit）。
+fn arw2_block_value(row: u32, block: u32) -> u32 {
+    100 + (row * 37 + block * 113) % 1500
+}
+
+/// [`synthetic_arw2`] を展開したときの画素 (x, y) の値。
+fn arw2_pixel(x: u32, y: u32) -> u16 {
+    let block = (x / 32) * 2 + (x % 2);
+    (arw2_block_value(y, block) * 2) as u16
+}
+
+/// 途中で切れた Sony の圧縮 ARW・データの位置がファイルの外の ARW をエラーにする（A-1）。
+///
+/// LibRaw 0.21.2 の `sony_arw2_load_raw` は `fread` の戻り値を見ないため、この確認がなければ
+/// `unpack` が成功し、読めなかった行が直前の行の値（データがなければ初期化していないメモリ）の
+/// 画像になる（実機の ARW で確認した不具合の再現）。
+#[test]
+fn truncated_sony_arw2_is_rejected() {
+    let (w, h) = (64u32, 32u32);
+    let (full, data_off) = synthetic_arw2(w, h, None);
+    let data_end = data_off + (w * h) as usize;
+    assert_eq!(full.len(), data_end);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("full.arw");
+    std::fs::write(&path, &full).unwrap();
+    // 完全なファイルは展開でき、値も合う。
+    let d = decode_file_with_details(&path).unwrap();
+    assert_eq!(d.details.unpack_function, "sony_arw2_load_raw()");
+    assert!(d.details.data_range_checked);
+    assert_eq!(
+        (
+            d.details.data_offset,
+            d.details.data_size,
+            d.details.input_size
+        ),
+        (data_off as i64, u64::from(w * h), full.len() as i64)
+    );
+    assert_eq!(d.details.data_error_count, 0);
+    for y in 0..h {
+        for x in 0..w {
+            assert_eq!(d.image.get(x, y), Some(arw2_pixel(x, y)), "({x}, {y})");
+        }
+    }
+    assert_eq!(decode_bytes(&full).unwrap(), d);
+
+    // 途中で切れたファイル（データの途中・最後の 1 バイト・データの前）。
+    for cut in [1, w as usize, (w * h / 2) as usize, (w * h) as usize - 1] {
+        let bytes = &full[..data_end - cut];
+        let p = dir.path().join(format!("cut{cut}.arw"));
+        std::fs::write(&p, bytes).unwrap();
+        for r in [decode_file(&p), decode_bytes(bytes).map(|d| d.image)] {
+            match r {
+                Err(RawError::Decode(msg)) => assert!(msg.contains("途中で切れて"), "{msg}"),
+                other => panic!("{cut} バイト欠けたファイル: {:?}", other.map(|i| i.width)),
+            }
+        }
+        // 撮影情報はデータを読まないので読める。
+        read_metadata(&p).unwrap();
+    }
+    // データの位置がファイルの外。
+    let mut outside = full.clone();
+    patch_tag(&mut outside, 273, full.len() as u32 + 4096);
+    assert!(matches!(decode_bytes(&outside), Err(RawError::Decode(_))));
+    // データの後ろに詰め物があるファイル（実機の α7 IV と同じ形）は通る。
+    let mut padded = full.clone();
+    padded.extend_from_slice(&[0u8; 2560]);
+    assert_eq!(decode_bytes(&padded).unwrap().image, d.image);
+}
+
+/// Sony の ARW の DefaultCropOrigin / DefaultCropSize（A-2）。LibRaw 0.21 はタグの値をそのまま
+/// `raw_inset_crops[0]` に入れる。余白 0 の ARW では有効画素の座標と同じ。
+#[test]
+fn sony_arw_default_crop() {
+    let (w, h) = (96u32, 40u32);
+    let (bytes, _) = synthetic_arw2(w, h, Some([6, 4, 80, 30]));
+    let d = decode_bytes(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (w, h));
+    assert_eq!(d.details.libraw_inset_crop, Some([6, 4, 80, 30]));
+    assert_eq!(d.image.default_crop, Some(PixelRect::new(6, 4, 80, 30)));
+    assert_eq!(d.details.default_crop_note, None);
+    // 撮影情報の寸法は見える範囲（カタログ・書き出しの「元の寸法」）。
+    assert_eq!(
+        (d.image.metadata.width, d.image.metadata.height),
+        (Some(80), Some(30))
+    );
+    let m = read_metadata_bytes(&bytes).unwrap();
+    assert_eq!((m.width, m.height), (Some(80), Some(30)));
+    // 画素は有効画素の全体（切り抜く前）。
+    assert_eq!(d.image.get(95, 39), Some(arw2_pixel(95, 39)));
+
+    // 有効画素からはみ出す範囲は使わない（全体に戻し、理由を残す）。
+    let (bytes, _) = synthetic_arw2(w, h, Some([20, 4, 80, 30]));
+    let d = decode_bytes(&bytes).unwrap();
+    assert_eq!(d.details.libraw_inset_crop, Some([20, 4, 80, 30]));
+    assert_eq!(d.image.default_crop, None);
+    assert!(d.details.default_crop_note.is_some());
+    assert_eq!(
+        (d.image.metadata.width, d.image.metadata.height),
+        (Some(w), Some(h))
+    );
+}
+
+/// DNG の DefaultCropOrigin / DefaultCropSize（A-2）。LibRaw 0.21 は ActiveArea の左上（余白）を
+/// 足した RAW のバッファの座標にするので、この crate は余白を引いて有効画素の座標に戻す。
+#[test]
+fn dng_default_crop_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut img = sample(CfaPattern::RGGB, 64, 48, 71);
+    img.default_crop = Some(PixelRect::new(4, 6, 50, 36));
+    for (i, margins) in [
+        DngMargins::default(),
+        DngMargins {
+            left: 4,
+            top: 2,
+            right: 6,
+            bottom: 8,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let opts = DngOptions {
+            margins,
+            ..Default::default()
+        };
+        let path = write(dir.path(), &format!("crop{i}.dng"), &img, &opts);
+        let d = decode_file_with_details(&path).unwrap();
+        assert_eq!(d.image.default_crop, img.default_crop, "{margins:?}");
+        assert_eq!(
+            d.details.libraw_inset_crop,
+            Some([4 + margins.left, 6 + margins.top, 50, 36])
+        );
+        assert_eq!(d.details.default_crop_note, None);
+        assert_eq!(
+            (d.image.metadata.width, d.image.metadata.height),
+            (Some(50), Some(36))
+        );
+        assert!(d.image.data == img.data);
+        let m = read_metadata(&path).unwrap();
+        assert_eq!((m.width, m.height), (Some(50), Some(36)));
+    }
+    // 原点が奇数（バッファの座標）の範囲は、LibRaw 0.21 が CFA の並びを保つために原点を 1 画素ずつ
+    // 進め、幅・高さを 1 画素ずつ減らす（LibRaw の動作の記録。変われば見直す）。
+    let mut odd = img.clone();
+    odd.default_crop = Some(PixelRect::new(3, 5, 50, 36));
+    let path = write(
+        dir.path(),
+        "crop_odd_origin.dng",
+        &odd,
+        &DngOptions::default(),
+    );
+    let d = decode_file_with_details(&path).unwrap();
+    assert_eq!(d.details.libraw_inset_crop, Some([4, 6, 49, 35]));
+    assert_eq!(d.image.default_crop, Some(PixelRect::new(4, 6, 49, 35)));
+    // 奇数の余白: LibRaw は有効画素の原点を 1 画素ずらす。既定の切り抜きはバッファの座標で
+    // 決まるので、有効画素の座標に戻した範囲は元の DNG の同じ画素を指す。
+    let opts = DngOptions {
+        margins: DngMargins {
+            left: 3,
+            top: 1,
+            right: 1,
+            bottom: 1,
+        },
+        ..Default::default()
+    };
+    let path = write(dir.path(), "crop_odd_margin.dng", &img, &opts);
+    let d = decode_file_with_details(&path).unwrap();
+    assert_eq!((d.details.left_margin, d.details.top_margin), (4, 2));
+    let [bx, by, ..] = d.details.libraw_inset_crop.unwrap();
+    let c = d.image.default_crop.unwrap();
+    assert_eq!((c.x + 4, c.y + 2), (bx, by));
+    // 有効画素の (c.x, c.y) は、元の DNG の有効画素の (c.x + 1, c.y + 1)。
+    assert_eq!(d.image.get(c.x, c.y), img.get(c.x + 1, c.y + 1));
+    assert!(c.x + 1 >= 4 && c.y + 1 >= 6, "{c:?}");
+    // 範囲の外のタグは使わない（LibRaw 0.21 は右端・下端にちょうど接する範囲も使わない）。
+    for (k, tag) in [[20, 6, 50, 36], [14, 12, 50, 36], [0, 0, 64, 48]]
+        .into_iter()
+        .enumerate()
+    {
+        let opts = DngOptions {
+            default_crop_tag: Some(tag),
+            ..Default::default()
+        };
+        let mut plain = img.clone();
+        plain.default_crop = None;
+        let path = write(dir.path(), &format!("crop_out{k}.dng"), &plain, &opts);
+        let d = decode_file_with_details(&path).unwrap();
+        assert_eq!(d.image.default_crop, None, "{tag:?}");
+        assert_eq!(
+            (d.image.metadata.width, d.image.metadata.height),
+            (Some(64), Some(48))
+        );
+    }
+}
+
+/// 飽和の閾値（A-3）。LibRaw で展開した RAW は、黒レベルと白レベルから仮置きの式で決める。
+#[test]
+fn saturation_level_is_set_from_levels() {
+    let dir = tempfile::tempdir().unwrap();
+    let img = sample(CfaPattern::RGGB, 32, 32, 73);
+    let path = write(dir.path(), "sat.dng", &img, &DngOptions::default());
+    let d = decode_file_with_details(&path).unwrap();
+    let expected = saturation_level_for(img.black_level, img.white_level);
+    assert_eq!(d.image.saturation_level, expected);
+    assert_eq!(d.details.saturation_level, expected);
+    assert!(expected < img.white_level && expected > 516.0);
 }

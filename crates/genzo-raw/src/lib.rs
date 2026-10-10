@@ -30,4 +30,7 @@ pub use decode::{
     extract_thumbnail_bytes, libraw_version, read_metadata, read_metadata_bytes,
 };
 pub use thumbnail::{EmbeddedThumbnail, MAX_THUMBNAIL_BYTES, ThumbnailFormat};
-pub use types::{CfaColor, CfaPattern, MAX_PIXELS, RawError, RawImage, normalize_as_shot_wb};
+pub use types::{
+    CfaColor, CfaPattern, MAX_PIXELS, PixelRect, RawError, RawImage, SATURATION_FRACTION,
+    normalize_as_shot_wb, saturation_level_for,
+};

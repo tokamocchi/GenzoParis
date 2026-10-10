@@ -33,6 +33,8 @@
 //! | 値 | 取り出し方 |
 //! |---|---|
 //! | CFA の値 | `rawdata.raw_image` の有効画素の範囲（`left_margin`・`top_margin` から `width` × `height`）。LibRaw の処理（黒レベルの減算・スケーリングなど）はしない |
+//! | 既定の切り抜き | `sizes.raw_inset_crops[0]`（DNG の DefaultCropOrigin / DefaultCropSize、Sony の ARW の同じタグ）を有効画素の座標にしたもの（[`RawImage::default_crop`]。DNG と Sony の ARW（余白 0）だけ。`crate::convert` の `default_crop`）。パイプラインはこの範囲をステージ 9 の基準の枠にする |
+//! | 飽和の閾値 | 黒レベルと白レベルから仮置きの式で決める（[`crate::saturation_level_for`]。[`RawImage::saturation_level`]） |
 //! | CFA の配列 | 有効画素の (0, 0)〜(1, 1) の `COLOR(row, col)`。2 つの緑は位置で区別する（R と同じ行が G1）。8 行 × 2 列の範囲で 2 × 2 の周期であることを確かめる |
 //! | 黒レベル | `black` ＋ `cblack[色の番号]` ＋ 繰り返しのパターン `cblack[6..]`（大きさ `cblack[4]` × `cblack[5]`）を CFA の 4 つの位置ごとに足す。パターンが 2 × 2 の周期で表せなければ対応外 |
 //! | 白レベル | `maximum`（黒レベルを含む生の値）。`linear_max` は [`RawDetails::linear_max`] に記録するだけ |
@@ -66,8 +68,16 @@
 //!   記録方式のビット数を超える値など）を検出した場合、LibRaw は数えるだけで展開を続ける。
 //!   [`decode_file`] はそれを [`RawError::Decode`] にする（[`DecodedRaw::into_verified_image`]）。
 //!   [`decode_file_with_details`]・[`decode_bytes`] は PoC-2 の記録のため `Ok` を返し、数を
-//!   [`RawDetails::data_error_count`] に記録する。ファイルの終わりを超える読み込みは LibRaw が
-//!   中断し、[`RawError::Decode`] になる。
+//!   [`RawDetails::data_error_count`] に記録する。
+//! - **途中で切れたファイル**: ファイルの終わりを超える読み込みの扱いは、LibRaw の展開の関数ごとに
+//!   違う。多くの関数は読み込みの不足を `derror()`（データの誤り）か入出力のエラーにするが、
+//!   LibRaw 0.21.2 の `sony_arw2_load_raw`（Sony の圧縮 ARW）は `fread` の戻り値を見ず、エラーも
+//!   データの誤りも返さずに展開する（読めなかった行は直前の行の値、データがまったくなければ初期化して
+//!   いないメモリが画素になる。実機の ARW を途中で切ったファイルで確認）。この crate は展開の前に、
+//!   その関数のときだけ `data_offset + data_size` が入力の大きさを超えないことを確かめ、超えていれば
+//!   [`RawError::Decode`] にする（[`RawDetails::data_range_checked`]。ファイルでもメモリ上のデータ
+//!   でも同じ）。ほかの関数では `data_size` の意味が違う（タイルの表の位置など）ため、この確認は
+//!   しない。
 //! - LibRaw 0.21 のロスレス JPEG の展開（`lossless_dng_load_raw`、α7 IV などのロスレス圧縮の
 //!   ARW に使う `sony_ljpeg_load_raw`）は、タイルの JPEG のヘッダが読めないとそこで展開を
 //!   打ち切り、エラーもデータの誤りも返さない（`src/decoders/dng.cpp`・
@@ -123,8 +133,10 @@ impl DecodedRaw {
     /// LibRaw が展開中にデータの誤りを検出していなければ [`RawImage`] を返す。
     ///
     /// LibRaw 0.21 は、圧縮データの符号の誤りや、記録方式のビット数を超える値などを
-    /// 「致命的でないデータの誤り」として数えるだけで展開を続ける（`LibRaw::derror()`。
-    /// ファイルの終わりに達した場合だけ中断する）。そのような結果は壊れた画素を含みうるため、
+    /// 「致命的でないデータの誤り」として数えるだけで展開を続ける（`LibRaw::derror()`。ファイルの
+    /// 終わりに達した場合の扱いは展開の関数ごとに違い、`sony_arw2_load_raw` は誤りとして数えない。
+    /// その関数で途中で切れたファイルは、展開の前の確認でエラーにする。モジュールの doc の
+    /// 「制限・注意」）。そのような結果は壊れた画素を含みうるため、
     /// 1 件でもあれば [`RawError::Decode`] にする（SEC-05: 壊れたファイルはそのファイルだけを
     /// エラーにする）。正常な ARW で誤りが数えられないことは PoC-2 で確認する。
     pub fn into_verified_image(self) -> Result<RawImage, RawError> {
@@ -201,7 +213,7 @@ pub struct DngColorMatrixInfo {
 pub struct RawDetails {
     /// デコーダの識別子（[`decoder_id`]。例: `"libraw-0.21.2"`）。
     pub decoder_id: String,
-    /// LibRaw が展開に使った関数の名前（例: `"sony_arw2_load_raw"`。記録方式の確認用）。
+    /// LibRaw が展開に使った関数の名前（例: `"sony_arw2_load_raw()"`。記録方式の確認用）。
     pub unpack_function: String,
     /// 展開中に LibRaw が検出した、致命的でないデータの誤りの数（0 より大きければ、画素は
     /// 壊れている可能性が高い。[`DecodedRaw::into_verified_image`]）。
@@ -252,6 +264,27 @@ pub struct RawDetails {
     pub libraw_make: Option<String>,
     /// LibRaw が正規化した機種名。
     pub libraw_model: Option<String>,
+    /// LibRaw の既定の切り抜き（`raw_inset_crops[0]` の cleft, ctop, cwidth, cheight。LibRaw の値
+    /// そのまま。DNG では RAW のバッファの座標）。なければ `None`。
+    pub libraw_inset_crop: Option<[u32; 4]>,
+    /// 採用した既定の切り抜き（有効画素の座標。[`RawImage::default_crop`] と同じ）。
+    pub default_crop: Option<crate::PixelRect>,
+    /// LibRaw の既定の切り抜きを採用しなかった理由（値があるのに採用しなかった場合だけ）。
+    pub default_crop_note: Option<String>,
+    /// Sony の SonyRawFileType（LibRaw のヘッダの注記: 0 = 非圧縮 14bit、1 = 非圧縮 12bit、
+    /// 2 = 圧縮（lossy）、3 = ロスレス圧縮、4 = ロスレス圧縮 v2）。Sony 以外・記録がなければ `None`。
+    pub sony_raw_file_type: Option<u32>,
+    /// RAW のデータの開始位置（LibRaw の内部の `data_offset`。展開の関数によって意味が違う）。
+    pub data_offset: i64,
+    /// RAW のデータの大きさ（LibRaw の内部の `data_size`。展開の関数によって意味が違う）。
+    pub data_size: u64,
+    /// 入力（ファイル・メモリ上のデータ）の大きさ（バイト。分からなければ負）。
+    pub input_size: i64,
+    /// 展開の前に、RAW のデータが入力の終わりを超えていないかを確かめたか（展開の関数が
+    /// `sony_arw2_load_raw` のとき。モジュールの doc の「制限・注意」）。
+    pub data_range_checked: bool,
+    /// 飽和の閾値（[`RawImage::saturation_level`] と同じ）。
+    pub saturation_level: f32,
 }
 
 /// 読み込み元。
@@ -283,6 +316,11 @@ pub fn libraw_version() -> Option<&'static str> {
 /// 設定（デモザイクなど）を使わず、RAW のデータと黒レベルなどをそのまま取り出すだけなので、
 /// 設定の項目は含めない。シムの取り出し方を変えて展開の結果（段階 A0 の出力）が変わる場合は、
 /// この識別子に印を加える（未定。変えるときに決める）。
+///
+/// 2026-10-10 に、展開の結果へ既定の切り抜き（[`RawImage::default_crop`]）と飽和の閾値
+/// （[`RawImage::saturation_level`]）を加えた（実機の ARW の不具合 A-2・A-3）。CFA の値は変わらないが、
+/// 現像の結果（範囲・白飛びの色）は変わる。この識別子には **まだ印を加えていない**（L0 / L1 の
+/// キャッシュのキーと `render_deps` の扱いと合わせて、人が決める）。
 ///
 /// LibRaw が無効な build では `None`。
 pub fn decoder_id() -> Option<String> {
@@ -413,6 +451,8 @@ mod tests {
             data: vec![600; 4],
             black_level: [512.0; 4],
             white_level: 16383.0,
+            saturation_level: 16383.0,
+            default_crop: None,
             as_shot_wb: [2.0, 1.0, 1.5, 1.0],
             cam_xyz: None,
             metadata: PhotoMetadata::default(),
@@ -443,6 +483,15 @@ mod tests {
             capture_time_source: CaptureTimeSource::None,
             libraw_make: None,
             libraw_model: None,
+            libraw_inset_crop: None,
+            default_crop: None,
+            default_crop_note: None,
+            sony_raw_file_type: None,
+            data_offset: 0,
+            data_size: 0,
+            input_size: 0,
+            data_range_checked: false,
+            saturation_level: 16383.0,
         };
         DecodedRaw { image, details }
     }

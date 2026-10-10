@@ -127,9 +127,10 @@ int32_t genzo_lr_version_number(void) {
 int32_t genzo_lr_header_version_number(void) { return LIBRAW_VERSION; }
 
 int32_t genzo_lr_abi_check(size_t sizes_size, size_t color_size, size_t meta_size,
-                           size_t thumb_size) {
+                           size_t thumb_size, size_t data_info_size) {
   if (sizes_size != sizeof(genzo_lr_sizes) || color_size != sizeof(genzo_lr_color) ||
-      meta_size != sizeof(genzo_lr_meta) || thumb_size != sizeof(genzo_lr_thumb)) {
+      meta_size != sizeof(genzo_lr_meta) || thumb_size != sizeof(genzo_lr_thumb) ||
+      data_info_size != sizeof(genzo_lr_data_info)) {
     return GENZO_LR_E_ABI_MISMATCH;
   }
   return 0;
@@ -248,6 +249,11 @@ int32_t genzo_lr_get_sizes(genzo_lr *h, genzo_lr_sizes *out) {
       }
     }
     copy_str(out->cdesc, sizeof out->cdesc, id.cdesc, sizeof id.cdesc);
+    const libraw_raw_inset_crop_t &crop = s.raw_inset_crops[0];
+    out->crop_left = crop.cleft;
+    out->crop_top = crop.ctop;
+    out->crop_width = crop.cwidth;
+    out->crop_height = crop.cheight;
     return 0;
   } catch (...) {
     return GENZO_LR_E_EXCEPTION;
@@ -346,6 +352,28 @@ int32_t genzo_lr_get_meta(genzo_lr *h, genzo_lr_meta *out) {
     out->flip = lr.imgdata.sizes.flip;
     out->width = lr.imgdata.sizes.width;
     out->height = lr.imgdata.sizes.height;
+    return 0;
+  } catch (...) {
+    return GENZO_LR_E_EXCEPTION;
+  }
+}
+
+int32_t genzo_lr_get_data_info(genzo_lr *h, genzo_lr_data_info *out) {
+  if (!h || !h->raw || !out) return GENZO_LR_E_NULL_ARG;
+  try {
+    std::memset(out, 0, sizeof *out);
+    out->input_size = -1;
+    /* LibRaw の内部の値（libraw_internal.h）。版によって構造が変わりうるため、シムのビルド時の
+     * ヘッダと実行時のライブラリの版（major.minor）が一致することを Rust 側で確かめてから使う
+     * （libraw/mod.rs の check_abi）。 */
+    libraw_internal_data_t *internal = h->raw->get_internal_data_pointer();
+    if (internal) {
+      out->data_offset = static_cast<int64_t>(internal->unpacker_data.data_offset);
+      out->data_size = static_cast<uint64_t>(internal->unpacker_data.data_size);
+      LibRaw_abstract_datastream *input = internal->internal_data.input;
+      if (input) out->input_size = static_cast<int64_t>(input->size());
+    }
+    out->sony_raw_file_type = h->raw->imgdata.makernotes.sony.SonyRawFileType;
     return 0;
   } catch (...) {
     return GENZO_LR_E_EXCEPTION;

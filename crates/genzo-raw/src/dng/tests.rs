@@ -18,6 +18,8 @@ fn sample_image(cfa: CfaPattern) -> RawImage {
         data,
         black_level: [512.0, 513.0, 514.0, 515.0],
         white_level: 16383.0,
+        saturation_level: 16383.0,
+        default_crop: None,
         as_shot_wb: [2.0, 1.0, 1.6, 1.0],
         cam_xyz: Some([[0.7, -0.2, -0.05], [-0.45, 1.25, 0.2], [-0.07, 0.15, 0.6]]),
         metadata: PhotoMetadata {

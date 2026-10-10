@@ -72,6 +72,21 @@ pub(crate) struct Sizes {
     pub raw_count: u32,
     pub cfa: [[i32; CFA_COLS]; CFA_ROWS],
     pub cdesc: [c_char; 8],
+    pub crop_left: u32,
+    pub crop_top: u32,
+    pub crop_width: u32,
+    pub crop_height: u32,
+}
+
+/// `genzo_lr_data_info`。
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct DataInfo {
+    pub data_offset: i64,
+    pub data_size: u64,
+    pub input_size: i64,
+    pub sony_raw_file_type: u32,
+    pub reserved: u32,
 }
 
 /// `genzo_lr_dng_color`。
@@ -169,6 +184,10 @@ impl Sizes {
             raw_count: 0,
             cfa: [[0; CFA_COLS]; CFA_ROWS],
             cdesc: [0; 8],
+            crop_left: 0,
+            crop_top: 0,
+            crop_width: 0,
+            crop_height: 0,
         }
     }
 }
@@ -246,6 +265,7 @@ unsafe extern "C" {
         color_size: usize,
         meta_size: usize,
         thumb_size: usize,
+        data_info_size: usize,
     ) -> i32;
     pub(crate) safe fn genzo_lr_strerror(code: i32) -> *const c_char;
 
@@ -265,6 +285,7 @@ unsafe extern "C" {
     pub(crate) fn genzo_lr_get_sizes(h: *mut GenzoLr, out: *mut Sizes) -> i32;
     pub(crate) fn genzo_lr_get_color(h: *mut GenzoLr, out: *mut Color) -> i32;
     pub(crate) fn genzo_lr_get_meta(h: *mut GenzoLr, out: *mut Meta) -> i32;
+    pub(crate) fn genzo_lr_get_data_info(h: *mut GenzoLr, out: *mut DataInfo) -> i32;
     pub(crate) fn genzo_lr_copy_raw(h: *mut GenzoLr, dst: *mut u16, dst_len: usize) -> i32;
     pub(crate) fn genzo_lr_error_count(h: *mut GenzoLr) -> i32;
     pub(crate) fn genzo_lr_decoder_name(h: *mut GenzoLr, dst: *mut c_char, dst_len: usize) -> i32;
