@@ -12,11 +12,15 @@
 //! 主な型と関数:
 //! - [`Catalog`] … カタログへの接続。開く（[`Catalog::open`]）と、必要ならバックアップを作ってから
 //!   移行する。閉じる（[`Catalog::close`]）と「正常に終了した」印を付ける。
-//! - 登録: [`Catalog::ensure_volume`]、[`Catalog::ensure_folder`]、[`Catalog::register_batch`]
+//! - 登録: [`Catalog::ensure_volume`]、[`Catalog::ensure_folder`]、[`Catalog::register_batch`]、
+//!   [`Catalog::find_file`]（登録済みのファイルの確認）
 //! - 検索: [`Filter`]、[`Sort`]、[`Catalog::search`]、[`Catalog::variant_summaries`]
 //! - 選別: [`Catalog::set_rating`]、[`Catalog::set_flag`]、[`Catalog::set_color_label`]
-//! - 現像設定・履歴: [`Catalog::save_develop`]、[`Catalog::undo_develop`]、[`Catalog::redo_develop`]
-//! - 削除・ファイル操作: [`Catalog::remove_assets`]、[`Catalog::trash_plan`]、[`Catalog::plan_trash`]
+//! - 現像設定・履歴: [`Catalog::save_develop`]、[`Catalog::apply_develop_to_many`]、
+//!   [`Catalog::save_develop_batch`]、[`Catalog::undo_develop`]、[`Catalog::redo_develop`]
+//! - 削除・ファイル操作: [`Catalog::remove_assets`]、[`Catalog::delete_virtual_copies`]、
+//!   [`Catalog::trash_plan`]、[`Catalog::plan_trash`]
+//! - 書き出しの原本の照合（6.4 節）: [`Catalog::files_in_folder`]、[`Catalog::files_named`]
 //! - バックアップ: [`Catalog::create_backup`]、[`restore_backup`]、[`Catalog::check_integrity`]
 //! - キャッシュ: [`ThumbStore`]（L0）、[`PreviewCache`]（L1）
 //! - ハッシュ: [`FileFacts::read`]、[`quick_hash`]、[`full_hash`]
@@ -53,8 +57,8 @@ pub use develop::{
 pub use dummy::{DummyReport, DummySpec, populate_dummy};
 pub use error::{CatalogError, Result};
 pub use files::{
-    FactsChange, FileLocation, FileOpEntry, FileOpPath, FileOpPayload, FileOpRecord, FileRecord,
-    PlannedFile, RemovalReport, TrashPlan,
+    FILES_NAMED_CHUNK, FactsChange, FileLocation, FileOpEntry, FileOpPath, FileOpPayload,
+    FileOpRecord, FileRecord, PlannedFile, RemovalReport, TrashPlan,
 };
 pub use hash::{
     FileFacts, QUICK_HASH_CHUNK, full_hash, full_hash_reader, quick_hash, quick_hash_reader,

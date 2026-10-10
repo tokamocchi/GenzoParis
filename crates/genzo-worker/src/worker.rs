@@ -78,12 +78,31 @@ impl Default for WorkerOptions {
     }
 }
 
-/// バイナリ `genzo-worker` の入口。
+/// バイナリ `genzo-worker` の入口（[`run_worker`] を、プログラム名を除いた引数で呼ぶ）。
 ///
 /// 引数: `--memory-limit-bytes <N>`（メモリの上限。[`crate::limits`]）。環境変数
 /// `GENZO_WORKER_TEST_HOOKS=1` でテスト用の口を有効にする。
 pub fn main_entry() -> ExitCode {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    run_worker(Vec::new(), std::env::args_os().skip(1).collect())
+}
+
+/// この実行ファイルをワーカーとして起動し直すときに、先頭に付ける引数（[`run_worker`] で設定する）。
+static RELAUNCH_PREFIX: std::sync::OnceLock<Vec<OsString>> = std::sync::OnceLock::new();
+
+/// ワーカーの本体を実行する（バイナリ `genzo-worker` の `main` と同じ処理）。
+///
+/// 本体の実行ファイル自身を隠しサブコマンド付きで起動する構成（`genzo __worker ...`。ワーカーの
+/// 実行ファイルを別に配布しないため）では、本体の `main` が隠しサブコマンドを見つけたら、この関数を
+/// 呼んで終了コードをそのまま返す。
+///
+/// - `relaunch_prefix`: この実行ファイルをワーカーとして起動し直すときに先頭に付ける引数
+///   （`genzo-worker` では空、`genzo __worker` の構成では `["__worker"]`）。テスト用の子プロセス
+///   （[`TEST_HOLD_WHILE_ARG`]）を起動するときに使う。
+/// - `args`: ワーカーへの引数（プログラム名と隠しサブコマンドを除いたもの）。`--memory-limit-bytes <N>`
+///   など（[`main_entry`]）。
+pub fn run_worker(relaunch_prefix: Vec<OsString>, args: Vec<OsString>) -> ExitCode {
+    // 1 つのプロセスでワーカーを実行するのは 1 回だけなので、最初の値を使う。
+    let _ = RELAUNCH_PREFIX.set(relaunch_prefix);
     let mut memory_limit = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -945,11 +964,13 @@ pub const TEST_CHILD_HOLD_MAX: Duration = Duration::from_secs(120);
 const TEST_CHILD_POLL: Duration = Duration::from_millis(20);
 
 /// テスト用: 標準出力・標準エラー出力を引き継いだ子プロセス（このワーカーの実行ファイルを
-/// [`TEST_HOLD_WHILE_ARG`] 付きで起動したもの）を残す。子プロセスは待たない（ワーカーはこの後
+/// [`run_worker`] の `relaunch_prefix` と [`TEST_HOLD_WHILE_ARG`] 付きで起動したもの）を残す。子プロセスは待たない（ワーカーはこの後
 /// 異常終了する）。
 fn leave_child_holding_pipes(hold_while: &Path) {
+    let prefix = RELAUNCH_PREFIX.get().cloned().unwrap_or_default();
     let spawned = std::env::current_exe().and_then(|exe| {
         std::process::Command::new(exe)
+            .args(prefix)
             .arg(TEST_HOLD_WHILE_ARG)
             .arg(hold_while)
             .stdin(std::process::Stdio::null())

@@ -19,7 +19,7 @@ use genzo_model::{
     AssetId, FileId, FileOpId, FileOpKind, FileOpState, FileRole, FileStatus, FolderId, VariantId,
     VolumeId,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::Catalog;
@@ -192,6 +192,10 @@ pub struct FileOpRecord {
 
 const FILE_COLUMNS: &str = "id, asset_id, folder_id, name, role, size, mtime, quick_hash, full_hash, revision, status, status_reason";
 
+/// [`Catalog::files_named`] の 1 回の問い合わせに入れる名前の数（SQLite の引数の数の上限
+/// （3.32 以降の既定 32766）より十分に小さい数）。
+pub const FILES_NAMED_CHUNK: usize = 500;
+
 fn file_from_row(row: &rusqlite::Row<'_>) -> Result<FileRecord> {
     let role: String = row.get(4)?;
     let size: i64 = row.get(5)?;
@@ -269,6 +273,63 @@ impl Catalog {
             Some(row) => file_from_row(row),
             None => Err(CatalogError::NotFound(format!("ファイル {file_id}"))),
         }
+    }
+
+    /// フォルダの中の名前 `name` のファイル（比較は登録と同じ [`path_key`]。なければ `None`）。
+    ///
+    /// 登録済みで変化のないファイルの解析を省く（取り込みのやり直し）のに使う。
+    pub fn find_file(&self, folder_id: FolderId, name: &str) -> Result<Option<FileRecord>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {FILE_COLUMNS} FROM file WHERE folder_id = ?1 AND name_key = ?2"
+        ))?;
+        let mut rows = stmt.query(params![folder_id.get(), path_key(name)])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(file_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// フォルダの中のファイル（配下のフォルダは含まない。比較キーの順）。
+    ///
+    /// 書き出し先のフォルダにある、カタログに登録されたファイルの照合（04 の 6.4 節）に使う。
+    pub fn files_in_folder(&self, folder_id: FolderId) -> Result<Vec<FileRecord>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {FILE_COLUMNS} FROM file WHERE folder_id = ?1 ORDER BY name_key"
+        ))?;
+        let mut rows = stmt.query([folder_id.get()])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(file_from_row(row)?);
+        }
+        Ok(out)
+    }
+
+    /// すべてのフォルダから、名前が `names` のどれかと同じファイル（比較は登録と同じ [`path_key`]。
+    /// 大文字・小文字と Unicode の正規化の違いを区別しない）。id の順。
+    ///
+    /// 書き出しの原本の照合（04 の 6.4 節）に使う: 書き出し先のフォルダが、カタログに別のパス
+    /// （シンボリックリンクを経由したフォルダ・大文字と小文字の違いなど）で登録されたフォルダでも、
+    /// 同じ名前のファイルを同一性（ボリュームとファイル ID）で照合できるようにする。
+    ///
+    /// `name_key` だけの索引はないので、[`FILES_NAMED_CHUNK`] 件ごとに `file` の表を 1 回走査する
+    /// （50 万件での時間は PoC-6 で計測する）。
+    pub fn files_named(&self, names: &[&str]) -> Result<Vec<FileRecord>> {
+        let mut keys: Vec<String> = names.iter().map(|n| path_key(n)).collect();
+        keys.sort();
+        keys.dedup();
+        let mut out = Vec::new();
+        for chunk in keys.chunks(FILES_NAMED_CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {FILE_COLUMNS} FROM file WHERE name_key IN ({placeholders})"
+            ))?;
+            let mut rows = stmt.query(params_from_iter(chunk))?;
+            while let Some(row) = rows.next()? {
+                out.push(file_from_row(row)?);
+            }
+        }
+        out.sort_by_key(|f| f.id);
+        Ok(out)
     }
 
     /// asset のファイル（主となるファイルが先）。

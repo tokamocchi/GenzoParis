@@ -9,7 +9,7 @@
 //! |---|---|---|
 //! | [`protocol`] | 制御のメッセージ（標準入出力、1 行 1 メッセージの JSON） | 1.2 節「ワーカーとのやり取り」 |
 //! | [`shm`] | 共有メモリ（本体が確保して所有し、ワーカーは書き込むだけ。ファイルを使う方式） | 1.2 節、AR-10、PoC-2 |
-//! | [`worker`] | ワーカーの処理（バイナリ `genzo-worker`） | 1.2 節、2.6 節「RAW 以外の入力」、4 章 |
+//! | [`worker`] | ワーカーの処理（バイナリ `genzo-worker`。本体の実行ファイルの隠しサブコマンドからは [`run_worker`]） | 1.2 節、2.6 節「RAW 以外の入力」、4 章 |
 //! | [`client`] | 本体側: 1 つのワーカーの起動・タイムアウト・再起動・取り消し・バッファの検証 | 1.2 節、6.1 節、6.3 節 |
 //! | [`pool`] | 本体側: 対話用 1 個とバッチ用 1〜2 個のワーカー | 1.2 節のプロセス構成 |
 //! | [`failures`] | 同じファイルで 2 回続けて失敗したらスキップ | 1.2 節、6.3 節 |
@@ -80,6 +80,7 @@ pub use protocol::{
 };
 pub use shm::{BufferError, PayloadKind, ShmArena};
 pub use validate::{MAX_THUMBNAIL_EDGE, MAX_THUMBNAIL_JPEG_BYTES};
+pub use worker::{main_entry, run_worker};
 
 /// ワーカーの実行ファイルを指定する環境変数（[`locate_worker_executable`]）。
 pub const ENV_WORKER_PATH: &str = "GENZO_WORKER_PATH";
@@ -89,3 +90,10 @@ pub const ENV_TEST_HOOKS: &str = "GENZO_WORKER_TEST_HOOKS";
 
 /// ワーカーの実行ファイルの名前（拡張子を除く）。
 pub const WORKER_EXE_NAME: &str = "genzo-worker";
+
+/// 本体の実行ファイル自身をワーカーとして起動するときの隠しサブコマンドの名前（`genzo __worker`）。
+///
+/// 本体の `main` は、最初の引数がこの名前なら [`run_worker`] を呼ぶ（`relaunch_prefix` には
+/// `[WORKER_SUBCOMMAND]`、`args` には残りの引数を渡す）。本体の側は [`WorkerConfig::args`] に
+/// `[WORKER_SUBCOMMAND]`、[`WorkerConfig::executable`] に本体の実行ファイルを設定して起動する。
+pub const WORKER_SUBCOMMAND: &str = "__worker";

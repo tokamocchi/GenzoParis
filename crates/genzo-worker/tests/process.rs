@@ -40,6 +40,22 @@ fn ping_reports_version_and_pid() {
     c.shutdown().unwrap();
 }
 
+/// `WorkerConfig::args` は実行ファイルの直後に渡る（本体の実行ファイルを `genzo __worker` で起動する
+/// 構成のため）。ここでは `genzo-worker` が受け付ける引数（メモリの上限）を渡して、届いたことを確かめる。
+#[test]
+fn extra_args_are_passed_to_the_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let mut cfg = config(root.path());
+    cfg.args = vec![
+        "--memory-limit-bytes".into(),
+        (256u64 * 1024 * 1024).to_string().into(),
+    ];
+    let mut c = WorkerClient::spawn(cfg).unwrap();
+    let pong = c.ping().unwrap();
+    assert_ne!(pong.memory_limit, MemoryLimitStatus::NotRequested);
+    c.shutdown().unwrap();
+}
+
 #[test]
 fn crash_is_recovered_and_the_next_job_succeeds() {
     let root = tempfile::tempdir().unwrap();

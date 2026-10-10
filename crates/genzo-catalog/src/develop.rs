@@ -358,6 +358,36 @@ impl Catalog {
         Ok(out)
     }
 
+    /// variant ごとに別の設定を、1 つのトランザクションで保存する（DEV-30 の一部の項目だけの貼り付けなど）。
+    ///
+    /// それぞれの variant に履歴を 1 件ずつ追加する。同じ variant が重複していたら、最後の設定を
+    /// 保存して履歴は 1 件にする。1 件でも失敗したら（存在しない variant・不正な設定など）すべて
+    /// 取り消す。結果は `items` と同じ順。
+    pub fn save_develop_batch(
+        &mut self,
+        items: &[(VariantId, DevelopSettings)],
+        label: &str,
+    ) -> Result<Vec<HistoryEntryId>> {
+        let mut last = std::collections::HashMap::new();
+        for (i, (v, _)) in items.iter().enumerate() {
+            last.insert(*v, i);
+        }
+        let encoded = items
+            .iter()
+            .map(|(_, s)| encode(s))
+            .collect::<Result<Vec<_>>>()?;
+        let now = now_utc_string();
+        let tx = self.conn.transaction()?;
+        let mut saved = std::collections::HashMap::new();
+        for (i, (v, _)) in items.iter().enumerate() {
+            if last[v] == i {
+                saved.insert(*v, save_develop_tx(&tx, *v, &encoded[i], label, &now)?);
+            }
+        }
+        tx.commit()?;
+        Ok(items.iter().map(|(v, _)| saved[v]).collect())
+    }
+
     /// 1 つ前の履歴に戻す（Undo）。戻せない場合は `None`。
     pub fn undo_develop(&mut self, variant_id: VariantId) -> Result<Option<DevelopSettings>> {
         self.step_history(variant_id, false)
@@ -595,19 +625,31 @@ impl Catalog {
     ///
     /// 履歴・スナップショット・キーワードの付与・コレクションの所属も削除される（ON DELETE CASCADE）。
     pub fn delete_virtual_copy(&mut self, variant_id: VariantId) -> Result<()> {
+        self.delete_virtual_copies(&[variant_id])
+    }
+
+    /// 複数の仮想コピーを 1 つのトランザクションで削除する（6.4 節。DATA-02）。1 件でも削除できない
+    /// （マスター・存在しない variant）なら、何も削除しない。重複は 1 回として扱う。
+    pub fn delete_virtual_copies(&mut self, variant_ids: &[VariantId]) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
         let tx = self.conn.transaction()?;
-        let is_master: bool = tx
-            .query_row(
-                "SELECT is_master FROM variant WHERE id = ?1",
-                [variant_id.get()],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| CatalogError::NotFound(format!("variant {variant_id}")))?;
-        if is_master {
-            return Err(CatalogError::CannotDeleteMaster(variant_id));
+        for &variant_id in variant_ids {
+            if !seen.insert(variant_id) {
+                continue;
+            }
+            let is_master: bool = tx
+                .query_row(
+                    "SELECT is_master FROM variant WHERE id = ?1",
+                    [variant_id.get()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| CatalogError::NotFound(format!("variant {variant_id}")))?;
+            if is_master {
+                return Err(CatalogError::CannotDeleteMaster(variant_id));
+            }
+            tx.execute("DELETE FROM variant WHERE id = ?1", [variant_id.get()])?;
         }
-        tx.execute("DELETE FROM variant WHERE id = ?1", [variant_id.get()])?;
         tx.commit()?;
         Ok(())
     }

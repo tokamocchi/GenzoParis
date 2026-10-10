@@ -337,3 +337,71 @@ fn reverting_to_default_settings_is_stored_compactly() {
     assert_eq!(json, None);
     assert_eq!(hash, DevelopSettings::default().develop_hash_hex());
 }
+
+#[test]
+fn batch_save_stores_different_settings_atomically() {
+    let mut f = Fixture::new();
+    let a = f.photo("A.ARW", 1, None).master_variant_id;
+    let b = f.photo("B.ARW", 2, None).master_variant_id;
+    let entries = f
+        .cat
+        .save_develop_batch(&[(a, exposure(0.5)), (b, exposure(-0.5))], "部分の貼り付け")
+        .unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_ne!(entries[0], entries[1]);
+    assert_eq!(f.cat.develop_settings(a).unwrap(), exposure(0.5));
+    assert_eq!(f.cat.develop_settings(b).unwrap(), exposure(-0.5));
+    assert_eq!(
+        labels(&f.cat, a),
+        vec![HISTORY_LABEL_IMPORT, "部分の貼り付け"]
+    );
+    // 同じ variant が重複していれば、最後の設定を保存し、履歴は 1 件。
+    let dup = f
+        .cat
+        .save_develop_batch(&[(a, exposure(1.0)), (a, exposure(2.0))], "重複")
+        .unwrap();
+    assert_eq!(dup[0], dup[1]);
+    assert_eq!(f.cat.develop_settings(a).unwrap(), exposure(2.0));
+    assert_eq!(f.cat.history(a).unwrap().len(), 3);
+    // 1 件でも失敗したら、すべて取り消す（存在しない variant・不正な設定）。
+    for bad in [
+        vec![(b, exposure(1.5)), (VariantId::new(9999), exposure(1.0))],
+        vec![(b, exposure(1.5)), (a, exposure(f32::NAN))],
+    ] {
+        assert!(f.cat.save_develop_batch(&bad, "x").is_err());
+        assert_eq!(f.cat.develop_settings(b).unwrap(), exposure(-0.5));
+        assert_eq!(f.cat.history(b).unwrap().len(), 2);
+    }
+    assert!(f.cat.save_develop_batch(&[], "空").unwrap().is_empty());
+}
+
+#[test]
+fn virtual_copies_are_deleted_atomically() {
+    let mut f = Fixture::new();
+    let o = f.photo("A.ARW", 1, None);
+    let master = o.master_variant_id;
+    let vc1 = f.cat.create_virtual_copy(master, None).unwrap();
+    let vc2 = f.cat.create_virtual_copy(master, None).unwrap();
+    let vc3 = f.cat.create_virtual_copy(master, None).unwrap();
+    // 1 件でも削除できなければ（マスター・存在しない variant）、何も削除しない。
+    assert!(matches!(
+        f.cat.delete_virtual_copies(&[vc1, master]),
+        Err(CatalogError::CannotDeleteMaster(v)) if v == master
+    ));
+    assert!(matches!(
+        f.cat.delete_virtual_copies(&[vc1, VariantId::new(9999)]),
+        Err(CatalogError::NotFound(_))
+    ));
+    assert_eq!(f.cat.variants_of_asset(o.asset_id).unwrap().len(), 4);
+    // 重複は 1 回として扱う。
+    f.cat.delete_virtual_copies(&[vc1, vc2, vc1]).unwrap();
+    let left: Vec<VariantId> = f
+        .cat
+        .variants_of_asset(o.asset_id)
+        .unwrap()
+        .into_iter()
+        .map(|v| v.id)
+        .collect();
+    assert_eq!(left, vec![master, vc3]);
+    f.cat.delete_virtual_copies(&[]).unwrap();
+}

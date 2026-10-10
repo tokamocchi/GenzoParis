@@ -315,3 +315,66 @@ fn native_path(parts: &[&str]) -> String {
     }
     p.to_string_lossy().into_owned()
 }
+
+#[test]
+fn files_can_be_found_by_folder_and_name() {
+    let mut f = Fixture::new();
+    let a = f.photo("A.ARW", 1, None);
+    f.photo("b.jpg", 2, None);
+    // 比較は登録と同じキー（大文字・小文字を区別しない）。
+    let found = f.cat.find_file(f.folder, "a.arw").unwrap().unwrap();
+    assert_eq!(found.id, a.file_id);
+    assert_eq!(found.name, "A.ARW");
+    assert!(f.cat.find_file(f.folder, "C.ARW").unwrap().is_none());
+    let other = f.cat.ensure_folder(f.volume, "2024/大阪").unwrap();
+    assert!(f.cat.find_file(other, "A.ARW").unwrap().is_none());
+    let names: Vec<String> = f
+        .cat
+        .files_in_folder(f.folder)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(names, vec!["A.ARW", "b.jpg"]);
+    assert!(f.cat.files_in_folder(other).unwrap().is_empty());
+}
+
+#[test]
+fn files_can_be_found_by_name_across_folders() {
+    let mut f = Fixture::new();
+    let a = f.photo("A.ARW", 1, None);
+    let b = f.photo("b.jpg", 2, None);
+    let other = f.cat.ensure_folder(f.volume, "2024/大阪").unwrap();
+    let a2 = f
+        .cat
+        .register_file(&photo_req(other, "a.arw", 3, None))
+        .unwrap();
+    // 大文字・小文字を区別せず、すべてのフォルダから探す（id の順）。
+    let ids: Vec<_> = f
+        .cat
+        .files_named(&["A.arw"])
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(ids, vec![a.file_id, a2.file_id]);
+    // 複数の名前・重複・見つからない名前。
+    let ids: Vec<_> = f
+        .cat
+        .files_named(&["B.JPG", "b.jpg", "none.jpg", "a.ARW"])
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(ids, vec![a.file_id, b.file_id, a2.file_id]);
+    assert!(f.cat.files_named(&[]).unwrap().is_empty());
+    // 1 回の問い合わせの上限を超える数の名前でも探せる。
+    let mut many: Vec<String> = (0..crate::FILES_NAMED_CHUNK + 5)
+        .map(|i| format!("x{i}.jpg"))
+        .collect();
+    many.push("b.jpg".to_owned());
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    let found = f.cat.files_named(&refs).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, b.file_id);
+}

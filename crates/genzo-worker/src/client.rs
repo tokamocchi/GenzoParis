@@ -246,6 +246,12 @@ impl JobTimeouts {
 pub struct WorkerConfig {
     /// ワーカーの実行ファイル。`None` なら [`locate_worker_executable`] で探す。
     pub executable: Option<PathBuf>,
+    /// 実行ファイルの直後に付ける引数（既定は空）。
+    ///
+    /// 本体の実行ファイル自身を隠しサブコマンド付きでワーカーとして起動する構成（`genzo __worker`。
+    /// [`crate::WORKER_SUBCOMMAND`]・[`crate::run_worker`]）では `["__worker"]` を渡す。ワーカーへの
+    /// 引数（`--memory-limit-bytes` など）は、この後に付ける。
+    pub args: Vec<OsString>,
     /// ジョブの種類ごとのタイムアウト。
     pub timeouts: JobTimeouts,
     /// 起動と握手のタイムアウト。
@@ -278,6 +284,7 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             executable: None,
+            args: Vec::new(),
             timeouts: JobTimeouts::default(),
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
             memory_limit_bytes: None,
@@ -888,6 +895,7 @@ impl WorkerClient {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        cmd.args(&self.config.args);
         if let Some(limit) = self.config.memory_limit_bytes {
             cmd.arg("--memory-limit-bytes").arg(limit.to_string());
         }
