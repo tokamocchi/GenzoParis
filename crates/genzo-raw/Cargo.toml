@@ -10,7 +10,8 @@ publish.workspace = true
 
 [features]
 default = []
-# LibRaw の FFI を有効にする（システムの LibRaw を pkg-config で探す）。
+# LibRaw の FFI を有効にする（システムの LibRaw を pkg-config で探し、C++ のシムをビルドする。
+# build.rs）。
 libraw = []
 
 [dependencies]
@@ -20,6 +21,11 @@ thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# 合成 DNG を、この crate と独立した TIFF / EXIF の読み取りで確かめる（src/dng/tests.rs）。
+kamadak-exif.workspace = true
+# 合成 DNG に埋め込む JPEG のプレビューを作る（tests/libraw.rs）。
+image.workspace = true
+tempfile.workspace = true
 
 [build-dependencies]
 cc.workspace = true

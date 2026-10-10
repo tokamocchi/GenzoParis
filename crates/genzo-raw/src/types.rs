@@ -18,7 +18,7 @@ pub const MAX_PIXELS: u64 = 200_000_000;
 /// 白レベルの上限（データは u16）。
 const MAX_WHITE_LEVEL: f32 = 65_535.0;
 /// 撮影時の WB の係数として受け付ける上限（G を 1 としたとき）。
-const MAX_WB_COEFF: f32 = 1_000.0;
+pub(crate) const MAX_WB_COEFF: f32 = 1_000.0;
 /// G の係数を 1 とみなす許容差。
 const WB_GREEN_TOLERANCE: f32 = 1e-3;
 /// カメラ行列の要素の絶対値の上限。
@@ -348,7 +348,7 @@ impl RawImage {
 }
 
 /// カメラ行列を検証する（有限・要素の大きさ・正則）。
-fn validate_matrix(m: &[[f32; 3]; 3]) -> Result<(), RawError> {
+pub(crate) fn validate_matrix(m: &[[f32; 3]; 3]) -> Result<(), RawError> {
     if !m.iter().flatten().all(|v| v.is_finite()) {
         return Err(RawError::InvalidColorMatrix(
             "有限でない要素があります".to_owned(),
