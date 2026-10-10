@@ -19,6 +19,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - CI: [.github/workflows/ci.yml](../.github/workflows/ci.yml) の `lint` ジョブで、push と pull request のたびに実行します。
   - ローカル: `cargo install cargo-deny --locked` で入れて、`cargo deny check` を実行します。ライセンスごとの一覧は `cargo deny list` で出せます。
 - 2026-10-09 の確認結果: cargo-deny 0.20.2 で `cargo deny check` を実行し、advisories・bans・licenses・sources がすべて通りました。警告は、同じクレートの複数の版（hashbrown・miniz_oxide・syn）の 3 件だけです。
+- 2026-10-10 の確認結果: `genzo-color`・`genzo-raw`・`genzo-media`・`genzo-catalog`・`genzo-jobs`・`genzo-testkit` の実装の後に再実行し、同じ結果でした（すべて通り、警告は同じ 3 件）。
 - **cargo-deny が見るのは、各クレートの `Cargo.toml` の `license` と、ライセンスのファイルだけです。** C のソースを同梱してビルドするクレートについて、同梱したソースの版やファイルのヘッダは確認しません。現在の依存では次の 3 つが該当します。
   - `lcms2-sys`（Little CMS 2）と `libsqlite3-sys`（SQLite）: 2 章の一覧に記録します。
   - `blake3`: BLAKE3 の作者たち自身による C とアセンブリの実装を同梱しています（`c/` ディレクトリ）。crate のライセンスは `Cargo.toml` で CC0-1.0 / Apache-2.0 / Apache-2.0 WITH LLVM-exception の選択です。`c/blake3.c` の先頭にはライセンスの表示がなく（1.8.7 で確認）、C の部分にも crate と同じライセンスが及ぶと考えていますが、要確認です。
@@ -43,7 +44,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 
 | 名前 | 用途 | 版またはコミット | 取得元 | ライセンス（確認した資料） | リンク方法・ビルドの設定 | 配布するバイナリと対応するソース | 必要な表記 | 確認状況 |
 |---|---|---|---|---|---|---|---|---|
-| LibRaw | RAW の展開とメタデータの取得。ワーカープロセスだけで使う（[04](04_architecture.md) の 1.2 節、`genzo-raw` の機能フラグ `libraw`） | 開発環境は 0.21.2。macOS の CI は実行時点の Homebrew の版（記録していない）。Windows は未定。0.21 系を想定 | Ubuntu 24.04 の apt（`libraw-dev` 0.21.2-2.1ubuntu0.24.04.2）、macOS は Homebrew（`libraw`）、Windows は未定。上流は https://www.libraw.org/ | LGPL-2.1 または CDDL-1.0 の選択（`libraw.h` のヘッダで確認）。上流の配布物の LICENSE ファイルは未確認。どちらを選ぶかは要確認（3.1 節） | 動的リンクの予定。pkg-config で探し、C++ のシムを cc でビルドする（FFI は未実装のため、現時点ではリンクしていない） | 未定。同梱する場合は、共有ライブラリと、対応するソースの提供方法を決める | 選んだライセンスの全文と著作権表示（要確認） | AI 記入（2026-10-09）。人の確認待ち |
+| LibRaw | RAW の展開とメタデータの取得。ワーカープロセスだけで使う（[04](04_architecture.md) の 1.2 節、`genzo-raw` の機能フラグ `libraw`） | 開発環境は 0.21.2。macOS の CI は実行時点の Homebrew の版（2026-10-10 の時点で 0.22 系。コミット 966b379 の記録による。CI では版を記録していない）。Windows は未定。0.21 以降を想定（`genzo-raw` の build.rs で 0.21 以上を要求） | Ubuntu 24.04 の apt（`libraw-dev` 0.21.2-2.1ubuntu0.24.04.2）、macOS は Homebrew（`libraw`）、Windows は未定。上流は https://www.libraw.org/ | LGPL-2.1 または CDDL-1.0 の選択（`libraw.h` のヘッダで確認）。上流の配布物の LICENSE ファイルは未確認。どちらを選ぶかは要確認（3.1 節） | 動的リンク。pkg-config で `libraw_r`（スレッドセーフ版）を探し、なければ `libraw`（この場合は LibRaw の使用をプロセスの中で 1 つずつに制限する）。C++ のシム（`crates/genzo-raw/src/shim/`）を cc でビルドする。pkg-config が返す lcms2 はリンクしない（3.2 節）。Windows は環境変数 `LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR` で指定する（未確認） | 未定。同梱する場合は、共有ライブラリと、対応するソースの提供方法を決める | 選んだライセンスの全文と著作権表示（要確認） | AI 記入（2026-10-09）。人の確認待ち |
 | Little CMS 2 | ICC プロファイルの変換と 3D LUT の作成（`genzo-color`。04 の 2.6 節・5 章） | 2.19（`lcms2-sys` 4.0.7 が同梱するソース。Rust のラッパーは `lcms2` 6.2.0） | crates.io の `lcms2-sys`（`vendor/` に上流のソースを同梱）。上流は Marti Maria Saguer による Little CMS | MIT（`vendor/LICENSE` と、`vendor/src/*.c` のファイルのヘッダで確認）。ラッパーの crate も MIT | 静的リンク。workspace の `Cargo.toml` で `lcms2` の機能フラグ `static` を有効にし、同梱のソースを cc でビルドする（3.2 節） | 実行ファイルに含まれる。対応するソースは crates.io の `lcms2-sys` 4.0.7 | MIT の著作権表示と許諾文 | AI 記入（2026-10-09）。人の確認待ち |
 | SQLite | カタログ DB とサムネイル DB（`genzo-catalog`。04 の 3 章） | 3.53.2（`libsqlite3-sys` 0.38.2 が同梱する amalgamation。`rusqlite` 0.40.2） | crates.io の `libsqlite3-sys`（`sqlite3/` に同梱）。上流は https://sqlite.org/ | パブリックドメイン（`sqlite3.c` のヘッダの「The author disclaims copyright to this source code」で確認）。バインディングの crate は MIT | 静的リンク。`rusqlite` の機能フラグ `bundled` と `backup`。コンパイルの設定は `libsqlite3-sys` の build.rs の既定（3.3 節）。システムの SQLite は使わない | 実行ファイルに含まれる。対応するソースは crates.io の `libsqlite3-sys` 0.38.2 | SQLite 自体は不要とされる（パブリックドメイン）。バインディングの MIT の表記は Rust のクレートとして扱う | AI 記入（2026-10-09）。人の確認待ち |
 | FFmpeg / ffprobe | 動画のメタデータの取得とサムネイルの生成（`genzo-media`）。子プロセスとして実行する（04 の 1.2 節） | 開発環境は 6.1.1。配布する版は未定 | 開発環境は Ubuntu 24.04 の apt（`ffmpeg` 7:6.1.1-3ubuntu5）。配布物での入手方法は未定 | ビルドの構成で LGPL-2.1-or-later・GPL-2.0-or-later・(L)GPL-3.0-or-later のいずれかになり、`--enable-nonfree` のビルドは再配布できないとされる。開発環境の版は `--enable-gpl` のビルド（`ffmpeg -version` の configure の引数と、Ubuntu の copyright ファイルで確認）。上流の LICENSE.md は未確認 | リンクしない（子プロセス）。同梱する場合は configure の引数を記録する | 未定（同梱するか、利用者に入れてもらうか）。同梱する場合は対応するソースとビルドの構成の提供が必要 | 同梱する場合は、ライセンスの全文、ビルドの構成、組み込んだ外部ライブラリの表記（要確認） | AI 記入（2026-10-09）。配布の方針は人の判断待ち |
@@ -67,8 +68,12 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - Ubuntu の `libraw.so.23` は、lcms2・libjpeg・libgomp（OpenMP）に動的リンクしています（`ldd` で確認）。Homebrew の LibRaw の依存と、Windows で使う LibRaw のビルドの設定（OpenMP や lcms2 を使うか）を記録してください。同梱する場合は、これらの依存ライブラリも台帳に追加します。
   - LibRaw とアプリ（`genzo-color`）の両方が lcms2 を使うため、ワーカーのプロセスに 2 つの版の lcms2 が入る可能性があります（3.2 節）。シンボルの衝突や、どちらの版が使われるかを PoC-2 で確認してください。
   - Windows / macOS の配布物に LibRaw を同梱する場合、LGPL の条件（利用者がライブラリを差し替えられること、対応するソースの提供）を満たす方法を決めてください。
-  - **本体の実行ファイルに LibRaw が入るか。** Cargo の機能フラグは同じビルドの中で共通になるため、`genzo-cli/libraw` を有効にすると本体の実行ファイル（`genzo`）が使う `genzo-raw` でも `libraw` が有効になります。LibRaw の関数を呼ぶのはワーカーだけですが、OS とリンカーによっては本体の実行ファイルも LibRaw の共有ライブラリに依存する可能性があります（未確認）。配布物の構成と LGPL の条件に関わるため、FFI の作業で確認してください。
-- **CI**: macOS では Homebrew の `libraw` を入れて、機能フラグ `libraw` を有効にしたビルドとテストも実行します。FFI の実装前のため、現時点では LibRaw にリンクしていません。
+  - **本体の実行ファイルに LibRaw が入るか。** Cargo の機能フラグは同じビルドの中で共通になるため、`genzo-cli/libraw` を有効にすると本体の実行ファイル（`genzo`）が使う `genzo-raw` でも `libraw` が有効になります。LibRaw の関数を呼ぶのはワーカーだけですが、OS とリンカーによっては本体の実行ファイルも LibRaw の共有ライブラリに依存する可能性があります。配布物の構成と LGPL の条件に関わります。
+    - Linux（Ubuntu 24.04）: `--features genzo-cli/libraw` でビルドした `genzo` と `genzo-worker`（どちらも現時点では LibRaw の関数を呼ばない）が `libraw_r.so` に依存しないことを、`ldd` で確認しました（2026-10-10）。Linux では rustc（と Ubuntu の gcc）がリンカーに `--as-needed` を渡し、使わない共有ライブラリを記録しないためと考えています。
+    - macOS: ld64 は既定では、指定したライブラリ（dylib）を使われなくても実行ファイルに記録するとされるため、本体も LibRaw に依存する可能性があります（未確認）。`otool -L` で確認し、必要なら本体の crate のリンクの引数に `-Wl,-dead_strip_dylibs` を加えることを検討してください。
+    - Windows: 未確認（LibRaw の入手方法が未定）。
+  - **スレッドセーフな版（`libraw_r`）を使うこと。** autotools でビルドした `libraw`（`_r` なし）は `LIBRAW_NOTHREADS` 付きで、展開の関数が静的変数を使うため、別のインスタンスでも並行して展開するとデータが壊れます。`genzo-raw` は `libraw_r` が見つからず `libraw` にリンクする場合、ビルド時に警告を出し、LibRaw の使用をプロセスの中で 1 つずつに制限します（`crates/genzo-raw/build.rs`）。Windows の LibRaw（`Makefile.msvc` のビルド）は `LIBRAW_NOTHREADS` を使わないとみなしていますが、未確認です。
+- **CI**: macOS では Homebrew の `libraw` を入れて、機能フラグ `libraw` を有効にしたビルドとテスト（合成 DNG を LibRaw で展開するテストを含む）も実行します。Windows の CI は LibRaw なしの構成だけです。
 
 ### 3.2 Little CMS 2
 

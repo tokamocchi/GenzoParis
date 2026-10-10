@@ -28,18 +28,18 @@
 
 | No | 作業 | 状態 | メモ |
 |---|---|---|---|
-| 1 | workspace と crate の雛形、`genzo-model` | 未着手 | |
-| 2 | CI（最小限）、cargo-deny、第三者の台帳（`docs/third_party.md`） | 未着手 | |
-| 3 | `genzo-color` | 未着手 | |
-| 4 | `genzo-raw`（LibRaw の FFI） | 未着手 | |
-| 5 | `genzo-media` | 未着手 | |
-| 6 | `genzo-catalog` | 未着手 | |
-| 7 | `genzo-jobs` | 未着手 | |
-| 8 | `genzo-testkit` | 未着手 | |
+| 1 | workspace と crate の雛形、`genzo-model` | 完了 | |
+| 2 | CI（最小限）、cargo-deny、第三者の台帳（`docs/third_party.md`） | 完了 | Windows の CI は LibRaw なし（入手方法が未定） |
+| 3 | `genzo-color` | 完了（独立レビュー済み） | 純粋なガンマの変換先で、33³ の LUT の暗部（L* < 5）の ΔE2000 が 1 を超える。扱いは PoC-1 で決める |
+| 4 | `genzo-raw`（LibRaw の FFI） | 完了（独立レビュー済み） | `libraw_r` を推奨（`libraw` では LibRaw の使用を 1 つずつに制限）。実機の ARW での確認は PoC-2 |
+| 5 | `genzo-media` | 完了（独立レビュー済み） | Windows / macOS 固有の動作（大文字・小文字、exFAT での名前の変更）は実機で未確認 |
+| 6 | `genzo-catalog` | 完了（独立レビュー済み） | スキーマの版 2。PERF-07（50 万件で 0.2 秒）は撮影日時順などで未達の見込み。PoC-6 で決める |
+| 7 | `genzo-jobs` | 完了（独立レビュー済み） | 優先度の高い大きなメモリの要求が待たされうる件は、PoC で PERF-13 を計測して判断する |
+| 8 | `genzo-testkit` | 完了（独立レビュー済み） | ColorChecker の値は X-Rite の原本と未照合（人の確認が必要） |
 | 9 | `genzo-pipeline`（CPU 基準実装） | 未着手 | |
 | 10 | `genzo-worker` | 未着手 | |
 | 11 | `genzo-gpu` | 未着手 | |
 | 12 | `genzo-api` | 未着手 | |
 | 13 | `genzo-cli` | 未着手 | |
-| 14 | 全体のレビューと修正 | 未着手 | |
+| 14 | 全体のレビューと修正 | 進行中 | 2026-10-10: No.3〜8 の統合を確認（fmt・clippy・test を LibRaw の有無の両方で、cargo-deny、Windows / macOS 向けの cargo clippy --target） |
 | 15 | PoC の記録のひな形（`docs/poc/`）と README の更新 | 未着手 | |

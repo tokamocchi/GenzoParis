@@ -2,7 +2,7 @@
 
 Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカタログ管理を行う、Windows / macOS 向けのデスクトップアプリです。
 
-現在は設計の段階です。実装はまだありません。
+現在は開発の初期段階です（コアの crate を実装中。アプリとしてはまだ使えません）。進捗は [docs/implementation_status.md](docs/implementation_status.md) にあります。
 
 ## 設計資料
 
@@ -20,7 +20,7 @@ Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカ�
 
 ## 開発
 
-Rust の Cargo workspace です（crate の構成は [docs/04_architecture.md](docs/04_architecture.md) の 1.4 節）。Rust は stable を使います（`rust-toolchain.toml`。最小の版は 1.88）。
+Rust の Cargo workspace です（crate の構成は [docs/04_architecture.md](docs/04_architecture.md) の 1.4 節）。Rust の版は `rust-toolchain.toml` で 1.97.0 に固定しています（手元と CI で clippy の警告をそろえるため。`Cargo.toml` の最小の版は 1.88）。
 
 ### ビルドとテスト
 
@@ -33,21 +33,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ### LibRaw（機能フラグ `libraw`）
 
-RAW の展開には LibRaw（0.21 系）を使います。機能フラグ `libraw` は既定では無効で、LibRaw がなくてもビルドとテストができます。LibRaw の関数を呼ぶのはワーカープロセスだけで、本体からは呼びません（[docs/04_architecture.md](docs/04_architecture.md) の 1.2 節）。
+RAW の展開には LibRaw（0.21 以降。スレッドセーフ版の `libraw_r`）を使います。機能フラグ `libraw` は既定では無効で、LibRaw がなくてもビルドとテストができます。LibRaw の関数を呼ぶのはワーカープロセスだけで、本体からは呼びません（[docs/04_architecture.md](docs/04_architecture.md) の 1.2 節）。
 
 | OS | LibRaw の導入方法 |
 |---|---|
 | Ubuntu | `sudo apt install libraw-dev pkg-config` |
 | macOS | `brew install libraw pkgconf` |
-| Windows | 未定 |
+| Windows | 未定（環境変数 `LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR` で指定する方法を用意しているが、未確認。`crates/genzo-raw/build.rs`） |
 
 ```sh
 cargo test --workspace --features genzo-cli/libraw
 ```
 
-`genzo-cli/libraw` を指定すると、`genzo-api`・`genzo-worker`・`genzo-raw` の `libraw` も有効になります。LibRaw の FFI はまだ実装していないため、現時点では機能フラグを有効にしても LibRaw にはリンクしません。
+`genzo-cli/libraw` を指定すると、`genzo-api`・`genzo-worker`・`genzo-raw` の `libraw` も有効になります。LibRaw は pkg-config で `libraw_r` を探し、なければ `libraw` を使います（`libraw` はスレッドセーフでないため、LibRaw の使用をプロセスの中で 1 つずつに制限します）。
 
-Cargo の機能フラグは同じビルドの中で共通になるため、`libraw` を有効にすると、本体の実行ファイル（`genzo`）が使う `genzo-raw` でも `libraw` が有効になります。OS とリンカーによっては、本体の実行ファイルも LibRaw の共有ライブラリに依存する可能性があります。本体に LibRaw を入れない構成は、LibRaw の FFI の作業で確認します。
+Cargo の機能フラグは同じビルドの中で共通になるため、`libraw` を有効にすると、本体の実行ファイル（`genzo`）が使う `genzo-raw` でも `libraw` が有効になります。Linux では本体の実行ファイルが LibRaw の共有ライブラリに依存しないことを確認しましたが、macOS・Windows は未確認です（[docs/third_party.md](docs/third_party.md) の 3.1 節）。
 
 ### 依存ライブラリのライセンスと脆弱性の確認
 
