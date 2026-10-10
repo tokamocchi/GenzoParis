@@ -91,7 +91,8 @@ fn h264_metadata_and_thumbnail() {
     assert_eq!((thumb.jpeg.width, thumb.jpeg.height), (160, 120));
     // 3 秒の動画は長さの 10%（0.3 秒）の位置。
     assert_eq!(thumb.position_ms, 300);
-    assert_eq!(thumb.color, VideoColorHandling::Bt709);
+    // 320×240 で色の記録がないので SD とみなす（BT.601 の行列。原色は変換しない。指摘 F29）。
+    assert_eq!(thumb.color, VideoColorHandling::PrimariesNotConverted);
     let d = decode_image_bytes(&thumb.jpeg.bytes).unwrap();
     assert_eq!(
         d.profile,
@@ -114,11 +115,30 @@ fn srgb8_to_p3(c: [f64; 3]) -> [f64; 3] {
         .map(|v| srgb_encode(v.clamp(0.0, 1.0)) * 255.0)
 }
 
+/// サムネイルの中央の色（8bit）。
+fn thumbnail_center(t: &FfmpegTools, video: &Path) -> [u8; 3] {
+    let thumb = t
+        .thumbnail(
+            video,
+            CacheSpec {
+                long_edge: 64,
+                quality: 100,
+            },
+        )
+        .unwrap();
+    // 1 秒の動画は先頭のフレーム。
+    assert_eq!(thumb.position_ms, 0);
+    let d = decode_image_bytes(&thumb.jpeg.bytes).unwrap();
+    let rgb = d.pixels.to_rgb8();
+    rgb.pixel(rgb.width() / 2, rgb.height() / 2).unwrap()
+}
+
 #[test]
 fn thumbnail_colors_use_bt709_matrix() {
-    // BT.709 の行列で YUV にした単色の動画。行列を記録したもの・しないものの両方で、元の色
+    // BT.709 の行列で YUV にした単色の HD の動画。行列を記録したもの・しないものの両方で、元の色
     // （sRGB）を P3 にした値に近いこと（記録がないときに ffmpeg の既定の BT.601 で戻すと、
-    // R が 10 段階以上ずれる）。
+    // R が 10 段階以上ずれる）。記録がない SD の動画は BT.601 で戻すので（指摘 F29。
+    // `untagged_sd_video_uses_bt601_matrix`）、ここでは HD の寸法にする。
     let Some(t) = tools() else { return };
     let dir = tempfile::tempdir().unwrap();
     let color = [192.0, 64.0, 32.0];
@@ -126,7 +146,7 @@ fn thumbnail_colors_use_bt709_matrix() {
         "-f",
         "lavfi",
         "-i",
-        "color=c=0xC04020:s=64x48:d=1:r=10",
+        "color=c=0xC04020:s=1280x720:d=1:r=10",
         "-vf",
         "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
         "-c:v",
@@ -155,23 +175,8 @@ fn thumbnail_colors_use_bt709_matrix() {
         };
         let p = t.probe(&video).unwrap();
         assert_eq!(p.color_space.is_some(), name == "tagged.mp4", "{p:?}");
-        let thumb = t
-            .thumbnail(
-                &video,
-                CacheSpec {
-                    long_edge: 64,
-                    quality: 100,
-                },
-            )
-            .unwrap();
-        // 1 秒の動画は先頭のフレーム。
-        assert_eq!(thumb.position_ms, 0);
-        let px = decode_image_bytes(&thumb.jpeg.bytes)
-            .unwrap()
-            .pixels
-            .to_rgb8()
-            .pixel(32, 24)
-            .unwrap();
+        assert_eq!(p.coded_size, Some((1280, 720)));
+        let px = thumbnail_center(&t, &video);
         let expected = srgb8_to_p3(color);
         for k in 0..3 {
             // 4:2:0・制限範囲の 8bit・JPEG の丸めの分を見込む。
@@ -180,6 +185,57 @@ fn thumbnail_colors_use_bt709_matrix() {
                 "{name}: {px:?} vs {expected:?}"
             );
         }
+    }
+}
+
+#[test]
+fn untagged_sd_video_uses_bt601_matrix() {
+    // 色の記録がない SD（640×480）の動画を BT.601・制限範囲で符号化したもの（古いカメラ・携帯電話の
+    // H.264 など）。慣習（mpv などのプレイヤー）どおり BT.601 で戻し、元の色に近いこと。
+    // 再現（指摘 F29）: 修正前は BT.709 で戻し、(200,60,60) が sRGB で約 (209,72,54)
+    // （ΔE2000 で約 5.4）になった。縦に撮った動画（回転の記録付き）も、符号化された寸法で決める。
+    let Some(t) = tools() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let color = [200.0, 60.0, 60.0];
+    let args = [
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=0xC83C3C:s=640x480:d=1:r=10",
+        "-vf",
+        "scale=out_color_matrix=bt601:out_range=tv,format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+    ];
+    let Some(video) = make_video(&t, &dir.path().join("sd.mp4"), &args) else {
+        return;
+    };
+    let src_str = video.to_str().unwrap().to_owned();
+    let Some(rotated) = make_video(
+        &t,
+        &dir.path().join("sd_rotated.mp4"),
+        &["-display_rotation:v:0", "90", "-i", &src_str, "-c", "copy"],
+    ) else {
+        return;
+    };
+    let expected = srgb8_to_p3(color);
+    for v in [&video, &rotated] {
+        let p = t.probe(v).unwrap();
+        assert_eq!(p.color_space, None, "{p:?}");
+        assert_eq!(p.coded_size, Some((640, 480)));
+        let px = thumbnail_center(&t, v);
+        for k in 0..3 {
+            assert!(
+                (f64::from(px[k]) - expected[k]).abs() <= 6.0,
+                "{}: {px:?} vs {expected:?}",
+                v.display()
+            );
+        }
+        let thumb = t.thumbnail(v, CacheSpec::L0_THUMBNAIL).unwrap();
+        // 原色（SMPTE-C / EBU）は変換していない。
+        assert_eq!(thumb.color, VideoColorHandling::PrimariesNotConverted);
     }
 }
 

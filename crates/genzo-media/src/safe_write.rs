@@ -353,9 +353,10 @@ fn temp_file_in(dir: &Path) -> Result<tempfile::NamedTempFile> {
 
 /// 名前の変更の後、フォルダの変更を永続化する（Unix。失敗しても書き出し自体は成功している）。
 fn sync_dir(dir: &Path) {
+    // Apple でも F_FULLFSYNC が使えなければ fsync に戻す（genzo_model::fs_sync。失敗は無視する）。
     #[cfg(unix)]
     if let Ok(d) = File::open(dir) {
-        let _ = d.sync_all();
+        let _ = genzo_model::fs_sync::sync_file_full(&d);
     }
     #[cfg(not(unix))]
     let _ = dir;
@@ -396,9 +397,11 @@ where
     let dir = parent_dir(&target).to_path_buf();
     let mut tmp = temp_file_in(&dir)?;
     write(tmp.as_file_mut())?;
+    // std の `sync_all` は Apple で F_FULLFSYNC に対応しないファイルシステム（SMB など）に書き出すと
+    // 毎回失敗するため、fsync に戻す同期を使う（指摘 F19。genzo_model::fs_sync）。
     tmp.as_file_mut()
         .flush()
-        .and_then(|()| tmp.as_file().sync_all())
+        .and_then(|()| genzo_model::fs_sync::sync_file_full(tmp.as_file()))
         .map_err(|e| MediaError::io(tmp.path(), e))?;
 
     if policy == ConflictPolicy::Overwrite {

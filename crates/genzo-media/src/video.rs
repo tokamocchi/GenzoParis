@@ -12,9 +12,12 @@
 //! ## 色の扱い（IQ-09）
 //!
 //! YUV → RGB の変換は ffmpeg（swscale）が行う。変換の行列は、動画に記録された行列
-//! （`color_space`）があればそれを使い、記録がなければ **BT.709** を使う（ffmpeg の既定は BT.601
-//! のため明示する。HD 以上の動画は BT.709 が普通）。得られた RGB は **sRGB とみなす**（BT.709 と
-//! sRGB は原色と白色点が同じ。伝達関数の違い（BT.709 の OETF と sRGB）は無視する）。
+//! （`color_space`）があればそれを使い、記録がなければ、回転を反映する前の寸法（`coded_size`）で
+//! 決める: **SD（幅 1280 未満かつ高さ 576 以下）は BT.601、それ以外（と寸法が分からないもの）は
+//! BT.709**（mpv などのプレイヤーの慣習と同じ。ffmpeg の既定は寸法によらず BT.601 のため、
+//! 常に明示する）。得られた RGB は **sRGB とみなす**（BT.709 と sRGB は原色と白色点が同じ。
+//! 伝達関数の違い（BT.709 の OETF と sRGB）は無視する。記録がない SD の原色（SMPTE-C / EBU）も
+//! 変換しない。[`VideoColorHandling::PrimariesNotConverted`] で知らせる）。
 //! HDR（PQ・HLG）のトーンマッピング、BT.2020 の色域の変換、Log 収録（D-Log など。メタデータでは
 //! 見分けられないことが多い）の LUT の適用は **later**（VID-06・CLR-03）。現状はそのまま sRGB と
 //! みなして表示するので、色が正しくない。該当しそうな動画は [`VideoColorHandling`] で知らせる。
@@ -101,17 +104,34 @@ pub struct VideoProbe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoColorHandling {
-    /// BT.709（または記録なし）として、sRGB とみなした。
+    /// BT.709（または記録がなく HD 以上）として、sRGB とみなした。
     Bt709,
     /// HDR（PQ・HLG）だが、トーンマッピングせずに sRGB とみなした（later）。
     HdrNotToneMapped,
-    /// BT.709 以外の原色（BT.2020、SD の BT.601 など）だが、原色を変換せずに sRGB とみなした
-    /// （later）。
+    /// BT.709 以外の原色（BT.2020、SD の BT.601 など。記録がない SD も含む）だが、原色を変換せずに
+    /// sRGB とみなした（later）。
     PrimariesNotConverted,
 }
 
 impl VideoColorHandling {
-    /// メタデータから判定する。
+    /// ffprobe の結果から判定する（サムネイルではこちらを使う）。
+    ///
+    /// [`from_metadata`](Self::from_metadata) に加えて、色の記録（行列・原色）がない SD の動画
+    /// （回転を反映する前の寸法が幅 1280 未満かつ高さ 576 以下。BT.601 の行列で戻す）を、原色
+    /// （SMPTE-C / EBU）を変換していないものとして
+    /// [`PrimariesNotConverted`](Self::PrimariesNotConverted) にする。
+    pub fn from_probe(p: &VideoProbe) -> Self {
+        let by_metadata = Self::from_metadata(&p.metadata);
+        if by_metadata == Self::Bt709 && p.metadata.color_primaries.is_none() && untagged_is_sd(p) {
+            Self::PrimariesNotConverted
+        } else {
+            by_metadata
+        }
+    }
+
+    /// メタデータ（記録された原色・伝達関数）だけから判定する。行列の記録と符号化された寸法は
+    /// 見ないので、記録がない SD の動画も [`Bt709`](Self::Bt709) になる。ffprobe の結果があれば
+    /// [`from_probe`](Self::from_probe) を使う。
     pub fn from_metadata(m: &VideoMetadata) -> Self {
         let transfer = m.color_transfer.as_deref().unwrap_or_default();
         let primaries = m.color_primaries.as_deref().unwrap_or_default();
@@ -326,11 +346,30 @@ pub fn thumbnail_position_s(duration_s: Option<f64>) -> f64 {
     }
 }
 
+/// 行列の記録がない動画を SD とみなす幅の上限（これ未満）。
+const SD_MAX_WIDTH_EXCLUSIVE: u32 = 1280;
+/// 行列の記録がない動画を SD とみなす高さの上限（これ以下）。
+const SD_MAX_HEIGHT: u32 = 576;
+
+/// 行列の記録がない動画を SD とみなすか（回転を反映する前の寸法で決める）。
+///
+/// mpv などのプレイヤーの慣習と同じく、幅 1280 未満かつ高さ 576 以下を SD とする（シネスコで
+/// 切り抜いた 1280×534 などの HD を SD と誤らないよう、高さだけでは決めない）。寸法が分からなければ
+/// SD とみなさない（BT.709）。
+fn untagged_is_sd(probe: &VideoProbe) -> bool {
+    probe.color_space.is_none()
+        && probe
+            .coded_size
+            .is_some_and(|(w, h)| w < SD_MAX_WIDTH_EXCLUSIVE && h <= SD_MAX_HEIGHT)
+}
+
 /// ffmpeg の scale フィルターの `in_color_matrix` に渡す値。記録があれば `auto`（記録どおり）、
-/// なければ `bt709`。
+/// なければ SD（[`untagged_is_sd`]）は `bt601`、それ以外は `bt709`。
 fn input_color_matrix(probe: &VideoProbe) -> &'static str {
     if probe.color_space.is_some() {
         "auto"
+    } else if untagged_is_sd(probe) {
+        "bt601"
     } else {
         "bt709"
     }
@@ -525,7 +564,7 @@ impl FfmpegTools {
         Ok(VideoThumbnail {
             jpeg,
             position_ms: (position * 1000.0).round() as u64,
-            color: VideoColorHandling::from_metadata(&probe.metadata),
+            color: VideoColorHandling::from_probe(probe),
         })
     }
 }
@@ -689,6 +728,67 @@ mod tests {
         ] {
             assert_eq!(normalize_rotation(deg), n, "{deg}");
         }
+    }
+
+    /// 行列の記録がない動画の行列は、回転を反映する前の寸法で決める（指摘 F29）。
+    ///
+    /// SD（幅 1280 未満かつ高さ 576 以下）は BT.601、それ以外は BT.709。シネスコで切り抜いた
+    /// HD（1280×534）は幅で HD とみなす。寸法が分からなければ BT.709。
+    #[test]
+    fn untagged_matrix_depends_on_coded_size() {
+        let probe = |coded: Option<(u32, u32)>, rotation_deg: u32| VideoProbe {
+            coded_size: coded,
+            rotation_deg,
+            ..Default::default()
+        };
+        // 記録がない SD は原色を変換していない（PrimariesNotConverted）。
+        let (sd, hd) = (
+            VideoColorHandling::PrimariesNotConverted,
+            VideoColorHandling::Bt709,
+        );
+        for (coded, rot, matrix, color) in [
+            (Some((640, 480)), 0, "bt601", sd),
+            (Some((720, 576)), 0, "bt601", sd),
+            (Some((720, 480)), 0, "bt601", sd),
+            (Some((352, 288)), 0, "bt601", sd),
+            // 縦に撮った SD（回転の記録付き）。表示上の高さは 640 だが、符号化された寸法で決める。
+            (Some((640, 480)), 90, "bt601", sd),
+            (Some((1024, 576)), 0, "bt601", sd),
+            (Some((1024, 600)), 0, "bt709", hd),
+            (Some((1280, 720)), 0, "bt709", hd),
+            (Some((1280, 534)), 0, "bt709", hd),
+            (Some((1920, 1080)), 90, "bt709", hd),
+            (Some((3840, 2160)), 0, "bt709", hd),
+            (None, 0, "bt709", hd),
+        ] {
+            let p = probe(coded, rot);
+            assert_eq!(input_color_matrix(&p), matrix, "{coded:?} {rot}");
+            assert_eq!(VideoColorHandling::from_probe(&p), color, "{coded:?} {rot}");
+        }
+        // 行列の記録があれば、寸法によらず記録どおり（auto）。
+        let mut p = probe(Some((640, 480)), 0);
+        p.color_space = Some("bt709".to_owned());
+        p.metadata.color_primaries = Some("bt709".to_owned());
+        assert_eq!(input_color_matrix(&p), "auto");
+        assert_eq!(
+            VideoColorHandling::from_probe(&p),
+            VideoColorHandling::Bt709
+        );
+        // 原色だけ BT.709 と記録された SD: 行列は BT.601 で戻すが、原色は BT.709 のまま。
+        let mut p = probe(Some((640, 480)), 0);
+        p.metadata.color_primaries = Some("bt709".to_owned());
+        assert_eq!(input_color_matrix(&p), "bt601");
+        assert_eq!(
+            VideoColorHandling::from_probe(&p),
+            VideoColorHandling::Bt709
+        );
+        // HDR の判定は寸法より優先する。
+        let mut p = probe(Some((640, 480)), 0);
+        p.metadata.color_transfer = Some("smpte2084".to_owned());
+        assert_eq!(
+            VideoColorHandling::from_probe(&p),
+            VideoColorHandling::HdrNotToneMapped
+        );
     }
 
     #[test]
@@ -874,7 +974,8 @@ mod tests {
             let thumb = t.thumbnail(&video, CacheSpec::L0_THUMBNAIL).unwrap();
             assert_eq!(thumb.position_ms, 0);
             assert_eq!((thumb.jpeg.width, thumb.jpeg.height), (64, 48));
-            assert_eq!(thumb.color, VideoColorHandling::Bt709);
+            // 64×48 で色の記録がないので SD とみなす（BT.601 の行列。原色は変換しない）。
+            assert_eq!(thumb.color, VideoColorHandling::PrimariesNotConverted);
 
             // -ss の位置でもフレームが出るなら、長さの 10%（1 秒）の位置を使う。
             let t = tools(
@@ -911,7 +1012,8 @@ mod tests {
             let ss = args.iter().position(|a| *a == "-ss").unwrap();
             assert!(ss < i);
             assert_eq!(args[ss + 1], "1.000");
-            assert!(args.contains(&"scale=in_color_matrix=bt709,format=rgb24"));
+            // 64×48 で行列の記録がないので BT.601（記録がない SD。指摘 F29）。
+            assert!(args.contains(&"scale=in_color_matrix=bt601,format=rgb24"));
             assert!(
                 args.windows(2)
                     .any(|w| w == ["-protocol_whitelist", "file"])

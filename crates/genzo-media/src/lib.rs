@@ -3,7 +3,7 @@
 //! | モジュール | 内容 | 設計書 |
 //! |---|---|---|
 //! | [`buffer`] | 8bit / 16bit の RGB 画像（[`RgbImage8`]・[`RgbImage16`]・[`DynRgbImage`]） | 2.6 節 |
-//! | [`decode`] | JPEG / PNG / TIFF の読み込み、埋め込みの ICC（なければ sRGB）と Exif | 2.6 節「RAW 以外の入力」、LIB-14 |
+//! | [`decode`] | JPEG / PNG / TIFF の読み込み、埋め込みの ICC（なければ sRGB。Exif が DCF のオプション色空間を示せば Adobe RGB）と Exif | 2.6 節「RAW 以外の入力」、LIB-14 |
 //! | [`orientation`] | Exif の向き（Orientation）を画素に反映する | PRV-01、4 章 |
 //! | [`resize`] | 面積平均の縮小（リニアな値で平均する） | PRV-01、EXP-01 |
 //! | [`cache`] | B5 のキャッシュ（Display P3 の JPEG、L0・L1）を作る | PRV-01、2.6 節の B5、4 章 |
@@ -55,6 +55,7 @@ pub mod error;
 pub mod exif_read;
 pub mod exif_write;
 pub mod export;
+pub mod file_lock;
 pub mod jpeg;
 pub mod orientation;
 pub mod png_io;
@@ -75,6 +76,7 @@ pub use decode::{
     decode_image_file, open_read_only, probe_image_bytes, probe_image_file,
 };
 pub use error::{MediaError, Result};
+pub use exif_read::AdobeRgbBasis;
 pub use exif_write::{EXIF_SOFTWARE, ExifData, exif_tiff_bytes};
 pub use export::{
     EXPORT_ICC_VERSION, encode_export, export_icc_profile, export_image, standard_profile_for,

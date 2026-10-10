@@ -4,7 +4,9 @@
 //!   TIFF は 0〜1 に収めて 16bit にする）。向き（Orientation）は **反映しない**（記録されたまま返す。
 //!   反映は [`crate::orientation::apply_orientation`]）。
 //! - 埋め込みの ICC プロファイルを返す。ない・読めない・RGB でない・変換に使えないときは sRGB と
-//!   みなす（2.6 節）。その理由を [`SrgbAssumption`] で返す。
+//!   みなす（2.6 節）。その理由を [`SrgbAssumption`] で返す。ただし、Exif が DCF のオプション
+//!   色空間（ColorSpace=0xFFFF かつ InteropIndex が R03、または非標準の ColorSpace=2）を示すときは
+//!   **Adobe RGB (1998) とみなす**（[`SourceProfile::AssumedAdobeRgb`]。指摘 F28）。
 //! - Exif（kamadak-exif）から [`PhotoMetadata`] を作る。
 //!
 //! 信頼できない入力のデコードはワーカープロセスで行う（04 の 1.1 節・1.2 節、SEC-05）。
@@ -22,7 +24,7 @@ use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
 use crate::buffer::{DynRgbImage, MAX_IMAGE_PIXELS, RgbImage, Sample};
 use crate::error::{MediaError, Result};
-use crate::exif_read::{parse_exif, photo_metadata_from_exif};
+use crate::exif_read::{AdobeRgbBasis, adobe_rgb_hint, parse_exif, photo_metadata_from_exif};
 use crate::orientation::apply_orientation_dyn;
 
 /// デコーダーが一度に確保してよいメモリの上限（バイト。仮置き）。
@@ -71,7 +73,8 @@ impl ImageFileFormat {
     }
 }
 
-/// 埋め込みの ICC プロファイルを使わず、sRGB とみなした理由。
+/// 埋め込みの ICC プロファイルを使わなかった理由（sRGB とみなした理由。Adobe RGB とみなした場合
+/// （[`SourceProfile::AssumedAdobeRgb`]）の ICC の状態にも使う）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SrgbAssumption {
     /// ICC プロファイルが埋め込まれていない。
@@ -91,15 +94,26 @@ pub enum SourceProfile {
     Embedded(IccProfile),
     /// sRGB とみなす（理由付き）。
     AssumedSrgb(SrgbAssumption),
+    /// 埋め込みの ICC プロファイルを使えず、Exif が DCF のオプション色空間（Adobe RGB）を示すので、
+    /// Adobe RGB (1998) とみなす（指摘 F28。[`crate::exif_read::adobe_rgb_hint`]）。
+    AssumedAdobeRgb {
+        /// Exif のどの値から判断したか。
+        basis: AdobeRgbBasis,
+        /// 埋め込みの ICC プロファイルを使わなかった理由（普通は [`SrgbAssumption::NoProfile`]）。
+        icc: SrgbAssumption,
+    },
 }
 
 impl SourceProfile {
-    /// 色の変換に使うプロファイル（sRGB とみなす場合は sRGB のプロファイル）。
+    /// 色の変換に使うプロファイル（sRGB・Adobe RGB とみなす場合は、それぞれの標準のプロファイル）。
     pub fn to_icc(&self) -> Result<IccProfile> {
         match self {
             Self::Embedded(p) => Ok(p.clone()),
             Self::AssumedSrgb(_) => {
                 crate::profiles::standard(StandardProfile::Srgb, IccVersion::V4_3)
+            }
+            Self::AssumedAdobeRgb { .. } => {
+                crate::profiles::standard(StandardProfile::AdobeRgb1998, IccVersion::V4_3)
             }
         }
     }
@@ -110,8 +124,26 @@ impl SourceProfile {
     }
 }
 
-/// 埋め込みの ICC のバイト列を確認する。
-pub(crate) fn resolve_profile(icc: Option<Vec<u8>>) -> SourceProfile {
+/// 色を解釈するプロファイルを決める。
+///
+/// 埋め込みの ICC のバイト列を確認し、使えればそれを使う。使えない（ない・壊れているなど）とき、
+/// Exif が Adobe RGB を示せば（`exif_hint`。[`crate::exif_read::adobe_rgb_hint`]）Adobe RGB (1998)、
+/// それ以外は sRGB とみなす（04 の 2.6 節）。
+pub(crate) fn resolve_profile(
+    icc: Option<Vec<u8>>,
+    exif_hint: Option<AdobeRgbBasis>,
+) -> SourceProfile {
+    match resolve_icc(icc) {
+        SourceProfile::AssumedSrgb(icc) => match exif_hint {
+            Some(basis) => SourceProfile::AssumedAdobeRgb { basis, icc },
+            None => SourceProfile::AssumedSrgb(icc),
+        },
+        other => other,
+    }
+}
+
+/// 埋め込みの ICC のバイト列を確認する（使えなければ sRGB とみなす）。
+fn resolve_icc(icc: Option<Vec<u8>>) -> SourceProfile {
     let Some(bytes) = icc.filter(|b| !b.is_empty()) else {
         return SourceProfile::AssumedSrgb(SrgbAssumption::NoProfile);
     };
@@ -239,11 +271,12 @@ fn read_metadata_blobs(
     }
 }
 
+/// Exif を解析して、メタデータと、色空間の手がかり（[`adobe_rgb_hint`]）を返す。
 fn metadata_from(
     exif_blob: Option<Vec<u8>>,
     tiff_file: Option<Vec<u8>>,
     (w, h): (u32, u32),
-) -> PhotoMetadata {
+) -> (PhotoMetadata, Option<AdobeRgbBasis>) {
     let exif = exif_blob.or(tiff_file).and_then(parse_exif);
     let mut meta = exif
         .as_ref()
@@ -251,7 +284,7 @@ fn metadata_from(
         .unwrap_or_default();
     meta.width = Some(w);
     meta.height = Some(h);
-    meta
+    (meta, exif.as_ref().and_then(adobe_rgb_hint))
 }
 
 /// image crate の画像を 8bit / 16bit の RGB にする。
@@ -302,10 +335,11 @@ fn detect_or_err(bytes: &[u8]) -> Result<ImageFileFormat> {
 pub fn probe_image_bytes(bytes: &[u8]) -> Result<ImageInfo> {
     let (format, icc, exif, dims) = probe_parts(bytes)?;
     let tiff_file = (format == ImageFileFormat::Tiff).then(|| bytes.to_vec());
+    let (metadata, hint) = metadata_from(exif, tiff_file, dims);
     Ok(ImageInfo {
         format,
-        profile: resolve_profile(icc),
-        metadata: metadata_from(exif, tiff_file, dims),
+        profile: resolve_profile(icc, hint),
+        metadata,
     })
 }
 
@@ -357,11 +391,12 @@ fn decode_pixels(bytes: &[u8]) -> Result<RawDecoded> {
 
 /// `tiff_file` は TIFF のときのファイル全体（Exif の解析に使う）。
 fn finish_decoded(d: RawDecoded, tiff_file: Option<Vec<u8>>) -> DecodedImage {
+    let (metadata, hint) = metadata_from(d.exif, tiff_file, d.dims);
     DecodedImage {
         format: d.format,
         pixels: d.pixels,
-        profile: resolve_profile(d.icc),
-        metadata: metadata_from(d.exif, tiff_file, d.dims),
+        profile: resolve_profile(d.icc, hint),
+        metadata,
         alpha_dropped: d.alpha_dropped,
     }
 }
@@ -424,10 +459,11 @@ pub fn probe_image_file(path: &Path) -> Result<ImageInfo> {
     let (format, icc, exif, dims) = probe_parts(&bytes)?;
     // TIFF の Exif の解析には、読んだバッファをそのまま渡す（複製しない）。
     let tiff_file = (format == ImageFileFormat::Tiff).then_some(bytes);
+    let (metadata, hint) = metadata_from(exif, tiff_file, dims);
     Ok(ImageInfo {
         format,
-        profile: resolve_profile(icc),
-        metadata: metadata_from(exif, tiff_file, dims),
+        profile: resolve_profile(icc, hint),
+        metadata,
     })
 }
 
@@ -461,33 +497,33 @@ mod tests {
     #[test]
     fn profile_resolution() {
         assert_eq!(
-            resolve_profile(None),
+            resolve_profile(None, None),
             SourceProfile::AssumedSrgb(SrgbAssumption::NoProfile)
         );
         assert_eq!(
-            resolve_profile(Some(vec![])),
+            resolve_profile(Some(vec![]), None),
             SourceProfile::AssumedSrgb(SrgbAssumption::NoProfile)
         );
         assert!(matches!(
-            resolve_profile(Some(vec![1, 2, 3])),
+            resolve_profile(Some(vec![1, 2, 3]), None),
             SourceProfile::AssumedSrgb(SrgbAssumption::Invalid(_))
         ));
         let p3 = IccProfile::standard(StandardProfile::DisplayP3).unwrap();
         assert_eq!(
-            resolve_profile(Some(p3.as_bytes().to_vec())),
+            resolve_profile(Some(p3.as_bytes().to_vec()), None),
             SourceProfile::Embedded(p3.clone())
         );
         // デバイスリンクのクラスにしたもの（RGB だが変換に使えない）。
         let mut link = p3.as_bytes().to_vec();
         link[12..16].copy_from_slice(b"link");
         assert!(matches!(
-            resolve_profile(Some(link)),
+            resolve_profile(Some(link), None),
             SourceProfile::AssumedSrgb(SrgbAssumption::Unsupported(_))
         ));
         // 色空間を GRAY にしたもの。
         let mut gray = p3.as_bytes().to_vec();
         gray[16..20].copy_from_slice(b"GRAY");
-        let r = resolve_profile(Some(gray));
+        let r = resolve_profile(Some(gray), None);
         assert!(
             matches!(
                 r,
@@ -560,6 +596,96 @@ mod tests {
         );
         let info = probe_image_bytes(&jpg).unwrap();
         assert_eq!(info.metadata.width, Some(8));
+    }
+
+    /// ICC のない JPEG で、Exif が DCF のオプション色空間（Adobe RGB）を示すもの（指摘 F28）。
+    ///
+    /// 再現: 修正前は sRGB とみなし、Adobe RGB の ICC を埋め込んだ同じ画素値の JPEG と比べて
+    /// サムネイル（B5）の彩度が落ちた（(0,200,0) が P3 で約 (90,197,59)。ICC 付きは約 (0,197,32)）。
+    #[test]
+    fn dcf_option_color_space_without_icc_is_adobe_rgb() {
+        use crate::cache::{CacheSpec, cache_jpeg_from_decoded};
+        use crate::exif_read::{AdobeRgbBasis, test_support::color_space_exif};
+        use crate::jpeg::encode_jpeg;
+
+        let colors = [
+            [0u8, 200, 0],
+            [200, 50, 50],
+            [60, 120, 200],
+            [128, 128, 128],
+        ];
+        let img =
+            RgbImage8::from_fn(8 * colors.len() as u32, 8, |x, _| colors[x as usize / 8]).unwrap();
+        let adobe = IccProfile::standard(StandardProfile::AdobeRgb1998).unwrap();
+        let with_icc = encode_jpeg(&img, 100, Some(adobe.as_bytes()), None).unwrap();
+        let spec = CacheSpec {
+            long_edge: img.width(),
+            quality: 100,
+        };
+        let center = |jpeg: &[u8]| -> Vec<[u8; 3]> {
+            let d = decode_image_bytes(jpeg).unwrap();
+            let b5 = cache_jpeg_from_decoded(&d, None, spec).unwrap();
+            let px = decode_image_bytes(&b5.bytes).unwrap().pixels.to_rgb8();
+            (0..colors.len() as u32)
+                .map(|i| px.pixel(i * 8 + 4, 4).unwrap())
+                .collect()
+        };
+        let reference = center(&with_icc);
+
+        for (cs, idx, basis) in [
+            (0xFFFF, Some("R03"), AdobeRgbBasis::DcfOptionR03),
+            (2, None, AdobeRgbBasis::ColorSpace2),
+        ] {
+            let exif = color_space_exif(Some(cs), idx);
+            let jpg = encode_jpeg(&img, 100, None, Some(&exif)).unwrap();
+            let expected = SourceProfile::AssumedAdobeRgb {
+                basis,
+                icc: SrgbAssumption::NoProfile,
+            };
+            let d = decode_image_bytes(&jpg).unwrap();
+            assert_eq!(d.profile, expected);
+            assert!(!d.profile.is_embedded());
+            assert_eq!(
+                d.profile.to_icc().unwrap(),
+                IccProfile::standard(StandardProfile::AdobeRgb1998).unwrap()
+            );
+            assert_eq!(probe_image_bytes(&jpg).unwrap().profile, expected);
+            // 色は ICC を埋め込んだものと同じになる。
+            let got = center(&jpg);
+            for (g, r) in got.iter().zip(&reference) {
+                assert!(
+                    g.iter().zip(r).all(|(a, b)| a.abs_diff(*b) <= 2),
+                    "{cs:#x} {idx:?}: {got:?} vs {reference:?}"
+                );
+            }
+        }
+
+        // ICC があれば、Exif が R03 でも ICC を使う。
+        let p3 = IccProfile::standard(StandardProfile::DisplayP3).unwrap();
+        let exif = color_space_exif(Some(0xFFFF), Some("R03"));
+        let jpg = encode_jpeg(&img, 100, Some(p3.as_bytes()), Some(&exif)).unwrap();
+        assert_eq!(
+            decode_image_bytes(&jpg).unwrap().profile,
+            SourceProfile::Embedded(p3)
+        );
+        // 壊れた ICC と R03: ICC を使えないので Adobe RGB とみなし、ICC の状態も返す。
+        assert!(matches!(
+            resolve_profile(Some(vec![1, 2, 3]), Some(AdobeRgbBasis::DcfOptionR03)),
+            SourceProfile::AssumedAdobeRgb {
+                basis: AdobeRgbBasis::DcfOptionR03,
+                icc: SrgbAssumption::Invalid(_),
+            }
+        ));
+        // R98（基本の DCF）や Uncalibrated だけなら、従来どおり sRGB とみなす。
+        for (cs, idx) in [(0xFFFF, None), (0xFFFF, Some("R98")), (1, Some("R03"))] {
+            let exif = color_space_exif(Some(cs), idx);
+            let jpg = encode_jpeg(&img, 100, None, Some(&exif)).unwrap();
+            assert_eq!(
+                decode_image_bytes(&jpg).unwrap().profile,
+                SourceProfile::AssumedSrgb(SrgbAssumption::NoProfile),
+                "{cs:#x} {idx:?}"
+            );
+        }
     }
 
     #[test]

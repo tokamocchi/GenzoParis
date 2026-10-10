@@ -1,5 +1,6 @@
 //! Exif の読み取り（kamadak-exif）。LIB-14 のメタデータ（カメラ・レンズ・露出・GPS・撮影日時・向き）を
-//! [`PhotoMetadata`] にする。
+//! [`PhotoMetadata`] にする。ICC プロファイルのない画像の色空間の手がかり（DCF のオプション色空間）も
+//! 読む（[`adobe_rgb_hint`]）。
 //!
 //! Exif は信頼できない入力として扱う。読めない・範囲外の値は `None` にし、エラーにはしない
 //! （一部が壊れていても、読めた項目は使う）。
@@ -153,6 +154,42 @@ pub fn exif_orientation(e: &Exif) -> Orientation {
         .unwrap_or_default()
 }
 
+/// ICC プロファイルのない画像を Adobe RGB (1998) とみなす、Exif の手がかり（指摘 F28）。
+///
+/// DCF（CIPA DC-009）のオプション色空間の画像（カメラで色空間を AdobeRGB にして撮った JPEG）は、
+/// ICC プロファイルを埋め込まず、Exif だけで色空間を示すことがある。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdobeRgbBasis {
+    /// ColorSpace（0xA001）が 0xFFFF（Uncalibrated）で、Interoperability IFD の
+    /// InteroperabilityIndex が `"R03"`（DCF のオプション色空間）。
+    DcfOptionR03,
+    /// ColorSpace が 2（Exif の規格にない値。Adobe RGB を示すのに使うカメラ・ソフトがある）。
+    ColorSpace2,
+}
+
+/// ColorSpace の値: Uncalibrated（sRGB 以外）。
+const COLOR_SPACE_UNCALIBRATED: u32 = 0xFFFF;
+/// ColorSpace の値: Adobe RGB を示す非標準の値。
+const COLOR_SPACE_NONSTANDARD_ADOBE_RGB: u32 = 2;
+
+/// Exif が Adobe RGB (1998) を示すか（[`AdobeRgbBasis`]）。示さなければ `None`。
+///
+/// ColorSpace=1（sRGB）・InteropIndex が `"R98"`（基本の DCF）・Uncalibrated だけ（Display P3 など。
+/// このアプリの Display P3 / Adobe RGB の書き出しも ICC を埋め込んだうえで 0xFFFF を書く）は
+/// 手がかりにしない。ICC プロファイルがあれば ICC を優先する（呼び出し側。[`crate::decode`]）。
+pub fn adobe_rgb_hint(e: &Exif) -> Option<AdobeRgbBasis> {
+    match uint(e, Tag::ColorSpace)? {
+        COLOR_SPACE_UNCALIBRATED
+            if ascii(e, Tag::InteroperabilityIndex)
+                .is_some_and(|i| i.eq_ignore_ascii_case("R03")) =>
+        {
+            Some(AdobeRgbBasis::DcfOptionR03)
+        }
+        COLOR_SPACE_NONSTANDARD_ADOBE_RGB => Some(AdobeRgbBasis::ColorSpace2),
+        _ => None,
+    }
+}
+
 /// Exif から写真のメタデータを作る。幅・高さは入れない（画像のデコード側で入れる）。
 pub fn photo_metadata_from_exif(e: &Exif) -> PhotoMetadata {
     PhotoMetadata {
@@ -168,6 +205,61 @@ pub fn photo_metadata_from_exif(e: &Exif) -> PhotoMetadata {
         orientation: exif_orientation(e),
         gps: gps(e),
         capture: capture(e),
+    }
+}
+
+/// テスト用の Exif（TIFF の構造）。
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// ColorSpace（Exif IFD）と InteroperabilityIndex（Interoperability IFD）だけを持つ Exif を
+    /// 手で組み立てる（リトルエンディアン）。exif_write は Interoperability IFD を書かないため。
+    pub(crate) fn color_space_exif(
+        color_space: Option<u16>,
+        interop_index: Option<&str>,
+    ) -> Vec<u8> {
+        fn entry(out: &mut Vec<u8>, tag: u16, typ: u16, count: u32, value: [u8; 4]) {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&typ.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&value);
+        }
+        const SHORT: u16 = 3;
+        const LONG: u16 = 4;
+        const ASCII: u16 = 2;
+        let mut out = b"II*\0".to_vec();
+        out.extend_from_slice(&8u32.to_le_bytes());
+        // 0th IFD（8 バイト目から。エントリは Exif IFD へのポインタだけ）。
+        let exif_ifd = 8 + 2 + 12 + 4;
+        out.extend_from_slice(&1u16.to_le_bytes());
+        entry(&mut out, 0x8769, LONG, 1, (exif_ifd as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        // Exif IFD。
+        let n = u16::from(color_space.is_some()) + u16::from(interop_index.is_some());
+        let interop_ifd = exif_ifd + 2 + 12 * usize::from(n) + 4;
+        out.extend_from_slice(&n.to_le_bytes());
+        if let Some(cs) = color_space {
+            let v = cs.to_le_bytes();
+            entry(&mut out, 0xA001, SHORT, 1, [v[0], v[1], 0, 0]);
+        }
+        if interop_index.is_some() {
+            entry(
+                &mut out,
+                0xA005,
+                LONG,
+                1,
+                (interop_ifd as u32).to_le_bytes(),
+            );
+        }
+        out.extend_from_slice(&0u32.to_le_bytes());
+        // Interoperability IFD（InteroperabilityIndex は 3 文字 + NUL なので値の欄に収まる）。
+        if let Some(idx) = interop_index {
+            assert_eq!(idx.len(), 3);
+            let b = idx.as_bytes();
+            out.extend_from_slice(&1u16.to_le_bytes());
+            entry(&mut out, 0x0001, ASCII, 4, [b[0], b[1], b[2], 0]);
+            out.extend_from_slice(&0u32.to_le_bytes());
+        }
+        out
     }
 }
 
@@ -304,5 +396,30 @@ mod tests {
         };
         let e = parse_exif(encode_exif_tiff(&ifds, ByteOrder::Big).unwrap()).unwrap();
         assert_eq!(exif_orientation(&e), Orientation::Normal);
+    }
+
+    /// ICC のない画像の色空間の手がかり（DCF のオプション色空間。指摘 F28）。
+    #[test]
+    fn adobe_rgb_hint_from_dcf_color_space() {
+        use test_support::color_space_exif;
+        let hint = |cs, idx| adobe_rgb_hint(&parse_exif(color_space_exif(cs, idx)).unwrap());
+        // DCF のオプション色空間: ColorSpace=0xFFFF（Uncalibrated）かつ InteropIndex="R03"。
+        assert_eq!(
+            hint(Some(0xFFFF), Some("R03")),
+            Some(AdobeRgbBasis::DcfOptionR03)
+        );
+        // 非標準の ColorSpace=2（Adobe RGB を示すのに使うカメラ・ソフトがある）。
+        assert_eq!(hint(Some(2), None), Some(AdobeRgbBasis::ColorSpace2));
+        assert_eq!(hint(Some(2), Some("R98")), Some(AdobeRgbBasis::ColorSpace2));
+        // sRGB（ColorSpace=1）・基本の DCF（R98）・Uncalibrated だけ（このアプリの Display P3 の
+        // 書き出しなど。ICC を埋め込む）は手がかりにしない。
+        assert_eq!(hint(Some(1), Some("R98")), None);
+        assert_eq!(hint(Some(1), Some("R03")), None);
+        assert_eq!(hint(Some(0xFFFF), Some("R98")), None);
+        assert_eq!(hint(Some(0xFFFF), None), None);
+        assert_eq!(hint(None, Some("R03")), None);
+        assert_eq!(hint(None, None), None);
+        // このアプリの書き出しの Exif（sRGB）。
+        assert_eq!(adobe_rgb_hint(&parse_exif(write(&sample())).unwrap()), None);
     }
 }

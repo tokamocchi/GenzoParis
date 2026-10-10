@@ -22,5 +22,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 
+# ロックファイルの排他（flock。標準ライブラリの File::try_lock は Rust 1.89 からのため。`file_lock` の doc）。
+# tempfile が既に使っている版と同じ。
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
 [lints]
 workspace = true
