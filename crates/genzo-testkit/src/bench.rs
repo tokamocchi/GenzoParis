@@ -284,7 +284,7 @@ impl fmt::Display for BenchResult {
             } else {
                 "未達"
             };
-            write!(f, "、目標 {t} ms（{verdict}）を超えた回数 {over}")?;
+            write!(f, "、目標 {t:.3} ms（{verdict}）を超えた回数 {over}")?;
         }
         for (name, p) in &self.phases {
             write!(
@@ -876,7 +876,8 @@ mod tests {
         assert_eq!(r.warmup, 0);
         let text = r.to_string();
         assert!(text.contains("95 パーセンタイル 29.000 ms"), "{text}");
-        assert!(text.contains("未達"), "{text}");
+        // 目標も他の値と同じ桁数で出す（1/15 秒の 66.666666… をそのまま出さない）。
+        assert!(text.contains("目標 25.000 ms（未達）"), "{text}");
     }
 
     #[test]
