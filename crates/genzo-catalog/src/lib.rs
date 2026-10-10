@@ -45,7 +45,8 @@ mod util;
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "test-support")]
+// 他の crate の結合テスト（機能フラグ `test-support`）と、この crate のテストが使う。
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod testing;
 

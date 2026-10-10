@@ -345,6 +345,59 @@ fn settings_are_stored_as_key_values() {
     assert!(!f.cat.remove_setting("default_tz").unwrap());
 }
 
+/// 複数の設定と、撮影日時の推定し直しが済んでいない印を、1 つのトランザクションで保存する。
+#[test]
+fn several_settings_and_the_reresolve_mark_are_saved_together() {
+    let mut f = Fixture::new();
+    f.cat.set_setting("a", "old").unwrap();
+    // 何もなければ、何も書かない（印も付けない）。
+    f.cat.set_settings(&[], false).unwrap();
+    assert!(!f.cat.capture_time_reresolve_pending().unwrap());
+    // 印を付けない保存は、印に触れない。
+    f.cat
+        .set_settings(&[("a", "new"), ("b", "1")], false)
+        .unwrap();
+    assert_eq!(f.cat.setting("a").unwrap().as_deref(), Some("new"));
+    assert_eq!(f.cat.setting("b").unwrap().as_deref(), Some("1"));
+    assert!(!f.cat.capture_time_reresolve_pending().unwrap());
+    // 同じキーを続けて指定したときは、後の値が残る。印は、設定がなくても付けられる。
+    f.cat.set_settings(&[("b", "2"), ("b", "3")], true).unwrap();
+    assert_eq!(f.cat.setting("b").unwrap().as_deref(), Some("3"));
+    assert!(f.cat.capture_time_reresolve_pending().unwrap());
+    f.cat.set_settings(&[], true).unwrap();
+    assert!(f.cat.capture_time_reresolve_pending().unwrap());
+}
+
+/// 後の設定の書き込みが失敗したら、先の設定も印も保存しない（ディスクが一杯・入出力のエラーなどでの
+/// 途中の失敗で、一部だけ保存されない）。失敗の後も、同じカタログに書ける。
+#[test]
+fn settings_are_not_partly_saved_when_a_later_write_fails() {
+    let mut f = Fixture::new();
+    f.cat.set_setting("a", "old").unwrap();
+    let path = f.cat.path().unwrap().to_path_buf();
+    // 3 つ目の項目（`c`）の書き込みだけを失敗させる。
+    crate::testing::fail_setting_writes(&path, "c").unwrap();
+    let result = f
+        .cat
+        .set_settings(&[("a", "new"), ("b", "1"), ("c", "2")], true);
+    assert!(matches!(result, Err(CatalogError::Sqlite(_))), "{result:?}");
+    assert_eq!(f.cat.setting("a").unwrap().as_deref(), Some("old"));
+    assert_eq!(f.cat.setting("b").unwrap(), None);
+    assert_eq!(f.cat.setting("c").unwrap(), None);
+    assert!(!f.cat.capture_time_reresolve_pending().unwrap());
+    // 失敗したトランザクションが残らず、続けて書ける（失敗する項目以外）。
+    f.cat.set_setting("d", "1").unwrap();
+    assert_eq!(f.cat.setting("d").unwrap().as_deref(), Some("1"));
+    // 失敗の原因がなくなれば、同じ保存が通る。
+    crate::testing::allow_setting_writes(&path).unwrap();
+    f.cat
+        .set_settings(&[("a", "new"), ("b", "1"), ("c", "2")], true)
+        .unwrap();
+    assert_eq!(f.cat.setting("a").unwrap().as_deref(), Some("new"));
+    assert_eq!(f.cat.setting("c").unwrap().as_deref(), Some("2"));
+    assert!(f.cat.capture_time_reresolve_pending().unwrap());
+}
+
 #[test]
 fn future_schema_version_is_rejected_without_changes() {
     let dir = tempfile::tempdir().unwrap();

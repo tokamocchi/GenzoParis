@@ -288,13 +288,39 @@ impl Catalog {
             .optional()?)
     }
 
-    /// 設定の値を保存する（あれば置き換える）。
+    /// 設定の値を保存する（あれば置き換える）。1 件ごとにコミットする（複数の設定を 1 つの要求として
+    /// 保存するときは、途中で失敗しても一部だけ残らないよう、[`Catalog::set_settings`] を使う）。
     pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO setting(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
+        upsert_setting(&self.conn, key, value)
+    }
+
+    /// 複数の設定を、1 つのトランザクションで保存する（あれば置き換える）。すべて保存されるか、途中で失敗
+    /// したときは 1 つも保存されない（カタログは元の値のまま）。同じキーを複数回指定したときは、後の値が残る。
+    ///
+    /// `mark_capture_time_reresolve` が `true` なら、撮影日時の推定し直しが済んでいない印
+    /// （[`Catalog::set_capture_time_reresolve_pending`]）も、同じトランザクションで付ける。既定のタイム
+    /// ゾーンを変える更新で使う（設定と印が別々にコミットされると、一方だけが残りうる）。
+    pub fn set_settings(
+        &mut self,
+        entries: &[(&str, &str)],
+        mark_capture_time_reresolve: bool,
+    ) -> Result<()> {
+        if entries.is_empty() && !mark_capture_time_reresolve {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        for &(key, value) in entries {
+            upsert_setting(&tx, key, value)?;
+        }
+        if mark_capture_time_reresolve {
+            set_app_state(
+                &tx,
+                STATE_CAPTURE_TIME_RERESOLVE,
+                CAPTURE_TIME_RERESOLVE_PENDING,
+            )?;
+        }
+        // 途中で失敗したときは、`tx` を捨てて（ロールバックして）エラーを返す。
+        tx.commit()?;
         Ok(())
     }
 
@@ -373,6 +399,15 @@ pub(crate) fn get_app_state(conn: &Connection, key: &str) -> Result<Option<Strin
             row.get(0)
         })
         .optional()?)
+}
+
+fn upsert_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO setting(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 fn set_app_state(conn: &Connection, key: &str, value: &str) -> Result<()> {
