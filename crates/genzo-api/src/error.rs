@@ -250,7 +250,7 @@ const HINT_IN_USE: &str =
     "カタログを開いている GenzoParis（アプリ・CLI）を終了してから、やり直してください";
 const HINT_CACHE: &str = "サムネイル・プレビューのキャッシュは作り直せます（カタログの復元は不要です）。開くときに壊れていれば自動で退避して作り直します。直らなければ、アプリを終了し、データのフォルダの thumbs.db の名前を変えてから開き直してください";
 const HINT_PROTECTED: &str = "書き出し先のフォルダか、衝突時の扱い（連番）を変えてください";
-const HINT_TRASH: &str = "ゴミ箱のあるドライブか、macOS では Finder を制御する許可（プライバシーとセキュリティのオートメーション）を確かめてください。直接の削除は行いません";
+const HINT_TRASH: &str = "ゴミ箱のあるドライブか（ネットワークの共有フォルダ・一部の外付けドライブにはありません）、ファイルの権限を確かめてください。直接の削除は行いません";
 const HINT_WORKER: &str = "ワーカーの実行ファイルの場所（GENZO_WORKER_PATH）を確かめてください";
 const HINT_FFMPEG: &str =
     "ffmpeg / ffprobe が使えるか（GENZO_FFMPEG / GENZO_FFPROBE）確かめてください";

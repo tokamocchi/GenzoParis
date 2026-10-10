@@ -50,11 +50,12 @@
 //! | [`error`] | [`ApiError`] と UI に見せる分類（[`ErrorInfo`]・[`ErrorKind`]） | 6.3 節 |
 //! | [`types`] | 引数・応答の型（serde の素直な形） | 1.5 節 |
 //! | `import` | 取り込み（[`Core::import_folder`]） | IMP-01・VID-01・PRV-01、3.5 節 |
-//! | `search` | 検索と世代（[`Core::search`]・[`Core::range`]・[`Core::index_of`]） | LIB-07・08、3.2 節・3.7 節 |
+//! | `search` | 検索と世代（[`Core::search`]・[`Core::range`]・[`Core::index_of`]）、結果のバックグラウンドの作り直し | LIB-07・08、3.2 節・3.7 節 |
 //! | `library` | 選別（[`Core::set_rating`] など）・詳細・フォルダ・ファイルの状態（[`Core::check_files`]） | LIB-04・14、3.3 節 |
 //! | `previews` | サムネイル（[`Core::thumbnail`]）・L1（[`Core::preview_path`]）と、現像結果からの作り直し | 4 章・4.1 節、PRV-01・02・04 |
 //! | `develop` | 現像のセッション（[`Core::open_develop`]・[`Core::set_settings`]・Undo / Redo・一括適用・仮想コピー） | DEV-00〜08・15・26・27・30、6.2 節 |
 //! | `render` | GPU → CPU の切り替え、画面のプロファイル（[`Core::set_display_profile`]） | 2.4 節・6.3 節、IQ-05 |
+//! | `region` | 表示範囲の描画（[`Core::render_region`]。ルーペの等倍表示・拡大とパン。P0 の最新の 1 件だけ、取り消しあり） | PRV-03・LIB-02、2.7 節・6.1 節 |
 //! | `export` | 書き出し（[`Core::export`]） | EXP-01・04、2.4 節・6.4 節 |
 //! | `delete` | 削除（[`Core::plan_delete`]・[`Core::execute_delete`]）とファイル操作の確定 | FILE-01、6.4 節、DATA-07 |
 //! | `settings` | 設定（[`Core::settings`]・[`Core::update_settings`]） | SYS-05 |
@@ -67,7 +68,6 @@
 //!   置かない（`core` の doc）。
 //! - **ボリューム**: OS のボリューム ID（FILE-03、v1）の代わりに、パスの先頭（`/`・`C:\`）をボリュームと
 //!   する（`paths` の doc）。
-//! - **検索結果の作り直し**: バックグラウンドではなく、カタログを変えた操作の直後に同期で行う（`search` の doc）。
 //! - **書き出しの原本の照合**: カタログ全体ではなく、今回の入力、書き出し先のフォルダにあるカタログの
 //!   ファイル、上書きの設定では書き出すファイルと同じ名前のカタログのファイルを保護の対象にする
 //!   （`export` の doc）。
@@ -79,8 +79,8 @@
 //!
 //! # まだないもの（implementation_status の進捗表 No.12）
 //!
-//! - ルーペの等倍表示（PRV-03）・拡大とパン（LIB-02）の表示範囲を描く入口（genzo-pipeline の
-//!   `Engine::render_region` をコア API から使うもの。P0 の「最新の 1 件だけ」で描き、取り消せるもの）。
+//! - 表示範囲の描画（[`Core::render_region`]）の GPU 版（今は CPU 版だけ）と、ビューポートへの直接の描画
+//!   （04 の 1.5 節。UI の方式と合わせて決める）。
 //! - WB のスポイト（DEV-03。指定した点を中立にする WB を求めるコマンド）。撮影時の WB の色温度・tint は
 //!   [`SourceInfo::as_shot_white_balance`] で返す。
 
@@ -100,6 +100,7 @@ mod lock;
 pub mod maintenance;
 mod paths;
 mod previews;
+mod region;
 mod render;
 mod search;
 mod settings;
@@ -115,6 +116,7 @@ pub use events::{CatalogChange, Event, WarningCode};
 pub use import::{IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS, media_kind};
 pub use maintenance::{RestorePlan, apply_restore, prepare_restore};
 pub use previews::{L0_FORMAT_VERSION, L1_FORMAT_VERSION};
+pub use region::{MAX_REGION_OUTPUT_PIXELS, MAX_REGION_SCALE, MAX_REGION_SOURCE_PIXELS};
 pub use search::MAX_RANGE_LEN;
 pub use settings::{
     KEY_DEFAULT_EXPORT_COLOR_SPACE, KEY_DEFAULT_UTC_OFFSET_MINUTES, KEY_PREVIEW_CACHE_BYTES,

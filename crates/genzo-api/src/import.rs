@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use genzo_catalog::{FileFacts, RegisterFile, RegisterStatus};
 use genzo_media::CacheSpec;
-use genzo_model::{AssetKind, CaptureTime, FileRole, FileStatus, FolderId, TzSource, VariantId};
+use genzo_model::{AssetKind, CaptureTime, FileRole, FileStatus, FolderId, VariantId};
 use genzo_worker::{Lane, WorkerClientError};
 use parking_lot::Mutex;
 
@@ -377,12 +377,16 @@ fn prepare(ctx: &JobCtx<'_>, c: &Candidate, folder: FolderId) -> Prepared {
         Ok(f) => f,
         Err(e) => return Prepared::NotRegistered(format!("ファイルを読めません: {e}")),
     };
-    // 登録済みで変化がなければ、解析を省く（エラーだったファイルは読み直す）。
+    // 登録済みで変化がなければ、解析を省く（エラーだったファイルと、メタデータが空の asset（読めずに
+    // 登録した後、見つからない状態を経て戻ったもの。implementation_status の No.45）は読み直す）。
     let existing = inner.with_catalog_api(|cat| {
         let Some(rec) = cat.find_file(folder, &c.name)? else {
             return Ok(None);
         };
         if rec.facts != facts || rec.status != FileStatus::Ok {
+            return Ok(None);
+        }
+        if rec.role == FileRole::Primary && cat.asset_metadata_is_empty(rec.asset_id)? {
             return Ok(None);
         }
         let master = cat
@@ -633,12 +637,12 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
             }
         }
         let outcomes = inner.with_catalog_api(|c| {
-            // 既定のタイムゾーンで推定する撮影日時は、登録の直前（カタログのロックの中）の設定で推定し直す
-            // （準備の後に設定が変わった場合、推定し直しのジョブの一覧より後に登録されたものが古い
-            // オフセットのまま残らないように）。
+            // 既定のタイムゾーンで推定する撮影日時（utc_only の表示のオフセットを含む）は、登録の直前
+            // （カタログのロックの中）の設定で推定し直す（準備の後に設定が変わった場合、推定し直しの
+            // ジョブの一覧より後に登録されたものが古いオフセットのまま残らないように）。
             let offset = inner.default_offset();
             for r in &mut requests {
-                if r.capture.tz_source == TzSource::UserDefault {
+                if r.capture.uses_default_offset() {
                     r.capture = r
                         .capture
                         .with_default_offset(offset)

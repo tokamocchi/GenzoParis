@@ -12,8 +12,9 @@
 //! - 現像のプレビュー（P0）は 1 本のスレッドのスケジューラで「最新の 1 件だけ」を処理する
 //!   （`submit_latest`。6.2 節）。
 //! - DB 書き込みスレッド（1.3 節）の代わりに、カタログの接続を 1 つの `Mutex` で守り、書き込みを
-//!   1 つずつにする（SQLite の書き込みは 1 本しか進まないので、同じ効果）。読み取りプールはまだない
-//!   （検索も同じ接続。PoC-6 で必要なら分ける）。
+//!   1 つずつにする（SQLite の書き込みは 1 本しか進まないので、同じ効果）。読み取りプールはまだなく、
+//!   検索結果の作り直し（3.7 節。専用のスレッド）だけが読み取り専用の接続を使う（[`Core::search`] など
+//!   ほかの読み取りは同じ接続。PoC-6 で必要なら分ける）。
 //! - GPU スレッド（1.3 節）は置かず、GPU を使う処理は呼び出したスレッドで行う（genzo-gpu の
 //!   `GpuRenderer` はスレッド間で共有できる）。P0 と P3 の GPU の投入の順序の制御（PERF-13）は PoC-3 で
 //!   GPU スレッドを置くかとあわせて決める。
@@ -43,7 +44,7 @@ use crate::error::ApiError;
 use crate::events::{Event, EventHub, WarningCode};
 use crate::jobs::JobRegistry;
 use crate::render::{DisplayState, GpuState};
-use crate::search::SearchState;
+use crate::search::SearchShared;
 use crate::types::{BackupEntry, CoreSettings, PreviousShutdown, StartupReport};
 
 /// サムネイル DB（L0）と L1 プレビューのキャッシュ。
@@ -85,7 +86,8 @@ pub(crate) struct Inner {
     pub engine: Engine,
     pub gpu: Mutex<GpuState>,
     pub display: Mutex<DisplayState>,
-    pub search: Mutex<SearchState>,
+    /// 検索の状態と、作り直しのスレッドとの受け渡し（`search` の doc）。
+    pub search: Arc<SearchShared>,
     pub develop: Arc<DevelopShared>,
     pub jobs: JobRegistry,
     pub plans: Mutex<PlanStore>,
@@ -100,6 +102,8 @@ pub(crate) struct Inner {
     pub startup: StartupReport,
     pub closed: AtomicBool,
     pub saver: Mutex<Option<JoinHandle<()>>>,
+    /// 検索結果の作り直しのスレッド（3.7 節。`search` の doc）。
+    pub search_refresher: Mutex<Option<JoinHandle<()>>>,
     /// カタログのロック（閉じたら解放する）。
     pub lock: Mutex<Option<crate::lock::CatalogLock>>,
 }
@@ -334,7 +338,7 @@ impl Core {
             engine,
             gpu: Mutex::new(GpuState::default()),
             display: Mutex::new(display),
-            search: Mutex::new(SearchState::default()),
+            search: Arc::new(SearchShared::default()),
             develop: Arc::new(DevelopShared::default()),
             jobs: JobRegistry::default(),
             plans: Mutex::new(PlanStore::default()),
@@ -351,6 +355,7 @@ impl Core {
             },
             closed: AtomicBool::new(false),
             saver: Mutex::new(None),
+            search_refresher: Mutex::new(None),
             lock: Mutex::new(Some(lock)),
         });
 
@@ -376,6 +381,14 @@ impl Core {
         // 現像設定の自動保存のスレッド（DATA-03）。
         match crate::develop::spawn_saver(&inner) {
             Ok(saver) => *inner.saver.lock() = Some(saver),
+            Err(e) => {
+                let _ = close_inner(&inner);
+                return Err(e);
+            }
+        }
+        // 検索結果の作り直しのスレッド（3.7 節）。
+        match crate::search::spawn_refresher(&inner) {
+            Ok(h) => *inner.search_refresher.lock() = Some(h),
             Err(e) => {
                 let _ = close_inner(&inner);
                 return Err(e);
@@ -473,6 +486,9 @@ fn close_inner(inner: &Arc<Inner>) -> Result<(), ApiError> {
     inner.interactive.shutdown_now();
     // キューから実行されずに外れたジョブも、取り消しとして記録して知らせる。
     inner.jobs.reap_unrun(inner);
+    // 検索結果の作り直しのスレッドを止める（読み取り専用の接続を閉じる。カタログを閉じる前に）。
+    let refresher = inner.search_refresher.lock().take();
+    crate::search::stop_refresher(inner, refresher);
     // 3. ワーカーを終了させる（他に参照が残っていれば drop で強制終了する）。
     if let Some(pool) = inner.workers.lock().take()
         && let Ok(pool) = Arc::try_unwrap(pool)
@@ -538,7 +554,23 @@ fn build_parts(
         crate::settings::persist_default_offset(catalog, &settings, config, events)?;
     // 保存していなかった既存のカタログでは、取り込んだ時期ごとに推定のオフセットが混ざっていうるので、
     // 保存した値で推定し直す（写真がなければ不要）。
-    let reresolve_capture_times = offset_newly_saved && catalog.counts()?.assets > 0;
+    // スキーマの版 4（utc_only）より前から移行したカタログでは、移行で utc_only にした asset（UTC の印
+    // `Z` だけの撮影日時）の表示のオフセットが +00:00 のままなので、既定のタイムゾーンにする
+    // （UTC は変わらない。implementation_status の No.32）。
+    // どちらも、推定し直しが済んでいない印（移行では同じトランザクションで、既定のタイムゾーンの保存では
+    // 保存の前に付く。genzo-catalog の STATE_CAPTURE_TIME_RERESOLVE）で判断する。推定し直しのジョブは終えたときに印を
+    // 外すので、前回はジョブを終える前に終わった（強制終了・途中で閉じた）場合も、ここで推定し直す。
+    let pending = catalog.capture_time_reresolve_pending()?;
+    let reresolve_capture_times = if offset_newly_saved || pending {
+        let has_assets = catalog.counts()?.assets > 0;
+        if !has_assets {
+            // 推定し直すものがない。
+            catalog.set_capture_time_reresolve_pending(false)?;
+        }
+        has_assets
+    } else {
+        false
+    };
     // キャッシュ（作り直せるので、開けなくてもカタログは開く。DATA-03b）。
     let (mut thumbs, mut previews) = open_caches(config, &settings, events)?;
     // キャッシュがこのカタログ（の今の世代）のものでなければ捨てる（復元の後・別のカタログ・データの

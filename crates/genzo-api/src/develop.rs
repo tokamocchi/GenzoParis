@@ -113,6 +113,8 @@ pub(crate) struct DevelopShared {
     save: Mutex<SaveRecord>,
     /// 保存する設定の写しの通しの番号（大きいほど新しい）。
     save_seq: AtomicU64,
+    /// 表示範囲の描画（[`Core::render_region`]。`region` の doc）。
+    pub region: Mutex<crate::region::RegionState>,
 }
 
 /// 現像中の写真の現像設定を最後に書いた写し（[`DevelopShared::save`]）。
@@ -476,6 +478,37 @@ pub(crate) fn rerender(inner: &Arc<Inner>) {
         };
         submit_render(inner, s, q);
     }
+}
+
+/// 表示範囲の描画に使う、現像中の写真の入力・今の設定（保存待ちの変更を含む）・設定の世代。
+/// `variant_id` の写真を開いていなければ [`ApiError::NoDevelopSession`]。
+pub(crate) fn session_snapshot(
+    inner: &Inner,
+    variant_id: VariantId,
+) -> Result<(PhotoSource, DevelopSettings, u64), ApiError> {
+    let state = inner.develop.state.lock();
+    let s = state
+        .as_ref()
+        .filter(|s| s.variant_id == variant_id)
+        .ok_or(ApiError::NoDevelopSession)?;
+    Ok((s.source.clone(), s.settings.clone(), s.generation))
+}
+
+/// 動画の variant が含まれていればエラーにする（動画には現像設定を保存しない。implementation_status の
+/// No.31。動画は現像できず（[`Core::open_develop`] の doc）、保存した設定は使われないため、一括適用や
+/// CLI の `develop set` で誤って保存しないようにする）。
+fn reject_videos(c: &genzo_catalog::Catalog, targets: &[VariantId]) -> Result<(), ApiError> {
+    if let Some(v) = c
+        .variant_summaries(targets)?
+        .iter()
+        .find(|s| s.kind == genzo_model::AssetKind::Video)
+    {
+        return Err(ApiError::InvalidArgument(format!(
+            "動画（variant {}）には現像設定を保存できません（動画はカタログの管理だけ）",
+            v.variant_id
+        )));
+    }
+    Ok(())
 }
 
 /// 自動保存のスレッド（DATA-03: ドラッグでない変更は、最後の操作から 1 秒後に保存する）。
@@ -873,7 +906,7 @@ impl Core {
     }
 
     /// 1 つ前の履歴に戻す（DEV-27。再起動の後もできる）。保存待ちの変更があれば、先に保存してから戻す。
-    /// 戻せなければ `None`。
+    /// 戻せなければ `None`。動画の variant は [`ApiError::InvalidArgument`]（現像設定を保存しない。No.31）。
     pub fn undo(&self, variant_id: VariantId) -> Result<Option<DevelopSettings>, ApiError> {
         self.step_history(variant_id, false)
     }
@@ -900,12 +933,13 @@ impl Core {
         let seq = inner.develop.next_save_seq();
         let result = {
             let mut record = inner.develop.save.lock();
-            let result = inner.with_catalog(|c| {
-                if forward {
-                    c.redo_develop(variant_id)
+            let result = inner.with_catalog_api(|c| {
+                reject_videos(c, &[variant_id])?;
+                Ok(if forward {
+                    c.redo_develop(variant_id)?
                 } else {
-                    c.undo_develop(variant_id)
-                }
+                    c.undo_develop(variant_id)?
+                })
             })?;
             if result.is_some() {
                 record.record(variant_id, seq);
@@ -955,7 +989,9 @@ impl Core {
     /// 設定を複数の variant にまとめて適用する（DEV-30。1 つのトランザクションで、それぞれに履歴を
     /// 1 件記録する）。`groups` で写す項目を選べる（既定はすべて）。適用した variant の数を返す。
     ///
-    /// 現像中の写真が含まれていれば、保存待ちの変更を先に保存し、適用した設定で描き直す。
+    /// 現像中の写真が含まれていれば、保存待ちの変更を先に保存し、適用した設定で描き直す。動画の variant が
+    /// 含まれていれば [`ApiError::InvalidArgument`] で、何も保存しない（動画には現像設定を保存しない。
+    /// implementation_status の No.31）。
     pub fn paste_settings(
         &self,
         source: &DevelopSettings,
@@ -993,6 +1029,7 @@ impl Core {
             .as_ref()
             .map(|s| (s.variant_id, s.render_deps.clone()));
         let applied: Vec<(VariantId, DevelopSettings)> = inner.with_catalog_api(|c| {
+            reject_videos(c, targets)?;
             let mut items = Vec::with_capacity(targets.len());
             for &v in targets {
                 let current = c.develop_settings(v)?;

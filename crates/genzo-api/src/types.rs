@@ -535,9 +535,10 @@ pub enum RenderBackend {
 pub struct SourceInfo {
     /// RAW か。
     pub is_raw: bool,
-    /// 幅（向きを反映する前）。
+    /// 幅（向きを反映する前。RAW は既定の切り抜き（DefaultCrop）の幅で、利用者の切り抜き
+    /// （`CropRect`）の割合の基準。既定の切り抜きのない RAW は有効画素の幅）。
     pub width: u32,
-    /// 高さ（向きを反映する前）。
+    /// 高さ（向きを反映する前。幅と同じく、RAW は既定の切り抜きの高さ）。
     pub height: u32,
     /// RAW のデコーダの識別子。
     pub decoder: Option<String>,
@@ -684,6 +685,87 @@ pub struct DevelopFrame {
     pub b3: Arc<ImageTile>,
     /// ステージ 17a の出力（モニターのプロファイルで符号化した値）を 8bit にしたもの
     /// （R, G, B の並び、行優先）。
+    pub display_rgb8: Arc<Vec<u8>>,
+}
+
+/// 表示範囲の座標系（04 の 2.7 節。[`crate::Core::render_region`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegionSpace {
+    /// C：出力座標（切り抜いた後の画像。フル解像度の画素の単位。左上が (0, 0)）。
+    #[default]
+    Output,
+    /// G：ジオメトリ補正後の全体（切り抜く前の画像全体）。G の外接矩形の長辺を 1 とした値。
+    Geometry,
+}
+
+/// 表示範囲の描画の要求（ルーペの等倍表示 PRV-03・拡大とパン LIB-02。[`crate::Core::render_region`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RegionRequest {
+    /// 現像中の写真（[`crate::Core::open_develop`] で開いたもの）。
+    pub variant_id: VariantId,
+    /// 範囲の座標系。
+    #[serde(default)]
+    pub space: RegionSpace,
+    /// 範囲の左上の x。
+    pub x: f64,
+    /// 範囲の左上の y。
+    pub y: f64,
+    /// 範囲の幅。
+    pub width: f64,
+    /// 範囲の高さ。
+    pub height: f64,
+    /// 表示の倍率（出力の 1 画素を画面の何画素で表すか。1.0 が等倍、0.5 が縮小、2.0 が拡大）。
+    #[serde(default = "default_region_scale")]
+    pub scale: f64,
+}
+
+fn default_region_scale() -> f64 {
+    1.0
+}
+
+/// 表示範囲の描画の結果の情報（ピクセルを除く）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegionInfo {
+    /// variant。
+    pub variant_id: VariantId,
+    /// 描いた現像設定の世代（[`crate::Core::set_settings`] が返した値。古い世代の結果は捨ててよい）。
+    pub generation: u64,
+    /// 要求の通しの番号（新しい要求ほど大きい）。
+    pub request: u64,
+    /// 描いた範囲（C の格子、フル解像度の画素。出力の画像の内側に収めたもの）の左上の x。
+    pub x: u32,
+    /// 描いた範囲の左上の y。
+    pub y: u32,
+    /// 描いた範囲の幅（フル解像度の画素）。
+    pub region_width: u32,
+    /// 描いた範囲の高さ（フル解像度の画素）。
+    pub region_height: u32,
+    /// 出力の画像全体の寸法（C の格子、フル解像度）。
+    pub full_width: u32,
+    /// 出力の画像全体の高さ。
+    pub full_height: u32,
+    /// 表示の倍率（要求の値）。
+    pub scale: f64,
+    /// 返した画像の幅（範囲の幅 × 倍率を四捨五入。1 以上）。
+    pub width: u32,
+    /// 返した画像の高さ。
+    pub height: u32,
+    /// 処理したタイルの数。
+    pub tiles: u64,
+    /// 画面の出力を sRGB とみなしたか（IQ-05）。
+    pub display_assumed_srgb: bool,
+    /// 現像の警告。
+    pub warnings: Vec<String>,
+}
+
+/// 表示範囲の描画の結果（ピクセルを含む。[`crate::Core::render_region`]）。
+#[derive(Debug, Clone)]
+pub struct RegionFrame {
+    /// 情報。
+    pub info: RegionInfo,
+    /// ステージ 17a の出力（モニターのプロファイルで符号化した値）を 8bit にしたもの（R, G, B の並び、
+    /// 行優先。寸法は `info.width` × `info.height`）。
     pub display_rgb8: Arc<Vec<u8>>,
 }
 

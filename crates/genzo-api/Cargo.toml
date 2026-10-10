@@ -13,8 +13,10 @@ default = []
 # ワーカー経由の LibRaw による RAW の展開を有効にする。LibRaw の関数を呼ぶのはワーカープロセスだけ
 # （04 の 1.2 節）。
 # 注意: Cargo の機能フラグは同じビルドの中で共通になるため、これを有効にすると、本体の実行ファイルが
-# 使う genzo-raw でも libraw が有効になる（OS とリンカーによっては、本体の実行ファイルも LibRaw の
-# 共有ライブラリに依存しうる）。本体に LibRaw を入れない構成は、LibRaw の FFI の作業で確認する。
+# 使う genzo-raw でも libraw が有効になる（本体の実行ファイルも LibRaw の共有ライブラリに依存しうる）。
+# 配布するアプリ（決定 No.4）では、本体はこの機能フラグなしでビルドし、ワーカーは別の実行ファイルとして
+# 別の cargo の実行でビルドする（`cargo build --release -p genzo-worker --features libraw`）。本体は
+# RAW のデコーダの識別子をワーカーの握手の応答から得るので、本体の genzo-raw の libraw は要らない。
 libraw = ["genzo-worker/libraw"]
 
 [lib]
@@ -54,7 +56,14 @@ tracing.workspace = true
 # 取り込みで、大文字・小文字だけが違う名前のフォルダが同じものかを確かめる（ファイルの識別子で比べる。F08）。
 same-file.workspace = true
 
+# Windows: ゴミ箱へ移す前に、ドライブにごみ箱があるかを確かめる（SHQueryRecycleBinW。決定 No.23）。
+# Microsoft の Win32 API の宣言だけの crate。版は依存の木に既にあるもの（Cargo.lock）と同じ。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Shell"] }
+
 [dev-dependencies]
+# 古い版のカタログを作って、コアが開いたときの移行を確かめる（`genzo_catalog::testing`）。
+genzo-catalog = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 # 合成の JPEG / PNG / TIFF（テストの入力）と、書き出したファイルの寸法の確認。
 image.workspace = true

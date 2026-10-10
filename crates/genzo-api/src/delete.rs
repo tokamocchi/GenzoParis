@@ -26,19 +26,133 @@ pub trait TrashBackend: Send + Sync + 'static {
     fn move_to_trash(&self, path: &Path) -> Result<(), String>;
 }
 
-/// OS のゴミ箱（trash crate。Windows のごみ箱、macOS の Finder のゴミ箱、Linux の freedesktop.org の
-/// ゴミ箱）。
+/// OS のゴミ箱（trash crate。Windows のごみ箱、macOS のゴミ箱、Linux の freedesktop.org のゴミ箱）。
 ///
-/// macOS では trash crate の既定（Finder を osascript で操作する方法）を使う: 初回に「Finder を制御する」
-/// 許可を求められ、拒否されると移動は失敗する。1 ファイルごとに osascript を起動し、Finder の効果音が
-/// 鳴る。NSFileManager の方法（許可が要らないが、Finder の「戻す」が使えないことがある）に変えるか、
-/// asset ごとにまとめて移すかは、M4 の前に人が判断する（implementation_status の表）。
+/// - **Windows**: 移す前に、そのドライブにごみ箱があるかを `SHQueryRecycleBinW` で確かめ、なければ失敗に
+///   する（決定 No.23）。trash crate は `FOF_NO_UI | FOF_ALLOWUNDO | FOF_WANTNUKEWARNING` で削除を呼ぶため、
+///   ごみ箱のないドライブ（ネットワークの共有フォルダなど）では、OS の「完全に削除しますか」の確認を利用者が
+///   承認すると直接削除されうる（6.4 節の「直接の削除に切り替えない」に反する）ため。ごみ箱があっても、
+///   ごみ箱の最大の大きさを超えるファイルや、ごみ箱の設定で「すぐに削除する」にしたドライブは、この確認では
+///   分からない（OS の確認が出うる）。**実機で未確認。**
+/// - **macOS**: trash crate の NSFileManager の方法（`trashItemAtURL`）を使う（決定 No.33）。Finder を
+///   osascript で操作する既定の方法と違い、「Finder を制御する」許可が要らず、効果音も鳴らない。ただし
+///   Finder の「戻す」が使えないことがある（macOS の不具合。ゴミ箱から手で戻すことはできる）。
+///   **実機で未確認。**
+/// - **Linux**: trash crate の freedesktop.org のゴミ箱。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsTrash;
 
 impl TrashBackend for OsTrash {
     fn move_to_trash(&self, path: &Path) -> Result<(), String> {
-        trash::delete(path).map_err(|e| e.to_string())
+        os_trash::ensure_trash_available(path)?;
+        os_trash::context().delete(path).map_err(|e| e.to_string())
+    }
+}
+
+/// OS ごとのゴミ箱の扱い（[`OsTrash`]）。
+mod os_trash {
+    /// trash crate の設定（macOS は NSFileManager の方法。決定 No.33）。
+    pub(super) fn context() -> trash::TrashContext {
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut ctx = trash::TrashContext::new();
+        #[cfg(target_os = "macos")]
+        {
+            use trash::macos::{DeleteMethod, TrashContextExtMacos};
+            ctx.set_delete_method(DeleteMethod::NsFileManager);
+        }
+        ctx
+    }
+
+    /// ゴミ箱へ移せるかを、移す前に確かめる（Windows: ドライブにごみ箱があるか。決定 No.23）。ほかの OS
+    /// では何もしない（trash crate はゴミ箱を使えなければ失敗を返し、直接は削除しない）。
+    #[cfg(not(windows))]
+    pub(super) fn ensure_trash_available(_path: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(super) fn ensure_trash_available(path: &std::path::Path) -> Result<(), String> {
+        use std::os::windows::ffi::OsStrExt;
+
+        use windows_sys::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
+
+        // ドライブの判定は、リンク・ドライブの割り当てを解決した実際の場所で行う（割り当てたネットワーク
+        // ドライブは \\?\UNC\server\share になる）。
+        let real = std::fs::canonicalize(path)
+            .map_err(|e| format!("ファイルの場所を確かめられません（{e}）。移していません"))?;
+        let root = recycle_bin_root(&real).ok_or_else(|| {
+            format!(
+                "{} のドライブを判定できないため、ごみ箱の有無を確かめられません。移していません",
+                real.display()
+            )
+        })?;
+        let wide: Vec<u16> = root.encode_wide().chain(std::iter::once(0)).collect();
+        let mut info = SHQUERYRBINFO {
+            cbSize: u32::try_from(std::mem::size_of::<SHQUERYRBINFO>())
+                .expect("構造体の大きさは u32 に収まる"),
+            ..Default::default()
+        };
+        // SAFETY: wide は NUL で終わる UTF-16 の文字列、info は cbSize を設定した有効な構造体。関数は
+        // info に書くだけ。
+        let hr = unsafe { SHQueryRecycleBinW(wide.as_ptr(), &mut info) };
+        if hr < 0 {
+            return Err(format!(
+                "{} にはごみ箱がありません（SHQueryRecycleBinW が 0x{:08X} を返しました）。直接の削除は行いません",
+                root.to_string_lossy(),
+                hr.cast_unsigned()
+            ));
+        }
+        Ok(())
+    }
+
+    /// ごみ箱を確かめるドライブの根（`C:\`・`\\server\share\`）。判定できなければ `None`。
+    #[cfg(windows)]
+    pub(super) fn recycle_bin_root(path: &std::path::Path) -> Option<std::ffi::OsString> {
+        use std::path::{Component, Prefix};
+
+        let Some(Component::Prefix(prefix)) = path.components().next() else {
+            return None;
+        };
+        let mut root = std::ffi::OsString::new();
+        match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                root.push(format!("{}:\\", char::from(letter)));
+            }
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                root.push("\\\\");
+                root.push(server);
+                root.push("\\");
+                root.push(share);
+                root.push("\\");
+            }
+            Prefix::Verbatim(_) | Prefix::DeviceNS(_) => return None,
+        }
+        Some(root)
+    }
+
+    #[cfg(all(test, windows))]
+    mod tests {
+        use std::ffi::OsString;
+        use std::path::Path;
+
+        use super::recycle_bin_root;
+
+        #[test]
+        fn roots_of_drives_and_shares() {
+            let root = |p: &str| recycle_bin_root(Path::new(p));
+            assert_eq!(root(r"C:\photos\a.jpg"), Some(OsString::from(r"C:\")));
+            assert_eq!(root(r"\\?\D:\photos\a.jpg"), Some(OsString::from(r"D:\")));
+            assert_eq!(
+                root(r"\\server\share\photos\a.jpg"),
+                Some(OsString::from(r"\\server\share\"))
+            );
+            assert_eq!(
+                root(r"\\?\UNC\server\share\a.jpg"),
+                Some(OsString::from(r"\\server\share\"))
+            );
+            assert_eq!(root(r"\\.\COM1"), None);
+            assert_eq!(root(r"photos\a.jpg"), None);
+        }
     }
 }
 

@@ -22,8 +22,8 @@ use crate::maintenance::RestorePlan;
 use crate::types::{
     BackupEntry, Capabilities, CatalogStats, CoreSettings, DeleteKind, DeletePlan, DeleteReport,
     DevelopState, DisplayInfo, FileCheckReport, FolderInfo, FrameInfo, HistoryItem, IndexOf,
-    JobInfo, RangeResult, SearchFilter, SearchResult, SearchSort, SettingGroups, SettingsUpdate,
-    StartupReport, ThumbnailData, VariantDetails,
+    JobInfo, RangeResult, RegionInfo, RegionRequest, SearchFilter, SearchResult, SearchSort,
+    SettingGroups, SettingsUpdate, StartupReport, ThumbnailData, VariantDetails,
 };
 
 /// コマンド（UI → コア）。
@@ -133,6 +133,12 @@ pub enum Command {
         /// variant。
         variant_id: VariantId,
     },
+    /// 表示に使う標準プレビュー（L1）。なければ作る処理を予約して `null`（作ったら
+    /// [`crate::Event::ThumbnailUpdated`]。[`crate::Core::request_preview`]）。→ [`Response::Path`]
+    RequestPreview {
+        /// variant。
+        variant_id: VariantId,
+    },
     /// サムネイル・プレビューを作り直す（P3 のジョブ）。→ [`Response::JobStarted`]
     RegeneratePreviews {
         /// variant。
@@ -158,6 +164,15 @@ pub enum Command {
     EndDrag,
     /// 現在の設定で同期で描く。→ [`Response::Frame`]
     RenderDevelop,
+    /// 現像中の写真の表示範囲を描く（ルーペの等倍表示・拡大とパン。P0 の最新の 1 件だけ。
+    /// [`crate::Core::render_region`]）。画素は [`crate::Core::region_frame`] で取る。
+    /// → [`Response::Region`]
+    RenderRegion {
+        /// 要求。
+        request: RegionRequest,
+    },
+    /// 実行中の表示範囲の描画を取り消す。→ [`Response::Ok`]
+    CancelRegion,
     /// 世代 `generation` 以降のプレビューを待つ。→ [`Response::FrameOrNone`]
     WaitForFrame {
         /// 世代。
@@ -323,6 +338,8 @@ pub enum Response {
     },
     /// プレビューの情報。
     Frame(Box<FrameInfo>),
+    /// 表示範囲の描画の情報（画素は [`crate::Core::region_frame`]）。
+    Region(Box<RegionInfo>),
     /// プレビューの情報（まだなければ `null`）。
     FrameOrNone {
         /// 情報。
@@ -435,6 +452,9 @@ impl Core {
             C::PreviewPath { variant_id } => R::Path {
                 path: self.preview_path(variant_id)?,
             },
+            C::RequestPreview { variant_id } => R::Path {
+                path: self.request_preview(variant_id)?,
+            },
             C::RegeneratePreviews { variant_ids } => R::JobStarted {
                 job_id: self.regenerate_previews(&variant_ids)?,
             },
@@ -447,6 +467,11 @@ impl Core {
             },
             C::EndDrag => R::Develop(Box::new(self.end_drag()?)),
             C::RenderDevelop => R::Frame(Box::new(self.render_develop()?)),
+            C::RenderRegion { request } => R::Region(Box::new(self.render_region(&request)?.info)),
+            C::CancelRegion => {
+                self.cancel_region()?;
+                R::Ok
+            }
             C::WaitForFrame {
                 generation,
                 timeout_ms,

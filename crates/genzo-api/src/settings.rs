@@ -108,6 +108,9 @@ pub(crate) fn persist_default_offset(
 ) -> Result<bool, ApiError> {
     let stored = catalog.setting(KEY_DEFAULT_UTC_OFFSET_MINUTES)?.is_some();
     if !stored {
+        // 保存する値で推定し直す（終える前にアプリが終わっても、次に開いたときに推定し直す。
+        // spawn_reresolve）。設定より先に印を付ける（間で終わっても、印が残る側に倒す）。
+        catalog.set_capture_time_reresolve_pending(true)?;
         catalog.set_setting(
             KEY_DEFAULT_UTC_OFFSET_MINUTES,
             &settings.default_utc_offset_minutes.to_string(),
@@ -205,6 +208,11 @@ impl Core {
                 c.set_setting(KEY_DEFAULT_EXPORT_COLOR_SPACE, &json)?;
             }
             if let Some(m) = update.default_utc_offset_minutes {
+                if m != previous.default_utc_offset_minutes {
+                    // 推定し直しを終える前にアプリが終わっても、次に開いたときに推定し直す（spawn_reresolve）。
+                    // 設定より先に付ける（間で終わっても、印が残る側に倒す）。
+                    c.set_capture_time_reresolve_pending(true)?;
+                }
                 c.set_setting(KEY_DEFAULT_UTC_OFFSET_MINUTES, &m.to_string())?;
             }
             Ok(())
@@ -241,6 +249,12 @@ impl Core {
 /// 開始時ではなく、チャンクごとにカタログのロックの中で今の設定から読む（後から同じチャンクを書くジョブは
 /// 必ず最新の設定を読むので、どの順で走っても最後に残る値は今の設定になる）、(2) 前のジョブは取り消す
 /// （無駄な処理を省くため）。
+///
+/// 推定し直しが済んでいない印（genzo-catalog の `STATE_CAPTURE_TIME_RERESOLVE`。既定のタイムゾーンを
+/// 変えたとき・初めて保存したとき・`utc_only` へ移行したときに付く）は、すべてのチャンクを同じオフセットで
+/// 書き、それがカタログに保存された今の既定のオフセットと同じときだけ、カタログのロックの中で外す
+/// （途中で設定が変わった場合は外さず、後のジョブに任せる）。取り消し・失敗では外さないので、終える前に
+/// アプリが終わっても、次に開いたときに推定し直す（[`crate::core`] の起動時の確認）。
 pub(crate) fn spawn_reresolve(inner: &Arc<Inner>) -> u64 {
     let mut last = inner.reresolve_job.lock();
     if let Some(previous) = last.take() {
@@ -253,12 +267,16 @@ pub(crate) fn spawn_reresolve(inner: &Arc<Inner>) -> u64 {
         "撮影日時の推定し直し",
         |ctx| {
             let inner = ctx.inner;
-            let assets = inner.with_catalog(|c| {
+            // 一覧を作ったときのオフセット（一覧の後に取り込んだものは、取り込みが今の設定で推定する）。
+            let (assets, start_offset) = inner.with_catalog(|c| {
                 let variants = c.all_variant_ids()?;
-                c.assets_of_variants(&variants)
+                Ok((c.assets_of_variants(&variants)?, inner.default_offset()))
             })?;
             let total = assets.len() as u64;
             let mut updated = 0u64;
+            // 一覧を作ったとき・各チャンクを書いたときのオフセットがすべて同じなら、その値（途中で設定が
+            // 変わったら None）。
+            let mut used = Some(start_offset);
             for (i, chunk) in assets.chunks(256).enumerate() {
                 if ctx.is_cancelled() {
                     return Err(ApiError::Cancelled);
@@ -266,6 +284,9 @@ pub(crate) fn spawn_reresolve(inner: &Arc<Inner>) -> u64 {
                 updated += inner.with_catalog_api(|c| {
                     // 今の設定（このチャンクを書く直前）のオフセット。
                     let offset = inner.default_offset();
+                    if used != Some(offset) {
+                        used = None;
+                    }
                     let mut n = 0;
                     for &a in chunk {
                         let current = c.capture_time(a)?;
@@ -281,6 +302,23 @@ pub(crate) fn spawn_reresolve(inner: &Arc<Inner>) -> u64 {
                 })?;
                 ctx.progress(((i + 1) * 256).min(assets.len()) as u64, total);
             }
+            if ctx.is_cancelled() {
+                return Err(ApiError::Cancelled);
+            }
+            inner.with_catalog_api(|c| {
+                // カタログに保存された今の既定のオフセット（設定を変えたときは、保存と同じロックの中で
+                // 印を付け直すので、ここで外しても後のジョブの分は残る）。
+                // 保存された値を読めなければ、使っている値（読み込みの代わりの値）と比べる。
+                let current = c
+                    .setting(KEY_DEFAULT_UTC_OFFSET_MINUTES)?
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .and_then(|m| chrono::FixedOffset::east_opt(m * 60))
+                    .unwrap_or_else(|| inner.default_offset());
+                if used == Some(current) {
+                    c.set_capture_time_reresolve_pending(false)?;
+                }
+                Ok(())
+            })?;
             if updated > 0 {
                 inner.events.emit(Event::CatalogChanged {
                     change: CatalogChange::CaptureTime,

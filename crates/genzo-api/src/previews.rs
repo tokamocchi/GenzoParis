@@ -222,10 +222,13 @@ pub(crate) fn load_source(
             &frame.image.metadata,
             frame.decoder_id.as_deref(),
         );
+        // 寸法は見える範囲（RAW の既定の切り抜き。利用者の切り抜きの割合の基準。genzo-pipeline の
+        // coords の「既定の切り抜き」）。
+        let visible = frame.image.visible_area();
         let info = SourceInfo {
             is_raw: true,
-            width: frame.image.width,
-            height: frame.image.height,
+            width: visible.width,
+            height: visible.height,
             decoder: frame.decoder_id.clone(),
             as_shot_white_balance: as_shot_white_balance(&frame.image),
         };
@@ -510,30 +513,34 @@ fn clear_pending(inner: &Inner, variant_id: VariantId) {
 /// 投入する前に、thumbs.db に作り直し待ちの印を付ける（作り直しの依頼は終了・異常終了で失われるため。
 /// 印は作り直して保存したときに外し、残っていれば次の起動で作り直す。[`regenerate_pending`]）。
 pub(crate) fn schedule_regenerate(inner: &Arc<Inner>, variant_id: VariantId) {
+    schedule_regenerate_with(inner, variant_id, Priority::P3);
+}
+
+/// [`schedule_regenerate`] と同じだが、優先度を指定する（表示に要る L1 は P1。[`Core::request_preview`]）。
+fn schedule_regenerate_with(inner: &Arc<Inner>, variant_id: VariantId, priority: Priority) {
     if let Err(e) = inner.with_cache(|c| c.thumbs.mark_regen_pending(&[variant_id])) {
         tracing::warn!(error = %e, "作り直し待ちの印を付けられない");
     }
     let weak = Arc::downgrade(inner);
-    let _ = inner.background.submit_latest(
-        format!("regenerate-{variant_id}"),
-        Priority::P3,
-        move |ctx| {
-            let Some(inner) = weak.upgrade() else {
-                return Ok(());
-            };
-            if let Err(e) = regenerate_one(&inner, variant_id, ctx.token())
-                && !e.is_cancelled()
-            {
-                inner.events.warn(
-                    WarningCode::PreviewFailed,
-                    format!("プレビューを作れませんでした: {e}"),
-                    Some(variant_id),
-                    None,
-                );
-            }
-            Ok(())
-        },
-    );
+    let _ =
+        inner
+            .background
+            .submit_latest(format!("regenerate-{variant_id}"), priority, move |ctx| {
+                let Some(inner) = weak.upgrade() else {
+                    return Ok(());
+                };
+                if let Err(e) = regenerate_one(&inner, variant_id, ctx.token())
+                    && !e.is_cancelled()
+                {
+                    inner.events.warn(
+                        WarningCode::PreviewFailed,
+                        format!("プレビューを作れませんでした: {e}"),
+                        Some(variant_id),
+                        None,
+                    );
+                }
+                Ok(())
+            });
 }
 
 /// 起動時に、前回作り直せなかった（作り直し待ちの印が残っている）variant の L0 / L1 を作り直すジョブを
@@ -618,6 +625,21 @@ impl Core {
         inner.with_cache(|c| c.previews.get(&key))
     }
 
+    /// 表示に標準プレビュー（L1）を使う: 今の現像設定の L1 があればそのファイルを返し、なければ現像結果
+    /// から L0 / L1 を作る処理を予約して `None` を返す（P1。作ったら [`crate::Event::ThumbnailUpdated`]
+    /// で知らせるので、もう一度呼ぶ）。
+    ///
+    /// 取り込みの後に L0 / L1 を作り直さない既定（[`crate::CoreConfig::render_previews_after_import`]。
+    /// implementation_status の No.24 の (b)）で、ルーペなど表示に要るときに作るための入口。同じ variant の
+    /// 予約が続いても、作る処理は最新の 1 件にまとめる。
+    pub fn request_preview(&self, variant_id: VariantId) -> Result<Option<PathBuf>, ApiError> {
+        if let Some(path) = self.preview_path(variant_id)? {
+            return Ok(Some(path));
+        }
+        schedule_regenerate_with(&self.inner, variant_id, Priority::P1);
+        Ok(None)
+    }
+
     /// サムネイル（L0）と標準プレビュー（L1）を作り直すジョブを投入する（P3）。ジョブの ID を返す。
     pub fn regenerate_previews(&self, variant_ids: &[VariantId]) -> Result<u64, ApiError> {
         self.inner.check_open()?;
@@ -639,6 +661,8 @@ mod tests {
             data: vec![0; 4],
             black_level: [0.0; 4],
             white_level: 1000.0,
+            saturation_level: 1000.0,
+            default_crop: None,
             as_shot_wb: [2.0, 1.0, 1.5, 1.0],
             cam_xyz: Some([
                 [0.7424, -0.2329, -0.0466],

@@ -55,6 +55,12 @@ pub const SKIP_HIDDEN_FILES: bool = true;
 
 /// ワーカーの起動方法（04 の 1.2 節）。
 ///
+/// **配布するアプリは [`WorkerLaunch::Executable`]（既定）を使う**: ワーカーを別の実行ファイル
+/// （`genzo-worker`）にし、本体の実行ファイルは LibRaw に依存しない（LibRaw を読み込むのはワーカーの
+/// プロセスだけにする。LGPL-2.1 の条件を満たしやすくするため。決定 No.4。ライセンスの扱いは人・専門家の
+/// 確認待ち）。[`WorkerLaunch::SelfSubcommand`] は、実行ファイルを 1 つにしたい開発用の CLI（`genzo`）の
+/// ためのもの（この場合、機能フラグ `libraw` を有効にした本体の実行ファイルは LibRaw に依存する）。
+///
 /// JSON では `{"kind": "executable", "path": null}`、
 /// `{"kind": "self_subcommand", "executable": null, "subcommand": "__worker"}` のように表す。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,9 +72,9 @@ pub enum WorkerLaunch {
         /// ワーカーの実行ファイル。
         path: Option<PathBuf>,
     },
-    /// 本体の実行ファイル自身を、隠しサブコマンド付きで起動する（`genzo __worker`）。CLI や将来の
-    /// アプリで、ワーカーの実行ファイルを別に配布しなくて済む。本体の `main` は、最初の引数が
-    /// `subcommand` なら [`genzo_worker::run_worker`] を呼ぶこと。
+    /// 本体の実行ファイル自身を、隠しサブコマンド付きで起動する（`genzo __worker`）。開発用の CLI で、
+    /// ワーカーの実行ファイルを別に用意しなくて済む（配布するアプリでは使わない。決定 No.4）。本体の
+    /// `main` は、最初の引数が `subcommand` なら [`genzo_worker::run_worker`] を呼ぶこと。
     SelfSubcommand {
         /// 実行ファイル。`None` なら本体の実行ファイル（`std::env::current_exe`）。
         executable: Option<PathBuf>,
@@ -98,6 +104,7 @@ impl WorkerLaunch {
 #[serde(rename_all = "snake_case")]
 pub enum GpuMode {
     /// 使えれば使う（環境変数 `GENZO_GPU=0` などでも止められる。genzo-gpu の `GpuContextOptions::from_env`）。
+    /// ソフトウェアの GPU は、[`CoreConfig::gpu_allow_software`] で許可したときだけ使う。
     #[default]
     Auto,
     /// 使わない（CPU 版だけで処理する）。
@@ -106,10 +113,6 @@ pub enum GpuMode {
 
 fn default_backup_generations() -> usize {
     genzo_catalog::DEFAULT_BACKUP_GENERATIONS
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// [`crate::Core::open`] の設定。
@@ -136,6 +139,11 @@ pub struct CoreConfig {
     /// GPU の使用。
     #[serde(default)]
     pub gpu: GpuMode,
+    /// ソフトウェアの GPU（Mesa の llvmpipe・Windows の WARP など。CPU で動く実装）も使うか（既定は
+    /// `false`: 使わずに CPU 版で処理する。決定 No.20）。`false` でも、環境変数
+    /// `GENZO_GPU_ALLOW_SOFTWARE=1` なら使う（開発・テスト用）。
+    #[serde(default)]
+    pub gpu_allow_software: bool,
     /// 自動バックアップの置き場。`None` なら `data_dir/backups`。
     #[serde(default)]
     pub backup_dir: Option<PathBuf>,
@@ -147,8 +155,12 @@ pub struct CoreConfig {
     #[serde(default)]
     pub backup_on_close: bool,
     /// 取り込みの後に、現像結果からサムネイル（L0）と標準プレビュー（L1）を作り直すか（4 章「最初の
-    /// 表示」: 取り込み直後は埋め込み JPEG を使い、バックグラウンドで現像結果に置き換える）。
-    #[serde(default = "default_true")]
+    /// 表示」: 取り込み直後は埋め込み JPEG を使う）。
+    ///
+    /// 既定は `false`（作り直さない。implementation_status の No.24 の (b)）: 取り込みのたびにすべての
+    /// 写真を現像する費用を避け、埋め込みのプレビューのまま表示する。現像設定を変えたとき（PRV-02）と、
+    /// 表示に L1 が要るとき（[`crate::Core::request_preview`]）に作る。
+    #[serde(default)]
     pub render_previews_after_import: bool,
     /// バッチ用のワーカーの数（1〜2）。`None` なら genzo-worker の既定値。
     #[serde(default)]
@@ -191,10 +203,11 @@ impl CoreConfig {
             default_utc_offset_minutes: None,
             preview_cache_bytes: None,
             gpu: GpuMode::Auto,
+            gpu_allow_software: false,
             backup_dir: None,
             backup_generations: default_backup_generations(),
             backup_on_close: false,
-            render_previews_after_import: true,
+            render_previews_after_import: false,
             batch_workers: None,
             background_threads: None,
             worker_test_hooks: false,
@@ -240,8 +253,19 @@ mod tests {
             serde_json::from_str(r#"{"catalog_path":"/a.db","data_dir":"/d"}"#).unwrap();
         assert_eq!(min.worker, WorkerLaunch::Executable { path: None });
         assert_eq!(min.gpu, GpuMode::Auto);
+        assert!(
+            !min.gpu_allow_software,
+            "ソフトウェアの GPU は既定で使わない（決定 No.20）"
+        );
         assert_eq!(min.backup_generations, 5);
-        assert!(min.render_previews_after_import);
+        assert!(
+            !min.render_previews_after_import,
+            "取り込みの後に L0 / L1 を作り直さない（決定 No.24）"
+        );
+        assert!(
+            !CoreConfig::new("/a.db", "/d").render_previews_after_import,
+            "決定 No.24"
+        );
         assert_eq!(min.backup_dir(), PathBuf::from("/d").join("backups"));
         let w: WorkerLaunch = serde_json::from_str(
             r#"{"kind":"self_subcommand","executable":null,"subcommand":"__worker"}"#,

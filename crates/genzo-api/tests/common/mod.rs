@@ -108,6 +108,8 @@ impl Env {
         };
         c.default_utc_offset_minutes = Some(JST_MINUTES);
         c.gpu = test_gpu_mode();
+        // テストでは、ソフトウェアの GPU（llvmpipe など）も使う（既定では使わない。決定 No.20）。
+        c.gpu_allow_software = true;
         c.render_previews_after_import = false;
         c.batch_workers = Some(1);
         c.worker_test_hooks = true;

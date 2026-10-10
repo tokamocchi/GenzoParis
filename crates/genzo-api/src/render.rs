@@ -3,9 +3,14 @@
 //!
 //! - GPU は最初に使うときに初期化する（起動を遅くしないため。PERF-12）。[`crate::GpuMode::Off`]・
 //!   アダプターがない・環境変数 `GENZO_GPU=0` なら CPU 版だけで処理する。
+//! - ソフトウェアの GPU（Mesa の llvmpipe・Windows の WARP など）は、既定では使わない（CPU 版で処理する。
+//!   決定 No.20）。[`crate::CoreConfig::gpu_allow_software`] または環境変数 `GENZO_GPU_ALLOW_SOFTWARE=1` で
+//!   使える。
 //! - GPU の側の失敗（[`genzo_gpu::GpuError::should_fall_back_to_cpu`]）では、CPU 版で処理し直して
 //!   警告のイベントを送る。次に使うときに GPU を初期化し直し、失敗が
 //!   [`crate::config::MAX_GPU_FAILURES`] 回に達したら、そのセッションでは GPU を使わない（6.3 節）。
+//!   GPU 版で扱えない入力・設定（`TooLarge`・`Unsupported`）は、CPU 版で処理するが、GPU の失敗としては
+//!   数えず、警告も送らない（[`genzo_gpu::GpuError::counts_as_gpu_failure`]。決定 No.26）。
 
 use std::sync::Arc;
 
@@ -123,8 +128,11 @@ impl Inner {
             GpuSlot::Unavailable => return None,
             GpuSlot::NotInitialized => {}
         }
-        let created = GpuContext::new(&GpuContextOptions::from_env())
-            .and_then(|c| c.map(GpuRenderer::new).transpose());
+        let mut options = GpuContextOptions::from_env();
+        if self.config.gpu_allow_software {
+            options.allow_software = true;
+        }
+        let created = GpuContext::new(&options).and_then(|c| c.map(GpuRenderer::new).transpose());
         match created {
             Ok(Some(r)) => {
                 let r = Arc::new(r);
@@ -219,8 +227,12 @@ impl Inner {
                     }
                     self.gpu_failed("GPU 版が B3 を返さなかった", variant_id);
                 }
-                Err(e) if e.should_fall_back_to_cpu() => {
+                Err(e) if e.counts_as_gpu_failure() => {
                     self.gpu_failed(&e.to_string(), variant_id);
+                }
+                // GPU 版で扱えない入力・設定（決定 No.26）: CPU 版で描くが、失敗としては数えない。
+                Err(e) if e.should_fall_back_to_cpu() => {
+                    tracing::info!(error = %e, "GPU 版で扱えないので CPU 版で描く");
                 }
                 Err(GpuError::Pipeline(e)) => return Err(e.into()),
                 Err(e) => return Err(e.into()),
@@ -258,8 +270,14 @@ impl Inner {
         )?;
         let backend = match outcome.backend {
             genzo_gpu::ExportBackend::Gpu => RenderBackend::Gpu,
-            genzo_gpu::ExportBackend::Cpu { gpu_error } => {
-                if let Some(e) = gpu_error {
+            genzo_gpu::ExportBackend::Cpu {
+                gpu_error,
+                gpu_failure,
+            } => {
+                // GPU 版で扱えない入力（gpu_failure が false）は数えない（決定 No.26）。
+                if let Some(e) = gpu_error
+                    && gpu_failure
+                {
                     self.gpu_failed(&e, Some(variant_id));
                 }
                 RenderBackend::Cpu

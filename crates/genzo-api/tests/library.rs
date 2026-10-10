@@ -119,6 +119,13 @@ fn import_mixed_folder_orders_by_capture_time_and_is_idempotent() {
     if fx.has_video {
         let clip = by_name(&items, "clip.mp4");
         assert_eq!(clip.kind, AssetKind::Video);
+        // creation_time は UTC の印（Z）だけ: UTC はそのまま、表示は既定のタイムゾーン（No.32）。
+        assert_eq!(clip.capture.tz_source, TzSource::UtcOnly);
+        assert_eq!(clip.capture.tz_assumed.as_deref(), Some("+09:00"));
+        assert_eq!(
+            clip.capture.utc.unwrap().to_rfc3339(),
+            "2024-05-01T00:30:00+00:00"
+        );
         let details = core.variant_details(clip.variant_id).unwrap();
         let video = details.video.unwrap();
         assert!(video.duration_s.unwrap() > 0.5, "{video:?}");
@@ -330,7 +337,9 @@ fn filters_generations_and_marks() {
     // 「★3 以上」の表示中に評価を 2 に下げても、条件を適用し直すまで残す（3.7 節）。
     let events = core.subscribe();
     core.set_rating(&[v3], Rating::new(2).unwrap()).unwrap();
-    let cur = core.current_search().unwrap();
+    // 作り直しはバックグラウンド（3.7 節）。終わるまで待つ。
+    let cur = core.wait_search_refreshed(None).unwrap().unwrap();
+    assert_eq!(core.current_search(), Some(cur));
     assert_eq!(
         cur.generation, g2.generation,
         "結果は変わらないので世代も変わらない"
@@ -339,7 +348,7 @@ fn filters_generations_and_marks() {
     // 表示していない写真を ★5 にすると、結果が変わるので新しい世代になる。
     let scan = by_name(&items, "scan.tif").variant_id;
     core.set_rating(&[scan], Rating::new(5).unwrap()).unwrap();
-    let cur = core.current_search().unwrap();
+    let cur = core.wait_search_refreshed(None).unwrap().unwrap();
     assert!(cur.generation > g2.generation);
     assert_eq!(cur.count, 4);
     let ev = drain(&events);

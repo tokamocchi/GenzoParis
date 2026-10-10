@@ -171,7 +171,8 @@ impl Core {
     ///   **メタデータ（寸法・撮影日時など）をワーカーで読み直して登録し直す**（取り込みと同じ経路。
     ///   リビジョンを上げてキャッシュを無効にする。4.1 節。読めなければ `status = error`）。見つからなかった
     ///   ファイルが同じ内容で戻っていれば `status = ok` に戻す（読めなかったファイルの `error` は、内容が
-    ///   同じならそのまま）。
+    ///   同じならそのまま）。読めずに登録した（メタデータが空の）asset は、戻ったときに読み直す
+    ///   （implementation_status の No.45）。
     pub fn check_files(&self, variant_ids: &[VariantId]) -> Result<FileCheckReport, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
@@ -237,7 +238,8 @@ pub(crate) enum Refreshed {
     Unchanged,
     /// 見つからない（状態は変えていない。呼び出し側が `status = missing` にする）。
     Missing,
-    /// 見つからなかったファイルが、同じ内容で戻った（`status = ok` にした）。
+    /// 見つからなかったファイルが、同じ内容で戻った（`status = ok` にした。メタデータが空の asset は
+    /// 読み直した。読めなければ `status = error`）。
     Restored,
     /// 内容が変わった（メタデータを読み直して登録し直した。リビジョンが上がった）。
     Changed,
@@ -276,15 +278,44 @@ pub(crate) fn refresh_file(
         message: e.to_string(),
     })?;
     if !facts.differs_from(&rec.facts) {
-        return Ok(match rec.status {
-            FileStatus::Missing => {
+        if rec.status != FileStatus::Missing {
+            return Ok(Refreshed::Unchanged);
+        }
+        // 見つからなかったファイルが同じ内容で戻った。読めずに登録した（メタデータが空の）asset は、
+        // ここで読み直す（implementation_status の No.45 の (b)。読めれば、取り込みと同じ経路で
+        // メタデータを保存する。revision は上げない）。
+        let empty = rec.role == genzo_model::FileRole::Primary
+            && inner.with_catalog(|c| c.asset_metadata_is_empty(rec.asset_id))?;
+        if !empty {
+            inner.with_catalog(|c| c.update_file_facts(rec.id, &facts))?;
+            return Ok(Refreshed::Restored);
+        }
+        match reread(inner, rec, path, facts.clone(), lane, token) {
+            Ok(()) => {}
+            Err(e) if e.is_cancelled() => return Err(e),
+            Err(e) => {
+                // ワーカーを使えない（ファイルの問題ではない）: 戻ったことだけを記録し、メタデータは次の
+                // 取り込みで読み直す（取り込みもメタデータが空の asset を読み直す）。
+                tracing::warn!(error = %e, path = %path.display(), "戻ったファイルのメタデータを読み直せません");
                 inner.with_catalog(|c| c.update_file_facts(rec.id, &facts))?;
-                Refreshed::Restored
             }
-            _ => Refreshed::Unchanged,
-        });
+        }
+        return Ok(Refreshed::Restored);
     }
     // 内容が変わった: メタデータを読み直して登録し直す。
+    reread(inner, rec, path, facts, lane, token)?;
+    Ok(Refreshed::Changed)
+}
+
+/// ワーカーでメタデータを読み直し、取り込みと同じ経路（`register_file`）で登録し直す。
+fn reread(
+    inner: &Inner,
+    rec: &FileRecord,
+    path: &Path,
+    facts: FileFacts,
+    lane: Lane,
+    token: &genzo_jobs::CancellationToken,
+) -> Result<(), ApiError> {
     let pool = inner.pool()?;
     let target = ProbeTarget {
         path,
@@ -295,7 +326,7 @@ pub(crate) fn refresh_file(
     let mut request = probe_request(&pool, &target, facts, inner.default_offset(), lane, token)?;
     inner.with_catalog_api(|c| {
         // 既定のタイムゾーンで推定する撮影日時は、登録の直前の設定で推定し直す（取り込みと同じ）。
-        if request.capture.tz_source == genzo_model::TzSource::UserDefault {
+        if request.capture.uses_default_offset() {
             request.capture = request
                 .capture
                 .with_default_offset(inner.default_offset())
@@ -303,8 +334,7 @@ pub(crate) fn refresh_file(
         }
         c.register_file(&request)?;
         Ok(())
-    })?;
-    Ok(Refreshed::Changed)
+    })
 }
 
 /// ファイルの状態・内容が変わった asset について: カタログの変更を知らせ、表示中の検索結果を作り直し、

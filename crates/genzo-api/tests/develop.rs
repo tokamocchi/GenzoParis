@@ -286,6 +286,28 @@ fn develop_and_export_without_gpu() {
     core.close().unwrap();
 }
 
+/// ソフトウェアの GPU（llvmpipe・WARP など）は、許可しなければ使わない（決定 No.20）。この開発環境
+/// （llvmpipe だけ）では、既定の設定では CPU 版で描く。
+#[test]
+fn software_gpu_is_not_used_unless_allowed() {
+    if std::env::var_os("GENZO_GPU_ALLOW_SOFTWARE").is_some() {
+        eprintln!("環境変数 GENZO_GPU_ALLOW_SOFTWARE があるのでスキップ");
+        return;
+    }
+    let env = Env::new();
+    let core = env.open_with(|c| {
+        c.gpu = GpuMode::Auto;
+        c.gpu_allow_software = false;
+    });
+    if let Some(adapter) = core.gpu_adapter() {
+        assert!(
+            !adapter.contains("ソフトウェアの実装"),
+            "既定ではソフトウェアの GPU を使わない: {adapter}"
+        );
+    }
+    core.close().unwrap();
+}
+
 /// GPU を使える環境では（CI 以外）、既定の設定で GPU 版か CPU 版のどちらかで描ける（GPU の失敗は CPU 版に
 /// 切り替える）。
 #[test]
