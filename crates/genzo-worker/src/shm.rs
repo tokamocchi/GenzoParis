@@ -53,7 +53,10 @@
 //!   [`BufferError::FileSizeChanged`] になる）。ワーカー側のマップへの書き込みは、ワーカーが
 //!   落ちるだけで済む。Linux の `memfd` と `F_SEAL_SHRINK` などとの比較は PoC-2 で行う。
 //! - 本体が異常終了した場合、一時ディレクトリが残る。次の起動時に [`purge_stale_arenas`] で削除する
-//!   （同時に 1 つしか起動しないことを本体側で保証したうえで呼ぶ）。
+//!   （[`crate::WorkerConfig::create_arena`] が一時ディレクトリを作る前に呼ぶ）。持ち主が生きているかは、
+//!   一時ディレクトリの中のロックファイル（[`ARENA_OWNER_LOCK`]）で判断するので、並行して動いている本体
+//!   （CLI とアプリなど）のものは消さない。ワーカーは本体の終了（標準入力が閉じたこと）を別のスレッドで
+//!   見張り、処理中でもすぐに終わる（`crate::worker`）。
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -391,11 +394,24 @@ pub enum BufferError {
     Io(String),
 }
 
+/// 一時ディレクトリの中の、持ち主のロックファイルの名前（[`ShmArena`] が生きている間はロックしている。
+/// [`purge_stale_arenas`] は、ロックを取れたディレクトリ（持ち主が終わったもの）だけを削除する）。
+pub const ARENA_OWNER_LOCK: &str = ".owner.lock";
+
+/// ロックファイルのない一時ディレクトリ（古い版が作ったもの、作った直後のもの）を、[`purge_stale_arenas`]
+/// が削除するまでの経過時間（**仮置き**: 1 時間。作った直後のディレクトリをロックの前に消さないため）。
+pub const UNLOCKED_ARENA_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 /// 本体が所有する、共有メモリのファイルを置く一時ディレクトリ。
 ///
-/// drop するとディレクトリごと削除する。
+/// drop するとディレクトリごと削除する。生きている間は、ディレクトリの中のロックファイル
+/// （[`ARENA_OWNER_LOCK`]）をロックしておく（持ち主が異常終了すると OS がロックを解放するので、次の起動の
+/// 掃除で、終わった本体のものだけを見分けられる）。
 #[derive(Debug)]
 pub struct ShmArena {
+    /// 持ち主のロック（ディレクトリより先に閉じる。Windows では開いているファイルを削除できないため。
+    /// フィールドは宣言の順に drop される）。ファイルロックが使えないファイルシステムでは `None`。
+    _owner_lock: Option<genzo_media::file_lock::LockedFile>,
     dir: tempfile::TempDir,
     next: AtomicU64,
 }
@@ -409,9 +425,28 @@ impl ShmArena {
     /// `root` の下に作る。
     pub fn new_in(root: &Path) -> io::Result<Self> {
         let prefix = format!("{ARENA_DIR_PREFIX}{}-", std::process::id());
-        // Unix では 0700 で作られる（tempfile の既定）。
-        let dir = tempfile::Builder::new().prefix(&prefix).tempdir_in(root)?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(&prefix);
+        // Unix では持ち主だけが開けるようにする（0700。tempfile の既定は umask に従うため、明示する）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o700));
+        }
+        let dir = builder.tempdir_in(root)?;
+        let lock_path = dir.path().join(ARENA_OWNER_LOCK);
+        let owner_lock = match genzo_media::file_lock::try_lock_exclusive(&lock_path, true)? {
+            genzo_media::file_lock::TryLock::Locked(l) => Some(l),
+            // 作った直後のディレクトリなので、ほかに持ち主はいない。ファイルロックが使えない場合は、
+            // 掃除では経過時間で判断する（ロックファイルを消して印にする）。
+            genzo_media::file_lock::TryLock::WouldBlock
+            | genzo_media::file_lock::TryLock::Unsupported(_) => {
+                let _ = fs::remove_file(&lock_path);
+                None
+            }
+        };
         Ok(Self {
+            _owner_lock: owner_lock,
             dir,
             next: AtomicU64::new(0),
         })
@@ -459,11 +494,12 @@ impl ShmArena {
         Ok(buffer)
     }
 
-    /// ディレクトリに残っている共有メモリのファイルの数（診断・テスト用）。
+    /// ディレクトリに残っている共有メモリのファイルの数（診断・テスト用。ロックファイルは数えない）。
     pub fn live_buffers(&self) -> io::Result<usize> {
         let mut n = 0;
         for entry in fs::read_dir(self.dir.path())? {
-            if entry?.file_type()?.is_file() {
+            let entry = entry?;
+            if entry.file_type()?.is_file() && entry.file_name() != ARENA_OWNER_LOCK {
                 n += 1;
             }
         }
@@ -471,11 +507,14 @@ impl ShmArena {
     }
 }
 
-/// `root` の下にある、[`ShmArena`] の一時ディレクトリ（`genzo-shm-` で始まるもの）を削除する。
+/// `root` の下にある、[`ShmArena`] の一時ディレクトリ（`genzo-shm-` で始まるもの）のうち、持ち主の本体が
+/// 終わったものを削除する（本体が異常終了・強制終了して残った、展開済みの画素のファイルを、次の起動時に
+/// 掃除する）。
 ///
-/// 本体が異常終了して残ったディレクトリを、次の起動時に掃除するためのもの。**他の本体のプロセスが
-/// 動いていないことを確かめてから呼ぶ**（動いているプロセスの共有メモリも消してしまうため）。
-/// `keep` のディレクトリは残す。削除した数を返す。
+/// 持ち主が生きているか（同じプロセスを含む）は、ディレクトリの中のロックファイル（[`ARENA_OWNER_LOCK`]）の
+/// ロックを取れるかで判断する（持ち主が終わると OS がロックを解放する）。ロックファイルのないもの（古い版・
+/// 作った直後・ファイルロックが使えないファイルシステム）は、最後の変更から [`UNLOCKED_ARENA_MIN_AGE`]
+/// 以上たったものだけを削除する。`keep` のディレクトリは残す。削除した数を返す。
 pub fn purge_stale_arenas(root: &Path, keep: Option<&ShmArena>) -> io::Result<usize> {
     let keep = keep.map(|a| a.path().to_path_buf());
     let mut removed = 0;
@@ -492,11 +531,30 @@ pub fn purge_stale_arenas(root: &Path, keep: Option<&ShmArena>) -> io::Result<us
         if keep.as_deref() == Some(path.as_path()) {
             continue;
         }
+        if !owner_has_finished(&path) {
+            continue;
+        }
         if fs::remove_dir_all(&path).is_ok() {
             removed += 1;
         }
     }
     Ok(removed)
+}
+
+/// 一時ディレクトリの持ち主が終わったか（[`purge_stale_arenas`]）。分からなければ `false`（残す）。
+fn owner_has_finished(dir: &Path) -> bool {
+    let lock_path = dir.join(ARENA_OWNER_LOCK);
+    match genzo_media::file_lock::try_lock_exclusive(&lock_path, false) {
+        // ロックを取れたら、持ち主は終わっている（取ったロックは、ここで閉じて外す）。
+        Ok(genzo_media::file_lock::TryLock::Locked(_)) => true,
+        Ok(_) => false,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::metadata(dir)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= UNLOCKED_ARENA_MIN_AGE),
+        Err(_) => false,
+    }
 }
 
 /// 本体が所有する共有メモリ（1 つのファイル）。drop するとファイルを削除する。
@@ -1165,14 +1223,20 @@ mod tests {
     fn purge_removes_only_other_arenas() {
         let root = tempfile::tempdir().unwrap();
         let keep = ShmArena::new_in(root.path()).unwrap();
+        // 持ち主が終わった（ロックファイルはあるが、誰もロックしていない）もの。
         let stale = root.path().join("genzo-shm-99999-abc");
         fs::create_dir(&stale).unwrap();
+        fs::write(stale.join(ARENA_OWNER_LOCK), b"").unwrap();
         fs::write(stale.join("0.shm"), b"x").unwrap();
+        // ロックファイルがなく、作った直後のもの（ロックの前かもしれないので残す）。
+        let fresh = root.path().join("genzo-shm-99998-def");
+        fs::create_dir(&fresh).unwrap();
         let other = root.path().join("other-dir");
         fs::create_dir(&other).unwrap();
         fs::write(root.path().join("genzo-shm-file"), b"x").unwrap();
         assert_eq!(purge_stale_arenas(root.path(), Some(&keep)).unwrap(), 1);
         assert!(!stale.exists());
+        assert!(fresh.exists());
         assert!(other.exists());
         assert!(keep.path().exists());
         assert!(

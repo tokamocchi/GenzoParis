@@ -375,8 +375,12 @@ pub struct ProfileSummary {
     pub embedded: bool,
     /// 埋め込みのプロファイルの説明（'desc' タグ）。
     pub description: Option<String>,
-    /// sRGB とみなした理由（埋め込みを使った場合は `None`）。
+    /// sRGB とみなした理由（埋め込みを使った場合・Adobe RGB とみなした場合は `None`）。
     pub assumed_srgb_reason: Option<String>,
+    /// ICC プロファイルを使えず、Exif が DCF のオプション色空間を示すので Adobe RGB (1998) と
+    /// みなした理由（それ以外は `None`。指摘 F28。[`genzo_media::SourceProfile::AssumedAdobeRgb`]）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumed_adobe_rgb_reason: Option<String>,
 }
 
 /// [`Job::ProbePhoto`] の結果。
@@ -414,6 +418,10 @@ pub struct RawFrameInfo {
     pub metadata: PhotoMetadata,
     /// デコーダの識別子（04 の 2.5 節の `render_deps.raw_decoder`。例: `"libraw-0.21.2"`）。
     pub decoder_id: Option<String>,
+    /// `cam_xyz` の出どころ（DNG の ColorMatrix・LibRaw の内蔵の表など。04 の 2.5 節の
+    /// `render_deps.camera_profile` の記録用）。古いワーカーの応答にはない（`None`）。
+    #[serde(default)]
+    pub cam_xyz_source: Option<genzo_raw::CamXyzSource>,
 }
 
 /// [`Job::DecodeImage`] の付随情報（画素は共有メモリ）。
@@ -791,6 +799,7 @@ mod tests {
                     embedded: false,
                     description: None,
                     assumed_srgb_reason: Some("NoProfile".into()),
+                    assumed_adobe_rgb_reason: None,
                 }),
             }),
             JobOutput::Video(VideoProbe::default()),
@@ -808,6 +817,7 @@ mod tests {
                 ]),
                 metadata: PhotoMetadata::default(),
                 decoder_id: None,
+                cam_xyz_source: Some(genzo_raw::CamXyzSource::LibRawTable),
             }),
             JobOutput::Image(LinearImageInfo {
                 format: PhotoFormat::Png,
@@ -819,6 +829,7 @@ mod tests {
                     embedded: true,
                     description: Some("Display P3".into()),
                     assumed_srgb_reason: None,
+                    assumed_adobe_rgb_reason: None,
                 },
                 alpha_dropped: true,
             }),

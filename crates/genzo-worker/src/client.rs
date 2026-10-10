@@ -2,7 +2,9 @@
 //! 6.3 節「エラー処理」）。
 //!
 //! - 起動: 実行ファイル（[`locate_worker_executable`]）を起動し、[`Job::Ping`] でプロトコルの版を
-//!   確かめる（握手）。
+//!   確かめる（握手）。ワーカーは本体と別のプロセスグループで起動する（Unix は `process_group(0)`、
+//!   Windows は `CREATE_NEW_PROCESS_GROUP`）。端末の Ctrl+C が本体と一緒にワーカーへ届かないようにする
+//!   ため（本体が取り消して終わらせる。genzo-cli の Ctrl+C の扱い。K3）。
 //! - 依頼: 1 つのワーカーには同時に 1 件だけ依頼する（[`WorkerClient`] のメソッドは `&mut self`）。
 //!   複数のワーカーを並行して使うときは [`crate::WorkerPool`] を使う。
 //! - タイムアウト: ジョブの種類ごと（[`JobTimeouts`]）。超えたらワーカーを強制終了して再起動し、
@@ -327,13 +329,14 @@ impl WorkerConfig {
         Ok(())
     }
 
-    /// 共有メモリの一時ディレクトリを作る。
+    /// 共有メモリの一時ディレクトリを作る。その前に、終わった本体が残した一時ディレクトリを掃除する
+    /// （[`crate::shm::purge_stale_arenas`]。失敗しても続ける）。
     pub fn create_arena(&self) -> Result<ShmArena, WorkerClientError> {
-        let arena = match &self.shm_root {
-            Some(root) => ShmArena::new_in(root),
-            None => ShmArena::new(),
-        };
-        arena.map_err(|e| WorkerClientError::Shm(format!("一時ディレクトリを作れない: {e}")))
+        let root = self.shm_root.clone().unwrap_or_else(std::env::temp_dir);
+        // 掃除できなくても続ける（次の起動でもう一度試す）。
+        let _ = crate::shm::purge_stale_arenas(&root, None);
+        ShmArena::new_in(&root)
+            .map_err(|e| WorkerClientError::Shm(format!("一時ディレクトリを作れない: {e}")))
     }
 }
 
@@ -469,6 +472,8 @@ pub struct RawFrame {
     pub image: RawImage,
     /// デコーダの識別子。
     pub decoder_id: Option<String>,
+    /// `image.cam_xyz` の出どころ（render_deps の記録用。分からなければ `None`）。
+    pub cam_xyz_source: Option<genzo_raw::CamXyzSource>,
 }
 
 /// [`WorkerClient::decode_image`] の結果（リニア BT.2020。04 の 2.6 節の B2）。
@@ -908,12 +913,26 @@ impl WorkerClient {
         } else {
             cmd.env_remove(ENV_TEST_HOOKS);
         }
+        // ワーカーは本体の Ctrl+C を受け取らない（K3）。端末の Ctrl+C は前面のプロセスグループのすべての
+        // プロセス（Windows ではコンソールにつながるすべてのプロセス）に届くため、同じグループのワーカーは
+        // 本体が処理を取り消す前に終わり、処理中のファイルが「読めない」と記録されてしまう。ワーカーは
+        // 本体が終わらせる（取り消し・終了の依頼・標準入力を閉じる）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // 新しいプロセスグループ（グループの ID はワーカーのプロセス ID）。孫プロセス（ffmpeg）も
+            // このグループに入る。
+            cmd.process_group(0);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             /// CREATE_NO_WINDOW（Win32 のプロセス作成フラグ）。コンソールのウィンドウを開かない。
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
+            /// CREATE_NEW_PROCESS_GROUP（Win32 のプロセス作成フラグ）。新しいプロセスグループにし、
+            /// CTRL+C を受け取らない（子プロセスにも引き継ぐ）。
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         }
         let mut child = cmd
             .spawn()
@@ -1194,11 +1213,16 @@ impl WorkerClient {
         info: RawFrameInfo,
     ) -> Result<RawFrame, WorkerClientError> {
         let decoder_id = info.decoder_id.clone();
+        let cam_xyz_source = info.cam_xyz_source;
         let image = buffer
             .open_payload(PayloadKind::CfaU16, self.config.verify_checksum)
             .and_then(|p| validate::raw_image(&p, info));
         match image {
-            Ok(image) => Ok(RawFrame { image, decoder_id }),
+            Ok(image) => Ok(RawFrame {
+                image,
+                decoder_id,
+                cam_xyz_source,
+            }),
             Err(e) => self.invalid_buffer(e),
         }
     }

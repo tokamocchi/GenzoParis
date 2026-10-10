@@ -43,9 +43,9 @@ use std::time::Duration;
 
 use genzo_color::{IccProfile, IccTransform, IccVersion, RenderingIntent, StandardProfile};
 use genzo_media::{
-    CacheJpeg, CacheSpec, DecodedImage, DynRgbImage, FfmpegTools, ImageFileFormat, MediaError,
-    RgbImage, RgbImage8, Sample, SourceProfile, SrgbAssumption, cache_jpeg_from_decoded,
-    cache_jpeg_from_encoded, render_cache_jpeg,
+    AdobeRgbBasis, CacheJpeg, CacheSpec, DecodedImage, DynRgbImage, FfmpegTools, ImageFileFormat,
+    MediaError, RgbImage, RgbImage8, Sample, SourceProfile, SrgbAssumption,
+    cache_jpeg_from_decoded, cache_jpeg_from_encoded, render_cache_jpeg,
 };
 use genzo_model::{Orientation, PhotoMetadata};
 use genzo_raw::{CfaPattern, RawError, RawImage, ThumbnailFormat};
@@ -141,7 +141,15 @@ pub fn run_worker(relaunch_prefix: Vec<OsString>, args: Vec<OsString>) -> ExitCo
         test_hooks: test_hooks_enabled(),
         memory_limit,
     };
-    let stdin = io::stdin().lock();
+    // 標準入力は別のスレッドで読み、閉じたら（本体が終了した・異常終了した）処理中の依頼があっても
+    // すぐに終わる（孤立したワーカーがデコードを続け、CPU と共有メモリのファイルを使い続けないように）。
+    let stdin = match watch_stdin() {
+        Ok(r) => io::BufReader::new(r),
+        Err(e) => {
+            eprintln!("genzo-worker: 標準入力を読むスレッドを作れません: {e}");
+            return ExitCode::from(3);
+        }
+    };
     let stdout = io::stdout().lock();
     match serve(stdin, stdout, &options) {
         Ok(()) => ExitCode::SUCCESS,
@@ -150,6 +158,63 @@ pub fn run_worker(relaunch_prefix: Vec<OsString>, args: Vec<OsString>) -> ExitCo
             ExitCode::from(3)
         }
     }
+}
+
+/// 標準入力を読むスレッドから受け取るデータ（[`watch_stdin`]）。
+struct StdinChannel {
+    rx: crossbeam_channel::Receiver<Vec<u8>>,
+    chunk: Vec<u8>,
+    pos: usize,
+}
+
+impl io::Read for StdinChannel {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos >= self.chunk.len() {
+            match self.rx.recv() {
+                Ok(chunk) => {
+                    self.chunk = chunk;
+                    self.pos = 0;
+                }
+                // 読むスレッドが終わった（入力の終わり）。
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.chunk.len() - self.pos);
+        buf[..n].copy_from_slice(&self.chunk[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// 標準入力を別のスレッドで読む。入力が終わったら（本体が標準入力を閉じた・本体が終了した）、処理中の
+/// 依頼があってもプロセスをすぐに終える（本体は [`Job::Shutdown`] の応答を受け取ってから閉じるので、
+/// 正常な終了の手順は変わらない）。
+fn watch_stdin() -> io::Result<StdinChannel> {
+    use std::io::Read;
+    let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+    std::thread::Builder::new()
+        .name("genzo-worker-stdin".to_owned())
+        .spawn(move || {
+            let mut stdin = io::stdin().lock();
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => std::process::exit(0),
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => std::process::exit(0),
+                }
+            }
+        })?;
+    Ok(StdinChannel {
+        rx,
+        chunk: Vec::new(),
+        pos: 0,
+    })
 }
 
 /// 環境変数でテスト用の口が有効にされているか。
@@ -252,6 +317,7 @@ enum Pending {
     Raw {
         path: PathBuf,
         image: RawImage,
+        cam_xyz_source: genzo_raw::CamXyzSource,
     },
     Image {
         path: PathBuf,
@@ -362,8 +428,12 @@ impl<'a> Worker<'a> {
     }
 
     fn decode_raw(&mut self, path: PathBuf, shm: &ShmRef, pending: Option<Pending>) -> JobResult {
-        let image = match pending {
-            Some(Pending::Raw { path: p, image }) if p == path => image,
+        let (image, cam_xyz_source) = match pending {
+            Some(Pending::Raw {
+                path: p,
+                image,
+                cam_xyz_source,
+            }) if p == path => (image, cam_xyz_source),
             _ => {
                 check_input(&path)?;
                 let format = detect_photo_format(&path)?;
@@ -373,12 +443,19 @@ impl<'a> Worker<'a> {
                         format!("RAW ではない（{format:?}）"),
                     ));
                 }
-                genzo_raw::decode_file(&path).map_err(raw_err)?
+                // 行列の出どころ（render_deps の記録用）も返すため、詳細付きで展開する。
+                let decoded = genzo_raw::decode_file_with_details(&path).map_err(raw_err)?;
+                let source = decoded.details.cam_xyz_source;
+                (decoded.into_verified_image().map_err(raw_err)?, source)
             }
         };
         let data_len = image.data.len() as u64 * 2;
         if let Err(e) = ShmWriter::check_capacity(shm, data_len) {
-            self.pending = Some(Pending::Raw { path, image });
+            self.pending = Some(Pending::Raw {
+                path,
+                image,
+                cam_xyz_source,
+            });
             return Err(e);
         }
         let mut writer = ShmWriter::open(shm)?;
@@ -410,6 +487,7 @@ impl<'a> Worker<'a> {
             cam_xyz: image.cam_xyz,
             metadata,
             decoder_id: genzo_raw::decoder_id(),
+            cam_xyz_source: Some(cam_xyz_source),
         }))
     }
 
@@ -731,22 +809,45 @@ fn photo_format_of(f: ImageFileFormat) -> PhotoFormat {
     }
 }
 
+/// ICC プロファイルを使わなかった理由の文字列。
+fn icc_unused_reason(reason: &SrgbAssumption) -> String {
+    match reason {
+        SrgbAssumption::NoProfile => "ICC プロファイルが埋め込まれていない".to_owned(),
+        SrgbAssumption::Invalid(e) => format!("ICC プロファイルを読めない: {e}"),
+        SrgbAssumption::NotRgb => "RGB のプロファイルではない".to_owned(),
+        SrgbAssumption::Unsupported(e) => format!("変換に使えないプロファイル: {e}"),
+    }
+}
+
 fn profile_summary(p: &SourceProfile) -> ProfileSummary {
     match p {
         SourceProfile::Embedded(icc) => ProfileSummary {
             embedded: true,
             description: icc.description().map(str::to_owned),
             assumed_srgb_reason: None,
+            assumed_adobe_rgb_reason: None,
         },
         SourceProfile::AssumedSrgb(reason) => ProfileSummary {
             embedded: false,
             description: None,
-            assumed_srgb_reason: Some(match reason {
-                SrgbAssumption::NoProfile => "ICC プロファイルが埋め込まれていない".to_owned(),
-                SrgbAssumption::Invalid(e) => format!("ICC プロファイルを読めない: {e}"),
-                SrgbAssumption::NotRgb => "RGB のプロファイルではない".to_owned(),
-                SrgbAssumption::Unsupported(e) => format!("変換に使えないプロファイル: {e}"),
-            }),
+            assumed_srgb_reason: Some(icc_unused_reason(reason)),
+            assumed_adobe_rgb_reason: None,
+        },
+        SourceProfile::AssumedAdobeRgb { basis, icc } => ProfileSummary {
+            embedded: false,
+            description: None,
+            assumed_srgb_reason: None,
+            assumed_adobe_rgb_reason: Some(format!(
+                "{}（{}）",
+                match basis {
+                    AdobeRgbBasis::DcfOptionR03 => {
+                        "Exif が DCF のオプション色空間（ColorSpace=Uncalibrated、InteropIndex=R03）を示す"
+                    }
+                    AdobeRgbBasis::ColorSpace2 =>
+                        "Exif の ColorSpace が 2（非標準。Adobe RGB を示す）",
+                },
+                icc_unused_reason(icc)
+            )),
         },
     }
 }
@@ -1031,6 +1132,7 @@ fn oversize(mode: OversizeMode, shm: &ShmRef) -> JobResult {
         cam_xyz: None,
         metadata: PhotoMetadata::default(),
         decoder_id: Some("test-oversize".to_owned()),
+        cam_xyz_source: None,
     };
     match mode {
         OversizeMode::TooManyPixels => {
@@ -1108,6 +1210,28 @@ mod tests {
             .filter(|l| !l.is_empty())
             .map(|l| serde_json::from_slice(l).unwrap())
             .collect()
+    }
+
+    /// Adobe RGB とみなした場合の要約（指摘 F28）。sRGB とみなした理由は入れない。
+    #[test]
+    fn profile_summary_reports_assumed_adobe_rgb() {
+        let s = profile_summary(&SourceProfile::AssumedAdobeRgb {
+            basis: AdobeRgbBasis::DcfOptionR03,
+            icc: SrgbAssumption::NoProfile,
+        });
+        assert!(!s.embedded);
+        assert_eq!(s.assumed_srgb_reason, None);
+        let r = s.assumed_adobe_rgb_reason.unwrap();
+        assert!(r.contains("R03") && r.contains("ICC"), "{r}");
+        let s = profile_summary(&SourceProfile::AssumedSrgb(SrgbAssumption::NoProfile));
+        assert!(s.assumed_srgb_reason.is_some());
+        assert_eq!(s.assumed_adobe_rgb_reason, None);
+        // 新しい項目がない古い形の JSON も読める（serde の既定値）。
+        let old: ProfileSummary = serde_json::from_str(
+            r#"{"embedded":false,"description":null,"assumed_srgb_reason":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.assumed_adobe_rgb_reason, None);
     }
 
     fn write_jpeg(dir: &Path, name: &str, w: u32, h: u32) -> PathBuf {

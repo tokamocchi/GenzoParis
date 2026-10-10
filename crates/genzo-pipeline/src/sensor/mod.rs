@@ -31,8 +31,14 @@
 //!   を返し、呼び出し側（UI）が表示する。理由: 対応していない機種でも写真を開けなくしない
 //!   （01 の方針「他のファイルの処理は続ける」）。厳密に扱いたい呼び出し側は、警告を見てエラーに
 //!   してよい。
-//! - **カメラ行列の出どころ**: 04 の 2.5 節（render_deps）のとおり、アプリのデータファイルの行列を
-//!   [`SensorOptions::camera_matrix`] で渡す。渡さなければ RAW の `cam_xyz` を使う。
+//! - **カメラ行列の出どころ**: 04 の 2.5 節（render_deps）の設計では、アプリのデータファイルの行列を
+//!   [`SensorOptions::camera_matrix`] で渡す。**今はデータファイルがなく、呼び出し側（genzo-api・
+//!   genzo-cli）は渡していない**ので、RAW の `cam_xyz`（ARW は LibRaw の内蔵の表、DNG は D65 の
+//!   ColorMatrix。genzo-raw の `select_cam_xyz`）を使う。LibRaw を更新すると、同じ処理バージョン・同じ
+//!   設定でも色が変わりうる（genzo-api は使った行列の出どころとハッシュ・デコーダを `render_deps` に記録し、
+//!   違えば警告する。implementation_status No.25）。また `SensorOptions` はエンジン全体で 1 つで
+//!   キャッシュキーに入らないため、データファイルを導入するときは、行列を写真ごと（`PhotoSource` か
+//!   `render_deps` から解決）に渡す仕組みが要る。
 //! - **端の外**: 各ステージの入力の端の外は鏡映で拡張する（2.7 節。[`crate::border`]）。CFA は
 //!   ステージ 2 で鏡映して作り、出力の範囲が画像の外にはみ出す部分は、出力（B2）を鏡映した値に
 //!   する（[`SensorPlan::render_roi`]）。タイルに分けても分けなくても、画素ごとの結果は同じ。
@@ -109,8 +115,9 @@ pub struct SensorOptions {
     pub demosaic: Option<DemosaicMethod>,
     /// 飽和した画素の切りそろえ（[`wb`] の doc）。
     pub saturation_clip: SaturationClip,
-    /// 「XYZ（D65）→ カメラ RGB」の行列（アプリのデータファイルの値。2.5 節の render_deps）。
-    /// `None` なら RAW の `cam_xyz` を使う。
+    /// 「XYZ（D65）→ カメラ RGB」の行列（設計の予定ではアプリのデータファイルの値。2.5 節の
+    /// render_deps）。`None` なら RAW の `cam_xyz` を使う（今は呼び出し側が渡さないので、常にこちら。
+    /// モジュールの doc の「カメラ行列の出どころ」）。
     pub camera_matrix: Option<Mat3>,
 }
 

@@ -37,7 +37,11 @@ pub fn shm_files_under(shm_root: &Path) -> usize {
     for dir in std::fs::read_dir(shm_root).unwrap() {
         let dir = dir.unwrap();
         if dir.file_type().unwrap().is_dir() {
-            n += std::fs::read_dir(dir.path()).unwrap().count();
+            // 持ち主のロックファイル（genzo_worker::shm::ARENA_OWNER_LOCK）は数えない。
+            n += std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter(|e| e.as_ref().unwrap().file_name() != genzo_worker::shm::ARENA_OWNER_LOCK)
+                .count();
         }
     }
     n

@@ -579,3 +579,100 @@ fn shutdown_is_graceful() {
     assert_eq!(pool.worker_count(Lane::Batch), 2);
     pool.shutdown().unwrap();
 }
+
+/// 本体が異常終了して標準入力が閉じたら、処理中の依頼があってもワーカーはすぐに終わる（孤立したワーカー
+/// がデコードを続けて CPU と共有メモリのファイルを使い続けないように。指摘 F22）。ここでは依頼の処理の
+/// 代わりに、応答しない（ハング）テスト用の口を使う。
+#[test]
+fn worker_exits_when_its_input_is_closed_even_while_busy() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_genzo-worker"))
+        .env(genzo_worker::ENV_TEST_HOOKS, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let send = |stdin: &mut std::process::ChildStdin, id: u64, job: genzo_worker::protocol::Job| {
+        let mut line = serde_json::to_vec(&genzo_worker::protocol::Request { id, job }).unwrap();
+        line.push(b'\n');
+        stdin.write_all(&line).unwrap();
+        stdin.flush().unwrap();
+    };
+    // 起動を確かめる。
+    send(&mut stdin, 1, genzo_worker::protocol::Job::Ping);
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    assert!(line.contains("\"id\":1"), "{line}");
+    // 応答しない依頼を送ってから、標準入力を閉じる（本体の異常終了の代わり）。
+    send(
+        &mut stdin,
+        2,
+        genzo_worker::protocol::Job::TestHang { shm: None },
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    drop(stdin);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let exited = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if exited.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(exited.is_some(), "入力が閉じたら終わる");
+}
+
+/// ワーカーは本体と別のプロセスグループで動く（端末の Ctrl+C は前面のプロセスグループのすべてに SIGINT を
+/// 送るため、同じグループだと、本体が処理を取り消す前にワーカーが終わり、処理中のファイルが「読めない」と
+/// 記録される。K3）。グループの確認には libc を使うので Linux だけ（macOS も同じ std の
+/// `process_group` を使う。genzo-cli の Ctrl+C の結合テストは Unix で確かめる）。
+#[cfg(target_os = "linux")]
+#[test]
+fn worker_runs_in_its_own_process_group() {
+    let root = tempfile::tempdir().unwrap();
+    let mut c = WorkerClient::spawn(config(root.path())).unwrap();
+    c.ping().unwrap();
+    let pid = libc::pid_t::try_from(c.pid().unwrap()).unwrap();
+    // SAFETY: プロセスグループの ID を読むだけで、メモリを扱わない。
+    let (worker_group, own_group) = unsafe { (libc::getpgid(pid), libc::getpgid(0)) };
+    assert_eq!(worker_group, pid, "ワーカーは自分のプロセスグループを作る");
+    assert_ne!(worker_group, own_group, "本体のプロセスグループに入らない");
+    c.shutdown().unwrap();
+}
+
+/// 起動時の掃除は、持ち主のプロセスが終わった（ロックが外れた）一時ディレクトリだけを削除し、動いている
+/// 本体（同じプロセスを含む）のものは残す（指摘 F22）。
+#[test]
+fn purge_removes_only_arenas_of_finished_owners() {
+    use genzo_worker::shm::{ARENA_DIR_PREFIX, purge_stale_arenas};
+    let root = tempfile::tempdir().unwrap();
+    let live = genzo_worker::ShmArena::new_in(root.path()).unwrap();
+    let buffer = live.allocate(1024).unwrap();
+    // 持ち主が異常終了して残ったもの（ロックファイルはあるが、誰もロックしていない）。
+    let stale = root.path().join(format!("{ARENA_DIR_PREFIX}999999-dead"));
+    std::fs::create_dir(&stale).unwrap();
+    std::fs::write(stale.join(".owner.lock"), b"").unwrap();
+    std::fs::write(stale.join("1.shm"), vec![0u8; 128]).unwrap();
+    let removed = purge_stale_arenas(root.path(), None).unwrap();
+    assert_eq!(removed, 1);
+    assert!(!stale.exists());
+    assert!(live.path().is_dir(), "動いている本体のものは残す");
+    assert!(buffer.path().is_file());
+    // Unix では、一時ディレクトリは持ち主だけが開ける（0700）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(live.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+    }
+}

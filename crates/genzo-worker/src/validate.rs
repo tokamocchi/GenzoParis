@@ -281,6 +281,7 @@ mod tests {
             cam_xyz: None,
             metadata: PhotoMetadata::default(),
             decoder_id: Some("test".into()),
+            cam_xyz_source: None,
         }
     }
 
@@ -389,6 +390,7 @@ mod tests {
                 embedded: false,
                 description: None,
                 assumed_srgb_reason: Some("なし".into()),
+                assumed_adobe_rgb_reason: None,
             },
             alpha_dropped: false,
         }
