@@ -130,6 +130,9 @@ impl DisplayProfile {
     }
 
     /// 画面用の 3D LUT を作る（相対的な色域を維持。格子数は通常 [`crate::lut::DEFAULT_LUT_SIZE`]）。
+    ///
+    /// モニターの色域の外の格子点は 0〜1 の外の値を持つ（トーンカーブが表のプロファイルでは延長した
+    /// 値。LUT 型のプロファイルでは 0〜1 に収められたままのことがある。[`Lut3d::from_icc`]）。
     pub fn build_lut(&self, source: DisplayLutSource, size: usize) -> Result<Lut3d> {
         let src = IccProfile::standard(source.standard_profile())?;
         Lut3d::from_icc(&src, &self.profile, size)

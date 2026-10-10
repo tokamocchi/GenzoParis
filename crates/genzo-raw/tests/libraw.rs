@@ -415,6 +415,48 @@ fn non_ascii_path_and_read_only_file() {
     );
 }
 
+/// MAX_PATH（260）を超える長いパスの RAW も開ける（指摘 F20）。
+///
+/// Windows では、LibRaw の中の C の実行時ライブラリは接頭辞（`\\?\`）のない長いパスを開けず、
+/// 正常なファイルが「壊れている可能性」（[`RawError::Decode`]）と報告されていた。Windows で
+/// 意味のある確認になる（Windows の CI には LibRaw がないため、実行は PoC-2 の実機確認）。
+/// Linux・macOS ではパスの上限が長いため、そのまま開けることを確かめるだけになる。
+#[test]
+fn long_path_over_max_path() {
+    // Windows のパスの長さ（UTF-16 の単位）。
+    fn utf16_len(p: &Path) -> usize {
+        p.as_os_str().to_string_lossy().encode_utf16().count()
+    }
+    let dir = tempfile::tempdir().unwrap();
+    // 1 つの名前は 255 文字までのため、短めのディレクトリを重ねて 300 文字を超えるようにする。
+    let mut deep = std::path::absolute(dir.path()).unwrap();
+    let mut n = 0;
+    while utf16_len(&deep) <= 300 {
+        deep.push(format!("長いパスのテスト_{n:02}_{}", "x".repeat(40)));
+        n += 1;
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    let img = sample(CfaPattern::RGGB, 32, 32, 33);
+    let jpeg = make_jpeg(24, 16);
+    let opts = DngOptions {
+        preview: Some(DngPreview::Jpeg {
+            width: 24,
+            height: 16,
+            data: jpeg.clone(),
+        }),
+        ..Default::default()
+    };
+    let path = write(&deep, "IMG_0001_長いパス.dng", &img, &opts);
+    assert!(utf16_len(&path) > 300, "{}", path.display());
+
+    assert!(decode_file(&path).unwrap().data == img.data);
+    let meta = read_metadata(&path).unwrap();
+    assert_eq!(meta.make.as_deref(), Some("GenzoTest"));
+    let t = extract_thumbnail(&path).unwrap();
+    assert_eq!(t.format, ThumbnailFormat::Jpeg);
+    assert_eq!(t.data, jpeg);
+}
+
 #[test]
 fn parallel_decoding_gives_identical_results() {
     let dir = tempfile::tempdir().unwrap();

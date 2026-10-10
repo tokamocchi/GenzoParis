@@ -522,7 +522,8 @@ impl From<RenderingIntent> for Intent {
 ///   適用する [`crate::transfer`] の関数とは値が違う）、1 超えは冪の区間を延長。
 /// - 純粋なべき乗（Adobe RGB のガンマなど）: 負の値は 0、1 超えは延長。
 /// - 表のカーブ（v2 の 2 点以上の 'curv'。IEC 61966-2-1 は v2 ではこの形になる）: 0〜1 に収める。
-///   1 点の 'curv'（ガンマ値）は上のガンマ 1・純粋なべき乗と同じ扱い。
+///   1 点の 'curv'（ガンマ値）は上のガンマ 1・純粋なべき乗と同じ扱い。この変換自体は収めたまま
+///   だが、3D LUT の格子点は [`crate::lut::Lut3d::from_icc`] が範囲の外へ延長する（指摘 F36）。
 ///
 /// 黒点の補正は使わない。スレッド間で共有できる（lcms2 のキャッシュを無効にしている）。
 pub struct IccTransform {
@@ -599,6 +600,176 @@ impl IccTransform {
             self.inner.transform_in_place(c);
         }
     }
+}
+
+/// 表のトーンカーブの逆関数（変換先の出力の段）を、0〜1 の外へ線形に延長するための値。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TabulatedCurveExtension {
+    /// リニアの値 0 での出力（lcms2 が 0 より下の値を収めた先）。
+    at0: f32,
+    /// 0 より下の傾き。
+    slope0: f32,
+    /// リニアの値 1 での出力（lcms2 が 1 より上の値を収めた先）。
+    at1: f32,
+    /// 1 より上の傾き。
+    slope1: f32,
+}
+
+impl TabulatedCurveExtension {
+    /// 0 の側の傾きを測る幅（リニアの値）。IEC 61966-2-1 の線形の区間（0.0031308 まで）に収まる
+    /// 幅にした。lcms2 の逆関数の出力は 16bit に量子化される（1/65535）ので、傾きの刻みは
+    /// 1024 / 65535 ≒ 0.016（傾き約 12.9 の 0.12%）。
+    const STEP0: f32 = 1.0 / 1024.0;
+    /// 1 の側の傾きを測る幅。1 の近くは曲がりが小さいので幅を広げ、量子化による傾きの刻みを
+    /// 128 / 65535 ≒ 0.002（傾き約 0.44 の 0.45%）にした（幅 1/1024 では 3.5%）。曲がりによる
+    /// 差は IEC 61966-2-1 で 0.23%。
+    const STEP1: f32 = 1.0 / 128.0;
+
+    /// 変換先のトーンカーブ（表）から作る。lcms2 の出力の段（`BuildRGBOutputMatrixShaper`）と同じく
+    /// `cmsReverseToneCurve` で逆関数を作り、同じ関数（`cmsEvalToneCurveFloat`）で端の値と傾きを測る。
+    /// 有限でなければ `None`（延長しない）。
+    fn new(curve: &lcms2::ToneCurveRef) -> Option<Self> {
+        let inv = curve.reversed();
+        let at0 = inv.eval(0.0_f32);
+        let at1 = inv.eval(1.0_f32);
+        let slope0 = (inv.eval(Self::STEP0) - at0) / Self::STEP0;
+        let slope1 = (at1 - inv.eval(1.0 - Self::STEP1)) / Self::STEP1;
+        let e = Self {
+            at0,
+            slope0,
+            at1,
+            slope1,
+        };
+        [at0, slope0, at1, slope1]
+            .iter()
+            .all(|v| v.is_finite())
+            .then_some(e)
+    }
+
+    /// リニアの値 `x` が 0〜1 の外なら、端から線形に延長した値。内側（と NaN）は `None`
+    /// （lcms2 の値をそのまま使う）。
+    fn extend(&self, x: f32) -> Option<f32> {
+        if x < 0.0 {
+            Some(self.at0 + self.slope0 * x)
+        } else if x > 1.0 {
+            Some(self.at1 + self.slope1 * (x - 1.0))
+        } else {
+            None
+        }
+    }
+}
+
+/// 変換先のプロファイルを出力に使うとき、lcms2 が LUT のタグ（BToD・BToA）ではなく行列と
+/// トーンカーブ（matrix-shaper）を使うか（lcms2 の `_cmsReadOutputLUT` と同じ判定）。
+fn uses_output_matrix_shaper(profile: &Profile, intent: RenderingIntent) -> bool {
+    let (float_tag, tag16) = match intent {
+        RenderingIntent::Perceptual => (TagSignature::BToD0Tag, TagSignature::BToA0Tag),
+        RenderingIntent::RelativeColorimetric => (TagSignature::BToD1Tag, TagSignature::BToA1Tag),
+        RenderingIntent::Saturation => (TagSignature::BToD2Tag, TagSignature::BToA2Tag),
+        // 絶対的な色域を維持するインテントの 16bit の LUT は、相対的なものと同じタグ。
+        RenderingIntent::AbsoluteColorimetric => (TagSignature::BToD3Tag, TagSignature::BToA1Tag),
+    };
+    profile.is_matrix_shaper()
+        && !profile.has_tag(float_tag)
+        && !profile.has_tag(tag16)
+        && !profile.has_tag(TagSignature::BToA0Tag)
+}
+
+/// `src` → `dst` の変換の出力（`outputs`。`inputs` を [`IccTransform`] で変換したもの）のうち、
+/// 変換先の表のトーンカーブで 0〜1 に収められたチャンネルを、範囲の外へ線形に延長した値に置き換える
+/// （3D LUT の格子点用。指摘 F36）。延長の対象のチャンネルがあり、延長の処理をしたら `true`
+/// （実際に 0〜1 の外の値があったかどうかは問わない）。
+///
+/// 対象は、変換先が matrix-shaper で（出力に LUT のタグを使わない）、トーンカーブが表（2 点以上の
+/// 'curv'）のチャンネルだけ。次のものはそのままにする:
+///
+/// - 区分関数（'para'）とガンマ値（1 点の 'curv'）のチャンネル: lcms2 が範囲の外も計算する
+///   （[`IccTransform`] の doc。純粋なべき乗の負の値が 0 になる件は implementation_status の No.13）。
+/// - LUT 型（BToA・BToD）のプロファイル: 範囲の外へ延長する手段がない（既知の制約）。
+///
+/// 手順: 変換先のトーンカーブをガンマ 1 に置き換えたプロファイル（行列・白色点などのタグは同じ）への
+/// 変換で、範囲を切らないリニアな値を求める。その値が 0〜1 の内側のチャンネルは lcms2 の出力のまま、
+/// 外側のチャンネルは、lcms2 の逆関数の端の値から端の傾きで線形に延長する（0〜1 の境界で
+/// lcms2 の出力とつながる）。
+///
+/// 延長の準備（ガンマ 1 のプロファイル・変換）を作れない場合は、延長せずに `false` を返す
+/// （LUT の作成は失敗させず、修正前の格子点のままにする）。
+pub(crate) fn extend_tabulated_output(
+    src: &IccProfile,
+    dst: &IccProfile,
+    intent: RenderingIntent,
+    inputs: &[[f32; 3]],
+    outputs: &mut [[f32; 3]],
+) -> Result<bool> {
+    if inputs.len() != outputs.len() {
+        return Err(ColorError::LengthMismatch {
+            input: inputs.len(),
+            output: outputs.len(),
+        });
+    }
+    if !dst.is_rgb() {
+        return Ok(false);
+    }
+    let d = dst.to_lcms()?;
+    if !uses_output_matrix_shaper(&d, intent) {
+        return Ok(false);
+    }
+    const TRC_TAGS: [TagSignature; 3] = [
+        TagSignature::RedTRCTag,
+        TagSignature::GreenTRCTag,
+        TagSignature::BlueTRCTag,
+    ];
+    let mut extensions = [None; 3];
+    for (ext, sig) in extensions.iter_mut().zip(TRC_TAGS) {
+        let Tag::ToneCurve(curve) = d.read_tag(sig) else {
+            return Ok(false);
+        };
+        // 表のカーブ（lcms2 の内部で区分の数が 0）だけ。1 点の 'curv' はガンマ値（区分関数の型 1）。
+        if curve.parametric_type() == 0 && !curve.is_multisegment() {
+            *ext = TabulatedCurveExtension::new(curve);
+        }
+    }
+    if extensions.iter().all(Option::is_none) {
+        return Ok(false);
+    }
+
+    // トーンカーブをガンマ 1 にした変換先（ガンマ 1 は lcms2 が範囲の外の値もそのまま通す）。
+    let Ok(mut linear_dst) = Profile::new_icc(dst.as_bytes()) else {
+        return Ok(false);
+    };
+    let gamma1 = ToneCurve::new(1.0);
+    for sig in TRC_TAGS {
+        if !linear_dst.write_tag(sig, Tag::ToneCurve(&gamma1)) {
+            return Ok(false);
+        }
+    }
+    let s = src.to_lcms()?;
+    let Ok(to_linear) =
+        Transform::<[f32; 3], [f32; 3], GlobalContext, DisallowCache>::new_flags_context(
+            GlobalContext::new(),
+            &s,
+            PixelFormat::RGB_FLT,
+            &linear_dst,
+            PixelFormat::RGB_FLT,
+            intent.into(),
+            Flags::NO_CACHE,
+        )
+    else {
+        return Ok(false);
+    };
+    const CHUNK: usize = 1 << 20;
+    let mut linear = vec![[0.0_f32; 3]; inputs.len()];
+    for (s, l) in inputs.chunks(CHUNK).zip(linear.chunks_mut(CHUNK)) {
+        to_linear.transform_pixels(s, l);
+    }
+    for (out, lin) in outputs.iter_mut().zip(&linear) {
+        for ((o, l), ext) in out.iter_mut().zip(lin).zip(&extensions) {
+            if let Some(v) = ext.as_ref().and_then(|e| e.extend(*l)) {
+                *o = v;
+            }
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -749,6 +920,153 @@ mod tests {
         let o = run(StandardProfile::AdobeRgb1998, IccVersion::V4_3);
         assert!(close(o[0], 0.0, 1e-6) && close(o[1], 0.0, 1e-6), "{o:?}");
         assert!(close(o[2], 2.0_f64.powf(256.0 / 563.0), 1e-3), "{o:?}");
+    }
+
+    #[test]
+    fn tabulated_output_extension_applies_only_to_tabulated_channels() {
+        // 指摘 F36: 変換先のトーンカーブが表のチャンネルだけを、0〜1 の外へ線形に延長する。
+        // R だけ 1024 点の表、G・B は IEC 61966-2-1 の区分関数（'para'）の sRGB（v4.3）を作る。
+        let src = IccProfile::standard(StandardProfile::Bt2020SrgbTransfer).unwrap();
+        let table: Vec<u16> = (0..1024)
+            .map(|i| (crate::transfer::srgb_decode(f64::from(i) / 1023.0) * 65535.0).round() as u16)
+            .collect();
+        let table_curve = ToneCurve::new_tabulated(&table);
+        let para = tone_curve(TransferFunction::Srgb).unwrap();
+        let prim = StandardProfile::Srgb.primaries();
+        let mut p = Profile::new_rgb(
+            &to_cie_xyy(D65),
+            &CIExyYTRIPLE {
+                Red: to_cie_xyy(prim.red),
+                Green: to_cie_xyy(prim.green),
+                Blue: to_cie_xyy(prim.blue),
+            },
+            &[&table_curve, &para, &para],
+        )
+        .unwrap();
+        p.set_version(4.3);
+        let mixed = IccProfile::from_bytes(&p.icc().unwrap()).unwrap();
+
+        // BT.2020 の緑・赤（sRGB の色域の外）と灰色（色域内）。
+        let inputs = [[0.0_f32, 1.0, 0.0], [1.0, 0.0, 0.0], [0.5, 0.5, 0.5]];
+        let t = IccTransform::new(&src, &mixed, RenderingIntent::RelativeColorimetric).unwrap();
+        let mut out = [[0.0_f32; 3]; 3];
+        t.transform(&inputs, &mut out).unwrap();
+        let clamped = out;
+        let extended = extend_tabulated_output(
+            &src,
+            &mixed,
+            RenderingIntent::RelativeColorimetric,
+            &inputs,
+            &mut out,
+        )
+        .unwrap();
+        assert!(extended);
+        // 期待値: sRGB のリニアな R（自前の行列）を、0 より下は傾き 12.92、1 より上は 1 での傾き
+        // 1.055 / 2.4 で延長した値。0 の近くの傾きは、1024 点の表の 16bit の量子化（最初の区間の
+        // 差が 4.958 ではなく 5）で約 13.01 になる（lcms2 の逆関数の作り方を Python で再現して確認）
+        // ので、1.5% の差を許す。
+        let lin = working_to(RgbColorSpace::Srgb).to_f32();
+        let green_r = lin.apply(inputs[0])[0];
+        let red_r = lin.apply(inputs[1])[0];
+        assert!(green_r < -0.5 && red_r > 1.5, "{green_r} {red_r}");
+        // 緑の R（表）: 修正前は 0 に収められていた。
+        assert!(clamped[0][0].abs() < 1e-6, "{clamped:?}");
+        let expected = 12.92 * green_r;
+        assert!(
+            (out[0][0] - expected).abs() < 0.015 * expected.abs(),
+            "{:?} vs {expected}",
+            out[0]
+        );
+        // 赤の R（表）: 修正前は 1 に収められていた。
+        assert!((clamped[1][0] - 1.0).abs() < 1e-6, "{clamped:?}");
+        let expected = 1.0 + 1.055 / 2.4 * (red_r - 1.0);
+        assert!(
+            (out[1][0] - expected).abs() < 0.01,
+            "{:?} vs {expected}",
+            out[1]
+        );
+        // G・B（区分関数）は lcms2 の値のまま（lcms2 が範囲の外も計算する）。
+        for k in [0, 1] {
+            assert_eq!(out[k][1..], clamped[k][1..], "{k}");
+        }
+        assert!(out[0][2] < -1.0 && out[1][1] < -1.0, "{out:?}");
+        // 色域内の色は変わらない。
+        assert_eq!(out[2], clamped[2]);
+
+        // 区分関数だけの変換先（v4 の標準の sRGB）では何もしない。
+        let v4 = IccProfile::standard(StandardProfile::Srgb).unwrap();
+        let t = IccTransform::new(&src, &v4, RenderingIntent::RelativeColorimetric).unwrap();
+        let mut out = [[0.0_f32; 3]; 3];
+        t.transform(&inputs, &mut out).unwrap();
+        let before = out;
+        assert!(
+            !extend_tabulated_output(
+                &src,
+                &v4,
+                RenderingIntent::RelativeColorimetric,
+                &inputs,
+                &mut out
+            )
+            .unwrap()
+        );
+        assert_eq!(out, before);
+        // 長さが違えばエラー。
+        assert!(matches!(
+            extend_tabulated_output(
+                &src,
+                &v4,
+                RenderingIntent::RelativeColorimetric,
+                &inputs,
+                &mut out[..2]
+            ),
+            Err(ColorError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn output_matrix_shaper_detection_follows_lcms_tag_selection() {
+        // lcms2 は出力に、インテントの BToD → BToA（絶対的は BToA1）→ BToA0 の順で LUT のタグを
+        // 探し、なければ matrix-shaper を使う（_cmsReadOutputLUT）。LUT のタグを使うプロファイルの
+        // 出力は延長しない。
+        use RenderingIntent::*;
+        let v2 =
+            IccProfile::standard_with_version(StandardProfile::Srgb, IccVersion::V2_4).unwrap();
+        let base = v2.to_lcms().unwrap();
+        for intent in [
+            Perceptual,
+            RelativeColorimetric,
+            Saturation,
+            AbsoluteColorimetric,
+        ] {
+            assert!(uses_output_matrix_shaper(&base, intent), "{intent:?}");
+        }
+        let pipe = lcms2::Pipeline::new(3, 3).unwrap();
+        let with_tag = |sig: TagSignature| {
+            let mut p = v2.to_lcms().unwrap();
+            assert!(p.write_tag(sig, Tag::Pipeline(&pipe)), "{sig:?}");
+            p
+        };
+        // BToA0 があれば、どのインテントでも LUT（ほかのインテントの代わりにも使う）。
+        let p = with_tag(TagSignature::BToA0Tag);
+        for intent in [
+            Perceptual,
+            RelativeColorimetric,
+            Saturation,
+            AbsoluteColorimetric,
+        ] {
+            assert!(!uses_output_matrix_shaper(&p, intent), "{intent:?}");
+        }
+        // BToA1 は相対的・絶対的だけ。
+        let p = with_tag(TagSignature::BToA1Tag);
+        assert!(uses_output_matrix_shaper(&p, Perceptual));
+        assert!(!uses_output_matrix_shaper(&p, RelativeColorimetric));
+        assert!(uses_output_matrix_shaper(&p, Saturation));
+        assert!(!uses_output_matrix_shaper(&p, AbsoluteColorimetric));
+        // BToD1（浮動小数点の LUT）は相対的だけ。
+        let p = with_tag(TagSignature::BToD1Tag);
+        assert!(uses_output_matrix_shaper(&p, Perceptual));
+        assert!(!uses_output_matrix_shaper(&p, RelativeColorimetric));
+        assert!(uses_output_matrix_shaper(&p, AbsoluteColorimetric));
     }
 
     #[test]

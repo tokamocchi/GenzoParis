@@ -21,30 +21,65 @@
 //!   同じ値のときはどちらの四面体を選んでも結果は同じになる（隣り合う四面体は境界の面で一致する）。
 //! - 出力は格子の値をそのまま補間した値で、0〜1 に収めない（量子化するときに収める）。格子の値に
 //!   NaN・無限大があれば、作成時に 0 に置き換える（2.6 節）。
-
+//!
+//! ## 格子点の値（変換先の色域の外の点）
+//!
+//! 変換先（モニター）の色域の外の格子点は、0〜1 の外の値を持つ。色域の境界の近くの色は、色域の
+//! 外の格子点との補間で求まるため、格子点が 0〜1 に収められていると、境界の近くの誤差が増える
+//! （指摘 F36）。変換先のトーンカーブの種類ごとの扱い:
+//!
+//! - 区分関数（v4 の 'para'）・ガンマ値（1 点の 'curv'）: lcms2 の変換が範囲の外も計算する
+//!   （[`IccTransform`] の doc。純粋なべき乗の負の値は 0 になる）。
+//! - 表（v2 の 2 点以上の 'curv'。Windows の既定の sRGB のプロファイルもこの形とされる。**要確認**）:
+//!   lcms2 は出力を 0〜1 に収める。変換先が matrix-shaper なら、トーンカーブをガンマ 1 にした
+//!   プロファイルへの変換で範囲を切らないリニアな値を求め、0〜1 の外のチャンネルを、lcms2 の逆関数の
+//!   端の値から端の傾き（0 の側は幅 1/1024、1 の側は幅 1/128 の差分で測る）で線形に延長する
+//!   （`icc.rs` の `extend_tabulated_output`）。
+//!   0 より下は v4 の区分関数と同じく線形の区間の延長になる。1 より上は v4 の冪の延長と値が違う
+//!   （線形）が、精度は v4 とほぼ同じ（下の表）。
+//! - LUT 型のプロファイル（出力に BToA・BToD のタグを使うもの）: lcms2 の値のまま（延長する手段が
+//!   ない。既知の制約。実際のモニターのプロファイルでの誤差は PoC-1 で確認する）。
 //!
 //! ## 精度（lcms2 の直接変換との差。PoC-1 の合格基準「ΔE2000 で最大 1 以下」（仮置き）との関係）
 //!
 //! 変換元 (a)（BT.2020・IEC 61966-2-1）から各変換先への 33³ の LUT を、lcms2 の直接変換と
 //! ΔE2000（変換先のプロファイルで Lab（D50）にして計算）で比べた最大値（このコンテナで測定。
-//! 一様な乱数 20 万点と、無彩色・暗部・原色の軸の点。「色域内」は直接変換の出力が 0〜1 に収まる点。
 //! `report_lut_accuracy` のテストで再現できる）:
 //!
-//! | 変換先 | 色域内 | 色域内で L* ≥ 5 |
-//! |---|---|---|
-//! | sRGB | 0.48 | 0.48 |
-//! | Display P3 | 0.34 | 0.34 |
-//! | リニア BT.2020 | 0.44 | 0.44 |
-//! | Adobe RGB（ガンマ 563/256） | **1.85** | 0.62 |
-//! | ガンマ 1.8 のモニターの例 | **1.31** | 0.55 |
+//! - 「色域内」「全体」: 変換元の値で一様な乱数 20 万点と、無彩色・暗部・原色の軸の点（色域の圧縮
+//!   なし）。「色域内」は、変換先のリニアな RGB（ICC の行列で計算）と直接変換の出力がどちらも 0〜1 に
+//!   収まる点。「全体」は色域の外の色も含む。
+//! - 「圧縮後」: genzo-pipeline の `DisplayTransform` と同じ手順（モニターの色域への色域の圧縮 →
+//!   符号化 → LUT → 0〜1 に収める）で、B3（リニア BT.2020）の 0〜1 の一様な乱数 30 万点。直接変換も
+//!   同じ圧縮・符号化の後に行う。一様な乱数なので、暗部（L* < 5）の点は少ない。
+//!
+//! | 変換先 | 色域内 | 色域内で L* ≥ 5 | 全体 | 圧縮後 |
+//! |---|---|---|---|---|
+//! | sRGB（v4.3） | 0.48 | 0.48 | 0.48 | 0.50 |
+//! | Display P3（v4.3） | 0.34 | 0.34 | 0.34 | 0.33 |
+//! | リニア BT.2020 | 0.44 | 0.44 | 0.44 | 0.16 |
+//! | Adobe RGB（ガンマ 563/256） | **1.21** | 0.61 | **1.85** | 0.48 |
+//! | ガンマ 1.8 のモニターの例 | 0.92 | 0.55 | **1.31** | 0.35 |
+//! | sRGB v2.4（4096 点の表） | 0.47 | 0.47 | 0.47 | 0.50 |
+//! | sRGB v2.1（1024 点の表。Windows の既定に似せたもの） | 0.48 | 0.48 | 0.48 | 0.50 |
+//! | Display P3 v2.4（4096 点の表） | 0.34 | 0.34 | 0.34 | 0.33 |
+//! | Display P3 v2.1（1024 点の表） | 0.34 | 0.34 | 0.34 | 0.33 |
+//!
+//! 表のトーンカーブの変換先は、格子点を延長する前（指摘 F36 の修正前）は sRGB v2.4 で色域内 1.14・
+//! 圧縮後 1.54、Display P3 v2.4 で色域内 1.05・圧縮後 1.38 だった（圧縮後の最大は、白に近い明るい
+//! 暖色など、色域の境界の近くの明るい色）。
 //!
 //! 変換先の伝達関数が純粋なべき乗だと、0 の近くで傾きが無限大になり、最初の格子の区間
-//! （L* < 5 程度の暗部）の補間誤差が大きくなる。格子数を 65 にしても Adobe RGB で 0.84 で、
-//! 暗部を除けば 33³ で基準を満たす。基準の適用範囲（暗部を除くか）、格子数、1D の後段カーブの
-//! 追加のどれで対応するかは PoC-1 で判断する。
+//! （L* < 5 程度の暗部）の補間誤差が大きくなる。格子数を 65 にすると Adobe RGB の色域内で 0.65
+//! （全体で 0.84）で、暗部を除けば 33³ で基準を満たす。基準の適用範囲（暗部を除くか）、格子数、1D の
+//! 後段カーブの追加のどれで対応するかは PoC-1 で判断する。
+//!
+//! 「色域内」の判定は、指摘 F36 の修正（2026-10-10）で、直接変換の出力だけでなく変換先のリニアな
+//! RGB も見るようにした。それまでの値（Adobe RGB 1.85、ガンマ 1.8 の例 1.31、65³ の Adobe RGB 0.84）
+//! は、lcms2 が負の値を 0 に収めた色域のわずかに外の暗い色を含んでいた（今の「全体」と同じ値）。
 
 use crate::error::{ColorError, Result};
-use crate::icc::{IccProfile, IccTransform, RenderingIntent};
+use crate::icc::{IccProfile, IccTransform, RenderingIntent, extend_tabulated_output};
 
 /// 格子数の既定値（2.6 節・5 章）。
 pub const DEFAULT_LUT_SIZE: usize = 33;
@@ -132,11 +167,16 @@ impl Lut3d {
     ///
     /// 画面用には `src` を [`crate::icc::StandardProfile::Bt2020SrgbTransfer`]（キャッシュの表示では
     /// Display P3）、`dst` をモニターのプロファイルにする（2.6 節 17a）。
+    ///
+    /// `dst` の色域の外の格子点は、0〜1 の外の値を持つ（境界の近くの補間の誤差を小さくするため）。
+    /// lcms2 は変換先のトーンカーブが表（v2 の 2 点以上の 'curv'）だと出力を 0〜1 に収めるので、
+    /// matrix-shaper のプロファイルではその格子点を範囲の外へ線形に延長する（指摘 F36。
+    /// 方法はモジュールの doc の「格子点の値」）。
     pub fn from_icc(src: &IccProfile, dst: &IccProfile, size: usize) -> Result<Self> {
         Self::from_icc_with_intent(src, dst, size, RenderingIntent::RelativeColorimetric)
     }
 
-    /// インテントを指定して lcms2 の変換から作る。
+    /// インテントを指定して lcms2 の変換から作る（格子点の値は [`Lut3d::from_icc`] と同じ扱い）。
     pub fn from_icc_with_intent(
         src: &IccProfile,
         dst: &IccProfile,
@@ -148,6 +188,7 @@ impl Lut3d {
         let identity = Self::identity(size)?;
         let mut data = vec![[0.0_f32; 3]; identity.data.len()];
         transform.transform(&identity.data, &mut data)?;
+        extend_tabulated_output(src, dst, intent, &identity.data, &mut data)?;
         Self::from_data(size, data)
     }
 
@@ -251,10 +292,13 @@ impl Lut3d {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::display::{DisplayLutSource, DisplayProfile};
     use crate::icc::{IccVersion, StandardProfile};
     use crate::lab::delta_e2000;
     use crate::matrix::Mat3;
-    use crate::test_util::rgb_to_lab;
+    use crate::space::{BT709_PRIMARIES, DISPLAY_P3_PRIMARIES};
+    use crate::test_util::{rgb_to_lab, tabulated_srgb_transfer_profile};
+    use crate::transfer::srgb_encode_f32;
     use lcms2::{CIExyY, CIExyYTRIPLE, Profile, ToneCurve};
 
     /// 決定的な疑似乱数（線形合同法）で 0〜1 の値を作る。
@@ -549,6 +593,11 @@ mod tests {
         let via_lut: Vec<[f32; 3]> = inputs.iter().map(|v| lut.apply(*v)).collect();
         let lab_d = rgb_to_lab(dst, &direct);
         let lab_l = rgb_to_lab(dst, &via_lut);
+        // 色域内の判定には、変換先のリニアな RGB（ICC の行列で計算。変換元の伝達関数は
+        // IEC 61966-2-1）も使う。変換先のトーンカーブが表（v2）だと直接変換の出力は 0〜1 に
+        // 収められるため、出力だけでは色域の外の色を見分けられない（指摘 F36）。
+        let src_to_dst_linear = dst.rgb_to_pcs_xyz_matrix().unwrap().inverse().unwrap()
+            * src.rgb_to_pcs_xyz_matrix().unwrap();
         let mut st = DeltaEStats {
             max_in_gamut: 0.0,
             max_in_gamut_l5: 0.0,
@@ -558,7 +607,11 @@ mod tests {
         for i in 0..inputs.len() {
             let de = delta_e2000(lab_d[i], lab_l[i]);
             st.max_all = st.max_all.max(de);
-            if direct[i].iter().all(|v| (0.0..=1.0).contains(v)) {
+            let linear = src_to_dst_linear
+                .apply(inputs[i].map(|v| crate::transfer::srgb_decode(f64::from(v))));
+            if direct[i].iter().all(|v| (0.0..=1.0).contains(v))
+                && linear.iter().all(|v| (0.0..=1.0).contains(v))
+            {
                 st.n_in_gamut += 1;
                 st.max_in_gamut = st.max_in_gamut.max(de);
                 if lab_d[i].l >= 5.0 {
@@ -573,8 +626,9 @@ mod tests {
     fn display_lut_matches_direct_lcms_within_delta_e_1() {
         // PoC-1 の合格基準（仮置き）: 3D LUT と lcms2 の直接変換の差が ΔE2000 で最大 1 以下。
         // 変換先の伝達関数が IEC 61966-2-1 型（0 の近くが線形）なら、33³ ですべての色が満たす。
+        // v2 の表のトーンカーブ（'curv'）の変換先も含める（指摘 F36）。
         let src = IccProfile::standard(StandardProfile::Bt2020SrgbTransfer).unwrap();
-        let dsts = [
+        let mut dsts = vec![
             ("sRGB", IccProfile::standard(StandardProfile::Srgb).unwrap()),
             (
                 "Display P3",
@@ -584,11 +638,8 @@ mod tests {
                 "リニア BT.2020",
                 IccProfile::standard(StandardProfile::LinearBt2020).unwrap(),
             ),
-            (
-                "sRGB v2",
-                IccProfile::standard_with_version(StandardProfile::Srgb, IccVersion::V2_4).unwrap(),
-            ),
         ];
+        dsts.extend(tabulated_trc_destinations());
         for (name, dst) in &dsts {
             let st = delta_e_vs_direct(&src, dst, DEFAULT_LUT_SIZE, 20_000);
             assert!(
@@ -614,8 +665,10 @@ mod tests {
     fn display_lut_pure_gamma_destination_known_limitation() {
         // 変換先の伝達関数が純粋なべき乗（Adobe RGB のガンマ 563/256、ガンマ 1.8 のモニター）だと、
         // 0 の近くで傾きが無限大になるため、最初の格子の区間の補間誤差が大きい。33³ では L* < 5 の
-        // 暗部で ΔE2000 が 1 を超える（測定値は最大 1.3〜1.9 程度）。L* ≥ 5 では 1 以下。
-        // PoC-1 の合格基準をそのまま満たさない既知の制約として、モジュールの doc に書いている。
+        // 暗部で ΔE2000 が 1 を超える（このコンテナでの測定値: 色域内で Adobe RGB 1.21、キャッシュ →
+        // モニターの例 1.22、モニターの例 0.92。色域のわずかに外の暗い色も含めると 1.85・1.31）。
+        // L* ≥ 5 では 1 以下。PoC-1 の合格基準をそのまま満たさない既知の制約として、モジュールの
+        // doc に書いている。
         let src = IccProfile::standard(StandardProfile::Bt2020SrgbTransfer).unwrap();
         let p3 = IccProfile::standard(StandardProfile::DisplayP3).unwrap();
         let cases = [
@@ -645,13 +698,134 @@ mod tests {
         }
     }
 
+    /// v2 の表のトーンカーブ（'curv'）を持つモニターのプロファイルの例（指摘 F36）。
+    fn tabulated_trc_destinations() -> Vec<(&'static str, IccProfile)> {
+        vec![
+            (
+                "sRGB v2.4（4096 点の表）",
+                IccProfile::standard_with_version(StandardProfile::Srgb, IccVersion::V2_4).unwrap(),
+            ),
+            (
+                "sRGB v2.1（1024 点の表）",
+                tabulated_srgb_transfer_profile(BT709_PRIMARIES, 1024),
+            ),
+            (
+                "Display P3 v2.4（4096 点の表）",
+                IccProfile::standard_with_version(StandardProfile::DisplayP3, IccVersion::V2_4)
+                    .unwrap(),
+            ),
+            (
+                "Display P3 v2.1（1024 点の表）",
+                tabulated_srgb_transfer_profile(DISPLAY_P3_PRIMARIES, 1024),
+            ),
+        ]
+    }
+
+    /// genzo-pipeline の `DisplayTransform` と同じ手順（モニターの色域への色域の圧縮 →
+    /// IEC 61966-2-1 で符号化 → LUT → 0〜1 に収める）の結果と、同じく色域の圧縮と符号化の後に
+    /// LUT を通さず lcms2 で直接変換した結果の ΔE2000（変換先のプロファイルで Lab（D50）にして
+    /// 計算）の最大。入力は B3（リニア BT.2020）の 0〜1 の一様な乱数。
+    fn display_path_max_delta_e(dst: &IccProfile, size: usize, n_random: usize) -> f64 {
+        let display = DisplayProfile::resolve(Some(dst.as_bytes())).unwrap();
+        assert!(!display.is_assumed_srgb());
+        let gamut = display.gamut().unwrap();
+        let lut = display.build_lut(DisplayLutSource::Working, size).unwrap();
+        let src = IccProfile::standard(StandardProfile::Bt2020SrgbTransfer).unwrap();
+        let t = IccTransform::new(&src, dst, RenderingIntent::RelativeColorimetric).unwrap();
+        let mut rng = Lcg(0x1234_5678);
+        let encoded: Vec<[f32; 3]> = (0..n_random)
+            .map(|_| gamut.compress_working(rng.rgb()).map(srgb_encode_f32))
+            .collect();
+        let via_lut: Vec<[f32; 3]> = encoded
+            .iter()
+            .map(|v| lut.apply(*v).map(|x| x.clamp(0.0, 1.0)))
+            .collect();
+        let mut direct = vec![[0.0_f32; 3]; encoded.len()];
+        t.transform(&encoded, &mut direct).unwrap();
+        let lab_d = rgb_to_lab(dst, &direct);
+        let lab_l = rgb_to_lab(dst, &via_lut);
+        lab_d
+            .iter()
+            .zip(&lab_l)
+            .map(|(a, b)| delta_e2000(*a, *b))
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn tabulated_trc_destination_grid_points_extend_outside_0_1() {
+        // 指摘 F36: v2 の表のトーンカーブ（'curv'）の変換先では、lcms2 の変換の出力は 0〜1 に
+        // 収められる（IccTransform の doc）。LUT の格子点まで収められると、モニターの色域の境界の
+        // 近くの補間の誤差が増える。格子点は v4（'para'）の変換先と同じく 0〜1 の外の値を持つこと。
+        let src = IccProfile::standard(StandardProfile::Bt2020SrgbTransfer).unwrap();
+        // tabulated_trc_destinations の並びに対応する、v4（'para'）の標準のプロファイル。
+        let kinds = [
+            StandardProfile::Srgb,
+            StandardProfile::Srgb,
+            StandardProfile::DisplayP3,
+            StandardProfile::DisplayP3,
+        ];
+        for ((name, dst), kind) in tabulated_trc_destinations().into_iter().zip(kinds) {
+            let v4 = Lut3d::from_icc(&src, &IccProfile::standard(kind).unwrap(), 33).unwrap();
+            let lut = Lut3d::from_icc(&src, &dst, 33).unwrap();
+            // 格子点 (0, 1, 0)（BT.2020 の緑）は変換先の色域の外で、R・B が負になる。
+            let g = lut.at(0, 32, 0);
+            let g4 = v4.at(0, 32, 0);
+            assert!(g[0] < -1.0 && g[2] < -0.1, "{name}: {g:?}（v4 は {g4:?}）");
+            let mut outside = 0;
+            for (a, b) in lut.data().iter().zip(v4.data()) {
+                for k in 0..3 {
+                    if b[k] < 0.0 {
+                        // 0 より下: v4 の区分関数も表の延長も、線形の区間（傾き 12.92）の延長
+                        // （1024 点の表は 16bit の量子化で、傾きが 0.7% ほど大きい）。
+                        assert!(
+                            (a[k] - b[k]).abs() <= 0.01 * b[k].abs() + 2e-3,
+                            "{name}: {a:?} vs {b:?}"
+                        );
+                    } else if b[k] > 1.0 {
+                        // 1 より上: v4 は冪の延長、表は 1 での傾きで線形に延長する（冪は上に凸なので、
+                        // 線形の延長は v4 以上になる）。
+                        assert!(a[k] >= b[k] - 2e-3, "{name}: {a:?} vs {b:?}");
+                    } else {
+                        assert!((a[k] - b[k]).abs() <= 2e-3, "{name}: {a:?} vs {b:?}");
+                    }
+                    if !(0.0..=1.0).contains(&a[k]) {
+                        outside += 1;
+                    }
+                }
+            }
+            assert!(outside > 10_000, "{name}: 0〜1 の外の値 {outside}");
+        }
+    }
+
+    #[test]
+    fn display_path_matches_direct_lcms_for_tabulated_trc_destinations() {
+        // 指摘 F36: DisplayTransform と同じ手順で、PoC-1 の合格基準（仮置き。ΔE2000 で最大 1 以下）を
+        // 表のトーンカーブのモニターでも満たす。修正前は、格子点が 0〜1 に収められていたため、
+        // 明るい色の色域の境界の近く（B3 = [0.998, 0.927, 0.697] など）で 1 を超えていた。
+        // v4（'para'）の変換先も比べる（修正の前後で変わらない）。
+        let mut dsts = tabulated_trc_destinations();
+        dsts.push((
+            "sRGB v4.3",
+            IccProfile::standard(StandardProfile::Srgb).unwrap(),
+        ));
+        dsts.push((
+            "Display P3 v4.3",
+            IccProfile::standard(StandardProfile::DisplayP3).unwrap(),
+        ));
+        for (name, dst) in &dsts {
+            let max = display_path_max_delta_e(dst, DEFAULT_LUT_SIZE, 60_000);
+            assert!(max <= 1.0, "{name}: 最大 ΔE2000 = {max}");
+        }
+    }
+
     /// 格子数ごとの誤差の一覧を表示する（PoC-1 の検討用。`cargo test -p genzo-color --release
-    /// report_lut_accuracy -- --ignored --nocapture`）。
+    /// report_lut_accuracy -- --ignored --nocapture`）。最後の列は、DisplayTransform と同じ手順
+    /// （色域の圧縮 → 符号化 → LUT）で B3 の一様な乱数 30 万点を比べた最大（指摘 F36）。
     #[test]
     #[ignore]
     fn report_lut_accuracy() {
         let src = IccProfile::standard(StandardProfile::Bt2020SrgbTransfer).unwrap();
-        let dsts = [
+        let mut dsts = vec![
             ("sRGB", IccProfile::standard(StandardProfile::Srgb).unwrap()),
             (
                 "Display P3",
@@ -667,12 +841,16 @@ mod tests {
             ),
             ("モニターの例（ガンマ 1.8）", monitor_like_profile()),
         ];
-        println!("| 変換先 | 格子数 | 色域内の最大 | 色域内（L* ≥ 5）の最大 | 全体の最大 |");
+        dsts.extend(tabulated_trc_destinations());
+        println!(
+            "| 変換先 | 格子数 | 色域内の最大 | 色域内（L* ≥ 5）の最大 | 全体の最大 | 色域を圧縮した入力の最大 |"
+        );
         for (name, dst) in &dsts {
             for size in [17, 33, 49, 65] {
                 let st = delta_e_vs_direct(&src, dst, size, 200_000);
+                let display = display_path_max_delta_e(dst, size, 300_000);
                 println!(
-                    "| {name} | {size} | {:.3} | {:.3} | {:.3} |",
+                    "| {name} | {size} | {:.3} | {:.3} | {:.3} | {display:.3} |",
                     st.max_in_gamut, st.max_in_gamut_l5, st.max_all
                 );
             }

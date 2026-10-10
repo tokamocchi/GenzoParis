@@ -7,6 +7,8 @@
 //! - 写真・動画のメタデータ: [`PhotoMetadata`]、[`VideoMetadata`]
 //! - 書き出しの設定（EXP-01・EXP-04、6.4 節）: [`ExportSettings`]
 //! - キャッシュキー（4.1 節）: [`CacheKey`]
+//! - ファイルの同期（fsync）の OS ごとの違い（6.4 節。指摘 F19）: [`fs_sync`]。書き出し
+//!   （genzo-media）・バックアップと L1（genzo-catalog）の両方が使うため、共通のこの crate に置く
 //!
 //! この crate は他の内部 crate に依存しない（04 の 1.4 節）。
 
@@ -15,6 +17,7 @@ pub mod capture_time;
 pub mod catalog;
 pub mod develop;
 pub mod export;
+pub mod fs_sync;
 pub mod ids;
 pub mod metadata;
 pub mod phase;

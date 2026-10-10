@@ -260,7 +260,11 @@ impl<'a> Processor<'a> {
         Ok(p)
     }
 
-    /// 所有するデータを開く（Windows で、ワイド文字のパスに LibRaw が対応していない場合）。
+    /// 所有するデータを開く（Windows で、ワイド文字のパスに LibRaw が対応していない場合と、
+    /// 長いパスを LibRaw が開けない場合）。
+    ///
+    /// メモリから開くため、最後の 1 バイトだけが欠けたファイルは検出できない
+    /// （[`crate::decode_bytes`] と同じ制限。tests/libraw.rs の `truncated_files_return_errors`）。
     #[cfg(any(windows, not(unix)))]
     fn open_owned(data: Vec<u8>) -> Result<Self, RawError> {
         if data.is_empty() {
@@ -313,19 +317,34 @@ impl<'a> Processor<'a> {
     #[cfg(windows)]
     fn open_path_native(path: &Path) -> Result<Self, RawError> {
         use std::os::windows::ffi::OsStrExt;
-        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if wide.contains(&0) {
+        let original: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if original.contains(&0) {
             return Err(RawError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "パスに NUL 文字が含まれています",
             )));
         }
+        // MAX_PATH を超える長いパスは、LibRaw の中の C の実行時ライブラリが接頭辞なしでは開けず、
+        // LIBRAW_IO_ERROR（「壊れている可能性」）になる。std の事前の確認は自動で `\\?\` を付けて
+        // 通るため、長いパスは拡張長パスにしてから渡す（指摘 F20。crate::win_long_path）。
+        // 短いパスは従来どおりそのまま渡す。
+        let absolute: Vec<u16> = std::path::absolute(path)?
+            .as_os_str()
+            .encode_wide()
+            .collect();
+        let extended = crate::win_long_path::extended_length_path(&absolute);
+        let is_long = extended.is_some();
+        let mut wide = extended.unwrap_or(original);
         wide.push(0);
         let mut p = Self::new()?;
         // SAFETY: wide は NUL 終端の UTF-16 の文字列で、呼び出しの間有効。
         let rc = unsafe { ffi::genzo_lr_open_wfile(p.ptr(), wide.as_ptr()) };
-        if rc == libraw_code::NOT_IMPLEMENTED {
-            // LibRaw が Unicode のパスに対応せずにビルドされている。Rust で読み込んで渡す。
+        if rc == libraw_code::NOT_IMPLEMENTED || (is_long && rc == libraw_code::IO_ERROR) {
+            // NOT_IMPLEMENTED: LibRaw が Unicode のパスに対応せずにビルドされている。
+            // 長いパスの IO_ERROR: C の実行時ライブラリが拡張長パスを受け付けない場合に備える
+            // （std では開けることを open_path で確かめてある。Windows の実機では未確認）。
+            // どちらも Rust で読み込んで渡す。本当に壊れたファイルは、メモリから開くときに
+            // LibRaw がエラーにする。
             drop(p);
             return Self::open_owned(std::fs::read(path)?);
         }

@@ -19,6 +19,10 @@ pub mod dng;
 mod libraw;
 pub mod thumbnail;
 pub mod types;
+// Windows の長いパスを LibRaw に渡す形にする（Windows で `libraw` が有効なときだけ使う。
+// 文字列の変換だけなので、テストはどの OS でも行う）。
+#[cfg(any(all(windows, feature = "libraw"), test))]
+mod win_long_path;
 
 pub use decode::{
     CamXyzSource, CaptureTimeSource, DecodedRaw, DngColorMatrixInfo, LIBRAW_ENABLED, RawDetails,
