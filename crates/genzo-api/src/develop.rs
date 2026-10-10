@@ -14,7 +14,11 @@
 //! - 保存（DATA-03・DEV-27）: ドラッグの終了（[`Core::end_drag`]）で履歴に 1 件記録して保存する。
 //!   ドラッグでない変更は、最後の操作から [`DEVELOP_SAVE_DELAY`]（1 秒）後にまとめて保存する（自動保存の
 //!   スレッド）。変更が続いても、最初の未保存の変更から [`DEVELOP_SAVE_MAX_DELAY`] がたてば保存する。
-//!   [`Core::close_develop`]・[`Core::close`] で保存待ちの変更を保存する。
+//!   [`Core::close_develop`]・[`Core::close`] で保存待ちの変更を保存する。**保存に失敗したら、セッションを
+//!   捨てない**（未保存の設定の唯一のメモリ上の写しなので）: 写真を閉じる・別の写真を開く・Undo・一括適用は
+//!   エラーで戻ってセッションを残し、[`Core::close`] は何も閉じずにエラーで戻る（もう一度閉じられる）。
+//!   閉じ直せない最後の機会（drop など）に保存できなければ、警告して設定を捨て、カタログに「正常に終了した」
+//!   印を付けずに閉じる（[`shutdown`]）。
 //! - Undo / Redo（DEV-27）はカタログの履歴で行うので、再起動の後もできる。
 //! - 設定のコピーと複数の variant への一括適用（DEV-30。[`Core::paste_settings`]）、仮想コピーの作成
 //!   （LIB-13。[`Core::create_virtual_copy`]）。
@@ -685,20 +689,69 @@ fn saver_loop(
     }
 }
 
-/// 終了の処理: 保存待ちの変更を保存し、自動保存のスレッドを止める。
-pub(crate) fn shutdown(inner: &Arc<Inner>) -> Result<(), ApiError> {
+/// [`shutdown`] の結果。
+#[derive(Debug)]
+pub(crate) enum ShutdownOutcome {
+    /// すでに終了している（別の終了の処理が、現像のセッションの扱いを済ませた）。
+    AlreadyClosed,
+    /// 保存待ちの変更を保存した（保存待ちがなかった場合を含む）。セッションを捨て、コアを終了済みにした。
+    Saved,
+    /// 保存できなかったが、最後の機会（`last_chance`）なので、セッションを捨て、コアを終了済みにした。
+    /// 保存待ちだった設定は失われる（呼び出し側は、カタログに「正常に終了した」印を付けない）。
+    Abandoned(ApiError),
+    /// 保存できなかった。セッション（未保存の設定の唯一のメモリ上の写し）もコアも、そのまま
+    /// （終了済みにしない。もう一度閉じられる）。
+    Kept(ApiError),
+}
+
+/// 終了の処理の最初: 保存待ちの変更を保存し、保存できたら、現像のセッションを捨て、コアを終了済みにして、
+/// 自動保存のスレッドを止める。
+///
+/// 保存に失敗したときは、セッションを捨てない。セッションは、保存待ちの設定の唯一のメモリ上の写しで、
+/// 捨てるとその編集は失われる（原因がディスクの空き容量の不足などの一時的なものでも）。`last_chance` が
+/// 偽（[`Core::close`]）なら、何も変えずに [`ShutdownOutcome::Kept`] で返す（コアは終了済みにならず、
+/// 自動保存のスレッドも動き続けるので、呼び出し側は、原因を取り除いてもう一度閉じられる）。真（drop・
+/// 起動の失敗の後始末など、もう閉じ直せない）なら、閉じるしかないので、セッションを捨てて
+/// [`ShutdownOutcome::Abandoned`] で返し、警告 [`WarningCode::SaveFailed`] で知らせる。
+///
+/// 終了済みの印（`closed`）は、保存の後に state のロックの中で立てる（保存に失敗したら立てない。
+/// 以前は先に立てたので、失敗しても閉じ直せなかった）。ロックの中なので、同時に閉じる 2 つの処理のどちらかが
+/// 保存を終えて印を立てた後、もう一方は [`ShutdownOutcome::AlreadyClosed`] になる。
+pub(crate) fn shutdown(inner: &Arc<Inner>, last_chance: bool) -> ShutdownOutcome {
     let mut state = inner.develop.state.lock();
-    let r = match state.as_mut() {
+    if inner.closed.load(Ordering::Acquire) {
+        return ShutdownOutcome::AlreadyClosed;
+    }
+    let (saved, variant) = match state.as_mut() {
         Some(s) => {
             s.dragging = false;
-            save_locked(inner, s, None).map(|_| ())
+            (save_locked(inner, s, None).map(|_| ()), Some(s.variant_id))
         }
-        None => Ok(()),
+        None => (Ok(()), None),
     };
+    let error = match saved {
+        Err(e) if !last_chance => return ShutdownOutcome::Kept(e),
+        Err(e) => {
+            inner.events.warn(
+                WarningCode::SaveFailed,
+                format!(
+                    "現像設定を保存できないまま終了します。保存できなかった編集は失われ、次に開いたときに「前回は正常に終了しませんでした」と表示されます: {e}"
+                ),
+                variant,
+                None,
+            );
+            Some(e)
+        }
+        Ok(()) => None,
+    };
+    inner.closed.store(true, Ordering::Release);
     *state = None;
     inner.develop.stop.store(true, Ordering::Release);
     inner.develop.cv.notify_all();
-    r
+    match error {
+        Some(e) => ShutdownOutcome::Abandoned(e),
+        None => ShutdownOutcome::Saved,
+    }
 }
 
 fn state_of(s: &Session, can_undo: bool, can_redo: bool) -> DevelopState {
@@ -936,6 +989,9 @@ impl Core {
     }
 
     /// 現像中の写真を閉じる（保存待ちの変更を保存する。ドラッグ中なら終えたものとして記録する）。
+    ///
+    /// 保存できなければエラーを返し、セッションは閉じない（未保存の設定は残る。原因を取り除いてから、
+    /// もう一度閉じられる）。
     pub fn close_develop(&self) -> Result<(), ApiError> {
         let inner = &self.inner;
         let mut state = inner.develop.state.lock();

@@ -29,8 +29,9 @@
 //! を持ったまま取るが、持っている間はほかのロックを取らない（葉）。
 //!
 //! 例外は、設定の更新のロック（`Inner::settings_update`）。[`Core::update_settings`] だけが、ほかのロックを
-//! 持たずに最初に取り、更新が終わるまで（カタログ → 設定 → キャッシュ → 推定し直しのジョブの記録の順に
-//! 取りながら）持つ。ほかの処理はこのロックを取らないので、ロックの輪はできない。
+//! 持たずに最初に取り、更新が終わるまで（カタログ → 設定 → 推定し直しのジョブの記録 → キャッシュの順に
+//! 取りながら。推定し直しのジョブの記録は、失敗しうるキャッシュの上限の反映より前に取る）持つ。ほかの
+//! 処理はこのロックを取らないので、ロックの輪はできない。
 //!
 //! もう 1 つの例外は、表示範囲の描画のロック（`DevelopShared::region`）。[`Core::render_region`] は、要求の
 //! 番号の割り当てから、対話用のスケジューラへの投入と取り消しトークンの公開まで（1 つの区間）を、このロックを
@@ -472,7 +473,7 @@ impl Core {
         match crate::develop::spawn_saver(&inner) {
             Ok(saver) => *inner.saver.lock() = Some(saver),
             Err(e) => {
-                let _ = close_inner(&inner);
+                let _ = close_inner(&inner, true);
                 return Err(e);
             }
         }
@@ -480,7 +481,7 @@ impl Core {
         match crate::search::spawn_refresher(&inner) {
             Ok(h) => *inner.search_refresher.lock() = Some(h),
             Err(e) => {
-                let _ = close_inner(&inner);
+                let _ = close_inner(&inner, true);
                 return Err(e);
             }
         }
@@ -496,8 +497,23 @@ impl Core {
     /// 必要なら自動バックアップを作り、カタログに「正常に終了した」印を付けて閉じる（DATA-05）。
     ///
     /// 2 回目以降は何もしない。
+    ///
+    /// **保存待ちの現像設定を保存できなかったとき**（ディスクの空き容量の不足など）は、そのエラーを返し、
+    /// **何も閉じない**: コアは開いたままで（[`Core::is_closed`] は `false`）、未保存の設定もメモリに残り、
+    /// 自動保存も試し直す。原因を取り除いてから、もう一度 `close` を呼べる。閉じられないまま終わる（drop
+    /// する）と、最後にもう一度だけ保存を試し、できなければ、保存待ちの設定を捨てて、カタログに「正常に
+    /// 終了した」印を付けずに閉じる（次に開いたとき、前回の異常終了として警告する）ので、UI は、エラーを
+    /// 利用者に知らせ、再試行か破棄かを選ばせること。保存の後の段階（ワーカーの終了・カタログを閉じるなど）
+    /// のエラーは、閉じた後（`is_closed` が `true`）に返り、閉じ直しはできない。
     pub fn close(&self) -> Result<(), ApiError> {
-        close_inner(&self.inner)
+        close_inner(&self.inner, false)
+    }
+
+    /// 終了しているか。[`Core::close`] が、保存待ちの現像設定の保存を終えて終了の処理に入った後（その後の段階で
+    /// エラーになった場合を含む）と、drop の後は `true`。`close` がエラーを返したとき、これが `false` なら、
+    /// コアは開いたままで、もう一度 `close` できる。
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire)
     }
 
     /// イベントの受け取り側を作る（04 の 1.5 節）。起動時の警告は、後から作った受け取り側にも届く。
@@ -545,28 +561,45 @@ impl Core {
 
 impl Drop for Core {
     fn drop(&mut self) {
+        // 閉じ直せない最後の機会（保存できなくても、閉じるしかない）。
         if !self.inner.closed.load(Ordering::Acquire)
-            && let Err(e) = close_inner(&self.inner)
+            && let Err(e) = close_inner(&self.inner, true)
         {
             tracing::warn!(error = %e, "コアを閉じるときにエラーが起きました");
         }
     }
 }
 
-/// 終了の処理（[`Core::close`]）。
-fn close_inner(inner: &Arc<Inner>) -> Result<(), ApiError> {
-    if inner.closed.swap(true, Ordering::AcqRel) {
-        return Ok(());
-    }
+/// 終了の処理（[`Core::close`]・drop）。`last_chance` は、保存待ちの現像設定を保存できなかったときに、
+/// 閉じるのをやめて、もう一度閉じられるようにせず、未保存の設定を捨てて閉じるか（drop など、閉じ直せない
+/// とき。[`Core::close`] の doc）。
+fn close_inner(inner: &Arc<Inner>, last_chance: bool) -> Result<(), ApiError> {
+    use crate::develop::ShutdownOutcome;
+
     let mut first_err: Option<ApiError> = None;
+    // 保存待ちの現像設定を保存できなかったか（できなければ、正常に終了した印を付けない）。
+    let mut unsaved = false;
+    // 1. 保存待ちの現像設定を保存する。保存できたら（または最後の機会なら）、コアを終了済みにして、自動保存
+    //    のスレッドを止める。保存できずに、閉じ直せるなら、何も閉じずに戻る。
+    match crate::develop::shutdown(inner, last_chance) {
+        ShutdownOutcome::AlreadyClosed => return Ok(()),
+        ShutdownOutcome::Kept(e) => {
+            tracing::warn!(error = %e, "保存待ちの現像設定を保存できないため、閉じない");
+            return Err(e);
+        }
+        ShutdownOutcome::Saved => {}
+        ShutdownOutcome::Abandoned(e) => {
+            tracing::warn!(error = %e, "保存待ちの現像設定を保存できないまま閉じる");
+            unsaved = true;
+            first_err = Some(e);
+        }
+    }
     let mut keep = |r: Result<(), ApiError>| {
         if let Err(e) = r {
             tracing::warn!(error = %e, "終了の処理でエラー");
             first_err.get_or_insert(e);
         }
     };
-    // 1. 保存待ちの現像設定を保存し、自動保存のスレッドを止める。
-    keep(crate::develop::shutdown(inner));
     if let Some(h) = inner.saver.lock().take() {
         let _ = h.join();
     }
@@ -603,7 +636,13 @@ fn close_inner(inner: &Arc<Inner>) -> Result<(), ApiError> {
         keep(cache.thumbs.close().map_err(ApiError::from));
     }
     if let Some(cat) = inner.catalog.lock().take() {
-        keep(cat.close().map_err(ApiError::from));
+        if unsaved {
+            // 保存できなかった編集があるので、「正常に終了した」印は付けずに、接続だけを閉じる（次に開いたとき、
+            // 前回の異常終了として警告する。DATA-05）。
+            drop(cat);
+        } else {
+            keep(cat.close().map_err(ApiError::from));
+        }
     }
     // カタログを閉じてから、ロックを解放する。
     inner.lock.lock().take();

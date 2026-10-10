@@ -1093,6 +1093,61 @@ fn a_catalog_cannot_be_opened_twice_at_the_same_time() {
     env.open().close().unwrap();
 }
 
+/// 同じ既存のカタログを、シンボリックリンクの別名で開いても、同じカタログとして排他になる（ロックの
+/// ファイルの名前を、渡されたパスの書き方ではなく、リンクを解決したパスから求める。以前は別名にも
+/// `.lock` を付けたので別のロックになり、同じカタログを同時に開けた。正常終了の印も食い違った）。
+/// 別名で開いている間は、本体の名前でも、復元の差し替えでも同じ。
+#[cfg(unix)]
+#[test]
+fn a_catalog_cannot_be_opened_twice_through_a_symlink_alias() {
+    use std::os::unix::fs::symlink;
+
+    let env = Env::new();
+    // 既存のカタログを作っておく（別名で開くのは、既にあるカタログ）。
+    env.open().close().unwrap();
+    let link_dir = env.dir.path().join("links");
+    std::fs::create_dir_all(&link_dir).unwrap();
+    let alias = link_dir.join("alias.db");
+    symlink(env.catalog_path(), &alias).unwrap();
+    let config_via_alias = || {
+        let mut c = env.config();
+        c.catalog_path = alias.clone();
+        c
+    };
+    let assert_in_use = |r: Result<genzo_api::Core, genzo_api::ApiError>| match r {
+        Err(e) => assert_eq!(e.kind(), genzo_api::ErrorKind::Conflict, "{e:?}"),
+        Ok(_) => panic!("同じカタログの 2 つ目は開けない"),
+    };
+
+    // 本体の名前で開いている間は、別名で開けない。
+    let first = env.open();
+    assert_in_use(genzo_api::Core::open(config_via_alias()));
+    // 開いている間は、別名を渡した復元の差し替えもしない（リンクの名前の変更もしない）。
+    let backup = first.backup_now().unwrap();
+    let plan = genzo_api::prepare_restore(&backup.path, &alias).unwrap();
+    assert!(genzo_api::apply_restore(&plan).is_err());
+    assert!(
+        std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "別名はそのまま"
+    );
+    first.close().unwrap();
+
+    // 別名で開いている間は、本体の名前で開けない。
+    let via_alias = genzo_api::Core::open(config_via_alias()).unwrap();
+    assert_in_use(genzo_api::Core::open(env.config()));
+    via_alias.close().unwrap();
+
+    // 閉じた後は、どちらでも開ける。
+    env.open().close().unwrap();
+    genzo_api::Core::open(config_via_alias())
+        .unwrap()
+        .close()
+        .unwrap();
+}
+
 /// キャッシュの回収（L1 のフォルダの走査に時間がかかる）の間も、ドラッグの終了（保存）が待たされない
 /// （回収はカタログとキャッシュのロックの外でフォルダを走査し、現像の保存は現像のロックの外でカタログに
 /// 書く。PERF-13、指摘 F24）。
@@ -1676,6 +1731,86 @@ fn a_failed_settings_update_does_not_leave_part_of_it_in_the_catalog() {
     core.close().unwrap();
 }
 
+/// 1 回の更新でキャッシュの上限と既定のタイムゾーンの両方を変えるとき、新しい上限の反映（超えた分の回収。
+/// SQLite のエラーなどで失敗しうる）が失敗しても、撮影日時の推定し直しのジョブを投入する（Codex のレビュー。
+/// コア API は、エラーを返すが、更新は保存とメモリ上の設定への反映まで済んでいる）。
+///
+/// 以前は、上限の反映の失敗が、ジョブの投入より前に `?` で戻ったので、実行中の設定とカタログは新しい
+/// タイムゾーンなのに、撮影日時は古いタイムゾーンで推定したままで、次に開く（印を見てジョブを動かす）まで
+/// 直らなかった。
+///
+/// 失敗は、テスト用の関数（`genzo_catalog::testing::fail_preview_evictions`）で、プレビューの索引の行の削除
+/// だけを SQLite のエラーにして起こす（カタログへの保存は成功する。時間には依存しない）。
+#[test]
+fn a_failed_cache_capacity_update_still_reresolves_capture_times_for_the_new_offset() {
+    use genzo_api::ApiError;
+
+    const N: usize = 5;
+    let env = Env::new();
+    let open = || env.open();
+    // 既定のタイムゾーン（+09:00）を保存してから、オフセットのない写真を登録する。
+    open().close().unwrap();
+    register_user_default_assets(&env.catalog_path(), N);
+    let core = open();
+    let offsets = |core: &genzo_api::Core| -> Vec<Option<String>> {
+        all_items(core)
+            .iter()
+            .map(|s| s.capture.tz_assumed.clone())
+            .collect()
+    };
+    let jst = Some("+09:00".to_owned());
+    assert_eq!(offsets(&core), vec![jst; N], "更新の前は +09:00");
+    let before = core.settings();
+    let update = SettingsUpdate {
+        preview_cache_bytes: Some(before.preview_cache_bytes + 50_000_000),
+        default_utc_offset_minutes: Some(60),
+        ..Default::default()
+    };
+
+    // 上限の反映（超えた分の回収）だけを失敗させる。
+    let thumbs_db = env.config().thumbs_path();
+    genzo_catalog::testing::fail_preview_evictions(&thumbs_db).unwrap();
+    let err = core.update_settings(&update).unwrap_err();
+    assert!(
+        matches!(&err, ApiError::Cache { .. })
+            && format!("{err:?}").contains("preview index delete"),
+        "上限の反映の失敗のはず: {err:?}"
+    );
+    // 保存とメモリ上の設定は、更新のとおり（失敗したのは、上限の反映のうちの回収だけ）。
+    let current = core.settings();
+    assert_eq!(current.default_utc_offset_minutes, 60);
+    assert_eq!(
+        current.preview_cache_bytes,
+        update.preview_cache_bytes.unwrap()
+    );
+    // 推定し直しのジョブが投入されていて、撮影日時が新しいオフセットで求め直される。
+    core.wait_idle();
+    assert_eq!(
+        offsets(&core),
+        vec![Some("+01:00".to_owned()); N],
+        "プレビューの上限の反映の失敗で、撮影日時の推定し直しが飛ばされた（実行中の設定は +01:00）"
+    );
+    // 終えたジョブが、推定し直しが済んでいない印を外している（次に開いても、もう一度動かさない）。
+    let pending = genzo_catalog::Catalog::open_read_only(env.catalog_path())
+        .unwrap()
+        .capture_time_reresolve_pending()
+        .unwrap();
+    assert!(!pending, "ジョブが終わったので、印は外れているはず");
+
+    // 失敗の原因がなくなれば、同じ上限の更新が通る。開き直しても、新しい設定と撮影日時のまま。
+    genzo_catalog::testing::allow_preview_evictions(&thumbs_db).unwrap();
+    core.update_settings(&SettingsUpdate {
+        preview_cache_bytes: update.preview_cache_bytes,
+        ..Default::default()
+    })
+    .unwrap();
+    core.close().unwrap();
+    let core = open();
+    assert_eq!(core.settings(), current);
+    assert_eq!(offsets(&core), vec![Some("+01:00".to_owned()); N]);
+    core.close().unwrap();
+}
+
 /// 表示範囲の描画（ルーペ・パン）が重なっても、先に番号を取った古い要求が、後から投入して、先に投入した
 /// 新しい要求を取り消さない（Codex のレビュー。`Core` は `Sync` で、Tauri からは要求ごとに `spawn_blocking`
 /// で呼ぶので、パンの連続で 2 つの `render_region` は重なる）。
@@ -2133,5 +2268,161 @@ fn a_vanished_folder_is_marked_missing_and_restored_but_not_trashed() {
     let report = core.check_files(&[a]).unwrap();
     assert_eq!((report.ok, report.missing.len()), (1, 0), "{report:?}");
     assert_eq!(all_items(&core)[0].file_status, FileStatus::Ok);
+    core.close().unwrap();
+}
+
+/// 現像設定の保存だけを失敗させた Core を開く（Codex のレビュー。ディスクが一杯・入出力のエラーなどで、
+/// 終了のときの保存が失敗する場合の再現）。写真 `A.jpg` を取り込んで開き、露光量 +0.5 を保存待ちにして、
+/// 保存の書き込みを失敗させた状態で返す（自動保存は動かない。保存は、テストが呼ぶ操作だけ）。
+fn open_with_unsaved_develop_and_failing_saves(
+    env: &Env,
+) -> (genzo_api::Core, genzo_api::VariantId) {
+    write_jpeg(&env.photos.join("A.jpg"), (48, 32), 1, None);
+    // 自動保存のスレッドが割り込まないよう、待ち時間を十分に長くする。
+    let core = env.open_with(|c| c.develop_save_delay = Some(std::time::Duration::from_secs(3600)));
+    import(&core, &env.photos);
+    let a = all_items(&core)[0].variant_id;
+    core.open_develop(a).unwrap();
+    core.set_settings(&develop_exposure(0.5), false).unwrap();
+    // 取り込み（最初の履歴を作る）の後で、現像設定の書き込みだけを失敗させる。
+    genzo_catalog::testing::fail_develop_writes(env.catalog_path()).unwrap();
+    (core, a)
+}
+
+/// 終了のときに現像設定を保存できなくても、未保存の設定の唯一のメモリ上の写しを捨てず、カタログに「正常に
+/// 終了した」印も付けない。原因がなくなってからもう一度閉じれば、保存して閉じる（Codex のレビュー）。
+///
+/// 以前は、終了の処理が保存に失敗しても、現像のセッション（未保存の設定の唯一の写し）を無条件に捨て、
+/// 「終了済み」の印を先に付けてカタログを閉じた。呼び出し側はエラーを受け取るが、閉じ直せず（2 回目の
+/// `close` は何もしない）、編集は失われ、次に開いたときも「前回は正常に終了した」と扱われた。
+///
+/// 失敗は、テスト用の関数（`genzo_catalog::testing::fail_develop_writes`）で、現像設定の書き込みだけを
+/// SQLite のエラーにして起こす（時間には依存しない）。
+#[test]
+fn a_failed_save_at_close_keeps_the_unsaved_settings_and_allows_closing_again() {
+    let env = Env::new();
+    let (core, a) = open_with_unsaved_develop_and_failing_saves(&env);
+
+    // 保存に失敗したので、閉じられない（エラー）。コアは開いたままで、何も捨てていない。
+    let err = core.close().expect_err("保存できないのに、閉じられた");
+    assert!(!core.is_closed(), "保存できないのに、終了済みにした: {err}");
+    assert_eq!(
+        core.develop_settings(a).unwrap(),
+        develop_exposure(0.5),
+        "未保存の設定を捨てた: {err}"
+    );
+    // 原因が残っている間は、閉じ直しても同じ（何もしないで成功にしない）。
+    assert!(core.close().is_err(), "2 回目の close が何もせずに成功した");
+    assert!(!core.is_closed());
+    assert!(core.flush_develop().is_err());
+    assert_eq!(
+        core.develop_settings(a).unwrap(),
+        develop_exposure(0.5),
+        "閉じ直しの失敗で、未保存の設定を捨てた"
+    );
+
+    // 原因がなくなれば、閉じ直せて、保存した設定が残る。
+    genzo_catalog::testing::allow_develop_writes(env.catalog_path()).unwrap();
+    core.close().unwrap();
+    assert!(core.is_closed());
+    let core = env.open();
+    assert_eq!(
+        core.startup_report().previous_shutdown,
+        genzo_api::PreviousShutdown::Clean
+    );
+    assert_eq!(core.develop_settings(a).unwrap(), develop_exposure(0.5));
+    assert_eq!(history_labels(&core, a), vec!["読み込み", "露光量 +0.50"]);
+    core.close().unwrap();
+}
+
+/// 上の回帰テストの別の経路: 保存できなかった `close` の後、原因がなくなってから、閉じ直さずに drop しても
+/// （drop は最後の機会として、もう一度保存する）、未保存の設定を保存して、正常に終了した印を付ける。
+#[test]
+fn dropping_the_core_after_a_failed_close_saves_once_the_cause_is_gone() {
+    let env = Env::new();
+    let (core, a) = open_with_unsaved_develop_and_failing_saves(&env);
+    assert!(core.close().is_err());
+    genzo_catalog::testing::allow_develop_writes(env.catalog_path()).unwrap();
+    drop(core);
+
+    let core = env.open();
+    assert_eq!(
+        core.startup_report().previous_shutdown,
+        genzo_api::PreviousShutdown::Clean
+    );
+    assert_eq!(core.develop_settings(a).unwrap(), develop_exposure(0.5));
+    core.close().unwrap();
+}
+
+/// drop のように、もう閉じ直せない最後の機会に保存できなければ、閉じるしかない（ロックを放し、ワーカーを
+/// 終わらせる）が、カタログには「正常に終了した」印を付けず、次に開いたときに前回の異常終了として知らせる
+/// （保存できなかった編集があることを、利用者が気づけるようにする。Codex のレビュー）。保存できなかった
+/// ことは、警告（`SaveFailed`）でも知らせる。
+///
+/// 以前は、保存に失敗しても「正常に終了した」印を付けたので、次に開いても何も知らされなかった。
+#[test]
+fn closing_for_the_last_time_without_saving_is_not_marked_as_a_clean_shutdown() {
+    let env = Env::new();
+    let (core, a) = open_with_unsaved_develop_and_failing_saves(&env);
+    let rx = core.subscribe();
+    drop(core);
+    // 保存できなかったことの警告（閉じる処理の中で出す）。
+    let saved_warning = rx.try_iter().any(|e| {
+        matches!(
+            e,
+            Event::Warning {
+                code: WarningCode::SaveFailed,
+                variant_id: Some(v),
+                ..
+            } if v == a
+        )
+    });
+    assert!(saved_warning, "保存できなかったことを警告していない");
+
+    genzo_catalog::testing::allow_develop_writes(env.catalog_path()).unwrap();
+    let core = env.open();
+    assert_eq!(
+        core.startup_report().previous_shutdown,
+        genzo_api::PreviousShutdown::Unclean,
+        "保存できなかったのに、正常に終了した印を付けた"
+    );
+    assert!(
+        core.startup_warnings().iter().any(|e| matches!(
+            e,
+            Event::Warning {
+                code: WarningCode::UncleanShutdown,
+                ..
+            }
+        )),
+        "前回の異常終了を知らせていない"
+    );
+    core.close().unwrap();
+}
+
+/// UI の「写真を閉じる」（`close_develop`）と写真の切り替え（`open_develop`）は、保存に失敗したら、現像の
+/// セッションを残す（未保存の設定の唯一の写しを捨てない）。原因がなくなってからもう一度閉じれば保存される。
+/// 終了（`close`）の経路と違い、以前から守られていた経路の回帰テスト（Codex のレビューの確認）。
+#[test]
+fn a_failed_save_keeps_the_develop_session_when_closing_or_switching_photos() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("B.jpg"), (48, 32), 2, None);
+    let (core, a) = open_with_unsaved_develop_and_failing_saves(&env);
+    // 写真 B（取り込みは、書き込みを失敗させる前に済ませる必要がある）。
+    genzo_catalog::testing::allow_develop_writes(env.catalog_path()).unwrap();
+    import(&core, &env.photos);
+    let b = by_name(&all_items(&core), "B.jpg").variant_id;
+    genzo_catalog::testing::fail_develop_writes(env.catalog_path()).unwrap();
+
+    // 写真の切り替え: 保存に失敗したら、切り替えず、A のセッションを残す。
+    assert!(core.open_develop(b).is_err());
+    assert_eq!(core.develop_settings(a).unwrap(), develop_exposure(0.5));
+    // 写真を閉じる: 同じ。
+    assert!(core.close_develop().is_err());
+    assert_eq!(core.develop_settings(a).unwrap(), develop_exposure(0.5));
+
+    genzo_catalog::testing::allow_develop_writes(env.catalog_path()).unwrap();
+    core.close_develop().unwrap();
+    assert_eq!(core.develop_settings(a).unwrap(), develop_exposure(0.5));
+    assert_eq!(history_labels(&core, a), vec!["読み込み", "露光量 +0.50"]);
     core.close().unwrap();
 }

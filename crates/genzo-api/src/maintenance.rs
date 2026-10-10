@@ -273,7 +273,10 @@ pub fn apply_restore(plan: &RestorePlan) -> Result<Vec<PathBuf>, ApiError> {
             plan.restored_path.display()
         )));
     }
-    if plan.displaced_path.exists() {
+    // symlink_metadata: リンクの先ではなく、その名前の項目があるか（壊れたリンクも「ある」。`exists` はリンクを
+    // たどるので、壊れたリンクの上へ名前を変えて、リンクを置き換えてしまう）。
+    let present = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    if present(&plan.displaced_path) {
         return Err(ApiError::InvalidArgument(format!(
             "退避先 {} が既にあります",
             plan.displaced_path.display()
@@ -290,8 +293,6 @@ pub fn apply_restore(plan: &RestorePlan) -> Result<Vec<PathBuf>, ApiError> {
     // `-wal` だけが残ると、次に開いたときに新しい空のカタログへ古い `-wal` が適用されうるため）。
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut steps: Vec<(PathBuf, PathBuf)> = Vec::new();
-    // symlink_metadata: リンクの先ではなく、その名前の項目があるか（壊れたリンクも退避する）。
-    let present = |p: &Path| std::fs::symlink_metadata(p).is_ok();
     if present(&plan.catalog_path) {
         steps.push((plan.catalog_path.clone(), plan.displaced_path.clone()));
     }
@@ -414,6 +415,36 @@ mod tests {
             "stale-journal"
         );
         assert_eq!(moved.len(), 3, "退避したファイルを返す: {moved:?}");
+    }
+
+    /// 退避先に壊れたシンボリックリンク（リンク先がない）があるとき、リンクを置き換えない。`Path::exists`
+    /// はリンクをたどって「ない」と答えるため、以前は今のカタログの名前の変更でリンクが置き換わっていた
+    /// （付随するファイルの退避先は、リンクそのものを見ていた）。
+    #[cfg(unix)]
+    #[test]
+    fn restore_does_not_replace_a_dangling_symlink_at_the_displaced_path() {
+        let d = tempfile::tempdir().unwrap();
+        let plan = plan_in(d.path());
+        std::fs::write(&plan.catalog_path, "current").unwrap();
+        std::fs::write(&plan.restored_path, "restored").unwrap();
+        let nowhere = d.path().join("nowhere.db");
+        std::os::unix::fs::symlink(&nowhere, &plan.displaced_path).unwrap();
+        assert!(
+            !plan.displaced_path.exists(),
+            "前提: リンク先がないので exists は偽"
+        );
+        let err = apply_restore(&plan).unwrap_err();
+        assert!(matches!(err, ApiError::InvalidArgument(_)), "{err}");
+        let meta = std::fs::symlink_metadata(&plan.displaced_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "リンクのまま残っている");
+        assert_eq!(std::fs::read_link(&plan.displaced_path).unwrap(), nowhere);
+        assert!(!nowhere.exists(), "リンクの先にファイルを作らない");
+        assert_eq!(
+            read(&plan.catalog_path),
+            "current",
+            "今のカタログは動かさない"
+        );
+        assert_eq!(read(&plan.restored_path), "restored");
     }
 
     /// 退避の途中で失敗したら（`-wal` を移せないなど）、今のカタログを元の名前に戻す（カタログの本体が
