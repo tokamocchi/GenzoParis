@@ -22,6 +22,7 @@ pub(crate) mod code {
     pub(crate) const BUFFER_SIZE: i32 = -200_006;
     pub(crate) const NO_THUMB_DATA: i32 = -200_007;
     pub(crate) const ABI_MISMATCH: i32 = -200_008;
+    pub(crate) const THUMB_TRUNCATED: i32 = -200_009;
 }
 
 /// LibRaw のエラーコード（`libraw_const.h` の `LibRaw_errors`）。

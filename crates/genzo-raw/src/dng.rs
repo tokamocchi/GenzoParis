@@ -375,13 +375,23 @@ fn srational(v: f64) -> Result<(i32, i32), DngError> {
     Ok((if v < 0.0 { -n } else { n }, d))
 }
 
+/// シャッター速度の逆数が整数 n に近い（1/n 秒とみなす）と判定する、相対的な差の上限。
+///
+/// 仮置き: 1e-6。[`PhotoMetadata::shutter_s`] は f32 なので、1/n を f32 にした値の逆数は
+/// n から相対的に最大で約 6e-8（f32 の丸めの相対誤差 2⁻²⁴）ずれる。その十数倍の余裕を
+/// 持たせ、かつ 1/250.4 秒（相対的な差 1.6e-3）や 0.3333 秒（1e-4）のような 1/n でない値を
+/// 1/n に丸めない大きさにした。差の絶対値で判定すると、n が大きい（1/32000 秒など）ときに
+/// f32 の誤差だけで判定を外れるため、相対的な差にする。
+const EXPOSURE_RECIPROCAL_TOLERANCE: f64 = 1e-6;
+
 /// シャッター速度（秒）を RATIONAL にする。1 秒未満で 1/n に近ければ 1/n の形にする。
 fn exposure_time(seconds: f32) -> Result<(u32, u32), DngError> {
     let s = f64::from(seconds);
     if s > 0.0 && s < 1.0 {
         let inv = 1.0 / s;
-        if (inv - inv.round()).abs() < 1e-3 && inv.round() <= f64::from(u32::MAX) {
-            return Ok((1, inv.round() as u32));
+        let n = inv.round();
+        if (inv - n).abs() <= inv * EXPOSURE_RECIPROCAL_TOLERANCE && n <= f64::from(u32::MAX) {
+            return Ok((1, n as u32));
         }
     }
     rational(s)

@@ -10,9 +10,11 @@
 //! - LibRaw のインスタンスは関数の呼び出しごとに作って破棄する。LibRaw のドキュメント
 //!   （API-notes の「Thread safety」）では、1 つのインスタンスを 1 つのスレッドで使う限り、
 //!   スレッドごとに別のインスタンスを並行して使えるとされている。そのため、これらの関数は
-//!   複数のスレッドから同時に呼んでよい（このとき `libraw_r` にリンクしていること。build.rs）。
-//!   並行して展開した結果が一致することはテストで確かめているが、実機の ARW での確認と
-//!   性能の計測は PoC-2 で行う（AR-7）。
+//!   複数のスレッドから同時に呼んでよい。ただし、スレッドセーフでない `libraw`
+//!   （`LIBRAW_NOTHREADS` 付きのビルド。展開の関数が静的変数を使う）にリンクした build では、
+//!   LibRaw の使用をプロセスの中で 1 つずつに制限する（並行しても速くならない。build.rs の
+//!   説明）。並行して展開した結果が一致することはテストで確かめているが、実機の ARW での
+//!   確認と性能の計測は PoC-2 で行う（AR-7）。
 //! - ファイルは読み取り専用で開く（DATA-01）。LibRaw 0.21 の `open_file` は
 //!   `std::filebuf::open(.., in | binary)` または `fopen(.., "rb")` で開く（LibRaw の
 //!   `src/libraw_datastream.cpp`）。
@@ -57,16 +59,32 @@
 //!
 //! - LibRaw は幅か高さが 22 画素未満の RAW を RAW として扱わない（dcraw 以来の `identify` の
 //!   判定）。そのような入力は [`RawError::Unsupported`]。
-//! - 展開中に LibRaw が致命的でないデータの誤りを検出しても、展開は成功として返し、その数を
-//!   [`RawDetails::data_error_count`] に記録する（扱いはワーカーが決める）。ファイルの終わりを
-//!   超える読み込みは LibRaw が中断し、[`RawError::Decode`] になる。
+//! - 展開中に LibRaw が致命的でないデータの誤り（`LibRaw::derror()`。圧縮データの符号の誤り、
+//!   記録方式のビット数を超える値など）を検出した場合、LibRaw は数えるだけで展開を続ける。
+//!   [`decode_file`] はそれを [`RawError::Decode`] にする（[`DecodedRaw::into_verified_image`]）。
+//!   [`decode_file_with_details`]・[`decode_bytes`] は PoC-2 の記録のため `Ok` を返し、数を
+//!   [`RawDetails::data_error_count`] に記録する。ファイルの終わりを超える読み込みは LibRaw が
+//!   中断し、[`RawError::Decode`] になる。
+//! - LibRaw 0.21 のロスレス JPEG の展開（`lossless_dng_load_raw`、α7 IV などのロスレス圧縮の
+//!   ARW に使う `sony_ljpeg_load_raw`）は、タイルの JPEG のヘッダが読めないとそこで展開を
+//!   打ち切り、エラーもデータの誤りも返さない（`src/decoders/dng.cpp`・
+//!   `src/decoders/decoders_libraw_dcrdefs.cpp`。残りの画素は展開されないまま）。この crate は
+//!   それを検出できない（Compression を 7 に書き換えた合成 DNG で、`data_error_count` が 0 の
+//!   まま `Ok` になることを確認した）。壊れたロスレス圧縮の ARW の扱いは PoC-2 で確認する。
+//! - 埋め込みサムネイルのデータがファイルの終わりを超えている場合（LibRaw 0.21 は 16 KiB まで
+//!   読み越して、足りない部分を初期化しないまま返す）は [`RawError::Decode`] にする
+//!   （JPEG と 8bit のビットマップ。シムで確かめる）。
 //! - メモリ上のデータ（[`decode_bytes`] など）では、LibRaw 0.21 の `LibRaw_buffer_datastream::read`
 //!   が途中で切れた最後の値も読めた数に数えるため、最後の数バイトだけが欠けたデータを
 //!   検出できない場合がある。ワーカーはファイルの API を使う。
 //! - 余白（`left_margin`・`top_margin`）が奇数の場合、LibRaw は余白を偶数にそろえて CFA の配列を
-//!   ずらすが、黒レベルの繰り返しのパターンはずらさない。この crate は LibRaw と同じ添字で
-//!   パターンを読むため、そのような RAW で CFA の位置ごとに黒レベルが違うと、位置がずれる
-//!   （合成 DNG のテストで確認。対象機種の ARW で起きるかは PoC-2 で確認する）。
+//!   ずらすが、黒レベルの繰り返しのパターンはずらさない（LibRaw 0.21 の `src/utils/open.cpp`
+//!   の `open_datastream`）。この crate は LibRaw と同じ添字でパターンを読むため、そのような RAW で
+//!   CFA の位置ごとに黒レベルが違うと、位置がずれる（合成 DNG のテストで確認）。LibRaw 0.21 の
+//!   ソースでは、繰り返しのパターン（`cblack[4]`・`cblack[5]`）を設定するのは DNG の
+//!   BlackLevelRepeatDim と一部のタグ（0xf00a）だけで、Sony の ARW の黒レベルは `black` と
+//!   `cblack[0..4]` で表されるため、対象機種の ARW には影響しない見込み（PoC-2 で確認する）。
+//!   元の余白が奇数だったかは LibRaw の公開の値から分からないため、検出はしない。
 
 use std::path::Path;
 
@@ -85,12 +103,37 @@ const LIBRAW_DISABLED: &str =
     "この build では LibRaw が無効です（genzo-raw の機能フラグ libraw を有効にしてください）";
 
 /// 展開した RAW と、展開の詳細。
+///
+/// [`RawDetails::data_error_count`] が 0 より大きい場合、[`image`](Self::image) は
+/// 壊れた画素（LibRaw が読み飛ばした・範囲外の値・初期化されていない値）を含みうる。
+/// 本番の展開では [`into_verified_image`](Self::into_verified_image)（[`decode_file`] と同じ
+/// 判定）で取り出す。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedRaw {
-    /// 展開した RAW（検証済み）。
+    /// 展開した RAW（[`RawImage::validate`] 済み。データの誤りの有無は問わない）。
     pub image: RawImage,
     /// 展開の詳細（PoC-2 の記録用）。
     pub details: RawDetails,
+}
+
+impl DecodedRaw {
+    /// LibRaw が展開中にデータの誤りを検出していなければ [`RawImage`] を返す。
+    ///
+    /// LibRaw 0.21 は、圧縮データの符号の誤りや、記録方式のビット数を超える値などを
+    /// 「致命的でないデータの誤り」として数えるだけで展開を続ける（`LibRaw::derror()`。
+    /// ファイルの終わりに達した場合だけ中断する）。そのような結果は壊れた画素を含みうるため、
+    /// 1 件でもあれば [`RawError::Decode`] にする（SEC-05: 壊れたファイルはそのファイルだけを
+    /// エラーにする）。正常な ARW で誤りが数えられないことは PoC-2 で確認する。
+    pub fn into_verified_image(self) -> Result<RawImage, RawError> {
+        let count = self.details.data_error_count;
+        if count > 0 {
+            return Err(RawError::Decode(format!(
+                "RAW のデータに誤りがあります（LibRaw が {count} 件の誤りを検出。展開の関数 {}）",
+                self.details.unpack_function
+            )));
+        }
+        Ok(self.image)
+    }
 }
 
 /// XYZ → カメラ RGB の行列（[`RawImage::cam_xyz`]）の出どころ。
@@ -157,7 +200,8 @@ pub struct RawDetails {
     pub decoder_id: String,
     /// LibRaw が展開に使った関数の名前（例: `"sony_arw2_load_raw"`。記録方式の確認用）。
     pub unpack_function: String,
-    /// 展開中に LibRaw が検出した、致命的でないデータの誤りの数。
+    /// 展開中に LibRaw が検出した、致命的でないデータの誤りの数（0 より大きければ、画素は
+    /// 壊れている可能性が高い。[`DecodedRaw::into_verified_image`]）。
     pub data_error_count: i32,
     /// DNG か。
     pub is_dng: bool,
@@ -253,17 +297,23 @@ pub fn decoder_id() -> Option<String> {
 ///
 /// 有効画素の範囲の CFA の値・黒レベル・白レベル・撮影時の WB・カメラ行列・撮影情報を取り出し、
 /// [`RawImage::validate`] で検証して返す。3 色・2 × 2 のベイヤー配列以外は
-/// [`RawError::Unsupported`]。
+/// [`RawError::Unsupported`]。LibRaw が展開中にデータの誤りを検出した場合は
+/// [`RawError::Decode`]（[`DecodedRaw::into_verified_image`]）。
 pub fn decode_file(path: impl AsRef<Path>) -> Result<RawImage, RawError> {
-    decode_file_with_details(path).map(|d| d.image)
+    decode_file_with_details(path)?.into_verified_image()
 }
 
 /// [`decode_file`] と同じだが、展開の詳細（[`RawDetails`]）も返す。
+///
+/// PoC-2 の記録のため、LibRaw がデータの誤りを検出しても `Ok` を返し、その数を
+/// [`RawDetails::data_error_count`] に入れる。結果を使う場合は
+/// [`DecodedRaw::into_verified_image`] で確かめる。
 pub fn decode_file_with_details(path: impl AsRef<Path>) -> Result<DecodedRaw, RawError> {
     decode_source(Source::Path(path.as_ref()))
 }
 
-/// メモリ上の RAW のデータを展開する（[`decode_file_with_details`] と同じ処理）。
+/// メモリ上の RAW のデータを展開する（[`decode_file_with_details`] と同じ処理。データの誤りの
+/// 扱いも同じ）。
 pub fn decode_bytes(data: &[u8]) -> Result<DecodedRaw, RawError> {
     decode_source(Source::Bytes(data))
 }
@@ -281,7 +331,8 @@ pub fn read_metadata_bytes(data: &[u8]) -> Result<PhotoMetadata, RawError> {
 /// RAW のファイルの埋め込みサムネイル（プレビュー）を取り出す。
 ///
 /// 埋め込みサムネイルがない、または対応していない形式（16bit のビットマップなど）の場合は
-/// [`RawError::Unsupported`]。複数ある場合は LibRaw が選んだもの（通常は最も大きいもの）。
+/// [`RawError::Unsupported`]。データがファイルの終わりを超えている（途中で切れている）場合は
+/// [`RawError::Decode`]。複数ある場合は LibRaw が選んだもの（通常は最も大きいもの）。
 pub fn extract_thumbnail(path: impl AsRef<Path>) -> Result<EmbeddedThumbnail, RawError> {
     thumbnail_source(Source::Path(path.as_ref()))
 }
@@ -349,6 +400,68 @@ mod tests_without_libraw {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CfaPattern;
+
+    fn decoded(data_error_count: i32) -> DecodedRaw {
+        let image = RawImage {
+            width: 2,
+            height: 2,
+            cfa: CfaPattern::RGGB,
+            data: vec![600; 4],
+            black_level: [512.0; 4],
+            white_level: 16383.0,
+            as_shot_wb: [2.0, 1.0, 1.5, 1.0],
+            cam_xyz: None,
+            metadata: PhotoMetadata::default(),
+        };
+        let details = RawDetails {
+            decoder_id: "libraw-0.21.2".to_owned(),
+            unpack_function: "sony_arw_load_raw".to_owned(),
+            data_error_count,
+            is_dng: false,
+            raw_width: 2,
+            raw_height: 2,
+            left_margin: 0,
+            top_margin: 0,
+            raw_pitch_bytes: 4,
+            raw_bits_per_sample: 14,
+            libraw_black: 512,
+            libraw_cblack: [0; 4],
+            black_pattern_size: [0; 2],
+            linear_max: [0; 4],
+            cam_mul: [2.0, 1.0, 1.5, 0.0],
+            pre_mul: [2.0, 1.0, 1.5, 0.0],
+            libraw_cam_xyz: [[0.0; 3]; 4],
+            rgb_cam: [[0.0; 4]; 3],
+            dng_color_matrices: Vec::new(),
+            cam_xyz_source: CamXyzSource::None,
+            wb_source: WbSource::AsShot,
+            timestamp: None,
+            capture_time_source: CaptureTimeSource::None,
+            libraw_make: None,
+            libraw_model: None,
+        };
+        DecodedRaw { image, details }
+    }
+
+    /// LibRaw が展開中にデータの誤りを検出した結果（壊れた画素を含みうる）は、
+    /// [`decode_file`] の経路（[`DecodedRaw::into_verified_image`]）でエラーにする。
+    /// レビューで見つけた不具合（誤りの数を捨てて Ok を返していた）の再現テスト。
+    #[test]
+    fn data_errors_are_rejected_by_verified_image() {
+        let ok = decoded(0);
+        assert_eq!(ok.clone().into_verified_image().unwrap(), ok.image);
+        for count in [1, 7, i32::MAX] {
+            let r = decoded(count).into_verified_image();
+            match r {
+                Err(RawError::Decode(msg)) => {
+                    assert!(msg.contains(&count.to_string()), "{msg}");
+                    assert!(msg.contains("sony_arw_load_raw"), "{msg}");
+                }
+                other => panic!("{count}: {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn sources_serialize_with_stable_names() {

@@ -408,6 +408,22 @@ int32_t genzo_lr_unpack_thumb(genzo_lr *h, genzo_lr_thumb *out) {
     const int rc = h->raw->unpack_thumb();
     if (rc != LIBRAW_SUCCESS) return rc;
     const libraw_thumbnail_t &t = h->raw->imgdata.thumbnail;
+    /* LibRaw 0.21 の unpack_thumb は、ファイルの終わりを THUMB_READ_BEYOND（16 KiB）まで
+     * 超えるサムネイルも読み込み、足りない部分を初期化しないままのバッファで返す
+     * （src/decoders/unpack_thumb.cpp）。JPEG と 8bit のビットマップ（PPM）はファイルの
+     * バイト列をそのまま読み込むため、toffset + tlength がファイルの大きさ以下であることを
+     * 確かめ、超えていれば途中で切れているとみなす。 */
+    libraw_internal_data_t *internal = h->raw->get_internal_data_pointer();
+    if (internal) {
+      const LibRaw_internal_thumbnail_formats f = internal->unpacker_data.thumb_format;
+      if (f == LIBRAW_INTERNAL_THUMBNAIL_JPEG || f == LIBRAW_INTERNAL_THUMBNAIL_PPM) {
+        LibRaw_abstract_datastream *input = internal->internal_data.input;
+        const INT64 offset = internal->internal_data.toffset;
+        if (!input || offset < 0 || offset + static_cast<INT64>(t.tlength) > input->size()) {
+          return GENZO_LR_E_THUMB_TRUNCATED;
+        }
+      }
+    }
     out->format = static_cast<int32_t>(t.tformat);
     out->width = t.twidth;
     out->height = t.theight;

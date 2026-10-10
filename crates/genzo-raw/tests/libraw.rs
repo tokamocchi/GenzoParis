@@ -535,6 +535,91 @@ fn truncated_files_return_errors() {
     }
 }
 
+/// `ifd` の位置の IFD から、`tag` の項目（12 バイト）の位置を探す。
+fn ifd_entry(bytes: &[u8], ifd: usize, tag: u16) -> Option<usize> {
+    let n = u16::from_le_bytes([bytes[ifd], bytes[ifd + 1]]) as usize;
+    (0..n)
+        .map(|i| ifd + 2 + 12 * i)
+        .find(|&e| u16::from_le_bytes([bytes[e], bytes[e + 1]]) == tag)
+}
+
+/// 項目の値（LONG 1 つ）を読む。
+fn entry_long(bytes: &[u8], entry: usize) -> u32 {
+    u32::from_le_bytes(bytes[entry + 8..entry + 12].try_into().unwrap())
+}
+
+/// 埋め込みサムネイルのデータがファイルの終わりを超えている（途中で切れた）場合に、エラーにする。
+///
+/// LibRaw 0.21 の `unpack_thumb` は、ファイルの終わりを最大 16 KiB（`THUMB_READ_BEYOND`）
+/// 超えるサムネイルも読み込み、足りない部分を初期化しないままのバッファで返す
+/// （`src/decoders/unpack_thumb.cpp`）。レビューで見つけた不具合の再現テスト。
+#[test]
+fn thumbnail_beyond_end_of_file_is_rejected() {
+    let jpeg = make_jpeg(64, 64);
+    // LibRaw が読み越しを許す範囲（16 KiB）に収まる大きさで、後半が欠けるようにする。
+    assert!(jpeg.len() / 2 < 16 * 1024, "{}", jpeg.len());
+    let img = sample(CfaPattern::RGGB, 32, 32, 59);
+    let opts = DngOptions {
+        preview: Some(DngPreview::Jpeg {
+            width: 64,
+            height: 64,
+            data: jpeg.clone(),
+        }),
+        ..Default::default()
+    };
+    let mut bytes = dng::encode(&img, &opts).unwrap();
+    // 完全なファイルでは読める。
+    assert_eq!(extract_thumbnail_bytes(&bytes).unwrap().data, jpeg);
+    // プレビューの StripOffsets をファイルの末尾に付けた JPEG の前半に向ける
+    // （StripByteCounts は JPEG の全体の長さのまま）。
+    let ifd0 = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let sub = entry_long(&bytes, ifd_entry(&bytes, ifd0, 330).unwrap()) as usize;
+    let strip = ifd_entry(&bytes, sub, 273).unwrap();
+    let new_offset = u32::try_from(bytes.len()).unwrap();
+    bytes.extend_from_slice(&jpeg[..jpeg.len() / 2]);
+    bytes[strip + 8..strip + 12].copy_from_slice(&new_offset.to_le_bytes());
+
+    let r = extract_thumbnail_bytes(&bytes);
+    assert!(
+        matches!(&r, Err(RawError::Decode(_))),
+        "途中で切れたサムネイルが返された: {:?}",
+        r.map(|t| t.data.len())
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("thumb_cut.dng");
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(matches!(extract_thumbnail(&path), Err(RawError::Decode(_))));
+    // RAW の展開と撮影情報には影響しない。
+    assert!(decode_file(&path).unwrap().data == img.data);
+}
+
+/// 読み取りの権限がないファイルは、壊れたファイル（[`RawError::Decode`]）ではなく
+/// 入出力のエラー（PermissionDenied）にする。root で実行している場合は権限を無視して
+/// 読めてしまうため、確かめずに終える。
+#[cfg(unix)]
+#[test]
+fn unreadable_file_is_an_io_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let img = sample(CfaPattern::RGGB, 32, 32, 61);
+    let path = write(dir.path(), "noperm.dng", &img, &DngOptions::default());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&path).is_ok() {
+        // root など、権限を無視できる場合。
+        return;
+    }
+    for r in [
+        decode_file(&path).map(|_| ()),
+        read_metadata(&path).map(|_| ()),
+        extract_thumbnail(&path).map(|_| ()),
+    ] {
+        assert!(
+            matches!(&r, Err(RawError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{r:?}"
+        );
+    }
+}
+
 /// IFD0 のタグの値（4 バイト以内のもの）を書き換える。
 fn patch_tag(bytes: &mut [u8], tag: u16, value: u32) {
     let ifd = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
@@ -590,6 +675,39 @@ fn abnormal_dimensions_return_errors() {
         matches!(decode_bytes(&bytes), Err(RawError::TooManyPixels { .. })),
         "{:?}",
         decode_bytes(&bytes).map(|_| ())
+    );
+}
+
+/// ベイヤー以外の DNG（CFA のないリニア DNG、R と G だけの CFA）は、展開せずに
+/// [`RawError::Unsupported`] にする（`cfa_from_libraw` の分岐を LibRaw の実際の値で確かめる）。
+/// 撮影情報は読める。
+#[test]
+fn non_bayer_dngs_are_unsupported() {
+    let img = sample(CfaPattern::RGGB, 32, 32, 67);
+    let full = dng::encode(&img, &DngOptions::default()).unwrap();
+    let ifd0 = u32::from_le_bytes(full[4..8].try_into().unwrap()) as usize;
+
+    // PhotometricInterpretation = 34892（LinearRaw）: LibRaw の filters は 0。
+    let mut linear = full.clone();
+    patch_tag(&mut linear, 262, 34892);
+    assert!(
+        matches!(decode_bytes(&linear), Err(RawError::Unsupported(_))),
+        "{:?}",
+        decode_bytes(&linear).map(|_| ())
+    );
+    assert_eq!(
+        read_metadata_bytes(&linear).unwrap().make.as_deref(),
+        Some("GenzoTest")
+    );
+
+    // CFAPattern = R G / G G（B がない）。
+    let mut two_colors = full;
+    let e = ifd_entry(&two_colors, ifd0, 33422).unwrap();
+    two_colors[e + 8..e + 12].copy_from_slice(&[0, 1, 1, 1]);
+    assert!(
+        matches!(decode_bytes(&two_colors), Err(RawError::Unsupported(_))),
+        "{:?}",
+        decode_bytes(&two_colors).map(|d| d.image.cfa)
     );
 }
 

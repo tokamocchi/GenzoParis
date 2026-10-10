@@ -6,6 +6,8 @@
 //! - [`Processor`] は LibRaw のインスタンス 1 つを持ち、作ったスレッドの中だけで使う
 //!   （生のポインタを持つため `Send` / `Sync` ではない）。破棄するときに LibRaw のインスタンスを
 //!   解放する。公開 API（[`crate::decode`]）は呼び出しごとに作って破棄する（AR-7）。
+//! - スレッドセーフでない LibRaw（`libraw`。build.rs の cfg `genzo_libraw_nothreads`）に
+//!   リンクしている場合は、LibRaw の使用をプロセスの中で 1 つずつに制限する（[`lock_libraw`]）。
 //! - シムと Rust の構造体の大きさと、ビルド時の LibRaw のヘッダと実行時のライブラリの版
 //!   （major.minor）が一致することを、最初に使うときに確かめる。一致しなければ
 //!   [`RawError::Unsupported`]（構造体のレイアウトが違う LibRaw を使うと未定義動作になるため）。
@@ -28,6 +30,35 @@ use crate::decode::{DecodedRaw, Source};
 use crate::thumbnail::{EmbeddedThumbnail, MAX_THUMBNAIL_BYTES};
 
 use ffi::{code, libraw_code};
+
+/// LibRaw を使う間（インスタンスを作ってから破棄するまで）保持するガード。
+///
+/// スレッドセーフでない LibRaw（`LIBRAW_NOTHREADS` 付きでビルドされた `libraw`）は、展開の
+/// 関数が静的変数を使うため、別のインスタンスでも同時に使うとデータが壊れる（build.rs の説明）。
+/// その場合だけ、プロセスの中で共通のロックを持つ。
+struct LibRawGuard {
+    #[cfg(genzo_libraw_nothreads)]
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+/// [`LibRawGuard`] を得る（スレッドセーフな LibRaw では何もしない）。
+fn lock_libraw() -> LibRawGuard {
+    #[cfg(genzo_libraw_nothreads)]
+    {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // ロックで守るのは LibRaw の静的変数だけで、Rust の値は持たないため、
+        // 以前の保持者がパニックしていても使い続けてよい。
+        LibRawGuard {
+            _lock: LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
+    }
+    #[cfg(not(genzo_libraw_nothreads))]
+    {
+        LibRawGuard {}
+    }
+}
 
 /// `LibRaw::versionNumber()` の値を (major, minor, patch) に分ける
 /// （`LIBRAW_MAKE_VERSION(major, minor, patch)` = `(major << 16) | (minor << 8) | patch`）。
@@ -140,6 +171,9 @@ fn check(rc: i32, what: &str) -> Result<(), RawError> {
         code::NO_THUMB_DATA => {
             RawError::Decode(format!("{what}: 埋め込みサムネイルのデータがありません"))
         }
+        code::THUMB_TRUNCATED => RawError::Decode(format!(
+            "{what}: 埋め込みサムネイルのデータがファイルの終わりを超えています（途中で切れている可能性があります）"
+        )),
         code::BUFFER_SIZE | code::NULL_ARG | code::ABI_MISMATCH => {
             RawError::Decode(format!("{what}: シムの呼び出しが不正です（{rc}）"))
         }
@@ -253,6 +287,10 @@ impl<'a> Processor<'a> {
                 format!("通常のファイルではありません: {}", path.display()),
             )));
         }
+        // 読み取りの権限がないなどで開けない場合も、LibRaw に渡す前に入出力のエラーにする
+        // （LibRaw は開けないファイルを LIBRAW_IO_ERROR で返し、壊れたファイルと区別できない）。
+        // 読み取り専用で開き、すぐに閉じる（DATA-01）。
+        drop(std::fs::File::open(path)?);
         Self::open_path_native(path)
     }
 
@@ -436,6 +474,8 @@ impl<'a> Processor<'a> {
 
 /// RAW を展開する（[`crate::decode_file_with_details`] の実体）。
 pub(crate) fn decode(source: Source<'_>) -> Result<DecodedRaw, RawError> {
+    // p より先に作り、p を破棄した後に解放する（ローカル変数は作った順の逆に破棄される）。
+    let _guard = lock_libraw();
     let mut p = Processor::open(source)?;
     // 展開の前に、寸法の上限と対応している CFA かを確かめる（大きな確保と無駄な展開を避ける）。
     let before = p.sizes()?;
@@ -460,6 +500,8 @@ pub(crate) fn decode(source: Source<'_>) -> Result<DecodedRaw, RawError> {
 
 /// 撮影情報を読む（[`crate::read_metadata`] の実体）。
 pub(crate) fn metadata(source: Source<'_>) -> Result<PhotoMetadata, RawError> {
+    // p より先に作り、p を破棄した後に解放する（ローカル変数は作った順の逆に破棄される）。
+    let _guard = lock_libraw();
     let mut p = Processor::open(source)?;
     let meta = p.meta()?;
     Ok(convert::photo_metadata(&meta).0)
@@ -467,6 +509,8 @@ pub(crate) fn metadata(source: Source<'_>) -> Result<PhotoMetadata, RawError> {
 
 /// 埋め込みサムネイルを取り出す（[`crate::extract_thumbnail`] の実体）。
 pub(crate) fn thumbnail(source: Source<'_>) -> Result<EmbeddedThumbnail, RawError> {
+    // p より先に作り、p を破棄した後に解放する（ローカル変数は作った順の逆に破棄される）。
+    let _guard = lock_libraw();
     let mut p = Processor::open(source)?;
     let (t, data) = p.thumbnail()?;
     convert::thumbnail_from_libraw(t.format, t.width, t.height, t.colors, data)
@@ -479,10 +523,11 @@ mod tests {
     #[test]
     fn abi_and_versions_match() {
         check_abi().unwrap();
+        // 版そのものは環境で異なる（Ubuntu の apt は 0.21 系、Homebrew は 0.22 系など）ため固定しない。
+        // ヘッダとライブラリの版の一致は check_abi で確かめる。
         let v = version();
-        assert!(v.starts_with("0.21."), "{v}");
         let id = decoder_id();
-        assert!(id.starts_with("libraw-0.21."), "{id}");
+        assert!(id.starts_with("libraw-"), "{id}");
         // 版の文字列（"0.21.2-Release"）と識別子（"libraw-0.21.2"）が対応する。
         assert!(
             v.starts_with(id.trim_start_matches("libraw-")),
@@ -512,6 +557,10 @@ mod tests {
             Err(RawError::Unsupported(_))
         ));
         assert!(matches!(check(-12345, "x"), Err(RawError::Decode(_))));
+        assert!(matches!(
+            check(code::THUMB_TRUNCATED, "x"),
+            Err(RawError::Decode(_))
+        ));
         let msg = check(libraw_code::DATA_ERROR, "展開")
             .unwrap_err()
             .to_string();

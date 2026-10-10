@@ -26,6 +26,17 @@
 //! 渡さない。LibRaw の共有ライブラリは自分の依存（lcms2・OpenMP など）を自分で読み込む。
 //! LibRaw を静的にリンクする場合（`LIBRAW_STATIC=1`）は、依存するライブラリを
 //! `RUSTFLAGS` などで別に指定する必要がある（未確認）。
+//!
+//! # スレッドセーフでない LibRaw（`libraw`）
+//!
+//! LibRaw の autotools のビルドでは、`libraw` は `LIBRAW_NOTHREADS` 付きでビルドされ、展開の
+//! 関数（`getbithuff`・`sony_decrypt` など）が静的変数を使う（LibRaw 0.21 の
+//! `src/decoders/decoders_dcraw.cpp`・`src/metadata/sony.cpp`）。そのため、別のインスタンスでも
+//! 複数のスレッドから同時に展開すると、データが壊れる。`libraw_r` が見つからず `libraw` に
+//! リンクする場合（環境変数での指定では、Windows 以外でライブラリの名前が `_r` で終わらない
+//! 場合）は、cfg `genzo_libraw_nothreads` を設定し、LibRaw の使用をプロセスの中で 1 つずつに
+//! 制限する（`src/libraw/mod.rs`）。Windows の LibRaw（`Makefile.msvc` のビルド）は
+//! `LIBRAW_NOTHREADS` を使わないとみなす（未確認）。
 
 use std::env;
 use std::path::PathBuf;
@@ -37,8 +48,12 @@ const SHIM_HEADER: &str = "src/shim/genzo_libraw_shim.h";
 /// 必要な LibRaw の最小の版（04 の 1.2 節の前提は 0.21 系。docs/third_party.md）。
 const MIN_LIBRAW_VERSION: &str = "0.21";
 
+/// スレッドセーフでない LibRaw にリンクするときに設定する cfg。
+const NOTHREADS_CFG: &str = "genzo_libraw_nothreads";
+
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rustc-check-cfg=cfg({NOTHREADS_CFG})");
     if env::var_os("CARGO_FEATURE_LIBRAW").is_none() {
         return;
     }
@@ -65,6 +80,14 @@ fn main() {
     for dir in &found.link_dirs {
         println!("cargo::rustc-link-search=native={}", dir.display());
     }
+    if !found.thread_safe {
+        println!(
+            "cargo::warning=スレッドセーフでない LibRaw（{}）にリンクします。LibRaw の使用は\
+             プロセスの中で 1 つずつに制限されます（libraw_r を推奨）",
+            found.lib_name
+        );
+        println!("cargo::rustc-cfg={NOTHREADS_CFG}");
+    }
     let kind = if found.static_link { "static" } else { "dylib" };
     println!("cargo::rustc-link-lib={kind}={}", found.lib_name);
 
@@ -89,6 +112,8 @@ struct LibRawLocation {
     link_dirs: Vec<PathBuf>,
     lib_name: String,
     static_link: bool,
+    /// スレッドセーフな版（`libraw_r` など。`LIBRAW_NOTHREADS` なし）か。
+    thread_safe: bool,
 }
 
 /// pkg-config で `libraw_r`、なければ `libraw` を探す。
@@ -117,6 +142,8 @@ fn find_with_pkg_config() -> Option<LibRawLocation> {
         return Some(LibRawLocation {
             include_dirs: lib.include_paths,
             link_dirs: lib.link_paths,
+            // pkg-config の libraw（_r なし）は LIBRAW_NOTHREADS 付きのビルド。
+            thread_safe: name == "libraw_r",
             lib_name,
             static_link: false,
         });
@@ -148,6 +175,7 @@ fn find_with_env() -> Option<LibRawLocation> {
     Some(LibRawLocation {
         include_dirs,
         link_dirs: vec![lib_dir],
+        thread_safe: target_os == "windows" || lib_name.ends_with("_r"),
         lib_name,
         static_link,
     })

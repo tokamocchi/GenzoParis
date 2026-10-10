@@ -458,6 +458,18 @@ fn rational_conversion() {
     assert_eq!(srational(1.25).unwrap(), (5, 4));
     assert!(srational(f64::INFINITY).is_err());
     assert_eq!(exposure_time(1.0 / 8000.0).unwrap(), (1, 8000));
+    // 電子シャッターの 1/32000 秒も 1/n の形にする（f32 の 1/32000 の逆数は 32000 から
+    // 約 2e-3 ずれるため、差の絶対値で判定すると 31/1000000 になっていた）。
+    assert_eq!(exposure_time(1.0 / 32000.0).unwrap(), (1, 32000));
+    assert_eq!(exposure_time(1.0 / 16000.0).unwrap(), (1, 16000));
+    // 1/n でない値は 1/n に丸めない。
+    let (n, d) = exposure_time(1.0 / 250.4).unwrap();
+    assert!(
+        (f64::from(n) / f64::from(d) - 1.0 / 250.4).abs() < 1e-6,
+        "{n}/{d}"
+    );
+    let (n, d) = exposure_time(0.3333).unwrap();
+    assert_eq!((n, d), (3333, 10000));
     assert_eq!(exposure_time(0.3).unwrap(), (3, 10));
     assert_eq!(exposure_time(30.0).unwrap(), (30, 1));
     assert_eq!(exposure_time(2.5).unwrap(), (5, 2));

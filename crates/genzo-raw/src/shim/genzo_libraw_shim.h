@@ -33,6 +33,8 @@ extern "C" {
 #define GENZO_LR_E_BUFFER_SIZE (-200006)
 #define GENZO_LR_E_NO_THUMB_DATA (-200007)
 #define GENZO_LR_E_ABI_MISMATCH (-200008)
+/* 埋め込みサムネイルのデータがファイルの終わりを超えている（途中で切れている）。 */
+#define GENZO_LR_E_THUMB_TRUNCATED (-200009)
 
 /* LibRaw の LIBRAW_CBLACK_SIZE と同じ値（シムの中で static_assert で確かめる）。 */
 #define GENZO_LR_CBLACK_SIZE 4104
@@ -169,7 +171,8 @@ int32_t genzo_lr_error_count(genzo_lr *h);
 /* 展開に使う関数の名前（LibRaw::unpack_function_name。記録方式の確認用）。 */
 int32_t genzo_lr_decoder_name(genzo_lr *h, char *dst, size_t dst_len);
 
-/* 埋め込みサムネイルを読み込み、形式と大きさを返す。 */
+/* 埋め込みサムネイルを読み込み、形式と大きさを返す。データがファイルの終わりを超えている
+ * 場合は GENZO_LR_E_THUMB_TRUNCATED。 */
 int32_t genzo_lr_unpack_thumb(genzo_lr *h, genzo_lr_thumb *out);
 /* 読み込んだサムネイルのバイト列をコピーする。dst_len は genzo_lr_thumb.length と同じ。 */
 int32_t genzo_lr_copy_thumb(genzo_lr *h, uint8_t *dst, size_t dst_len);
