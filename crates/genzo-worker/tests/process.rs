@@ -65,6 +65,69 @@ fn ping_reports_version_and_pid() {
     c.shutdown().unwrap();
 }
 
+/// `ping()` が返すメモリの上限の状態は、握手で確定した状態（`worker_info()`）と同じ（上限はワーカーの
+/// 起動のときに決まり、動いている間は変わらない）。
+///
+/// Windows では、上限を本体がジョブオブジェクトでかけ、ワーカー自身は知らない（`NotRequested` と答える）。
+/// そのため握手の応答だけを本体の側の結果で置き換えていて、`ping()` がワーカーの答えをそのまま返すと、
+/// 上限がかかっているのに「指定なし」と報告した（Windows の CI で `ping_reports_version_and_pid` が
+/// `NotRequested` で失敗した）。Windows の実機がなくても確かめられるよう、握手の応答と、そのあとの
+/// 応答で状態が違う偽のワーカー（`/bin/sh` のスクリプト）で確かめる。
+#[cfg(unix)]
+#[test]
+fn ping_reports_the_memory_limit_status_fixed_at_the_handshake() {
+    use genzo_worker::protocol::{JobOutput, PongInfo, Response};
+    let root = tempfile::tempdir().unwrap();
+    // 依頼の番号を除いた、応答の JSON（`,"result":...}`）。番号はスクリプトが依頼の番号で補う。
+    let reply = |memory_limit| {
+        let response = Response {
+            id: 0,
+            result: Ok(JobOutput::Pong(PongInfo {
+                protocol_version: PROTOCOL_VERSION,
+                worker_version: "fake".to_owned(),
+                pid: 1,
+                raw_decoder: None,
+                test_hooks: false,
+                memory_limit,
+            })),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        json.strip_prefix(r#"{"id":0"#).unwrap().to_owned()
+    };
+    let applied = MemoryLimitStatus::Applied {
+        bytes: genzo_worker::limits::DEFAULT_MEMORY_LIMIT_BYTES,
+    };
+    // 最初の依頼（握手）には上限ありと答え、以後の依頼には指定なしと答える。
+    let script = format!(
+        r#"n=0
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9][0-9]*\),.*$/\1/p')
+  if [ "$n" = 0 ]; then rest='{first}'; else rest='{later}'; fi
+  n=1
+  printf '{{"id":%s%s\n' "$id" "$rest"
+done
+"#,
+        first = reply(applied.clone()),
+        later = reply(MemoryLimitStatus::NotRequested),
+    );
+    let script_path = root.path().join("fake-worker.sh");
+    std::fs::write(&script_path, script).unwrap();
+    // スクリプトを直接は実行せず `sh` に渡す（書いた直後のファイルを実行すると、別のテストが同時に
+    // プロセスを作っている場合に「Text file busy」で失敗することがあるため）。
+    let mut cfg = config(root.path());
+    cfg.executable = Some("/bin/sh".into());
+    cfg.args = vec![script_path.into_os_string()];
+    cfg.memory_limit_bytes = None;
+    let mut c = WorkerClient::spawn(cfg).unwrap();
+    assert_eq!(c.worker_info().unwrap().memory_limit, applied, "握手の応答");
+    let pong = c.ping().unwrap();
+    assert_eq!(pong.worker_version, "fake", "偽のワーカーの応答");
+    assert_eq!(
+        pong.memory_limit, applied,
+        "ping も、握手で確定した状態を返す"
+    );
+}
+
 /// `WorkerConfig::args` は実行ファイルの直後に渡る（本体の実行ファイルを `genzo __worker` で起動する
 /// 構成のため）。ここでは `genzo-worker` が受け付ける引数（メモリの上限）を渡して、届いたことを確かめる。
 #[test]

@@ -1266,9 +1266,20 @@ impl WorkerClient {
     }
 
     /// 生存の確認（往復の確認）。
+    ///
+    /// 応答の `memory_limit` は、起動のときの握手で確定した状態（[`WorkerClient::worker_info`] と同じ）。
     pub fn ping(&mut self) -> Result<PongInfo, WorkerClientError> {
         match self.call(Job::Ping, &CancellationToken::new())? {
-            Ok(JobOutput::Pong(p)) => Ok(p),
+            Ok(JobOutput::Pong(mut p)) => {
+                // メモリの上限は起動のときに決まり、動いている間は変わらない。Windows では上限を本体が
+                // ジョブオブジェクトでかけ、ワーカーは知らない（`NotRequested` と答える）ので、ワーカーの
+                // 答えをそのまま返すと、上限がかかっているのに「指定なし」と報告してしまう。握手の応答
+                // （`start` で本体の側の結果に置き換えたもの）の状態を返す。
+                if let Some(info) = self.worker_info() {
+                    p.memory_limit = info.memory_limit.clone();
+                }
+                Ok(p)
+            }
             Ok(other) => self.unexpected(&other),
             Err(e) => Err(WorkerClientError::Job(e)),
         }

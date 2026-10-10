@@ -11,7 +11,8 @@
 //!   上限はワーカーが起動する子プロセス（ffmpeg・ffprobe）にも引き継がれる（プロセスごとに同じ上限）。
 //! - **Windows**: 本体がワーカーを入れるジョブオブジェクトの `JOB_OBJECT_LIMIT_PROCESS_MEMORY`
 //!   （プロセスごとのコミットの上限。孫プロセスにもかかる。[`crate::tree`]）。ワーカーの側では設定しない
-//!   （本体は Windows では `--memory-limit-bytes` を渡さず、握手の応答の状態を本体の側の結果で置き換える）。
+//!   （本体は Windows では `--memory-limit-bytes` を渡さず、握手の応答の状態を本体の側の結果で置き換える。
+//!   [`crate::WorkerClient::ping`] の応答も、この握手で確定した状態を返す）。
 //!   **実機で未確認。**
 //! - **macOS**: 設けない（`RLIMIT_DATA` は `mmap` による確保を制限しないとされ、効果が限られるため。
 //!   決定 No.12）。上限を指定しても [`MemoryLimitStatus::NotApplied`] を返す。
