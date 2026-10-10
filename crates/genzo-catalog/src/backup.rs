@@ -11,6 +11,9 @@
 //!   分からないため、世代の管理では消さない（ID のないカタログでは、古い形式で作って管理する）。
 //! - 今作ったバックアップは、世代の管理で消さない（時計が既存のバックアップより前に戻っていても。F09）。
 //! - 復元は、バックアップを検証してから **新しいファイル** へ書き出す（既存のファイルは上書きしない）。
+//! - バックアップと復元の先は、**どんな場合も上書きしない**。存在の確認はリンクをたどらずにその名前の項目を
+//!   見て（壊れたシンボリックリンクも「ある」）、公開は「上書きしない」名前の変更（`publish_noclobber`）で
+//!   行う（確認の後に別のプロセスが作った場合も置き換えない）。
 //! - 詳細チェック（`integrity_check`・`foreign_key_check`・FTS の索引の確認）は
 //!   [`Catalog::check_integrity`] で、アイドル時か手動で行う（起動時は行わない。DATA-05）。
 
@@ -19,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
+use tempfile::TempPath;
 
 use crate::catalog::{
     Catalog, SHUTDOWN_CLEAN, STATE_CACHE_GENERATION, STATE_CATALOG_ID, STATE_SHUTDOWN,
@@ -97,21 +101,39 @@ pub(crate) fn backup_file_name(owner: &BackupOwner, at: DateTime<Utc>, n: u32) -
     name
 }
 
+/// パスに何か（ファイル・フォルダ・壊れたシンボリックリンクを含む）があるか。
+///
+/// `Path::exists` はシンボリックリンクをたどるため、リンク先のない（壊れた）リンクを「ない」と答え、
+/// その上へ名前を変えるとリンクを置き換えてしまう。ここではリンクをたどらず、その名前の項目そのものを見る。
+fn exists_no_follow(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(CatalogError::io(path, e)),
+    }
+}
+
 /// `conn` の DB を `dest` に `VACUUM INTO` で書き出す。
 ///
-/// `dest` が既にあればエラー。一時ファイルに書いて `fsync` し、名前を変えて公開する。
+/// `dest` が既にあればエラー（壊れたシンボリックリンクも「ある」。上書きしない）。一時ファイルに書いて
+/// `fsync` し、「上書きしない」名前の変更で公開する。
 pub(crate) fn vacuum_into_file(conn: &Connection, dest: &Path) -> Result<()> {
-    vacuum_into_file_with(conn, dest, |_| Ok(()))
+    vacuum_into_file_with(conn, dest, |_| Ok(()), || {})
 }
 
 /// [`vacuum_into_file`] と同じ。ただし、公開（名前の変更）の前に一時ファイルに `prepare` を行う。
 /// `prepare` が失敗した場合は公開せず、一時ファイルを削除する。
-fn vacuum_into_file_with(
+///
+/// `before_publish` は、存在の確認と同期が済んで、公開する直前に呼ぶ（テスト用の口。確認の後に別の
+/// プロセスが `dest` を作った状況を、決まった順序で作るため）。
+pub(crate) fn vacuum_into_file_with(
     conn: &Connection,
     dest: &Path,
     prepare: impl FnOnce(&Path) -> Result<()>,
+    before_publish: impl FnOnce(),
 ) -> Result<()> {
-    if dest.exists() {
+    // VACUUM INTO は時間がかかるので、既にあれば先に断る（公開のときにも、上書きしない名前の変更で確かめる）。
+    if exists_no_follow(dest)? {
         return Err(CatalogError::AlreadyExists(dest.to_path_buf()));
     }
     let file_name = dest.file_name().ok_or_else(|| {
@@ -130,21 +152,40 @@ fn vacuum_into_file_with(
             tmp.display()
         ))
     })?;
-    let result = (|| -> Result<()> {
-        conn.execute("VACUUM INTO ?1", [tmp_str])?;
-        prepare(&tmp)?;
-        sync_file(&tmp)?;
-        if dest.exists() {
+    // 失敗したとき（パニックを含む）は、drop で一時ファイルを削除する。まだファイルがなくてもよい。
+    let tmp_path = TempPath::try_from_path(&tmp).map_err(|e| CatalogError::io(&tmp, e))?;
+    conn.execute("VACUUM INTO ?1", [tmp_str])?;
+    prepare(&tmp)?;
+    sync_file(&tmp)?;
+    before_publish();
+    publish_noclobber(tmp_path, dest)?;
+    sync_parent_dir(dest);
+    Ok(())
+}
+
+/// 一時ファイル `tmp` を、既存の項目（壊れたシンボリックリンクを含む）を置き換えずに `dest` の名前にする。
+/// 既にあれば [`CatalogError::AlreadyExists`]（`tmp` は削除する）。
+///
+/// 確認と名前の変更を 1 つの操作で行う（Linux・macOS では `renameat2(RENAME_NOREPLACE)`、なければ
+/// ハードリンクと削除、Windows では上書きしない `MoveFileExW`。tempfile の `persist_noclobber`）。
+fn publish_noclobber(tmp: TempPath, dest: &Path) -> Result<()> {
+    let error = match tmp.persist_noclobber(dest) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(CatalogError::AlreadyExists(dest.to_path_buf()));
         }
-        fs::rename(&tmp, dest).map_err(|e| CatalogError::io(dest, e))?;
-        sync_parent_dir(dest);
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+        Err(e) => e,
+    };
+    // 上書きしない名前の変更もハードリンクも使えないファイルシステム（NAS・一部の外付けのドライブなど）。
+    // 名前が空いていることを確かめてから、通常の名前の変更をする（そのファイルシステムでは、確かめてから
+    // 変更するまでの間の競合は防げない。失敗したら `error.path` を drop して一時ファイルを消す）。
+    if exists_no_follow(dest)? {
+        return Err(CatalogError::AlreadyExists(dest.to_path_buf()));
     }
-    result
+    error
+        .path
+        .persist(dest)
+        .map_err(|e| CatalogError::io(dest, e.error))
 }
 
 /// ファイルの内容をストレージへ書き出す（`fsync`）。
@@ -390,14 +431,15 @@ pub struct RestoreReport {
 
 /// バックアップを検証してから、新しいファイル `dest` へ復元する。
 ///
-/// `dest` が既にあればエラー（既存のカタログを上書きしない）。復元したファイルを
+/// `dest` が既にあればエラー（既存のカタログを上書きしない。壊れたシンボリックリンクも「ある」。
+/// 公開は上書きしない名前の変更なので、検証の間に作られた場合も置き換えない）。復元したファイルを
 /// [`Catalog::open`] で開いて使う。バックアップのファイルは変更しない。
 ///
 /// バックアップは使用中のカタログから作るため、「使用中」の印（DATA-05）を持っている。
 /// そのまま開くと「前回は正常に終了しなかった」と報告してしまうので、検証を通った復元先の
 /// コピーには「正常に終了した」印を付けてから公開する（レビューで再現した問題の修正）。
 pub fn restore_backup(backup: &Path, dest: &Path) -> Result<RestoreReport> {
-    if dest.exists() {
+    if exists_no_follow(dest)? {
         return Err(CatalogError::AlreadyExists(dest.to_path_buf()));
     }
     let conn = open_for_reading(backup)?;
@@ -409,7 +451,7 @@ pub fn restore_backup(backup: &Path, dest: &Path) -> Result<RestoreReport> {
     if !problems.is_empty() {
         return Err(CatalogError::IntegrityCheckFailed(problems));
     }
-    vacuum_into_file_with(&conn, dest, mark_restored_copy_clean)?;
+    vacuum_into_file_with(&conn, dest, mark_restored_copy_clean, || {})?;
     Ok(RestoreReport {
         path: dest.to_path_buf(),
         schema_version: version,
@@ -568,6 +610,44 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 公開は、既にある項目を置き換えず、失敗したときは一時ファイルを残さない。成功したときは一時ファイルの
+    /// 名前が残らない。上書きしない名前の変更ができない種類の失敗（宛先のフォルダがない）は、確認の後の
+    /// 通常の名前の変更でも同じエラーになる。
+    #[test]
+    fn publish_noclobber_keeps_existing_items_and_cleans_up() {
+        let d = tempfile::tempdir().unwrap();
+        let new_tmp = |content: &[u8]| {
+            let tmp = d.path().join(".x.db.tmp");
+            fs::write(&tmp, content).unwrap();
+            (tmp.clone(), TempPath::try_from_path(tmp).unwrap())
+        };
+        let dest = d.path().join("x.db");
+
+        // 空いている名前には公開できる。
+        let (tmp, path) = new_tmp(b"new");
+        publish_noclobber(path, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"new");
+        assert!(!tmp.exists(), "公開した後に一時ファイルの名前は残らない");
+
+        // 既にあれば置き換えず、一時ファイルを削除する。
+        let (tmp, path) = new_tmp(b"newer");
+        let err = publish_noclobber(path, &dest).unwrap_err();
+        assert!(
+            matches!(&err, CatalogError::AlreadyExists(p) if *p == dest),
+            "{err}"
+        );
+        assert_eq!(fs::read(&dest).unwrap(), b"new");
+        assert!(!tmp.exists());
+
+        // 宛先のフォルダがないときは入出力のエラー（一時ファイルは削除する）。
+        let (tmp, path) = new_tmp(b"x");
+        let missing = d.path().join("no-such-dir").join("x.db");
+        let err = publish_noclobber(path, &missing).unwrap_err();
+        assert!(matches!(err, CatalogError::Io { .. }), "{err}");
+        assert!(!tmp.exists());
+        assert!(!missing.exists());
+    }
 
     #[test]
     fn backup_names_are_parsed_strictly() {

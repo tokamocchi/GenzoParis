@@ -23,8 +23,8 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
+# バックアップ・復元の公開を「上書きしない」名前の変更にする（`persist_noclobber`。genzo-media の
+# safe_write と同じ。テストでも使う）。
 tempfile.workspace = true
 
 [lints]

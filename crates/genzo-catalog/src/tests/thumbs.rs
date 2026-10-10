@@ -284,6 +284,37 @@ fn eviction_skips_previews_that_cannot_be_deleted() {
     assert!(cache.total_bytes().unwrap() <= 250);
 }
 
+/// 索引の行の削除が SQLite のエラーで失敗すると、容量の変更（回収）はエラーを返し、実際のプレビューは
+/// 消えない。失敗の原因がなくなれば、同じ回収が通る（テスト用の関数 `fail_preview_evictions` の確認。
+/// 上位の crate で、キャッシュの容量の反映だけが失敗する場合の再現に使う）。
+#[test]
+fn a_failed_eviction_returns_the_error_and_succeeds_once_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let thumbs = dir.path().join("thumbs.db");
+    let mut cache =
+        PreviewCache::open(dir.path().join("previews"), &thumbs, 1_000_000_000_000_000).unwrap();
+    let k = key(1, CacheKind::L1Preview);
+    cache.put(&k, None, &jpeg(100, 1)).unwrap();
+    assert_eq!(cache.total_bytes().unwrap(), 100);
+
+    crate::testing::fail_preview_evictions(&thumbs).unwrap();
+    let err = cache.set_capacity_bytes(200_000_000).unwrap_err();
+    assert!(matches!(err, CatalogError::Sqlite(_)), "{err:?}");
+    // 容量は新しい値になる（回収だけが失敗する）。実際のプレビューのファイルは消えない。
+    assert_eq!(cache.capacity_bytes(), 200_000_000);
+    assert!(cache.contains(&k).unwrap());
+
+    // 失敗の原因がなくなれば、同じ回収が通る（足した行だけが、ファイルがないまま索引から除かれる）。
+    crate::testing::allow_preview_evictions(&thumbs).unwrap();
+    let report = cache.set_capacity_bytes(200_000_000).unwrap();
+    assert_eq!(
+        (report.removed, report.failed, report.freed_bytes),
+        (1, 0, 1_000_000_000_000)
+    );
+    assert_eq!(cache.total_bytes().unwrap(), 100);
+    assert!(cache.contains(&k).unwrap());
+}
+
 /// 突き合わせ（reconcile）は、書き込み中かもしれない新しい一時ファイルを削除しない。
 #[test]
 fn reconcile_keeps_recent_temp_files() {

@@ -3,6 +3,7 @@
 use rusqlite::Connection;
 
 use super::Fixture;
+use crate::backup::vacuum_into_file_with;
 use crate::{
     BackupOwner, Catalog, CatalogError, DEFAULT_BACKUP_GENERATIONS, Filter, PreviousShutdown, Sort,
     backup_catalog_file, create_backup, list_backups, prune_backups, restore_backup,
@@ -442,4 +443,105 @@ fn the_catalog_id_is_kept_by_backup_and_restore() {
     let name = info.path.file_name().unwrap().to_str().unwrap().to_owned();
     assert!(name.starts_with("old-backup-2"), "{name}");
     assert_eq!(list_backups(&dir, &legacy_owner).unwrap().len(), 1);
+}
+
+/// フォルダに残った一時ファイル（`.tmp` で終わる名前）。公開に失敗しても残さない。
+fn tmp_leftovers(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect()
+}
+
+/// 存在確認の後、公開の直前に別のプロセスが宛先を作っても、そのファイルを置き換えない（「バックアップと
+/// 復元の先を上書きしない」保証は、確認と公開の間でも守る。公開は「上書きしない」名前の変更で行う）。
+#[test]
+fn publish_does_not_replace_a_file_created_after_the_existence_check() {
+    let mut f = Fixture::new();
+    f.photo("A.ARW", 1, None);
+    let dest = f.dir.path().join("raced.db");
+    let err = vacuum_into_file_with(
+        &f.cat.conn,
+        &dest,
+        |_| Ok(()),
+        // 確認が済んで公開する直前に、別のプロセスが宛先を作った。
+        || std::fs::write(&dest, b"created by someone else").unwrap(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, CatalogError::AlreadyExists(p) if *p == dest),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        b"created by someone else",
+        "別のプロセスが作ったファイルは置き換えない"
+    );
+    assert!(
+        tmp_leftovers(f.dir.path()).is_empty(),
+        "一時ファイルを残さない"
+    );
+}
+
+/// リンク先のない（壊れた）シンボリックリンクが宛先にあるとき、リンクを置き換えない。`Path::exists` は
+/// リンクをたどって「ない」と答えるため、以前は名前の変更でリンクが置き換わっていた。確認の後に
+/// 作られた場合も同じ。
+#[cfg(unix)]
+#[test]
+fn backup_and_restore_do_not_replace_a_dangling_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let mut f = Fixture::new();
+    f.photo("A.ARW", 1, None);
+    let missing = f.dir.path().join("nowhere.db");
+    let assert_link_kept = |link: &std::path::Path| {
+        let meta = std::fs::symlink_metadata(link).unwrap();
+        assert!(meta.file_type().is_symlink(), "リンクのまま残っている");
+        assert_eq!(std::fs::read_link(link).unwrap(), missing);
+        assert!(!missing.exists(), "リンクの先にファイルを作らない");
+    };
+
+    // バックアップ（Catalog::backup_to・backup_catalog_file）。
+    let backup = f.dir.path().join("b.db");
+    symlink(&missing, &backup).unwrap();
+    assert!(!backup.exists(), "前提: リンク先がないので exists は偽");
+    assert!(matches!(
+        f.cat.backup_to(&backup),
+        Err(CatalogError::AlreadyExists(_))
+    ));
+    assert_link_kept(&backup);
+    assert!(matches!(
+        backup_catalog_file(&f.catalog_path(), &backup),
+        Err(CatalogError::AlreadyExists(_))
+    ));
+    assert_link_kept(&backup);
+
+    // 復元。
+    let good = f.dir.path().join("good.db");
+    f.cat.backup_to(&good).unwrap();
+    let restored = f.dir.path().join("restored.db");
+    symlink(&missing, &restored).unwrap();
+    assert!(matches!(
+        restore_backup(&good, &restored),
+        Err(CatalogError::AlreadyExists(_))
+    ));
+    assert_link_kept(&restored);
+
+    // 存在確認の後（公開の直前）にリンクが作られた場合。
+    let raced = f.dir.path().join("raced.db");
+    let err = vacuum_into_file_with(
+        &f.cat.conn,
+        &raced,
+        |_| Ok(()),
+        || symlink(&missing, &raced).unwrap(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, CatalogError::AlreadyExists(_)), "{err}");
+    assert_link_kept(&raced);
+    assert!(
+        tmp_leftovers(f.dir.path()).is_empty(),
+        "一時ファイルを残さない"
+    );
 }

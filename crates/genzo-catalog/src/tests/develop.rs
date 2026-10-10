@@ -405,3 +405,33 @@ fn virtual_copies_are_deleted_atomically() {
     assert_eq!(left, vec![master, vc3]);
     f.cat.delete_virtual_copies(&[]).unwrap();
 }
+
+/// 現像設定の保存の書き込みが失敗しても、カタログに一部だけ残さず、続けて使える。失敗の原因がなくなれば、
+/// 同じ保存が通る（テスト用の関数 `fail_develop_writes` の確認。上位の crate の、保存の失敗の再現に使う）。
+#[test]
+fn a_failed_develop_save_leaves_nothing_and_succeeds_once_allowed() {
+    let mut f = Fixture::new();
+    let path = f.catalog_path();
+    let v = f.photo("A.ARW", 1, None).master_variant_id;
+    crate::testing::fail_develop_writes(&path).unwrap();
+    let result = f.cat.save_develop(v, &exposure(0.5), "露光量 +0.50");
+    assert!(matches!(result, Err(CatalogError::Sqlite(_))), "{result:?}");
+    // 設定も履歴も変わらない（失敗したトランザクションが残らない）。
+    assert_eq!(
+        f.cat.develop_settings(v).unwrap(),
+        DevelopSettings::default()
+    );
+    assert_eq!(labels(&f.cat, v), vec![HISTORY_LABEL_IMPORT]);
+    // 現像設定以外の書き込みは、仕掛けている間も通る。
+    f.cat.set_setting("a", "1").unwrap();
+    // 失敗の原因がなくなれば、同じ保存が通る。
+    crate::testing::allow_develop_writes(&path).unwrap();
+    f.cat
+        .save_develop(v, &exposure(0.5), "露光量 +0.50")
+        .unwrap();
+    assert_eq!(f.cat.develop_settings(v).unwrap(), exposure(0.5));
+    assert_eq!(
+        labels(&f.cat, v),
+        vec![HISTORY_LABEL_IMPORT, "露光量 +0.50"]
+    );
+}
