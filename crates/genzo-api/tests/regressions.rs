@@ -1591,6 +1591,91 @@ fn concurrent_settings_updates_do_not_leave_memory_different_from_the_catalog() 
     core.close().unwrap();
 }
 
+/// 1 つの設定の更新が複数の項目を変えるとき、途中の保存が失敗しても、カタログに要求の一部だけを残さない
+/// （Codex のレビュー。ディスクが一杯・入出力のエラーなどで、後の項目の書き込みが失敗する場合）。
+///
+/// 以前は、項目ごとの書き込みと、撮影日時の推定し直しが済んでいない印の書き込みが別々にコミットされたので、
+/// 後の項目が失敗すると、先の項目と印がカタログに残った。実行中の設定は古い値のままなのに、次に開くと
+/// 一部だけ適用された要求を読み込んだ（キャッシュの上限などだけが変わり、印のせいで撮影日時を推定し直す）。
+///
+/// 失敗は、テスト用の関数（`genzo_catalog::testing::fail_setting_writes`）で、既定のオフセットの書き込みだけを
+/// SQLite のエラーにして起こす（時間には依存しない）。更新は、ほかの項目を書いた後で、最後にオフセットを書く。
+#[test]
+fn a_failed_settings_update_does_not_leave_part_of_it_in_the_catalog() {
+    use genzo_api::{
+        KEY_DEFAULT_EXPORT_COLOR_SPACE, KEY_DEFAULT_UTC_OFFSET_MINUTES, KEY_PREVIEW_CACHE_BYTES,
+        KEY_PREVIEW_CACHE_DIR,
+    };
+    use genzo_model::OutputColorSpace;
+
+    let env = Env::new();
+    let core = env.open();
+    // 写真がないので、開いたときに印（推定し直しが済んでいない印）は外れている。
+    let before = core.settings();
+    let keys = [
+        KEY_PREVIEW_CACHE_DIR,
+        KEY_PREVIEW_CACHE_BYTES,
+        KEY_DEFAULT_EXPORT_COLOR_SPACE,
+        KEY_DEFAULT_UTC_OFFSET_MINUTES,
+    ];
+    // カタログに保存されている項目と印（別の接続で読む）。
+    let stored = || {
+        let cat = genzo_catalog::Catalog::open_read_only(env.catalog_path()).unwrap();
+        let values: Vec<Option<String>> = keys.iter().map(|k| cat.setting(k).unwrap()).collect();
+        (values, cat.capture_time_reresolve_pending().unwrap())
+    };
+    let stored_before = stored();
+    assert!(!stored_before.1, "{stored_before:?}");
+    // 4 項目のどれも、今の値と違う値にする（既定のオフセットを変えるので、印も付く）。
+    let update = SettingsUpdate {
+        preview_cache_dir: Some(env.dir.path().join("another-preview-cache")),
+        preview_cache_bytes: Some(before.preview_cache_bytes + 50_000_000),
+        default_export_color_space: Some(OutputColorSpace::AdobeRgb),
+        default_utc_offset_minutes: Some(before.default_utc_offset_minutes + 60),
+    };
+    assert_ne!(
+        update.default_export_color_space,
+        Some(before.default_export_color_space)
+    );
+
+    // 既定のオフセットの書き込みだけを失敗させる。
+    genzo_catalog::testing::fail_setting_writes(env.catalog_path(), KEY_DEFAULT_UTC_OFFSET_MINUTES)
+        .unwrap();
+    let err = core.update_settings(&update).unwrap_err();
+    // 実行中の設定も、カタログ（項目と印）も、更新の前のまま（一部だけ保存されていない）。
+    assert_eq!(core.settings(), before, "{err}");
+    assert_eq!(stored(), stored_before, "一部だけ保存された: {err}");
+    // 次に開いても、更新の前の設定を読み込む。
+    core.close().unwrap();
+    let core = env.open();
+    assert_eq!(core.settings(), before);
+
+    // 失敗の原因がなくなれば、同じ更新が通り、全項目が保存される。
+    genzo_catalog::testing::allow_setting_writes(env.catalog_path()).unwrap();
+    let current = core.update_settings(&update).unwrap();
+    assert_eq!(
+        current.preview_cache_bytes,
+        update.preview_cache_bytes.unwrap()
+    );
+    core.wait_idle();
+    core.close().unwrap();
+    let core = env.open();
+    assert_eq!(core.settings(), current);
+    assert_eq!(
+        current.default_utc_offset_minutes,
+        before.default_utc_offset_minutes + 60
+    );
+    assert_eq!(
+        current.default_export_color_space,
+        OutputColorSpace::AdobeRgb
+    );
+    assert_eq!(
+        current.preview_cache_dir,
+        env.dir.path().join("another-preview-cache")
+    );
+    core.close().unwrap();
+}
+
 /// 表示範囲の描画（ルーペ・パン）が重なっても、先に番号を取った古い要求が、後から投入して、先に投入した
 /// 新しい要求を取り消さない（Codex のレビュー。`Core` は `Sync` で、Tauri からは要求ごとに `spawn_blocking`
 /// で呼ぶので、パンの連続で 2 つの `render_region` は重なる）。
@@ -1701,5 +1786,352 @@ fn an_older_region_request_does_not_cancel_a_newer_one_submitted_before_it() {
     }
     // 最後に描けた結果は最新の要求のもの。
     assert_eq!(core.region_frame().unwrap().info.request, 2);
+    core.close().unwrap();
+}
+
+/// 現像設定の保存（現像のロックを外して書く保存）を、ロックを外した直後で止めておく道具（テスト用）。
+struct SaveStall {
+    /// 真の間に、次の保存が止まる（止まったら偽に戻す。1 回だけ止める）。
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 保存が止まったことの知らせ。
+    stalled: crossbeam_channel::Receiver<()>,
+    /// 止めた保存を再開する合図（送り側が閉じても再開する。テストが失敗して抜けても、スレッドが残らない）。
+    release: crossbeam_channel::Sender<()>,
+}
+
+fn open_with_save_stall(env: &Env) -> (genzo_api::Core, SaveStall) {
+    use crossbeam_channel::unbounded;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let (stalled_tx, stalled) = unbounded::<()>();
+    let (release, release_rx) = unbounded::<()>();
+    let hook_armed = Arc::clone(&armed);
+    let core = env.open_with_config_and_hooks(
+        // 自動保存のスレッドが割り込まないよう、待ち時間を十分に長くする（保存は、テストが呼ぶ操作だけ）。
+        |c| c.develop_save_delay = Some(std::time::Duration::from_secs(3600)),
+        |hooks| {
+            hooks.on_develop_save =
+                Some(Arc::new(move |genzo_api::DevelopSaveStage::Unlocked(_)| {
+                    if hook_armed.swap(false, Ordering::SeqCst) {
+                        let _ = stalled_tx.send(());
+                        let _ = release_rx.recv();
+                    }
+                }));
+        },
+    );
+    (
+        core,
+        SaveStall {
+            armed,
+            stalled,
+            release,
+        },
+    )
+}
+
+fn develop_exposure(ev: f32) -> DevelopSettings {
+    DevelopSettings {
+        exposure_ev: ev,
+        ..Default::default()
+    }
+}
+
+fn history_labels(core: &genzo_api::Core, v: genzo_api::VariantId) -> Vec<String> {
+    core.history(v)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.label)
+        .collect()
+}
+
+/// 現像のロックを外して書く保存（`flush_develop`・自動保存・ドラッグの終了）が、ロックを取る前に止まって
+/// いる間に、同じ写真の新しい設定と、別の写真の設定が保存されても、古い写しで新しい設定を上書きしない
+/// （Codex のレビュー。`Core` は `Sync` で、自動保存のスレッドと UI の呼び出しは同時に動く）。
+///
+/// 以前は、保存の追い越しの記録が「最後に書いた 1 件（variant と番号）」だけだった。別の写真を書くと、
+/// A の新しい書き込みの記録が消え、止まっていた古い写しが A の新しい設定と履歴を上書きした。
+///
+/// 順序は、時間ではなくフック（`CoreHooks::on_develop_save`）とチャネルで決める。A の保存を、写しを取って
+/// ロックを外した直後で止め、止めている間に A への貼り付けと、B の編集・保存を終えてから再開する。
+#[test]
+fn a_stale_save_does_not_overwrite_newer_settings_after_another_photo_was_saved() {
+    use genzo_api::SettingGroups;
+
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (48, 32), 1, None);
+    write_jpeg(&env.photos.join("B.jpg"), (48, 32), 2, None);
+    let (core, stall) = open_with_save_stall(&env);
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let (a, b) = (
+        by_name(&items, "A.jpg").variant_id,
+        by_name(&items, "B.jpg").variant_id,
+    );
+    core.open_develop(a).unwrap();
+    // 保存待ちの変更（これが、止める保存の古い写しになる）。
+    core.set_settings(&develop_exposure(0.5), false).unwrap();
+
+    let core_ref = &core;
+    let stale_saved = std::thread::scope(move |scope| {
+        let core = core_ref;
+        let SaveStall {
+            armed,
+            stalled,
+            release,
+        } = stall;
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let stale = scope.spawn(move || core.flush_develop());
+        stalled
+            .recv_timeout(common::WAIT_LIMIT)
+            .expect("保存が、ロックを外した直後で止まらない");
+
+        // 止めている間: A の新しい設定を貼り付ける（一括適用。保存待ちの古い写しも、先に保存される）。
+        core.paste_settings(&develop_exposure(2.0), &[a], SettingGroups::ALL)
+            .unwrap();
+        // 続けて B を開いて編集し、保存する（保存の記録が B のものになる）。
+        core.open_develop(b).unwrap();
+        core.set_settings(&develop_exposure(1.0), false).unwrap();
+        assert!(core.flush_develop().unwrap());
+        assert_eq!(core.develop_settings(b).unwrap(), develop_exposure(1.0));
+
+        // 止めていた古い写しの保存を再開する。
+        release.send(()).unwrap();
+        let stale_saved = stale.join().unwrap().unwrap();
+        // B は開いたままなので、A はカタログの値を読む。
+        assert_eq!(
+            core.develop_settings(a).unwrap(),
+            develop_exposure(2.0),
+            "古い写し（露光量 +0.50）が、A の新しい設定を上書きした"
+        );
+        assert_eq!(
+            history_labels(core, a),
+            vec!["読み込み", "露光量 +0.50", "設定の貼り付け"],
+            "古い写しが履歴に追加された"
+        );
+        assert_eq!(core.develop_settings(b).unwrap(), develop_exposure(1.0));
+        stale_saved
+    });
+    assert!(!stale_saved, "古い写しは書かない");
+}
+
+/// 上の回帰テストの別の経路: 止めている間の A の新しい書き込みが Undo で、追い越す別の写真の書き込みが、
+/// 現像していない B の Undo（現像のセッションを経由せずに、保存の記録を書き換える）。
+#[test]
+fn a_stale_save_does_not_overwrite_an_undo_after_another_photos_undo() {
+    use genzo_api::SettingGroups;
+
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (48, 32), 1, None);
+    write_jpeg(&env.photos.join("B.jpg"), (48, 32), 2, None);
+    let (core, stall) = open_with_save_stall(&env);
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let (a, b) = (
+        by_name(&items, "A.jpg").variant_id,
+        by_name(&items, "B.jpg").variant_id,
+    );
+    // B に、Undo できる履歴を作っておく（B は開かない）。
+    core.paste_settings(&develop_exposure(0.3), &[b], SettingGroups::ALL)
+        .unwrap();
+    core.open_develop(a).unwrap();
+    core.set_settings(&develop_exposure(0.5), false).unwrap();
+
+    let core_ref = &core;
+    let stale_saved = std::thread::scope(move |scope| {
+        let core = core_ref;
+        let SaveStall {
+            armed,
+            stalled,
+            release,
+        } = stall;
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let stale = scope.spawn(move || core.flush_develop());
+        stalled
+            .recv_timeout(common::WAIT_LIMIT)
+            .expect("保存が、ロックを外した直後で止まらない");
+
+        // 止めている間: A を Undo する（保存待ちの古い写しを先に保存してから、1 つ前に戻す）。
+        assert_eq!(core.undo(a).unwrap(), Some(DevelopSettings::default()));
+        // 続けて B を Undo する（保存の記録が B のものになる）。
+        assert_eq!(core.undo(b).unwrap(), Some(DevelopSettings::default()));
+
+        release.send(()).unwrap();
+        let stale_saved = stale.join().unwrap().unwrap();
+        // カタログの値を読むため、A を閉じる。
+        core.close_develop().unwrap();
+        assert_eq!(
+            core.develop_settings(a).unwrap(),
+            DevelopSettings::default(),
+            "古い写し（露光量 +0.50）が、Undo の結果を上書きした"
+        );
+        let history = core.history(a).unwrap();
+        assert_eq!(
+            history.iter().map(|h| h.label.as_str()).collect::<Vec<_>>(),
+            vec!["読み込み", "露光量 +0.50"],
+            "古い写しが履歴に追加された"
+        );
+        assert!(history[0].is_current, "Undo した位置のまま");
+        stale_saved
+    });
+    assert!(!stale_saved, "古い写しは書かない");
+}
+
+/// 上の回帰テストの別の経路: 止めている間に、A の現像のセッションが A を書かずに閉じ（設定を保存済みの
+/// 値に戻していたので、閉じるときに書くものがない）、現像していない A への貼り付けが、止めた保存を追い
+/// 越す。貼り付けは、現像中の写真に限らず、書いた variant をすべて記録しなければならない（検証担当が追加。
+/// 現像中の写真だけを記録する実装に戻すと失敗する）。
+#[test]
+fn a_stale_save_does_not_overwrite_a_paste_into_a_photo_that_is_no_longer_open() {
+    use genzo_api::SettingGroups;
+
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (48, 32), 1, None);
+    let (core, stall) = open_with_save_stall(&env);
+    import(&core, &env.photos);
+    let a = all_items(&core)[0].variant_id;
+    core.open_develop(a).unwrap();
+    // 保存待ちの変更（これが、止める保存の古い写しになる）。
+    core.set_settings(&develop_exposure(0.5), false).unwrap();
+
+    let core_ref = &core;
+    let stale_saved = std::thread::scope(move |scope| {
+        let core = core_ref;
+        let SaveStall {
+            armed,
+            stalled,
+            release,
+        } = stall;
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let stale = scope.spawn(move || core.flush_develop());
+        stalled
+            .recv_timeout(common::WAIT_LIMIT)
+            .expect("保存が、ロックを外した直後で止まらない");
+
+        // 止めている間: 設定を保存済みの値に戻し（保存待ちがなくなる）、A を閉じる（何も書かない）。
+        core.set_settings(&DevelopSettings::default(), false)
+            .unwrap();
+        core.close_develop().unwrap();
+        assert_eq!(history_labels(core, a), vec!["読み込み"]);
+        // 現像していない A に貼り付ける。
+        core.paste_settings(&develop_exposure(2.0), &[a], SettingGroups::ALL)
+            .unwrap();
+
+        release.send(()).unwrap();
+        let stale_saved = stale.join().unwrap().unwrap();
+        assert_eq!(
+            core.develop_settings(a).unwrap(),
+            develop_exposure(2.0),
+            "古い写し（露光量 +0.50）が、貼り付けた設定を上書きした"
+        );
+        assert_eq!(
+            history_labels(core, a),
+            vec!["読み込み", "設定の貼り付け"],
+            "古い写しが履歴に追加された"
+        );
+        stale_saved
+    });
+    assert!(!stale_saved, "古い写しは書かない");
+}
+
+/// ファイルの状態を調べる `metadata` が「ファイルがない」以外の理由で失敗したとき、ファイルを見つからない
+/// （`missing`）と報告しない。状態は変えず、見つからないという誤解を招く警告も出さない（指摘 3）。
+///
+/// 権限を使わずに再現する: 写真のフォルダを通常のファイルに置き換える（フォルダの部分がフォルダでない
+/// ので、`metadata` は NotFound ではなく NotADirectory で失敗する。root で実行しても同じ）。Windows では
+/// この状況が NotFound になるため、Unix だけで確かめる。
+#[cfg(unix)]
+#[test]
+fn unreadable_metadata_is_not_reported_as_a_missing_file() {
+    use genzo_api::ApiError;
+
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (32, 24), 1, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let a = all_items(&core)[0].variant_id;
+    let rx = core.subscribe();
+
+    // フォルダを退避し、同じ名前の通常のファイルを置く。
+    let aside = env.dir.path().join("photos.aside");
+    std::fs::rename(&env.photos, &aside).unwrap();
+    std::fs::write(&env.photos, b"not a folder").unwrap();
+    let file_missing_warnings = |rx: &crossbeam_channel::Receiver<Event>| {
+        common::drain(rx)
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::Warning {
+                        code: WarningCode::FileMissing,
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let status = |core: &genzo_api::Core| {
+        let item = all_items(core).remove(0);
+        (item.file_status, item.file_revision)
+    };
+
+    // ファイルの確認: 見つからないものに数えず、状態を変えない（読めないファイルは、今の状態のまま）。
+    let report = core.check_files(&[a]).unwrap();
+    assert!(report.missing.is_empty(), "{report:?}");
+    assert_eq!(report.checked, 1, "{report:?}");
+    assert_eq!(status(&core), (FileStatus::Ok, 1));
+
+    // 現像を開く（元ファイルの照合を経由する経路）: FileAccess で失敗する。見つからないという警告は
+    // 出さず、状態も変えない。
+    let err = core.open_develop(a).unwrap_err();
+    assert!(matches!(err, ApiError::FileAccess { .. }), "{err:?}");
+    assert!(
+        !err.to_string().contains("見つかりません"),
+        "見つからないという誤った理由: {err}"
+    );
+    assert_eq!(status(&core), (FileStatus::Ok, 1));
+    assert_eq!(file_missing_warnings(&rx), 0, "見つからないという警告");
+
+    // フォルダが戻れば、何も変わっていない（missing にしていないので、戻す処理も要らない）。
+    std::fs::remove_file(&env.photos).unwrap();
+    std::fs::rename(&aside, &env.photos).unwrap();
+    let report = core.check_files(&[a]).unwrap();
+    assert_eq!((report.ok, report.missing.len()), (1, 0), "{report:?}");
+    assert!(report.changed.is_empty(), "{report:?}");
+    assert_eq!(status(&core), (FileStatus::Ok, 1));
+    core.open_develop(a).unwrap();
+    core.close().unwrap();
+}
+
+/// フォルダごと見えない（ドライブを外した状態の代わり）ファイルは、これまでどおり見つからない（`missing`）
+/// として記録し、戻れば `ok` に戻す。`missing` は戻せる印なので記録してよい。一方、ゴミ箱への移動は、
+/// フォルダごと見えなければ移さず失敗にしてカタログに残す（`trash_does_not_drop_photos_on_an_unreachable_volume`）。
+/// 両者は矛盾しない（指摘 3。NotFound 以外のエラーだけを「見つからない」にしない変更の境界）。
+#[test]
+fn a_vanished_folder_is_marked_missing_and_restored_but_not_trashed() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("vol").join("A.jpg"), (32, 24), 1, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let a = all_items(&core)[0].variant_id;
+    let offline = env.photos.join("vol-offline");
+    std::fs::rename(env.photos.join("vol"), &offline).unwrap();
+
+    let report = core.check_files(&[a]).unwrap();
+    assert_eq!(report.missing.len(), 1, "{report:?}");
+    assert_eq!(all_items(&core)[0].file_status, FileStatus::Missing);
+    // 見つからない印が付いていても、ゴミ箱への移動は失敗にして写真を残す。
+    let plan = core.plan_delete(DeleteKind::Trash, &[a]).unwrap();
+    let delete = core.execute_delete(plan.plan_id).unwrap();
+    assert_eq!(delete.failed.len(), 1, "{delete:?}");
+    assert!(delete.removed_assets.is_empty(), "{delete:?}");
+    assert_eq!(all_items(&core).len(), 1, "写真はカタログに残る");
+
+    // フォルダが戻れば ok に戻る。
+    std::fs::rename(&offline, env.photos.join("vol")).unwrap();
+    let report = core.check_files(&[a]).unwrap();
+    assert_eq!((report.ok, report.missing.len()), (1, 0), "{report:?}");
+    assert_eq!(all_items(&core)[0].file_status, FileStatus::Ok);
     core.close().unwrap();
 }

@@ -166,7 +166,8 @@ impl Core {
 
     /// 指定した variant のファイルの状態を確かめる（3.3 節「表示したときに確認」）。
     ///
-    /// - 見つからなければ `status = missing` にする。
+    /// - 見つからなければ（NotFound。フォルダごと見えない場合を含む）`status = missing` にする。権限が
+    ///   ないなど、ないと言えない理由で状態を確かめられないファイルは、状態を変えない（`report.ok` に数える）。
     /// - 見つかったら、サイズ・更新日時が変わっていればクイックハッシュを求め直し、内容の変化を検知したら
     ///   **メタデータ（寸法・撮影日時など）をワーカーで読み直して登録し直す**（取り込みと同じ経路。
     ///   リビジョンを上げてキャッシュを無効にする。4.1 節。読めなければ `status = error`）。見つからなかった
@@ -221,7 +222,7 @@ impl Core {
                     report.changed.push(path);
                     changed_assets.push(f.asset_id);
                 }
-                // 読めない（ハッシュを求められない）ファイルは、今の状態のまま。
+                // 読めない（状態を確かめられない・ハッシュを求められない）ファイルは、今の状態のまま。
                 Err(ApiError::FileAccess { .. }) => report.ok += 1,
                 Err(e) => return Err(e),
             }
@@ -236,7 +237,8 @@ impl Core {
 pub(crate) enum Refreshed {
     /// 変化はない（読めなかったファイルで、内容が同じものを含む）。
     Unchanged,
-    /// 見つからない（状態は変えていない。呼び出し側が `status = missing` にする）。
+    /// 見つからない（`metadata` が NotFound か、通常のファイルでない。状態は変えていない。呼び出し側が
+    /// `status = missing` にする）。権限がないなど、ないと言えない場合は、これではなくエラーにする。
     Missing,
     /// 見つからなかったファイルが、同じ内容で戻った（`status = ok` にした。メタデータが空の asset は
     /// 読み直した。読めなければ `status = error`）。
@@ -251,8 +253,10 @@ pub(crate) enum Refreshed {
 /// サイズ・更新日時が記録と同じで、見つからない印もなければ、何もしない。違えば、クイックハッシュを
 /// 求め、内容が変わっていればワーカーでメタデータを読み直し、取り込みと同じ経路（`register_file`。
 /// リビジョンを上げ、利用者の撮影日時の修正を引き継ぎ、読めなければ `status = error`）で登録し直す。
-/// 読めることを確かめずに `error` を `ok` にしない。ファイルを読めない（ハッシュを求められない）場合は
-/// [`ApiError::FileAccess`]。
+/// 読めることを確かめずに `error` を `ok` にしない。ファイルの状態を確かめられない（`metadata` が
+/// NotFound 以外で失敗した。権限がない・フォルダの部分がフォルダでないなど）場合と、ファイルを読めない
+/// （ハッシュを求められない）場合は [`ApiError::FileAccess`]（カタログの状態は変えない。ないと言えない
+/// ファイルを `missing` にしない）。
 pub(crate) fn refresh_file(
     inner: &Inner,
     rec: &FileRecord,
@@ -260,8 +264,22 @@ pub(crate) fn refresh_file(
     lane: Lane,
     token: &genzo_jobs::CancellationToken,
 ) -> Result<Refreshed, ApiError> {
-    let Some(meta) = std::fs::metadata(path).ok().filter(|m| m.is_file()) else {
-        return Ok(Refreshed::Missing);
+    let meta = match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => m,
+        // 通常のファイルでない（同じ名前のフォルダになっているなど）: 元のファイルはない。
+        Ok(_) => return Ok(Refreshed::Missing),
+        // 見つからない（フォルダごとなくなった・ドライブが外れた場合も含む）。`missing` は、戻れば `ok` に
+        // 戻せる印なので記録してよい（ゴミ箱への移動は、フォルダごと見えなければ移さず失敗にする。移す
+        // という取り消せない操作は、ないと確かめられたものだけを扱うため。delete.rs）。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Refreshed::Missing),
+        // それ以外（権限がない・フォルダの部分がフォルダでない・一時的な入出力のエラーなど）は、あるか
+        // ないかが分からない。見つからないものとして記録せず（状態を変えず）、読めないエラーにする。
+        Err(e) => {
+            return Err(ApiError::FileAccess {
+                path: path.to_path_buf(),
+                message: format!("ファイルの状態を確かめられません: {e}"),
+            });
+        }
     };
     let mtime_ns = meta
         .modified()

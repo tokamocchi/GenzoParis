@@ -139,12 +139,23 @@ impl Env {
 
     /// 部品の差し替え（`CoreHooks`。ゴミ箱は偽物）を追加で指定して開く。
     pub fn open_with_hooks(&self, f: impl FnOnce(&mut CoreHooks)) -> Core {
-        let mut hooks = CoreHooks {
+        self.open_with_config_and_hooks(|_| {}, f)
+    }
+
+    /// 設定（`CoreConfig`）と部品の差し替え（`CoreHooks`。ゴミ箱は偽物）の両方を指定して開く。
+    pub fn open_with_config_and_hooks(
+        &self,
+        config: impl FnOnce(&mut CoreConfig),
+        hooks: impl FnOnce(&mut CoreHooks),
+    ) -> Core {
+        let mut c = self.config();
+        config(&mut c);
+        let mut h = CoreHooks {
             trash: self.trash.clone(),
             ..CoreHooks::default()
         };
-        f(&mut hooks);
-        Core::open_with(self.config(), hooks).unwrap()
+        hooks(&mut h);
+        Core::open_with(c, h).unwrap()
     }
 }
 

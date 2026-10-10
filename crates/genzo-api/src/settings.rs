@@ -165,6 +165,10 @@ impl Core {
     /// 同時に呼んでも、更新全体（保存から、メモリ上の設定・キャッシュの上限への反映まで）は 1 つずつ行う
     /// （同じ項目を同時に変えても、実行中の設定と保存された設定が食い違わない。後から順番が来た更新の値が残る）。
     ///
+    /// カタログへの保存は、要求のすべての項目（と、既定のタイムゾーンを変えるときの、撮影日時の推定し直しが
+    /// 済んでいない印）を 1 つのトランザクションで行う。途中で失敗したら、カタログも、実行中の設定も、更新の前の
+    /// まま（エラーを返す）。
+    ///
     /// - キャッシュの上限: すぐに有効（超えていれば古いものから削除する。SCL-04）。
     /// - キャッシュの場所: 次に開いたときに有効（今のキャッシュは移さない）。取り込みは、開いている間、
     ///   今開いているキャッシュのフォルダと、設定した新しい場所の両方を飛ばす（`import::excluded_dirs`）。
@@ -211,29 +215,38 @@ impl Core {
             }
         };
         let previous = inner.settings.lock().clone();
+        // 保存する値は、カタログに書く前にすべて作る（変換で失敗したときに、何も書かないため）。
+        let mut entries: Vec<(&str, String)> = Vec::new();
+        if let Some(dir) = &update.preview_cache_dir {
+            let s = dir.to_str().ok_or_else(|| {
+                ApiError::InvalidArgument("UTF-8 で表せないパスは使えません".to_owned())
+            })?;
+            entries.push((KEY_PREVIEW_CACHE_DIR, s.to_owned()));
+        }
+        if let Some(bytes) = update.preview_cache_bytes {
+            entries.push((KEY_PREVIEW_CACHE_BYTES, bytes.to_string()));
+        }
+        if let Some(space) = update.default_export_color_space {
+            let json =
+                serde_json::to_string(&space).map_err(|e| ApiError::Internal(e.to_string()))?;
+            entries.push((KEY_DEFAULT_EXPORT_COLOR_SPACE, json));
+        }
+        if let Some(m) = update.default_utc_offset_minutes {
+            entries.push((KEY_DEFAULT_UTC_OFFSET_MINUTES, m.to_string()));
+        }
+        // 既定のオフセットを変えるときは、推定し直しを終える前にアプリが終わっても、次に開いたときに推定し直す
+        // 印（spawn_reresolve）を、設定と同じトランザクションで付ける。
+        let mark_reresolve = update
+            .default_utc_offset_minutes
+            .is_some_and(|m| m != previous.default_utc_offset_minutes);
+        // 要求のすべての項目と印を、1 つのトランザクションで保存する。途中で失敗したら、カタログは更新の前の
+        // まま（項目ごとにコミットすると、後の項目が失敗したときに、先の項目だけが保存され、実行中の設定は
+        // 古い値のままなのに、次に開いたときに一部だけ適用された更新を読み込む）。失敗したときは、メモリ上の
+        // 設定・キャッシュの上限も変えない（下の反映に進まずに、エラーを返す）。
         inner.with_catalog_api(|c| {
-            if let Some(dir) = &update.preview_cache_dir {
-                let s = dir.to_str().ok_or_else(|| {
-                    ApiError::InvalidArgument("UTF-8 で表せないパスは使えません".to_owned())
-                })?;
-                c.set_setting(KEY_PREVIEW_CACHE_DIR, s)?;
-            }
-            if let Some(bytes) = update.preview_cache_bytes {
-                c.set_setting(KEY_PREVIEW_CACHE_BYTES, &bytes.to_string())?;
-            }
-            if let Some(space) = update.default_export_color_space {
-                let json =
-                    serde_json::to_string(&space).map_err(|e| ApiError::Internal(e.to_string()))?;
-                c.set_setting(KEY_DEFAULT_EXPORT_COLOR_SPACE, &json)?;
-            }
-            if let Some(m) = update.default_utc_offset_minutes {
-                if m != previous.default_utc_offset_minutes {
-                    // 推定し直しを終える前にアプリが終わっても、次に開いたときに推定し直す（spawn_reresolve）。
-                    // 設定より先に付ける（間で終わっても、印が残る側に倒す）。
-                    c.set_capture_time_reresolve_pending(true)?;
-                }
-                c.set_setting(KEY_DEFAULT_UTC_OFFSET_MINUTES, &m.to_string())?;
-            }
+            let entries: Vec<(&str, &str)> =
+                entries.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            c.set_settings(&entries, mark_reresolve)?;
             Ok(())
         })?;
         // テスト用の口（`CoreHooks::on_settings_update`）。更新のロックを持ったまま呼ぶ。

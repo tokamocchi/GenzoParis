@@ -19,6 +19,7 @@
 //! - 設定のコピーと複数の variant への一括適用（DEV-30。[`Core::paste_settings`]）、仮想コピーの作成
 //!   （LIB-13。[`Core::create_virtual_copy`]）。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -32,7 +33,7 @@ use genzo_worker::Lane;
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use crate::config::{DEVELOP_SAVE_DELAY, DEVELOP_SAVE_MAX_DELAY};
-use crate::core::{Core, Inner};
+use crate::core::{Core, DevelopSaveStage, Inner};
 use crate::error::ApiError;
 use crate::events::{CatalogChange, Event, WarningCode};
 use crate::previews::{load_source, schedule_regenerate, variant_file};
@@ -108,33 +109,101 @@ pub(crate) struct DevelopShared {
     opening: Mutex<Option<genzo_jobs::CancellationToken>>,
     /// 最後に割り当てた設定の世代（セッションをまたいだ通しの番号。[`DevelopShared::next_generation`]）。
     last_generation: AtomicU64,
-    /// 現像中の写真の現像設定をカタログに書く操作を 1 つずつにし、最後に書いた写しを覚える
-    /// （[`save_unlocked`] は state のロックの外で書くため。ロックの順序は state → save → カタログ）。
-    save: Mutex<SaveRecord>,
+    /// 現像中の写真の現像設定をカタログに書く操作を 1 つずつにする（[`save_unlocked`] は state のロックの
+    /// 外で書くため。ロックの順序は state → save → カタログ）。書く操作は、書いた後に
+    /// [`DevelopShared::record_written`] で記録する。
+    save: Mutex<()>,
+    /// state のロックを外して書く保存の追い越しの記録（[`SaveRecord`]）。**葉のロック**: 持っている間に
+    /// ほかのロックを取らず、待たない（state のロックを持ったまま取るので、`save` とは別にしている。
+    /// `save` はカタログのロックを待つ間も持たれる）。
+    save_record: Mutex<SaveRecord>,
     /// 保存する設定の写しの通しの番号（大きいほど新しい）。
     save_seq: AtomicU64,
     /// 表示範囲の描画（[`Core::render_region`]。`region` の doc）。
     pub region: Mutex<crate::region::RegionState>,
 }
 
-/// 現像中の写真の現像設定を最後に書いた写し（[`DevelopShared::save`]）。
+/// state のロックを外して書く保存（[`save_unlocked`]）の追い越しの記録（[`DevelopShared::save_record`]）。
+///
+/// 写しの番号は、設定を変えてカタログに書く操作がどれも state のロックの中で割り当てるので、同じ variant
+/// では、番号が大きいほど新しい設定。state のロックを外してから書くまでの間に、同じ variant のもっと新しい
+/// 写しが書かれたら、古い写しは書かない（新しい設定と履歴を上書きしない）。
+///
+/// 覚えるのは variant ごと。以前のように全体で 1 件だけ（最後に書いた variant と番号）にすると、別の
+/// variant を書いた時点で、止まっている保存が見るべき記録が消えた。
+///
+/// 覚えるのは、**書くか書かないかを決める前の保存（[`SaveRecord::begin`] から [`SaveRecord::end`] まで）が
+/// ある variant だけ**で、その保存がなくなれば記録も捨てる。書いた variant の数に応じて増え続けないので、
+/// セッションを閉じるときや variant を消すときの掃除は要らない（掃除を入れると、止まっている保存が
+/// 見るべき記録まで消しうる）。
 #[derive(Default)]
 struct SaveRecord {
-    /// 書いた variant。
-    variant: Option<VariantId>,
-    /// 書いた写しの番号。
-    seq: u64,
+    /// variant ごとの、決める前の保存と、その間に書かれた写し。
+    pending: HashMap<VariantId, PendingSaves>,
+}
+
+/// 1 つの variant について、決める前の保存の状態（[`SaveRecord::pending`]）。
+#[derive(Default)]
+struct PendingSaves {
+    /// 決める前の保存の数。
+    count: usize,
+    /// その間に書かれた、最も新しい写しの番号（戻らない）。
+    newest: u64,
 }
 
 impl SaveRecord {
-    /// `seq` より新しい写しを `variant` に書いた後か。
-    fn has_newer(&self, variant: VariantId, seq: u64) -> bool {
-        self.variant == Some(variant) && self.seq > seq
+    /// `variant` の保存が、state のロックを外して、書くか書かないかを決めるまで待ち始める。**写しの番号を
+    /// 割り当てたのと同じ state のロックの中**で呼ぶ（これより後に割り当てた番号の書き込みを、すべて覚える
+    /// ため）。
+    fn begin(&mut self, variant: VariantId) {
+        self.pending.entry(variant).or_default().count += 1;
     }
 
-    fn record(&mut self, variant: VariantId, seq: u64) {
-        self.variant = Some(variant);
-        self.seq = seq;
+    /// [`SaveRecord::begin`] の保存が、書くか書かないかを決め終えた。待っている保存がなくなれば記録を捨てる。
+    fn end(&mut self, variant: VariantId) {
+        if let Some(p) = self.pending.get_mut(&variant) {
+            p.count = p.count.saturating_sub(1);
+            if p.count == 0 {
+                self.pending.remove(&variant);
+            }
+        }
+    }
+
+    /// `variants` に番号 `seq` の写しを書いた。待っている保存がある variant だけ覚える。
+    fn written(&mut self, variants: &[VariantId], seq: u64) {
+        for v in variants {
+            if let Some(p) = self.pending.get_mut(v) {
+                p.newest = p.newest.max(seq);
+            }
+        }
+    }
+
+    /// 待っている保存の番号 `seq` より新しい写しを、`variant` に書いた後か。
+    fn has_newer(&self, variant: VariantId, seq: u64) -> bool {
+        self.pending.get(&variant).is_some_and(|p| p.newest > seq)
+    }
+}
+
+/// state のロックを外して書く保存が、書くか書かないかを決めるまでの印（drop で [`SaveRecord::end`]）。
+struct UnlockedSave<'a> {
+    shared: &'a DevelopShared,
+    variant: VariantId,
+    seq: u64,
+}
+
+impl UnlockedSave<'_> {
+    /// 書く前に、同じ variant にもっと新しい写しが書かれていないか（`save` のロックを持って呼ぶ）。
+    fn is_superseded(&self) -> bool {
+        self.shared
+            .save_record
+            .lock()
+            .has_newer(self.variant, self.seq)
+    }
+}
+
+impl Drop for UnlockedSave<'_> {
+    fn drop(&mut self) {
+        self.shared.save_record.lock().end(self.variant);
     }
 }
 
@@ -152,6 +221,23 @@ impl DevelopShared {
     /// 保存する設定の写しの新しい番号。
     fn next_save_seq(&self) -> u64 {
         self.save_seq.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// `variants` に番号 `seq` の現像設定を書いた（`save` のロックを持ったまま、カタログに書いた直後に呼ぶ。
+    /// 現像設定を書くのは、写す元の variant に限らず、すべてここに記録する）。
+    fn record_written(&self, variants: &[VariantId], seq: u64) {
+        self.save_record.lock().written(variants, seq);
+    }
+
+    /// state のロックを外して書く保存（番号 `seq`）を、追い越しの記録に登録する。**番号を割り当てたのと同じ
+    /// state のロックの中**で呼び、書くか書かないかを決めるまで（返す印を drop するまで）持つ。
+    fn begin_unlocked_save(&self, variant: VariantId, seq: u64) -> UnlockedSave<'_> {
+        self.save_record.lock().begin(variant);
+        UnlockedSave {
+            shared: self,
+            variant,
+            seq,
+        }
     }
 }
 
@@ -244,9 +330,9 @@ fn save_locked(inner: &Arc<Inner>, s: &mut Session, label: Option<&str>) -> Resu
     let settings = s.settings.clone();
     let seq = inner.develop.next_save_seq();
     {
-        let mut record = inner.develop.save.lock();
+        let _write = inner.develop.save.lock();
         inner.with_catalog(|c| c.save_develop(v, &settings, &label))?;
-        record.record(v, seq);
+        inner.develop.record_written(&[v], seq);
     }
     s.saved = settings;
     s.saved_seq = seq;
@@ -260,9 +346,9 @@ fn save_locked(inner: &Arc<Inner>, s: &mut Session, label: Option<&str>) -> Resu
 ///
 /// 現像のロックを持ったままカタログのロックを待つと、カタログを長く使う処理の間、スライダーの操作・
 /// プレビューの描画の受け取り（P0）・UI のプレビューの取得まで止まるため（PERF-13。指摘 F24）。写しを
-/// 取ってからロックを外して書き、ロックを取り直して `saved` を更新する。書く前に、より新しい写しが
-/// 書かれていれば（ロックを外している間に、一括適用・Undo などが書いた）書かない（保存待ちのまま残り、
-/// 次の保存で書く）。
+/// 取ってからロックを外して書き、ロックを取り直して `saved` を更新する。書く前に、同じ variant の
+/// より新しい写しが書かれていれば（ロックを外している間に、一括適用・Undo などが書いた。間に別の variant
+/// が書かれていても同じ。[`SaveRecord`]）書かない（保存待ちのまま残り、次の保存で書く）。
 fn save_unlocked(
     inner: &Arc<Inner>,
     state: &mut MutexGuard<'_, Option<Session>>,
@@ -280,17 +366,26 @@ fn save_unlocked(
     let (v, first) = (s.variant_id, s.first_generation);
     let settings = s.settings.clone();
     let seq = inner.develop.next_save_seq();
+    // 番号を割り当てたのと同じ state のロックの中で登録する（これより後の、同じ variant への書き込みを
+    // 取りこぼさないため）。
+    let pending = inner.develop.begin_unlocked_save(v, seq);
     let written = MutexGuard::unlocked(state, || -> Result<bool, ApiError> {
-        let mut record = inner.develop.save.lock();
-        if record.has_newer(v, seq) {
+        // テスト用の口（`CoreHooks::on_develop_save`）。state のロックを外した後、保存のロックを取る前に、
+        // ロックを持たずに呼ぶ。
+        if let Some(hook) = &inner.on_develop_save {
+            hook(DevelopSaveStage::Unlocked(v));
+        }
+        let write = inner.develop.save.lock();
+        if pending.is_superseded() {
             return Ok(false);
         }
         inner.with_catalog(|c| c.save_develop(v, &settings, &label))?;
-        record.record(v, seq);
-        drop(record);
+        inner.develop.record_written(&[v], seq);
+        drop(write);
         after_develop_saved(inner, &[v]);
         Ok(true)
     })?;
+    drop(pending);
     if written
         && let Some(s) = state
             .as_mut()
@@ -932,7 +1027,7 @@ impl Core {
         }
         let seq = inner.develop.next_save_seq();
         let result = {
-            let mut record = inner.develop.save.lock();
+            let _write = inner.develop.save.lock();
             let result = inner.with_catalog_api(|c| {
                 reject_videos(c, &[variant_id])?;
                 Ok(if forward {
@@ -942,7 +1037,7 @@ impl Core {
                 })
             })?;
             if result.is_some() {
-                record.record(variant_id, seq);
+                inner.develop.record_written(&[variant_id], seq);
             }
             result
         };
@@ -1022,7 +1117,7 @@ impl Core {
             save_locked(inner, s, None)?;
         }
         let seq = inner.develop.next_save_seq();
-        let mut record = inner.develop.save.lock();
+        let write = inner.develop.save.lock();
         // 外部データ（render_deps）は貼り付けない（写真ごとに違う。`deps` の doc）: 貼り付け先の値のままにし、
         // 現像中の写真なら、実際に使っている値にする。
         let session_deps = state
@@ -1051,12 +1146,13 @@ impl Core {
             c.save_develop_batch(&items, label)?;
             Ok(items)
         })?;
-        if let Some(s) = state.as_ref()
-            && targets.contains(&s.variant_id)
-        {
-            record.record(s.variant_id, seq);
-        }
-        drop(record);
+        let mut ids: Vec<VariantId> = applied.iter().map(|(v, _)| *v).collect();
+        ids.sort();
+        ids.dedup();
+        // 書いた variant をすべて記録する（現像中の写真に限らない。現像していた写真の古い写しの保存が、
+        // 現像のセッションが閉じた後で止まっていることもある）。
+        inner.develop.record_written(&ids, seq);
+        drop(write);
         if let Some(s) = state.as_mut()
             && let Some((_, settings)) = applied.iter().find(|(v, _)| *v == s.variant_id)
         {
@@ -1067,9 +1163,6 @@ impl Core {
             submit_render(inner, s, RenderQuality::Final);
         }
         drop(state);
-        let mut ids: Vec<VariantId> = applied.iter().map(|(v, _)| *v).collect();
-        ids.sort();
-        ids.dedup();
         after_develop_saved(inner, &ids);
         Ok(ids.len())
     }
@@ -1189,16 +1282,77 @@ mod tests {
         );
     }
 
-    /// state のロックを外して書く保存は、より新しい写しが書かれた後なら書かない（古い設定で上書きしない）。
+    /// state のロックを外して書く保存は、同じ variant のより新しい写しが書かれた後なら書かない（古い設定で
+    /// 上書きしない）。間に別の variant を書いても、その記録は消えない（以前は全体で 1 件だけ覚えていて、
+    /// 別の variant を書くと消えた）。
     #[test]
     fn older_snapshots_are_not_written_after_newer_ones() {
         let (a, b) = (VariantId::new(1), VariantId::new(2));
         let mut r = SaveRecord::default();
-        assert!(!r.has_newer(a, 1));
-        r.record(a, 5);
+        // a の写し（番号 4）が、書く前で止まっている。
+        r.begin(a);
+        assert!(!r.has_newer(a, 4), "まだ何も書かれていない");
+        r.written(&[a], 5);
         assert!(r.has_newer(a, 4), "a に 5 を書いた後の 4 は古い");
+        assert!(!r.has_newer(a, 5), "同じ番号は古くない（自分自身）");
         assert!(!r.has_newer(a, 6));
+        // 別の variant を書いても、a の記録は消えない。
+        r.written(&[b], 9);
+        assert!(
+            r.has_newer(a, 4),
+            "b を書いても、a の新しい写しは覚えている"
+        );
         assert!(!r.has_newer(b, 1), "別の写真には関係しない");
+        // 番号は戻らない（遅れて来た古い番号の記録で、新しい番号を忘れない）。
+        r.written(&[a], 3);
+        assert!(r.has_newer(a, 4));
+        // 1 回で複数の variant を書いた場合（一括適用）。
+        r.begin(b);
+        r.written(&[a, b], 12);
+        assert!(r.has_newer(a, 11) && r.has_newer(b, 11));
+    }
+
+    /// 追い越しの記録は、決める前の保存がある variant の分だけ持ち、保存がなくなれば捨てる（書いた variant の
+    /// 数に応じて増え続けない。セッションを閉じる・variant を消すときの掃除も要らない）。
+    #[test]
+    fn save_record_only_keeps_variants_with_pending_saves() {
+        let (a, b) = (VariantId::new(1), VariantId::new(2));
+        let mut r = SaveRecord::default();
+        // 決める前の保存がない variant への書き込みは、覚えない。
+        r.written(&[a, b], 7);
+        assert!(r.pending.is_empty());
+        assert!(!r.has_newer(a, 1));
+        // 同じ variant の保存が 2 つ決める前なら、両方が終わるまで覚えている。
+        r.begin(a);
+        r.begin(a);
+        r.written(&[a], 8);
+        r.end(a);
+        assert!(r.has_newer(a, 6), "もう 1 つの保存が残っている");
+        r.end(a);
+        assert!(r.pending.is_empty(), "保存がなくなれば捨てる");
+        // 捨てた後に同じ variant の保存を始めても、前の記録は残っていない（番号は新しい）。
+        r.begin(a);
+        assert!(!r.has_newer(a, 9));
+        r.end(a);
+        // 余分な end（登録のない variant）は何もしない。
+        r.end(b);
+        assert!(r.pending.is_empty());
+    }
+
+    /// 印（[`UnlockedSave`]）は、drop で（エラーで途中で抜けても）登録を外す。
+    #[test]
+    fn unlocked_save_marker_unregisters_on_drop() {
+        let shared = DevelopShared::default();
+        let a = VariantId::new(1);
+        let seq = shared.next_save_seq();
+        {
+            let pending = shared.begin_unlocked_save(a, seq);
+            assert!(!pending.is_superseded());
+            shared.record_written(&[a], seq + 1);
+            assert!(pending.is_superseded());
+            assert_eq!(shared.save_record.lock().pending.len(), 1);
+        }
+        assert!(shared.save_record.lock().pending.is_empty());
     }
 
     #[test]

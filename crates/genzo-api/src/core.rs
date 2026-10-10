@@ -24,6 +24,9 @@
 //!
 //! 現像のセッション → 検索の状態 → カタログ → キャッシュ（thumbs.db・previews）。それ以外のロック
 //! （ジョブの記録・GPU・画面のプロファイル・削除の計画・設定）は、他のロックを持たずに短く使う。
+//! 現像設定を書く操作のロック（`DevelopShared::save`）は、現像のセッションの次、カタログの前に取る。
+//! 現像設定の保存の追い越しの記録のロック（`DevelopShared::save_record`）は、現像のセッションや `save`
+//! を持ったまま取るが、持っている間はほかのロックを取らない（葉）。
 //!
 //! 例外は、設定の更新のロック（`Inner::settings_update`）。[`Core::update_settings`] だけが、ほかのロックを
 //! 持たずに最初に取り、更新が終わるまで（カタログ → 設定 → キャッシュ → 推定し直しのジョブの記録の順に
@@ -83,6 +86,22 @@ pub struct CoreHooks {
     /// 要求を追い越して取り消さない」ことを、時間によらずに確かめられる。
     #[doc(hidden)]
     pub on_region_request: Option<Arc<dyn Fn(RegionRequestStage) + Send + Sync>>,
+    /// 現像設定の保存（[`Core::flush_develop`]・自動保存など、現像のロックを外して書く保存）が途中の段階に
+    /// 着いたときに呼ぶ関数（テスト専用。[`DevelopSaveStage`]）。関数の中で保存を止めておけば、「止まっている
+    /// 間に、同じ写真の新しい設定と別の写真の設定が保存されても、古い写しで上書きしない」ことを、時間に
+    /// よらずに確かめられる。
+    #[doc(hidden)]
+    pub on_develop_save: Option<Arc<dyn Fn(DevelopSaveStage) + Send + Sync>>,
+}
+
+/// 現像設定の保存（現像のロックを外して書く保存）の途中の段階（テスト専用のフック
+/// [`CoreHooks::on_develop_save`] に渡す）。
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevelopSaveStage {
+    /// 保存する写しを取り終えて現像のロックを外した直後で、保存のロックを取る前（ロックを持たずに呼ぶ）。
+    /// 値は保存する variant。
+    Unlocked(genzo_model::VariantId),
 }
 
 /// 表示範囲の描画（[`Core::render_region`]）の途中の段階（テスト専用のフック
@@ -118,6 +137,7 @@ impl Default for CoreHooks {
             before_preview_scan: None,
             on_settings_update: None,
             on_region_request: None,
+            on_develop_save: None,
         }
     }
 }
@@ -152,6 +172,8 @@ pub(crate) struct Inner {
     pub on_settings_update: Option<Arc<dyn Fn(SettingsUpdateStage) + Send + Sync>>,
     /// [`CoreHooks::on_region_request`]。
     pub on_region_request: Option<Arc<dyn Fn(RegionRequestStage) + Send + Sync>>,
+    /// [`CoreHooks::on_develop_save`]。
+    pub on_develop_save: Option<Arc<dyn Fn(DevelopSaveStage) + Send + Sync>>,
     pub settings: Mutex<CoreSettings>,
     /// 設定の更新（[`Core::update_settings`]）を 1 つずつにするロック（保存・メモリ上の設定への反映・
     /// キャッシュの上限への反映を、別々のロックで行うので、更新全体を守る。ロックの順序の節）。
@@ -409,6 +431,7 @@ impl Core {
             before_preview_scan: hooks.before_preview_scan,
             on_settings_update: hooks.on_settings_update,
             on_region_request: hooks.on_region_request,
+            on_develop_save: hooks.on_develop_save,
             settings: Mutex::new(settings),
             settings_update: Mutex::new(()),
             reresolve_job: Mutex::new(None),
