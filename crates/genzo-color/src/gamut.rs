@@ -1,7 +1,7 @@
 //! 色域の圧縮（04 の 2.6 節「3 つの圧縮・変換」の 2。ステージ 17 の最初）。
 //!
-//! **仮実装**: 方式は PoC-4 で候補を比較して選ぶ（05 の PoC-4 (2)）。それまでの仮の方式として、
-//! 次の「輝度に向かって彩度を下げる、ソフトな膝つきの圧縮」を実装する。
+//! **方式（人の判断の表 No.3 の決定）**: 色域内の色は変えず、色域外の色だけを、輝度を保ったまま
+//! 無彩色（同じ輝度のグレー）に向かって彩度を下げ、色域の境界に収める。
 //!
 //! ## 方式
 //!
@@ -9,54 +9,42 @@
 //! 無彩色からの差 `d = c − (Y, Y, Y)` に分ける。
 //!
 //! 1. `(Y, Y, Y) + s·d` が 0〜1 の立方体に収まる最大の `s` を `s_max` とし、色域の境界までの
-//!    相対的な距離を `t = 1 / s_max`（色域内なら `t ≤ 1`、境界で 1、色域外で 1 超え）とする。
-//! 2. `t` が膝 `k`（[`GamutCompressor::threshold`]）以下なら **何もしない**。
-//! 3. `t > k` なら、`t' = k + (1 − k)·f((t − k)/(1 − k))`、
-//!    `f(x) = x / (1 + x^p)^(1/p)`（p は [`GamutCompressor::power`]）で圧縮し、
-//!    `c' = (Y, Y, Y) + (t'/t)·d` とする。`f` は単調増加で、`f(0) = 0`、`f'(0) = 1`（p ≥ 1 のとき
-//!    膝でなめらか）、`x → ∞` で 1 に近づくので、どれだけ遠い色域外の色も色域内に収まる。
+//!    相対的な距離を `t = 1 / s_max`（色域内なら `t ≤ 1`、境界で 1、色域外で 1 超え）とする:
+//!    `t = max_i( d_i / (1 − Y)（d_i > 0）, −d_i / Y（d_i < 0） )`。
+//! 2. `t ≤ 1`（色域内。すべてのチャンネルが 0〜1）なら **何もしない**（入力をそのまま返す）。
+//! 3. `t > 1`（色域外）なら `c' = (Y, Y, Y) + d / t` とする（境界の上の点。どれかのチャンネルが
+//!    0 か 1 になる）。
 //!
 //! 性質:
+//! - **色域内の色は変えない**（ビット単位で同じ）。以前の仮実装（膝 0.8・べき乗 1.2 のソフトな圧縮）では
+//!   境界に近い鮮やかな色（原色を含む）も彩度が下がっていた。
 //! - **輝度を保つ**（輝度の係数の和が 1 で、`d` の輝度は 0 のため）。
-//! - **色相をなるべく保つ**: リニアな RGB で無彩色（同じ輝度のグレー）と混ぜるので、色度図の上では
-//!   白色点に向かう直線上を動き、主波長が保たれる（知覚的な色相は Abney 効果で多少ずれる）。
+//! - **色相をなるべく保つ**: リニアな RGB で無彩色と混ぜるので、色度図の上では白色点に向かう直線上を
+//!   動き、主波長が保たれる（知覚的な色相は Abney 効果で多少ずれる）。
+//! - 色域外の色は境界に重なる（彩度の違う色域外の色が、境界で同じ色になる）。境界で値は連続だが、
+//!   傾きは連続でない（ソフトな圧縮ではない）。
 //! - 出力は必ず 0〜1。最後に 0〜1 に収めるのは丸め誤差（1e-7 程度）の吸収のためだけで、
 //!   単純な切り捨て（clamp）で色域外の色を処理しているわけではない。
-//! - 膝より外側では、色域内の色（境界に近い鮮やかな色）も少し彩度が下がる（膝つきの圧縮の性質）。
 //! - 輝度が 0 以下の色は黒 (0, 0, 0)、1 以上の色は白 (1, 1, 1) にする（輝度を 0〜1 に収めるのは
 //!   トーンの圧縮（ステージ 15）の役割で、ここに来る輝度は 0〜1 の前提）。
 //! - NaN・無限大の成分は 0 とみなす（2.6 節: NaN・無限大は 0 に置き換える）。NaN は出力しない。
 //!
-//! 計算は f32 で行う（CPU 基準実装と GPU 版で同じ精度にするため。2.3 節）。
+//! 計算は f32 で行う（CPU 基準実装と GPU 版で同じ式・同じ順序にするため。2.3 節）。
 
 use crate::error::{ColorError, Result};
 use crate::space::RgbColorSpace;
 
-/// 膝（圧縮を始める、色域の境界までの相対的な距離）の既定値（仮置き）。
-///
-/// 0.8 は「境界の 8 割より内側の色は変えない」という意味。PoC-4 で画質を比較して決める。
-pub const DEFAULT_GAMUT_THRESHOLD: f32 = 0.8;
-/// 圧縮の曲線の形（べき乗 p）の既定値（仮置き）。
-///
-/// p が大きいほど膝が鋭く（色域内の色の変化が小さく）なり、p = 1 が最もなだらか。
-/// 1.2 は、膝の位置での変化をなだらかにしつつ、境界（t = 1）の色を t' ≒ 0.91 に保つ値として
-/// 選んだ。根拠のある値ではなく、PoC-4 で決める。
-pub const DEFAULT_GAMUT_POWER: f32 = 1.2;
-
-/// 色域の圧縮（仮実装）。出力先の色空間のリニア RGB に対して使う。
+/// 色域の圧縮。出力先の色空間のリニア RGB に対して使う（モジュールの doc の方式）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GamutCompressor {
     luminance: [f32; 3],
-    threshold: f32,
-    power: f32,
 }
 
 impl GamutCompressor {
-    /// 輝度の係数（出力先の色空間の RGB → XYZ の行列の 2 行目）と、膝・べき乗から作る。
+    /// 輝度の係数（出力先の色空間の RGB → XYZ の行列の 2 行目）から作る。
     ///
-    /// 係数は和が 1 になるよう正規化する。係数が負・有限でない・和が 0 以下、膝が 0 以上 1 未満で
-    /// ない、べき乗が 1 以上の有限の値でないならエラー。
-    pub fn new(luminance_coefficients: [f64; 3], threshold: f32, power: f32) -> Result<Self> {
+    /// 係数は和が 1 になるよう正規化する。係数が負・有限でない・和が 0 以下ならエラー。
+    pub fn new(luminance_coefficients: [f64; 3]) -> Result<Self> {
         let sum: f64 = luminance_coefficients.iter().sum();
         if !luminance_coefficients
             .iter()
@@ -67,51 +55,20 @@ impl GamutCompressor {
                 reason: "輝度の係数は 0 以上の有限の値で、和が正である必要がある",
             });
         }
-        if !(threshold.is_finite() && (0.0..1.0).contains(&threshold)) {
-            return Err(ColorError::InvalidArgument {
-                reason: "色域の圧縮の膝は 0 以上 1 未満である必要がある",
-            });
-        }
-        if !(power.is_finite() && power >= 1.0) {
-            return Err(ColorError::InvalidArgument {
-                reason: "色域の圧縮のべき乗は 1 以上の有限の値である必要がある",
-            });
-        }
         let l = luminance_coefficients.map(|w| (w / sum) as f32);
-        Ok(Self {
-            luminance: l,
-            threshold,
-            power,
-        })
+        Ok(Self { luminance: l })
     }
 
-    /// 標準の色空間（出力先）用。膝とべき乗は既定値（仮置き）。
+    /// 標準の色空間（出力先）用。
     pub fn for_space(space: RgbColorSpace) -> Self {
         Self {
             luminance: space.luminance_coefficients().map(|w| w as f32),
-            threshold: DEFAULT_GAMUT_THRESHOLD,
-            power: DEFAULT_GAMUT_POWER,
         }
-    }
-
-    /// 膝とべき乗を変えたものを返す（検証は [`GamutCompressor::new`] と同じ）。
-    pub fn with_params(self, threshold: f32, power: f32) -> Result<Self> {
-        Self::new(self.luminance.map(f64::from), threshold, power)
     }
 
     /// 輝度の係数（和が 1）。
     pub fn luminance_coefficients(&self) -> [f32; 3] {
         self.luminance
-    }
-
-    /// 膝。
-    pub fn threshold(&self) -> f32 {
-        self.threshold
-    }
-
-    /// べき乗。
-    pub fn power(&self) -> f32 {
-        self.power
     }
 
     /// 1 画素を圧縮する（リニア RGB → 0〜1 のリニア RGB）。
@@ -139,21 +96,10 @@ impl GamutCompressor {
             };
             t = t.max(ti);
         }
-        if t <= self.threshold {
+        if t <= 1.0 {
             return c;
         }
-        let k = self.threshold;
-        let x = (t - k) / (1.0 - k);
-        // f(x) = x / (1 + x^p)^(1/p)。x が大きいときは 1 / (x^(−p) + 1)^(1/p) で計算する
-        // （x^p のあふれを避ける）。
-        let p = self.power;
-        let f = if x <= 1.0 {
-            x / (1.0 + x.powf(p)).powf(1.0 / p)
-        } else {
-            1.0 / (x.powf(-p) + 1.0).powf(1.0 / p)
-        };
-        let t_new = k + (1.0 - k) * f;
-        let scale = if t.is_finite() { t_new / t } else { 0.0 };
+        let scale = if t.is_finite() { 1.0 / t } else { 0.0 };
         [
             (y + scale * d[0]).clamp(0.0, 1.0),
             (y + scale * d[1]).clamp(0.0, 1.0),
@@ -184,22 +130,35 @@ mod tests {
         rgb.iter().all(|v| (0.0..=1.0).contains(v))
     }
 
+    /// どれかのチャンネルが 0 か 1（色域の境界の上）か。
+    fn on_boundary(rgb: [f32; 3]) -> bool {
+        rgb.iter().any(|&v| !(1e-5..=1.0 - 1e-5).contains(&v))
+    }
+
     #[test]
-    fn colors_inside_knee_are_unchanged() {
+    fn in_gamut_colors_are_unchanged() {
+        // 境界の上の色（原色・二次色）も含め、色域内の色は変えない（人の判断 No.3）。
         let c = GamutCompressor::for_space(RgbColorSpace::Srgb);
         for rgb in [
             [0.5, 0.5, 0.5],
             [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
             [0.2, 0.25, 0.3],
             [0.6, 0.5, 0.45],
             [0.18, 0.18, 0.18],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [0.95, 0.02, 0.4],
         ] {
             assert_eq!(c.compress(rgb), rgb);
         }
     }
 
     #[test]
-    fn out_of_gamut_examples_are_brought_inside() {
+    fn out_of_gamut_examples_are_brought_to_the_boundary() {
         let c = GamutCompressor::for_space(RgbColorSpace::Srgb);
         // BT.2020 の原色を sRGB にすると色域外（負の値・1 超え）になる。
         let m = working_to(RgbColorSpace::Srgb);
@@ -221,6 +180,7 @@ mod tests {
             assert!(!in_unit_cube(rgb), "{rgb:?} は色域外のはず");
             let out = c.compress(rgb);
             assert!(in_unit_cube(out), "{rgb:?} → {out:?}");
+            assert!(on_boundary(out), "{rgb:?} → {out:?} は境界の上");
             assert!(
                 (lum(&c, out) - lum(&c, rgb)).abs() < 1e-5,
                 "{rgb:?} → {out:?}"
@@ -246,7 +206,8 @@ mod tests {
 
     #[test]
     fn monotonic_in_saturation() {
-        // 同じ輝度・同じ色相で彩度を上げていくと、出力の彩度も単調に増える（追い越さない）。
+        // 同じ輝度・同じ色相で彩度を上げていくと、出力の彩度は境界まで入力どおりに増え、境界で止まる
+        // （追い越さない）。
         let c = GamutCompressor::for_space(RgbColorSpace::Srgb);
         let y = 0.4_f32;
         let dir = [0.6_f32, -0.2, -0.4];
@@ -260,36 +221,10 @@ mod tests {
             let out = c.compress(rgb);
             let sat = out[0] - y;
             assert!(sat >= prev - 1e-6, "s = {s}: {sat} < {prev}");
+            if in_unit_cube(rgb) {
+                assert_eq!(out, rgb);
+            }
             prev = sat;
-        }
-    }
-
-    #[test]
-    fn knee_is_soft() {
-        // 膝 k のすぐ外側（t = k + ε）では、圧縮による変化は ε に比べて十分小さい
-        // （f'(0) = 1 で、膝で傾きが連続。単純な切り捨てのような折れ曲がりがない）。
-        let c = GamutCompressor::for_space(RgbColorSpace::Srgb);
-        let w = c.luminance_coefficients();
-        let y = 0.3_f32;
-        // 輝度 0 の向き。
-        let dir = [0.5_f32, -0.1, -0.3];
-        let dl = w[0] * dir[0] + w[1] * dir[1] + w[2] * dir[2];
-        let dir = dir.map(|v| v - dl);
-        // この向きで t = 1 になる倍率 s1（R が 1 に届く、または G/B が 0 に届く）。
-        let s1 = dir
-            .iter()
-            .map(|&d| if d > 0.0 { (1.0 - y) / d } else { y / -d })
-            .fold(f32::INFINITY, f32::min);
-        for eps in [1e-3_f32, 1e-2] {
-            let s = s1 * (DEFAULT_GAMUT_THRESHOLD + eps);
-            let rgb = [y + s * dir[0], y + s * dir[1], y + s * dir[2]];
-            let out = c.compress(rgb);
-            let change = (0..3).map(|k| (out[k] - rgb[k]).abs()).fold(0.0, f32::max);
-            let dist = (0..3)
-                .map(|k| (s1 * eps * dir[k]).abs())
-                .fold(0.0, f32::max);
-            // 2 次の微小量（f(x) ≒ x − x^(1+p)/p）なので、ε が 1e-2 でも数 % 以下。
-            assert!(change < 0.05 * dist + 1e-6, "ε = {eps}: {change} vs {dist}");
         }
     }
 
@@ -313,39 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn knee_and_power_parameters() {
-        let base = GamutCompressor::for_space(RgbColorSpace::Srgb);
-        // 境界上の色（sRGB の赤）: t = 1 は t' = k + (1 − k)·2^(−1/p) になる。
-        let red = [1.0_f32, 0.0, 0.0];
-        let y = lum(&base, red);
-        let out = base.compress(red);
-        let t_new = (out[0] - y) / (1.0 - y);
-        let k = DEFAULT_GAMUT_THRESHOLD;
-        let p = DEFAULT_GAMUT_POWER;
-        let expected = k + (1.0 - k) * 2.0_f32.powf(-1.0 / p);
-        assert!((t_new - expected).abs() < 1e-5, "{t_new} vs {expected}");
-        // べき乗を大きくすると、境界の色の変化は小さくなる。
-        let sharp = base.with_params(0.8, 8.0).unwrap();
-        let out_sharp = sharp.compress(red);
-        assert!(out_sharp[0] > out[0]);
-        // 膝 0: すべての有彩色が圧縮される。
-        let all = base.with_params(0.0, 1.0).unwrap();
-        assert_ne!(all.compress([0.5, 0.4, 0.4]), [0.5, 0.4, 0.4]);
-    }
-
-    #[test]
     fn invalid_parameters() {
-        let l = RgbColorSpace::Srgb.luminance_coefficients();
-        assert!(GamutCompressor::new(l, 1.0, 1.2).is_err());
-        assert!(GamutCompressor::new(l, -0.1, 1.2).is_err());
-        assert!(GamutCompressor::new(l, f32::NAN, 1.2).is_err());
-        assert!(GamutCompressor::new(l, 0.8, 0.5).is_err());
-        assert!(GamutCompressor::new(l, 0.8, f32::INFINITY).is_err());
-        assert!(GamutCompressor::new([0.0, 0.0, 0.0], 0.8, 1.2).is_err());
-        assert!(GamutCompressor::new([0.5, -0.1, 0.6], 0.8, 1.2).is_err());
-        assert!(GamutCompressor::new([0.5, f64::NAN, 0.6], 0.8, 1.2).is_err());
+        assert!(GamutCompressor::new([0.0, 0.0, 0.0]).is_err());
+        assert!(GamutCompressor::new([0.5, -0.1, 0.6]).is_err());
+        assert!(GamutCompressor::new([0.5, f64::NAN, 0.6]).is_err());
         // 和が 1 でない係数は正規化される。
-        let c = GamutCompressor::new([2.0, 6.0, 2.0], 0.8, 1.2).unwrap();
+        let c = GamutCompressor::new([2.0, 6.0, 2.0]).unwrap();
         assert_eq!(c.luminance_coefficients(), [0.2, 0.6, 0.2]);
     }
 
@@ -373,7 +281,7 @@ mod tests {
         }
 
         #[test]
-        fn luminance_is_preserved_for_y_in_range(
+        fn luminance_is_preserved_and_out_of_gamut_lands_on_the_boundary(
             y in 0.001_f32..0.999,
             dr in -3.0_f32..3.0, dg in -3.0_f32..3.0, db in -3.0_f32..3.0,
             space in 0usize..4,
@@ -386,21 +294,20 @@ mod tests {
             prop_assume!(y_in > 0.0 && y_in < 1.0);
             let out = c.compress(rgb);
             prop_assert!((lum(&c, out) - y_in).abs() < 2e-5, "{:?} → {:?}", rgb, out);
+            if !in_unit_cube(rgb) {
+                prop_assert!(on_boundary(out), "{:?} → {:?}", rgb, out);
+            }
         }
 
         #[test]
-        fn in_gamut_inside_knee_is_identity(
+        fn in_gamut_is_identity(
             r in 0.0_f32..=1.0, g in 0.0_f32..=1.0, b in 0.0_f32..=1.0,
+            space in 0usize..4,
         ) {
-            let c = GamutCompressor::for_space(RgbColorSpace::Srgb);
+            let c = GamutCompressor::for_space(RgbColorSpace::ALL[space]);
             let rgb = [r, g, b];
             let y = lum(&c, rgb);
             prop_assume!(y > 0.0 && y < 1.0);
-            let t = rgb
-                .iter()
-                .map(|&v| if v > y { (v - y) / (1.0 - y) } else { (y - v) / y })
-                .fold(0.0_f32, f32::max);
-            prop_assume!(t <= DEFAULT_GAMUT_THRESHOLD * 0.999);
             prop_assert_eq!(c.compress(rgb), rgb);
         }
     }

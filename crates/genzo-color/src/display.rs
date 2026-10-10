@@ -14,11 +14,11 @@
 //! 注意（PoC-1 で確認する点）: LUT の入力は BT.2020 の 0〜1 に収めてから引く（[`Lut3d::apply`]）。
 //! モニターの色域が BT.2020 の外にわずかにはみ出す場合（Display P3 の赤の角は BT.2020 の
 //! リニア値で B ≒ −0.0012）、その部分は LUT の手前で切られる。P3 の色域内の色で見積もると
-//! ΔE2000 で最大 0.6 程度（P3 の赤の角）。既定の膝つきの色域の圧縮を通すと、境界の色は内側に
-//! 寄せられるため、実際に切られるのは極端に鮮やかな入力だけになる。
+//! ΔE2000 で最大 0.6 程度（P3 の赤の角）。色域の圧縮は色域内の色を変えない（人の判断の表 No.3）ので、
+//! モニターの色域の境界の上の色（P3 の赤の角など）は、この見積もりの分だけ切られうる。
 
 use crate::error::{ColorError, Result};
-use crate::gamut::{DEFAULT_GAMUT_POWER, DEFAULT_GAMUT_THRESHOLD, GamutCompressor};
+use crate::gamut::GamutCompressor;
 use crate::icc::{IccProfile, IccTransform, RenderingIntent, StandardProfile};
 use crate::lut::Lut3d;
 use crate::matrix::{Mat3, Mat3F32};
@@ -149,7 +149,7 @@ impl DisplayProfile {
     /// 求める。両者がずれていると、圧縮の目標の色域と実際の表示の色域が少し違う。
     pub fn gamut(&self) -> Option<DisplayGamut> {
         let m = self.profile.working_to_linear_rgb_matrix()?;
-        DisplayGamut::from_working_to_display(&m, DEFAULT_GAMUT_THRESHOLD, DEFAULT_GAMUT_POWER).ok()
+        DisplayGamut::from_working_to_display(&m).ok()
     }
 }
 
@@ -165,7 +165,7 @@ pub struct DisplayGamut {
 }
 
 impl DisplayGamut {
-    /// 標準の色空間を表示先とする（膝とべき乗は既定値。仮置き）。
+    /// 標準の色空間を表示先とする。
     pub fn for_space(space: RgbColorSpace) -> Self {
         let to = working_to(space);
         Self {
@@ -177,17 +177,13 @@ impl DisplayGamut {
 
     /// 作業色空間 → 表示先のリニア RGB の行列から作る。輝度の係数は、この行列から求めた
     /// 表示先の RGB → XYZ の Y の行。
-    pub fn from_working_to_display(
-        working_to_display: &Mat3,
-        threshold: f32,
-        power: f32,
-    ) -> Result<Self> {
+    pub fn from_working_to_display(working_to_display: &Mat3) -> Result<Self> {
         let back = working_to_display.inverse()?;
         let luminance = (BT2020_TO_XYZ * back).row(1);
         Ok(Self {
             working_to_display: working_to_display.to_f32(),
             display_to_working: back.to_f32(),
-            compressor: GamutCompressor::new(luminance, threshold, power)?,
+            compressor: GamutCompressor::new(luminance)?,
         })
     }
 
@@ -337,7 +333,7 @@ mod tests {
                 "{rgb:?} → {p:?}"
             );
         }
-        // 膝の内側の色は（行列の往復の誤差を除いて）変わらない。
+        // 色域内の色は（行列の往復の誤差を除いて）変わらない。
         let gray = g.compress_working([0.3, 0.3, 0.3]);
         for v in gray {
             assert!((v - 0.3).abs() < 1e-5);
@@ -349,13 +345,12 @@ mod tests {
         for k in 0..3 {
             assert!((a[k] - b[k]).abs() < 2e-3, "{a:?} vs {b:?}");
         }
-        assert_eq!(s.compressor().threshold(), DEFAULT_GAMUT_THRESHOLD);
     }
 
     #[test]
     fn display_gamut_rejects_singular_matrix() {
         let singular = Mat3::from_rows([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]);
-        assert!(DisplayGamut::from_working_to_display(&singular, 0.8, 1.2).is_err());
+        assert!(DisplayGamut::from_working_to_display(&singular).is_err());
     }
 
     #[test]
@@ -368,12 +363,9 @@ mod tests {
     fn display_gamut_matrices_compose_to_compress_working() {
         // 公開した 2 つの行列と圧縮を順にかけると、compress_working とビット単位で同じ。
         let p3 = IccProfile::standard(StandardProfile::DisplayP3).unwrap();
-        let from_profile = DisplayGamut::from_working_to_display(
-            &p3.working_to_linear_rgb_matrix().unwrap(),
-            0.8,
-            1.2,
-        )
-        .unwrap();
+        let from_profile =
+            DisplayGamut::from_working_to_display(&p3.working_to_linear_rgb_matrix().unwrap())
+                .unwrap();
         let gamuts = RgbColorSpace::ALL
             .map(DisplayGamut::for_space)
             .into_iter()

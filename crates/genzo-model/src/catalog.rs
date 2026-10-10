@@ -124,8 +124,12 @@ string_enum!(
 string_enum!(
     /// 撮影日時の UTC を推定するのに使ったオフセットの出どころ（`asset.tz_source`。レビュー R-18）。
     TzSource {
-        /// ファイルのメタデータ（EXIF の OffsetTimeOriginal、動画の作成日時など）に記録されていた。
+        /// ファイルのメタデータ（EXIF の OffsetTimeOriginal、動画の作成日時の `+09:00` など）に記録されていた。
         Exif => "exif",
+        /// ファイルには UTC の印（`Z`）だけが記録されていた（ffprobe の動画の `creation_time` など。
+        /// implementation_status の No.32）。UTC はその値のまま使い、撮影した地点のオフセットは分からない
+        /// ため、表示のオフセット（`tz_assumed`）にはユーザーが設定した既定のタイムゾーンを使う。
+        UtcOnly => "utc_only",
         /// オフセットが記録されていなかったため、ユーザーが設定した既定のタイムゾーンを使った。
         UserDefault => "user_default",
         /// ユーザーがこの写真・動画に明示的に設定した（LIB-16）。
@@ -354,6 +358,7 @@ mod tests {
         assert_eq!(FileStatus::Missing.as_str(), "missing");
         assert_eq!(FileStatus::Error.as_str(), "error");
         assert_eq!(TzSource::Exif.as_str(), "exif");
+        assert_eq!(TzSource::UtcOnly.as_str(), "utc_only");
         assert_eq!(TzSource::UserDefault.as_str(), "user_default");
         assert_eq!(TzSource::UserSet.as_str(), "user_set");
         assert_eq!(FileOpKind::Trash.as_str(), "trash");

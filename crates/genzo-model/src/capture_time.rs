@@ -6,6 +6,11 @@
 //!
 //! - オフセットの情報がない写真・動画は、ユーザーが設定した既定のオフセットで UTC を
 //!   推定し、`tz_source = user_default` と記録する。
+//! - UTC の印（`Z`）だけが記録されている値（ffprobe の動画の `creation_time` など）は、UTC を
+//!   その値のまま使い、`tz_source = utc_only`・元のオフセット（`offset`）を `"Z"`
+//!   （[`UTC_ONLY_OFFSET`]）と記録する。撮影した地点のオフセットは分からないため、表示の
+//!   オフセット（`tz_assumed`）には既定のオフセットを使う（implementation_status の No.32 の (a)）。
+//!   `+00:00` と書かれた値は、オフセットが記録されたもの（`exif`）として扱う。
 //! - 撮影日時がないファイルは、現在時刻などで置き換えず `utc = None` とする
 //!   （撮影日時順の並べ替えでは最後に並べる）。
 //!
@@ -24,6 +29,10 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, SecondsFormat, Time
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::TzSource;
+
+/// UTC の印（`Z`）だけが記録されていたことを表す、元のオフセット（[`CaptureTime::offset`]・
+/// `captured_offset`）の値。
+pub const UTC_ONLY_OFFSET: &str = "Z";
 
 /// 撮影日時の解析・計算のエラー。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -45,6 +54,7 @@ pub struct CaptureTime {
     /// 元の日時の文字列（`captured_at_raw`）。ファイルに日時がなければ `None`。
     pub raw: Option<String>,
     /// ファイルに記録されていたオフセット（`captured_offset`。`"+09:00"` 形式）。なければ `None`。
+    /// UTC の印（`Z`）だけが記録されていた場合は [`UTC_ONLY_OFFSET`]（`"Z"`）。
     pub offset: Option<String>,
     /// UTC の推定に使ったオフセットの出どころ（`tz_source`）。
     /// 日時がない場合は、日時が分かったときに使う既定の扱い（`user_default`）にしておく。
@@ -79,6 +89,8 @@ impl CaptureTime {
     /// - `offset`: EXIF の OffsetTimeOriginal など（`"+09:00"`、`"+0900"`、`"Z"`）。
     ///   `raw` 自体にオフセットが含まれる場合は、そちらを優先する。
     /// - `default_offset`: オフセットがない場合に使う、ユーザー設定の既定のオフセット。
+    ///   UTC の印（`Z`）だけの場合は、表示のオフセット（`tz_assumed`）にだけ使う（UTC は変えない。
+    ///   `tz_source = utc_only`）。
     pub fn resolve(
         raw: Option<&str>,
         offset: Option<&str>,
@@ -87,7 +99,7 @@ impl CaptureTime {
         let Some(raw_str) = raw.filter(|s| !s.is_empty()) else {
             return Ok(Self::unknown());
         };
-        let Some((local, embedded)) = parse_datetime(raw_str)? else {
+        let Some((local, embedded)) = parse_datetime_marked(raw_str)? else {
             return Ok(Self {
                 raw: Some(raw_str.to_owned()),
                 ..Self::unknown()
@@ -96,21 +108,45 @@ impl CaptureTime {
         // 文字列に含まれるオフセットを優先し、なければ別に渡されたオフセットを使う。
         let original = match (embedded, offset.map(str::trim).filter(|s| !s.is_empty())) {
             (Some(o), _) => Some(o),
-            (None, Some(s)) => Some(parse_offset(s)?),
+            (None, Some(s)) => Some(parse_original_offset(s)?),
             (None, None) => None,
         };
-        let (used, tz_source) = match original {
-            Some(o) => (o, TzSource::Exif),
-            None => (default_offset, TzSource::UserDefault),
+        let (recorded, assumed, tz_source, base) = match original {
+            Some(Original::Offset(o)) => (Some(format_offset(o)), o, TzSource::Exif, o),
+            Some(Original::UtcOnly) => (
+                Some(UTC_ONLY_OFFSET.to_owned()),
+                default_offset,
+                TzSource::UtcOnly,
+                utc_offset(),
+            ),
+            None => (None, default_offset, TzSource::UserDefault, default_offset),
         };
         Ok(Self {
             raw: Some(raw_str.to_owned()),
-            offset: original.map(format_offset),
+            offset: recorded,
             tz_source,
-            tz_assumed: Some(format_offset(used)),
+            tz_assumed: Some(format_offset(assumed)),
             correction_s: 0,
-            utc: Some(to_utc(local, used, 0)?),
+            utc: Some(to_utc(local, base, 0)?),
         })
+    }
+
+    /// ファイルに UTC の印（`Z`）だけが記録されていたか（元のオフセットが [`UTC_ONLY_OFFSET`]）。
+    ///
+    /// このとき UTC はファイルの値で決まり、`tz_assumed` は表示のオフセットにだけ使う
+    /// （[`with_user_offset`](Self::with_user_offset) で指定しても UTC は変わらない）。
+    pub fn records_utc_only(&self) -> bool {
+        self.offset
+            .as_deref()
+            .is_some_and(|o| o.trim().eq_ignore_ascii_case(UTC_ONLY_OFFSET))
+    }
+
+    /// 既定のタイムゾーンを使っているか（`tz_source` が `user_default` か `utc_only`）。
+    ///
+    /// 既定のタイムゾーンを変えたときに [`with_default_offset`](Self::with_default_offset) で
+    /// 推定し直す対象（`user_default` は UTC も、`utc_only` は表示のオフセットだけが変わる）。
+    pub fn uses_default_offset(&self) -> bool {
+        matches!(self.tz_source, TzSource::UserDefault | TzSource::UtcOnly)
     }
 
     /// [`resolve`](Self::resolve) と同じだが、失敗しない。取り込み用。
@@ -147,7 +183,10 @@ impl CaptureTime {
 
     /// ユーザーが指定したオフセットで UTC を推定し直す（LIB-16。`tz_source = user_set`）。
     ///
-    /// 日時がない場合は何もしない。
+    /// 日時がない場合は何もしない。UTC の印（`Z`）だけが記録されていた場合
+    /// （[`records_utc_only`](Self::records_utc_only)）は、UTC はそのままで表示のオフセットだけを
+    /// 変える（撮影した瞬間は分かっているため）。カメラが現地時刻を UTC として書いていた場合の
+    /// ずれは、時計のずれの補正（[`with_correction`](Self::with_correction)）で直す。
     pub fn with_user_offset(&self, offset: FixedOffset) -> Result<Self, CaptureTimeError> {
         if self.utc.is_none() {
             return Ok(self.clone());
@@ -171,6 +210,10 @@ impl CaptureTime {
         }
         let mut next = self.clone();
         match self.offset.as_deref() {
+            Some(_) if self.records_utc_only() => {
+                next.tz_source = TzSource::UtcOnly;
+                next.tz_assumed = Some(format_offset(default_offset));
+            }
             Some(original) => {
                 next.tz_source = TzSource::Exif;
                 next.tz_assumed = Some(format_offset(parse_offset(original)?));
@@ -184,12 +227,13 @@ impl CaptureTime {
     }
 
     /// ユーザー設定の既定のオフセットを変えたときに、既定のオフセットで推定していた
-    /// もの（`tz_source = user_default`）だけ UTC を推定し直す。
+    /// もの（`tz_source = user_default`）だけ UTC を推定し直す。`tz_source = utc_only` は
+    /// 表示のオフセットだけを変える（UTC は変えない）。
     pub fn with_default_offset(
         &self,
         default_offset: FixedOffset,
     ) -> Result<Self, CaptureTimeError> {
-        if self.tz_source != TzSource::UserDefault || self.utc.is_none() {
+        if !self.uses_default_offset() || self.utc.is_none() {
             return Ok(self.clone());
         }
         let mut next = self.clone();
@@ -208,6 +252,9 @@ impl CaptureTime {
     }
 
     /// 元の文字列・推定に使ったオフセット・補正値から UTC を計算し直す。
+    ///
+    /// UTC の印（`Z`）だけが記録されていた場合は、`tz_assumed`（表示のオフセット）によらず、
+    /// 元の文字列を UTC として読む。
     fn recomputed(mut self) -> Result<Self, CaptureTimeError> {
         let parsed = match self.raw.as_deref() {
             Some(raw) => parse_datetime(raw)?,
@@ -217,8 +264,13 @@ impl CaptureTime {
             self.utc = None;
             return Ok(self);
         };
-        let offset = parse_offset(assumed)?;
-        self.utc = Some(to_utc(local, offset, self.correction_s)?);
+        let assumed = parse_offset(assumed)?;
+        let base = if self.records_utc_only() {
+            utc_offset()
+        } else {
+            assumed
+        };
+        self.utc = Some(to_utc(local, base, self.correction_s)?);
         Ok(self)
     }
 
@@ -244,6 +296,38 @@ impl fmt::Display for CaptureTime {
             Some(t) => write!(f, "{}", t.format("%Y-%m-%d %H:%M:%S %:z")),
             None => f.write_str("（撮影日時なし）"),
         }
+    }
+}
+
+/// UTC（+00:00）のオフセット。
+fn utc_offset() -> FixedOffset {
+    FixedOffset::east_opt(0).expect("0 は有効なオフセット")
+}
+
+/// ファイルに記録されていた元のオフセット。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Original {
+    /// `+09:00` などのオフセット（`+00:00` を含む）。
+    Offset(FixedOffset),
+    /// UTC の印（`Z`）だけ。撮影した地点のオフセットは分からない。
+    UtcOnly,
+}
+
+impl Original {
+    fn to_fixed(self) -> FixedOffset {
+        match self {
+            Self::Offset(o) => o,
+            Self::UtcOnly => utc_offset(),
+        }
+    }
+}
+
+/// 別に渡された元のオフセット（EXIF の OffsetTimeOriginal など）を解析する。`Z` は UTC の印だけ。
+fn parse_original_offset(s: &str) -> Result<Original, CaptureTimeError> {
+    if s.trim().eq_ignore_ascii_case(UTC_ONLY_OFFSET) {
+        Ok(Original::UtcOnly)
+    } else {
+        parse_offset(s).map(Original::Offset)
     }
 }
 
@@ -276,10 +360,17 @@ fn is_blank_datetime(s: &str) -> bool {
 
 /// 日時の文字列を、現地時刻と（あれば）文字列に含まれるオフセットに分けて解析する。
 ///
-/// 日時なしとして扱う文字列なら `Ok(None)`。
+/// 日時なしとして扱う文字列なら `Ok(None)`。末尾の `Z`（UTC の印）は +00:00 のオフセットとして返す。
 pub fn parse_datetime(
     s: &str,
 ) -> Result<Option<(NaiveDateTime, Option<FixedOffset>)>, CaptureTimeError> {
+    Ok(parse_datetime_marked(s)?.map(|(local, o)| (local, o.map(Original::to_fixed))))
+}
+
+/// [`parse_datetime`] と同じだが、末尾の `Z`（UTC の印だけ）と `+00:00` を区別する。
+fn parse_datetime_marked(
+    s: &str,
+) -> Result<Option<(NaiveDateTime, Option<Original>)>, CaptureTimeError> {
     let trimmed = s.trim_matches(|c: char| c.is_whitespace() || c == '\0');
     if is_blank_datetime(trimmed) {
         return Ok(None);
@@ -288,10 +379,7 @@ pub fn parse_datetime(
     // 末尾のオフセットを切り離す。日付の部分（先頭 10 文字）の '-' と区別するため、
     // 時刻の部分だけを探す。
     let (body, offset) = if let Some(body) = trimmed.strip_suffix(['Z', 'z']) {
-        (
-            body,
-            Some(FixedOffset::east_opt(0).expect("0 は有効なオフセット")),
-        )
+        (body, Some(Original::UtcOnly))
     } else {
         let time_start = trimmed
             .char_indices()
@@ -302,7 +390,7 @@ pub fn parse_datetime(
             Some(pos) => {
                 let split = time_start + pos;
                 let offset = parse_offset(&trimmed[split..]).map_err(|_| invalid())?;
-                (&trimmed[..split], Some(offset))
+                (&trimmed[..split], Some(Original::Offset(offset)))
             }
             None => (trimmed, None),
         }
@@ -419,8 +507,16 @@ mod tests {
             Some("2024-05-01T03:34:56.250Z")
         );
 
-        // ffprobe の creation_time の形式。
+        // ffprobe の creation_time の形式（UTC の印だけ。No.32）。UTC はそのまま、表示は既定のオフセット。
         let t = CaptureTime::resolve(Some("2024-05-01T03:34:56.000000Z"), None, jst()).unwrap();
+        assert_eq!(t.offset.as_deref(), Some(UTC_ONLY_OFFSET));
+        assert_eq!(t.tz_source, TzSource::UtcOnly);
+        assert_eq!(t.tz_assumed.as_deref(), Some("+09:00"));
+        assert_eq!(t.utc, Some(utc(2024, 5, 1, 3, 34, 56)));
+        assert_eq!(t.to_string(), "2024-05-01 12:34:56 +09:00");
+
+        // +00:00 と書かれた値は、オフセットが記録されたもの。
+        let t = CaptureTime::resolve(Some("2024-05-01T03:34:56+00:00"), None, jst()).unwrap();
         assert_eq!(t.offset.as_deref(), Some("+00:00"));
         assert_eq!(t.tz_source, TzSource::Exif);
         assert_eq!(t.utc, Some(utc(2024, 5, 1, 3, 34, 56)));
@@ -630,6 +726,67 @@ mod tests {
             "-01:30"
         );
         assert_eq!(format_offset(FixedOffset::east_opt(0).unwrap()), "+00:00");
+    }
+
+    #[test]
+    fn utc_only_keeps_utc_and_uses_the_default_offset_for_display() {
+        let utc0 = FixedOffset::east_opt(0).unwrap();
+        let paris = FixedOffset::east_opt(2 * 3600).unwrap();
+        let t = CaptureTime::resolve(Some("2024-05-01T03:00:00Z"), None, jst()).unwrap();
+        assert!(t.records_utc_only());
+        assert!(t.uses_default_offset());
+        let instant = utc(2024, 5, 1, 3, 0, 0);
+
+        // 既定のタイムゾーンを変えると、表示のオフセットだけが変わる（UTC は変えない）。
+        let moved = t.with_default_offset(paris).unwrap();
+        assert_eq!(moved.tz_source, TzSource::UtcOnly);
+        assert_eq!(moved.tz_assumed.as_deref(), Some("+02:00"));
+        assert_eq!(moved.utc, Some(instant));
+        assert_eq!(moved.to_string(), "2024-05-01 05:00:00 +02:00");
+
+        // 利用者がタイムゾーンを指定しても、撮影した瞬間（UTC）は変えない。
+        let set = t.with_user_offset(paris).unwrap();
+        assert_eq!(set.tz_source, TzSource::UserSet);
+        assert_eq!(set.utc, Some(instant));
+        assert_eq!(set.to_string(), "2024-05-01 05:00:00 +02:00");
+        // 既定のタイムゾーンを変えても、指定したものは変わらない。
+        assert_eq!(set.with_default_offset(utc0).unwrap(), set);
+        // 指定の取り消しで utc_only（既定のオフセットで表示）に戻る。
+        assert_eq!(set.without_user_offset(jst()).unwrap(), t);
+
+        // 時計のずれの補正は UTC に加える（カメラが現地時刻を UTC として書いていた場合など）。
+        let fixed = t.with_correction(-9 * 3600).unwrap();
+        assert_eq!(fixed.utc, Some(utc(2024, 4, 30, 18, 0, 0)));
+        assert_eq!(fixed.with_correction(0).unwrap(), t);
+        assert_eq!(
+            fixed.with_user_offset(paris).unwrap().utc,
+            fixed.utc,
+            "補正後の UTC を保つ"
+        );
+
+        // 別に渡されたオフセットが Z だけの場合も同じ扱い。
+        let t2 = CaptureTime::resolve(Some("2024:05:01 03:00:00"), Some("Z"), jst()).unwrap();
+        assert_eq!(t2.tz_source, TzSource::UtcOnly);
+        assert_eq!(t2.offset.as_deref(), Some(UTC_ONLY_OFFSET));
+        assert_eq!(t2.utc, Some(instant));
+        // 取り込み用（失敗しない）でも同じ。
+        let t3 = CaptureTime::resolve_lossy(Some("2024-05-01T03:00:00.000000Z"), None, jst());
+        assert_eq!(t3.tz_source, TzSource::UtcOnly);
+        assert_eq!(t3.utc, Some(instant));
+
+        // 公開の parse_datetime は、Z を +00:00 として返す（従来どおり）。
+        let (_, o) = parse_datetime("2024-05-01T03:00:00Z").unwrap().unwrap();
+        assert_eq!(o, Some(utc0));
+    }
+
+    #[test]
+    fn exif_records_do_not_use_the_default_offset() {
+        let t = CaptureTime::resolve(Some("2024:05:01 12:00:00"), Some("+09:00"), jst()).unwrap();
+        assert!(!t.records_utc_only());
+        assert!(!t.uses_default_offset());
+        let d = CaptureTime::resolve(Some("2024:05:01 12:00:00"), None, jst()).unwrap();
+        assert!(d.uses_default_offset());
+        assert!(!d.records_utc_only());
     }
 
     #[test]

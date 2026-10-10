@@ -3,7 +3,7 @@
 //! - 作成: 変換元プロファイル（[`crate::icc::StandardProfile::Bt2020SrgbTransfer`]、キャッシュを
 //!   表示するときは Display P3）→ 変換先プロファイル（モニター）の変換を、lcms2 の浮動小数点の
 //!   変換（既定は相対的な色域を維持するインテント。色域の圧縮は前段で済んでいるため）で、格子
-//!   （既定 33³）の各点に評価して作る。
+//!   （既定 65³。人の判断の表 No.13）の各点に評価して作る。
 //! - 適用: **四面体補間を自前で実装** する（GPU のハードウェア補間は精度が GPU によって違うため、
 //!   GPU 版も同じ式で補間する。2.3 節）。
 //!
@@ -42,9 +42,10 @@
 //!
 //! ## 精度（lcms2 の直接変換との差。PoC-1 の合格基準「ΔE2000 で最大 1 以下」（仮置き）との関係）
 //!
-//! 変換元 (a)（BT.2020・IEC 61966-2-1）から各変換先への 33³ の LUT を、lcms2 の直接変換と
-//! ΔE2000（変換先のプロファイルで Lab（D50）にして計算）で比べた最大値（このコンテナで測定。
-//! `report_lut_accuracy` のテストで再現できる）:
+//! 変換元 (a)（BT.2020・IEC 61966-2-1）から各変換先への LUT を、lcms2 の直接変換と ΔE2000（変換先の
+//! プロファイルで Lab（D50）にして計算）で比べた最大値（このコンテナで測定。`report_lut_accuracy` の
+//! テストで再現できる。2026-10-10、色域の圧縮を「色域外の色だけを動かす」方式（人の判断の表 No.3）に
+//! 変えた後の値）:
 //!
 //! - 「色域内」「全体」: 変換元の値で一様な乱数 20 万点と、無彩色・暗部・原色の軸の点（色域の圧縮
 //!   なし）。「色域内」は、変換先のリニアな RGB（ICC の行列で計算）と直接変換の出力がどちらも 0〜1 に
@@ -53,36 +54,38 @@
 //!   符号化 → LUT → 0〜1 に収める）で、B3（リニア BT.2020）の 0〜1 の一様な乱数 30 万点。直接変換も
 //!   同じ圧縮・符号化の後に行う。一様な乱数なので、暗部（L* < 5）の点は少ない。
 //!
+//! **既定の 65³**（人の判断の表 No.13 の決定。どの変換先も基準を満たす）:
+//!
 //! | 変換先 | 色域内 | 色域内で L* ≥ 5 | 全体 | 圧縮後 |
 //! |---|---|---|---|---|
-//! | sRGB（v4.3） | 0.48 | 0.48 | 0.48 | 0.50 |
-//! | Display P3（v4.3） | 0.34 | 0.34 | 0.34 | 0.33 |
-//! | リニア BT.2020 | 0.44 | 0.44 | 0.44 | 0.16 |
-//! | Adobe RGB（ガンマ 563/256） | **1.21** | 0.61 | **1.85** | 0.48 |
-//! | ガンマ 1.8 のモニターの例 | 0.92 | 0.55 | **1.31** | 0.35 |
-//! | sRGB v2.4（4096 点の表） | 0.47 | 0.47 | 0.47 | 0.50 |
-//! | sRGB v2.1（1024 点の表。Windows の既定に似せたもの） | 0.48 | 0.48 | 0.48 | 0.50 |
-//! | Display P3 v2.4（4096 点の表） | 0.34 | 0.34 | 0.34 | 0.33 |
-//! | Display P3 v2.1（1024 点の表） | 0.34 | 0.34 | 0.34 | 0.33 |
+//! | sRGB（v4.3） | 0.18 | 0.18 | 0.18 | 0.18 |
+//! | Display P3（v4.3） | 0.11 | 0.11 | 0.11 | 0.11 |
+//! | リニア BT.2020 | 0.10 | 0.09 | 0.10 | 0.04 |
+//! | Adobe RGB（ガンマ 563/256） | 0.65 | 0.34 | 0.84 | 0.32 |
+//! | ガンマ 1.8 のモニターの例 | 0.48 | 0.29 | 0.58 | 0.19 |
+//! | sRGB v2.4（4096 点の表） | 0.18 | 0.18 | 0.18 | 0.18 |
+//! | sRGB v2.1（1024 点の表。Windows の既定に似せたもの） | 0.18 | 0.18 | 0.18 | 0.18 |
+//! | Display P3 v2.4（4096 点の表） | 0.11 | 0.11 | 0.11 | 0.11 |
+//! | Display P3 v2.1（1024 点の表） | 0.11 | 0.11 | 0.11 | 0.11 |
 //!
-//! 表のトーンカーブの変換先は、格子点を延長する前（指摘 F36 の修正前）は sRGB v2.4 で色域内 1.14・
+//! 参考: 以前の既定の 33³ では、sRGB 0.48（圧縮後 0.52）、Display P3 0.34、Adobe RGB の色域内 **1.21**・
+//! 全体 **1.85**、ガンマ 1.8 の例の色域内 0.92・全体 **1.31** で、変換先の伝達関数が純粋なべき乗だと、
+//! 0 の近くで傾きが無限大になるため、最初の格子の区間（L* < 5 程度の暗部）の補間誤差が基準を超えた。
+//! 格子数を 65 にして、基準を満たすようにした（GPU のバッファは 65³ × 3 × 4 バイト ≒ 3.3 MB）。
+//!
+//! 表のトーンカーブの変換先は、格子点を延長する前（指摘 F36 の修正前。33³）は sRGB v2.4 で色域内 1.14・
 //! 圧縮後 1.54、Display P3 v2.4 で色域内 1.05・圧縮後 1.38 だった（圧縮後の最大は、白に近い明るい
 //! 暖色など、色域の境界の近くの明るい色）。
 //!
-//! 変換先の伝達関数が純粋なべき乗だと、0 の近くで傾きが無限大になり、最初の格子の区間
-//! （L* < 5 程度の暗部）の補間誤差が大きくなる。格子数を 65 にすると Adobe RGB の色域内で 0.65
-//! （全体で 0.84）で、暗部を除けば 33³ で基準を満たす。基準の適用範囲（暗部を除くか）、格子数、1D の
-//! 後段カーブの追加のどれで対応するかは PoC-1 で判断する。
-//!
 //! 「色域内」の判定は、指摘 F36 の修正（2026-10-10）で、直接変換の出力だけでなく変換先のリニアな
-//! RGB も見るようにした。それまでの値（Adobe RGB 1.85、ガンマ 1.8 の例 1.31、65³ の Adobe RGB 0.84）
-//! は、lcms2 が負の値を 0 に収めた色域のわずかに外の暗い色を含んでいた（今の「全体」と同じ値）。
+//! RGB も見るようにした。それまでの値（33³ で Adobe RGB 1.85、ガンマ 1.8 の例 1.31、65³ の Adobe RGB
+//! 0.84）は、lcms2 が負の値を 0 に収めた色域のわずかに外の暗い色を含んでいた（今の「全体」と同じ値）。
 
 use crate::error::{ColorError, Result};
 use crate::icc::{IccProfile, IccTransform, RenderingIntent, extend_tabulated_output};
 
-/// 格子数の既定値（2.6 節・5 章）。
-pub const DEFAULT_LUT_SIZE: usize = 33;
+/// 格子数の既定値（2.6 節・5 章。人の判断の表 No.13 で 33 から 65 に変えた。モジュールの doc の精度の表）。
+pub const DEFAULT_LUT_SIZE: usize = 65;
 /// 格子数の下限。
 pub const MIN_LUT_SIZE: usize = 2;
 /// 格子数の上限（仮置き）。129³ × 12 バイト ≒ 26 MB で、これより細かい格子は必要ないと考えた。
@@ -625,23 +628,44 @@ mod tests {
     #[test]
     fn display_lut_matches_direct_lcms_within_delta_e_1() {
         // PoC-1 の合格基準（仮置き）: 3D LUT と lcms2 の直接変換の差が ΔE2000 で最大 1 以下。
-        // 変換先の伝達関数が IEC 61966-2-1 型（0 の近くが線形）なら、33³ ですべての色が満たす。
-        // v2 の表のトーンカーブ（'curv'）の変換先も含める（指摘 F36）。
+        // 既定の 65³ では、変換先の伝達関数が IEC 61966-2-1 型でも純粋なべき乗（Adobe RGB のガンマ
+        // 563/256、ガンマ 1.8 のモニター）でも、色域内と全体（色域外の入力も含む）で満たす（人の判断
+        // No.13。33³ では純粋なべき乗の暗部で 1 を超えた）。v2 の表のトーンカーブ（'curv'）の変換先も
+        // 含める（指摘 F36）。
         let src = IccProfile::standard(StandardProfile::Bt2020SrgbTransfer).unwrap();
+        let p3 = IccProfile::standard(StandardProfile::DisplayP3).unwrap();
         let mut dsts = vec![
-            ("sRGB", IccProfile::standard(StandardProfile::Srgb).unwrap()),
+            (
+                "sRGB",
+                &src,
+                IccProfile::standard(StandardProfile::Srgb).unwrap(),
+            ),
             (
                 "Display P3",
+                &src,
                 IccProfile::standard(StandardProfile::DisplayP3).unwrap(),
             ),
             (
                 "リニア BT.2020",
+                &src,
                 IccProfile::standard(StandardProfile::LinearBt2020).unwrap(),
             ),
+            (
+                "Adobe RGB",
+                &src,
+                IccProfile::standard(StandardProfile::AdobeRgb1998).unwrap(),
+            ),
+            ("モニターの例（ガンマ 1.8）", &src, monitor_like_profile()),
+            // キャッシュ（B5、Display P3）を表示するときの LUT も同じ仕組みで作れる。
+            ("キャッシュ → モニターの例", &p3, monitor_like_profile()),
         ];
-        dsts.extend(tabulated_trc_destinations());
-        for (name, dst) in &dsts {
-            let st = delta_e_vs_direct(&src, dst, DEFAULT_LUT_SIZE, 20_000);
+        dsts.extend(
+            tabulated_trc_destinations()
+                .into_iter()
+                .map(|(name, dst)| (name, &src, dst)),
+        );
+        for (name, s, dst) in &dsts {
+            let st = delta_e_vs_direct(s, dst, DEFAULT_LUT_SIZE, 20_000);
             assert!(
                 st.n_in_gamut > 1000,
                 "{name}: 比べた点が少ない（{}）",
@@ -662,40 +686,16 @@ mod tests {
     }
 
     #[test]
-    fn display_lut_pure_gamma_destination_known_limitation() {
-        // 変換先の伝達関数が純粋なべき乗（Adobe RGB のガンマ 563/256、ガンマ 1.8 のモニター）だと、
-        // 0 の近くで傾きが無限大になるため、最初の格子の区間の補間誤差が大きい。33³ では L* < 5 の
-        // 暗部で ΔE2000 が 1 を超える（このコンテナでの測定値: 色域内で Adobe RGB 1.21、キャッシュ →
-        // モニターの例 1.22、モニターの例 0.92。色域のわずかに外の暗い色も含めると 1.85・1.31）。
-        // L* ≥ 5 では 1 以下。PoC-1 の合格基準をそのまま満たさない既知の制約として、モジュールの
-        // doc に書いている。
+    fn pure_gamma_destination_exceeds_the_criterion_with_33_points() {
+        // 以前の既定（33³）の既知の制約の記録: 変換先の伝達関数が純粋なべき乗だと、0 の近くで傾きが
+        // 無限大になるため、最初の格子の区間の補間誤差が大きく、L* < 5 の暗部で ΔE2000 が 1 を超える
+        // （このコンテナでの測定値: 色域内で Adobe RGB 1.21）。L* ≥ 5 では 1 以下。65³ ではどちらも
+        // 1 以下（上のテスト）。
         let src = IccProfile::standard(StandardProfile::Bt2020SrgbTransfer).unwrap();
-        let p3 = IccProfile::standard(StandardProfile::DisplayP3).unwrap();
-        let cases = [
-            (
-                "Adobe RGB",
-                &src,
-                IccProfile::standard(StandardProfile::AdobeRgb1998).unwrap(),
-            ),
-            ("モニターの例（ガンマ 1.8）", &src, monitor_like_profile()),
-            // キャッシュ（B5、Display P3）を表示するときの LUT も同じ仕組みで作れる。
-            ("キャッシュ → モニターの例", &p3, monitor_like_profile()),
-        ];
-        for (name, s, dst) in &cases {
-            let st = delta_e_vs_direct(s, dst, DEFAULT_LUT_SIZE, 20_000);
-            assert!(st.n_in_gamut > 1000, "{name}");
-            assert!(
-                st.max_in_gamut_l5 <= 1.0,
-                "{name}: L* ≥ 5 の最大 ΔE2000 = {}",
-                st.max_in_gamut_l5
-            );
-            // 暗部を含めた最大の上限（劣化の検出用）。
-            assert!(
-                st.max_in_gamut <= 2.5,
-                "{name}: 色域内の最大 ΔE2000 = {}",
-                st.max_in_gamut
-            );
-        }
+        let dst = IccProfile::standard(StandardProfile::AdobeRgb1998).unwrap();
+        let st = delta_e_vs_direct(&src, &dst, 33, 20_000);
+        assert!(st.max_in_gamut_l5 <= 1.0, "{}", st.max_in_gamut_l5);
+        assert!(st.max_in_gamut > 1.0, "{}", st.max_in_gamut);
     }
 
     /// v2 の表のトーンカーブ（'curv'）を持つモニターのプロファイルの例（指摘 F36）。

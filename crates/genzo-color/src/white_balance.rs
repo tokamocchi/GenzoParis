@@ -9,13 +9,15 @@
 //!   色温度とみなす）。`P(T)` は Krystek (1985) のプランク軌跡の uv の有理式近似
 //!   （適用範囲は 1000〜15000 K。15000 K を超える範囲は外挿のため、高い色温度の値は近似的な
 //!   目安になる）。
-//! - **基準の白（tint = 0）**: 4000 K 未満はプランク軌跡の点（Duv = 0）。4000 K 以上は
+//! - **基準の白（tint = 0）**: 低い色温度ではプランク軌跡の点（Duv = 0）、高い色温度では
 //!   **CIE の昼光軌跡**（CIE 15 の昼光の色度の式。適用範囲は 4000〜25000 K で、それを超える範囲は
 //!   外挿）の点 `D(T)` の Duv（`(D(T) − P(T)) · N(T)`）とする。つまり、`D(T)` を色温度 T の
 //!   等色温度線に射影した点で、`D(T)` とのずれは 10000 K 以下で 5e-5 未満（uv）。
-//!   4000 K で基準の白は不連続になる（Duv の差は約 0.0028 = tint 約 8.3）。2 つの標準の式が
-//!   4000 K で一致しないためで、色温度のスライダーを 4000 K をまたいで動かすと、tint 約 8 に
-//!   相当する色の跳びが出る（PoC で問題になれば、なめらかにつなぐ方式を検討する）。
+//!   2 つの標準の式は 4000 K で一致しない（Duv の差は約 0.0028 = tint 約 8.3）ので、
+//!   [`WB_REFERENCE_BLEND_START_K`]〜[`WB_REFERENCE_BLEND_END_K`]（3800〜4200 K。仮置き）の間で
+//!   昼光の Duv に重み `w = s²(3 − 2s)`（`s` は区間の中の位置 0〜1。両端で傾き 0）を掛けて、なめらかに
+//!   つなぐ（人の判断の表 No.17 の決定。以前は 4000 K で tint 約 8 に相当する色の跳びがあった）。
+//!   3800〜4000 K では昼光の式を適用範囲の外へ少し外挿して使う。
 //! - **tint**: 基準の白からの Duv のずれを [`TINT_DUV_PER_UNIT`] で割った値。**正の値は白を
 //!   緑の側（Duv > 0、プランク軌跡より上）にずらす**。光源が緑に寄っているとみなして補正する
 //!   ので、画像は緑が弱まりマゼンタ寄りになる（genzo-model の `WhiteBalance::Custom` の tint の
@@ -23,10 +25,12 @@
 //! - 色温度を上げると光源を青寄りとみなすので、画像は暖色寄りになる。
 //! - 低い色温度で tint を大きく正にすると、白の色度がスペクトル軌跡の外（実在しない色）に
 //!   なりうる（概算では、2000 K では Duv が +0.01 程度でスペクトル軌跡に近づく）。白のカメラ RGB
-//!   が 0 以下になる場合、係数は作れずエラーになる。
+//!   が 0 以下になる場合、係数は作れずエラーになる（[`wb_multipliers_from_temperature_tint`]）。
+//!   [`wb_multipliers_from_temperature_tint_clamped`] は、そのような設定を係数を作れる範囲に丸める
+//!   （人の判断の表 No.17。丸めたことは呼び出し側が警告で知らせる）。
 //!
 //! 法線をどの温度でもプランク軌跡のもの（等色温度線）にそろえているので、(T, tint) と白の色度は
-//! 1 対 1 に対応し、逆算（係数 → 色温度・tint）は一意に決まる（4000 K ちょうどは昼光の側とする）。
+//! 1 対 1 に対応し、逆算（係数 → 色温度・tint）は一意に決まる。
 //!
 //! ## 係数の計算
 //!
@@ -46,9 +50,11 @@ pub const WB_TEMPERATURE_MAX_K: f64 = 50000.0;
 pub const WB_TINT_MIN: f64 = -150.0;
 /// tint の上限。genzo-model の `ranges::TINT` と同じ値。
 pub const WB_TINT_MAX: f64 = 150.0;
-/// 基準の白をプランク軌跡から CIE の昼光軌跡に切り替える色温度（K）。CIE の昼光の式の
-/// 適用範囲の下限。
-pub const PLANCKIAN_DAYLIGHT_BOUNDARY_K: f64 = 4000.0;
+/// 基準の白をプランク軌跡から CIE の昼光軌跡へ切り替え始める色温度（K）。**仮置き**: CIE の昼光の
+/// 式の適用範囲の下限（4000 K）の前後 200 K（人の判断の表 No.17 の例の値）。
+pub const WB_REFERENCE_BLEND_START_K: f64 = 3800.0;
+/// 基準の白が CIE の昼光軌跡になる色温度（K）。**仮置き**（[`WB_REFERENCE_BLEND_START_K`] を参照）。
+pub const WB_REFERENCE_BLEND_END_K: f64 = 4200.0;
 /// tint の 1 単位あたりの Duv（CIE 1960 uv）（仮置き）。
 ///
 /// tint の範囲 ±150 が Duv ±0.05 に対応する。光源の色のずれを十分に含む広さとして選んだ
@@ -129,14 +135,24 @@ fn planckian_frame(temperature_k: f64) -> (Uv, [f64; 2]) {
     (Uv::new(u, v), normal)
 }
 
-/// 基準の白（tint = 0）の Duv。4000 K 未満は 0、4000 K 以上は昼光軌跡の点の Duv。
+/// 昼光の Duv に掛ける重み（[`WB_REFERENCE_BLEND_START_K`] 以下で 0、[`WB_REFERENCE_BLEND_END_K`]
+/// 以上で 1、その間は `s²(3 − 2s)`）。
+pub fn daylight_reference_weight(temperature_k: f64) -> f64 {
+    let s = ((temperature_k - WB_REFERENCE_BLEND_START_K)
+        / (WB_REFERENCE_BLEND_END_K - WB_REFERENCE_BLEND_START_K))
+        .clamp(0.0, 1.0);
+    s * s * (3.0 - 2.0 * s)
+}
+
+/// 基準の白（tint = 0）の Duv（モジュールの doc: 低い色温度は 0、高い色温度は昼光軌跡の点の Duv、
+/// その間はなめらかにつなぐ）。
 fn reference_duv(temperature_k: f64, p: Uv, normal: [f64; 2]) -> f64 {
-    if temperature_k < PLANCKIAN_DAYLIGHT_BOUNDARY_K {
-        0.0
-    } else {
-        let d = daylight_locus_xy(temperature_k).to_uv();
-        (d.u - p.u) * normal[0] + (d.v - p.v) * normal[1]
+    let w = daylight_reference_weight(temperature_k);
+    if w == 0.0 {
+        return 0.0;
     }
+    let d = daylight_locus_xy(temperature_k).to_uv();
+    w * ((d.u - p.u) * normal[0] + (d.v - p.v) * normal[1])
 }
 
 fn check_temperature_tint(temperature_k: f64, tint: f64) -> Result<()> {
@@ -209,11 +225,7 @@ pub fn temperature_tint_from_white_point(white: Xy) -> Result<TemperatureTint> {
         }
         0.5 * (lo + hi)
     };
-    let mut temperature_k = 1e6 / mired;
-    // 4000 K の境界のごく近く（丸め誤差の範囲）は、昼光の側（4000 K ちょうど）とする。
-    if (temperature_k - PLANCKIAN_DAYLIGHT_BOUNDARY_K).abs() < 1e-6 {
-        temperature_k = PLANCKIAN_DAYLIGHT_BOUNDARY_K;
-    }
+    let temperature_k = 1e6 / mired;
     let (p, n) = planckian_frame(temperature_k);
     let duv = (w.u - p.u) * n[0] + (w.v - p.v) * n[1];
     let tint = (duv - reference_duv(temperature_k, p, n)) / TINT_DUV_PER_UNIT;
@@ -270,6 +282,103 @@ pub fn wb_multipliers_from_temperature_tint(
 ) -> Result<[f64; 3]> {
     let white = white_point_from_temperature_tint(temperature_k, tint)?;
     wb_multipliers_from_white_xyz(cam_xyz, white.to_xyz(1.0)?)
+}
+
+/// 係数を作れる範囲に丸めるときに、色温度を寄せていく先（K。D65 に近い色温度。tint 0）。
+const CLAMP_TARGET_K: f64 = 6504.0;
+/// 丸めの二分法の回数（区間の幅は 2^−48 倍になる）。
+const CLAMP_BISECTION_STEPS: u32 = 48;
+
+/// [`wb_multipliers_from_temperature_tint_clamped`] の結果。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClampedWhiteBalance {
+    /// 係数（G = 1）。
+    pub multipliers: [f64; 3],
+    /// 指定された色温度・tint。
+    pub requested: TemperatureTint,
+    /// 係数を作るのに実際に使った色温度・tint（丸めなければ `requested` と同じ）。
+    pub used: TemperatureTint,
+}
+
+impl ClampedWhiteBalance {
+    /// 作れる範囲に丸めたか。
+    pub fn was_clamped(&self) -> bool {
+        self.requested != self.used
+    }
+}
+
+/// 色温度と tint からカメラの WB の係数を求める。係数を作れない（白のカメラ RGB が 0 以下になる）、
+/// または係数が `max_multiplier` を超える設定は、**作れる範囲に丸める**（人の判断の表 No.17）。
+///
+/// 丸め方: まず色温度はそのままで tint を 0 に向かって縮め（二分法）、作れる範囲の端の値を使う。
+/// tint 0 でも作れなければ、tint 0 のまま色温度を 6504 K（D65 の近く）に向かって寄せる（mired で
+/// 二分法）。6504 K・tint 0 でも作れなければ（カメラ行列の誤り）エラー。範囲外・有限でない入力、
+/// 不正なカメラ行列はエラー（[`wb_multipliers_from_temperature_tint`] と同じ）。
+pub fn wb_multipliers_from_temperature_tint_clamped(
+    cam_xyz: &Mat3,
+    temperature_k: f64,
+    tint: f64,
+    max_multiplier: f64,
+) -> Result<ClampedWhiteBalance> {
+    check_temperature_tint(temperature_k, tint)?;
+    let requested = TemperatureTint {
+        temperature_k,
+        tint,
+    };
+    // Ok(Some(係数))・Ok(None)（作れない）・Err（そのほかの誤り）。
+    let attempt = |t: f64, tint: f64| -> Result<Option<[f64; 3]>> {
+        match wb_multipliers_from_temperature_tint(cam_xyz, t, tint) {
+            Ok(m) if m.iter().all(|v| *v <= max_multiplier) => Ok(Some(m)),
+            Ok(_) | Err(ColorError::InvalidWhiteBalance { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    };
+    let done = |m: [f64; 3], t: f64, tint: f64| ClampedWhiteBalance {
+        multipliers: m,
+        requested,
+        used: TemperatureTint {
+            temperature_k: t,
+            tint,
+        },
+    };
+    if let Some(m) = attempt(temperature_k, tint)? {
+        return Ok(done(m, temperature_k, tint));
+    }
+    // tint を縮める（lo: 作れる、hi: 作れない。tint の倍率）。
+    if let Some(m0) = attempt(temperature_k, 0.0)? {
+        let (mut lo, mut hi, mut best) = (0.0f64, 1.0f64, m0);
+        for _ in 0..CLAMP_BISECTION_STEPS {
+            let mid = 0.5 * (lo + hi);
+            match attempt(temperature_k, mid * tint)? {
+                Some(m) => {
+                    lo = mid;
+                    best = m;
+                }
+                None => hi = mid,
+            }
+        }
+        return Ok(done(best, temperature_k, lo * tint));
+    }
+    // tint 0 のまま、色温度を CLAMP_TARGET_K に寄せる（mired で。lo: 作れる側の位置）。
+    let (m_req, m_target) = (1e6 / temperature_k, 1e6 / CLAMP_TARGET_K);
+    let at = |u: f64| 1e6 / (m_target + u * (m_req - m_target));
+    let Some(m_target_wb) = attempt(CLAMP_TARGET_K, 0.0)? else {
+        return Err(ColorError::InvalidWhiteBalance {
+            reason: "6504 K・tint 0 でも係数を作れない（カメラ行列が不正）",
+        });
+    };
+    let (mut lo, mut hi, mut best) = (0.0f64, 1.0f64, m_target_wb);
+    for _ in 0..CLAMP_BISECTION_STEPS {
+        let mid = 0.5 * (lo + hi);
+        match attempt(at(mid), 0.0)? {
+            Some(m) => {
+                lo = mid;
+                best = m;
+            }
+            None => hi = mid,
+        }
+    }
+    Ok(done(best, at(lo), 0.0))
 }
 
 /// カメラの WB の係数から、白の XYZ（Y = 1 に正規化）を求める。
@@ -411,8 +520,8 @@ mod tests {
     }
 
     #[test]
-    fn below_4000k_is_on_planckian_locus() {
-        for t in [2000.0, 2856.0, 3500.0, 3999.0] {
+    fn below_the_blend_is_on_planckian_locus() {
+        for t in [2000.0, 2856.0, 3500.0, 3799.0, 3800.0] {
             let w = white_point_from_temperature_tint(t, 0.0).unwrap();
             let p = planckian_locus_uv(t).to_xy();
             assert!(uv_dist(w, p) < 1e-12, "{t}");
@@ -420,9 +529,9 @@ mod tests {
     }
 
     #[test]
-    fn above_4000k_is_close_to_daylight_locus() {
+    fn above_the_blend_is_close_to_daylight_locus() {
         // 基準の白は、昼光軌跡の点を等色温度線に射影したもの。10000 K 以下では 5e-5 以内。
-        for t in [4000.0, 5000.0, 5500.0, 6504.0, 7500.0, 10000.0] {
+        for t in [4200.0, 5000.0, 5500.0, 6504.0, 7500.0, 10000.0] {
             let w = white_point_from_temperature_tint(t, 0.0).unwrap();
             let d = daylight_locus_xy(t);
             assert!(uv_dist(w, d) < 5e-5, "{t}: {}", uv_dist(w, d));
@@ -430,16 +539,36 @@ mod tests {
     }
 
     #[test]
-    fn discontinuity_at_4000k_is_pure_tint_offset() {
-        // 4000 K の前後で基準の白は Duv 約 0.0028 だけ跳ぶ（doc に書いた既知の性質）。
-        let below = white_point_from_temperature_tint(4000.0 - 1e-9, 0.0).unwrap();
-        let at = white_point_from_temperature_tint(4000.0, 0.0).unwrap();
-        let jump = uv_dist(below, at);
-        assert!((jump - 0.00276).abs() < 1e-4, "{jump}");
-        // 跳びは tint の方向だけなので、tint をずらすと一致する。
-        let shifted =
-            white_point_from_temperature_tint(4000.0 - 1e-9, jump / TINT_DUV_PER_UNIT).unwrap();
-        assert!(uv_dist(shifted, at) < 1e-9);
+    fn reference_white_is_smooth_around_4000k() {
+        // 人の判断 No.17: 以前は 4000 K の前後で基準の白が Duv 約 0.0028（tint 約 8.3）跳んでいた。
+        // 3800〜4200 K で 2 つの式をなめらかにつなぐので、跳びはなく、傾きも連続。
+        let duv = |t: f64| {
+            let (p, n) = planckian_frame(t);
+            reference_duv(t, p, n)
+        };
+        let jump = (duv(4000.0 + 1e-9) - duv(4000.0 - 1e-9)).abs();
+        assert!(jump < 1e-12, "{jump}");
+        // 区間の両端で値・傾きが連続（重みの傾きが 0）。
+        for t in [WB_REFERENCE_BLEND_START_K, WB_REFERENCE_BLEND_END_K] {
+            let h = 1e-3;
+            let left = (duv(t) - duv(t - h)) / h;
+            let right = (duv(t + h) - duv(t)) / h;
+            assert!((left - right).abs() < 1e-7, "{t}: {left} {right}");
+        }
+        // 1 K ごとの基準の白の変化は、区間の中でも区間の外と同じ程度（tint の 0.05 未満の変化）。
+        let mut prev = white_point_from_temperature_tint(3700.0, 0.0).unwrap();
+        let mut t = 3701.0;
+        while t <= 4300.0 {
+            let w = white_point_from_temperature_tint(t, 0.0).unwrap();
+            let d = uv_dist(prev, w);
+            assert!(d < 1e-4, "{t}: {d}");
+            prev = w;
+            t += 1.0;
+        }
+        // 重み。
+        assert_eq!(daylight_reference_weight(3800.0), 0.0);
+        assert_eq!(daylight_reference_weight(4000.0), 0.5);
+        assert_eq!(daylight_reference_weight(4200.0), 1.0);
     }
 
     #[test]
@@ -472,12 +601,13 @@ mod tests {
     #[test]
     fn multiplier_directions() {
         let cam = typical_cam_xyz();
-        // 色温度を上げる（光源が青寄り）と、R の係数は増え、B の係数は減る。4000 K の前後は
-        // 基準の白が tint の方向に跳ぶ（doc に書いた不連続）ため、区間ごとに確認する。
-        for temps in [
-            &[2000.0, 2500.0, 3000.0, 3500.0, 3999.0][..],
-            &[4000.0, 5000.0, 6500.0, 9000.0, 20000.0, 50000.0][..],
-        ] {
+        // 色温度を上げる（光源が青寄り）と、R の係数は増え、B の係数は減る（4000 K の前後もなめらかに
+        // つながる）。
+        for temps in [&[
+            2000.0, 2500.0, 3000.0, 3500.0, 3800.0, 3900.0, 3999.0, 4000.0, 4100.0, 4200.0, 5000.0,
+            6500.0, 9000.0, 20000.0, 50000.0,
+        ][..]]
+        {
             let mut prev = wb_multipliers_from_temperature_tint(&cam, temps[0], 0.0).unwrap();
             for &t in &temps[1..] {
                 let m = wb_multipliers_from_temperature_tint(&cam, t, 0.0).unwrap();
@@ -630,6 +760,56 @@ mod tests {
         // 不正な色度。
         assert!(temperature_tint_from_white_point(Xy::new(f64::NAN, 0.3)).is_err());
         assert!(temperature_tint_from_white_point(Xy::new(0.3, 0.0)).is_err());
+    }
+
+    #[test]
+    fn unbuildable_white_balance_is_clamped_to_the_buildable_range() {
+        // 人の判断 No.17: 低い色温度で tint を大きく正にすると、白のカメラ RGB が 0 以下になり係数を
+        // 作れない。作れる範囲に丸める（色温度はそのまま、tint を 0 に向かって縮める）。
+        let cam = XYZ_TO_SRGB;
+        let (t, tint) = (2000.0, 150.0);
+        assert!(matches!(
+            wb_multipliers_from_temperature_tint(&cam, t, tint),
+            Err(ColorError::InvalidWhiteBalance { .. })
+        ));
+        let r = wb_multipliers_from_temperature_tint_clamped(&cam, t, tint, 1000.0).unwrap();
+        assert!(r.was_clamped());
+        assert_eq!(r.used.temperature_k, t);
+        assert!(r.used.tint > 0.0 && r.used.tint < tint, "{r:?}");
+        assert!(
+            r.multipliers
+                .iter()
+                .all(|v| v.is_finite() && *v > 0.0 && *v <= 1000.0)
+        );
+        // 丸めた値は作れる範囲の端（少しでも tint を大きくすると作れない、または上限を超える）。
+        let beyond = r.used.tint + 0.01;
+        let over = match wb_multipliers_from_temperature_tint(&cam, t, beyond) {
+            Ok(m) => m.iter().any(|v| *v > 1000.0),
+            Err(ColorError::InvalidWhiteBalance { .. }) => true,
+            Err(e) => panic!("{e}"),
+        };
+        assert!(over, "{r:?}");
+        // 作れる設定は丸めない（係数も同じ）。
+        let ok = wb_multipliers_from_temperature_tint_clamped(&cam, 5000.0, 10.0, 1000.0).unwrap();
+        assert!(!ok.was_clamped());
+        assert_eq!(
+            ok.multipliers,
+            wb_multipliers_from_temperature_tint(&cam, 5000.0, 10.0).unwrap()
+        );
+        // 係数の上限を小さくすると、上限の内に収まるように丸める。
+        let small = wb_multipliers_from_temperature_tint_clamped(&cam, 2000.0, 0.0, 2.0).unwrap();
+        assert!(small.was_clamped());
+        assert!(small.multipliers.iter().all(|v| *v <= 2.0), "{small:?}");
+        // tint 0 でも作れない色温度は、色温度を 6504 K に向かって寄せる。
+        assert!(small.used.temperature_k > 2000.0 && small.used.tint == 0.0);
+        // 範囲外の入力はエラーのまま。
+        assert!(wb_multipliers_from_temperature_tint_clamped(&cam, 1999.0, 0.0, 1000.0).is_err());
+        // 6504 K でも作れないカメラ行列はエラー。
+        let neg = Mat3::diagonal([-1.0, 1.0, 1.0]) * typical_cam_xyz();
+        assert!(matches!(
+            wb_multipliers_from_temperature_tint_clamped(&neg, 5000.0, 0.0, 1000.0),
+            Err(ColorError::InvalidWhiteBalance { .. })
+        ));
     }
 
     #[test]

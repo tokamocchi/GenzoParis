@@ -23,7 +23,7 @@ pub mod metadata;
 pub mod phase;
 
 pub use cache_key::{CacheColorSpace, CacheFormat, CacheKey, CacheKind, RenderQuality};
-pub use capture_time::{CaptureTime, CaptureTimeError};
+pub use capture_time::{CaptureTime, CaptureTimeError, UTC_ONLY_OFFSET};
 pub use catalog::{
     AssetKind, CollectionKind, ColorLabel, FileOpKind, FileOpState, FileRole, FileStatus, Flag,
     ParseEnumError, Rating, TzSource,
