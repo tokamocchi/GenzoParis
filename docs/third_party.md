@@ -19,7 +19,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - CI: [.github/workflows/ci.yml](../.github/workflows/ci.yml) の `lint` ジョブで、push と pull request のたびに実行します。
   - ローカル: `cargo install cargo-deny --locked` で入れて、`cargo deny check` を実行します。ライセンスごとの一覧は `cargo deny list` で出せます。
 - 2026-10-09 の確認結果: cargo-deny 0.20.2 で `cargo deny check` を実行し、advisories・bans・licenses・sources がすべて通りました。警告は、同じクレートの複数の版（hashbrown・miniz_oxide・syn）の 3 件だけです。
-- 2026-10-10 の確認結果: `genzo-color`・`genzo-raw`・`genzo-media`・`genzo-catalog`・`genzo-jobs`・`genzo-testkit` の実装の後に再実行し、同じ結果でした（すべて通り、警告は同じ 3 件）。
+- 2026-10-10 の確認結果: `genzo-color`・`genzo-raw`・`genzo-media`・`genzo-catalog`・`genzo-jobs`・`genzo-testkit` の実装の後に再実行し、同じ結果でした（すべて通り、警告は同じ 3 件）。同日、`genzo-pipeline`・`genzo-worker`・`genzo-gpu` の実装の後（`naga` 30.0.1 を `genzo-gpu` の開発用の依存に、`libc` を `genzo-worker` の Linux 用の依存に追加）にも再実行し、同じ結果でした。
 - **cargo-deny が見るのは、各クレートの `Cargo.toml` の `license` と、ライセンスのファイルだけです。** C のソースを同梱してビルドするクレートについて、同梱したソースの版やファイルのヘッダは確認しません。現在の依存では次の 3 つが該当します。
   - `lcms2-sys`（Little CMS 2）と `libsqlite3-sys`（SQLite）: 2 章の一覧に記録します。
   - `blake3`: BLAKE3 の作者たち自身による C とアセンブリの実装を同梱しています（`c/` ディレクトリ）。crate のライセンスは `Cargo.toml` で CC0-1.0 / Apache-2.0 / Apache-2.0 WITH LLVM-exception の選択です。`c/blake3.c` の先頭にはライセンスの表示がなく（1.8.7 で確認）、C の部分にも crate と同じライセンスが及ぶと考えていますが、要確認です。
@@ -48,7 +48,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | Little CMS 2 | ICC プロファイルの変換と 3D LUT の作成（`genzo-color`。04 の 2.6 節・5 章） | 2.19（`lcms2-sys` 4.0.7 が同梱するソース。Rust のラッパーは `lcms2` 6.2.0） | crates.io の `lcms2-sys`（`vendor/` に上流のソースを同梱）。上流は Marti Maria Saguer による Little CMS | MIT（`vendor/LICENSE` と、`vendor/src/*.c` のファイルのヘッダで確認）。ラッパーの crate も MIT | 静的リンク。workspace の `Cargo.toml` で `lcms2` の機能フラグ `static` を有効にし、同梱のソースを cc でビルドする（3.2 節） | 実行ファイルに含まれる。対応するソースは crates.io の `lcms2-sys` 4.0.7 | MIT の著作権表示と許諾文 | AI 記入（2026-10-09）。人の確認待ち |
 | SQLite | カタログ DB とサムネイル DB（`genzo-catalog`。04 の 3 章） | 3.53.2（`libsqlite3-sys` 0.38.2 が同梱する amalgamation。`rusqlite` 0.40.2） | crates.io の `libsqlite3-sys`（`sqlite3/` に同梱）。上流は https://sqlite.org/ | パブリックドメイン（`sqlite3.c` のヘッダの「The author disclaims copyright to this source code」で確認）。バインディングの crate は MIT | 静的リンク。`rusqlite` の機能フラグ `bundled` と `backup`。コンパイルの設定は `libsqlite3-sys` の build.rs の既定（3.3 節）。システムの SQLite は使わない | 実行ファイルに含まれる。対応するソースは crates.io の `libsqlite3-sys` 0.38.2 | SQLite 自体は不要とされる（パブリックドメイン）。バインディングの MIT の表記は Rust のクレートとして扱う | AI 記入（2026-10-09）。人の確認待ち |
 | FFmpeg / ffprobe | 動画のメタデータの取得とサムネイルの生成（`genzo-media`）。子プロセスとして実行する（04 の 1.2 節） | 開発環境は 6.1.1。配布する版は未定 | 開発環境は Ubuntu 24.04 の apt（`ffmpeg` 7:6.1.1-3ubuntu5）。配布物での入手方法は未定 | ビルドの構成で LGPL-2.1-or-later・GPL-2.0-or-later・(L)GPL-3.0-or-later のいずれかになり、`--enable-nonfree` のビルドは再配布できないとされる。開発環境の版は `--enable-gpl` のビルド（`ffmpeg -version` の configure の引数と、Ubuntu の copyright ファイルで確認）。上流の LICENSE.md は未確認 | リンクしない（子プロセス）。同梱する場合は configure の引数を記録する | 未定（同梱するか、利用者に入れてもらうか）。同梱する場合は対応するソースとビルドの構成の提供が必要 | 同梱する場合は、ライセンスの全文、ビルドの構成、組み込んだ外部ライブラリの表記（要確認） | AI 記入（2026-10-09）。配布の方針は人の判断待ち |
-| RCD デモザイク | デモザイク（04 の 2.1 節のステージ 5。CPU 版と GPU 版） | 未実装。移植するファイルはまだない | アルゴリズムの考案者は Luis Sanz Rodríguez。実装の例は RawTherapee と darktable にある | 自前で実装する予定（アプリと同じ GPL-3.0-or-later）。RawTherapee / darktable の実装は GPL-3.0 系とされるが、個別のファイルのヘッダは未確認 | 該当なし（自前の Rust / WGSL のコード） | アプリのソースに含まれる | アルゴリズムの出典の記載（推奨）。移植する場合は元の著作権表示を残す | 実装前。移植する場合は事前に記入する（3.5 節） |
+| RCD デモザイク | デモザイク（04 の 2.1 節のステージ 5。最終品質） | CPU 版は自前の実装（`crates/genzo-pipeline/src/sensor/demosaic/rcd.rs`。2026-10-10）。GPU 版は未実装（書き出しのセンサー処理は CPU 版を使う）。第三者のファイルは取り込んでいない | アルゴリズムの考案者は Luis Sanz Rodríguez。実装者（AI）の報告では「公開されているアルゴリズムの説明」をもとに書いたが、**その説明の出典（URL・版）は未確認**。実装の例は RawTherapee と darktable にあるとされる | 自前の実装として、アプリと同じ GPL-3.0-or-later。実装者は他のプロジェクトのソースを参照・複製していないと報告しているが、独立性は人が確認していない（3.5 節）。RawTherapee / darktable の実装は GPL-3.0 系とされるが、個別のファイルのヘッダは未確認 | 該当なし（自前の Rust のコード） | アプリのソースに含まれる | アルゴリズムの出典（考案者の名前）を doc コメントに記載済み。説明の出典が分かれば追記する | AI 記入（2026-10-10）。説明の出典と実装の独立性は人の確認待ち（3.5 節） |
 | カメラ行列（α7 IV / α7C） | カメラ RGB から XYZ への変換（04 の 2.5 節の `render_deps`、2.6 節） | 未作成 | 候補は LibRaw の内蔵の表、DNG の ColorMatrix、カラーチャートからの自作（3.6 節） | 要確認（出典ごとに利用条件を確認する） | アプリのデータファイルとして持ち、ID とハッシュで参照する | アプリに同梱する予定 | 出典による（要確認） | 未着手 |
 | Mesa（llvmpipe） | 開発環境（Linux のコンテナ）で wgpu を動かすための、ソフトウェアの Vulkan | 25.2.8（`mesa-vulkan-drivers` 25.2.8-0ubuntu0.24.04.4）。Vulkan のローダーは `libvulkan1` 1.3.275.0 | Ubuntu 24.04 の apt | 主に MIT とされる（未確認。配布しないため優先度は低い） | wgpu が実行時に Vulkan のローダー経由で読み込む。ビルド時のリンクはない | **配布物に含めない** | 不要（配布しない） | 開発環境だけで使う |
 
@@ -108,10 +108,17 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 ### 3.5 RCD デモザイク
 
 - **出典**: RCD（Ratio Corrected Demosaicing）の考案者は Luis Sanz Rodríguez です。
-- **方針**: 公開されているアルゴリズムの説明をもとに、CPU 版（Rust）と GPU 版（WGSL）を自前で実装する予定です。自前で実装する場合も、doc コメントにアルゴリズムの出典（考案者の名前）を書きます。
+- **実装の状況**（2026-10-10、AI 記入）
+  - CPU 版を `crates/genzo-pipeline/src/sensor/demosaic/rcd.rs` に自前で実装しました。ファイルの doc コメントに、考案者の名前、手順と式、余白（10 画素）を書いています。
+  - 実装者（AI）の報告: 公開されているアルゴリズムの説明（手順の構成と考え方）をもとに書き、RawTherapee・darktable・考案者の参照実装などのソースは参照・複製していない。説明と違う点として、2 方向の推定の重み付き平均を線形補間（lerp）の形で書いたこと、比の補正の ε を分子にも入れたこと、上限で切り詰めないこと（下限 0 だけ）、近傍との比較に斜めの 4 画素を使ったことを挙げています（同じファイルの「参照の説明からの変更点」）。
+  - 第三者のファイルは取り込んでいないので、1.3 節の「移植する前の記入」には当たらないと考えています。ただし、下の要確認の点が済むまでは確定しません。
+  - GPU 版（WGSL）は未実装です（`genzo-gpu`）。作る場合も同じ方針で、この節に追記します。
+- **要確認**
+  - **説明の出典**: 実装の元にした「公開されているアルゴリズムの説明」の所在（URL・版・日付）を、この環境では確認できていません。人が特定して記録してください。
+  - **実装の独立性**: AI が書いたコードは、学習したデータに含まれうる既存の実装（RawTherapee・darktable など。GPL-3.0 系とされる）に似る可能性を否定できません。必要に応じて既存の実装と比べ、表現（変数の構成・コメント・特徴的な定数の並び）まで似ている部分がないかを人が確認してください。似ている部分が見つかった場合は、下の「移植・参考にするときの手順」に従って元の著作権表示とライセンスを記録します（GPL-3.0-only のコードであれば、配布物全体の「以降の版」の扱いにも関わります）。
+  - 考案者自身による実装も公開されているとされますが、所在とライセンスは未確認です。
 - **実装の例**（参考。いずれも未確認）
   - RawTherapee と darktable に実装があり、GPL-3.0 系とされています。ファイルのパス・版・ヘッダは未確認です。
-  - 考案者自身による実装も公開されているとされますが、所在とライセンスは要確認です。
 - **移植・参考にするときの手順**（04 の 9 章の AR-8）
   1. 使うファイルのパス、リポジトリ、コミット（または版）を、この台帳に記録する。
   2. ファイルのヘッダのライセンスの表示を記録する。GPL-3.0-only と GPL-3.0-or-later を区別する。GPL-3.0-only のコードを取り込むと、配布物全体は事実上 GPL-3.0 だけで配布することになる（「以降の版」を選べなくなる）とされるため、取り込む前に人が判断する。
