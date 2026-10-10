@@ -93,10 +93,14 @@ fn assert_close(a: f32, b: f32, tol: f32, what: &str) {
 
 #[test]
 fn version_and_decoder_id() {
+    // 版そのものは環境で異なる（Ubuntu の apt は 0.21 系、Homebrew は 0.22 系など）ため固定しない。
+    // 版の文字列（"0.21.2-Release"）と識別子（"libraw-0.21.2"）が対応することだけを確かめる。
     let v = libraw_version().unwrap();
-    assert!(v.starts_with("0.21."), "{v}");
     let id = decoder_id().unwrap();
-    assert!(id.starts_with("libraw-0.21."), "{id}");
+    let number = id
+        .strip_prefix("libraw-")
+        .expect("識別子は libraw- で始まる");
+    assert!(v.starts_with(number), "{v} / {id}");
     const { assert!(genzo_raw::LIBRAW_ENABLED) };
 }
 
