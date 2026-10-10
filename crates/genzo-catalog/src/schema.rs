@@ -50,12 +50,20 @@ pub(crate) struct Migration {
 }
 
 /// カタログのマイグレーションの列。新しい版は末尾に追加し、既存の版の内容は変えない。
-pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "初期スキーマ（04 の 3.1 節・3.5 節・3.6 節・6.4 節）",
-    sql: include_str!("sql/catalog_0001_initial.sql"),
-    post: None,
-}];
+pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "初期スキーマ（04 の 3.1 節・3.5 節・3.6 節・6.4 節）",
+        sql: include_str!("sql/catalog_0001_initial.sql"),
+        post: None,
+    },
+    Migration {
+        version: 2,
+        description: "外部キーの子の列の索引（variant.history_pos・stack.top_variant_id）",
+        sql: include_str!("sql/catalog_0002_fk_child_indexes.sql"),
+        post: None,
+    },
+];
 
 /// サムネイル DB のマイグレーションの列。
 pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[Migration {
@@ -66,7 +74,7 @@ pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[Migration {
 }];
 
 /// このアプリのカタログのスキーマの版。
-pub const CATALOG_SCHEMA_VERSION: u32 = 1;
+pub const CATALOG_SCHEMA_VERSION: u32 = 2;
 
 /// このアプリのサムネイル DB のスキーマの版。
 pub const THUMBS_SCHEMA_VERSION: u32 = 1;
@@ -143,6 +151,19 @@ pub(crate) fn configure_connection(
     conn.pragma_update(None, "cache_size", -CACHE_SIZE_KIB)?;
     conn.set_prepared_statement_cache_capacity(64);
     Ok(())
+}
+
+/// 書き込み用の接続のトランザクションを `BEGIN IMMEDIATE` で始めるようにする。
+///
+/// 既定の `BEGIN DEFERRED` では、読み取りから始めたトランザクションが途中で書き込みに移るとき、
+/// その間に別の接続がコミットしていると、`busy_timeout` で待たずに直ちに `SQLITE_BUSY`
+/// （`SQLITE_BUSY_SNAPSHOT`）で失敗する（SQLite の説明書「Write-Ahead Logging」の
+/// 「Sometimes Queries Return SQLITE_BUSY In WAL Mode」）。登録・削除・履歴の移動などは
+/// 読んでから書くので、書き込みのロックを最初に取り、競合したら `busy_timeout` まで待つ。
+/// 書き込みは DB 書き込みスレッドに集める設計（04 の 1.3 節）だが、CLI とアプリが同じカタログを
+/// 同時に開いた場合などにも、途中で失敗せずに待つようにするため。
+pub(crate) fn use_immediate_transactions(conn: &mut Connection) {
+    conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
 }
 
 /// 読み取り専用の接続の設定（WAL・同期の設定は書き込み側の接続が行う）。

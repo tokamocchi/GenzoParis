@@ -88,15 +88,28 @@ impl TextQuery {
     }
 }
 
+/// 検索語の区切りとして扱う文字か（空白と制御文字）。
+///
+/// 制御文字（特に NUL）を語に含めると、SQLite が C の文字列として扱う箇所で語が NUL の位置で
+/// 切れる。FTS5 の検索式では引用符が閉じられずに構文エラーになり（"unterminated string"）、
+/// `LIKE` のパターンでは `%` だけが残って全件に一致してしまう（レビューで再現）。
+/// 制御文字はファイル名・キャプションの検索語として意味を持たないので、区切りとして扱う。
+fn is_term_separator(c: char) -> bool {
+    c.is_whitespace() || c.is_control()
+}
+
 /// テキスト検索の入力を解析する（3.6 節）。
 ///
-/// 入力を [`search_key`] で正規化してから空白（NFKC で全角の空白も半角になる）で区切る。
-/// 同じ語が重複していても結果は変わらないため、そのまま使う。
+/// 入力を [`search_key`] で正規化してから空白（NFKC で全角の空白も半角になる）と制御文字で
+/// 区切る。同じ語が重複していても結果は変わらないため、そのまま使う。
 pub fn parse_text_query(input: &str) -> TextQuery {
     let normalized = search_key(input);
     let mut fts_terms = Vec::new();
     let mut like_patterns = Vec::new();
-    for term in normalized.split_whitespace() {
+    for term in normalized
+        .split(is_term_separator)
+        .filter(|t| !t.is_empty())
+    {
         if term.chars().count() >= TRIGRAM_MIN_CHARS {
             fts_terms.push(fts_phrase(term));
         } else {
@@ -180,6 +193,12 @@ mod tests {
 
         let q = parse_text_query("  \u{3000} ");
         assert!(q.is_empty());
+
+        // 制御文字（NUL など）は区切りとして扱い、語に含めない。
+        let q = parse_text_query("ab\0cde\u{1}f\tg");
+        assert_eq!(q.fts_match.as_deref(), Some("\"cde\""));
+        assert_eq!(q.like_patterns, vec!["%ab%", "%f%", "%g%"]);
+        assert!(parse_text_query("\0\u{7f}\u{9f}").is_empty());
 
         // FTS5 の演算子は語として引用符で囲まれる（2 文字以下は LIKE）。
         let q = parse_text_query("NEAR OR \"x* ^a:b (c) -d");

@@ -413,9 +413,9 @@ fn foreign_sqlite_files_and_non_databases_are_rejected() {
     ));
 }
 
-/// 試験用の版 2（列の追加と、Rust の処理による値の書き込み）。
-const TEST_V2: Migration = Migration {
-    version: 2,
+/// 試験用の次の版（列の追加と、Rust の処理による値の書き込み）。
+const TEST_NEXT: Migration = Migration {
+    version: CATALOG_SCHEMA_VERSION + 1,
     description: "試験用: asset に列を追加",
     sql: "ALTER TABLE asset ADD COLUMN test_note TEXT;",
     post: Some(|tx| {
@@ -432,7 +432,11 @@ fn old_catalog_is_backed_up_and_migrated() {
     f.cat.close().unwrap();
     let backup_dir = f.dir.path().join("migration-backups");
 
-    let migrations = [CATALOG_MIGRATIONS[0], TEST_V2];
+    let migrations: Vec<Migration> = CATALOG_MIGRATIONS
+        .iter()
+        .copied()
+        .chain([TEST_NEXT])
+        .collect();
     let cat = Catalog::open_with_migrations(
         &path,
         &OpenOptions {
@@ -442,9 +446,9 @@ fn old_catalog_is_backed_up_and_migrated() {
     )
     .unwrap();
     let report = cat.open_report().clone();
-    assert_eq!(report.migrated_from, Some(1));
-    assert_eq!(report.schema_version, 2);
-    assert_eq!(cat.schema_version().unwrap(), 2);
+    assert_eq!(report.migrated_from, Some(CATALOG_SCHEMA_VERSION));
+    assert_eq!(report.schema_version, CATALOG_SCHEMA_VERSION + 1);
+    assert_eq!(cat.schema_version().unwrap(), CATALOG_SCHEMA_VERSION + 1);
     assert_eq!(report.previous_shutdown, PreviousShutdown::Clean);
     // データは残り、移行の処理が動いた。
     let note: String = cat
@@ -459,7 +463,7 @@ fn old_catalog_is_backed_up_and_migrated() {
     // 外部キーの確認が元に戻っている。
     assert!(cat.connection_settings().unwrap().foreign_keys);
 
-    // 移行の前のバックアップがあり、版 1 のままのデータを持つ。
+    // 移行の前のバックアップがあり、移行前の版のままのデータを持つ。
     let backup = report.migration_backup.expect("バックアップを作る");
     assert!(backup.starts_with(&backup_dir));
     assert!(
@@ -468,13 +472,15 @@ fn old_catalog_is_backed_up_and_migrated() {
             .unwrap()
             .to_str()
             .unwrap()
-            .starts_with("catalog.v1-before-migration-")
+            .starts_with(&format!(
+                "catalog.v{CATALOG_SCHEMA_VERSION}-before-migration-"
+            ))
     );
     let b = Connection::open(&backup).unwrap();
     let v: i64 = b
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 1);
+    assert_eq!(v, i64::from(CATALOG_SCHEMA_VERSION));
     let n: i64 = b
         .query_row("SELECT count(*) FROM asset", [], |r| r.get(0))
         .unwrap();
@@ -482,14 +488,16 @@ fn old_catalog_is_backed_up_and_migrated() {
     assert!(b.prepare("SELECT test_note FROM asset").is_err());
     cat.close().unwrap();
 
-    // 版 2 の DB は、版 1 までしか知らないアプリでは開けない。
-    assert!(matches!(
-        Catalog::open(&path),
-        Err(CatalogError::FutureSchema {
-            found: 2,
-            supported: 1
-        })
-    ));
+    // 次の版の DB は、今の版までしか知らないアプリでは開けない。
+    let err = Catalog::open(&path).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CatalogError::FutureSchema { found, supported }
+                if found == CATALOG_SCHEMA_VERSION + 1 && supported == CATALOG_SCHEMA_VERSION
+        ),
+        "{err}"
+    );
 }
 
 #[test]
@@ -497,17 +505,21 @@ fn failed_migration_is_rolled_back() {
     let f = Fixture::new();
     let path = f.catalog_path();
     f.cat.close().unwrap();
-    const BROKEN_V2: Migration = Migration {
-        version: 2,
+    const BROKEN_NEXT: Migration = Migration {
+        version: CATALOG_SCHEMA_VERSION + 1,
         description: "試験用: 途中で失敗する",
         sql: "ALTER TABLE asset ADD COLUMN x TEXT; SELECT * FROM no_such_table;",
         post: None,
     };
-    let migrations = [CATALOG_MIGRATIONS[0], BROKEN_V2];
+    let migrations: Vec<Migration> = CATALOG_MIGRATIONS
+        .iter()
+        .copied()
+        .chain([BROKEN_NEXT])
+        .collect();
     assert!(Catalog::open_with_migrations(&path, &OpenOptions::default(), &migrations).is_err());
-    // 版 1 のまま、列も追加されていない。開き直せる。
+    // 元の版のまま、列も追加されていない。開き直せる。
     let cat = Catalog::open(&path).unwrap();
-    assert_eq!(cat.schema_version().unwrap(), 1);
+    assert_eq!(cat.schema_version().unwrap(), CATALOG_SCHEMA_VERSION);
     assert!(cat.conn.prepare("SELECT x FROM asset").is_err());
     assert!(cat.connection_settings().unwrap().foreign_keys);
     // 移行の前のバックアップは作られている（失敗しても残す）。
@@ -594,4 +606,248 @@ fn in_memory_catalog_works() {
     );
     assert_eq!(cat.backup_stem(), "catalog");
     cat.close().unwrap();
+}
+
+/// 外部キーの子の列の組（`pragma_foreign_key_list` の 1 つの制約）ごとに、その列を先頭に持つ
+/// 索引（または INTEGER PRIMARY KEY）があることを確かめる。
+///
+/// 子の列に索引がないと、親の行を削除するたびに子のテーブル全体を読む（SQLite の説明書
+/// 「SQLite Foreign Key Support」の 3 節）。版 1 では variant.history_pos に索引がなかった。
+#[test]
+fn every_foreign_key_child_column_is_indexed() {
+    let f = Fixture::new();
+    let conn = &f.cat.conn;
+    let tables: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let mut checked = 0;
+    for table in &tables {
+        // 外部キー（id ごとに、子の列を seq の順に）。
+        let mut fks: std::collections::BTreeMap<i64, Vec<String>> = Default::default();
+        let mut stmt = conn
+            .prepare("SELECT id, seq, \"from\" FROM pragma_foreign_key_list(?1) ORDER BY id, seq")
+            .unwrap();
+        for row in stmt
+            .query_map([table], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(2)?))
+            })
+            .unwrap()
+        {
+            let (id, col) = row.unwrap();
+            fks.entry(id).or_default().push(col);
+        }
+        if fks.is_empty() {
+            continue;
+        }
+        // 索引の先頭の列の並び（式の索引の列は名前がないので None）。
+        let mut index_columns: Vec<Vec<Option<String>>> = Vec::new();
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_index_list(?1)")
+            .unwrap()
+            .query_map([table], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for name in names {
+            let cols: Vec<Option<String>> = conn
+                .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+                .unwrap()
+                .query_map([&name], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            index_columns.push(cols);
+        }
+        // INTEGER PRIMARY KEY（rowid の別名）は索引の一覧に出ないので別に調べる。
+        let rowid_alias: Option<String> = conn
+            .query_row(
+                "SELECT name FROM pragma_table_info(?1) WHERE pk = 1 AND upper(type) = 'INTEGER'
+                 AND (SELECT count(*) FROM pragma_table_info(?1) WHERE pk > 0) = 1",
+                [table],
+                |r| r.get(0),
+            )
+            .ok();
+        for cols in fks.values() {
+            let covered = index_columns.iter().any(|idx| {
+                idx.len() >= cols.len()
+                    && idx
+                        .iter()
+                        .zip(cols)
+                        .all(|(i, c)| i.as_deref() == Some(c.as_str()))
+            }) || (cols.len() == 1
+                && rowid_alias.as_deref() == Some(cols[0].as_str()));
+            assert!(covered, "{table}({}) に索引がない", cols.join(", "));
+            checked += 1;
+        }
+    }
+    // file・folder・variant・history_entry・snapshot・keyword などの外部キーを調べた。
+    assert!(checked >= 15, "{checked}");
+}
+
+/// 履歴や asset の削除で、variant などのテーブル全体を読まない（索引で参照を探す）。
+#[test]
+fn deleting_history_and_assets_does_not_scan_whole_tables() {
+    use rusqlite::StatementStatus;
+    let mut f = Fixture::new();
+    let mut outcomes = Vec::new();
+    for i in 0..50u64 {
+        outcomes.push(f.photo(&format!("IMG{i:04}.ARW"), i, None));
+    }
+    let v = outcomes[0].master_variant_id;
+    let edit = |ev: f32| genzo_model::DevelopSettings {
+        exposure_ev: ev,
+        ..Default::default()
+    };
+    f.cat.save_develop(v, &edit(0.5), "1").unwrap();
+    f.cat.save_develop(v, &edit(1.0), "2").unwrap();
+    let last: i64 = f
+        .cat
+        .conn
+        .query_row("SELECT max(id) FROM history_entry", [], |r| r.get(0))
+        .unwrap();
+
+    let conn = &f.cat.conn;
+    let mut stmt = conn
+        .prepare("DELETE FROM history_entry WHERE id = ?1")
+        .unwrap();
+    assert_eq!(stmt.execute([last]).unwrap(), 1);
+    assert_eq!(stmt.get_status(StatementStatus::FullscanStep), 0);
+
+    // asset の削除（file・variant・history_entry などへの ON DELETE CASCADE を含む）。
+    let mut stmt = conn.prepare("DELETE FROM asset WHERE id = ?1").unwrap();
+    assert_eq!(stmt.execute([outcomes[1].asset_id.get()]).unwrap(), 1);
+    assert_eq!(stmt.get_status(StatementStatus::FullscanStep), 0);
+}
+
+/// 版 1 のカタログ（索引の追加の前）を開くと、バックアップを作ってから最新の版へ移行する。
+#[test]
+fn version_1_catalog_is_migrated_to_the_current_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog.db");
+    let (asset, variant) = {
+        let mut cat =
+            Catalog::open_with_migrations(&path, &OpenOptions::default(), &CATALOG_MIGRATIONS[..1])
+                .unwrap();
+        assert_eq!(cat.schema_version().unwrap(), 1);
+        let vol = cat.ensure_volume("v", None, None).unwrap();
+        let folder = cat.ensure_folder(vol, "a").unwrap();
+        let o = cat
+            .register_file(&super::photo_req(
+                folder,
+                "A.ARW",
+                1,
+                Some("2024:05:01 12:00:00"),
+            ))
+            .unwrap();
+        cat.save_develop(
+            o.master_variant_id,
+            &genzo_model::DevelopSettings {
+                exposure_ev: 0.7,
+                ..Default::default()
+            },
+            "露光量",
+        )
+        .unwrap();
+        cat.set_caption(o.asset_id, Some("京都旅行")).unwrap();
+        cat.close().unwrap();
+        (o.asset_id, o.master_variant_id)
+    };
+    let index_count = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'index'
+             AND name IN ('variant_history_pos', 'stack_top_variant')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(index_count(&Connection::open(&path).unwrap()), 0);
+
+    let mut cat = Catalog::open(&path).unwrap();
+    let report = cat.open_report().clone();
+    assert_eq!(report.migrated_from, Some(1));
+    assert_eq!(report.schema_version, CATALOG_SCHEMA_VERSION);
+    assert_eq!(report.previous_shutdown, PreviousShutdown::Clean);
+    assert_eq!(index_count(&cat.conn), 2);
+    // データ・履歴・テキスト検索はそのまま使える。
+    assert_eq!(cat.develop_settings(variant).unwrap().exposure_ev, 0.7);
+    assert!(cat.undo_develop(variant).unwrap().is_some());
+    let hits = cat
+        .search(
+            &crate::Filter {
+                text: Some("京都旅行".to_owned()),
+                ..Default::default()
+            },
+            &crate::Sort::default(),
+        )
+        .unwrap();
+    assert_eq!(hits, vec![variant]);
+    assert!(cat.check_integrity().unwrap().is_ok());
+    cat.remove_assets(&[asset]).unwrap();
+    assert_eq!(rows(&cat, "history_entry"), 0);
+    cat.close().unwrap();
+
+    // 移行の前のバックアップは版 1 のまま。版 1 のバックアップも復元でき、開くと移行される。
+    let backup = report.migration_backup.expect("バックアップを作る");
+    let restored = dir.path().join("restored.db");
+    let r = crate::restore_backup(&backup, &restored).unwrap();
+    assert_eq!(r.schema_version, 1);
+    let cat = Catalog::open(&restored).unwrap();
+    assert_eq!(cat.open_report().migrated_from, Some(1));
+    assert_eq!(rows(&cat, "asset"), 1);
+    cat.close().unwrap();
+}
+
+/// 同じカタログを 2 つの接続（別のスレッド）から書いても、読んでから書くトランザクションが
+/// `SQLITE_BUSY`（スナップショットの競合）で途中で失敗せず、ロックを待って成功する。
+#[test]
+fn two_writers_wait_for_each_other_instead_of_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog.db");
+    let folder = {
+        let mut cat = Catalog::open(&path).unwrap();
+        let vol = cat.ensure_volume("v", None, None).unwrap();
+        let folder = cat.ensure_folder(vol, "a").unwrap();
+        cat.close().unwrap();
+        folder
+    };
+    let workers: Vec<_> = (0..2u64)
+        .map(|w| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut cat = Catalog::open(&path).unwrap();
+                for i in 0..60u64 {
+                    let n = w * 1000 + i;
+                    // 登録は既存の行を読んでから書く（冪等性のため）。
+                    let o = cat
+                        .register_batch(&[
+                            super::photo_req(folder, &format!("W{w}_{i:03}.ARW"), n, None),
+                            super::photo_req(folder, &format!("W{w}_{i:03}.JPG"), n + 500, None),
+                        ])
+                        .unwrap();
+                    cat.set_rating(
+                        &[o[0].master_variant_id],
+                        genzo_model::Rating::new(3).unwrap(),
+                    )
+                    .unwrap();
+                    cat.undo_develop(o[0].master_variant_id).unwrap();
+                }
+                cat.close().unwrap();
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().expect("書き込みが SQLITE_BUSY で失敗しない");
+    }
+    let cat = Catalog::open(&path).unwrap();
+    assert_eq!(rows(&cat, "asset"), 120);
+    assert_eq!(rows(&cat, "file"), 240);
+    assert!(cat.check_integrity().unwrap().is_ok());
 }

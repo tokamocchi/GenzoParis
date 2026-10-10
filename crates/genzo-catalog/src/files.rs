@@ -537,6 +537,8 @@ impl Catalog {
     ///
     /// - ゴミ箱: 対象の asset をカタログから除く。
     /// - 移動・リネーム: ファイルのフォルダと名前を新しくし、テキスト検索の索引も更新する。
+    ///
+    /// どちらも、予定の後にカタログから除かれた asset・ファイルは飛ばす（更新するものがないため）。
     pub fn complete_file_op(&mut self, id: FileOpId) -> Result<()> {
         self.transition_file_op(id, FileOpState::Done, None)
     }
@@ -785,19 +787,28 @@ fn apply_file_op(tx: &Transaction<'_>, kind: FileOpKind, payload: &FileOpPayload
                         e.file_id
                     ))
                 })?;
-                let n = tx.execute(
-                    "UPDATE file SET folder_id = ?2, name = ?3, name_key = ?4 WHERE id = ?1",
-                    params![
-                        e.file_id.get(),
-                        to.folder_id.get(),
-                        to.name,
-                        path_key(&to.name)
-                    ],
-                )?;
-                if n == 0 {
-                    return Err(CatalogError::NotFound(format!("ファイル {}", e.file_id)));
+                // 予定の後にカタログから除かれたファイル（asset の除去など）は、更新するものがない
+                // ので飛ばす（ゴミ箱の done と同じく、存在しないものは無視する）。OS の操作は
+                // 成功しているので、NotFound にすると記録を done にできなくなる（レビューで再現）。
+                // テキスト検索の索引は、記録の asset ではなく、ファイルの現在の asset で作り直す。
+                let asset: Option<i64> = tx
+                    .prepare_cached(
+                        "UPDATE file SET folder_id = ?2, name = ?3, name_key = ?4 WHERE id = ?1
+                         RETURNING asset_id",
+                    )?
+                    .query_row(
+                        params![
+                            e.file_id.get(),
+                            to.folder_id.get(),
+                            to.name,
+                            path_key(&to.name)
+                        ],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(asset) = asset {
+                    touched.push(asset);
                 }
-                touched.push(e.asset_id.get());
             }
             touched.sort_unstable();
             touched.dedup();

@@ -182,6 +182,10 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
     };
     let mut ctes: Vec<String> = Vec::new();
     let mut conds: Vec<String> = Vec::new();
+    // asset の列（撮影日時・カメラ・レンズ・種別）を使う場合だけ asset を結合する。
+    // asset の ID は variant.asset_id で足りる（外部キーで asset の存在は保証される）。
+    // 評価・フラグだけの検索で、50 万件の variant ごとに asset を引かないため（PERF-07）。
+    let mut needs_asset = false;
 
     if let Some(min) = filter.rating_min {
         let p = q.bind(i64::from(min));
@@ -216,29 +220,34 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
     if let Some(from) = filter.captured_from {
         let p = q.bind(utc_to_db_string(from));
         conds.push(format!("a.captured_at_utc >= {p}"));
+        needs_asset = true;
     }
     if let Some(until) = filter.captured_until {
         let p = q.bind(utc_to_db_string(until));
         conds.push(format!("a.captured_at_utc < {p}"));
+        needs_asset = true;
     }
     if let Some(cameras) = &filter.cameras {
         let list = q.bind_list(cameras.iter().cloned());
         conds.push(format!("a.camera IN {list}"));
+        needs_asset = true;
     }
     if let Some(lenses) = &filter.lenses {
         let list = q.bind_list(lenses.iter().cloned());
         conds.push(format!("a.lens IN {list}"));
+        needs_asset = true;
     }
     if let Some(kind) = filter.kind {
         let p = q.bind(kind.as_str().to_owned());
         conds.push(format!("a.kind = {p}"));
+        needs_asset = true;
     }
     if let Some(text) = &filter.text {
         let tq = parse_text_query(text);
         if let Some(m) = tq.fts_match {
             let p = q.bind(m);
             conds.push(format!(
-                "a.id IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH {p})"
+                "v.asset_id IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH {p})"
             ));
         }
         if !tq.like_patterns.is_empty() {
@@ -251,7 +260,7 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
                 })
                 .collect();
             conds.push(format!(
-                "a.id IN (SELECT t.asset_id FROM asset_text t WHERE {})",
+                "v.asset_id IN (SELECT t.asset_id FROM asset_text t WHERE {})",
                 likes.join(" AND ")
             ));
         }
@@ -263,12 +272,12 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
                 "folder_tree(id) AS (SELECT {p} UNION SELECT f.id FROM folder f JOIN folder_tree t ON f.parent_id = t.id)"
             ));
             conds.push(
-                "a.id IN (SELECT fl.asset_id FROM file fl WHERE fl.folder_id IN (SELECT id FROM folder_tree))"
+                "v.asset_id IN (SELECT fl.asset_id FROM file fl WHERE fl.folder_id IN (SELECT id FROM folder_tree))"
                     .to_owned(),
             );
         } else {
             conds.push(format!(
-                "a.id IN (SELECT fl.asset_id FROM file fl WHERE fl.folder_id = {p})"
+                "v.asset_id IN (SELECT fl.asset_id FROM file fl WHERE fl.folder_id = {p})"
             ));
         }
     }
@@ -297,8 +306,9 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
         SortKey::CaptureTime => format!("a.captured_at_utc {dir} NULLS LAST, v.id ASC"),
         SortKey::FileName => format!("pf.name_key {dir} NULLS LAST, v.id ASC"),
         SortKey::Rating => format!("v.rating {dir}, v.id ASC"),
-        SortKey::ImportOrder => format!("a.id {dir}, v.id ASC"),
+        SortKey::ImportOrder => format!("v.asset_id {dir}, v.id ASC"),
     };
+    needs_asset |= sort.key == SortKey::CaptureTime;
     let needs_primary_file = sort.key == SortKey::FileName || filter.file_statuses.is_some();
 
     let mut sql = String::new();
@@ -307,9 +317,12 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
         sql.push_str(&ctes.join(", "));
         sql.push(' ');
     }
-    sql.push_str("SELECT v.id FROM variant v JOIN asset a ON a.id = v.asset_id");
+    sql.push_str("SELECT v.id FROM variant v");
+    if needs_asset {
+        sql.push_str(" JOIN asset a ON a.id = v.asset_id");
+    }
     if needs_primary_file {
-        sql.push_str(" LEFT JOIN file pf ON pf.asset_id = a.id AND pf.role = 'primary'");
+        sql.push_str(" LEFT JOIN file pf ON pf.asset_id = v.asset_id AND pf.role = 'primary'");
     }
     if !conds.is_empty() {
         sql.push_str(" WHERE ");
@@ -498,6 +511,59 @@ mod tests {
                 &Sort::new(SortKey::CaptureTime, direction),
             );
             assert!(q.sql.contains("NULLS LAST, v.id ASC"), "{}", q.sql);
+        }
+    }
+
+    #[test]
+    fn asset_is_joined_only_when_its_columns_are_used() {
+        let joined = |filter: &Filter, sort: Sort| {
+            build_search_sql(filter, &sort).sql.contains("JOIN asset a")
+        };
+        let rating = Sort::new(SortKey::Rating, SortDirection::Descending);
+        // 評価・フラグ・テキスト・フォルダ・キーワードと、評価順・登録順・ファイル名順では結合しない。
+        let no_asset_columns = Filter {
+            rating_min: Rating::new(3),
+            flags: Some(vec![Flag::Picked]),
+            text: Some("京都 海".to_owned()),
+            folder: Some(FolderFilter {
+                folder_id: FolderId::new(1),
+                include_subfolders: true,
+            }),
+            keywords: vec![KeywordId::new(1)],
+            ..Default::default()
+        };
+        assert!(!joined(&no_asset_columns, rating));
+        for key in [SortKey::ImportOrder, SortKey::FileName] {
+            assert!(!joined(
+                &Filter::default(),
+                Sort::new(key, SortDirection::Ascending)
+            ));
+        }
+        // 撮影日時順・撮影日時・カメラ・レンズ・種別では結合する。
+        assert!(joined(&Filter::default(), Sort::default()));
+        for filter in [
+            Filter {
+                captured_from: Some(DateTime::<Utc>::UNIX_EPOCH),
+                ..Default::default()
+            },
+            Filter {
+                captured_until: Some(DateTime::<Utc>::UNIX_EPOCH),
+                ..Default::default()
+            },
+            Filter {
+                cameras: Some(vec!["X".to_owned()]),
+                ..Default::default()
+            },
+            Filter {
+                lenses: Some(vec!["Y".to_owned()]),
+                ..Default::default()
+            },
+            Filter {
+                kind: Some(AssetKind::Video),
+                ..Default::default()
+            },
+        ] {
+            assert!(joined(&filter, rating), "{filter:?}");
         }
     }
 

@@ -62,7 +62,8 @@ pub use hash::{
 pub use keyword::{Keyword, KeywordMatch};
 pub use library::{AssetRecord, CatalogCounts};
 pub use preview_cache::{
-    DEFAULT_PREVIEW_CAPACITY_BYTES, EvictionReport, PreviewCache, ReconcileReport,
+    DEFAULT_PREVIEW_CAPACITY_BYTES, EvictionReport, PREVIEW_TEMP_FILE_MIN_AGE, PreviewCache,
+    ReconcileReport,
 };
 pub use register::{
     Folder, JPEG_EXTENSIONS, MediaMetadata, PairClass, RAW_EXTENSIONS, RegisterFile,

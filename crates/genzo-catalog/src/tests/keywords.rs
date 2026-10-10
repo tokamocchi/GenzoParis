@@ -133,3 +133,33 @@ fn tagging_and_untagging() {
     assert!(f.cat.keywords_of(b).unwrap().is_empty());
     assert!(f.cat.delete_keyword(parent).is_err());
 }
+
+#[test]
+fn keyword_search_with_nul_matches_nothing() {
+    let mut f = Fixture::new();
+    f.cat.ensure_keyword_path(&["場所", "京都"]).unwrap();
+    // NUL で LIKE のパターンが切れて「京」の前方一致や全件一致にならない。
+    for q in ["京\0", "\0", "京都\0x"] {
+        assert!(
+            f.cat
+                .find_keywords(q, KeywordMatch::Prefix)
+                .unwrap()
+                .is_empty(),
+            "{q:?}"
+        );
+        assert!(
+            f.cat
+                .find_keywords(q, KeywordMatch::Exact)
+                .unwrap()
+                .is_empty(),
+            "{q:?}"
+        );
+    }
+    assert_eq!(
+        f.cat
+            .find_keywords("京", KeywordMatch::Prefix)
+            .unwrap()
+            .len(),
+        1
+    );
+}

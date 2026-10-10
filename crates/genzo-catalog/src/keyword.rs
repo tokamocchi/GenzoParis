@@ -131,7 +131,9 @@ impl Catalog {
     /// 名前でキーワードを探す（完全一致・前方一致。NFKC ＋ 小文字化して比較。3.6 節）。
     pub fn find_keywords(&self, query: &str, mode: KeywordMatch) -> Result<Vec<Keyword>> {
         let key = search_key(query.trim());
-        if key.is_empty() {
+        // キーワードの名前は NUL を含まない（non_empty_name で拒否している）。NUL を含む検索語を
+        // LIKE に渡すと NUL の位置でパターンが切れて意図しない一致になるため、一致なしとする。
+        if key.is_empty() || key.contains('\0') {
             return Ok(Vec::new());
         }
         let rows = match mode {

@@ -60,7 +60,7 @@ fn trash_operation_state_machine_and_catalog_update() {
     assert!(rec.payload.entries.iter().all(|e| e.to.is_none()));
     assert_eq!(
         rec.payload.entries[0].from.absolute_path.as_deref(),
-        Some("/mnt/photos/2024/京都/A.ARW")
+        Some(native_path(&["/mnt/photos", "2024", "京都", "A.ARW"]).as_str())
     );
 
     // planned から直接 done にはできるが、done の後は変えられない（遷移の確認）。
@@ -163,7 +163,7 @@ fn move_and_rename_update_catalog_on_done() {
     assert_eq!(to.folder_id, dest);
     assert_eq!(
         to.absolute_path.as_deref(),
-        Some("/mnt/photos/2024/選別済み/A.ARW")
+        Some(native_path(&["/mnt/photos", "2024", "選別済み", "A.ARW"]).as_str())
     );
     // done の前はカタログは元のまま。
     assert_eq!(f.cat.file(raw.file_id).unwrap().folder_id, f.folder);
@@ -265,4 +265,53 @@ fn remove_assets_ignores_unknown_ids_and_keeps_files_on_disk() {
     assert!(again.asset_id > a.asset_id);
     assert!(again.master_variant_id > a.master_variant_id);
     assert!(again.file_id > a.file_id);
+}
+
+/// 移動の予定の後に asset をカタログから除いても、OS の移動が終わった記録を done にできる。
+///
+/// 修正前は、除かれたファイルの更新が NotFound になり、記録が executing のまま残っていた
+/// （起動のたびに未完了として列挙され、done にできない。レビューで再現）。
+#[test]
+fn move_can_be_completed_after_an_asset_was_removed() {
+    let mut f = Fixture::new();
+    let removed = f.photo("A.ARW", 1, None);
+    let kept = f.photo("B.ARW", 2, None);
+    let dest = f.cat.ensure_folder(f.volume, "2024/選別済み").unwrap();
+    let op = f
+        .cat
+        .plan_move(&[removed.file_id, kept.file_id], dest)
+        .unwrap();
+    f.cat.start_file_op(op).unwrap();
+    f.cat.remove_assets(&[removed.asset_id]).unwrap();
+    f.cat.complete_file_op(op).unwrap();
+    assert_eq!(f.cat.file_op(op).unwrap().state, FileOpState::Done);
+    assert!(f.cat.unfinished_file_ops().unwrap().is_empty());
+    // 残っているファイルは移動先に移り、除いた asset は戻らない。
+    assert_eq!(f.cat.file(kept.file_id).unwrap().folder_id, dest);
+    assert!(matches!(
+        f.cat.file(removed.file_id),
+        Err(CatalogError::NotFound(_))
+    ));
+    assert_eq!(f.rows("asset"), 1);
+    assert!(f.cat.check_integrity().unwrap().is_ok());
+
+    // リネームでも同じ（すべて除かれていても done にできる）。
+    let op = f
+        .cat
+        .plan_rename(&[(kept.file_id, "C.ARW".to_owned())])
+        .unwrap();
+    f.cat.remove_assets(&[kept.asset_id]).unwrap();
+    f.cat.complete_file_op(op).unwrap();
+    assert_eq!(f.cat.file_op(op).unwrap().state, FileOpState::Done);
+    assert_eq!(f.rows("asset"), 0);
+    assert!(f.cat.check_integrity().unwrap().is_ok());
+}
+
+/// OS の区切り文字で組み立てたパスの文字列（Windows では '\\' 区切りになるため）。
+fn native_path(parts: &[&str]) -> String {
+    let mut p = std::path::PathBuf::new();
+    for part in parts {
+        p.push(part);
+    }
+    p.to_string_lossy().into_owned()
 }

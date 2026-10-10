@@ -170,6 +170,63 @@ mod tests {
         );
     }
 
+    /// BLAKE3 の公式のテストベクタ（BLAKE3-team/BLAKE3 の test_vectors/test_vectors.json）の
+    /// `hash`（拡張出力）の先頭 32 バイト。入力は 0, 1, ..., 250 の繰り返し（[`data`]）。
+    /// 1024 バイトの境目（BLAKE3 の chunk の大きさ）の前後と、複数の chunk の木を含む長さを選んだ。
+    const BLAKE3_PUBLISHED: &[(usize, &str)] = &[
+        (
+            1,
+            "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
+        ),
+        (
+            1023,
+            "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11",
+        ),
+        (
+            1024,
+            "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
+        ),
+        (
+            1025,
+            "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444",
+        ),
+        (
+            102_400,
+            "bc3e3d41a1146b069abffad3c0d44860cf664390afce4d9661f7902e7943e085",
+        ),
+    ];
+
+    /// 1 回の読み取りで最大 `n` バイトしか返さない入力（ストリーミングの境目を試すため）。
+    struct SmallReads<R> {
+        inner: R,
+        n: usize,
+    }
+
+    impl<R: Read> Read for SmallReads<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let len = buf.len().min(self.n);
+            self.inner.read(&mut buf[..len])
+        }
+    }
+
+    #[test]
+    fn full_hash_matches_published_vectors_even_with_small_reads() {
+        for &(len, expected) in BLAKE3_PUBLISHED {
+            let d = data(len);
+            assert_eq!(
+                full_hash_reader(Cursor::new(&d)).unwrap(),
+                expected,
+                "len = {len}"
+            );
+            // 7 バイトずつ読んでも（chunk の境目をまたいで少しずつ加えても）同じ値。
+            let reader = SmallReads {
+                inner: Cursor::new(&d),
+                n: 7,
+            };
+            assert_eq!(full_hash_reader(reader).unwrap(), expected, "len = {len}");
+        }
+    }
+
     #[test]
     fn full_hash_streaming_equals_one_shot() {
         for len in [

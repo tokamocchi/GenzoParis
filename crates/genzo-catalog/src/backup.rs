@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, SHUTDOWN_CLEAN, STATE_SHUTDOWN};
 use crate::error::{CatalogError, Result};
 use crate::schema::{self, CATALOG_SPEC};
 use crate::util::timestamp_for_filename;
@@ -41,6 +41,16 @@ pub struct BackupInfo {
 ///
 /// `dest` が既にあればエラー。一時ファイルに書いて `fsync` し、名前を変えて公開する。
 pub(crate) fn vacuum_into_file(conn: &Connection, dest: &Path) -> Result<()> {
+    vacuum_into_file_with(conn, dest, |_| Ok(()))
+}
+
+/// [`vacuum_into_file`] と同じ。ただし、公開（名前の変更）の前に一時ファイルに `prepare` を行う。
+/// `prepare` が失敗した場合は公開せず、一時ファイルを削除する。
+fn vacuum_into_file_with(
+    conn: &Connection,
+    dest: &Path,
+    prepare: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     if dest.exists() {
         return Err(CatalogError::AlreadyExists(dest.to_path_buf()));
     }
@@ -62,6 +72,7 @@ pub(crate) fn vacuum_into_file(conn: &Connection, dest: &Path) -> Result<()> {
     })?;
     let result = (|| -> Result<()> {
         conn.execute("VACUUM INTO ?1", [tmp_str])?;
+        prepare(&tmp)?;
         sync_file(&tmp)?;
         if dest.exists() {
             return Err(CatalogError::AlreadyExists(dest.to_path_buf()));
@@ -262,6 +273,10 @@ pub struct RestoreReport {
 ///
 /// `dest` が既にあればエラー（既存のカタログを上書きしない）。復元したファイルを
 /// [`Catalog::open`] で開いて使う。バックアップのファイルは変更しない。
+///
+/// バックアップは使用中のカタログから作るため、「使用中」の印（DATA-05）を持っている。
+/// そのまま開くと「前回は正常に終了しなかった」と報告してしまうので、検証を通った復元先の
+/// コピーには「正常に終了した」印を付けてから公開する（レビューで再現した問題の修正）。
 pub fn restore_backup(backup: &Path, dest: &Path) -> Result<RestoreReport> {
     if dest.exists() {
         return Err(CatalogError::AlreadyExists(dest.to_path_buf()));
@@ -275,11 +290,25 @@ pub fn restore_backup(backup: &Path, dest: &Path) -> Result<RestoreReport> {
     if !problems.is_empty() {
         return Err(CatalogError::IntegrityCheckFailed(problems));
     }
-    vacuum_into_file(&conn, dest)?;
+    vacuum_into_file_with(&conn, dest, mark_restored_copy_clean)?;
     Ok(RestoreReport {
         path: dest.to_path_buf(),
         schema_version: version,
     })
+}
+
+/// 復元先の一時ファイルに「正常に終了した」印を付ける（公開の前に呼ぶ）。
+fn mark_restored_copy_clean(tmp: &Path) -> Result<()> {
+    let conn = Connection::open_with_flags(
+        tmp,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(schema::BUSY_TIMEOUT)?;
+    conn.execute(
+        "UPDATE app_state SET value = ?2 WHERE key = ?1",
+        [STATE_SHUTDOWN, SHUTDOWN_CLEAN],
+    )?;
+    conn.close().map_err(|(_, e)| CatalogError::Sqlite(e))
 }
 
 /// `PRAGMA integrity_check` の結果（問題がなければ空）。

@@ -229,3 +229,24 @@ fn virtual_copies_match_through_their_asset() {
             .unwrap();
     assert_eq!(t.search("海の夕焼け"), vec![master, vc]);
 }
+
+/// 制御文字（NUL など）を含む入力は、区切りとして扱う。
+///
+/// 修正前は、3 文字以上の語に NUL があると FTS5 が "unterminated string" のエラーを返し、
+/// 1〜2 文字の語に NUL があると LIKE のパターンが NUL の位置で切れて、「\0」だけの入力が
+/// 全件に一致していた（レビューで再現）。
+#[test]
+fn control_characters_in_queries_are_separators() {
+    let t = text_fixture();
+    // 「京都」と「旅行」の AND（間の NUL は空白と同じ）。
+    assert_eq!(t.labels("京都\0旅行"), t.labels("京都 旅行"));
+    assert_eq!(t.labels("京都\0旅行"), vec!["kyoto_trip"]);
+    // 3 文字以上の語の途中の NUL でもエラーにならない。
+    assert_eq!(t.labels("夕焼け\0富士山"), vec!["sunset"]);
+    assert_eq!(t.labels("tokyo\u{1}night"), vec!["upper"]);
+    // 1〜2 文字の語の NUL で、条件が「何にでも一致」に変わらない。
+    assert_eq!(t.labels("海\0"), vec!["sea"]);
+    assert!(t.labels("\0zz").is_empty());
+    // 制御文字だけの入力は、空白だけの入力と同じく条件なし。
+    assert_eq!(t.search("\0\u{7}"), t.search("   "));
+}

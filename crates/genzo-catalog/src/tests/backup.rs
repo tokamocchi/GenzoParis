@@ -34,14 +34,24 @@ fn online_backup_and_restore_to_a_new_file() {
     f.photo("B.ARW", 2, None);
 
     let restored = f.dir.path().join("restored.db");
+    let backup_bytes = std::fs::read(&backup).unwrap();
     let report = restore_backup(&backup, &restored).unwrap();
     assert_eq!(report.schema_version, crate::CATALOG_SCHEMA_VERSION);
+    // バックアップのファイルは変更しない（開いている間に作ったので「使用中」の印のまま）。
+    assert_eq!(std::fs::read(&backup).unwrap(), backup_bytes);
+    let in_backup: String = Connection::open(&backup)
+        .unwrap()
+        .query_row(
+            "SELECT value FROM app_state WHERE key = 'shutdown'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(in_backup, "in_use");
     let cat = Catalog::open(&restored).unwrap();
-    // バックアップは開いている間に作ったので、「使用中」の印が残っている。
-    assert_eq!(
-        cat.open_report().previous_shutdown,
-        PreviousShutdown::Unclean
-    );
+    // 検証を通った復元先は「正常に終了した」状態にするので、最初に開いたときに
+    // 「前回は正常に終了しなかった」と報告しない（DATA-05 の印を誤らせない）。
+    assert_eq!(cat.open_report().previous_shutdown, PreviousShutdown::Clean);
     let ids = cat.search(&Filter::default(), &Sort::default()).unwrap();
     assert_eq!(ids, vec![a.master_variant_id]);
     assert_eq!(

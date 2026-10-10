@@ -200,13 +200,16 @@ fn preview_index_is_rebuilt_from_files() {
         for k in &keys {
             cache.put(k, None, &jpeg(100, 1)).unwrap();
         }
-        // 生成の途中で終了した一時ファイル。
+        // 生成の途中で終了した一時ファイル（最後の更新から十分に時間が経ったもの）。
         let p = cache.path_for(&keys[0]).unwrap();
-        std::fs::write(
-            p.with_file_name(format!(".{}.1.2.tmp", keys[0])),
-            b"partial",
-        )
-        .unwrap();
+        let tmp = p.with_file_name(format!(".{}.1.2.tmp", keys[0]));
+        std::fs::write(&tmp, b"partial").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&tmp)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - crate::PREVIEW_TEMP_FILE_MIN_AGE * 2)
+            .unwrap();
         // ファイルだけが消えた。
         std::fs::remove_file(cache.path_for(&keys[1]).unwrap()).unwrap();
     }
@@ -230,4 +233,86 @@ fn preview_index_is_rebuilt_from_files() {
     std::fs::remove_file(cache.path_for(&keys[0]).unwrap()).unwrap();
     assert_eq!(cache.get(&keys[0]).unwrap(), None);
     assert_eq!(cache.count().unwrap(), 0);
+}
+
+/// 削除できないプレビュー（Windows で他のプログラムが開いているものなど）があっても、
+/// 公開（put）は失敗せず、回収はそれを飛ばして次の古いものを削除する。
+///
+/// 修正前は、最も古いファイルを削除できないと、以後のすべての put がエラーになっていた
+/// （レビューで再現。ここではファイルの代わりに空でないフォルダを置いて削除を失敗させる）。
+#[test]
+fn eviction_skips_previews_that_cannot_be_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cache = PreviewCache::open(
+        dir.path().join("previews"),
+        dir.path().join("thumbs.db"),
+        250,
+    )
+    .unwrap();
+    let keys: Vec<String> = (0..5).map(|i| key(i, CacheKind::L1Preview)).collect();
+    cache.put(&keys[0], None, &jpeg(100, 0)).unwrap();
+    cache.put(&keys[1], None, &jpeg(100, 1)).unwrap();
+    // 最も古い keys[0] を削除できない状態にする。
+    let stuck = cache.path_for(&keys[0]).unwrap();
+    std::fs::remove_file(&stuck).unwrap();
+    std::fs::create_dir_all(stuck.join("busy")).unwrap();
+
+    // 上限 250 を超えるので回収が動く。keys[0] は飛ばし、次に古い keys[1] を削除する。
+    let p = cache.put(&keys[2], None, &jpeg(100, 2)).unwrap();
+    assert!(p.exists());
+    assert!(!cache.contains(&keys[1]).unwrap());
+    assert!(cache.contains(&keys[2]).unwrap());
+    // 削除できなかったものは索引に残り、次の回収で再び試す。
+    assert_eq!(cache.count().unwrap(), 2);
+    let report = cache.evict_to(100, Some(&keys[2])).unwrap();
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.removed, 0);
+    assert_eq!(cache.count().unwrap(), 2);
+    // 削除できるようになれば削除される。
+    std::fs::remove_dir_all(&stuck).unwrap();
+    std::fs::write(&stuck, jpeg(100, 0)).unwrap();
+    let report = cache.evict_to(100, Some(&keys[2])).unwrap();
+    assert_eq!(
+        (report.removed, report.failed, report.freed_bytes),
+        (1, 0, 100)
+    );
+    assert!(!stuck.exists());
+    assert_eq!(cache.total_bytes().unwrap(), 100);
+    // 続けて公開しても失敗しない。
+    cache.put(&keys[3], None, &jpeg(100, 3)).unwrap();
+    cache.put(&keys[4], None, &jpeg(100, 4)).unwrap();
+    assert!(cache.total_bytes().unwrap() <= 250);
+}
+
+/// 突き合わせ（reconcile）は、書き込み中かもしれない新しい一時ファイルを削除しない。
+#[test]
+fn reconcile_keeps_recent_temp_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cache = PreviewCache::open(
+        dir.path().join("previews"),
+        dir.path().join("thumbs.db"),
+        1_000_000,
+    )
+    .unwrap();
+    let k = key(1, CacheKind::L1Preview);
+    let p = cache.put(&k, None, &jpeg(100, 1)).unwrap();
+    let fresh = p.with_file_name(format!(".{k}.7.8.tmp"));
+    std::fs::write(&fresh, b"writing").unwrap();
+    let report = cache.reconcile().unwrap();
+    assert_eq!(report.temp_files_removed, 0);
+    assert!(fresh.exists());
+    // 最後の更新から PREVIEW_TEMP_FILE_MIN_AGE 以上経ったものは、途中で終了したものとして削除する。
+    let old = std::time::SystemTime::now()
+        - crate::PREVIEW_TEMP_FILE_MIN_AGE
+        - std::time::Duration::from_secs(1);
+    std::fs::File::options()
+        .write(true)
+        .open(&fresh)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let report = cache.reconcile().unwrap();
+    assert_eq!(report.temp_files_removed, 1);
+    assert!(!fresh.exists());
+    assert!(p.exists());
 }

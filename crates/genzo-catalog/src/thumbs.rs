@@ -32,6 +32,7 @@ pub(crate) fn open_thumbs_connection(path: &Path) -> Result<Connection> {
     conn.busy_timeout(schema::BUSY_TIMEOUT)?;
     schema::check_identity(&conn, &THUMBS_SPEC, path)?;
     schema::configure_connection(&conn, Durability::Normal, false)?;
+    schema::use_immediate_transactions(&mut conn);
     schema::migrate(&mut conn, &THUMBS_SPEC, Some(path), None)?;
     Ok(conn)
 }
@@ -91,6 +92,7 @@ impl ThumbStore {
     pub fn open_in_memory() -> Result<Self> {
         let mut conn = Connection::open_in_memory()?;
         schema::configure_connection(&conn, Durability::Normal, true)?;
+        schema::use_immediate_transactions(&mut conn);
         schema::migrate(&mut conn, &THUMBS_SPEC, None, None)?;
         Ok(Self { conn, path: None })
     }

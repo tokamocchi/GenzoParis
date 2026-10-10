@@ -11,11 +11,11 @@ use crate::schema::{self, CATALOG_SCHEMA_VERSION, CATALOG_SPEC, Durability, Sche
 use crate::util::now_utc_string;
 
 /// `app_state` に保存する、前回の終了の状態のキー。
-const STATE_SHUTDOWN: &str = "shutdown";
+pub(crate) const STATE_SHUTDOWN: &str = "shutdown";
 /// 使用中（開いている）の印。
 const SHUTDOWN_IN_USE: &str = "in_use";
 /// 正常に終了した印。
-const SHUTDOWN_CLEAN: &str = "clean";
+pub(crate) const SHUTDOWN_CLEAN: &str = "clean";
 /// 最後に開いた日時のキー。
 const STATE_LAST_OPENED: &str = "last_opened_at";
 /// 最後に正常に閉じた日時のキー。
@@ -124,6 +124,7 @@ impl Catalog {
         // WAL への切り替えなどの書き込みの前に、GenzoParis のカタログかを確かめる。
         schema::check_identity(&conn, spec, path)?;
         schema::configure_connection(&conn, Durability::Full, false)?;
+        schema::use_immediate_transactions(&mut conn);
         let outcome = schema::migrate(
             &mut conn,
             spec,
@@ -148,6 +149,7 @@ impl Catalog {
     pub fn open_in_memory() -> Result<Self> {
         let mut conn = Connection::open_in_memory()?;
         schema::configure_connection(&conn, Durability::Full, true)?;
+        schema::use_immediate_transactions(&mut conn);
         let outcome = schema::migrate(&mut conn, &CATALOG_SPEC, None, None)?;
         let previous_shutdown = mark_in_use(&conn)?;
         Ok(Self {

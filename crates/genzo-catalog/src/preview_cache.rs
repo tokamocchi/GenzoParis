@@ -31,6 +31,15 @@ pub const DEFAULT_PREVIEW_CAPACITY_BYTES: u64 = 20_000_000_000;
 /// 回収で一度に調べる行の数。
 const EVICT_BATCH: i64 = 256;
 
+/// [`PreviewCache::reconcile`] が一時ファイルを「生成の途中で終了したもの」として削除するまでの、
+/// 最後の更新からの経過時間。
+///
+/// 仮置き: 10 分。突き合わせはアイドル時にも行い、その間もバックグラウンドのジョブが別の
+/// [`PreviewCache`]（別の接続）でプレビューを書いている場合がある（04 の 6.1 節）。書き込み中の
+/// 一時ファイルを消すと、その公開（名前の変更）が失敗する。プレビュー 1 件（数百 KB〜数 MB）の
+/// 書き込みと `fsync` は通常 1 秒未満で終わる見込みなので、それより十分に長い値として置いた。
+pub const PREVIEW_TEMP_FILE_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// 一時ファイルの名前の連番（同じプロセスの中での衝突を防ぐ）。
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -41,6 +50,9 @@ pub struct EvictionReport {
     pub removed: usize,
     /// 空けた容量（バイト）。
     pub freed_bytes: u64,
+    /// 削除できなかったプレビューの数（他のプログラムが開いている場合など）。索引には残し、
+    /// 次の回収でもう一度試す。
+    pub failed: usize,
 }
 
 /// 索引とフォルダの内容の突き合わせの結果。
@@ -242,33 +254,46 @@ impl PreviewCache {
 
     /// 合計が `capacity` 以下になるまで、最後に使った日時の古いものから削除する。
     ///
-    /// `protect` のキーは削除しない（公開した直後のものなど）。
+    /// `protect` のキーは削除しない（公開した直後のものなど）。削除できないファイル（Windows で
+    /// 他のプログラムが開いているものなど）は飛ばして次の古いものへ進み、
+    /// [`EvictionReport::failed`] に数える（1 つのファイルのために回収全体や [`PreviewCache::put`] を
+    /// 失敗させないため。レビューで再現）。
     pub fn evict_to(&mut self, capacity: u64, protect: Option<&str>) -> Result<EvictionReport> {
         let mut report = EvictionReport::default();
         let mut total = self.total_bytes()?;
+        // 飛ばした行を再び読まないよう、(use_seq, cache_key) の位置で区切って先へ読み進める。
+        let mut after: (i64, String) = (i64::MIN, String::new());
         while total > capacity {
-            let batch: Vec<(String, i64)> = {
+            let batch: Vec<(String, i64, i64)> = {
                 let mut stmt = self.conn.prepare_cached(
-                    "SELECT cache_key, size FROM preview
-                     WHERE cache_key IS NOT ?1 ORDER BY use_seq LIMIT ?2",
+                    "SELECT cache_key, size, use_seq FROM preview
+                     WHERE cache_key IS NOT ?1 AND (use_seq, cache_key) > (?3, ?4)
+                     ORDER BY use_seq, cache_key LIMIT ?2",
                 )?;
-                stmt.query_map(params![protect, EVICT_BATCH], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
+                stmt.query_map(params![protect, EVICT_BATCH, after.0, after.1], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })?
                 .collect::<rusqlite::Result<_>>()?
             };
             if batch.is_empty() {
                 break;
             }
-            for (key, size) in batch {
+            for (key, size, seq) in batch {
                 if total <= capacity {
                     break;
                 }
-                let path = self.path_for(&key)?;
-                match fs::remove_file(&path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(CatalogError::io(&path, e)),
+                after = (seq, key.clone());
+                // 索引のキーは書き込み時に検証している。不正なキーの行（外から書き換えられた場合）は、
+                // パスを組み立てずに索引から除くだけにする。
+                if let Ok(path) = self.path_for(&key) {
+                    match fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => {
+                            report.failed += 1;
+                            continue;
+                        }
+                    }
                 }
                 self.conn
                     .execute("DELETE FROM preview WHERE cache_key = ?1", [&key])?;
@@ -283,7 +308,8 @@ impl PreviewCache {
 
     /// 索引とフォルダの内容を突き合わせる（起動時やアイドル時。索引を失った場合の作り直し）。
     ///
-    /// 生成の途中で残った一時ファイルも削除する。
+    /// 生成の途中で残った一時ファイルも削除する。ただし、最後の更新から
+    /// [`PREVIEW_TEMP_FILE_MIN_AGE`] が経っていないものは、書き込み中の可能性があるので残す。
     pub fn reconcile(&mut self) -> Result<ReconcileReport> {
         let mut report = ReconcileReport::default();
         let mut on_disk = std::collections::HashMap::new();
@@ -300,7 +326,7 @@ impl PreviewCache {
                 for name in read_dir_names(&d2)? {
                     let p = d2.join(&name);
                     if name.starts_with('.') && name.ends_with(".tmp") {
-                        if fs::remove_file(&p).is_ok() {
+                        if is_stale_temp_file(&p) && fs::remove_file(&p).is_ok() {
                             report.temp_files_removed += 1;
                         }
                         continue;
@@ -373,6 +399,18 @@ fn read_dir_names(dir: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(out)
+}
+
+/// 一時ファイルが、最後の更新から [`PREVIEW_TEMP_FILE_MIN_AGE`] 以上経っているか。
+///
+/// 更新日時が読めない、または未来の日時（時計の変更など）の場合は、書き込み中の可能性を
+/// 否定できないので `false`（削除しない）とする。
+fn is_stale_temp_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .is_some_and(|age| age >= PREVIEW_TEMP_FILE_MIN_AGE)
 }
 
 fn is_hex_dir(name: &str) -> bool {
