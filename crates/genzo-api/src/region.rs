@@ -11,7 +11,9 @@
 //! - **P0 の「最新の 1 件だけ」**（04 の 6.1 節）: 対話用のスケジューラ（1 本のスレッド）に、決まった枠で
 //!   投入する。新しい要求が来ると、実行中・待っている古い要求は取り消され、その呼び出しは
 //!   [`ApiError::Cancelled`] で戻る（[`ApiError::is_cancelled`] が真。UI は誤りとして表示しない）。
-//!   [`Core::cancel_region`] で明示的に取り消せる（ルーペを閉じたときなど）。
+//!   [`Core::cancel_region`] で明示的に取り消せる（ルーペを閉じたときなど）。要求の番号の割り当てから、
+//!   スケジューラへの投入・取り消しトークンの公開までは 1 つのロックの下で行うので、呼び出しが重なっても
+//!   番号の順と投入の順は一致する（古い番号の要求が、後から投入して新しい要求を取り消すことはない）。
 //! - 倍率（[`RegionRequest::scale`]）: 1 は等倍。1 より小さければ B3（リニア）を面積平均で縮小してから
 //!   17a を適用する。1 より大きければ、等倍で描いた画面用の値を最近傍で拡大する（画素の境界をそのまま
 //!   見せるため）。
@@ -29,7 +31,7 @@ use genzo_jobs::{CancellationToken, JobError, JobOptions, Priority, SupersedePol
 use genzo_pipeline::finish::output::{Dither, quantize_u8};
 use genzo_pipeline::{FullResolutionJob, ImageTile, Roi, downscale_area};
 
-use crate::core::{Core, Inner};
+use crate::core::{Core, Inner, RegionRequestStage};
 use crate::error::ApiError;
 use crate::render::display_target;
 use crate::types::{RegionFrame, RegionInfo, RegionRequest, RegionSpace};
@@ -75,31 +77,57 @@ impl Core {
         let (source, settings, generation) =
             crate::develop::session_snapshot(inner, request.variant_id)?;
         let req = *request;
-        let seq = {
-            let mut st = inner.develop.region.lock();
+        // 要求の番号の割り当て・スケジューラへの投入・取り消しトークンの公開を、1 つの区間（`region` の
+        // ロックを持ったまま）にする。別々にすると、先に番号を取った古い要求が、止まっている間に追い越した
+        // 新しい要求の後で投入して、新しい要求（実行中・待ち）を取り消す（最後に描くのが古い範囲になる）。
+        // `pending` の公開も、投入の順と食い違わない。ほかのロックは、スケジューラの内部のロックだけ（順序は
+        // `region` → スケジューラ。スケジューラは、持っている間にここへ戻らない）。
+        let (seq, handle) = {
+            let mut st = match inner.develop.region.try_lock() {
+                Some(guard) => guard,
+                None => {
+                    // テスト用の口（`CoreHooks::on_region_request`）。待つ前に、ロックを持たずに呼ぶ。
+                    if let Some(hook) = &inner.on_region_request {
+                        hook(RegionRequestStage::Waiting);
+                    }
+                    inner.develop.region.lock()
+                }
+            };
             st.last_request += 1;
-            st.last_request
+            let seq = st.last_request;
+            // テスト用の口。区間の中（ロックを持ったまま）で呼ぶ。
+            if let Some(hook) = &inner.on_region_request {
+                hook(RegionRequestStage::Numbered(seq));
+            }
+            let weak = Arc::downgrade(inner);
+            let handle = inner.interactive.submit_latest_with(
+                REGION_SLOT,
+                JobOptions::new(Priority::P0)
+                    .label("表示範囲の描画")
+                    .supersede_policy(SupersedePolicy::CancelRunning),
+                move |ctx| {
+                    let Some(inner) = weak.upgrade() else {
+                        return Err(JobError::Cancelled);
+                    };
+                    // テスト用の口（スケジューラのスレッドで呼ぶ。`region` のロックは持たない）。
+                    if let Some(hook) = &inner.on_region_request {
+                        hook(RegionRequestStage::Running(seq));
+                    }
+                    let token = ctx.token().clone();
+                    let control = move || token.is_cancelled();
+                    let job = match inner.engine.full_resolution(&source, &settings) {
+                        Ok(j) => j,
+                        Err(e) => return Ok(Err(ApiError::from(e))),
+                    };
+                    Ok(render(&inner, &job, &req, generation, seq, &control))
+                },
+            );
+            if let Some(hook) = &inner.on_region_request {
+                hook(RegionRequestStage::Submitted(seq));
+            }
+            st.pending = Some((seq, handle.token().clone()));
+            (seq, handle)
         };
-        let weak = Arc::downgrade(inner);
-        let handle = inner.interactive.submit_latest_with(
-            REGION_SLOT,
-            JobOptions::new(Priority::P0)
-                .label("表示範囲の描画")
-                .supersede_policy(SupersedePolicy::CancelRunning),
-            move |ctx| {
-                let Some(inner) = weak.upgrade() else {
-                    return Err(JobError::Cancelled);
-                };
-                let token = ctx.token().clone();
-                let control = move || token.is_cancelled();
-                let job = match inner.engine.full_resolution(&source, &settings) {
-                    Ok(j) => j,
-                    Err(e) => return Ok(Err(ApiError::from(e))),
-                };
-                Ok(render(&inner, &job, &req, generation, seq, &control))
-            },
-        );
-        inner.develop.region.lock().pending = Some((seq, handle.token().clone()));
         let outcome = handle.wait();
         let frame = {
             let mut st = inner.develop.region.lock();

@@ -108,7 +108,7 @@ pub mod types;
 
 pub use command::{Command, Response};
 pub use config::{CoreConfig, GpuMode, WorkerLaunch};
-pub use core::{Core, CoreHooks};
+pub use core::{Core, CoreHooks, RegionRequestStage, SettingsUpdateStage};
 pub use delete::{OsTrash, TrashBackend};
 pub use develop::{HISTORY_LABEL_GENERIC, HISTORY_LABEL_PASTE, describe_change};
 pub use error::{ApiError, ErrorInfo, ErrorKind};

@@ -1492,3 +1492,214 @@ fn names_that_differ_only_in_case_or_normalization_are_not_merged() {
         core.close().unwrap();
     }
 }
+
+/// 同じ項目を同時に変える 2 つの設定の更新が、保存（カタログ）と反映（メモリ上の設定・キャッシュの上限）
+/// の順序を入れ替えて終わらない（Codex のレビュー。`Core` は `Sync` で、UI の複数の経路から同時に呼べる）。
+///
+/// 以前は、保存（カタログのロック）と反映（設定のロック）を別々のロックで行ったので、A が保存して反映の
+/// 前で止まっている間に、B が保存・反映まで終えると、後から A が古い値を反映した（カタログは B の値、
+/// 実行中は A の値になり、次に開くまで食い違う）。
+///
+/// 順序は、時間ではなくフック（`CoreHooks::on_settings_update`）とチャネルで決める。A を保存の直後で止めて、
+/// B を始める。B が A を追い越して保存まで進んだ（`Saved`）か、A の終わりを待つ（`Waiting`）かの
+/// 知らせのどちらかが届くまで待つので、どちらの場合も順序が決まる（待つ上限は失敗のときだけ使う）。
+#[test]
+fn concurrent_settings_updates_do_not_leave_memory_different_from_the_catalog() {
+    use crossbeam_channel::unbounded;
+    use genzo_api::SettingsUpdateStage as Stage;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    enum Seen {
+        ASaved,
+        BSaved,
+        BWaiting,
+    }
+
+    let env = Env::new();
+    let (seen_tx, seen_rx) = unbounded::<Seen>();
+    let (release_a_tx, release_a_rx) = unbounded::<()>();
+    let (release_b_tx, release_b_rx) = unbounded::<()>();
+    let saved_count = Arc::new(AtomicUsize::new(0));
+    let core = env.open_with_hooks(|hooks| {
+        hooks.on_settings_update = Some(Arc::new(move |stage| match stage {
+            // 保存の直後で止める（1 回目が A、2 回目が B。A が止まってから B を始めるので、順序は決まっている）。
+            Stage::Saved => {
+                if saved_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let _ = seen_tx.send(Seen::ASaved);
+                    let _ = release_a_rx.recv();
+                } else {
+                    let _ = seen_tx.send(Seen::BSaved);
+                    let _ = release_b_rx.recv();
+                }
+            }
+            Stage::Waiting => {
+                let _ = seen_tx.send(Seen::BWaiting);
+            }
+        }));
+    });
+    let update_a = SettingsUpdate {
+        preview_cache_bytes: Some(150_000_000),
+        default_utc_offset_minutes: Some(0),
+        ..Default::default()
+    };
+    let update_b = SettingsUpdate {
+        preview_cache_bytes: Some(250_000_000),
+        default_utc_offset_minutes: Some(60),
+        ..Default::default()
+    };
+    let (seen_b, in_memory) = std::thread::scope(|scope| {
+        let core = &core;
+        let a = scope.spawn(|| core.update_settings(&update_a));
+        // A が、カタログに保存し終えて、反映の前で止まるまで待つ。
+        let first = seen_rx.recv_timeout(common::WAIT_LIMIT);
+        assert!(matches!(first, Ok(Seen::ASaved)), "{first:?}");
+        let b = scope.spawn(|| core.update_settings(&update_b));
+        // B が A を追い越して保存まで進んだか、A の終わりを待つか。
+        let seen_b = seen_rx.recv_timeout(common::WAIT_LIMIT);
+        // 結果によらず、止めたスレッドを再開する（止めたままだと、スレッドが終わらない）。追い越した場合は、
+        // 先に B を終えてから A を再開する（以前の、食い違う順序）。待つ場合は、A を終えてから B が進む。
+        if matches!(seen_b, Ok(Seen::BSaved)) {
+            let _ = release_b_tx.send(());
+            b.join().unwrap().unwrap();
+            let _ = release_a_tx.send(());
+            a.join().unwrap().unwrap();
+        } else {
+            let _ = release_a_tx.send(());
+            a.join().unwrap().unwrap();
+            let _ = release_b_tx.send(());
+            b.join().unwrap().unwrap();
+        }
+        (seen_b, core.settings())
+    });
+    assert!(
+        matches!(seen_b, Ok(Seen::BSaved | Seen::BWaiting)),
+        "{seen_b:?}"
+    );
+    // 実行中の設定は、カタログに保存された設定（次に開いたときに復元される値）と同じ。
+    core.close().unwrap();
+    let core = env.open();
+    let restored = core.settings();
+    assert_eq!(
+        in_memory, restored,
+        "実行中の設定が、カタログに保存された設定と食い違う（追い越し: {seen_b:?}）"
+    );
+    // 保存は A、B の順に終わっているので、残るのは B の値。
+    assert_eq!(restored.preview_cache_bytes, 250_000_000);
+    assert_eq!(restored.default_utc_offset_minutes, 60);
+    core.close().unwrap();
+}
+
+/// 表示範囲の描画（ルーペ・パン）が重なっても、先に番号を取った古い要求が、後から投入して、先に投入した
+/// 新しい要求を取り消さない（Codex のレビュー。`Core` は `Sync` で、Tauri からは要求ごとに `spawn_blocking`
+/// で呼ぶので、パンの連続で 2 つの `render_region` は重なる）。
+///
+/// 以前は、要求の番号の割り当て（`region` のロック）とスケジューラへの投入が別々で、間を通しで守るものが
+/// なかった。A が番号 1 を割り当てて止まっている間に、B が番号 2 を割り当てて投入すると、後から A が
+/// 投入して B（実行中・待ち）を取り消した。残るのは古い範囲（番号 1）の描画だけで、最新の範囲は描かれない。
+///
+/// 順序は、時間ではなくフック（`CoreHooks::on_region_request`）とチャネルで決める。A を番号の割り当ての
+/// 直後で止めて、B を始める。B が A を追い越して番号を取った（`Numbered(2)`）か、A の区間の終わりを待つ
+/// （`Waiting`）かの知らせのどちらかが届くまで待つので、どちらの場合も順序が決まる。追い越した場合は、
+/// B のジョブを実行中のまま止めてから A を再開する（B が先に終わると、A が後から投入しても取り消すものが
+/// ない）。待つ上限は失敗のときだけ使う。
+#[test]
+fn an_older_region_request_does_not_cancel_a_newer_one_submitted_before_it() {
+    use crossbeam_channel::unbounded;
+    use genzo_api::{RegionRequest, RegionRequestStage as Stage, RegionSpace};
+    use std::sync::Arc;
+
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 1, None);
+    let (seen_tx, seen_rx) = unbounded::<Stage>();
+    let (release_a_tx, release_a_rx) = unbounded::<()>();
+    let (release_job_tx, release_job_rx) = unbounded::<()>();
+    let core = env.open_with_hooks(|hooks| {
+        // 止めたスレッドは、再開の合図か、送り側が閉じる（テストが失敗して抜ける）と動く。
+        hooks.on_region_request = Some(Arc::new(move |stage| {
+            let _ = seen_tx.send(stage);
+            match stage {
+                // 1 番目の要求（A）を、番号を割り当てた直後（投入の前）で止める。
+                Stage::Numbered(1) => {
+                    let _ = release_a_rx.recv();
+                }
+                // 2 番目の要求（B）のジョブを、実行中のまま止める。
+                Stage::Running(2) => {
+                    let _ = release_job_rx.recv();
+                }
+                _ => {}
+            }
+        }));
+    });
+    import(&core, &env.photos);
+    let v = all_items(&core)[0].variant_id;
+    core.open_develop(v).unwrap();
+    let request = |x: f64, y: f64, w: f64, h: f64| RegionRequest {
+        variant_id: v,
+        space: RegionSpace::Output,
+        x,
+        y,
+        width: w,
+        height: h,
+        scale: 1.0,
+    };
+    let (req_a, req_b) = (
+        request(0.0, 0.0, 32.0, 24.0),
+        request(16.0, 8.0, 16.0, 16.0),
+    );
+
+    let core_ref = &core;
+    let (a_result, b_result, b_first) = std::thread::scope(move |scope| {
+        let wait_for = |want: Stage| {
+            loop {
+                match seen_rx.recv_timeout(common::WAIT_LIMIT) {
+                    Ok(s) if s == want => return,
+                    Ok(_) => {}
+                    Err(e) => panic!("{want:?} の知らせが届かない: {e}"),
+                }
+            }
+        };
+        let a = scope.spawn(move || core_ref.render_region(&req_a));
+        // A が番号 1 を割り当てて、止まるまで待つ。
+        wait_for(Stage::Numbered(1));
+        let b = scope.spawn(move || core_ref.render_region(&req_b));
+        // B が A を追い越して番号 2 を取ったか、A の区間の終わりを待つか。
+        let b_first = loop {
+            match seen_rx.recv_timeout(common::WAIT_LIMIT) {
+                Ok(s @ (Stage::Numbered(2) | Stage::Waiting)) => break s,
+                Ok(_) => {}
+                Err(e) => panic!("B の最初の知らせが届かない: {e}"),
+            }
+        };
+        if b_first == Stage::Waiting {
+            // 直した後: A が区間を出てから、B が番号を取って投入する。
+            let _ = release_a_tx.send(());
+            wait_for(Stage::Running(2));
+        } else {
+            // 以前: 追い越した B のジョブが実行中で止まってから、A を再開する（A の投入が B を取り消す）。
+            wait_for(Stage::Running(2));
+            let _ = release_a_tx.send(());
+            wait_for(Stage::Submitted(1));
+        }
+        let _ = release_job_tx.send(());
+        (a.join().unwrap(), b.join().unwrap(), b_first)
+    });
+
+    let b_frame = b_result.unwrap_or_else(|e| {
+        panic!("最新の要求（番号 2）が、古い要求（番号 1）に取り消された（B の最初: {b_first:?}）: {e:?}")
+    });
+    assert_eq!(b_frame.info.request, 2);
+    assert_eq!(
+        (b_frame.info.x, b_frame.info.y, b_frame.info.width),
+        (16, 8, 16)
+    );
+    // A は、描けたか、B に取り消された（どちらも誤りではない）。
+    match a_result {
+        Ok(f) => assert_eq!(f.info.request, 1),
+        Err(e) => assert!(e.is_cancelled(), "{e:?}"),
+    }
+    // 最後に描けた結果は最新の要求のもの。
+    assert_eq!(core.region_frame().unwrap().info.request, 2);
+    core.close().unwrap();
+}

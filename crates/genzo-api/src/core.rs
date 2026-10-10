@@ -24,6 +24,16 @@
 //!
 //! 現像のセッション → 検索の状態 → カタログ → キャッシュ（thumbs.db・previews）。それ以外のロック
 //! （ジョブの記録・GPU・画面のプロファイル・削除の計画・設定）は、他のロックを持たずに短く使う。
+//!
+//! 例外は、設定の更新のロック（`Inner::settings_update`）。[`Core::update_settings`] だけが、ほかのロックを
+//! 持たずに最初に取り、更新が終わるまで（カタログ → 設定 → キャッシュ → 推定し直しのジョブの記録の順に
+//! 取りながら）持つ。ほかの処理はこのロックを取らないので、ロックの輪はできない。
+//!
+//! もう 1 つの例外は、表示範囲の描画のロック（`DevelopShared::region`）。[`Core::render_region`] は、要求の
+//! 番号の割り当てから、対話用のスケジューラへの投入と取り消しトークンの公開まで（1 つの区間）を、このロックを
+//! 持ったまま行う（投入の順と番号の順を一致させるため）。この間に取るほかのロックは、スケジューラの内部の
+//! ロックだけで、スケジューラは持っている間に API 側のロックを取らない（取り消しの通知などはロックの外で
+//! 行う）。ほかの処理がこのロックを持ったまま取るロックはない。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -63,6 +73,42 @@ pub struct CoreHooks {
     /// 待たずに、ほかの操作（現像設定の保存など）が終わる」ことを、時間によらずに確かめられる。
     #[doc(hidden)]
     pub before_preview_scan: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// 設定の更新（[`Core::update_settings`]）が途中の段階に着いたときに呼ぶ関数（テスト専用。
+    /// [`SettingsUpdateStage`]）。関数の中で更新を止めておけば、「別の更新が途中の間に、もう 1 つの更新が
+    /// 追い越して終わらない」ことを、時間によらずに確かめられる。
+    #[doc(hidden)]
+    pub on_settings_update: Option<Arc<dyn Fn(SettingsUpdateStage) + Send + Sync>>,
+    /// 表示範囲の描画（[`Core::render_region`]）が途中の段階に着いたときに呼ぶ関数（テスト専用。
+    /// [`RegionRequestStage`]）。関数の中で要求を止めておけば、「2 つの要求が重なっても、古い要求が新しい
+    /// 要求を追い越して取り消さない」ことを、時間によらずに確かめられる。
+    #[doc(hidden)]
+    pub on_region_request: Option<Arc<dyn Fn(RegionRequestStage) + Send + Sync>>,
+}
+
+/// 表示範囲の描画（[`Core::render_region`]）の途中の段階（テスト専用のフック
+/// [`CoreHooks::on_region_request`] に渡す）。数は要求の通し番号（1 から。[`crate::types::RegionInfo::request`]）。
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionRequestStage {
+    /// 別の要求が、番号の割り当てから投入までの区間の中にいて、その終わりを待つ直前（ロックを持たずに呼ぶ）。
+    Waiting,
+    /// 番号を割り当てた直後で、スケジューラへ投入する前。
+    Numbered(u64),
+    /// スケジューラへ投入した直後で、取り消しのトークンを公開する前。
+    Submitted(u64),
+    /// 描画のジョブが始まった直後（スケジューラのスレッドで呼ぶ）。
+    Running(u64),
+}
+
+/// 設定の更新（[`Core::update_settings`]）の途中の段階（テスト専用のフック
+/// [`CoreHooks::on_settings_update`] に渡す）。
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsUpdateStage {
+    /// 別の更新が更新専用のロックを持っていて、その終わりを待つ直前。
+    Waiting,
+    /// カタログへの保存が終わり、メモリ上の設定とキャッシュの上限への反映の前。
+    Saved,
 }
 
 impl Default for CoreHooks {
@@ -70,6 +116,8 @@ impl Default for CoreHooks {
         Self {
             trash: Arc::new(crate::delete::OsTrash),
             before_preview_scan: None,
+            on_settings_update: None,
+            on_region_request: None,
         }
     }
 }
@@ -100,7 +148,14 @@ pub(crate) struct Inner {
     pub trash: Arc<dyn TrashBackend>,
     /// [`CoreHooks::before_preview_scan`]。
     pub before_preview_scan: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// [`CoreHooks::on_settings_update`]。
+    pub on_settings_update: Option<Arc<dyn Fn(SettingsUpdateStage) + Send + Sync>>,
+    /// [`CoreHooks::on_region_request`]。
+    pub on_region_request: Option<Arc<dyn Fn(RegionRequestStage) + Send + Sync>>,
     pub settings: Mutex<CoreSettings>,
+    /// 設定の更新（[`Core::update_settings`]）を 1 つずつにするロック（保存・メモリ上の設定への反映・
+    /// キャッシュの上限への反映を、別々のロックで行うので、更新全体を守る。ロックの順序の節）。
+    pub settings_update: Mutex<()>,
     /// 最後に投入した撮影日時の推定し直しのジョブ（続けて設定を変えたときに、前のジョブを取り消す）。
     pub reresolve_job: Mutex<Option<u64>>,
     /// キャッシュの世代（カタログの `cache_generation`。キャッシュキーの材料。復元の後に変わる）。
@@ -352,7 +407,10 @@ impl Core {
             plans: Mutex::new(PlanStore::default()),
             trash: hooks.trash,
             before_preview_scan: hooks.before_preview_scan,
+            on_settings_update: hooks.on_settings_update,
+            on_region_request: hooks.on_region_request,
             settings: Mutex::new(settings),
+            settings_update: Mutex::new(()),
             reresolve_job: Mutex::new(None),
             cache_generation,
             raw_decoder,

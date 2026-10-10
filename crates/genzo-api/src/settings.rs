@@ -13,7 +13,7 @@ use genzo_catalog::Catalog;
 use genzo_model::OutputColorSpace;
 
 use crate::config::CoreConfig;
-use crate::core::{Core, Inner};
+use crate::core::{Core, Inner, SettingsUpdateStage};
 use crate::error::ApiError;
 use crate::events::{CatalogChange, Event, EventHub, WarningCode};
 use crate::jobs::spawn_job;
@@ -162,6 +162,9 @@ impl Core {
 
     /// 設定を変えてカタログに保存する。
     ///
+    /// 同時に呼んでも、更新全体（保存から、メモリ上の設定・キャッシュの上限への反映まで）は 1 つずつ行う
+    /// （同じ項目を同時に変えても、実行中の設定と保存された設定が食い違わない。後から順番が来た更新の値が残る）。
+    ///
     /// - キャッシュの上限: すぐに有効（超えていれば古いものから削除する。SCL-04）。
     /// - キャッシュの場所: 次に開いたときに有効（今のキャッシュは移さない）。取り込みは、開いている間、
     ///   今開いているキャッシュのフォルダと、設定した新しい場所の両方を飛ばす（`import::excluded_dirs`）。
@@ -192,6 +195,21 @@ impl Core {
                 dir.display()
             )));
         }
+        // 更新全体（カタログへの保存 → メモリ上の設定 → キャッシュの上限）を 1 つずつにする。保存と反映は別の
+        // ロックで行うので、守らないと、同じ項目を同時に変える 2 つの更新が、保存と反映で順序を入れ替えて
+        // 終わり、実行中の設定が、カタログに保存された値（次に開いたときに復元される値）や、キャッシュの
+        // 上限と食い違った（コア API は `Sync` で、UI の複数の経路から同時に呼べる）。「今の設定」
+        // （`previous`）も、前の更新が終わった後の値で読む。
+        let _serial = match inner.settings_update.try_lock() {
+            Some(guard) => guard,
+            None => {
+                // テスト用の口（`CoreHooks::on_settings_update`）。待つ前に、ロックを持たずに呼ぶ。
+                if let Some(hook) = &inner.on_settings_update {
+                    hook(SettingsUpdateStage::Waiting);
+                }
+                inner.settings_update.lock()
+            }
+        };
         let previous = inner.settings.lock().clone();
         inner.with_catalog_api(|c| {
             if let Some(dir) = &update.preview_cache_dir {
@@ -218,6 +236,10 @@ impl Core {
             }
             Ok(())
         })?;
+        // テスト用の口（`CoreHooks::on_settings_update`）。更新のロックを持ったまま呼ぶ。
+        if let Some(hook) = &inner.on_settings_update {
+            hook(SettingsUpdateStage::Saved);
+        }
         let current = {
             let mut s = inner.settings.lock();
             if let Some(dir) = &update.preview_cache_dir {
