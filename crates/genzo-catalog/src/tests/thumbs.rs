@@ -316,3 +316,43 @@ fn reconcile_keeps_recent_temp_files() {
     assert!(!fresh.exists());
     assert!(p.exists());
 }
+
+/// キャッシュの付随情報（持ち主のカタログの世代）と、作り直し待ちの印。
+#[test]
+fn thumbs_meta_and_regeneration_marks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("thumbs.db");
+    let mut store = ThumbStore::open(&path).unwrap();
+    assert_eq!(store.meta("catalog_generation").unwrap(), None);
+    store.set_meta("catalog_generation", "abc").unwrap();
+    store.set_meta("catalog_generation", "def").unwrap();
+    assert_eq!(
+        store.meta("catalog_generation").unwrap().as_deref(),
+        Some("def")
+    );
+    let (a, b) = (VariantId::new(1), VariantId::new(2));
+    store
+        .put(a, &key(1, CacheKind::L0Thumb), &jpeg(10, 1))
+        .unwrap();
+    store.mark_regen_pending(&[a, b]).unwrap();
+    store.mark_regen_pending(&[a]).unwrap();
+    let mut pending = store.regen_pending().unwrap();
+    pending.sort();
+    assert_eq!(pending, vec![a, b]);
+    store.clear_regen_pending(a).unwrap();
+    assert_eq!(store.regen_pending().unwrap(), vec![b]);
+    // 存在しない variant の印は回収で外す。
+    store.collect_garbage(&HashSet::from([a])).unwrap();
+    assert!(store.regen_pending().unwrap().is_empty());
+    store.mark_regen_pending(&[a]).unwrap();
+    assert_eq!(store.clear().unwrap(), 1);
+    assert_eq!(store.count().unwrap(), 0);
+    assert!(store.regen_pending().unwrap().is_empty());
+    store.close().unwrap();
+    // 開き直しても残る。
+    let store = ThumbStore::open(&path).unwrap();
+    assert_eq!(
+        store.meta("catalog_generation").unwrap().as_deref(),
+        Some("def")
+    );
+}

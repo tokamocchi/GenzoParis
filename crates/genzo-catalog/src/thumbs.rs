@@ -200,7 +200,89 @@ impl ThumbStore {
         for chunk in dead.chunks(GC_DELETE_BATCH) {
             removed += self.remove(chunk)?;
         }
+        // 存在しない variant の作り直し待ちの印も外す。
+        let pending: Vec<VariantId> = self
+            .regen_pending()?
+            .into_iter()
+            .filter(|v| !alive.contains(v))
+            .collect();
+        for v in pending {
+            self.clear_regen_pending(v)?;
+        }
         Ok(removed)
+    }
+
+    /// キャッシュの付随情報（`cache_meta`）の値を読む（キャッシュを作ったカタログの世代など）。
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM cache_meta WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// キャッシュの付随情報（`cache_meta`）の値を書く。
+    pub fn set_meta(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO cache_meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// すべてのサムネイルと作り直し待ちの印を削除する（キャッシュの持ち主のカタログが変わったとき）。
+    /// 削除したサムネイルの数を返す。
+    pub fn clear(&mut self) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let n = tx.execute("DELETE FROM thumb", [])?;
+        tx.execute("DELETE FROM regen_pending", [])?;
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// 現像結果からの作り直しを待つ印を付ける（作り直しの依頼が終了で取り消されても、次の起動で
+    /// 作り直せるように）。
+    pub fn mark_regen_pending(&mut self, variant_ids: &[VariantId]) -> Result<()> {
+        if variant_ids.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO regen_pending(variant_id, marked_at) VALUES (?1, ?2)
+                 ON CONFLICT(variant_id) DO UPDATE SET marked_at = excluded.marked_at",
+            )?;
+            let now = now_utc_string();
+            for v in variant_ids {
+                stmt.execute(params![v.get(), now])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 作り直し待ちの印を外す（作り直した・作る必要がなくなったとき）。
+    pub fn clear_regen_pending(&mut self, variant_id: VariantId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM regen_pending WHERE variant_id = ?1",
+            [variant_id.get()],
+        )?;
+        Ok(())
+    }
+
+    /// 作り直し待ちの印のある variant（古い順）。
+    pub fn regen_pending(&self) -> Result<Vec<VariantId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT variant_id FROM regen_pending ORDER BY marked_at, variant_id")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids.into_iter().map(VariantId::new).collect())
     }
 
     /// 保存しているサムネイルの数。

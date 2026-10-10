@@ -20,6 +20,44 @@ pub(crate) const SHUTDOWN_CLEAN: &str = "clean";
 const STATE_LAST_OPENED: &str = "last_opened_at";
 /// 最後に正常に閉じた日時のキー。
 const STATE_LAST_CLOSED: &str = "last_closed_at";
+/// キャッシュの世代のキー（カタログを作った・復元したときに新しくする。外部のキャッシュ（thumbs.db・
+/// L1 プレビュー）がこのカタログのものかを確かめるのに使う）。
+pub(crate) const STATE_CACHE_GENERATION: &str = "cache_generation";
+/// カタログの ID のキー（カタログを初めて書き込み用に開いたときに作る。バックアップ・復元では変わらない。
+/// 同じファイル名の別のカタログのバックアップを見分けるのに使う。F10）。
+pub(crate) const STATE_CATALOG_ID: &str = "catalog_id";
+
+/// 新しいキャッシュの世代（重ならない値。16 進数 32 文字）。
+pub(crate) fn new_cache_generation() -> String {
+    unique_hex(b"genzo.cache_generation\0")
+}
+
+/// 新しいカタログの ID（重ならない値。16 進数 32 文字）。
+fn new_catalog_id() -> String {
+    unique_hex(b"genzo.catalog_id\0")
+}
+
+/// 重ならない値（16 進数 32 文字）。時刻・プロセス・通し番号と、標準ライブラリの `RandomState`（OS の
+/// 乱数で初期化される）から作る（乱数の crate を使わないため）。`domain` は用途の区別。
+fn unique_hex(domain: &[u8]) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut h = blake3::Hasher::new();
+    h.update(domain);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    h.update(&now.to_le_bytes());
+    h.update(&std::process::id().to_le_bytes());
+    h.update(&COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    h.update(&random.to_le_bytes());
+    h.finalize().to_hex()[..32].to_owned()
+}
 
 /// 前回の終了の状態（DATA-05 の起動時の短いチェック）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +302,24 @@ impl Catalog {
     pub fn app_state(&self, key: &str) -> Result<Option<String>> {
         get_app_state(&self.conn, key)
     }
+
+    /// キャッシュの世代（なければ作って保存する）。カタログを作ったとき・バックアップから復元したときに
+    /// 新しい値になる。外部のキャッシュ（thumbs.db・L1 プレビュー）に記録しておき、違えば捨てる
+    /// （復元の後は ID が再利用されるため、前の写真のキャッシュを別の写真のものとして使わないように）。
+    pub fn cache_generation(&mut self) -> Result<String> {
+        if let Some(g) = get_app_state(&self.conn, STATE_CACHE_GENERATION)? {
+            return Ok(g);
+        }
+        let g = new_cache_generation();
+        set_app_state(&self.conn, STATE_CACHE_GENERATION, &g)?;
+        Ok(g)
+    }
+
+    /// カタログの ID（書き込み用に開いたときに、なければ作る。読み取り専用で開いた古いカタログでは
+    /// `None` のことがある）。バックアップ・復元では変わらない（F10）。
+    pub fn catalog_id(&self) -> Result<Option<String>> {
+        get_app_state(&self.conn, STATE_CATALOG_ID)
+    }
 }
 
 /// 接続の設定を読む。
@@ -280,7 +336,7 @@ pub(crate) fn connection_settings(conn: &Connection) -> Result<ConnectionSetting
     })
 }
 
-fn get_app_state(conn: &Connection, key: &str) -> Result<Option<String>> {
+pub(crate) fn get_app_state(conn: &Connection, key: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row("SELECT value FROM app_state WHERE key = ?1", [key], |row| {
             row.get(0)
@@ -307,6 +363,10 @@ fn mark_in_use(conn: &Connection) -> Result<PreviousShutdown> {
     };
     set_app_state(&tx, STATE_SHUTDOWN, SHUTDOWN_IN_USE)?;
     set_app_state(&tx, STATE_LAST_OPENED, &now_utc_string())?;
+    // カタログの ID（この修正の前に作ったカタログには、最初に開いたときに付ける。F10）。
+    if get_app_state(&tx, STATE_CATALOG_ID)?.is_none() {
+        set_app_state(&tx, STATE_CATALOG_ID, &new_catalog_id())?;
+    }
     tx.commit()?;
     Ok(previous)
 }

@@ -402,15 +402,145 @@ fn files_with_unreadable_metadata_are_registered_with_error_status() {
         f.cat.files_with_status(FileStatus::Error).unwrap(),
         vec![o.file_id]
     );
-    // 直ったファイルを登録し直すと ok に戻る（内容は同じなので Unchanged）。
+    // 直ったファイルを登録し直すと ok に戻る（読み直したメタデータを保存するので Updated。内容は同じ
+    // なので revision はそのまま。F03）。
     let fixed = RegisterFile { error: None, ..req };
-    assert_eq!(
-        f.cat.register_file(&fixed).unwrap().status,
-        RegisterStatus::Unchanged
-    );
+    let u = f.cat.register_file(&fixed).unwrap();
+    assert_eq!((u.status, u.revision), (RegisterStatus::Updated, 1));
     let file = f.cat.file(o.file_id).unwrap();
     assert_eq!(file.status, FileStatus::Ok);
     assert_eq!(file.status_reason, None);
+}
+
+/// 読めずに error で登録した写真を、内容が同じまま取り込み直してメタデータを読めた場合（F03）。
+#[test]
+fn metadata_read_after_an_error_is_stored_even_if_the_content_is_the_same() {
+    let mut f = Fixture::new();
+    let broken = RegisterFile {
+        folder_id: f.folder,
+        name: "DSC00001.ARW".to_owned(),
+        facts: facts(1),
+        kind: AssetKind::Photo,
+        metadata: MediaMetadata::None,
+        capture: capture(None),
+        error: Some("タイムアウト".to_owned()),
+    };
+    let o = f.cat.register_file(&broken).unwrap();
+    assert_eq!(f.cat.asset(o.asset_id).unwrap().camera, None);
+
+    // 同じ内容（facts）で、メタデータ付きで登録し直す。
+    let fixed = photo_req(f.folder, "DSC00001.ARW", 1, Some("2024:05:01 12:34:56"));
+    let u = f.cat.register_file(&fixed).unwrap();
+    // 呼び出し側（取り込み）が一覧・検索を作り直せるよう、Unchanged にしない。内容は同じなので
+    // revision は上げない（キャッシュは無効にしない）。
+    assert_eq!(u.status, RegisterStatus::Updated);
+    assert_eq!(u.revision, 1);
+    let file = f.cat.file(o.file_id).unwrap();
+    assert_eq!(file.status, FileStatus::Ok);
+    assert_eq!(file.status_reason, None);
+    assert_eq!(file.revision, 1);
+    let a = f.cat.asset(o.asset_id).unwrap();
+    assert_eq!(a.camera.as_deref(), Some("SONY ILCE-7M4"));
+    assert_eq!(a.lens.as_deref(), Some("FE 24-70mm F2.8 GM II"));
+    assert_eq!(a.iso, Some(100));
+    assert_eq!((a.width, a.height), (Some(7008), Some(4672)));
+    assert_eq!(a.capture.raw.as_deref(), Some("2024:05:01 12:34:56"));
+    assert_eq!(
+        a.capture.utc_db_string().as_deref(),
+        Some("2024-05-01T03:34:56.000Z")
+    );
+
+    // 3 回目（状態は ok・内容も同じ）は、今までどおり Unchanged。
+    let again = f.cat.register_file(&fixed).unwrap();
+    assert_eq!(again.status, RegisterStatus::Unchanged);
+}
+
+/// 動画でも同じ（ffprobe がない状態で取り込み、後で取り込み直した場合。F03）。利用者の撮影日時の
+/// 修正は引き継ぐ。
+#[test]
+fn video_metadata_read_after_an_error_is_stored_and_keeps_user_corrections() {
+    let mut f = Fixture::new();
+    let broken = RegisterFile {
+        folder_id: f.folder,
+        name: "C0001.MP4".to_owned(),
+        facts: facts(7),
+        kind: AssetKind::Video,
+        metadata: MediaMetadata::None,
+        capture: capture(None),
+        error: Some("ffprobe が見つかりません".to_owned()),
+    };
+    let o = f.cat.register_file(&broken).unwrap();
+    // 利用者が時計のずれ（+60 秒）を補正していた。
+    let corrected = f
+        .cat
+        .capture_time(o.asset_id)
+        .unwrap()
+        .with_correction(60)
+        .unwrap();
+    f.cat.set_capture_time(o.asset_id, &corrected).unwrap();
+
+    let fixed = video_req(f.folder, "C0001.MP4", 7, Some("2024-05-01T03:00:00Z"));
+    let u = f.cat.register_file(&fixed).unwrap();
+    assert_eq!(u.status, RegisterStatus::Updated);
+    let a = f.cat.asset(o.asset_id).unwrap();
+    assert_eq!((a.width, a.height), (Some(3840), Some(2160)));
+    let v = a.video.expect("動画の情報が入る");
+    assert_eq!(v.duration_s, Some(12.5));
+    assert_eq!(v.codec.as_deref(), Some("hevc"));
+    assert_eq!(a.capture.correction_s, 60);
+    assert_eq!(
+        a.capture.utc_db_string().as_deref(),
+        Some("2024-05-01T03:01:00.000Z")
+    );
+    assert_eq!(f.cat.file(o.file_id).unwrap().status, FileStatus::Ok);
+}
+
+/// 読めないままのファイルを登録し直しても、メタデータは消えない・変わらない（error → error）。
+/// 見つからなかったファイルが同じ内容で戻った場合も、今までどおり Unchanged。
+#[test]
+fn reregistering_without_recovery_keeps_metadata() {
+    let mut f = Fixture::new();
+    let o = f.photo("A.ARW", 1, Some("2024:05:01 12:00:00"));
+    f.cat
+        .set_file_status(
+            o.file_id,
+            FileStatus::Missing,
+            Some("ファイルが見つかりません"),
+        )
+        .unwrap();
+    let u = f
+        .cat
+        .register_file(&photo_req(
+            f.folder,
+            "A.ARW",
+            1,
+            Some("2024:05:01 12:00:00"),
+        ))
+        .unwrap();
+    assert_eq!(u.status, RegisterStatus::Unchanged);
+    assert_eq!(f.cat.file(o.file_id).unwrap().status, FileStatus::Ok);
+
+    let broken = RegisterFile {
+        folder_id: f.folder,
+        name: "B.ARW".to_owned(),
+        facts: facts(2),
+        kind: AssetKind::Photo,
+        metadata: MediaMetadata::None,
+        capture: capture(None),
+        error: Some("1 回目".to_owned()),
+    };
+    let b = f.cat.register_file(&broken).unwrap();
+    let again = RegisterFile {
+        error: Some("2 回目".to_owned()),
+        ..broken
+    };
+    assert_eq!(
+        f.cat.register_file(&again).unwrap().status,
+        RegisterStatus::Unchanged
+    );
+    let file = f.cat.file(b.file_id).unwrap();
+    assert_eq!(file.status, FileStatus::Error);
+    assert_eq!(file.status_reason.as_deref(), Some("2 回目"));
 }
 
 #[test]

@@ -46,8 +46,8 @@ mod util;
 mod tests;
 
 pub use backup::{
-    BackupInfo, DEFAULT_BACKUP_GENERATIONS, ForeignKeyViolation, IntegrityReport, RestoreReport,
-    backup_catalog_file, create_backup, list_backups, prune_backups, restore_backup,
+    BackupInfo, BackupOwner, DEFAULT_BACKUP_GENERATIONS, ForeignKeyViolation, IntegrityReport,
+    RestoreReport, backup_catalog_file, create_backup, list_backups, prune_backups, restore_backup,
 };
 pub use catalog::{Catalog, ConnectionSettings, OpenOptions, OpenReport, PreviousShutdown};
 pub use develop::{
@@ -67,7 +67,7 @@ pub use keyword::{Keyword, KeywordMatch};
 pub use library::{AssetRecord, CatalogCounts};
 pub use preview_cache::{
     DEFAULT_PREVIEW_CAPACITY_BYTES, EvictionReport, PREVIEW_TEMP_FILE_MIN_AGE, PreviewCache,
-    ReconcileReport,
+    PreviewScan, ReconcileReport, scan_preview_dir,
 };
 pub use register::{
     Folder, JPEG_EXTENSIONS, MediaMetadata, PairClass, RAW_EXTENSIONS, RegisterFile,

@@ -5,7 +5,9 @@
 //! - 1 ファイルの登録で、asset ＋ マスターの variant ＋ file を 1 つのトランザクションで作る（DATA-02）。
 //! - **同じファイルを登録し直しても件数は増えない**（`UNIQUE(folder_id, name_key)` で既存の行を探す）。
 //!   サイズ・更新日時・クイックハッシュのいずれかが変わっていたら `revision` を 1 増やし、
-//!   [`RegisterStatus::Updated`] を返す（キャッシュの無効化。4.1 節）。
+//!   [`RegisterStatus::Updated`] を返す（キャッシュの無効化。4.1 節）。読めなかった（`status = error`）
+//!   ファイルを内容が同じまま読み直せた場合も、メタデータを保存し直して [`RegisterStatus::Updated`] を
+//!   返す（`revision` はそのまま）。
 //! - 同じフォルダで拡張子だけが違う RAW と JPEG は、同じ asset にまとめる（JPEG は
 //!   `role = sidecar_jpeg`。IMP-06 の基本の扱い）。JPEG を先に登録していた場合は、RAW を
 //!   登録したときに JPEG を `sidecar_jpeg` に変えて同じ asset に入れる（評価やキーワードは残る）。
@@ -252,7 +254,9 @@ impl RegisterFile {
 pub enum RegisterStatus {
     /// 新しく登録した。
     Added,
-    /// 登録済みで、内容の変化を検知した（`revision` を 1 増やした）。
+    /// 登録済みで、内容の変化を検知した（`revision` を 1 増やした）。または、読めなかった
+    /// （`status = error`）ファイルを内容が同じまま読み直せて、メタデータを保存し直した（`revision` は
+    /// そのまま）。どちらも一覧・検索の作り直しが要る。
     Updated,
     /// 登録済みで、変化はなかった。
     Unchanged,
@@ -626,6 +630,9 @@ fn reregister(
         || existing.mtime != req.facts.mtime_ns
         || existing.quick_hash != req.facts.quick_hash;
     let (status, reason) = requested_status(req);
+    // 読めなかった（error）ファイルを、内容が同じまま読み直せた（ワーカーのタイムアウト・ffprobe が
+    // なかった など。F03）。読めたメタデータを保存する（内容は同じなので revision は上げない）。
+    let recovered = !changed && existing.status == FileStatus::Error && status == FileStatus::Ok;
     let mut revision = existing.revision;
     if changed {
         revision += 1;
@@ -654,6 +661,11 @@ fn reregister(
             "UPDATE file SET status = ?2, status_reason = ?3, status_at = ?4 WHERE id = ?1",
         )?
         .execute(params![existing.id, status.as_str(), reason, now])?;
+        if recovered && existing.role == FileRole::Primary {
+            // 撮影日時の利用者の修正は、内容が変わった場合と同じく引き継ぐ。
+            let previous = load_capture(tx, existing.asset_id)?;
+            update_asset_metadata(tx, existing.asset_id, req, Some(&previous))?;
+        }
     }
     if existing.name != req.name {
         // 大文字・小文字や正規化の違いだけの名前の変更。表示用の名前を新しくする。
@@ -662,7 +674,7 @@ fn reregister(
         refresh_asset_text(tx, existing.asset_id)?;
     }
     Ok(RegisterOutcome {
-        status: if changed {
+        status: if changed || recovered {
             RegisterStatus::Updated
         } else {
             RegisterStatus::Unchanged

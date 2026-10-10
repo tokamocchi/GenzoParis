@@ -531,3 +531,138 @@ fn search_returns_all_ids_for_thousands_of_rows() {
     sorted.sort();
     assert_eq!(keys, sorted);
 }
+
+/// 動画の長さ・fps・コーデックと、寸法（長辺）で絞り込む（VID-03。F40）。
+#[test]
+fn videos_are_filtered_by_duration_fps_codec_and_size() {
+    use crate::{MediaMetadata, RegisterFile};
+    let mut f = Fixture::new();
+    let folder = f.folder;
+    let mut video =
+        |name: &str, n: u64, duration: f64, fps: f64, codec: &str, (w, h): (u32, u32)| {
+            let mut r = video_req(folder, name, n, Some("2024-05-01T03:00:00Z"));
+            if let MediaMetadata::Video(v) = &mut r.metadata {
+                v.duration_s = Some(duration);
+                v.fps = Some(fps);
+                v.codec = Some(codec.to_owned());
+                v.width = Some(w);
+                v.height = Some(h);
+            }
+            f.cat.register_file(&r).unwrap().master_variant_id
+        };
+    // 4K・5 秒・HEVC、フル HD・60 秒・H.264、縦の 4K・8 秒・HEVC（大文字で記録）。
+    let short_4k = video("DJI_0001.MP4", 1, 5.0, 59.94, "hevc", (3840, 2160));
+    let long_hd = video("DJI_0002.MP4", 2, 60.0, 29.97, "h264", (1920, 1080));
+    let portrait = video("DJI_0003.MP4", 3, 8.0, 30.0, "HEVC", (2160, 3840));
+    // 写真（7008×4672）と、メタデータを読めなかった動画。
+    let photo = f.photo("A.ARW", 4, None).master_variant_id;
+    let unknown = f
+        .cat
+        .register_file(&RegisterFile {
+            folder_id: folder,
+            name: "DJI_0004.MP4".to_owned(),
+            facts: super::facts(5),
+            kind: AssetKind::Video,
+            metadata: MediaMetadata::None,
+            capture: super::capture(None),
+            error: Some("読めません".to_owned()),
+        })
+        .unwrap()
+        .master_variant_id;
+    let ids = |filter: Filter| {
+        let mut v = f
+            .cat
+            .search(
+                &filter,
+                &Sort::new(SortKey::ImportOrder, SortDirection::Ascending),
+            )
+            .unwrap();
+        v.sort();
+        assert_eq!(f.cat.count(&filter).unwrap(), v.len() as u64);
+        v
+    };
+    let sorted = |mut v: Vec<VariantId>| {
+        v.sort();
+        v
+    };
+    assert_eq!(
+        ids(Filter {
+            codecs: Some(vec!["HEVC".to_owned()]),
+            ..Default::default()
+        }),
+        sorted(vec![short_4k, portrait]),
+        "コーデックは大文字・小文字を区別しない"
+    );
+    assert_eq!(
+        ids(Filter {
+            codecs: Some(vec!["h264".to_owned(), "prores".to_owned()]),
+            ..Default::default()
+        }),
+        vec![long_hd]
+    );
+    assert!(
+        ids(Filter {
+            codecs: Some(Vec::new()),
+            ..Default::default()
+        })
+        .is_empty()
+    );
+    // 10 秒以下（上限・下限は値を含む）。写真と、長さの分からない動画は除く。
+    assert_eq!(
+        ids(Filter {
+            duration_max_s: Some(10.0),
+            ..Default::default()
+        }),
+        sorted(vec![short_4k, portrait])
+    );
+    assert_eq!(
+        ids(Filter {
+            duration_min_s: Some(8.0),
+            duration_max_s: Some(60.0),
+            ..Default::default()
+        }),
+        sorted(vec![long_hd, portrait])
+    );
+    assert_eq!(
+        ids(Filter {
+            fps_min: Some(50.0),
+            ..Default::default()
+        }),
+        vec![short_4k]
+    );
+    assert_eq!(
+        ids(Filter {
+            fps_max: Some(30.0),
+            ..Default::default()
+        }),
+        sorted(vec![long_hd, portrait])
+    );
+    // 長辺の画素数（縦の動画も 4K として扱う）。寸法は写真にも効く。
+    assert_eq!(
+        ids(Filter {
+            long_edge_min: Some(3840),
+            ..Default::default()
+        }),
+        sorted(vec![short_4k, portrait, photo])
+    );
+    assert_eq!(
+        ids(Filter {
+            long_edge_min: Some(3840),
+            kind: Some(AssetKind::Video),
+            ..Default::default()
+        }),
+        sorted(vec![short_4k, portrait])
+    );
+    assert_eq!(
+        ids(Filter {
+            long_edge_max: Some(1920),
+            ..Default::default()
+        }),
+        vec![long_hd]
+    );
+    // 条件がなければ、読めなかった動画も含めてすべて。
+    assert_eq!(
+        ids(Filter::default()),
+        sorted(vec![short_4k, long_hd, portrait, photo, unknown])
+    );
+}

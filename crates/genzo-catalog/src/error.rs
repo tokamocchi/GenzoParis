@@ -106,6 +106,24 @@ impl CatalogError {
         )
     }
 
+    /// DB のファイルが壊れている・別のファイル・版が合わないことを示すエラーか（作り直せるキャッシュの
+    /// DB（thumbs.db）を、退避して作り直すかの判断に使う。ディスクの容量不足・権限などの一時的・環境の
+    /// 問題では `false`）。
+    pub fn indicates_broken_database(&self) -> bool {
+        match self {
+            CatalogError::NotOurDatabase(_)
+            | CatalogError::FutureSchema { .. }
+            | CatalogError::OutdatedSchema { .. }
+            | CatalogError::Corrupt(_)
+            | CatalogError::IntegrityCheckFailed(_) => true,
+            CatalogError::Sqlite(rusqlite::Error::SqliteFailure(e, _)) => matches!(
+                e.code,
+                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+            ),
+            _ => false,
+        }
+    }
+
     /// 入出力のエラーを作る。
     pub(crate) fn io(path: impl Into<PathBuf>, source: io::Error) -> Self {
         CatalogError::Io {

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use genzo_model::VariantId;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::backup::sync_parent_dir;
+use crate::backup::sync_parent_dir_fast;
 use crate::error::{CatalogError, Result};
 use crate::thumbs::{looks_like_jpeg, open_thumbs_connection, validate_cache_key};
 use crate::util::{now_utc_string, u64_to_i64};
@@ -152,7 +152,10 @@ impl PreviewCache {
                 .create_new(true)
                 .open(&tmp)?;
             f.write_all(jpeg)?;
-            f.sync_all()?;
+            // 作り直せるキャッシュなので、Apple でも F_FULLFSYNC（装置のキャッシュの書き出し）は
+            // 使わず fsync にする（指摘 F19。取り込み直後の大量の生成を遅くしない。thumbs.db の
+            // synchronous=NORMAL と釣り合わせる）。中身が途中までのファイルを残さないため、同期は省かない。
+            genzo_model::fs_sync::sync_file_fast(&f)?;
             Ok(())
         };
         if let Err(e) = write() {
@@ -163,7 +166,7 @@ impl PreviewCache {
             let _ = fs::remove_file(&tmp);
             return Err(CatalogError::io(&path, e));
         }
-        sync_parent_dir(&path);
+        sync_parent_dir_fast(&path);
         let size = u64_to_i64(jpeg.len() as u64, "プレビューの大きさ")?;
         self.record_use(cache_key, variant_id, Some(size))?;
         self.evict_to(self.capacity_bytes, Some(cache_key))?;
@@ -310,50 +313,41 @@ impl PreviewCache {
     ///
     /// 生成の途中で残った一時ファイルも削除する。ただし、最後の更新から
     /// [`PREVIEW_TEMP_FILE_MIN_AGE`] が経っていないものは、書き込み中の可能性があるので残す。
+    ///
+    /// フォルダの走査（時間がかかる）を、このキャッシュのロックの外で行いたい場合は、
+    /// [`scan_preview_dir`] と [`PreviewCache::apply_scan`] に分けて呼ぶ。
     pub fn reconcile(&mut self) -> Result<ReconcileReport> {
-        let mut report = ReconcileReport::default();
-        let mut on_disk = std::collections::HashMap::new();
-        for l1 in read_dir_names(&self.root)? {
-            let d1 = self.root.join(&l1);
-            if !is_hex_dir(&l1) || !d1.is_dir() {
-                continue;
-            }
-            for l2 in read_dir_names(&d1)? {
-                let d2 = d1.join(&l2);
-                if !is_hex_dir(&l2) || !d2.is_dir() {
-                    continue;
-                }
-                for name in read_dir_names(&d2)? {
-                    let p = d2.join(&name);
-                    if name.starts_with('.') && name.ends_with(".tmp") {
-                        if is_stale_temp_file(&p) && fs::remove_file(&p).is_ok() {
-                            report.temp_files_removed += 1;
-                        }
-                        continue;
-                    }
-                    let Some(key) = name.strip_suffix(".jpg") else {
-                        continue;
-                    };
-                    if validate_cache_key(key).is_err() || !key.starts_with(&format!("{l1}{l2}")) {
-                        continue;
-                    }
-                    if let Ok(meta) = fs::metadata(&p) {
-                        on_disk.insert(key.to_owned(), meta.len());
-                    }
-                }
-            }
-        }
+        let scan = scan_preview_dir(&self.root)?;
+        self.apply_scan(scan)
+    }
+
+    /// フォルダの走査の結果（[`scan_preview_dir`]）で索引を突き合わせる（索引の更新だけなので短い）。
+    ///
+    /// 走査の後に公開されたプレビュー（索引にあり、走査の結果にない）は、ファイルがあれば索引に残す。
+    pub fn apply_scan(&mut self, scan: PreviewScan) -> Result<ReconcileReport> {
+        let PreviewScan {
+            on_disk,
+            temp_files_removed,
+        } = scan;
+        let mut report = ReconcileReport {
+            temp_files_removed,
+            ..ReconcileReport::default()
+        };
         let indexed: Vec<String> = {
             let mut stmt = self.conn.prepare("SELECT cache_key FROM preview")?;
             stmt.query_map([], |row| row.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        let tx = self.conn.transaction()?;
+        let mut gone = Vec::new();
         for key in &indexed {
-            if !on_disk.contains_key(key) {
-                tx.execute("DELETE FROM preview WHERE cache_key = ?1", [key])?;
-                report.dropped += 1;
+            if !on_disk.contains_key(key) && !self.path_for(key).is_ok_and(|p| p.is_file()) {
+                gone.push(key.clone());
             }
+        }
+        let tx = self.conn.transaction()?;
+        for key in &gone {
+            tx.execute("DELETE FROM preview WHERE cache_key = ?1", [key])?;
+            report.dropped += 1;
         }
         let known: std::collections::HashSet<&String> = indexed.iter().collect();
         let now = now_utc_string();
@@ -363,7 +357,8 @@ impl PreviewCache {
             }
             tx.execute(
                 "INSERT INTO preview(cache_key, variant_id, size, last_used_at, use_seq)
-                 VALUES (?1, NULL, ?2, ?3, (SELECT ifnull(max(use_seq), 0) + 1 FROM preview))",
+                 VALUES (?1, NULL, ?2, ?3, (SELECT ifnull(max(use_seq), 0) + 1 FROM preview))
+                 ON CONFLICT(cache_key) DO NOTHING",
                 params![key, u64_to_i64(*size, "プレビューの大きさ")?, now],
             )?;
             report.added += 1;
@@ -383,6 +378,52 @@ impl PreviewCache {
             )
             .optional()?)
     }
+}
+
+/// プレビューのフォルダの走査の結果（[`scan_preview_dir`]）。
+#[derive(Debug, Default)]
+pub struct PreviewScan {
+    /// フォルダにあるプレビュー（キー → 大きさ）。
+    on_disk: std::collections::HashMap<String, u64>,
+    /// 削除した一時ファイルの数。
+    temp_files_removed: usize,
+}
+
+/// プレビューのフォルダ `root` を走査する（索引の DB には触れない。生成の途中で残った古い一時ファイルは
+/// 削除する）。結果は [`PreviewCache::apply_scan`] で索引に反映する。
+pub fn scan_preview_dir(root: &Path) -> Result<PreviewScan> {
+    let mut scan = PreviewScan::default();
+    for l1 in read_dir_names(root)? {
+        let d1 = root.join(&l1);
+        if !is_hex_dir(&l1) || !d1.is_dir() {
+            continue;
+        }
+        for l2 in read_dir_names(&d1)? {
+            let d2 = d1.join(&l2);
+            if !is_hex_dir(&l2) || !d2.is_dir() {
+                continue;
+            }
+            for name in read_dir_names(&d2)? {
+                let p = d2.join(&name);
+                if name.starts_with('.') && name.ends_with(".tmp") {
+                    if is_stale_temp_file(&p) && fs::remove_file(&p).is_ok() {
+                        scan.temp_files_removed += 1;
+                    }
+                    continue;
+                }
+                let Some(key) = name.strip_suffix(".jpg") else {
+                    continue;
+                };
+                if validate_cache_key(key).is_err() || !key.starts_with(&format!("{l1}{l2}")) {
+                    continue;
+                }
+                if let Ok(meta) = fs::metadata(&p) {
+                    scan.on_disk.insert(key.to_owned(), meta.len());
+                }
+            }
+        }
+    }
+    Ok(scan)
 }
 
 fn read_dir_names(dir: &Path) -> Result<Vec<String>> {

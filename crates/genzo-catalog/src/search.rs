@@ -7,6 +7,8 @@
 //! - テキスト検索（3.6 節）は、ファイル名とキャプションを NFKC ＋ 小文字化した列を対象に、
 //!   3 文字以上の語を FTS5（trigram）、1〜2 文字の語を `LIKE` で探す。複数の語は AND。
 //! - キーワードは子のキーワードを含めて探す（再帰 CTE）。フォルダは配下を含めるかを選べる。
+//! - 動画の長さ・fps・コーデック（video_meta）と、寸法（長辺の画素数）で絞り込める（VID-03）。索引は
+//!   まだない（動画の件数が少ないうちは不要とみる。PoC-6 の実行計画で判断する）。
 //! - 利用者の入力はすべてバインドする値として渡し、SQL の文字列に埋め込まない。
 
 use chrono::{DateTime, Utc};
@@ -53,6 +55,23 @@ pub struct Filter {
     pub lenses: Option<Vec<String>>,
     /// 種別（写真 / 動画）。
     pub kind: Option<AssetKind>,
+    /// 長辺の画素数（`asset.width` と `asset.height` の大きいほう。向きによらない）の下限（この値を含む）。
+    /// 写真にも動画にも効く。指定すると寸法の分からないものは除く。
+    pub long_edge_min: Option<u32>,
+    /// 長辺の画素数の上限（この値を含む）。指定すると寸法の分からないものは除く。
+    pub long_edge_max: Option<u32>,
+    /// 動画の長さ（秒）の下限（この値を含む。VID-03）。動画の条件（長さ・fps・コーデック）を指定すると、
+    /// 写真と、その値の分からない動画は除く。
+    pub duration_min_s: Option<f64>,
+    /// 動画の長さ（秒）の上限（この値を含む）。
+    pub duration_max_s: Option<f64>,
+    /// 動画のフレームレートの下限（この値を含む）。
+    pub fps_min: Option<f64>,
+    /// 動画のフレームレートの上限（この値を含む）。
+    pub fps_max: Option<f64>,
+    /// 動画のコーデック（ffprobe の `codec_name`。`hevc`・`h264` など。ASCII の大文字・小文字を区別しない。
+    /// いずれかに一致）。
+    pub codecs: Option<Vec<String>>,
     /// テキスト（ファイル名とキャプション。3.6 節）。
     pub text: Option<String>,
     /// フォルダ。
@@ -241,6 +260,39 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
         let p = q.bind(kind.as_str().to_owned());
         conds.push(format!("a.kind = {p}"));
         needs_asset = true;
+    }
+    if let Some(min) = filter.long_edge_min {
+        let p = q.bind(i64::from(min));
+        conds.push(format!("max(a.width, a.height) >= {p}"));
+        needs_asset = true;
+    }
+    if let Some(max) = filter.long_edge_max {
+        let p = q.bind(i64::from(max));
+        conds.push(format!("max(a.width, a.height) <= {p}"));
+        needs_asset = true;
+    }
+    // 動画の情報（VID-03）。video_meta の行のある asset だけが一致する（写真は除く）。
+    let mut video_conds: Vec<String> = Vec::new();
+    for (value, cond) in [
+        (filter.duration_min_s, "vm.duration_s >="),
+        (filter.duration_max_s, "vm.duration_s <="),
+        (filter.fps_min, "vm.fps >="),
+        (filter.fps_max, "vm.fps <="),
+    ] {
+        if let Some(x) = value {
+            let p = q.bind(x);
+            video_conds.push(format!("{cond} {p}"));
+        }
+    }
+    if let Some(codecs) = &filter.codecs {
+        let list = q.bind_list(codecs.iter().map(|c| c.to_ascii_lowercase()));
+        video_conds.push(format!("lower(vm.codec) IN {list}"));
+    }
+    if !video_conds.is_empty() {
+        conds.push(format!(
+            "v.asset_id IN (SELECT vm.asset_id FROM video_meta vm WHERE {})",
+            video_conds.join(" AND ")
+        ));
     }
     if let Some(text) = &filter.text {
         let tq = parse_text_query(text);
@@ -539,7 +591,7 @@ mod tests {
                 Sort::new(key, SortDirection::Ascending)
             ));
         }
-        // 撮影日時順・撮影日時・カメラ・レンズ・種別では結合する。
+        // 撮影日時順・撮影日時・カメラ・レンズ・種別・寸法では結合する。
         assert!(joined(&Filter::default(), Sort::default()));
         for filter in [
             Filter {
@@ -562,9 +614,26 @@ mod tests {
                 kind: Some(AssetKind::Video),
                 ..Default::default()
             },
+            Filter {
+                long_edge_min: Some(3840),
+                ..Default::default()
+            },
         ] {
             assert!(joined(&filter, rating), "{filter:?}");
         }
+        // 動画の情報だけの条件では asset を結合しない（video_meta の副問い合わせ）。
+        let video_only = Filter {
+            duration_max_s: Some(10.0),
+            codecs: Some(vec!["HEVC".to_owned()]),
+            ..Default::default()
+        };
+        assert!(!joined(&video_only, rating));
+        let q = build_search_sql(&video_only, &rating);
+        assert!(
+            !q.sql.contains("HEVC") && !q.sql.contains("hevc"),
+            "{}",
+            q.sql
+        );
     }
 
     #[test]

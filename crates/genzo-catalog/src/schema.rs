@@ -66,18 +66,26 @@ pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[
 ];
 
 /// サムネイル DB のマイグレーションの列。
-pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "サムネイル（L0）とプレビュー（L1）の索引（04 の 4 章・4.1 節）",
-    sql: include_str!("sql/thumbs_0001_initial.sql"),
-    post: None,
-}];
+pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "サムネイル（L0）とプレビュー（L1）の索引（04 の 4 章・4.1 節）",
+        sql: include_str!("sql/thumbs_0001_initial.sql"),
+        post: None,
+    },
+    Migration {
+        version: 2,
+        description: "キャッシュの持ち主（カタログの世代）と、作り直し待ちの印",
+        sql: include_str!("sql/thumbs_0002_owner_and_pending.sql"),
+        post: None,
+    },
+];
 
 /// このアプリのカタログのスキーマの版。
 pub const CATALOG_SCHEMA_VERSION: u32 = 2;
 
 /// このアプリのサムネイル DB のスキーマの版。
-pub const THUMBS_SCHEMA_VERSION: u32 = 1;
+pub const THUMBS_SCHEMA_VERSION: u32 = 2;
 
 /// DB の種類ごとのスキーマの定義。
 #[derive(Clone, Copy)]
