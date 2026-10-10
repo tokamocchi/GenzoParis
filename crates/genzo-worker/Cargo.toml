@@ -24,11 +24,23 @@ path = "src/main.rs"
 genzo-raw.workspace = true
 genzo-media.workspace = true
 genzo-model.workspace = true
+# RAW 以外の画像をリニア BT.2020（B2）に変換する（lcms2。04 の 2.6 節「RAW 以外の入力」）。
+genzo-color.workspace = true
+# 取り消しトークン（04 の 6.1 節）。
+genzo-jobs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 memmap2.workspace = true
+# 共有メモリのデータを、本体の Vec<u16> / Vec<[f32; 3]> に直接読む（unsafe を使わずにバイト列として見る）。
+bytemuck.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+# 応答・取り消し・タイムアウトを同時に待つ（select）。
+crossbeam-channel.workspace = true
+
+# ワーカーのメモリの上限（setrlimit。04 の 1.2 節、AR-10）。Linux だけで使う。
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.190"
 
 [lints]
 workspace = true

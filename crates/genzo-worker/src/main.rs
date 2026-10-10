@@ -1,9 +1,11 @@
 //! ワーカープロセスの入口（`genzo-worker`）。
 //!
-//! 本体から起動され、標準入出力でジョブを受け取る。処理の本体は `genzo_worker` の
-//! ライブラリ側に置く。
+//! 本体（[`genzo_worker::WorkerClient`]）から起動され、標準入出力で 1 行 1 メッセージの JSON の
+//! ジョブを受け取る（docs/04_architecture.md の 1.2 節）。処理の本体はライブラリ側の
+//! [`genzo_worker::worker`] に置く。
+//!
+//! 引数: `--memory-limit-bytes <N>`（メモリの上限。Linux だけ。`genzo_worker::limits`）。
 
-fn main() {
-    eprintln!("genzo-worker: まだ実装されていません");
-    std::process::exit(2);
+fn main() -> std::process::ExitCode {
+    genzo_worker::worker::main_entry()
 }
