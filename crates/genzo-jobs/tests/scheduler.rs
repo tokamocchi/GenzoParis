@@ -375,6 +375,64 @@ fn rapid_latest_requests_keep_only_the_last() {
 }
 
 #[test]
+fn concurrent_latest_requests_keep_the_newest_generation() {
+    // 回帰テスト（レビューで発見）: 世代番号の割り当てとキューへの投入が別々に行われていたため、
+    // 複数のスレッドから同じスロットへ同時に投入すると、新しい世代の要求が古い世代の要求で
+    // 置き換えられ、古い設定のプレビューが最後に残ることがあった（6.2 節「最新の 1 件だけ」）。
+    const THREADS: usize = 4;
+    const PER_THREAD: usize = 300;
+    // 競合は確率的にしか起きないので、何回か繰り返す（修正後は常に成り立つ）。
+    for _ in 0..40 {
+        let s = scheduler(1, 0);
+        let blocker = Blocker::start(&s, JobOptions::new(Priority::P0));
+        let barrier = Barrier::new(THREADS);
+        // 共通の親トークン（例: 現像セッション）を持たせる。子トークンの作成で親のロックを
+        // 取り合うので、競合が起きやすくなる。
+        let session = CancellationToken::new();
+        let handles: Vec<JobHandle<u64>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let (s, barrier, session) = (&s, &barrier, &session);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        (0..PER_THREAD)
+                            .map(|_| {
+                                s.submit_latest_with(
+                                    "develop-preview",
+                                    JobOptions::new(Priority::P0).parent(session),
+                                    |ctx| Ok(ctx.generation().unwrap().get()),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().unwrap())
+                .collect()
+        });
+        // スロットに残るのは 1 件だけで、それは最も新しい世代の要求。
+        assert_eq!(s.queued_count(), 1);
+        let newest = handles
+            .iter()
+            .map(|h| h.generation().unwrap().get())
+            .max()
+            .unwrap();
+        blocker.finish();
+        let mut ran = Vec::new();
+        for h in handles {
+            match h.wait() {
+                Ok(generation) => ran.push(generation),
+                Err(JobError::Superseded) => {}
+                Err(e) => panic!("想定外のエラー: {e}"),
+            }
+        }
+        assert_eq!(ran, [newest]);
+    }
+}
+
+#[test]
 fn submit_latest_cancels_running_job() {
     let s = scheduler(2, 0);
     let (started_tx, started_rx) = bounded(1);
@@ -431,6 +489,32 @@ fn latest_slots_are_independent() {
     assert_eq!(a.wait().unwrap(), "loupe");
     assert_eq!(b.wait().unwrap(), "develop");
     assert_eq!(c.wait().unwrap(), "plain");
+}
+
+#[test]
+fn rejected_latest_requests_still_get_a_generation() {
+    // 実行されずに終わる要求（総量を超える宣言・終了後の投入）にも世代番号を返す。
+    let s = scheduler(1, 100);
+    let blocker = Blocker::start(&s, JobOptions::new(Priority::P0));
+    let queued = s.submit_latest("loupe", Priority::P0, |_| Ok(()));
+    let too_big = s.submit_latest_with(
+        "loupe",
+        JobOptions::new(Priority::P0).memory_bytes(101),
+        |_| Ok(()),
+    );
+    assert!(too_big.generation() > queued.generation());
+    assert!(matches!(
+        too_big.wait(),
+        Err(JobError::Memory(MemoryError::ExceedsBudget { .. }))
+    ));
+    // 満たせない要求は、スロットの古い要求を置き換えない。
+    assert_eq!(queued.state(), JobState::Queued);
+    blocker.finish();
+    queued.wait().unwrap();
+    s.shutdown();
+    let late = s.submit_latest("loupe", Priority::P0, |_| Ok(()));
+    assert!(late.generation().is_some());
+    assert!(matches!(late.wait(), Err(JobError::Shutdown)));
 }
 
 #[test]
@@ -565,6 +649,40 @@ fn taken_reservation_lives_with_the_result() {
 }
 
 #[test]
+fn dropping_handle_while_result_holds_reservation_does_not_deadlock() {
+    // 回帰テスト（レビューで発見）: 枠を持った結果を返すジョブの終了と同時にハンドルを drop
+    // すると、結果（枠）がスケジューラのロックの中で drop され、枠の返却の通知がロックを
+    // 取り直して実行スレッドが止まっていた（修正前は数回〜数十回の繰り返しで再現した）。
+    // 止まった場合にテストが戻らなくならないよう、別のスレッドで実行して上限を設ける
+    // （上限は失敗の検出だけに使い、結果は時間で決めない）。
+    const ROUNDS: usize = 2_000;
+    let (done_tx, done_rx) = bounded::<usize>(1);
+    std::thread::spawn(move || {
+        let s = scheduler(2, 1_000);
+        for _ in 0..ROUNDS {
+            let returning = Arc::new(AtomicBool::new(false));
+            let r = Arc::clone(&returning);
+            let h = s.submit_with(JobOptions::new(Priority::P1).memory_bytes(10), move |ctx| {
+                let reservation = ctx.take_reservation();
+                r.store(true, Ordering::Release);
+                Ok(reservation)
+            });
+            // ジョブが結果を返す直前まで待ってから、ハンドルを drop する。
+            while !returning.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            drop(h);
+        }
+        s.wait_idle();
+        let _ = done_tx.send(s.budget().used() as usize);
+    });
+    let used = done_rx
+        .recv_timeout(Duration::from_secs(120))
+        .expect("実行スレッドが止まった（結果の drop でデッドロック）");
+    assert_eq!(used, 0);
+}
+
+#[test]
 fn reserve_inside_job_waits_and_can_be_cancelled() {
     let s = scheduler(2, 100);
     let a = Blocker::start(&s, JobOptions::new(Priority::P3).memory_bytes(100));
@@ -592,6 +710,34 @@ fn reserve_inside_job_waits_and_can_be_cancelled() {
     a.finish();
     assert_eq!(h.wait().unwrap(), 50);
     assert_eq!(s.budget().used(), 0);
+}
+
+#[test]
+fn reserve_that_can_never_fit_beside_declared_memory_fails_immediately() {
+    // 回帰テスト（レビューで発見）: 投入時に宣言した枠（60）を持ったまま、総量（100）から
+    // それを引いた残りより大きい枠（50）を待つと、自分の枠が返らない限り満たせないので
+    // 永久に待っていた（同じ優先度以下の新しいジョブも、この待ちに止められていた）。
+    let s = scheduler(1, 100);
+    let mut h = s.submit_with(JobOptions::new(Priority::P3).memory_bytes(60), |ctx| {
+        let err = ctx.reserve(50).unwrap_err();
+        // ちょうど残り（40）なら取れる。
+        let fits = ctx.reserve(40)?;
+        Ok((err, fits.bytes()))
+    });
+    let (err, fits) = h
+        .wait_timeout(Duration::from_secs(30))
+        .expect("満たせない枠を待ち続けている")
+        .unwrap();
+    assert_eq!(
+        err,
+        MemoryError::ExceedsBudget {
+            requested: 110,
+            total: 100
+        }
+    );
+    assert_eq!(fits, 40);
+    assert_eq!(s.budget().used(), 0);
+    assert_eq!(s.budget().waiting(), 0);
 }
 
 #[test]
@@ -658,6 +804,29 @@ fn panicking_job_is_reported_and_pool_survives() {
     assert_eq!(s.submit(Priority::P1, |_| Ok(5)).wait().unwrap(), 5);
     let last = events.try_iter().filter(|e| e.id == id).last().unwrap();
     assert_eq!(last.kind, JobEventKind::State(JobState::Panicked));
+}
+
+#[test]
+fn panicking_drop_of_undelivered_result_does_not_kill_the_thread() {
+    // 回帰テスト（レビューで発見）: ハンドルが drop されていて届かなかった結果は実行スレッドで
+    // drop される。その drop がパニックすると、1 本だけのスレッド（GPU スレッド。6.1 節）が
+    // 終わり、以後のジョブが永久に実行されなかった。
+    struct PanicOnDrop;
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("結果の drop でのパニック（テスト用）");
+        }
+    }
+
+    let s = scheduler(1, 0);
+    let blocker = Blocker::start(&s, JobOptions::new(Priority::P0));
+    drop(s.submit(Priority::P1, |_| Ok(PanicOnDrop)));
+    blocker.finish();
+    let mut next = s.submit(Priority::P1, |_| Ok("next"));
+    let result = next
+        .wait_timeout(Duration::from_secs(30))
+        .expect("実行スレッドが失われた");
+    assert_eq!(result.unwrap(), "next");
 }
 
 #[test]
@@ -858,6 +1027,33 @@ fn shutdown_now_cancels_running_jobs() {
     s.shutdown_now();
     assert!(matches!(a.wait(), Err(JobError::Cancelled)));
     assert!(matches!(b.wait(), Err(JobError::Cancelled)));
+}
+
+#[test]
+fn shutdown_now_survives_panicking_cancel_callback() {
+    // 取り消しのコールバックがパニックしても、他の実行中のジョブへの通知とスレッドの回収は
+    // 最後まで行う（Drop からも呼ばれるため）。
+    let s = scheduler(2, 0);
+    let (tx, rx) = unbounded();
+    let (reg_tx, reg_rx) = bounded(1);
+    let a = s.submit(Priority::P3, move |ctx| {
+        let registration = ctx
+            .token()
+            .on_cancel(|| panic!("取り消しのコールバックのパニック（テスト用）"));
+        reg_tx.send(()).unwrap();
+        let result = spin_until_cancelled(tx)(ctx);
+        drop(registration);
+        result
+    });
+    reg_rx.recv().unwrap();
+    rx.recv().unwrap();
+    let (tx2, rx2) = bounded(1);
+    let b = s.submit(Priority::P3, spin_until_cancelled(tx2));
+    rx2.recv().unwrap();
+    s.shutdown_now();
+    assert!(matches!(a.wait(), Err(JobError::Cancelled)));
+    assert!(matches!(b.wait(), Err(JobError::Cancelled)));
+    assert_eq!(s.running_count(), 0);
 }
 
 #[test]

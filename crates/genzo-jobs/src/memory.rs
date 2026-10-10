@@ -533,6 +533,35 @@ mod tests {
     }
 
     #[test]
+    fn appendix_a1_uses_decimal_megabytes() {
+        // 02 の付録 A-1 の表の値（画素数・MB）と照合し、MB が 10^6 バイトであること（したがって
+        // SCL-05 の GB を 10^9 バイトとする解釈が付録と同じ単位であること）を確かめる。
+        // 行: （幅, 高さ, 画素数, RAW 16bit × 1ch の MB, RGBA f16 の MB, RGBA f32 の MB）。
+        // 画面表示用の行は RAW の列が「—」なので 0 とする。
+        const ROWS: [(u64, u64, u64, u64, u64, u64); 3] = [
+            (7008, 4672, 32_741_376, 65, 262, 524), // α7 IV
+            (6000, 4000, 24_000_000, 48, 192, 384), // α7C
+            (2560, 1440, 3_686_400, 0, 29, 59),     // 画面表示用
+        ];
+        const MB: u64 = 1_000_000;
+        const MIB: u64 = 1 << 20;
+        let round = |bytes: u64, unit: u64| (bytes + unit / 2) / unit;
+        for (w, h, pixels, raw_mb, f16_mb, f32_mb) in ROWS {
+            assert_eq!(w * h, pixels);
+            if raw_mb != 0 {
+                assert_eq!(round(pixels * 2, MB), raw_mb, "{w}x{h} RAW");
+                // 2^20 バイトを 1MB とすると表の値と合わない（α7 IV で 62、α7C で 46）。
+                assert_ne!(round(pixels * 2, MIB), raw_mb, "{w}x{h} RAW（2^20）");
+            }
+            assert_eq!(round(pixels * 8, MB), f16_mb, "{w}x{h} RGBA f16");
+            assert_eq!(round(pixels * 16, MB), f32_mb, "{w}x{h} RGBA f32");
+        }
+        // 既定の予算（仮置き）の値そのもの。
+        assert_eq!(DEFAULT_NORMAL_BUDGET_BYTES, 3_000_000_000);
+        assert_eq!(DEFAULT_BATCH_BUDGET_BYTES, 7_000_000_000);
+    }
+
+    #[test]
     fn acquire_and_release() {
         let budget = MemoryBudget::new(100);
         let token = CancellationToken::new();

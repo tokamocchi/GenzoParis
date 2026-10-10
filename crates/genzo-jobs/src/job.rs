@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -42,6 +42,9 @@ impl fmt::Display for JobId {
 ///
 /// [`crate::Scheduler::submit_latest`] で投入するたびに大きくなる。同じスロットの中では
 /// 新しい要求ほど大きい（番号はスケジューラ全体で一意で、スロットごとの連番ではない）。
+/// 番号はスケジューラのロックの中で、キューに入れる（古い要求を置き換える）順に割り当てる。
+/// そのため、複数のスレッドから同じスロットへ同時に投入しても、スロットに残るのは常に
+/// 最も大きい世代の要求になる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Generation(u64);
 
@@ -306,7 +309,9 @@ impl JobOptions {
 pub(crate) struct JobShared {
     pub(crate) id: JobId,
     priority: AtomicU8,
-    pub(crate) generation: Option<Generation>,
+    /// 世代番号（0 はなし）。キューに入れるときに、スケジューラのロックの中で割り当てる
+    /// （[`JobShared::set_generation`]）。
+    generation: AtomicU64,
     pub(crate) label: Option<Arc<str>>,
     pub(crate) token: CancellationToken,
     pub(crate) memory_bytes: u64,
@@ -319,16 +324,11 @@ pub(crate) struct JobShared {
 }
 
 impl JobShared {
-    pub(crate) fn new(
-        id: JobId,
-        options: &JobOptions,
-        generation: Option<Generation>,
-        token: CancellationToken,
-    ) -> Self {
+    pub(crate) fn new(id: JobId, options: &JobOptions, token: CancellationToken) -> Self {
         JobShared {
             id,
             priority: AtomicU8::new(options.priority.rank()),
-            generation,
+            generation: AtomicU64::new(0),
             label: options.label.clone(),
             token,
             memory_bytes: options.memory_bytes,
@@ -341,6 +341,20 @@ impl JobShared {
 
     pub(crate) fn priority(&self) -> Priority {
         Priority::from_rank(self.priority.load(Ordering::Acquire)).unwrap_or(Priority::P3)
+    }
+
+    /// 世代番号（[`crate::Scheduler::submit_latest`] で投入した場合）。
+    pub(crate) fn generation(&self) -> Option<Generation> {
+        match self.generation.load(Ordering::Acquire) {
+            0 => None,
+            raw => Some(Generation::from_raw(raw)),
+        }
+    }
+
+    /// 世代番号を記録する（スケジューラが投入の処理の中で 1 回だけ呼ぶ）。
+    pub(crate) fn set_generation(&self, generation: Generation) {
+        debug_assert!(generation.get() != 0, "世代番号 0 は「なし」を表す");
+        self.generation.store(generation.get(), Ordering::Release);
     }
 
     pub(crate) fn set_priority(&self, priority: Priority) {
@@ -417,8 +431,12 @@ pub(crate) trait Completion: Send {
     /// 結果から求めた終わった状態。
     fn state(&self) -> JobState;
     /// 結果をハンドルに届ける。待つことはない（チャネルには 1 件分の空きがある）。
-    /// ハンドルが drop されていて届かなかった結果を返す（ロックの外で drop する）。
-    fn deliver(self: Box<Self>) -> Option<Deferred>;
+    ///
+    /// 送り側（と、ハンドルが drop されていて届かなかった結果）を返す。呼び出し元は
+    /// スケジューラのロックの外で drop すること。送った直後にハンドルが drop されると、
+    /// 通路とその中の結果は送り側の drop で破棄されるため（結果が持つメモリの枠の返却は
+    /// スケジューラのロックを取る）。
+    fn deliver(self: Box<Self>) -> Deferred;
 }
 
 /// 型つきのジョブ。
@@ -443,11 +461,12 @@ impl<T: Send + 'static> Completion for TypedCompletion<T> {
         JobState::from_result(&self.result)
     }
 
-    fn deliver(self: Box<Self>) -> Option<Deferred> {
+    fn deliver(self: Box<Self>) -> Deferred {
         let TypedCompletion { result, tx } = *self;
+        // 送り側はここで drop しない（trait の説明を参照）。
         match tx.send(result) {
-            Ok(()) => None,
-            Err(undelivered) => Some(Box::new(undelivered.into_inner())),
+            Ok(()) => Box::new(tx),
+            Err(undelivered) => Box::new((undelivered.into_inner(), tx)),
         }
     }
 }
@@ -536,7 +555,7 @@ impl JobContext {
 
     /// 世代番号（[`crate::Scheduler::submit_latest`] で投入した場合）。
     pub fn generation(&self) -> Option<Generation> {
-        self.job.generation
+        self.job.generation()
     }
 
     /// 表示名。
@@ -588,7 +607,21 @@ impl JobContext {
     ///
     /// 枠を持ったまま追加の枠を待つと、他のジョブと互いに待ち合うことがある。なるべく
     /// 投入時に [`JobOptions::memory_bytes`] でまとめて宣言する。
+    ///
+    /// 投入時に宣言した枠（[`JobContext::reserved_bytes`]）はジョブの実行中は返却されないため、
+    /// `宣言した枠 + bytes` が予算の総量を超える要求は、待っても満たせない。この場合は待たずに
+    /// [`MemoryError::ExceedsBudget`]（`requested` は `宣言した枠 + bytes`）を返す。
+    /// [`JobContext::reserve`] で別に取って持っている枠は数えない。
     pub fn reserve(&self, bytes: u64) -> Result<Reservation, MemoryError> {
+        let held = self.reserved_bytes();
+        let total = self.budget.total();
+        // 宣言した枠は総量以下なので、引き算は桁あふれしない。
+        if bytes > total - held.min(total) {
+            return Err(MemoryError::ExceedsBudget {
+                requested: held.saturating_add(bytes),
+                total,
+            });
+        }
         self.budget
             .acquire_with_priority(bytes, self.priority(), &self.job.token)
     }
@@ -621,7 +654,7 @@ impl fmt::Debug for JobContext {
         f.debug_struct("JobContext")
             .field("id", &self.job.id)
             .field("priority", &self.priority())
-            .field("generation", &self.job.generation)
+            .field("generation", &self.job.generation())
             .field("cancelled", &self.is_cancelled())
             .finish()
     }
@@ -663,7 +696,7 @@ impl<T> JobHandle<T> {
 
     /// 世代番号（[`crate::Scheduler::submit_latest`] で投入した場合）。
     pub fn generation(&self) -> Option<Generation> {
-        self.job.generation
+        self.job.generation()
     }
 
     /// 表示名。
@@ -711,6 +744,10 @@ impl<T> JobHandle<T> {
     }
 
     /// 終わるまで待って結果を返す。
+    ///
+    /// ジョブの中から、同じスケジューラの（まだ始まっていない）別のジョブを待つと、空いている
+    /// スレッドがなければ戻らない。特に `threads = 1` のスケジューラ（GPU スレッド）では、
+    /// ジョブの中で同じスケジューラのジョブを待たないこと。
     pub fn wait(mut self) -> Result<T, JobError> {
         if self.taken {
             return Err(JobError::ResultTaken);
@@ -755,7 +792,7 @@ impl<T> fmt::Debug for JobHandle<T> {
         f.debug_struct("JobHandle")
             .field("id", &self.job.id)
             .field("priority", &self.priority())
-            .field("generation", &self.job.generation)
+            .field("generation", &self.job.generation())
             .field("state", &self.state())
             .finish()
     }
@@ -854,7 +891,6 @@ mod tests {
         let shared = JobShared::new(
             JobId::from_raw(1),
             &JobOptions::new(Priority::P3).label("書き出し"),
-            None,
             CancellationToken::new(),
         );
         let hub = EventHub::default();
@@ -876,5 +912,48 @@ mod tests {
         assert_eq!(shared.progress(), 0.0);
         shared.set_state(JobState::Succeeded);
         assert_eq!(shared.progress(), 1.0);
+    }
+
+    /// drop されたときに数を数える値。
+    struct DropCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn deliver_never_drops_the_result_itself() {
+        // 回帰テスト（レビューで発見）: 送った直後にハンドル（受け取り側）が drop されると、
+        // 通路は送り側の drop で破棄され、中の結果もそこで drop される。`deliver` はスケジューラの
+        // ロックの中で呼ばれるので、結果が持つ枠（Reservation）の返却がロックを取り直して
+        // デッドロックしていた。送り側は必ず呼び出し元へ返し、ロックの外で drop させる。
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let completion: Box<dyn Completion> = Box::new(TypedCompletion {
+            result: Ok(DropCounter(Arc::clone(&dropped))),
+            tx,
+        });
+        assert_eq!(completion.state(), JobState::Succeeded);
+        let deferred = completion.deliver();
+        // 送った後で受け取り側が消えても、結果はまだ drop されない（送り側が生きているため）。
+        drop(rx);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        // 返された値を（ロックの外で）drop した時点で、結果も drop される。
+        drop(deferred);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+
+        // 受け取り側が先に消えていた場合も、結果は返された値と一緒に drop される。
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        drop(rx);
+        let completion: Box<dyn Completion> = Box::new(TypedCompletion {
+            result: Ok(DropCounter(Arc::clone(&dropped))),
+            tx,
+        });
+        let deferred = completion.deliver();
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        drop(deferred);
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
     }
 }

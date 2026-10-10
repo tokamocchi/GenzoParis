@@ -11,6 +11,7 @@
 //! - 取り消しの確認は 1 回の不可分な読み取りだけで済む（親子の伝播は取り消しの時点で行う）。
 
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -90,7 +91,11 @@ impl CancellationToken {
     ///
     /// 2 回目以降の呼び出しは何もしない。コールバックはこの関数を呼んだスレッドで
     /// 同期的に実行される。
+    ///
+    /// コールバックがパニックした場合も、残りのコールバックの実行と子孫の取り消しを最後まで
+    /// 行ってから、最初のパニックを呼び出し元へ伝える（親子の取り消しの伝播を途中で失わない）。
     pub fn cancel(&self) {
+        let mut first_panic = None;
         // 深い親子関係でもスタックを使い切らないように、再帰ではなく明示的なスタックで辿る。
         let mut pending = vec![Arc::clone(&self.inner)];
         while let Some(node) = pending.pop() {
@@ -104,12 +109,17 @@ impl CancellationToken {
                     std::mem::take(&mut hooks.callbacks),
                 )
             };
+            pending.extend(children.iter().filter_map(Weak::upgrade));
             // コールバックはロックを外してから呼ぶ（コールバックの中で登録・解除しても
             // デッドロックしないように）。
             for (_, callback) in callbacks {
-                callback();
+                if let Err(payload) = catch_unwind(AssertUnwindSafe(callback)) {
+                    first_panic.get_or_insert(payload);
+                }
             }
-            pending.extend(children.iter().filter_map(Weak::upgrade));
+        }
+        if let Some(payload) = first_panic {
+            resume_unwind(payload);
         }
     }
 
@@ -131,7 +141,8 @@ impl CancellationToken {
     ///
     /// - 既に取り消されていれば、`callback` をこの場で（呼び出したスレッドで）呼ぶ。
     /// - コールバックは [`CancellationToken::cancel`] を呼んだスレッドで同期的に、1 回だけ
-    ///   実行される。重い処理をせず、パニックしないこと。`cancel` を呼ぶ側が持っている
+    ///   実行される。重い処理をせず、パニックしないこと（パニックは `cancel` の呼び出し元へ
+    ///   伝わる）。`cancel` を呼ぶ側が持っている
     ///   ロックを取ろうとするとデッドロックするので注意する。
     /// - 返り値を drop すると登録を解除する（解除と取り消しが同時に起きた場合は、
     ///   コールバックが呼ばれることがある）。
@@ -382,6 +393,34 @@ mod tests {
         });
         token.cancel();
         assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn panicking_callback_does_not_stop_propagation() {
+        // 回帰テスト（レビューで発見）: コールバックがパニックすると、同じトークンの残りの
+        // コールバックと子トークンの取り消しが行われず、「親が取り消されたら子も取り消し」が
+        // 崩れていた（キューにいる子のジョブが取り消されずに実行される）。
+        let root = CancellationToken::new();
+        let child = root.child();
+        let grandchild = child.child();
+        let count = Arc::new(AtomicUsize::new(0));
+        let _bad = root.on_cancel(|| panic!("コールバックのパニック（テスト用）"));
+        let regs: Vec<_> = [&root, &child, &grandchild]
+            .into_iter()
+            .map(|token| {
+                let c = Arc::clone(&count);
+                token.on_cancel(move || {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| root.cancel()));
+        // パニックは呼び出し元へ伝える（握りつぶさない）が、伝播は最後まで行う。
+        assert!(result.is_err());
+        assert!(child.is_cancelled());
+        assert!(grandchild.is_cancelled());
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        drop(regs);
     }
 
     #[test]

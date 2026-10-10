@@ -17,10 +17,12 @@
 //! スケジューラの状態のロックを持ったまま、次のことはしない:
 //! トークンの取り消し（コールバックがスケジューラのロックを取る）、メモリの枠の返却
 //! （通知がスケジューラのロックを取る）、ジョブのクロージャや結果の drop（捕捉した枠を返却する
-//! ことがある）。これらはロックを外してから行う。
+//! ことがある。結果を送った通路の送り側の drop も含む。ハンドルが先に drop されていると、
+//! 送り側の drop で通路の中の結果が drop されるため）。これらはロックを外してから行う。
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::thread::{JoinHandle, ThreadId};
@@ -41,6 +43,19 @@ const DEFAULT_THREAD_NAME: &str = "genzo-jobs";
 
 /// キューが空のときの「最も高い優先度の順位」の値（どの順位より大きい）。
 const NO_QUEUED_RANK: u8 = u8::MAX;
+
+/// 実行スレッドで、ロックの外に回した値（届かなかった結果・実行しなかったジョブの本体など）を
+/// drop する。
+///
+/// これらの drop は利用者の型の `Drop` を呼ぶのでパニックしうる。パニックで実行スレッドが
+/// 終わると、スレッドが 1 本だけのスケジューラ（GPU スレッド。6.1 節）では以後のジョブが
+/// 永久に実行されなくなるため、捕まえて捨てる（内容は既定のパニックフックで出力される）。
+fn drop_on_worker(deferred: Vec<Deferred>) {
+    if deferred.is_empty() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(move || drop(deferred)));
+}
 
 /// スケジューラの設定。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +150,6 @@ impl Scheduler {
             events: Arc::new(EventHub::default()),
             best_queued_rank: Arc::new(AtomicU8::new(NO_QUEUED_RANK)),
             next_id: AtomicU64::new(1),
-            next_generation: AtomicU64::new(1),
         });
 
         // 枠が返却されたら、メモリを待っているキューの先頭を再確認する。
@@ -225,6 +239,12 @@ impl Scheduler {
     ///   （[`SupersedePolicy::CancelRunning`]）。取り消されて終わったジョブの結果も
     ///   [`JobError::Superseded`] になる。
     /// - 返すハンドルの [`JobHandle::generation`] が世代番号（新しい要求ほど大きい）。
+    ///
+    /// 取り消しは協調的なので、取り消しを確認せずに最後まで実行された古いジョブは
+    /// `Ok` を返す。また、スレッドが 2 本以上あると、古いジョブ（実行中）と新しいジョブが
+    /// 同時に実行され、結果が届く順序は世代の順にならないことがある。結果を使う側は、
+    /// 世代番号を比べて古い結果を捨てること（6.2 節。GPU スレッドのように `threads = 1` なら
+    /// 同時には実行されない）。
     pub fn submit_latest<T, F>(
         &self,
         slot: impl Into<SlotKey>,
@@ -260,7 +280,7 @@ impl Scheduler {
         F: FnOnce(&JobContext) -> Result<T, JobError> + Send + 'static,
     {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        let job_shared = self.shared.new_job(&options, slot.is_some());
+        let job_shared = self.shared.new_job(&options);
         let handle = JobHandle::new(Arc::clone(&job_shared), rx, Arc::downgrade(&self.shared));
         self.shared
             .enqueue(&options, slot, job_shared, Box::new(TypedJob::new(job, tx)));
@@ -336,7 +356,10 @@ impl Scheduler {
         };
         drop(deferred);
         for token in running_tokens {
-            token.cancel();
+            // 利用者が登録した取り消しのコールバックがパニックしても、残りのジョブへの通知と
+            // スレッドの回収は最後まで行う（Drop からも呼ばれるため。内容は既定のパニック
+            // フックで出力される）。
+            let _ = catch_unwind(AssertUnwindSafe(|| token.cancel()));
         }
 
         let me = std::thread::current().id();
@@ -390,7 +413,6 @@ pub(crate) struct Shared {
     /// [`JobContext::should_yield`] がロックなしで読む。
     best_queued_rank: Arc<AtomicU8>,
     next_id: AtomicU64,
-    next_generation: AtomicU64,
 }
 
 /// スケジューラの状態（`Shared::state` のロックで守る）。
@@ -406,6 +428,9 @@ struct State {
     slots: HashMap<SlotKey, SlotState>,
     /// 終了処理を始めたか。
     shutting_down: bool,
+    /// 最後に割り当てた世代番号（0 は未割り当て）。ロックの中で割り当てることで、
+    /// 世代番号の順とスロットの置き換えの順を一致させる。
+    last_generation: u64,
 }
 
 /// キューにいるジョブ。
@@ -439,6 +464,12 @@ impl State {
         self.queue.is_empty() && self.running.is_empty()
     }
 
+    /// 次の世代番号を割り当てる（1 から始まる）。
+    fn allocate_generation(&mut self) -> Generation {
+        self.last_generation += 1;
+        Generation::from_raw(self.last_generation)
+    }
+
     /// キューからジョブを外す（スロットの記録も更新する）。
     fn remove_queued(&mut self, id: JobId) -> Option<QueuedJob> {
         let rank = self.queued_rank.remove(&id)?;
@@ -467,16 +498,16 @@ impl State {
 }
 
 impl Shared {
-    /// 新しいジョブの共有状態を作る（ID・世代番号・トークンを割り当てる）。
-    fn new_job(&self, options: &JobOptions, latest: bool) -> Arc<JobShared> {
+    /// 新しいジョブの共有状態を作る（ID・トークンを割り当てる）。
+    ///
+    /// 世代番号はここでは割り当てない（[`Shared::enqueue`] がロックの中で割り当てる）。
+    fn new_job(&self, options: &JobOptions) -> Arc<JobShared> {
         let id = JobId::from_raw(self.next_id.fetch_add(1, Ordering::Relaxed));
-        let generation = latest
-            .then(|| Generation::from_raw(self.next_generation.fetch_add(1, Ordering::Relaxed)));
         let token = match &options.parent {
             Some(parent) => parent.child(),
             None => CancellationToken::new(),
         };
-        Arc::new(JobShared::new(id, options, generation, token))
+        Arc::new(JobShared::new(id, options, token))
     }
 
     /// ジョブをキューに入れる。
@@ -490,7 +521,12 @@ impl Shared {
         let id = job_shared.id;
         let total = self.budget.total();
         if job_shared.memory_bytes > total {
-            // 待っても満たせないので、キューに入れずに失敗させる。
+            // 待っても満たせないので、キューに入れずに失敗させる（スロットの古い要求は
+            // 置き換えない）。
+            if slot.is_some() {
+                let generation = self.state.lock().allocate_generation();
+                job_shared.set_generation(generation);
+            }
             let error = JobError::Memory(MemoryError::ExceedsBudget {
                 requested: job_shared.memory_bytes,
                 total,
@@ -513,6 +549,11 @@ impl Shared {
         let mut to_cancel: Vec<CancellationToken> = Vec::new();
         let rejected = {
             let mut state = self.state.lock();
+            if slot.is_some() {
+                // 世代番号は置き換えと同じロックの中で割り当てる（新しい世代ほど後に置き換える）。
+                let generation = state.allocate_generation();
+                job_shared.set_generation(generation);
+            }
             if state.shutting_down {
                 Some((job, registration, JobError::Shutdown))
             } else if job_shared.token.is_cancelled() {
@@ -621,7 +662,7 @@ impl Shared {
             };
             match next {
                 None => return,
-                Some(Next::Discard(deferred)) => drop(deferred),
+                Some(Next::Discard(deferred)) => drop_on_worker(deferred),
                 Some(Next::Run(queued, reservation)) => self.run(queued, reservation),
             }
         }
@@ -714,7 +755,7 @@ impl Shared {
                 self.idle_cv.notify_all();
             }
         }
-        drop(deferred);
+        drop_on_worker(deferred);
     }
 
     /// 結果を届けて、終わった状態にする。
@@ -731,9 +772,8 @@ impl Shared {
         let final_state = completion.state();
         self.events
             .emit(job_shared.event(JobEventKind::State(final_state)));
-        if let Some(undelivered) = completion.deliver() {
-            deferred.push(undelivered);
-        }
+        // 送り側（と届かなかった結果）はロックの外で drop する（Completion::deliver を参照）。
+        deferred.push(completion.deliver());
         job_shared.set_state(final_state);
     }
 
@@ -749,6 +789,9 @@ impl Shared {
         deferred.push(body);
         deferred.push(Box::new(registration));
         self.complete(&job_shared, completion, deferred);
+        // ハンドルが既に drop されていれば、これが最後の参照になる。トークンに登録された
+        // 利用者のコールバック（捕捉した値）の drop もロックの外で行う。
+        deferred.push(Box::new(job_shared));
     }
 
     /// キューに入れなかったジョブを、実行せずに `error` で終える（ロックの外で呼ぶ）。
