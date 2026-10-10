@@ -1,8 +1,5 @@
-//! 検証用の最小 CLI（`genzo`）。
-//!
-//! 登録・検索・現像・書き出し・計測をコマンドから実行する（ORG-05）。自動テストと、
-//! AI による動作確認に使う（docs/04_architecture.md の 1.4 節）。
+//! 検証用の CLI（`genzo`）。処理は lib（`genzo_cli`）にある（ORG-05。04 の 1.4 節）。
 
-fn main() {
-    println!("genzo {}", env!("CARGO_PKG_VERSION"));
+fn main() -> std::process::ExitCode {
+    genzo_cli::main_entry()
 }

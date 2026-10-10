@@ -10,21 +10,51 @@ publish.workspace = true
 
 [features]
 default = []
-# LibRaw による RAW の展開を有効にする。
+# LibRaw による RAW の展開を有効にする（ワーカーとして動くときに使う。04 の 1.2 節）。
 libraw = ["genzo-worker/libraw", "genzo-api/libraw"]
+
+# コマンドの処理は lib（`genzo_cli`）に置き、単体テストは lib で行う。bin は lib の入口を呼ぶだけなので、
+# bin の単体テストの実行ファイルは作らない（test = false。ディスクとビルドの時間の節約）。
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "genzo"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 genzo-api.workspace = true
+# catalog restore の復元先がカタログかを確かめる（SQLite の application_id。開かずにヘッダーで判定）。
+genzo-catalog.workspace = true
 genzo-worker.workspace = true
+# カタログなしの現像（render）・計測（bench）で、パイプライン・GPU・書き出し・取り消しを直接使う
+# （04 の 1.4 節では CLI は genzo-api だけに依存する。逸脱の理由は lib.rs の doc）。
+genzo-model.workspace = true
+genzo-pipeline.workspace = true
+genzo-gpu.workspace = true
+genzo-media.workspace = true
+genzo-jobs.workspace = true
+genzo-raw.workspace = true
+# 計測の記録（05 の 1.8 節）と、計測用の合成の RAW・DNG。
+genzo-testkit.workspace = true
 clap.workspace = true
-anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+# コアのイベントの受け取り（genzo-api の Core::subscribe）。
+crossbeam-channel.workspace = true
+chrono.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# 計測用の合成 DNG を置く一時フォルダ。
+tempfile.workspace = true
+
+[dev-dependencies]
+# 結合テストの入力（合成の PNG / TIFF）と、書き出したファイルの寸法の確認。
+image.workspace = true
+# 書き出したファイルの Exif（GPS の有無）の確認。
+kamadak-exif.workspace = true
 
 [lints]
 workspace = true
