@@ -818,12 +818,20 @@ fn two_writers_wait_for_each_other_instead_of_failing() {
         cat.close().unwrap();
         folder
     };
+    // 両方の接続を開き終えてから書き始める。開く処理は印の書き込みを含むため、相手が書き続けて
+    // いると、遅いディスク（Windows の CI）では busy_timeout を超えて待たされることがある
+    // （このテストが確かめたいのは、読んでから書くトランザクションが待たずに失敗しないこと）。
+    // 回数も、busy_timeout（5 秒）の間に相手の書き込みが終わる程度に抑える。
+    const ITERATIONS: u64 = 20;
+    let opened = std::sync::Arc::new(std::sync::Barrier::new(2));
     let workers: Vec<_> = (0..2u64)
         .map(|w| {
             let path = path.clone();
+            let opened = std::sync::Arc::clone(&opened);
             std::thread::spawn(move || {
                 let mut cat = Catalog::open(&path).unwrap();
-                for i in 0..60u64 {
+                opened.wait();
+                for i in 0..ITERATIONS {
                     let n = w * 1000 + i;
                     // 登録は既存の行を読んでから書く（冪等性のため）。
                     let o = cat
@@ -847,7 +855,7 @@ fn two_writers_wait_for_each_other_instead_of_failing() {
         w.join().expect("書き込みが SQLITE_BUSY で失敗しない");
     }
     let cat = Catalog::open(&path).unwrap();
-    assert_eq!(rows(&cat, "asset"), 120);
-    assert_eq!(rows(&cat, "file"), 240);
+    assert_eq!(rows(&cat, "asset"), 2 * ITERATIONS as i64);
+    assert_eq!(rows(&cat, "file"), 4 * ITERATIONS as i64);
     assert!(cat.check_integrity().unwrap().is_ok());
 }
