@@ -108,6 +108,10 @@ impl Core {
                 // 2. L1: フォルダの走査（時間がかかる）は、カタログとキャッシュのロックの外で行う（その間も
                 //    評価・現像の保存・サムネイルの表示を止めない。指摘 F24）。索引の更新と上限容量を超えた
                 //    分の削除は、キャッシュのロックの中で短く行う。
+                // テスト用の口（`CoreHooks::before_preview_scan`）。走査と同じく、ロックの外で呼ぶ。
+                if let Some(hook) = &inner.before_preview_scan {
+                    hook();
+                }
                 let scan =
                     genzo_catalog::scan_preview_dir(&root).map_err(|source| ApiError::Cache {
                         path: root.clone(),

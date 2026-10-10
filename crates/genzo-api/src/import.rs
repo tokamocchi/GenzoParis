@@ -162,15 +162,33 @@ impl ExcludedDirs {
 }
 
 /// 取り込みで飛ばすフォルダ: データのフォルダ、L1 プレビューのキャッシュ、バックアップの置き場
-/// （データのフォルダの外に置く設定もあるため、3 つとも照合する）。
+/// （データのフォルダの外に置く設定もあるため、すべて照合する）。
+///
+/// L1 プレビューのキャッシュは、**今開いているキャッシュのフォルダ**（[`genzo_catalog::PreviewCache::root`]）と、
+/// **設定に記録されたフォルダ**の両方を飛ばす。設定の場所は、変えても次に開くまで有効にならない（今のキャッシュは
+/// 開き直さず、移さない。[`crate::Core::update_settings`]）ので、設定だけを見ると、設定を変えた後に、まだ使っている
+/// 古い場所の生成済みの JPEG を写真として登録してしまう。起動時に設定の場所を開けず既定の場所で開いた場合も、
+/// 開いているフォルダと設定のフォルダが違う。どちらも、この関数を呼ぶたびに今の状態から求める（開き直した後に
+/// 古い場所を覚えておくことはしない）。データのフォルダとバックアップの置き場は、起動の設定（[`CoreConfig`]）で
+/// 決まり、開いている間は変わらない。
+///
+/// [`CoreConfig`]: crate::config::CoreConfig
 pub(crate) fn excluded_dirs(inner: &crate::core::Inner) -> ExcludedDirs {
-    let preview_dir = inner.settings.lock().preview_cache_dir.clone();
+    // 2 つのロックは続けて取らず、それぞれ値を取り出してすぐに放す（ほかの処理とのロックの順序を作らない）。
+    let configured_preview_dir = inner.settings.lock().preview_cache_dir.clone();
+    let open_preview_dir = inner
+        .cache
+        .lock()
+        .as_ref()
+        .map(|c| c.previews.root().to_path_buf());
     let backup_dir = inner.config.backup_dir();
-    ExcludedDirs::new([
+    let mut dirs: Vec<&Path> = vec![
         inner.config.data_dir.as_path(),
-        preview_dir.as_path(),
+        configured_preview_dir.as_path(),
         backup_dir.as_path(),
-    ])
+    ];
+    dirs.extend(open_preview_dir.as_deref());
+    ExcludedDirs::new(dirs)
 }
 
 /// フォルダを走査する（シンボリックリンク・ジャンクションはたどらない。`excluded` の中は飛ばす）。

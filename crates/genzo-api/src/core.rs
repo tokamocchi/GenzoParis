@@ -58,12 +58,18 @@ pub(crate) struct CacheDb {
 pub struct CoreHooks {
     /// OS のゴミ箱への移動（既定は trash crate。テストでは偽物を渡して OS のゴミ箱を汚さない）。
     pub trash: Arc<dyn TrashBackend>,
+    /// キャッシュの回収のジョブが、L1 のフォルダを走査する直前に呼ぶ関数（テスト専用）。この間、ジョブは
+    /// カタログとキャッシュのロックを持っていない。関数の中でジョブを止めておけば、「回収が終わるのを
+    /// 待たずに、ほかの操作（現像設定の保存など）が終わる」ことを、時間によらずに確かめられる。
+    #[doc(hidden)]
+    pub before_preview_scan: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Default for CoreHooks {
     fn default() -> Self {
         Self {
             trash: Arc::new(crate::delete::OsTrash),
+            before_preview_scan: None,
         }
     }
 }
@@ -92,6 +98,8 @@ pub(crate) struct Inner {
     pub jobs: JobRegistry,
     pub plans: Mutex<PlanStore>,
     pub trash: Arc<dyn TrashBackend>,
+    /// [`CoreHooks::before_preview_scan`]。
+    pub before_preview_scan: Option<Arc<dyn Fn() + Send + Sync>>,
     pub settings: Mutex<CoreSettings>,
     /// 最後に投入した撮影日時の推定し直しのジョブ（続けて設定を変えたときに、前のジョブを取り消す）。
     pub reresolve_job: Mutex<Option<u64>>,
@@ -343,6 +351,7 @@ impl Core {
             jobs: JobRegistry::default(),
             plans: Mutex::new(PlanStore::default()),
             trash: hooks.trash,
+            before_preview_scan: hooks.before_preview_scan,
             settings: Mutex::new(settings),
             reresolve_job: Mutex::new(None),
             cache_generation,

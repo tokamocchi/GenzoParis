@@ -401,6 +401,197 @@ fn trash_refuses_a_file_replaced_after_registration() {
     core.close().unwrap();
 }
 
+/// 更新日時を設定する（ファイルシステムの時刻の細かさによらず、同じ値・違う値に決めるため）。
+fn set_mtime(path: &Path, t: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+}
+
+/// クイックハッシュが読む先頭と末尾の 64KiB（合わせて 128KiB）より大きい、ノイズの JPEG を書き、更新日時を
+/// `mtime` にする。
+fn write_large_jpeg(path: &Path, mtime: std::time::SystemTime) {
+    let (w, h) = (320u32, 240u32);
+    // 決まった列のノイズ（xorshift）。圧縮が効かず、ファイルが大きくなる。
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let raw: Vec<u8> = (0..w * h * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 32) as u8
+        })
+        .collect();
+    let rgb = genzo_media::RgbImage8::from_raw(w, h, raw).unwrap();
+    let bytes = genzo_media::jpeg::encode_jpeg(&rgb, 92, None, None).unwrap();
+    assert!(
+        bytes.len() > 128 * 1024 + 4096,
+        "中間のあるファイルにする: {} バイト",
+        bytes.len()
+    );
+    std::fs::write(path, bytes).unwrap();
+    set_mtime(path, mtime);
+}
+
+/// ファイルの中間の 1 バイトだけを書き換える（サイズも先頭と末尾の 64KiB も同じなので、クイックハッシュ
+/// は同じになる）。更新日時は `mtime` にする。
+fn rewrite_middle(path: &Path, mtime: std::time::SystemTime) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xff;
+    std::fs::write(path, &bytes).unwrap();
+    set_mtime(path, mtime);
+}
+
+/// 中間だけの書き換えは、クイックハッシュでは見分けられず、全体のハッシュなら見分けられる（テストの前提）。
+fn assert_only_the_middle_differs(path: &Path, before: &FileFacts, full_before: &str) {
+    let now = FileFacts::read(path).unwrap();
+    assert_eq!(now.size, before.size);
+    assert_eq!(now.quick_hash, before.quick_hash, "クイックハッシュは同じ");
+    assert_ne!(genzo_catalog::full_hash(path).unwrap(), full_before);
+}
+
+/// カタログに、ファイルの全体のハッシュを記録する（取り込みは記録しない。再リンクの確定・コピーの検証で
+/// 計算した値を記録する。04 の 3.3 節）。`Core` を閉じているときに呼ぶ。
+fn store_full_hash(env: &Env, path: &Path) {
+    let mut cat = genzo_catalog::Catalog::open(env.catalog_path()).unwrap();
+    let ids = cat.all_variant_ids().unwrap();
+    let assets = cat.assets_of_variants(&ids).unwrap();
+    let plan = cat.trash_plan(&assets).unwrap();
+    assert_eq!(plan.files.len(), 1);
+    cat.set_full_hash(
+        plan.files[0].file_id,
+        &genzo_catalog::full_hash(path).unwrap(),
+    )
+    .unwrap();
+    cat.close().unwrap();
+}
+
+/// ゴミ箱へ移す直前の確認は、サイズとクイックハッシュ（大きなファイルの中間を含まない）だけでは足りない:
+/// 登録の後に、サイズも先頭と末尾の 64KiB も同じまま、中間だけが書き換わったファイルは移さない
+/// （全体のハッシュを登録していない場合は、更新日時が登録と違えば同じファイルと確かめられない）。
+#[test]
+fn trash_refuses_a_file_whose_middle_was_rewritten_after_registration() {
+    let env = Env::new();
+    let path = env.photos.join("A.jpg");
+    let t0 = std::time::SystemTime::now() - std::time::Duration::from_secs(1000);
+    write_large_jpeg(&path, t0);
+    let before = FileFacts::read(&path).unwrap();
+    let full_before = genzo_catalog::full_hash(&path).unwrap();
+    let core = env.open();
+    import(&core, &env.photos);
+    let a = all_items(&core)[0].variant_id;
+    // アプリの外で、中間だけ書き換えた（更新日時は新しくなった）。
+    rewrite_middle(&path, t0 + std::time::Duration::from_secs(500));
+    assert_only_the_middle_differs(&path, &before, &full_before);
+    let plan = core.plan_delete(DeleteKind::Trash, &[a]).unwrap();
+    let report = core.execute_delete(plan.plan_id).unwrap();
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert!(report.failed[0].reason.contains("登録"), "{report:?}");
+    assert!(report.removed_assets.is_empty(), "{report:?}");
+    assert!(env.trash.moved.lock().is_empty(), "移さない");
+    assert!(path.is_file());
+    assert_eq!(all_items(&core).len(), 1, "写真はカタログに残る");
+    core.close().unwrap();
+}
+
+/// 全体のハッシュがカタログにあれば、更新日時まで元に戻して中間だけ書き換えたファイルも、全体のハッシュで
+/// 見分けて移さない。内容が同じなら、更新日時が違っていても移す（全体のハッシュが決め手）。
+#[test]
+fn trash_compares_the_full_hash_when_the_catalog_has_one() {
+    let env = Env::new();
+    let path = env.photos.join("A.jpg");
+    let t0 = std::time::SystemTime::now() - std::time::Duration::from_secs(1000);
+    write_large_jpeg(&path, t0);
+    let before = FileFacts::read(&path).unwrap();
+    let full_before = genzo_catalog::full_hash(&path).unwrap();
+    {
+        let core = env.open();
+        import(&core, &env.photos);
+        core.close().unwrap();
+    }
+    store_full_hash(&env, &path);
+    let core = env.open();
+    let a = all_items(&core)[0].variant_id;
+    // 中間だけ書き換え、更新日時も登録の時と同じにした（サイズ・更新日時・クイックハッシュが同じ）。
+    rewrite_middle(&path, t0);
+    assert_only_the_middle_differs(&path, &before, &full_before);
+    assert_eq!(FileFacts::read(&path).unwrap().mtime_ns, before.mtime_ns);
+    let plan = core.plan_delete(DeleteKind::Trash, &[a]).unwrap();
+    let report = core.execute_delete(plan.plan_id).unwrap();
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert!(
+        report.failed[0].reason.contains("全体のハッシュ"),
+        "{report:?}"
+    );
+    assert!(report.removed_assets.is_empty(), "{report:?}");
+    assert!(env.trash.moved.lock().is_empty(), "移さない");
+    assert_eq!(all_items(&core).len(), 1, "写真はカタログに残る");
+    // 内容を戻した（更新日時は違う）: 全体のハッシュが同じなので移す。
+    rewrite_middle(&path, t0 + std::time::Duration::from_secs(500));
+    assert_eq!(genzo_catalog::full_hash(&path).unwrap(), full_before);
+    let plan = core.plan_delete(DeleteKind::Trash, &[a]).unwrap();
+    let report = core.execute_delete(plan.plan_id).unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.trashed_files.len(), 1, "{report:?}");
+    assert_eq!(env.trash.moved.lock().len(), 1);
+    assert!(all_items(&core).is_empty());
+    core.close().unwrap();
+}
+
+/// 全体のハッシュを登録していない場合、更新日時だけが登録と違うファイル（内容は同じ）は、同じファイルと
+/// 確かめられないので移さない。ファイルの確認（`check_files`）で登録し直した後なら移せる。
+#[test]
+fn trash_needs_check_files_when_only_the_modified_time_differs() {
+    let env = Env::new();
+    let path = env.photos.join("A.jpg");
+    let t0 = std::time::SystemTime::now() - std::time::Duration::from_secs(1000);
+    write_large_jpeg(&path, t0);
+    let core = env.open();
+    import(&core, &env.photos);
+    let a = all_items(&core)[0].variant_id;
+    set_mtime(&path, t0 + std::time::Duration::from_secs(500));
+    let plan = core.plan_delete(DeleteKind::Trash, &[a]).unwrap();
+    let report = core.execute_delete(plan.plan_id).unwrap();
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert!(
+        report.failed[0].reason.contains("check_files"),
+        "{report:?}"
+    );
+    assert!(env.trash.moved.lock().is_empty(), "移さない");
+    // 確認して登録し直した（更新日時が今の値になる）後は、移せる。
+    let check = core.check_files(&[a]).unwrap();
+    assert_eq!(check.changed.len(), 1, "{check:?}");
+    let plan = core.plan_delete(DeleteKind::Trash, &[a]).unwrap();
+    let report = core.execute_delete(plan.plan_id).unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(env.trash.moved.lock().len(), 1);
+    core.close().unwrap();
+}
+
+/// クイックハッシュがファイルの全体を覆う小さなファイル（128KiB 以下）は、クイックハッシュが同じなら内容が
+/// 同じなので、更新日時が違っていても（全体のハッシュを登録していなくても）移す。
+#[test]
+fn trash_accepts_a_small_file_with_a_different_modified_time() {
+    let env = Env::new();
+    let path = env.photos.join("A.jpg");
+    write_jpeg(&path, (32, 24), 1, None);
+    assert!(std::fs::metadata(&path).unwrap().len() <= 128 * 1024);
+    let t0 = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let core = env.open();
+    import(&core, &env.photos);
+    let a = all_items(&core)[0].variant_id;
+    set_mtime(&path, t0 + std::time::Duration::from_secs(500));
+    let plan = core.plan_delete(DeleteKind::Trash, &[a]).unwrap();
+    let report = core.execute_delete(plan.plan_id).unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(env.trash.moved.lock().len(), 1);
+    core.close().unwrap();
+}
+
 /// ゴミ箱への移動で、元の場所が見えない（ドライブを外した・フォルダごと見えない）ファイルは「移した」
 /// 扱いにせず、失敗にしてカタログに残す。フォルダはあってファイルだけがない（アプリの外で削除された）
 /// 場合は、移すものがないとして報告する（指摘 F06）。
@@ -585,6 +776,72 @@ fn an_unusable_preview_folder_does_not_prevent_opening() {
         .unwrap()
         .expect("L1 は既定の場所に作る");
     assert!(l1.starts_with(&default_dir), "{l1:?}");
+    core.close().unwrap();
+}
+
+/// データのフォルダの外にあるプレビューのキャッシュ（L1）の場所を設定で変えても、変えた後の取り込みが、
+/// 今使っている（次に開くまで開いたままの）古い場所の JPEG を写真として登録しない。キャッシュは開き直さない
+/// ので、設定に記録された新しい場所だけを除外すると、古い場所の生成済みの JPEG が除外から漏れていた
+/// （Codex のレビュー P2）。設定に記録された新しい場所（次に開いたときに使う）も除外する。
+#[test]
+fn changing_the_preview_folder_keeps_excluding_the_one_in_use_from_import() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (32, 24), 1, None);
+    // データのフォルダの外の、1 つのフォルダの下に、古い場所と新しい場所を並べる（親を再帰で取り込む）。
+    let external = env.dir.path().join("external");
+    let old_dir = external.join("old-previews");
+    let new_dir = external.join("new-previews");
+    // 1. 古い場所を設定し、開き直して使う（キャッシュが古い場所で開く）。
+    let core = env.open();
+    core.update_settings(&SettingsUpdate {
+        preview_cache_dir: Some(old_dir.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    core.close().unwrap();
+    let core = env.open();
+    assert_eq!(core.settings().preview_cache_dir, old_dir);
+    import(&core, &env.photos);
+    let v = all_items(&core)[0].variant_id;
+    let job = core.regenerate_previews(&[v]).unwrap();
+    common::wait_ok(&core, job);
+    let l1 = core.preview_path(v).unwrap().expect("L1 を作る");
+    assert!(l1.starts_with(&old_dir), "{l1:?}");
+    assert!(l1.is_file());
+    // 2. 開いたまま、設定を新しい場所に変える（キャッシュは古い場所のまま。新しい場所は次に開いたときに使う）。
+    //    新しい場所には、キャッシュのファイルに見える JPEG を置いておく。
+    core.update_settings(&SettingsUpdate {
+        preview_cache_dir: Some(new_dir.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(core.settings().preview_cache_dir, new_dir);
+    write_jpeg(
+        &new_dir.join("ab").join("cd").join("next.jpg"),
+        (32, 24),
+        2,
+        None,
+    );
+    // 3. 親のフォルダを再帰で取り込んでも、古い場所・新しい場所のどちらの JPEG も登録しない。
+    let report = import(&core, &external);
+    assert_eq!(report.files_found, 0, "{report:?}");
+    assert_eq!(report.added, 0, "{report:?}");
+    assert!(report.not_registered.is_empty(), "{report:?}");
+    let items = all_items(&core);
+    assert_eq!(
+        common::names(&items),
+        vec!["A.jpg".to_owned()],
+        "プレビューの JPEG を写真として登録しない"
+    );
+    // 4. 古い場所・新しい場所そのものを指定した取り込みは、エラーにする。
+    for dir in [&old_dir, &new_dir] {
+        let job = core.import_folder(dir, true).unwrap();
+        let info = common::wait_done(&core, job);
+        assert_eq!(info.state, JobState::Failed, "{dir:?}: {info:?}");
+    }
+    assert_eq!(all_items(&core).len(), 1);
+    // 元の写真は変わらず、L1 のファイルも残っている。
+    assert!(l1.is_file());
     core.close().unwrap();
 }
 
@@ -837,54 +1094,65 @@ fn a_catalog_cannot_be_opened_twice_at_the_same_time() {
 }
 
 /// キャッシュの回収（L1 のフォルダの走査に時間がかかる）の間も、ドラッグの終了（保存）が待たされない
-/// （回収はカタログのロックの外でフォルダを走査し、現像の保存は現像のロックの外でカタログに書く。
-/// PERF-13、指摘 F24）。
+/// （回収はカタログとキャッシュのロックの外でフォルダを走査し、現像の保存は現像のロックの外でカタログに
+/// 書く。PERF-13、指摘 F24）。
+///
+/// 時間の長さは比べない（以前は「保存までの時間が、回収だけの時間の半分より短い」と比べていたが、
+/// ディスクが忙しい環境や遅い CI で、保存の書き込みも遅れて不安定だった）。回収のジョブを、フォルダを
+/// 走査する直前（`CoreHooks::before_preview_scan`。ロックの外）で止めておき、止めている間に保存が終わる
+/// ことを確かめる。保存が回収の終わりを待つなら、保存は止まったまま終わらない（待つ上限を過ぎたら
+/// 失敗にする。上限は失敗のときだけ使う）。
 #[test]
 fn saving_develop_settings_does_not_wait_for_cache_garbage_collection() {
-    use std::time::{Duration, Instant};
+    use crossbeam_channel::{bounded, unbounded};
     let env = Env::new();
+    // 回収のジョブが走査の直前に着いたことの知らせと、ジョブを再開する合図（送り側が閉じても再開する）。
+    let (reached_tx, reached_rx) = unbounded::<()>();
+    let (resume_tx, resume_rx) = unbounded::<()>();
+    let core = env.open_with_hooks(|hooks| {
+        hooks.before_preview_scan = Some(std::sync::Arc::new(move || {
+            let _ = reached_tx.send(());
+            let _ = resume_rx.recv();
+        }));
+    });
     write_jpeg(&env.photos.join("A.jpg"), (48, 32), 1, None);
-    let core = env.open();
     import(&core, &env.photos);
     let v = all_items(&core)[0].variant_id;
-    // L1 のフォルダに、索引にないプレビューのファイルをたくさん置く（走査に時間がかかるように）。
-    let root = env.dir.path().join("data").join("previews");
-    for i in 0..30_000u32 {
-        let key = format!("{:064x}", u128::from(i) * 0x9E37_79B9_7F4A_7C15);
-        let dir = root.join(&key[0..2]).join(&key[2..4]);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(format!("{key}.jpg")), [0xFF, 0xD8, 0xFF]).unwrap();
-    }
-    // 1 回目で索引に加える。2 回目の、回収だけにかかる時間を測る（3 回目と同じ条件）。
-    let job = core.collect_cache_garbage().unwrap();
-    common::wait_ok(&core, job);
-    let started = Instant::now();
-    let job = core.collect_cache_garbage().unwrap();
-    common::wait_ok(&core, job);
-    let alone = started.elapsed();
-    if alone < Duration::from_millis(100) {
-        eprintln!("回収が速すぎる（{alone:?}）ため、待たされないことの確認を飛ばす");
-        core.close().unwrap();
-        return;
-    }
     core.open_develop(v).unwrap();
     let s = DevelopSettings {
         exposure_ev: 0.5,
         ..Default::default()
     };
+    // ドラッグ中（保存はドラッグの終わりまで待つ）。
     core.set_settings(&s, true).unwrap();
-    let started = Instant::now();
     let job = core.collect_cache_garbage().unwrap();
-    // 回収のジョブが動き始めてから、ドラッグを終える（保存する）。
-    std::thread::sleep(Duration::from_millis(20));
-    core.end_drag().unwrap();
-    let saved_after = started.elapsed();
-    common::wait_ok(&core, job);
-    assert!(
-        saved_after < alone / 2,
-        "保存は回収を待たない（保存まで {saved_after:?}、回収だけで {alone:?}）"
+    reached_rx
+        .recv_timeout(common::WAIT_LIMIT)
+        .expect("回収のジョブが、走査の直前まで進まない");
+    // 回収を止めたまま、ドラッグを終える（保存する）。保存の完了を、別のスレッドの結果で待つ。
+    let (saved, job_state) = std::thread::scope(|scope| {
+        let (done_tx, done_rx) = bounded(1);
+        let core = &core;
+        scope.spawn(move || {
+            let _ = done_tx.send(core.end_drag().map(|_| ()));
+        });
+        let saved = done_rx.recv_timeout(common::WAIT_LIMIT);
+        // 回収を再開する前の状態（保存が終わったときに、回収が終わっていないことの確認）。
+        let job_state = core.job(job).map(|info| info.state);
+        // 結果によらず再開する（止めたままだと、保存を待つスレッドも回収のジョブも終わらない）。
+        let _ = resume_tx.send(());
+        (saved, job_state)
+    });
+    saved
+        .expect("保存が、止めておいた回収の終わりを待っている")
+        .unwrap();
+    assert_eq!(
+        job_state.unwrap(),
+        JobState::Running,
+        "保存が終わったとき、回収は止まったまま（終わっていない）"
     );
     assert_eq!(core.history(v).unwrap().len(), 2);
+    common::wait_ok(&core, job);
     core.close().unwrap();
 }
 

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use genzo_catalog::{Catalog, FileOpPath, FileOpRecord};
+use genzo_catalog::{Catalog, FileFacts, FileOpPath, FileOpRecord, FileRecord, QUICK_HASH_CHUNK};
 use genzo_model::{AssetId, FileOpKind, FileOpState, FileStatus, VariantId};
 
 use crate::core::Core;
@@ -246,6 +246,51 @@ fn same_content(a: &DeletePlan, b: &DeletePlan) -> bool {
     a.kind == b.kind && a.assets == b.assets && a.variants == b.variants && a.files == b.files
 }
 
+/// ゴミ箱へ移す直前に、今のファイルが、カタログに登録したファイルと同じかを確かめる（6.4 節）。同じと
+/// 確かめられなければ、利用者に見せる理由を返す。読めない・確かめられない場合も「同じ」とせず、移さない
+/// 側に倒す。ファイルは読み取り専用で開く。
+///
+/// - サイズとクイックハッシュ（サイズ ＋ 先頭と末尾の 64KiB）が違えば、別のファイル。
+/// - サイズが `2 * QUICK_HASH_CHUNK` 以下なら、クイックハッシュはファイルの全体を覆うので、これで確かめ
+///   終わる。
+/// - それより大きいファイルは、クイックハッシュが同じでも中間だけが違いうる（クイックハッシュは同一性の
+///   確定に使えない。3.3 節）。
+///   - カタログに全体のハッシュ（`file.full_hash`）があれば、ファイル全体の BLAKE3 を少しずつ読んで求め、
+///     比べる。これが決め手で、更新日時は見ない（内容が同じで更新日時だけが違うファイルは移す）。
+///   - なければ、登録の内容と比べるものがないので、更新日時が登録と同じことを求める。違えば、中身が同じか
+///     確かめられないため移さない（exFAT やネットワークのボリュームでは、内容が同じでも更新日時が違う
+///     ことがある。その場合は `check_files` で登録し直せば移せる）。更新日時まで保ったまま中間だけ書き換え
+///     られた場合は、全体のハッシュを登録していなければ見分けられない。
+fn verify_same_as_registered(path: &Path, registered: &FileRecord) -> Result<(), String> {
+    const RETRY: &str = "ファイルの確認（check_files）の後にやり直してください";
+    let now = FileFacts::read(path).map_err(|e| {
+        format!("ファイルを読めないため、登録のものと同じか確かめられません（{e}）。移していません")
+    })?;
+    if now.size != registered.facts.size || now.quick_hash != registered.facts.quick_hash {
+        return Err(format!(
+            "ファイルが登録の後に変わっています（同じ名前の別のファイルの可能性があります）。移していません。{RETRY}"
+        ));
+    }
+    if now.size <= 2 * QUICK_HASH_CHUNK {
+        return Ok(());
+    }
+    if let Some(expected) = &registered.full_hash {
+        return match genzo_catalog::full_hash(path) {
+            Ok(h) if h == *expected => Ok(()),
+            Ok(_) => Err("ファイルの全体のハッシュが登録のものと違います（同じ名前の別のファイルか、中間だけが書き換えられています）。移していません。ファイルを確かめてください（ファイルに触れない「カタログからの除去」は使えます）".to_owned()),
+            Err(e) => Err(format!(
+                "ファイルの全体のハッシュを求められないため、登録のものと同じか確かめられません（{e}）。移していません"
+            )),
+        };
+    }
+    if now.mtime_ns != registered.facts.mtime_ns {
+        return Err(format!(
+            "ファイルの更新日時が登録の時と違い、全体のハッシュも登録されていないため、同じファイルか確かめられません。移していません。{RETRY}"
+        ));
+    }
+    Ok(())
+}
+
 impl Core {
     /// 削除の計画を作る（影響を受けるファイルと variant の一覧。カタログもファイルも変えない）。
     ///
@@ -357,8 +402,13 @@ impl Core {
     /// 移し始める前に、すべてのファイルを確かめる（6.4 節「失敗したら元の状態のまま知らせる」）:
     /// - 元の場所が見えない（フォルダごと見えない・権限・入出力のエラー。ドライブを外した場合など）
     ///   ファイルがあれば、移さずに失敗にする（「移した」扱いにして写真を除かない）。
-    /// - 登録したファイルと内容（サイズとクイックハッシュ）が違えば、移さずに失敗にする（同じ名前の別の
-    ///   ファイルを移さない。更新日時は比べない（exFAT・ネットワークのボリュームで変わりうるため））。
+    /// - 登録したファイルと同じと確かめられなければ、移さずに失敗にする（同じ名前の別のファイルや、
+    ///   中間だけ書き換えられたファイルを移さない。確かめ方は [`verify_same_as_registered`]）。
+    ///
+    /// 全体のハッシュの計算はファイル全体を読むので、全体のハッシュを登録したファイルが多いと、この確認に
+    /// 時間がかかる。`execute_delete` は同期の API で、進捗の通知も取り消しもない。全体のハッシュを記録する
+    /// 経路は今はない（再リンクの確定・コピー取り込みの検証で記録する設計で、どちらも未実装）ので、今は
+    /// 影響しない。取り込みなどで多くのファイルに記録するようになったら、ジョブにして進捗と取り消しを付ける。
     fn trash_asset(
         &self,
         asset: AssetId,
@@ -404,17 +454,9 @@ impl Core {
             let registered = inner
                 .with_catalog(|c| c.file(f.file_id))
                 .map_err(|e| (path.clone(), e))?;
-            let same = genzo_catalog::FileFacts::read(&path).is_ok_and(|now| {
-                now.size == registered.facts.size && now.quick_hash == registered.facts.quick_hash
-            });
-            if !same {
-                return Err((
-                    path.clone(),
-                    ApiError::FileAccess {
-                        path,
-                        message: "ファイルが登録の後に変わっています（同じ名前の別のファイルの可能性があります）。移していません。ファイルの確認（check_files）の後にやり直してください".to_owned(),
-                    },
-                ));
+            // カタログのロックの外で確かめる（全体のハッシュはファイル全体を読むため時間がかかりうる）。
+            if let Err(message) = verify_same_as_registered(&path, &registered) {
+                return Err((path.clone(), ApiError::FileAccess { path, message }));
             }
             to_move.push((f.file_id, path));
         }

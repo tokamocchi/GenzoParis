@@ -131,9 +131,20 @@ impl Env {
             c,
             CoreHooks {
                 trash: self.trash.clone(),
+                ..CoreHooks::default()
             },
         )
         .unwrap()
+    }
+
+    /// 部品の差し替え（`CoreHooks`。ゴミ箱は偽物）を追加で指定して開く。
+    pub fn open_with_hooks(&self, f: impl FnOnce(&mut CoreHooks)) -> Core {
+        let mut hooks = CoreHooks {
+            trash: self.trash.clone(),
+            ..CoreHooks::default()
+        };
+        f(&mut hooks);
+        Core::open_with(self.config(), hooks).unwrap()
     }
 }
 
