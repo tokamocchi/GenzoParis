@@ -1,3 +1,5 @@
+# 手元と CI で同じ版の Rust を使う（新しい版の clippy の警告で CI だけが失敗するのを防ぐ）。
+# 版を上げるときは、手元で cargo clippy と cargo test が通ることを確認してから変更する。
 [toolchain]
-channel = "stable"
+channel = "1.97.0"
 components = ["rustfmt", "clippy"]
