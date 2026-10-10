@@ -45,11 +45,18 @@ mod util;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod testing;
+
 pub use backup::{
     BackupInfo, BackupOwner, DEFAULT_BACKUP_GENERATIONS, ForeignKeyViolation, IntegrityReport,
     RestoreReport, backup_catalog_file, create_backup, list_backups, prune_backups, restore_backup,
 };
-pub use catalog::{Catalog, ConnectionSettings, OpenOptions, OpenReport, PreviousShutdown};
+pub use catalog::{
+    Catalog, ConnectionSettings, OpenOptions, OpenReport, PreviousShutdown,
+    STATE_CAPTURE_TIME_RERESOLVE,
+};
 pub use develop::{
     DevelopState, HISTORY_LABEL_IMPORT, HISTORY_LABEL_VIRTUAL_COPY, HistoryEntry, Snapshot,
     VariantInfo,
@@ -75,7 +82,7 @@ pub use register::{
 };
 pub use schema::{
     BUSY_TIMEOUT, CACHE_SIZE_KIB, CATALOG_APPLICATION_ID, CATALOG_SCHEMA_VERSION,
-    THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION,
+    THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, UTC_ONLY_SCHEMA_VERSION,
 };
 pub use search::{Filter, FolderFilter, Sort, SortDirection, SortKey, VariantSummary};
 pub use thumbs::{ThumbStore, Thumbnail};

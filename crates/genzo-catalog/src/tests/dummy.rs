@@ -214,6 +214,20 @@ fn poc6_scale_measurement() {
         .variant_summaries(&ids[mid..(mid + 200).min(ids.len())])
         .unwrap();
     eprintln!("表示範囲 {} 件の詳細: {:?}", sums.len(), t.elapsed());
+    // 書き出しの原本の照合（上書きの設定）: 同じ名前のファイルをすべてのフォルダから探す
+    // （file(name_key) の索引。スキーマの版 3。No.11・27）。
+    for n in [100usize, 1000] {
+        let names: Vec<String> = (0..n).map(|i| format!("DSC{:07}.JPG", i * 37)).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        f.cat.files_named(&refs).unwrap();
+        let t = Instant::now();
+        let found = f.cat.files_named(&refs).unwrap();
+        eprintln!(
+            "名前で探す {n} 件: {} 件見つかった、{:?}",
+            found.len(),
+            t.elapsed()
+        );
+    }
     let t = Instant::now();
     f.cat
         .set_rating(

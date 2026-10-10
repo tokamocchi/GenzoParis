@@ -63,7 +63,30 @@ pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[
         sql: include_str!("sql/catalog_0002_fk_child_indexes.sql"),
         post: None,
     },
+    Migration {
+        version: 3,
+        description: "ファイル名（file.name_key）だけの索引（implementation_status の No.11・27）",
+        sql: include_str!("sql/catalog_0003_file_name_key_index.sql"),
+        post: None,
+    },
+    Migration {
+        version: UTC_ONLY_SCHEMA_VERSION,
+        description: "tz_source に utc_only を足す（asset の作り直し。implementation_status の No.32）",
+        sql: include_str!("sql/catalog_0004_tz_source_utc_only.sql"),
+        post: None,
+    },
 ];
+
+/// `tz_source = 'utc_only'`（UTC の印 `Z` だけの撮影日時）を足したカタログのスキーマの版。
+///
+/// これより前の版から移行したカタログでは、移行で `utc_only` にした asset の表示のオフセット
+/// （`tz_assumed`）が `+00:00` のまま（カタログはアプリの既定のタイムゾーンを知らないため）。
+/// そのため移行は、`utc_only` にした asset があれば、推定し直しが済んでいない印
+/// （[`crate::STATE_CAPTURE_TIME_RERESOLVE`]）を同じトランザクションで付ける。カタログを開いた側
+/// （genzo-api）は、印があれば既定のタイムゾーンで推定し直し（genzo-model の
+/// `CaptureTime::with_default_offset`）、終えたら印を外す（途中でアプリが終わっても、次に開いたときに
+/// 推定し直す）。
+pub const UTC_ONLY_SCHEMA_VERSION: u32 = 4;
 
 /// サムネイル DB のマイグレーションの列。
 pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[
@@ -82,7 +105,7 @@ pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[
 ];
 
 /// このアプリのカタログのスキーマの版。
-pub const CATALOG_SCHEMA_VERSION: u32 = 2;
+pub const CATALOG_SCHEMA_VERSION: u32 = 4;
 
 /// このアプリのサムネイル DB のスキーマの版。
 pub const THUMBS_SCHEMA_VERSION: u32 = 2;

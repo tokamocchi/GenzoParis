@@ -632,7 +632,14 @@ fn reregister(
     let (status, reason) = requested_status(req);
     // 読めなかった（error）ファイルを、内容が同じまま読み直せた（ワーカーのタイムアウト・ffprobe が
     // なかった など。F03）。読めたメタデータを保存する（内容は同じなので revision は上げない）。
-    let recovered = !changed && existing.status == FileStatus::Error && status == FileStatus::Ok;
+    // 読めずに登録した後、見つからない（missing）を経て戻ったファイル（メタデータが空のまま `missing`・
+    // `ok` になっている）も同じく保存する（implementation_status の No.45 の (b)）。
+    let recovered = !changed
+        && status == FileStatus::Ok
+        && (existing.status == FileStatus::Error
+            || (existing.role == FileRole::Primary
+                && !matches!(req.metadata, MediaMetadata::None)
+                && crate::library::asset_metadata_is_empty(tx, existing.asset_id)?));
     let mut revision = existing.revision;
     if changed {
         revision += 1;
@@ -655,12 +662,14 @@ fn reregister(
             let previous = load_capture(tx, existing.asset_id)?;
             update_asset_metadata(tx, existing.asset_id, req, Some(&previous))?;
         }
-    } else if existing.status != status || existing.status_reason.as_deref() != reason {
-        // 見つからなかった・読めなかったファイルが、元に戻った（またはその逆）。
-        tx.prepare_cached(
-            "UPDATE file SET status = ?2, status_reason = ?3, status_at = ?4 WHERE id = ?1",
-        )?
-        .execute(params![existing.id, status.as_str(), reason, now])?;
+    } else {
+        if existing.status != status || existing.status_reason.as_deref() != reason {
+            // 見つからなかった・読めなかったファイルが、元に戻った（またはその逆）。
+            tx.prepare_cached(
+                "UPDATE file SET status = ?2, status_reason = ?3, status_at = ?4 WHERE id = ?1",
+            )?
+            .execute(params![existing.id, status.as_str(), reason, now])?;
+        }
         if recovered && existing.role == FileRole::Primary {
             // 撮影日時の利用者の修正は、内容が変わった場合と同じく引き継ぐ。
             let previous = load_capture(tx, existing.asset_id)?;

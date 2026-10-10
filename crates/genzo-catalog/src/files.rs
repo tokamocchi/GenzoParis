@@ -311,8 +311,8 @@ impl Catalog {
     /// （シンボリックリンクを経由したフォルダ・大文字と小文字の違いなど）で登録されたフォルダでも、
     /// 同じ名前のファイルを同一性（ボリュームとファイル ID）で照合できるようにする。
     ///
-    /// `name_key` だけの索引はないので、[`FILES_NAMED_CHUNK`] 件ごとに `file` の表を 1 回走査する
-    /// （50 万件での時間は PoC-6 で計測する）。
+    /// `file(name_key)` の索引（スキーマの版 3。implementation_status の No.11・27）で探す
+    /// （[`FILES_NAMED_CHUNK`] 件ごとに 1 回の問い合わせ）。
     pub fn files_named(&self, names: &[&str]) -> Result<Vec<FileRecord>> {
         let mut keys: Vec<String> = names.iter().map(|n| path_key(n)).collect();
         keys.sort();

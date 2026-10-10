@@ -131,6 +131,14 @@ impl Catalog {
         Ok(())
     }
 
+    /// asset のメタデータが空か: 寸法・撮影日時の文字列・カメラ・レンズ・ISO・絞り・シャッター速度・
+    /// 焦点距離・GPS がすべてなく、動画の情報もない（読めずに `error` で登録したまま。
+    /// implementation_status の No.45）。読めたファイルは寸法が必ずあるので、空とみなすことはない。
+    /// asset がなければ [`CatalogError::NotFound`]。
+    pub fn asset_metadata_is_empty(&self, asset_id: AssetId) -> Result<bool> {
+        asset_metadata_is_empty(&self.conn, asset_id.get())
+    }
+
     /// asset の撮影日時を読む。
     pub fn capture_time(&self, asset_id: AssetId) -> Result<CaptureTime> {
         load_capture(&self.conn, asset_id.get())
@@ -293,4 +301,22 @@ pub struct CatalogCounts {
     pub files: u64,
     /// 履歴の件数。
     pub history_entries: u64,
+}
+
+/// asset のメタデータが空か: 寸法・撮影日時の文字列・カメラ・レンズ・ISO・絞り・シャッター速度・焦点距離・
+/// GPS がすべてなく、動画の情報もない（読めずに `error` で登録したまま。implementation_status の No.45）。
+///
+/// 読めたファイルは寸法が必ずある（写真はデコーダ、動画は ffprobe の値）ので、読めたファイルを空と
+/// みなすことはない。asset がなければ [`CatalogError::NotFound`]。
+pub(crate) fn asset_metadata_is_empty(conn: &rusqlite::Connection, asset_id: i64) -> Result<bool> {
+    conn.prepare_cached(
+        "SELECT width IS NULL AND height IS NULL AND captured_at_raw IS NULL AND camera IS NULL
+                AND lens IS NULL AND iso IS NULL AND aperture IS NULL AND shutter IS NULL
+                AND focal IS NULL AND gps_lat IS NULL AND gps_lon IS NULL
+                AND NOT EXISTS (SELECT 1 FROM video_meta v WHERE v.asset_id = asset.id)
+         FROM asset WHERE id = ?1",
+    )?
+    .query_row([asset_id], |row| row.get::<_, bool>(0))
+    .optional()?
+    .ok_or_else(|| CatalogError::NotFound(format!("asset {asset_id}")))
 }

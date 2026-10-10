@@ -859,3 +859,274 @@ fn two_writers_wait_for_each_other_instead_of_failing() {
     assert_eq!(rows(&cat, "file"), 4 * ITERATIONS as i64);
     assert!(cat.check_integrity().unwrap().is_ok());
 }
+
+/// 書き出しの原本の照合で、名前だけで探す問い合わせ（`files_named`）は、版 3 の `file(name_key)` の
+/// 索引を使い、`file` の表を走査しない（implementation_status の No.11・27）。
+#[test]
+fn files_named_uses_the_name_key_index() {
+    use rusqlite::StatementStatus;
+    let mut f = Fixture::new();
+    for i in 0..200u64 {
+        f.photo(&format!("IMG{i:04}.ARW"), i, None);
+    }
+    let plan: Vec<String> = f
+        .cat
+        .conn
+        .prepare("EXPLAIN QUERY PLAN SELECT id FROM file WHERE name_key IN (?1, ?2)")
+        .unwrap()
+        .query_map(["img0001.arw", "img0002.arw"], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(plan.iter().any(|d| d.contains("file_name_key")), "{plan:?}");
+    let mut stmt = f
+        .cat
+        .conn
+        .prepare("SELECT id FROM file WHERE name_key IN (?1, ?2)")
+        .unwrap();
+    let n = stmt
+        .query_map(["img0001.arw", "img0002.arw"], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .count();
+    assert_eq!(n, 2);
+    assert_eq!(stmt.get_status(StatementStatus::FullscanStep), 0);
+    assert_eq!(f.cat.files_named(&["Img0003.arw"]).unwrap().len(), 1);
+}
+
+/// 版 3 のカタログ（`tz_source` の CHECK 制約に `utc_only` がない）を開くと、asset の表を作り直して
+/// `utc_only` を使えるようにし、UTC の印（Z）だけの撮影日時を `utc_only` にする（No.32）。
+/// UTC・利用者の指定・ほかの列・外部キー・索引・AUTOINCREMENT の連番は保つ。
+#[test]
+fn version_3_catalog_is_migrated_to_utc_only() {
+    use chrono::{FixedOffset, TimeZone, Utc};
+    use genzo_model::{AssetId, CaptureTime, TzSource};
+
+    let jst = FixedOffset::east_opt(9 * 3600).unwrap();
+    // 版 3 までの取り込みが記録した形（Z を +00:00 のオフセットとして記録した）。
+    let legacy = |tz_source: TzSource, assumed: &str, utc_hour: u32| CaptureTime {
+        raw: Some("2024-05-01T03:00:00.000000Z".to_owned()),
+        offset: Some("+00:00".to_owned()),
+        tz_source,
+        tz_assumed: Some(assumed.to_owned()),
+        correction_s: 0,
+        utc: Some(Utc.with_ymd_and_hms(2024, 5, 1, utc_hour, 0, 0).unwrap()),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog.db");
+    let (old_video, set_video, photo, plus_zero, deleted) = {
+        let mut cat =
+            Catalog::open_with_migrations(&path, &OpenOptions::default(), &CATALOG_MIGRATIONS[..3])
+                .unwrap();
+        assert_eq!(cat.schema_version().unwrap(), 3);
+        let vol = cat.ensure_volume("v", None, None).unwrap();
+        let folder = cat.ensure_folder(vol, "a").unwrap();
+        let mut video = super::video_req(folder, "OLD.MP4", 1, None);
+        video.capture = legacy(TzSource::Exif, "+00:00", 3);
+        let old_video = cat.register_file(&video).unwrap();
+        cat.set_caption(old_video.asset_id, Some("京都旅行"))
+            .unwrap();
+        // 利用者がタイムゾーンを指定したもの（版 3 の計算: 文字列の時刻を +09:00 の現地時刻とみなした）。
+        let mut video = super::video_req(folder, "SET.MP4", 2, None);
+        video.capture = CaptureTime {
+            utc: Some(Utc.with_ymd_and_hms(2024, 4, 30, 18, 0, 0).unwrap()),
+            ..legacy(TzSource::UserSet, "+09:00", 0)
+        };
+        let set_video = cat.register_file(&video).unwrap();
+        let photo = cat
+            .register_file(&super::photo_req(
+                folder,
+                "A.ARW",
+                3,
+                Some("2024:05:01 12:00:00"),
+            ))
+            .unwrap();
+        // 別に +00:00 が記録された写真（Z ではない）。
+        let mut req = super::photo_req(folder, "B.ARW", 4, None);
+        req.capture =
+            CaptureTime::resolve(Some("2024:05:01 12:00:00"), Some("+00:00"), jst).unwrap();
+        let plus_zero = cat.register_file(&req).unwrap();
+        // 最後の id の asset を除く（id を再利用しないことの確認用）。
+        let del = cat
+            .register_file(&super::photo_req(folder, "DEL.ARW", 5, None))
+            .unwrap();
+        cat.remove_assets(&[del.asset_id]).unwrap();
+        // 版 3 の CHECK 制約は utc_only を拒む。
+        assert!(
+            cat.conn
+                .execute(
+                    "UPDATE asset SET tz_source = 'utc_only' WHERE id = ?1",
+                    [old_video.asset_id.get()],
+                )
+                .is_err()
+        );
+        cat.close().unwrap();
+        (
+            old_video.asset_id,
+            set_video.asset_id,
+            photo.asset_id,
+            plus_zero.asset_id,
+            del.asset_id,
+        )
+    };
+
+    let mut cat = Catalog::open(&path).unwrap();
+    let report = cat.open_report().clone();
+    assert_eq!(report.migrated_from, Some(3));
+    assert_eq!(report.schema_version, CATALOG_SCHEMA_VERSION);
+    assert!(report.migration_backup.is_some());
+    assert!(report.migrated_from.unwrap() < crate::UTC_ONLY_SCHEMA_VERSION);
+    // utc_only にした asset があるので、推定し直しが済んでいない印が（移行と同じトランザクションで）
+    // 付いている。外すと消える。
+    assert!(cat.capture_time_reresolve_pending().unwrap());
+    assert_eq!(
+        cat.app_state(crate::STATE_CAPTURE_TIME_RERESOLVE)
+            .unwrap()
+            .as_deref(),
+        Some("pending")
+    );
+
+    // Z だけの動画は utc_only（UTC は同じ。表示のオフセットは API が既定のタイムゾーンにする）。
+    let t = cat.capture_time(old_video).unwrap();
+    assert_eq!(t.tz_source, TzSource::UtcOnly);
+    assert_eq!(t.offset.as_deref(), Some(genzo_model::UTC_ONLY_OFFSET));
+    assert_eq!(t.tz_assumed.as_deref(), Some("+00:00"));
+    assert_eq!(
+        t.utc_db_string().as_deref(),
+        Some("2024-05-01T03:00:00.000Z")
+    );
+    let shown = t.with_default_offset(jst).unwrap();
+    assert_eq!(shown.utc, t.utc);
+    assert_eq!(shown.to_string(), "2024-05-01 12:00:00 +09:00");
+    cat.set_capture_time(old_video, &shown).unwrap();
+    assert_eq!(cat.capture_time(old_video).unwrap(), shown);
+    // 利用者の指定・オフセットが記録された写真は変えない。
+    let s = cat.capture_time(set_video).unwrap();
+    assert_eq!(s.tz_source, TzSource::UserSet);
+    assert_eq!(s.offset.as_deref(), Some("+00:00"));
+    assert_eq!(
+        s.utc_db_string().as_deref(),
+        Some("2024-04-30T18:00:00.000Z")
+    );
+    assert_eq!(cat.capture_time(photo).unwrap().tz_source, TzSource::Exif);
+    let p = cat.capture_time(plus_zero).unwrap();
+    assert_eq!(
+        (p.tz_source, p.offset.as_deref()),
+        (TzSource::Exif, Some("+00:00"))
+    );
+    // ほかの列（動画の情報・キャプション・寸法）。
+    let a = cat.asset(old_video).unwrap();
+    assert_eq!(a.caption.as_deref(), Some("京都旅行"));
+    assert_eq!(a.video.as_ref().and_then(|v| v.fps), Some(59.94));
+
+    // 新しい CHECK 制約: utc_only は受け付け、それ以外の値は拒む。
+    assert!(
+        cat.conn
+            .execute(
+                "UPDATE asset SET tz_source = 'bogus' WHERE id = ?1",
+                [photo.get()]
+            )
+            .is_err()
+    );
+    // 索引（撮影日時順・カメラ・レンズ）と名前の索引がある。
+    let n: i64 = cat
+        .conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name IN
+             ('asset_captured_at', 'asset_camera', 'asset_lens', 'file_name_key')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 4);
+    // 除いた asset の id を再利用しない。
+    let vol = cat.ensure_volume("v", None, None).unwrap();
+    let folder = cat.ensure_folder(vol, "a").unwrap();
+    let next = cat
+        .register_file(&super::photo_req(folder, "NEW.ARW", 6, None))
+        .unwrap();
+    assert!(
+        next.asset_id > deleted,
+        "{:?} > {:?}",
+        next.asset_id,
+        deleted
+    );
+    // 新しく取り込む Z だけの値は utc_only で保存できる。
+    let mut video = super::video_req(folder, "NEW.MP4", 7, None);
+    video.capture = CaptureTime::resolve(Some("2024-05-02T00:00:00Z"), None, jst).unwrap();
+    let new_video = cat.register_file(&video).unwrap();
+    assert_eq!(
+        cat.capture_time(new_video.asset_id).unwrap().tz_source,
+        TzSource::UtcOnly
+    );
+    // テキスト検索・撮影日時順の検索・外部キー（asset の削除で file・variant・video_meta も消える）。
+    let hits = cat
+        .search(
+            &crate::Filter {
+                text: Some("京都旅行".to_owned()),
+                ..Default::default()
+            },
+            &crate::Sort::default(),
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(cat.check_integrity().unwrap().is_ok());
+    let fk: i64 = cat
+        .conn
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(fk, 0);
+    cat.remove_assets(&[old_video]).unwrap();
+    for table in ["video_meta", "asset_text"] {
+        let n: i64 = cat
+            .conn
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE asset_id = ?1"),
+                [old_video.get()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "{table}");
+    }
+    let _: AssetId = old_video;
+    cat.set_capture_time_reresolve_pending(false).unwrap();
+    assert!(!cat.capture_time_reresolve_pending().unwrap());
+    cat.close().unwrap();
+}
+
+/// 新しいカタログ・utc_only にする asset がないカタログの移行では、撮影日時の推定し直しの印を付けない。
+#[test]
+fn migration_without_utc_only_assets_does_not_request_reresolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = Catalog::open(dir.path().join("fresh.db")).unwrap();
+    assert!(!fresh.capture_time_reresolve_pending().unwrap());
+    fresh.close().unwrap();
+
+    let path = dir.path().join("v3.db");
+    {
+        let mut cat =
+            Catalog::open_with_migrations(&path, &OpenOptions::default(), &CATALOG_MIGRATIONS[..3])
+                .unwrap();
+        let vol = cat.ensure_volume("v", None, None).unwrap();
+        let folder = cat.ensure_folder(vol, "a").unwrap();
+        cat.register_file(&super::photo_req(
+            folder,
+            "A.ARW",
+            1,
+            Some("2024:05:01 12:00:00"),
+        ))
+        .unwrap();
+        cat.close().unwrap();
+    }
+    let mut cat = Catalog::open(&path).unwrap();
+    assert_eq!(cat.open_report().migrated_from, Some(3));
+    assert!(!cat.capture_time_reresolve_pending().unwrap());
+    // 印を付ける・外す（genzo-api が既定のタイムゾーンを変えたとき・推定し直しを終えたとき）。
+    cat.set_capture_time_reresolve_pending(true).unwrap();
+    assert!(cat.capture_time_reresolve_pending().unwrap());
+    cat.set_capture_time_reresolve_pending(true).unwrap();
+    cat.set_capture_time_reresolve_pending(false).unwrap();
+    assert!(!cat.capture_time_reresolve_pending().unwrap());
+    cat.close().unwrap();
+}

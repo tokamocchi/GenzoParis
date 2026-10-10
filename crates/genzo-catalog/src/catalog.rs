@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::error::{CatalogError, Result};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::schema::Migration;
 use crate::schema::{self, CATALOG_SCHEMA_VERSION, CATALOG_SPEC, Durability, SchemaSpec};
 use crate::util::now_utc_string;
@@ -26,6 +26,14 @@ pub(crate) const STATE_CACHE_GENERATION: &str = "cache_generation";
 /// カタログの ID のキー（カタログを初めて書き込み用に開いたときに作る。バックアップ・復元では変わらない。
 /// 同じファイル名の別のカタログのバックアップを見分けるのに使う。F10）。
 pub(crate) const STATE_CATALOG_ID: &str = "catalog_id";
+/// 撮影日時の推定し直し（既定のタイムゾーンによる。`tz_source` が `user_default`・`utc_only` の asset）が
+/// 済んでいない印のキー（値は `pending`）。推定し直すジョブ（genzo-api）が終わる前にアプリが終わっても、
+/// 次に開いたときに推定し直せるようにする（[`Catalog::capture_time_reresolve_pending`]）。スキーマの版 4 の
+/// マイグレーション（`sql/catalog_0004_tz_source_utc_only.sql`）も、`utc_only` に変えた asset があれば
+/// 同じキーで印を付ける（移行と同じトランザクションで）。
+pub const STATE_CAPTURE_TIME_RERESOLVE: &str = "capture_time_reresolve";
+/// [`STATE_CAPTURE_TIME_RERESOLVE`] の値。
+const CAPTURE_TIME_RERESOLVE_PENDING: &str = "pending";
 
 /// 新しいキャッシュの世代（重ならない値。16 進数 32 文字）。
 pub(crate) fn new_cache_generation() -> String {
@@ -140,7 +148,7 @@ impl Catalog {
     }
 
     /// マイグレーションの列を指定して開く（マイグレーションのテスト用）。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn open_with_migrations(
         path: &Path,
         options: &OpenOptions,
@@ -319,6 +327,29 @@ impl Catalog {
     /// `None` のことがある）。バックアップ・復元では変わらない（F10）。
     pub fn catalog_id(&self) -> Result<Option<String>> {
         get_app_state(&self.conn, STATE_CATALOG_ID)
+    }
+
+    /// 撮影日時の推定し直し（既定のタイムゾーンによる）が済んでいないか（[`STATE_CAPTURE_TIME_RERESOLVE`]）。
+    pub fn capture_time_reresolve_pending(&self) -> Result<bool> {
+        Ok(get_app_state(&self.conn, STATE_CAPTURE_TIME_RERESOLVE)?.is_some())
+    }
+
+    /// 撮影日時の推定し直しが済んでいない印を付ける（`true`）・外す（`false`）。既定のタイムゾーンを
+    /// 保存する前に付け、推定し直しをすべて終えたら外す（[`STATE_CAPTURE_TIME_RERESOLVE`]）。
+    pub fn set_capture_time_reresolve_pending(&mut self, pending: bool) -> Result<()> {
+        if pending {
+            set_app_state(
+                &self.conn,
+                STATE_CAPTURE_TIME_RERESOLVE,
+                CAPTURE_TIME_RERESOLVE_PENDING,
+            )
+        } else {
+            self.conn.execute(
+                "DELETE FROM app_state WHERE key = ?1",
+                [STATE_CAPTURE_TIME_RERESOLVE],
+            )?;
+            Ok(())
+        }
     }
 }
 

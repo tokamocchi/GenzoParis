@@ -371,12 +371,16 @@ fn video_metadata_is_stored() {
     assert_eq!(v.bit_depth, Some(10));
     assert_eq!(v.color_transfer.as_deref(), Some("arib-std-b67"));
     assert_eq!(v.color_primaries.as_deref(), Some("bt2020"));
-    // 文字列に含まれるオフセット（Z）を使う。
+    // 文字列に含まれる UTC の印（Z）だけの値は、UTC をそのまま使う（utc_only。No.32）。
     assert_eq!(
         a.capture.utc_db_string().as_deref(),
         Some("2024-05-01T03:00:00.000Z")
     );
-    assert_eq!(a.capture.tz_source, TzSource::Exif);
+    assert_eq!(a.capture.tz_source, TzSource::UtcOnly);
+    assert_eq!(
+        a.capture.offset.as_deref(),
+        Some(genzo_model::UTC_ONLY_OFFSET)
+    );
 }
 
 #[test]
@@ -453,6 +457,73 @@ fn metadata_read_after_an_error_is_stored_even_if_the_content_is_the_same() {
     // 3 回目（状態は ok・内容も同じ）は、今までどおり Unchanged。
     let again = f.cat.register_file(&fixed).unwrap();
     assert_eq!(again.status, RegisterStatus::Unchanged);
+}
+
+/// 読めずに error で登録した写真が、見つからない（missing）を経て同じ内容で戻り、`missing` のまま、または
+/// `ok` に戻った（メタデータは空のまま）後に、メタデータ付きで登録し直すと保存する（No.45 の (b)）。
+#[test]
+fn metadata_is_stored_for_empty_assets_restored_via_missing() {
+    for restored_status in [FileStatus::Missing, FileStatus::Ok] {
+        let mut f = Fixture::new();
+        let broken = RegisterFile {
+            folder_id: f.folder,
+            name: "DSC00002.ARW".to_owned(),
+            facts: facts(2),
+            kind: AssetKind::Photo,
+            metadata: MediaMetadata::None,
+            capture: capture(None),
+            error: Some("タイムアウト".to_owned()),
+        };
+        let o = f.cat.register_file(&broken).unwrap();
+        assert!(f.cat.asset_metadata_is_empty(o.asset_id).unwrap());
+        f.cat
+            .set_file_status(o.file_id, FileStatus::Missing, Some("見つかりません"))
+            .unwrap();
+        if restored_status == FileStatus::Ok {
+            // 以前の版の「戻った」扱い（状態だけ ok にして、メタデータは空のまま）。
+            f.cat.update_file_facts(o.file_id, &facts(2)).unwrap();
+            assert_eq!(f.cat.file(o.file_id).unwrap().status, FileStatus::Ok);
+        }
+        // 読めないまま登録し直しても、空のまま（error になる）。
+        let still = f.cat.register_file(&broken).unwrap();
+        assert_eq!(f.cat.file(still.file_id).unwrap().status, FileStatus::Error);
+        f.cat
+            .set_file_status(o.file_id, restored_status, None)
+            .unwrap();
+
+        let fixed = photo_req(f.folder, "DSC00002.ARW", 2, Some("2024:05:01 12:34:56"));
+        let u = f.cat.register_file(&fixed).unwrap();
+        assert_eq!(
+            (u.status, u.revision),
+            (RegisterStatus::Updated, 1),
+            "{restored_status:?}"
+        );
+        let file = f.cat.file(o.file_id).unwrap();
+        assert_eq!((file.status, file.revision), (FileStatus::Ok, 1));
+        let a = f.cat.asset(o.asset_id).unwrap();
+        assert_eq!((a.width, a.height), (Some(7008), Some(4672)));
+        assert_eq!(a.capture.raw.as_deref(), Some("2024:05:01 12:34:56"));
+        assert!(!f.cat.asset_metadata_is_empty(o.asset_id).unwrap());
+        // 次は変化なし。
+        assert_eq!(
+            f.cat.register_file(&fixed).unwrap().status,
+            RegisterStatus::Unchanged
+        );
+    }
+    // メタデータのある asset は空ではない。動画の情報だけでも空ではない。
+    let mut f = Fixture::new();
+    let p = f.photo("A.ARW", 1, Some("2024:05:01 12:00:00"));
+    assert!(!f.cat.asset_metadata_is_empty(p.asset_id).unwrap());
+    let v = f
+        .cat
+        .register_file(&video_req(f.folder, "C.MP4", 2, None))
+        .unwrap();
+    assert!(!f.cat.asset_metadata_is_empty(v.asset_id).unwrap());
+    assert!(matches!(
+        f.cat
+            .asset_metadata_is_empty(genzo_model::AssetId::new(9999)),
+        Err(crate::CatalogError::NotFound(_))
+    ));
 }
 
 /// 動画でも同じ（ffprobe がない状態で取り込み、後で取り込み直した場合。F03）。利用者の撮影日時の
