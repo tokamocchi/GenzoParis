@@ -2,10 +2,20 @@
 //!
 //! # 出典
 //!
-//! RCD の考案者は Luis Sanz Rodríguez（2017 年ごろに公開）。この実装は、公開されている
-//! アルゴリズムの説明（手順の構成と考え方）をもとに書いたもので、他のプロジェクト（RawTherapee・
-//! darktable・考案者の参照実装など）のソースは参照・複製していない（docs/third_party.md の 3.5 節の
-//! 方針）。説明の正確な出典（URL・版）はこの環境では確認できていないため、人が確認して台帳に記入する。
+//! RCD の考案者は Luis Sanz Rodríguez（考案者の実装は <https://github.com/LuisSR/RCD-Demosaicing>、
+//! Release 2.3）。
+//!
+//! この実装は、RawTherapee（`rtengine/rcd_demosaic.cc`）・darktable（`src/iop/demosaicing/rcd.c`）の
+//! 2021 年以降の版を参考にした Rust への書き直しとして扱う（決定事項ログ No.34。2026-10-10 の調査で、
+//! 式の書き方・定数・変数名がこれらの版と一致した。docs/third_party.md の 3.5 節）。行をそのまま写した
+//! ものではないが、保守的に、参考にした実装の著作権表示をここに記す:
+//!
+//! - RawTherapee: Copyright (c) 2017-2020 Luis Sanz Rodriguez and Ingo Weyrich。GPL-3.0-or-later。
+//! - darktable: Copyright (C) 2010-2026 darktable developers（Ingo Weyrich・Luis Sanz Rodríguez・
+//!   Hanno Schwalm への帰属を含む）。GPL-3.0-or-later。
+//!
+//! どちらも GPL-3.0-or-later なので、このファイルも GenzoParis と同じ GPL-3.0-or-later で配布する。
+//! 由来の扱いと著作権表示の書き方は、人（必要なら専門家）の確認待ち（決定事項ログ No.34）。
 //!
 //! # 手順
 //!
@@ -37,14 +47,16 @@
 //!    `N_grad = ε + |G[i] − G[i−2w]| + |X[i−w] − X[i+w]| + |X[i−w] − X[i−3w]|` などで重み付けし、
 //!    `X = max(G + lerp(V_est, H_est, vh_disc), 0)`。
 //!
-//! # 参照の説明からの変更点（独自の工夫）
+//! # 参考にした実装との違い
 //!
 //! - 2 方向の推定の重み付き平均を `lerp` の形で書いた（数学的には同じ）。2 つの推定が等しいとき
 //!   丸めの誤差が出ないため、平らな画像を正確に再現できる。
-//! - 比の補正の ε を分子にも入れた（`(2 lpf + ε) / (lpf + lpf' + ε)`）。輝度が等しいとき比がちょうど
-//!   1 になり、平らな画像で G が正確に再現される。輝度が 0 の付近では比が 1 に近づく。
+//! - 比の補正の ε を分子にも入れた（`(2 lpf + ε) / (lpf + lpf' + ε)`）。考案者の 2.3 の式
+//!   `1 + (a − b) / (ε + a + b)` を整理したものと数学的に同じで、RawTherapee・darktable の
+//!   `2a / (ε + a + b)` とは異なる。輝度が等しいとき比がちょうど 1 になり、平らな画像で G が正確に
+//!   再現される。
 //! - 値の上限で切り詰めない（下限 0 だけ）。WB を掛けた後の値は 1 を超えるため（B1）。
-//! - 近傍との比較には斜めの 4 画素（同じ種類の位置：R・B どうし、G どうし）を使う。
+//! - 近傍との比較に斜めの 4 画素を使うのは、考案者の 2.3・RawTherapee・darktable と同じ（違いではない）。
 //!
 //! # 余白と並列化
 //!
