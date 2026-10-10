@@ -33,6 +33,7 @@ PERF-11（02）: 4K / H.265 / 10bit の動画 1 本あたり 2 秒以内（動�
 | 7-6 | ハードウェアデコードを使うか（PERF-11 を満たさない場合。05 の「不合格の場合」） | 使っていない | 05 の PoC-7 | |
 | 7-7 | Exiv2 を追加するか（LibRaw・ffprobe でメタデータが足りない場合。05 の「不合格の場合」） | 使っていない（Exif の読み取りは kamadak-exif） | 05 の PoC-7、`genzo-media` の `exif_read.rs`、[第三者の台帳](../third_party.md) の 4 章 | |
 | 7-8 | 色の記録（行列）がない動画の YUV → RGB の行列（2026-10-10 の指摘 F29） | 回転を反映する前の寸法で決める。幅 1280 未満かつ高さ 576 以下は BT.601、それ以外と寸法が分からないものは BT.709（mpv などの慣習に合わせたつもりだが、主要なプレイヤー・OS 標準のプレイヤーが同じ規則かは**未確認**）。記録がない SD の原色（SMPTE-C / EBU）は変換せず `PrimariesNotConverted` で知らせる | `genzo-media` の `video.rs`（`input_color_matrix`・`VideoColorHandling::from_probe`）、02 の IQ-09 | |
+| 7-9 | 動画の撮影日時が UTC の印（`Z`）だけのとき（ffprobe の `creation_time` など）の扱い。DJI の機種が現地時刻を UTC として書くか（[implementation_status](../implementation_status.md) の表 No.32） | 2026-10-10 から `tz_source = utc_only`（元のオフセットは `"Z"`）。UTC はそのまま使い、表示のオフセットには既定のタイムゾーンを使う。`+00:00` と書かれた値は `exif` | `genzo-model` の `capture_time.rs`、`genzo-catalog` の `catalog_0004_tz_source_utc_only.sql`、04 の 3.1 節 | 決定事項ログ No.54（AI の推奨で決定）。カメラが現地時刻を UTC として書いていた場合は、時計のずれの補正で直す前提。DJI の実データで確かめる |
 
 ## 3. この環境で AI が確認した事項（参考: 実機ではない）
 
@@ -40,7 +41,7 @@ PERF-11（02）: 4K / H.265 / 10bit の動画 1 本あたり 2 秒以内（動�
 
 - **ffprobe / ffmpeg**（FFmpeg 6.1.1。`crates/genzo-media/tests/video.rs`。動画は FFmpeg の `lavfi` で作った短いもの）: H.264 のメタデータとサムネイル、記録された行列がない動画の YUV → RGB に、HD 以上は BT.709、SD（幅 1280 未満かつ高さ 576 以下。回転を反映する前の寸法）は BT.601 の行列を使うこと（SD は 2026-10-10 の指摘 F29 で修正。640×480 で BT.601 で符号化した色の記録がない H.264 が元の色に近いこと）、回転した動画の表示上の寸法とサムネイル、10bit（`yuv420p10le` の H.264）のビット深度、壊れたファイル・存在しないファイルがエラーになること、タイムアウトで打ち切ること。ffmpeg・ffprobe がない環境では、これらのテストはスキップします。
 - **ワーカー経由**: 動画のメタデータとサムネイルのジョブ（`crates/genzo-worker/tests/jobs.rs`）。
-- **撮影日時**（`genzo-model` の `capture_time.rs` のテスト）: Exif のオフセットがある場合はそれを使い、ない場合はユーザーの既定のオフセットで推定して出どころを記録する。撮影日時がない場合は現在時刻で置き換えず UTC を空にする。ユーザーの補正の適用と取り消し。
+- **撮影日時**（`genzo-model` の `capture_time.rs` のテスト）: Exif のオフセットがある場合はそれを使い、ない場合はユーザーの既定のオフセットで推定して出どころを記録する。撮影日時がない場合は現在時刻で置き換えず UTC を空にする。ユーザーの補正の適用と取り消し。2026-10-10 から、UTC の印（`Z`）だけの値は `tz_source = utc_only` として UTC をそのまま使い、表示のオフセットに既定のタイムゾーンを使う（7-9。`genzo-model` の単体テスト、`genzo-catalog` の版 3 → 版 4 の移行のテスト、`genzo-api` の移行と既定のタイムゾーンの変更のテスト、ffmpeg で作った動画の取り込みのテスト。実際の DJI の動画では未確認）。
 - **LibRaw のメタデータ**: 合成 DNG（メーカー・機種・レンズ名・ISO・絞り・シャッター速度・焦点距離・GPS・撮影日時とオフセット）の往復（`crates/genzo-raw/tests/libraw.rs`）。実際の ARW でレンズ名などが取れるかは未確認。
 - **未確認**: DJI Osmo Pocket の動画（4K・H.265・10bit・Log）、1 本あたりの処理時間（両 OS）、Windows・macOS での動作。
 

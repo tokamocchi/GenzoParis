@@ -42,19 +42,37 @@ RAW の展開には LibRaw（0.21 以降。スレッドセーフ版の `libraw_r
 |---|---|
 | Ubuntu | `sudo apt install libraw-dev pkg-config` |
 | macOS | `brew install libraw pkgconf` |
-| Windows | 未定（環境変数 `LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR` で指定する方法を用意しているが、未確認。`crates/genzo-raw/build.rs`） |
+| Windows | vcpkg（`vcpkg install libraw:x64-windows`）などで入手し、環境変数 `LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR`（必要なら `LIBRAW_LIB_NAME`）で指定する（下の手順。**実機で未確認**） |
 
 ```sh
 cargo test --workspace --features genzo-cli/libraw
 ```
 
+Windows（PowerShell）の手順（実機で未確認。詳しくは `crates/genzo-raw/build.rs` の doc）:
+
+```powershell
+vcpkg install libraw:x64-windows
+$env:LIBRAW_INCLUDE_DIR = "C:\vcpkg\installed\x64-windows\include"   # libraw\libraw.h のある include
+$env:LIBRAW_LIB_DIR     = "C:\vcpkg\installed\x64-windows\lib"
+$env:LIBRAW_LIB_NAME    = "<.lib のファイル名から .lib を除いたもの>"   # 既定は libraw。入手したファイル名を確かめる
+cargo build -p genzo-cli --features libraw
+```
+
+実行するときは、LibRaw の DLL（と、その依存の DLL）を、ワーカーとして動く実行ファイル（開発用の CLI では `genzo.exe`、配布するアプリでは `genzo-worker.exe`）と同じフォルダか `PATH` の通ったフォルダに置いてください。vcpkg が作る `.lib` のファイル名と、スレッドセーフな版かどうかは未確認です（[docs/third_party.md](docs/third_party.md) の 3.1 節）。CI の Windows は LibRaw なしの構成だけを確かめます。
+
 `genzo-cli/libraw` を指定すると、`genzo-api`・`genzo-worker`・`genzo-raw` の `libraw` も有効になります。LibRaw は pkg-config で `libraw_r` を探し、なければ `libraw` を使います（`libraw` はスレッドセーフでないため、LibRaw の使用をプロセスの中で 1 つずつに制限します）。
 
-CLI の `genzo` は、自分自身を `genzo __worker` で起動してワーカーを兼ねます（ワーカーの実行ファイルを別に配布しない）。そのため、`libraw` を有効にした `genzo` は LibRaw の共有ライブラリに依存します（Linux の `ldd` で確認）。LibRaw の関数を呼ぶのは、ワーカーとして動くプロセスだけです。配布物の構成とライセンスの扱いは未定です（[docs/third_party.md](docs/third_party.md) の 3.1 節、[docs/implementation_status.md](docs/implementation_status.md) の「人の判断・確認が必要な事項」の No.4）。
+開発用の CLI の `genzo` は、自分自身を `genzo __worker` で起動してワーカーを兼ねます。そのため、`libraw` を有効にした `genzo` は LibRaw の共有ライブラリに依存します（Linux の `ldd` で確認）。LibRaw の関数を呼ぶのは、ワーカーとして動くプロセスだけです。**配布するアプリでは、ワーカーを別の実行ファイル（`genzo-worker`）にし、本体の実行ファイルは LibRaw に依存させません**（[決定事項ログ](docs/decision_log.md) No.32。`genzo-api` の `WorkerLaunch::Executable`。既定の設定）。Cargo の機能フラグは同じビルドの中で共通になるので、本体は `libraw` なしでビルドし、ワーカーは別に `cargo build --release -p genzo-worker --features libraw` でビルドします（Linux の `ldd` で、`genzo-worker` だけが `libraw_r.so.23` に依存することを確認）。LibRaw のライセンスは LGPL-2.1 を選ぶ方針ですが、**法的な事項のため、公開・配布の前に人（必要なら専門家）の確認が必要**です（[docs/third_party.md](docs/third_party.md) の 3.1 節、[docs/implementation_status.md](docs/implementation_status.md) の「人の判断・確認が必要な事項」の No.4）。
+
+### 実機のサンプルの回帰テスト（任意）
+
+手持ちの ARW などで展開・既定の切り抜き・飽和・壊れたファイルの扱い・既定の現像の統計を確かめます（`crates/genzo-pipeline/tests/private_samples.rs`。LibRaw が必要）。フォルダは **リポジトリの外** に置いてください。サンプルとそこから作った画像はリポジトリに入れません（`.gitignore` に `*.ARW`・`*.arw` があります。期待値の `crates/genzo-pipeline/tests/private_samples.json` には、ハッシュと写真の内容を明かさない数値だけを置きます。撮影日時・GPS・撮影場所も書きません）。サンプルはハッシュ（SHA-256）で期待値と対応づけ、期待値のないファイルは共通の性質（展開の成否・既定の切り抜きの範囲・端の帯がないことなど）だけを確かめます。壊したファイルは OS の一時フォルダに作り、終わったら消します。
+`GENZO_PRIVATE_SAMPLES=<フォルダ> cargo test -p genzo-pipeline --features libraw --release --test private_samples -- --nocapture`（未指定なら何もせずに成功。`GENZO_REQUIRE_PRIVATE_SAMPLES=1` で実行できない場合を失敗に、`GENZO_UPDATE_PRIVATE_EXPECT=1` で期待値を書き直し）。
+Windows（PowerShell）では `$env:GENZO_PRIVATE_SAMPLES="<フォルダ>"` を先に設定してください。期待値を書き直したときは、git の差分を確かめ、数値を別の人が確認してからコミットしてください。CI では実行しません（手で実行するか自前のランナーに入れるかは未決。[docs/implementation_status.md](docs/implementation_status.md) の表 No.58）。
 
 ### CLI（`genzo`）
 
-検証用の CLI です（ORG-05。UI なしで登録・検索・現像・書き出し・計測を行う）。結果は表か `--json`、進捗と警告は標準エラー、終了コードは 0（成功）・1（エラー）・2（使い方の誤り）・130（Ctrl+C で中断。1 回目は実行中の処理を取り消してカタログを閉じてから、2 回目はすぐに終了）です。詳しくは `genzo --help` と `crates/genzo-cli/src/lib.rs` の doc を見てください。
+検証用の CLI です（ORG-05。UI なしで登録・検索・現像・書き出し・計測を行う）。結果は表か `--json`、進捗と警告は標準エラー、終了コードは 0（成功）・1（エラー。`trash` を `--yes` なしで中止した場合を含む）・2（使い方の誤り）・3（結果は出したが一部が失敗した・問題が見つかった: 書き出し・削除・サムネイルの作り直しの一部の失敗、取り込みで登録できなかったファイル、`catalog check` で見つかった問題、`bench` での悪化）・130（Ctrl+C で中断。1 回目は実行中の処理を取り消してカタログを閉じてから、2 回目はすぐに終了。Windows でも 130）です（[決定事項ログ](docs/decision_log.md) No.52）。スクリプトからは、3 のときに結果の JSON を確かめてください。詳しくは `genzo --help` と `crates/genzo-cli/src/lib.rs` の doc を見てください。
 
 ```sh
 export GENZO_CATALOG=/path/to/catalog.db      # または --catalog
@@ -68,6 +86,9 @@ cargo run --release -p genzo-cli -- bench preview --synthetic 7008x4672 --out be
 ```
 
 - `--json` のときは、失敗（使い方の誤りを含む）も標準出力に `{"error": {"kind": ...}}` の JSON で出します。
+- `import` は、取り込みの後に現像結果からサムネイル・プレビューを作り直しません（埋め込みの JPEG のまま。現像設定を変えたときに作ります）。作り直すときは `--previews` を付けてください（決定事項ログ No.49）。
+- `--gpu auto`（既定）でも、ソフトウェアの GPU（Mesa の llvmpipe・Windows の WARP など）は使わず CPU 版で処理します。使うときは環境変数 `GENZO_GPU_ALLOW_SOFTWARE=1` を付けてください（決定事項ログ No.46）。
+- `develop region <ID>` で、表示範囲の描画（ルーペの等倍表示・拡大の入口。`Core::render_region`）を試せます（決定事項ログ No.58。既にあるファイルには書きません）。
 - Windows: 現像設定の JSON は、引数に直接書かずにファイル（`--json settings.json`）で渡すことをおすすめします（PowerShell・cmd.exe では引用符の扱いが違うため）。ファイルは UTF-8（BOM 付きも可）か BOM 付きの UTF-16 で読めます。PowerShell で `--json` の出力を受け取るときに日本語が化ける場合は、`[Console]::OutputEncoding = [Text.Encoding]::UTF8` を先に実行してください（出力は UTF-8）。
 - `bench` は release ビルドで実行してください（debug ビルドの時間は記録に「debug」と残り、参考値になります）。
 

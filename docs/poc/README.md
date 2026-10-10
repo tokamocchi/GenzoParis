@@ -92,7 +92,8 @@
 | `env`（`EnvironmentInfo`） | OS・CPU・ビルドの設定を自動で取得する。GPU とライブラリの版は呼び出し側で設定する。コミットは環境変数 `GENZO_BENCH_COMMIT`（なければ `GITHUB_SHA`） |
 | `record`（`InputRef`・`sha256_file_hex`） | 入力の ID と SHA-256、使った現像設定の記録 |
 | `diff` | 8bit 換算の差（IQ-07a）と ΔE2000 の平均・95 パーセンタイル・最大（IQ-07b、PoC-4） |
-| `colorchecker` | ColorChecker Classic の基準値（D50 → Bradford で D65）。**X-Rite の原本とは未照合**（PoC-4 のページ） |
+| `colorchecker` | ColorChecker Classic の基準値（D50 → Bradford で D65）。colour-science 0.4.6 と、GitHub 上の第三者のリポジトリにある X-Rite の CGATS ファイルの写しとは一致（2026-10-10）。**X-Rite・Calibrite のサイトの原本（一次資料）とは未照合**（PoC-4 の 4-1、[第三者の台帳](../third_party.md) の 3.8 節） |
+| `private_samples` | 実機のサンプル（リポジトリの外のフォルダ）を使う回帰テストの部品。期待値はハッシュと数値だけ（`crates/genzo-pipeline/tests/private_samples.json`） |
 
 **計測用のテスト**（通常のテストでは実行しない `#[ignore]` のもの。コマンドは各ファイルの doc のとおり）
 
@@ -103,11 +104,13 @@
 | `GENZO_REQUIRE_GPU=1 cargo test -p genzo-gpu` | CPU 版と GPU 版の一致テスト（IQ-07a）。GPU がなければ失敗にする（指定しなければスキップ）。CI のランナー（環境変数 `CI`）では、この指定がないと比較を飛ばす | PoC-3 |
 | `cargo test -p genzo-pipeline --release --test engine -- --ignored preview_matches_downscaled_full_resolution_iq07b --nocapture` | IQ-07b の判定（合成画像。現在は未達で失敗する。PoC-5 のページ） | PoC-3・PoC-5 |
 | `cargo test -p genzo-color --release report_lut_accuracy -- --ignored --nocapture` | 3D LUT と lcms2 の直接変換の差（格子数ごと） | PoC-1 |
+| `GENZO_PRIVATE_SAMPLES=<フォルダ> cargo test -p genzo-pipeline --features libraw --release --test private_samples -- --nocapture` | 実機のサンプルの回帰テスト（展開・既定の切り抜き・飽和・壊したファイル・既定の現像の統計）。フォルダはリポジトリの外。`#[ignore]` ではなく、フォルダを指定しなければ何もせずに成功する（[README](../../README.md) の「実機のサンプルの回帰テスト」） | PoC-2・PoC-4 |
 | `GENZO_POC6_ASSETS=500000 cargo test -p genzo-catalog --release -- --ignored poc6 --nocapture` | ダミーの asset（既定 10 万件）の登録、代表的な検索の時間と実行計画、DB と WAL の大きさ、評価の一括変更など。`GENZO_POC6_ANALYZE=1` で検索の前に `ANALYZE` を実行する | PoC-6 |
 
 - `poc6` の計測は、OS の一時ディレクトリにカタログ DB とそのバックアップ（同じくらいの大きさ）を作り、終わると削除します。50 万件では DB とバックアップを合わせて数 GB になりうるので、空き容量を確かめてから実行してください（カタログ DB の上限の目標は 5GB。SCL-02）。
 - 結果は標準出力（または標準エラー出力）に表示されます。`engine_bench`・`bench` は、`GENZO_BENCH_DIR` を設定したときだけ `genzo-testkit` の形式で記録を書きます（リポジトリの中にファイルを作らないため）。
 - GPU の選び方は環境変数 `GENZO_GPU`・`WGPU_BACKEND`・`WGPU_ADAPTER_NAME`・`WGPU_POWER_PREF`・`GENZO_GPU_ALLOW_SOFTWARE` で変えられます（`genzo-gpu` の `context` の doc）。記録の「条件」に、使ったアダプターの名前とバックエンドを書いてください。
+- ソフトウェアの GPU（Windows の WARP・Mesa の llvmpipe など）は、2026-10-10 から既定では使いません（CPU 版で処理する。決定事項ログ No.46）。アプリ・CLI で使うときは `GENZO_GPU_ALLOW_SOFTWARE=1` を付けます。`genzo-gpu` などのテストは許可して動かすので、この環境（llvmpipe）でも GPU 版と CPU 版の一致テストが動きます。実機の計測で、ソフトウェアの実装が選ばれていないことを記録の「条件」で確かめてください。
 
 ### 4.2 CLI（`genzo`）
 
