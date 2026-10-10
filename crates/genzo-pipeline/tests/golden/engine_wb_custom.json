@@ -1,0 +1,102 @@
+{
+  "format_version": 1,
+  "spec": {
+    "name": "engine_wb_custom",
+    "description": "WB 4300K・tint +8（合成のベイヤー 192x128、sRGB の書き出しの B4b）",
+    "inputs": [
+      {
+        "id": "synthetic:busy_bayer:192x128",
+        "sha256": "eb16718f57342c9b64539b6af5c6616c2ac1e12263b2ae2869edc0a2110b0f0b"
+      }
+    ],
+    "develop": {
+      "settings": {
+        "color": {
+          "saturation": 0.0,
+          "vibrance": 0.0
+        },
+        "contrast": 0.0,
+        "detail": {
+          "noise_reduction": {
+            "color": 0.0,
+            "luminance": 0.0
+          },
+          "sharpening": {
+            "amount": 0.0,
+            "detail": 0.0,
+            "masking": 0.0,
+            "radius": 1.0
+          }
+        },
+        "exposure_ev": 0.0,
+        "geometry": {
+          "angle_deg": 0.0,
+          "aspect": null,
+          "crop": {
+            "bottom": 1.0,
+            "left": 0.0,
+            "right": 1.0,
+            "top": 0.0
+          }
+        },
+        "lens": {
+          "distortion_scale": 100.0,
+          "profile_enabled": false,
+          "remove_chromatic_aberration": false,
+          "vignetting_scale": 100.0
+        },
+        "masks": [],
+        "process_version": 1,
+        "render_deps": {
+          "camera_profile": {
+            "id": "",
+            "sha256": ""
+          },
+          "lens_profile": null,
+          "raw_decoder": ""
+        },
+        "schema_version": 1,
+        "tone": {
+          "blacks": 0.0,
+          "highlights": 0.0,
+          "shadows": 0.0,
+          "whites": 0.0
+        },
+        "tone_curve": {
+          "blue": [],
+          "green": [],
+          "luma": [],
+          "parametric": {
+            "darks": 0.0,
+            "highlights": 0.0,
+            "lights": 0.0,
+            "shadows": 0.0
+          },
+          "red": []
+        },
+        "white_balance": {
+          "custom": {
+            "temperature_k": 4300.0,
+            "tint": 8.0
+          }
+        }
+      },
+      "develop_hash": "2f03f63c605cba70ac2467156feffccae6ddc76c590b170014f5c2c04d430af3",
+      "process_version": 1
+    },
+    "process_version": 1,
+    "tolerance": {
+      "metric": "diff_8bit",
+      "threshold": 1.0,
+      "max_pixels_over": 0,
+      "max_mean": null
+    }
+  },
+  "image": {
+    "file": "engine_wb_custom.gzf",
+    "width": 192,
+    "height": 128,
+    "channels": 3,
+    "sha256": "ff7e771885301be4cdb56e82e36496d45ab6b1c42bc121af40b75632905d4a75"
+  }
+}

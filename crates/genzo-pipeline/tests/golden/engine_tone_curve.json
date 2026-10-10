@@ -1,0 +1,127 @@
+{
+  "format_version": 1,
+  "spec": {
+    "name": "engine_tone_curve",
+    "description": "トーンカーブ（輝度・パラメトリック・R）（合成のベイヤー 192x128、sRGB の書き出しの B4b）",
+    "inputs": [
+      {
+        "id": "synthetic:busy_bayer:192x128",
+        "sha256": "eb16718f57342c9b64539b6af5c6616c2ac1e12263b2ae2869edc0a2110b0f0b"
+      }
+    ],
+    "develop": {
+      "settings": {
+        "color": {
+          "saturation": 0.0,
+          "vibrance": 0.0
+        },
+        "contrast": 0.0,
+        "detail": {
+          "noise_reduction": {
+            "color": 0.0,
+            "luminance": 0.0
+          },
+          "sharpening": {
+            "amount": 0.0,
+            "detail": 0.0,
+            "masking": 0.0,
+            "radius": 1.0
+          }
+        },
+        "exposure_ev": 0.0,
+        "geometry": {
+          "angle_deg": 0.0,
+          "aspect": null,
+          "crop": {
+            "bottom": 1.0,
+            "left": 0.0,
+            "right": 1.0,
+            "top": 0.0
+          }
+        },
+        "lens": {
+          "distortion_scale": 100.0,
+          "profile_enabled": false,
+          "remove_chromatic_aberration": false,
+          "vignetting_scale": 100.0
+        },
+        "masks": [],
+        "process_version": 1,
+        "render_deps": {
+          "camera_profile": {
+            "id": "",
+            "sha256": ""
+          },
+          "lens_profile": null,
+          "raw_decoder": ""
+        },
+        "schema_version": 1,
+        "tone": {
+          "blacks": 0.0,
+          "highlights": 0.0,
+          "shadows": 0.0,
+          "whites": 0.0
+        },
+        "tone_curve": {
+          "blue": [],
+          "green": [],
+          "luma": [
+            {
+              "x": 0.0,
+              "y": 0.05
+            },
+            {
+              "x": 0.3,
+              "y": 0.22
+            },
+            {
+              "x": 0.7,
+              "y": 0.8
+            },
+            {
+              "x": 1.0,
+              "y": 0.97
+            }
+          ],
+          "parametric": {
+            "darks": 0.0,
+            "highlights": 0.0,
+            "lights": 20.0,
+            "shadows": 0.0
+          },
+          "red": [
+            {
+              "x": 0.0,
+              "y": 0.0
+            },
+            {
+              "x": 0.5,
+              "y": 0.55
+            },
+            {
+              "x": 1.0,
+              "y": 1.0
+            }
+          ]
+        },
+        "white_balance": "as_shot"
+      },
+      "develop_hash": "9243648281193c33204661575ec4635234305e3c4ce9fc9bcb14ee1a8d9a76aa",
+      "process_version": 1
+    },
+    "process_version": 1,
+    "tolerance": {
+      "metric": "diff_8bit",
+      "threshold": 1.0,
+      "max_pixels_over": 0,
+      "max_mean": null
+    }
+  },
+  "image": {
+    "file": "engine_tone_curve.gzf",
+    "width": 192,
+    "height": 128,
+    "channels": 3,
+    "sha256": "7edeeb446b7f53f49a715833567eb07329187eb07f174b225dd8029239cd378c"
+  }
+}

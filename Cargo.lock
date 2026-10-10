@@ -633,8 +633,13 @@ dependencies = [
  "genzo-color",
  "genzo-model",
  "genzo-pipeline",
+ "genzo-raw",
+ "genzo-testkit",
+ "naga",
  "pollster",
+ "rayon",
  "thiserror",
+ "tracing",
  "wgpu",
 ]
 
@@ -685,6 +690,7 @@ dependencies = [
  "genzo-color",
  "genzo-model",
  "genzo-raw",
+ "genzo-testkit",
  "rayon",
  "thiserror",
 ]
@@ -724,9 +730,14 @@ dependencies = [
 name = "genzo-worker"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "crossbeam-channel",
+ "genzo-color",
+ "genzo-jobs",
  "genzo-media",
  "genzo-model",
  "genzo-raw",
+ "libc",
  "memmap2",
  "serde",
  "serde_json",

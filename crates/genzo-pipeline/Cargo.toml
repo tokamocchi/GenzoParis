@@ -15,5 +15,10 @@ genzo-raw.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# 合成のテストデータ（ベイヤー配列・ゾーンプレート・ColorChecker）と、画像の差（PSNR 用の値・ΔE2000）、
+# 比較の基準の縮小（downscale_area）。テストでだけ使う（genzo-testkit は genzo-pipeline に依存しない）。
+genzo-testkit.workspace = true
+
 [lints]
 workspace = true

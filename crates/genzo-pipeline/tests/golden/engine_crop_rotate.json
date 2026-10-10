@@ -1,0 +1,97 @@
+{
+  "format_version": 1,
+  "spec": {
+    "name": "engine_crop_rotate",
+    "description": "回転 4°・切り抜き（合成のベイヤー 192x128、sRGB の書き出しの B4b）",
+    "inputs": [
+      {
+        "id": "synthetic:busy_bayer:192x128",
+        "sha256": "eb16718f57342c9b64539b6af5c6616c2ac1e12263b2ae2869edc0a2110b0f0b"
+      }
+    ],
+    "develop": {
+      "settings": {
+        "color": {
+          "saturation": 0.0,
+          "vibrance": 0.0
+        },
+        "contrast": 0.0,
+        "detail": {
+          "noise_reduction": {
+            "color": 0.0,
+            "luminance": 0.0
+          },
+          "sharpening": {
+            "amount": 0.0,
+            "detail": 0.0,
+            "masking": 0.0,
+            "radius": 1.0
+          }
+        },
+        "exposure_ev": 0.0,
+        "geometry": {
+          "angle_deg": 4.0,
+          "aspect": null,
+          "crop": {
+            "bottom": 0.9,
+            "left": 0.1,
+            "right": 0.85,
+            "top": 0.1
+          }
+        },
+        "lens": {
+          "distortion_scale": 100.0,
+          "profile_enabled": false,
+          "remove_chromatic_aberration": false,
+          "vignetting_scale": 100.0
+        },
+        "masks": [],
+        "process_version": 1,
+        "render_deps": {
+          "camera_profile": {
+            "id": "",
+            "sha256": ""
+          },
+          "lens_profile": null,
+          "raw_decoder": ""
+        },
+        "schema_version": 1,
+        "tone": {
+          "blacks": 0.0,
+          "highlights": 0.0,
+          "shadows": 0.0,
+          "whites": 0.0
+        },
+        "tone_curve": {
+          "blue": [],
+          "green": [],
+          "luma": [],
+          "parametric": {
+            "darks": 0.0,
+            "highlights": 0.0,
+            "lights": 0.0,
+            "shadows": 0.0
+          },
+          "red": []
+        },
+        "white_balance": "as_shot"
+      },
+      "develop_hash": "f29f3c2dc1a54f94f6685a9878d064559a10ed5f2d0580a2be2b1dec22a4b595",
+      "process_version": 1
+    },
+    "process_version": 1,
+    "tolerance": {
+      "metric": "diff_8bit",
+      "threshold": 1.0,
+      "max_pixels_over": 0,
+      "max_mean": null
+    }
+  },
+  "image": {
+    "file": "engine_crop_rotate.gzf",
+    "width": 150,
+    "height": 113,
+    "channels": 3,
+    "sha256": "7c000aef5cc1510398aad90c9ec31f47d6c506f02db2cd6187fda1d3b1153248"
+  }
+}
