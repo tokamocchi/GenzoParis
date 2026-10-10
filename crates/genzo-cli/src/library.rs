@@ -50,7 +50,8 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
         g,
         out,
         &OpenOptions {
-            render_previews_after_import: a.no_previews.then_some(false),
+            // 既定は作り直さない（genzo-api の既定。implementation_status の No.24）。
+            render_previews_after_import: Some(a.previews && !a.no_previews),
             ..Default::default()
         },
     )?;
@@ -60,7 +61,7 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
         return Err(CliError::other("取り込みの結果がありません"));
     };
     s.close()?;
-    // 読めずに登録できなかったファイルがある・途中で取り消された場合は終了コード 1（書き出しの一部の
+    // 読めずに登録できなかったファイルがある・途中で取り消された場合は終了コード 3（書き出しの一部の
     // 失敗と同じ扱い）。メタデータを読めずに status = error で登録したファイルは、登録はできているので 0。
     let failed = !report.not_registered.is_empty() || report.cancelled;
     if out.json {
@@ -107,7 +108,7 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
         }
     }
     Ok(if failed {
-        Status::Failure
+        Status::Partial
     } else {
         Status::Success
     })
@@ -521,7 +522,7 @@ pub fn thumbs(g: &GlobalArgs, out: Output, cmd: ThumbsCommand) -> CliResult<Stat
         }
     }
     Ok(if failed {
-        Status::Failure
+        Status::Partial
     } else {
         Status::Success
     })
@@ -635,7 +636,7 @@ pub fn delete(
     let failed = !report.failed.is_empty();
     print_delete_report(out, &plan, &report);
     Ok(if failed {
-        Status::Failure
+        Status::Partial
     } else {
         Status::Success
     })

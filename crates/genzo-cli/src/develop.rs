@@ -9,17 +9,21 @@
 //!   `{"custom": {...}}`）は、種類が違えば置き換える。知らない項目（打ち間違い）はエラーにする
 //!   （genzo-model は知らない項目を無視するため、ここで確かめる）。
 //! - 設定の値の範囲は genzo-model の検証（`DevelopSettings::validate`）で確かめる。
+//! - `region` は写真を開いて（展開して）、表示範囲を描き（genzo-api の `render_region`。ルーペの等倍表示・
+//!   拡大とパンのコア API を試すため。implementation_status の No.52）、PNG に書く。
 //! - JSON の出力: `get` は設定そのもの（そのまま `set --replace` に渡せる）。`set`・`reset`・`undo`・
 //!   `redo` は `{"variant_id", "changed", "settings"}`（Undo / Redo できなければ `changed: false`、
 //!   `settings: null`。終了コードは 0）。
 
 use std::io::Read;
 
-use genzo_api::{DeleteKind, DevelopSettings, SettingGroups, VariantId};
+use genzo_api::{
+    DeleteKind, DevelopSettings, RegionRequest, RegionSpace, SettingGroups, VariantId,
+};
 use serde_json::{Value, json};
 
 use crate::Status;
-use crate::args::{DevelopCommand, GlobalArgs, setting_groups};
+use crate::args::{DevelopCommand, GlobalArgs, RegionArgs, RegionSpaceArg, setting_groups};
 use crate::error::{CliError, CliResult};
 use crate::library::{ensure_variants, unique_ids};
 use crate::output::{Output, Table, json_value};
@@ -57,6 +61,7 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
         DevelopCommand::DeleteCopy { variant } => {
             crate::library::delete(g, out, DeleteKind::VirtualCopies, &[variant], true)
         }
+        DevelopCommand::Region(a) => region(g, out, &a),
     }
 }
 
@@ -365,6 +370,81 @@ fn virtual_copy(
         out.line(format!("仮想コピーを作りました: variant {id}（元: {v}）"));
     }
     Ok(Status::Success)
+}
+
+/// `develop region`: 写真を開いて、表示範囲を描き（genzo-api の [`genzo_api::Core::render_region`]。
+/// implementation_status の No.52）、PNG に書く。画面のプロファイルは設定しないので sRGB とみなした値
+/// （ICC なしの PNG。sRGB として表示される）になる。
+fn region(g: &GlobalArgs, out: Output, a: &RegionArgs) -> CliResult<Status> {
+    if a.out.exists() {
+        return Err(CliError::Usage(format!(
+            "--out {} は既にあります（上書きしません）",
+            a.out.display()
+        )));
+    }
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    ensure_variants(&s, &[a.variant])?;
+    s.core.open_develop(a.variant)?;
+    let request = RegionRequest {
+        variant_id: a.variant,
+        space: match a.space {
+            RegionSpaceArg::Output => RegionSpace::Output,
+            RegionSpaceArg::Geometry => RegionSpace::Geometry,
+        },
+        x: a.x,
+        y: a.y,
+        width: a.width,
+        height: a.height,
+        scale: a.scale,
+    };
+    let frame = s.core.render_region(&request);
+    s.core.close_develop()?;
+    s.close()?;
+    let frame = frame?;
+    let info = &frame.info;
+    let image = genzo_media::RgbImage8::from_raw(
+        info.width,
+        info.height,
+        frame.display_rgb8.as_ref().clone(),
+    )
+    .map_err(|e| CliError::other(e.to_string()))?;
+    let png = genzo_media::png_io::encode_png(&image, None, None)
+        .map_err(|e| CliError::other(e.to_string()))?;
+    write_new_file(&a.out, &png)?;
+    if out.json {
+        out.print_json(&json!({ "path": a.out, "region": info }));
+    } else {
+        out.line(format!(
+            "表示範囲を書き出しました: {}（範囲 x={} y={} {}×{}、倍率 {}、{}×{}、画像全体 {}×{}）",
+            a.out.display(),
+            info.x,
+            info.y,
+            info.region_width,
+            info.region_height,
+            info.scale,
+            info.width,
+            info.height,
+            info.full_width,
+            info.full_height
+        ));
+    }
+    Ok(Status::Success)
+}
+
+/// 新しいファイルに書く（既にあれば書かない。途中で失敗したら書きかけのファイルを消す）。
+fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> CliResult<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| CliError::io(path, e))?;
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        return Err(CliError::io(path, e));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

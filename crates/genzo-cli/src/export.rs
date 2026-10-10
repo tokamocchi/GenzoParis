@@ -57,7 +57,7 @@ pub fn format_text(f: ExportFormat) -> String {
     }
 }
 
-/// `export`。一部でも失敗したら終了コード 1（結果の一覧は出す）。
+/// `export`。一部でも失敗したら終了コード 3（[`crate::EXIT_PARTIAL`]。結果の一覧は出す）。
 pub fn run(g: &GlobalArgs, out: Output, a: ExportArgs) -> CliResult<Status> {
     let ids = unique_ids(&a.variants);
     // 使い方の誤り（--quality と形式の組み合わせなど）は、カタログを開く前に確かめる。色空間の指定が
@@ -91,7 +91,7 @@ pub fn run(g: &GlobalArgs, out: Output, a: ExportArgs) -> CliResult<Status> {
     let failed = report.failed > 0 || report.cancelled;
     print_report(out, &settings, &report);
     Ok(if failed {
-        Status::Failure
+        Status::Partial
     } else {
         Status::Success
     })

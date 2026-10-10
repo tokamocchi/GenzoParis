@@ -23,12 +23,17 @@
 //!   JSON の文書** だけ（失敗は `{"error": {"kind", "message", "user_actionable", "retryable", "hint"}}`。
 //!   引数の解釈の誤り（clap）も同じ形で出す）。`kind` は genzo-api の `ErrorKind`（snake_case）か、使い方の
 //!   誤りの `usage` だけ（[`CliError`]）。進捗・警告は標準エラー（`--quiet` で進捗を止める）。
-//! - 終了コード: [`EXIT_SUCCESS`]（0）成功、[`EXIT_ERROR`]（1）エラー、[`EXIT_USAGE`]（2）使い方の誤り、
-//!   [`EXIT_INTERRUPTED`]（130）Ctrl+C で中断した（下の「Ctrl+C」）。
-//!   次も 1 にする: 書き出し・削除・サムネイルの作り直しで一部が失敗した、取り込みで読めずに登録
-//!   できなかったファイルがある（メタデータを読めずに `status = error` で登録したものは 0）、
-//!   `catalog check` で問題が見つかった、`trash` を `--yes` なしで中止した（端末では確認を求める）、
-//!   `bench` で前回より悪化した（今回の回数が 1.8 節の規則を満たす計測だけ）。
+//! - 終了コード（implementation_status の No.30。`--help` の末尾にも出す。[`args::EXIT_CODES_HELP`]）:
+//!   [`EXIT_SUCCESS`]（0）成功、[`EXIT_ERROR`]（1）エラー、[`EXIT_USAGE`]（2）使い方の誤り、
+//!   [`EXIT_PARTIAL`]（3）結果は出したが一部が失敗した・問題が見つかった、[`EXIT_INTERRUPTED`]（130）
+//!   Ctrl+C で中断した（下の「Ctrl+C」）。
+//!   - 3 にするもの: 書き出し・削除・サムネイルの作り直しで一部が失敗した、取り込みで読めずに登録
+//!     できなかったファイルがある（メタデータを読めずに `status = error` で登録したものは 0）、
+//!     `catalog check` で問題が見つかった、`bench` で前回より悪化した（今回の回数が 1.8 節の規則を満たす
+//!     計測だけ）。問題の検出も「結果は出したが、問題がある」として 3 にまとめる（スクリプトは 3 を見て
+//!     結果の JSON を確かめる）。
+//!   - 1 にするもの: 処理できなかったエラーのほか、`trash` を `--yes` なしで中止した場合（端末では確認を
+//!     求める。何も実行していないので、一部の失敗ではない）。
 //! - 入力の JSON（`develop set`・`render --settings`）は UTF-8（BOM 付きも）と BOM 付きの UTF-16 を読む
 //!   （Windows のメモ帳・PowerShell 5.1 の `>` で保存したファイル）。
 //!
@@ -52,7 +57,7 @@
 //! | `interrupt` | Ctrl+C の受け取り（1 回目は取り消して閉じる、2 回目はすぐに終了） |
 //! | `catalog` | `catalog init / info / check / backup / restore` |
 //! | `library` | `import`・`search`・`show`・`rate / flag / label / caption`・`thumbs`・`remove`・`trash` |
-//! | `develop` | `develop get / set / reset / undo / redo / history / copy / virtual-copy / delete-copy` |
+//! | `develop` | `develop get / set / reset / undo / redo / history / copy / virtual-copy / delete-copy / region` |
 //! | `export` | `export` と書き出しの設定 |
 //! | `standalone` | カタログなしの `render`・`info`（ワーカーを直接使う） |
 //! | `bench` | `bench preview / export`（genzo-testkit の計測と記録） |
@@ -106,10 +111,14 @@ use crate::output::Output;
 
 /// 終了コード: 成功。
 pub const EXIT_SUCCESS: u8 = 0;
-/// 終了コード: エラー（一部の失敗・確認の中止・チェックで見つかった問題を含む）。
+/// 終了コード: エラー（処理できなかった。確認の中止を含む）。
 pub const EXIT_ERROR: u8 = 1;
 /// 終了コード: 使い方の誤り（引数の誤り・カタログの指定がない）。
 pub const EXIT_USAGE: u8 = 2;
+/// 終了コード: 結果は出したが、一部が失敗した・問題が見つかった（書き出し・削除・サムネイルの作り直しの
+/// 一部の失敗、取り込みで登録できなかったファイル、`catalog check` で見つかった問題、`bench` での悪化。
+/// implementation_status の No.30）。
+pub const EXIT_PARTIAL: u8 = 3;
 /// 終了コード: Ctrl+C で中断した（Unix の慣習の 128 + SIGINT。`interrupt` の doc）。
 pub const EXIT_INTERRUPTED: u8 = 130;
 
@@ -118,8 +127,21 @@ pub const EXIT_INTERRUPTED: u8 = 130;
 pub enum Status {
     /// 成功（終了コード 0）。
     Success,
-    /// 結果は出したが、一部が失敗した・問題が見つかった（終了コード 1）。
+    /// 結果は出したが、一部が失敗した・問題が見つかった（終了コード 3。[`EXIT_PARTIAL`]）。
+    Partial,
+    /// 実行しなかった（確認の中止。終了コード 1）。
     Failure,
+}
+
+impl Status {
+    /// 終了コード。
+    pub fn exit_code(self) -> u8 {
+        match self {
+            Self::Success => EXIT_SUCCESS,
+            Self::Partial => EXIT_PARTIAL,
+            Self::Failure => EXIT_ERROR,
+        }
+    }
 }
 
 /// ログの水準を指定する環境変数（`--log` がなければ使う）。
@@ -170,8 +192,7 @@ pub fn main_entry() -> ExitCode {
         quiet: cli.global.quiet,
     };
     let code = match run(cli) {
-        Ok(Status::Success) => ExitCode::from(EXIT_SUCCESS),
-        Ok(Status::Failure) => ExitCode::from(EXIT_ERROR),
+        Ok(status) => ExitCode::from(status.exit_code()),
         Err(e) => {
             if out.json {
                 out.print_json(&e.to_json());
@@ -236,5 +257,29 @@ pub fn run(cli: Cli) -> CliResult<Status> {
             library::delete(&g, out, DeleteKind::Trash, &variants, yes)
         }
         Command::Bench(a) => bench::run(&g, out, a),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 終了コードの対応（implementation_status の No.30）。
+    #[test]
+    fn statuses_map_to_exit_codes() {
+        assert_eq!(Status::Success.exit_code(), 0);
+        assert_eq!(Status::Partial.exit_code(), 3);
+        assert_eq!(Status::Failure.exit_code(), 1);
+        assert_eq!(
+            (
+                EXIT_SUCCESS,
+                EXIT_ERROR,
+                EXIT_USAGE,
+                EXIT_PARTIAL,
+                EXIT_INTERRUPTED
+            ),
+            (0, 1, 2, 3, 130)
+        );
+        assert!(args::EXIT_CODES_HELP.contains("130"));
     }
 }

@@ -191,7 +191,7 @@ fn check(g: &GlobalArgs, out: Output, files: bool) -> CliResult<Status> {
             }
         }
     }
-    Ok(if ok { Status::Success } else { Status::Failure })
+    Ok(if ok { Status::Success } else { Status::Partial })
 }
 
 fn backup(g: &GlobalArgs, out: Output, to: Option<std::path::PathBuf>) -> CliResult<Status> {

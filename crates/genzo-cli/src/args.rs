@@ -16,10 +16,16 @@ use genzo_model::{ConflictPolicy, ExportFormat, OutputColorSpace};
 /// 登録・検索・現像・書き出し・計測を UI なしで行う。結果は表（人が読む）か、--json で JSON（機械が
 /// 読む）で標準出力に出す。進捗・警告は標準エラーに出す。
 ///
-/// 終了コード: 0 = 成功、1 = エラー（一部の失敗・確認の中止・チェックで問題が見つかった場合を含む）、
-/// 2 = 使い方の誤り、130 = Ctrl+C で中断した。
+/// 終了コードは [`EXIT_CODES_HELP`]（`--help` の末尾に出す）。
 #[derive(Debug, Parser)]
-#[command(name = "genzo", version, about, long_about = None, max_term_width = 100)]
+#[command(
+    name = "genzo",
+    version,
+    about,
+    long_about = None,
+    max_term_width = 100,
+    after_help = EXIT_CODES_HELP
+)]
 pub struct Cli {
     /// 全体のオプション。
     #[command(flatten)]
@@ -28,6 +34,16 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 }
+
+/// `--help` の末尾に出す終了コードの説明（`crate::EXIT_SUCCESS` 〜 `crate::EXIT_INTERRUPTED`。
+/// implementation_status の No.30）。
+pub const EXIT_CODES_HELP: &str = "終了コード:
+  0    成功
+  1    エラー（処理できなかった。trash を --yes なしで中止した場合を含む）
+  2    使い方の誤り（引数の誤り・カタログの指定がない）
+  3    結果は出したが、一部が失敗した・問題が見つかった（書き出し・削除・サムネイルの作り直しの一部の
+       失敗、取り込みで登録できなかったファイル、catalog check で見つかった問題、bench での悪化）
+  130  Ctrl+C で中断した";
 
 /// 全体のオプション（どのサブコマンドの後にも書ける）。
 #[derive(Debug, Clone, Args)]
@@ -39,7 +55,8 @@ pub struct GlobalArgs {
     /// それもなければカタログの隣の「<カタログ名>-data」
     #[arg(long, global = true, value_name = "DIR")]
     pub data_dir: Option<PathBuf>,
-    /// GPU の使用（auto: 使えれば使う / off: CPU 版だけ）
+    /// GPU の使用（auto: 使えれば使う / off: CPU 版だけ）。ソフトウェアの GPU（llvmpipe・WARP など）は、
+    /// 環境変数 GENZO_GPU_ALLOW_SOFTWARE=1 のときだけ使う
     #[arg(long, global = true, value_enum, default_value_t = GpuArg::Auto)]
     pub gpu: GpuArg,
     /// ログの水準（error / warn / info / debug / trace、または tracing の指定）。省略時は環境変数
@@ -166,7 +183,7 @@ pub enum CatalogCommand {
     Init,
     /// 件数・スキーマの版・前回の正常終了・バックアップの一覧
     Info,
-    /// 詳細チェック（DATA-05: integrity_check・外部キー・テキスト検索の索引）。問題があれば終了コード 1
+    /// 詳細チェック（DATA-05: integrity_check・外部キー・テキスト検索の索引）。問題があれば終了コード 3
     Check {
         /// 元ファイルの有無も確かめる（見つからなければ missing にする）
         #[arg(long)]
@@ -196,8 +213,13 @@ pub struct ImportArgs {
     /// 配下のフォルダを取り込まない
     #[arg(long)]
     pub no_recursive: bool,
-    /// 取り込みの後に、現像結果からサムネイル・プレビューを作り直さない（埋め込みの JPEG のまま）
-    #[arg(long)]
+    /// 取り込みの後に、現像結果からサムネイル・プレビューを作り直す（既定は作り直さず、埋め込みの
+    /// JPEG のまま。現像設定を変えたときに作る）
+    #[arg(long, conflicts_with = "no_previews")]
+    pub previews: bool,
+    /// 取り込みの後に、現像結果からサムネイル・プレビューを作り直さない（既定。以前の版との互換のため
+    /// 残す）
+    #[arg(long, hide = true)]
     pub no_previews: bool,
 }
 
@@ -366,6 +388,48 @@ pub enum DevelopCommand {
         #[arg(value_parser = parse_variant_id)]
         variant: VariantId,
     },
+    /// 表示範囲を描いて PNG（8bit、sRGB）に書く（ルーペの等倍表示・拡大とパンのコア API
+    /// `render_region` を試す。範囲は出力の画像の内側に収める）
+    Region(RegionArgs),
+}
+
+/// `develop region` の引数。
+#[derive(Debug, Args)]
+pub struct RegionArgs {
+    /// variant の ID（写真。動画は描けない）
+    #[arg(value_parser = parse_variant_id)]
+    pub variant: VariantId,
+    /// 範囲の左上の x（--space の座標）
+    #[arg(long, allow_hyphen_values = true)]
+    pub x: f64,
+    /// 範囲の左上の y
+    #[arg(long, allow_hyphen_values = true)]
+    pub y: f64,
+    /// 範囲の幅
+    #[arg(long)]
+    pub width: f64,
+    /// 範囲の高さ
+    #[arg(long)]
+    pub height: f64,
+    /// 座標系: output = 切り抜いた後の画像の画素（フル解像度）、geometry = 切り抜く前の全体で長辺を 1
+    /// とした値
+    #[arg(long, value_enum, default_value = "output")]
+    pub space: RegionSpaceArg,
+    /// 表示の倍率（1 = 等倍、0.5 = 縮小、2 = 拡大）
+    #[arg(long, default_value_t = 1.0)]
+    pub scale: f64,
+    /// 書き出す PNG のファイル（既にあれば使い方の誤り。上書きしない）
+    #[arg(long, value_name = "FILE")]
+    pub out: PathBuf,
+}
+
+/// 表示範囲の座標系（genzo-api の `RegionSpace`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RegionSpaceArg {
+    /// 出力座標（C）。
+    Output,
+    /// ジオメトリ補正後の全体（G）。
+    Geometry,
 }
 
 /// `thumbs` のサブコマンド。

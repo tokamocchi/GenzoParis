@@ -3,7 +3,7 @@
 //! genzo-testkit の [`Bench`] で測り、[`BenchRecorder`] で JSON（`<記録先>/<名前>.json`）に追記して、前回の
 //! 結果（同じ名前・条件・入力・現像設定・環境）と比べる。報告する値は平均・95 パーセンタイル・最大
 //! （[`genzo_testkit::bench::DurationStats`]）、目標を超えた回数。95 パーセンタイルが前回より 10% 以上
-//! 悪化したもの（genzo-testkit の既定。仮置き）があれば終了コード 1。目標に届かないだけなら 0
+//! 悪化したもの（genzo-testkit の既定。仮置き）があれば終了コード 3（[`crate::EXIT_PARTIAL`]）。目標に届かないだけなら 0
 //! （このコンテナの llvmpipe など、実機でない環境の数値で失敗にしないため）。
 //!
 //! # 計測する項目
@@ -30,7 +30,7 @@
 //!   混ざった結果を記録しないため）。書き出しは genzo-gpu の [`genzo_gpu::export_with_fallback`]（失敗したら
 //!   CPU 版。処理した側は `notes.backend`）。GPU の API（Vulkan・Metal・DX12 など）は `notes.gpu_backend`
 //!   （API が違う結果どうしは比べない）、GPU の名前とドライバーは環境の情報に記録する。
-//! - 終了コード 1（悪化）にするのは、**今回の回数が 1.8 節の規則を満たす** 計測が前回より悪化した場合
+//! - 終了コード 3（悪化）にするのは、**今回の回数が 1.8 節の規則を満たす** 計測が前回より悪化した場合
 //!   だけ（[`regression_fails`]）。`--runs` で回数を減らした試しの計測は、比べた結果を出すが終了コードには
 //!   しない（少ない回数の 95 パーセンタイルは最大値とほぼ同じで、ばらつきで悪化と判定されやすいため）。
 
@@ -270,7 +270,7 @@ pub fn preview_size((w, h): (u32, u32)) -> (u32, u32) {
     genzo_pipeline::preview_size(w, h, PREVIEW_LONG_EDGE)
 }
 
-/// 終了コードを 1（悪化）にするか: 前回より悪化し、今回の回数が 1.8 節の規則を満たす計測があるか。
+/// 終了コードを 3（悪化）にするか: 前回より悪化し、今回の回数が 1.8 節の規則を満たす計測があるか。
 pub fn regression_fails(reports: &[BenchReport]) -> bool {
     reports
         .iter()
@@ -634,7 +634,7 @@ pub fn run(g: &GlobalArgs, out: Output, a: BenchArgs) -> CliResult<Status> {
         );
     }
     Ok(if regressed {
-        Status::Failure
+        Status::Partial
     } else {
         Status::Success
     })

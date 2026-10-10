@@ -143,7 +143,8 @@ pub struct Loaded {
     pub metadata: PhotoMetadata,
     /// RAW か。
     pub is_raw: bool,
-    /// 幅と高さ（向きを反映する前）。
+    /// 元の幅と高さ（向きを反映する前）。RAW は見える範囲（既定の切り抜き。なければ有効画素の
+    /// 全体。04 の 2.7 節）で、`info` の寸法・書き出しの元の寸法と同じ。
     pub size: (u32, u32),
     /// RAW のデコーダの識別子。
     pub decoder: Option<String>,
@@ -158,7 +159,9 @@ pub fn load(client: &mut WorkerClient, path: &Path, kind: InputKind) -> CliResul
     match kind {
         InputKind::Raw => {
             let frame = client.decode_raw(path, &cancel)?;
-            let size = (frame.image.width, frame.image.height);
+            // 有効画素の全体（frame.image.width × height）ではなく、見える範囲の寸法。
+            let visible = frame.image.visible_area();
+            let size = (visible.width, visible.height);
             let metadata = frame.image.metadata.clone();
             Ok(Loaded {
                 source: PhotoSource::new(
@@ -283,11 +286,17 @@ pub fn render(g: &GlobalArgs, out: Output, a: RenderArgs) -> CliResult<Status> {
     )?;
     let backend = match &outcome.backend {
         ExportBackend::Gpu => RenderBackend::Gpu,
-        ExportBackend::Cpu { gpu_error } => {
-            if let Some(e) = gpu_error {
-                out.warn(format!(
+        ExportBackend::Cpu {
+            gpu_error,
+            gpu_failure,
+        } => {
+            match gpu_error {
+                Some(e) if *gpu_failure => out.warn(format!(
                     "GPU の処理に失敗したため、CPU 版で処理しました: {e}"
-                ));
+                )),
+                // GPU 版で扱えない入力（大きすぎる画像など。決定 No.26）。
+                Some(e) => out.warn(format!("GPU 版で扱えないため、CPU 版で処理しました: {e}")),
+                None => {}
             }
             RenderBackend::Cpu
         }

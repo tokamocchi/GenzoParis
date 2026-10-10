@@ -61,6 +61,10 @@ fn genzo_with(args: &[&str], env: &[(&str, &Path)], stdin: Option<&str>) -> Run 
         } else {
             Stdio::null()
         });
+    // テストでは、ソフトウェアの GPU（llvmpipe など）も使う（既定では使わない。決定 No.20）。
+    if std::env::var_os("GENZO_GPU_ALLOW_SOFTWARE").is_none() {
+        cmd.env("GENZO_GPU_ALLOW_SOFTWARE", "1");
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -218,8 +222,13 @@ fn make_video(path: &Path) -> bool {
     ok
 }
 
-/// LibRaw が有効な build なら、合成 DNG（埋め込みの JPEG のプレビュー付き）を書く。
+/// LibRaw が有効な build なら、合成 DNG（96 × 64、埋め込みの JPEG のプレビュー付き）を書く。
 fn make_dng(path: &Path) -> bool {
+    make_dng_with_crop(path, None)
+}
+
+/// [`make_dng`] に、既定の切り抜き（DefaultCropOrigin / DefaultCropSize。有効画素の座標）を付ける。
+fn make_dng_with_crop(path: &Path, default_crop: Option<genzo_raw::PixelRect>) -> bool {
     if !genzo_raw::LIBRAW_ENABLED {
         eprintln!("LibRaw が無効な build のため、DNG の部分を飛ばす");
         return false;
@@ -248,7 +257,8 @@ fn make_dng(path: &Path) -> bool {
     };
     params.metadata.capture.datetime = Some("2024:05:10 08:00:00".to_owned());
     params.metadata.capture.offset = Some("+09:00".to_owned());
-    let raw = mosaic(&camera, &params).unwrap();
+    let mut raw = mosaic(&camera, &params).unwrap();
+    raw.default_crop = default_crop;
     let preview_px: Vec<u8> = (0..w * h)
         .flat_map(|i| [(i % 256) as u8, 80, 120])
         .collect();
@@ -666,7 +676,7 @@ fn end_to_end_catalog_workflow() {
         "skip",
     ]);
     assert_eq!(e4["report"]["skipped"], 1);
-    // 元ファイルのあるフォルダへの上書きは拒否する（6.4 節）。一部の失敗は終了コード 1。
+    // 元ファイルのあるフォルダへの上書きは拒否する（6.4 節）。一部の失敗は終了コード 3（No.30）。
     let r = env.run(&[
         "export",
         &a.to_string(),
@@ -678,7 +688,7 @@ fn end_to_end_catalog_workflow() {
         "overwrite",
         "--json",
     ]);
-    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(r.code, genzo_cli::EXIT_PARTIAL as i32, "{}", r.stdout);
     assert_eq!(r.json()["report"]["failed"], 1);
     if video {
         let v = id_of(&all, "V.mp4");
@@ -830,6 +840,7 @@ fn usage_errors_exit_with_2() {
         &["bench", "preview", "--synthetic", "8x8"],
         &["develop", "set", "1"],
         &["show", "abc"],
+        &["import", "dir", "--previews", "--no-previews"],
     ] {
         let r = env.run(args);
         assert_eq!(r.code, 2, "{args:?}: {}", r.stderr);
@@ -857,6 +868,13 @@ fn usage_errors_exit_with_2() {
     let help = genzo_with(&["--help"], &[], None);
     assert_eq!(help.code, 0);
     assert!(help.stdout.contains("catalog") && help.stdout.contains("bench"));
+    // 終了コードの説明（No.30）。
+    assert!(help.stdout.contains("終了コード"), "{}", help.stdout);
+    assert!(
+        help.stdout.contains("3    結果は出したが"),
+        "{}",
+        help.stdout
+    );
     assert!(
         !help.stdout.contains("__worker"),
         "隠しサブコマンドは表示しない"
@@ -864,6 +882,144 @@ fn usage_errors_exit_with_2() {
     let version = genzo_with(&["--version"], &[], None);
     assert_eq!(version.code, 0);
     assert!(version.stdout.starts_with("genzo "));
+}
+
+/// 結果は出したが一部が失敗した・問題が見つかった場合は終了コード 3（No.30）: `catalog check` で見つからない
+/// ファイルがあった（書き出しの一部の失敗は `end_to_end_catalog_workflow`、`bench` の悪化は
+/// `bench_records_results_and_compares_with_the_previous_run` で確かめる）。
+#[test]
+fn partial_failures_exit_with_3() {
+    const PARTIAL: i32 = genzo_cli::EXIT_PARTIAL as i32;
+    assert_eq!(PARTIAL, 3);
+    let env = Env::new();
+    write_plain(&env.photos.join("A.png"), (40, 30));
+    write_plain(&env.photos.join("B.png"), (30, 40));
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let all = env.json(&["search"]);
+    let a = id_of(&all, "A.png");
+    std::fs::remove_file(env.photos.join("B.png")).unwrap();
+    // 見つからないファイルがある（問題の検出）。
+    let r = env.run(&["catalog", "check", "--files", "--json"]);
+    assert_eq!(r.code, PARTIAL, "{}\n{}", r.stdout, r.stderr);
+    let v = r.json();
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["files"]["missing"].as_array().unwrap().len(), 1, "{v}");
+    // 見つからないファイルは作り直しを飛ばす（失敗ではない）ので 0。
+    let r = env.run(&["thumbs", "regenerate", &a.to_string(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+}
+
+/// `develop region`: 表示範囲を描いて PNG に書く（コア API の render_region。No.52）。既にあるファイルには
+/// 書かない（使い方の誤り）。範囲は画像の内側に収める。
+#[test]
+fn develop_region_writes_the_rendered_region_as_png() {
+    let env = Env::new();
+    write_plain(&env.photos.join("A.png"), (120, 80));
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.png").to_string();
+    let out = env.path("region.png");
+    let r = env.json(&[
+        "develop",
+        "region",
+        &a,
+        "--x",
+        "-5",
+        "--y",
+        "10",
+        "--width",
+        "40",
+        "--height",
+        "20",
+        "--scale",
+        "2",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(r["region"]["x"], 0, "{r}");
+    assert_eq!(r["region"]["region_width"], 35, "{r}");
+    assert_eq!(
+        (
+            r["region"]["width"].as_u64(),
+            r["region"]["height"].as_u64()
+        ),
+        (Some(70), Some(40))
+    );
+    assert_eq!(r["region"]["full_width"], 120, "{r}");
+    let img = image::open(&out).unwrap();
+    assert_eq!((img.width(), img.height()), (70, 40));
+    // 既にあるファイルには書かない。
+    let again = env.run(&[
+        "develop",
+        "region",
+        &a,
+        "--x",
+        "0",
+        "--y",
+        "0",
+        "--width",
+        "4",
+        "--height",
+        "4",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(again.code, 2, "{}", again.stderr);
+    // G の座標（長辺を 1 とした値）で全体。
+    let g = env.path("g.png");
+    let r = env.json(&[
+        "develop",
+        "region",
+        &a,
+        "--space",
+        "geometry",
+        "--x",
+        "0",
+        "--y",
+        "0",
+        "--width",
+        "1",
+        "--height",
+        "1",
+        "--scale",
+        "0.5",
+        "--out",
+        g.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        (
+            r["region"]["region_width"].as_u64(),
+            r["region"]["region_height"].as_u64()
+        ),
+        (Some(120), Some(80)),
+        "{r}"
+    );
+    let img = image::open(&g).unwrap();
+    assert_eq!((img.width(), img.height()), (60, 40));
+    // 画像と重ならない範囲はエラー（書き出さない）。
+    let none = env.path("none.png");
+    let r = env.run(&[
+        "develop",
+        "region",
+        &a,
+        "--x",
+        "500",
+        "--y",
+        "0",
+        "--width",
+        "4",
+        "--height",
+        "4",
+        "--out",
+        none.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(r.json()["error"]["kind"], "invalid_input");
+    assert!(!none.exists());
+    assert_eq!(hashes(&env.photos), before, "元ファイルは変わらない");
 }
 
 /// エラーは終了コード 1。`--json` では標準出力に `{"error": ...}`。
@@ -1022,6 +1178,56 @@ fn render_protects_the_input_and_uses_the_default_gpu_setting() {
     assert_eq!(hashes(&env.photos), before);
 }
 
+/// `render` の `source_width`・`source_height` は、RAW の既定の切り抜きの寸法（向きを反映する前）で、
+/// `info` の寸法・書き出しの元の寸法と同じ（04 の 2.7 節。有効画素の全体の寸法ではない）。
+/// LibRaw が無効な build では飛ばす。
+#[test]
+fn render_reports_the_default_crop_size_of_a_raw() {
+    let env = Env::new();
+    let src = env.photos.join("C.dng");
+    // 有効画素 96 × 64 のうち、(4, 6) から 80 × 50 を既定の切り抜きにする。
+    if !make_dng_with_crop(&src, Some(genzo_raw::PixelRect::new(4, 6, 80, 50))) {
+        return;
+    }
+    let before = hashes(&env.photos);
+    let out = env.path("C.png");
+    let r = genzo_with(
+        &[
+            "render",
+            src.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--gpu",
+            "off",
+            "--json",
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["is_raw"], true);
+    assert_eq!(
+        (v["width"].as_u64(), v["height"].as_u64()),
+        (Some(80), Some(50))
+    );
+    assert_eq!(
+        (v["source_width"].as_u64(), v["source_height"].as_u64()),
+        (Some(80), Some(50)),
+        "有効画素の全体（96 × 64）ではなく既定の切り抜きの寸法"
+    );
+    let img = image::open(&out).unwrap();
+    assert_eq!((img.width(), img.height()), (80, 50));
+    let info = genzo_with(&["info", src.to_str().unwrap(), "--json"], &[], None);
+    assert_eq!(info.code, 0, "{}", info.stderr);
+    let m = &info.json()["probe"]["metadata"];
+    assert_eq!(
+        (m["width"].as_u64(), m["height"].as_u64()),
+        (Some(80), Some(50))
+    );
+    assert_eq!(hashes(&env.photos), before);
+}
+
 /// `bench`: 1.8 節の記録（平均・95 パーセンタイル・最大、条件、環境）を JSON に書き、2 回目は前回と比べる。
 #[test]
 fn bench_records_results_and_compares_with_the_previous_run() {
@@ -1101,7 +1307,16 @@ fn bench_records_results_and_compares_with_the_previous_run() {
         assert!(rep["comparison"].is_object(), "{rep}");
     }
     let regressed = v["regressed"].as_bool().unwrap();
-    assert_eq!(r.code, if regressed { 1 } else { 0 }, "{}", r.stderr);
+    assert_eq!(
+        r.code,
+        if regressed {
+            genzo_cli::EXIT_PARTIAL as i32
+        } else {
+            0
+        },
+        "{}",
+        r.stderr
+    );
     let file: Value = serde_json::from_str(
         &std::fs::read_to_string(dir.join("cli_preview_stage_c.json")).unwrap(),
     )
@@ -1354,9 +1569,10 @@ fn app_data_and_unrelated_files_are_not_touched() {
         r.json()
     };
     ok_json(&["catalog", "init"]);
-    // 1 回目の取り込みの後、現像結果のプレビュー（JPEG）がデータのフォルダにできる。
+    // 1 回目の取り込みの後、現像結果のプレビュー（JPEG）がデータのフォルダにできる（取り込みの後の
+    // 作り直しは既定では行わないので --previews で有効にする。決定 No.24）。
     let photos = env.photos.to_str().unwrap();
-    assert_eq!(ok_json(&["import", photos])["added"], 2);
+    assert_eq!(ok_json(&["import", photos, "--previews"])["added"], 2);
     let mut jpegs_in_data = 0;
     let mut stack = vec![data.clone()];
     while let Some(d) = stack.pop() {
@@ -1732,7 +1948,8 @@ mod ctrl_c {
         photos(&env, N as usize);
         env.json(&["catalog", "init"]);
         let dir = env.photos.to_str().unwrap();
-        let mut r = Running::spawn(&env, &["import", dir, "--json"]);
+        // 取り込みの後の作り直しは既定では行わない（決定 No.24）ので、--previews で有効にする。
+        let mut r = Running::spawn(&env, &["import", dir, "--previews", "--json"]);
         r.wait_stderr("サムネイルの作り直しの進捗", |l| {
             l.starts_with("サムネイルの作り直し: ")
         });
