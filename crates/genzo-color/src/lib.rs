@@ -77,7 +77,9 @@ pub use display::{
 };
 pub use error::{ColorError, Result};
 pub use gamut::GamutCompressor;
-pub use icc::{IccProfile, IccTransform, IccVersion, RenderingIntent, StandardProfile};
+pub use icc::{
+    EXPORT_ICC_VERSION, IccProfile, IccTransform, IccVersion, RenderingIntent, StandardProfile,
+};
 pub use lab::{Lab, delta_e76, delta_e2000};
 pub use lut::{DEFAULT_LUT_SIZE, Lut3d};
 pub use matrix::{Mat3, Mat3F32};

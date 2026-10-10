@@ -11,6 +11,12 @@
 //! - 画素ごとの変換（f32）は f32 のまま計算する（04 の 2.3 節）。非有限の入力（NaN・無限大）は
 //!   そのまま伝わる。NaN の検出は各ステージの出力で行う（2.6 節）。
 //! - OKLCh の色相は **度**（0 以上 360 未満）。彩度 C が 0 のときの色相は 0。
+//! - **無彩色の軸のずれ**: M1・M2（小数 10 桁の公表値）と、この crate の BT.2020 の白（D65 の xy
+//!   から求めた値）の丸めの違いで、作業色空間の無彩色 (g, g, g) の a・b はちょうど 0 にならない。
+//!   この crate の行列では `(a / L, b / L)` ≒ (−2.2e−5, −1.23e−4) で、g によらずほぼ一定
+//!   （f32 版・f64 版とも。2026-10-10 に計算で確認）。彩度を「a・b の大きさ」で測ると無彩色でも
+//!   わずかに 0 でないので、無彩色からの差を使う場合は白 (1, 1, 1) の `(a / L, b / L)` を軸として
+//!   引く（genzo-pipeline のステージ 13 がそうしている）。
 
 use crate::matrix::{Mat3, Mat3F32};
 use crate::space::BT2020_TO_XYZ;
@@ -44,10 +50,14 @@ pub const BT2020_TO_OKLAB_LMS: Mat3 = OKLAB_M1.mul_mat(&BT2020_TO_XYZ);
 /// LMS → リニア BT.2020。
 pub const OKLAB_LMS_TO_BT2020: Mat3 = expect_const(BT2020_TO_OKLAB_LMS.checked_inverse());
 
-const BT2020_TO_LMS_F32: Mat3F32 = BT2020_TO_OKLAB_LMS.to_f32();
-const LMS_TO_BT2020_F32: Mat3F32 = OKLAB_LMS_TO_BT2020.to_f32();
-const M2_F32: Mat3F32 = OKLAB_M2.to_f32();
-const M2_INV_F32: Mat3F32 = OKLAB_M2_INV.to_f32();
+/// [`BT2020_TO_OKLAB_LMS`] の f32 版（画素ごとの変換で使う値そのもの。GPU 版も同じ値を使う）。
+pub const BT2020_TO_OKLAB_LMS_F32: Mat3F32 = BT2020_TO_OKLAB_LMS.to_f32();
+/// [`OKLAB_LMS_TO_BT2020`] の f32 版。
+pub const OKLAB_LMS_TO_BT2020_F32: Mat3F32 = OKLAB_LMS_TO_BT2020.to_f32();
+/// [`OKLAB_M2`] の f32 版。
+pub const OKLAB_M2_F32: Mat3F32 = OKLAB_M2.to_f32();
+/// [`OKLAB_M2`] の逆行列（f64 で求めたもの）の f32 版。
+pub const OKLAB_M2_INV_F32: Mat3F32 = OKLAB_M2_INV.to_f32();
 
 /// XYZ（D65、白の Y = 1）→ OKLab（f64）。
 pub fn xyz_d65_to_oklab(xyz: [f64; 3]) -> [f64; 3] {
@@ -64,15 +74,15 @@ pub fn oklab_to_xyz_d65(lab: [f64; 3]) -> [f64; 3] {
 /// リニア BT.2020（作業色空間）→ OKLab（f32）。負の値を含む入力でも NaN にならない。
 #[inline]
 pub fn linear_bt2020_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
-    let lms = BT2020_TO_LMS_F32.apply(rgb);
-    M2_F32.apply([lms[0].cbrt(), lms[1].cbrt(), lms[2].cbrt()])
+    let lms = BT2020_TO_OKLAB_LMS_F32.apply(rgb);
+    OKLAB_M2_F32.apply([lms[0].cbrt(), lms[1].cbrt(), lms[2].cbrt()])
 }
 
 /// OKLab → リニア BT.2020（作業色空間）（f32）。
 #[inline]
 pub fn oklab_to_linear_bt2020(lab: [f32; 3]) -> [f32; 3] {
-    let c = M2_INV_F32.apply(lab);
-    LMS_TO_BT2020_F32.apply([c[0] * c[0] * c[0], c[1] * c[1] * c[1], c[2] * c[2] * c[2]])
+    let c = OKLAB_M2_INV_F32.apply(lab);
+    OKLAB_LMS_TO_BT2020_F32.apply([c[0] * c[0] * c[0], c[1] * c[1] * c[1], c[2] * c[2] * c[2]])
 }
 
 /// OKLab → OKLCh（L, C, h）。h は度で 0 以上 360 未満。C = 0 なら h = 0。

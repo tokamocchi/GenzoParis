@@ -223,7 +223,21 @@ impl ToneCurve {
         self.parametric == ParametricCurve::default()
             && [&self.luma, &self.red, &self.green, &self.blue]
                 .into_iter()
-                .all(|points| points_are_identity(points))
+                .all(|points| Self::points_are_identity(points))
+    }
+
+    /// 点のカーブ 1 本が恒等（何もしない）か。
+    ///
+    /// 空、または 0 と 1 を端点に持ち、すべての点が y = x の上にあるなら真。点は丸めた設定
+    /// （[`DevelopSettings::normalized`](crate::DevelopSettings::normalized) の後。x の昇順）を前提とする。
+    /// パイプライン（ステージ 16）が、恒等のカーブを飛ばす判定にこの関数を使う。
+    pub fn points_are_identity(points: &[CurvePoint]) -> bool {
+        match (points.first(), points.last()) {
+            (Some(first), Some(last)) => {
+                first.x == 0.0 && last.x == 1.0 && points.iter().all(|p| p.x == p.y)
+            }
+            _ => true,
+        }
     }
 
     /// 点のカーブ 4 本を、名前とともに返す（検証・丸め用）。
@@ -244,16 +258,6 @@ impl ToneCurve {
             &mut self.green,
             &mut self.blue,
         ]
-    }
-}
-
-/// 点のカーブが恒等か。
-fn points_are_identity(points: &[CurvePoint]) -> bool {
-    match (points.first(), points.last()) {
-        (Some(first), Some(last)) => {
-            first.x == 0.0 && last.x == 1.0 && points.iter().all(|p| p.x == p.y)
-        }
-        _ => true,
     }
 }
 
@@ -650,6 +654,22 @@ mod tests {
         c.luma.clear();
         c.parametric.darks = 5.0;
         assert!(!c.is_identity());
+        // 1 本ずつの判定（公開の関数）。
+        assert!(ToneCurve::points_are_identity(&[]));
+        assert!(ToneCurve::points_are_identity(&[
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.25),
+            CurvePoint::new(1.0, 1.0),
+        ]));
+        assert!(!ToneCurve::points_are_identity(&[
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.6),
+            CurvePoint::new(1.0, 1.0),
+        ]));
+        assert!(!ToneCurve::points_are_identity(&[
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.9, 0.9),
+        ]));
     }
 
     #[test]

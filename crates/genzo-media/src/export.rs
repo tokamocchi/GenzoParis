@@ -29,12 +29,9 @@ use crate::resize::downscale_encoded;
 use crate::safe_write::{ProtectedFiles, WriteOutcome, write_atomically};
 use crate::tiff_io::encode_tiff16_to;
 
-/// 書き出すファイルに埋め込む ICC プロファイルのバージョン（仮置き）。
-///
-/// v2.4 は古いビューア（v4 に対応しないもの）でも読めるため、互換性を優先した。IEC 61966-2-1 の
-/// 伝達関数は 4096 点の表になるが、v4 との差は ΔE2000 で 0.05 未満（genzo-color のテスト）。
-/// プロファイルは数 KB 大きくなる。PoC-1 の色の比較（IQ-06）で見直す。
-pub const EXPORT_ICC_VERSION: IccVersion = IccVersion::V2_4;
+/// 書き出すファイルに埋め込む ICC プロファイルのバージョン（仮置き。genzo-color の
+/// [`genzo_color::EXPORT_ICC_VERSION`] と同じ値で、理由はそちらの doc。genzo-pipeline も同じ定数を使う）。
+pub const EXPORT_ICC_VERSION: IccVersion = genzo_color::EXPORT_ICC_VERSION;
 
 /// 出力の色空間に対応する標準のプロファイル。
 pub const fn standard_profile_for(space: OutputColorSpace) -> StandardProfile {

@@ -26,14 +26,24 @@ pub const SRGB_GAMMA: f64 = 2.4;
 /// Adobe RGB (1998) のガンマ（563/256 = 2.19921875。仕様の値）。
 pub const ADOBE_RGB_GAMMA: f64 = 563.0 / 256.0;
 
-const SRGB_DECODE_THRESHOLD_F32: f32 = SRGB_DECODE_THRESHOLD as f32;
-const SRGB_ENCODE_THRESHOLD_F32: f32 = SRGB_ENCODE_THRESHOLD as f32;
-const SRGB_LINEAR_SLOPE_F32: f32 = SRGB_LINEAR_SLOPE as f32;
-const SRGB_OFFSET_F32: f32 = SRGB_OFFSET as f32;
-const SRGB_GAMMA_F32: f32 = SRGB_GAMMA as f32;
-const SRGB_INV_GAMMA_F32: f32 = (1.0 / SRGB_GAMMA) as f32;
-const ADOBE_RGB_GAMMA_F32: f32 = ADOBE_RGB_GAMMA as f32;
-const ADOBE_RGB_INV_GAMMA_F32: f32 = (256.0 / 563.0) as f32;
+// f32 版の関数が使う定数（f64 の値を f32 に丸めたもの）。GPU 版（genzo-gpu の WGSL）も同じ値を使う。
+
+/// [`SRGB_DECODE_THRESHOLD`] の f32 版。
+pub const SRGB_DECODE_THRESHOLD_F32: f32 = SRGB_DECODE_THRESHOLD as f32;
+/// [`SRGB_ENCODE_THRESHOLD`] の f32 版。
+pub const SRGB_ENCODE_THRESHOLD_F32: f32 = SRGB_ENCODE_THRESHOLD as f32;
+/// [`SRGB_LINEAR_SLOPE`] の f32 版。
+pub const SRGB_LINEAR_SLOPE_F32: f32 = SRGB_LINEAR_SLOPE as f32;
+/// [`SRGB_OFFSET`] の f32 版。
+pub const SRGB_OFFSET_F32: f32 = SRGB_OFFSET as f32;
+/// [`SRGB_GAMMA`] の f32 版。
+pub const SRGB_GAMMA_F32: f32 = SRGB_GAMMA as f32;
+/// `1 / SRGB_GAMMA` を f64 で求めて f32 に丸めた値（符号化の指数）。
+pub const SRGB_INV_GAMMA_F32: f32 = (1.0 / SRGB_GAMMA) as f32;
+/// [`ADOBE_RGB_GAMMA`] の f32 版（復号の指数）。
+pub const ADOBE_RGB_GAMMA_F32: f32 = ADOBE_RGB_GAMMA as f32;
+/// `256 / 563` を f64 で求めて f32 に丸めた値（符号化の指数）。
+pub const ADOBE_RGB_INV_GAMMA_F32: f32 = (256.0 / 563.0) as f32;
 
 /// 伝達関数の種類。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

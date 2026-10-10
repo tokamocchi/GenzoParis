@@ -193,6 +193,18 @@ impl DisplayGamut {
         &self.compressor
     }
 
+    /// 作業色空間 → 表示先のリニア RGB の行列（[`compress_working`](Self::compress_working) が
+    /// 最初にかける f32 の値そのもの。GPU 版が同じ行列を使うため）。
+    pub fn working_to_display(&self) -> Mat3F32 {
+        self.working_to_display
+    }
+
+    /// 表示先のリニア RGB → 作業色空間の行列（[`compress_working`](Self::compress_working) が
+    /// 最後にかける f32 の値そのもの）。
+    pub fn display_to_working(&self) -> Mat3F32 {
+        self.display_to_working
+    }
+
     /// 作業色空間の値（B3）を、表示先の色域に収めて作業色空間で返す。
     #[inline]
     pub fn compress_working(&self, rgb: [f32; 3]) -> [f32; 3] {
@@ -347,5 +359,43 @@ mod tests {
     fn assumed_srgb_has_gamut() {
         let d = DisplayProfile::resolve(None).unwrap();
         assert!(d.gamut().is_some());
+    }
+
+    #[test]
+    fn display_gamut_matrices_compose_to_compress_working() {
+        // 公開した 2 つの行列と圧縮を順にかけると、compress_working とビット単位で同じ。
+        let p3 = IccProfile::standard(StandardProfile::DisplayP3).unwrap();
+        let from_profile = DisplayGamut::from_working_to_display(
+            &p3.working_to_linear_rgb_matrix().unwrap(),
+            0.8,
+            1.2,
+        )
+        .unwrap();
+        let gamuts = RgbColorSpace::ALL
+            .map(DisplayGamut::for_space)
+            .into_iter()
+            .chain([from_profile]);
+        for g in gamuts {
+            for rgb in [
+                [0.3, 0.2, 0.1],
+                [1.2, -0.1, 0.4],
+                [0.0; 3],
+                [0.02, 0.9, 1.5],
+            ] {
+                let manual = g
+                    .display_to_working()
+                    .apply(g.compressor().compress(g.working_to_display().apply(rgb)));
+                assert_eq!(manual, g.compress_working(rgb), "{rgb:?}");
+            }
+        }
+        let srgb = DisplayGamut::for_space(RgbColorSpace::Srgb);
+        assert_eq!(
+            srgb.working_to_display(),
+            crate::space::working_to(RgbColorSpace::Srgb).to_f32()
+        );
+        assert_eq!(
+            srgb.display_to_working(),
+            crate::space::to_working(RgbColorSpace::Srgb).to_f32()
+        );
     }
 }

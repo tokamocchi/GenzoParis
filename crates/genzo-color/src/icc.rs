@@ -135,6 +135,16 @@ pub enum IccVersion {
     V4_3,
 }
 
+/// 書き出すファイル（ステージ 17b の B4b）に埋め込む ICC プロファイルのバージョン（**仮置き**）。
+///
+/// v2.4 は古いビューア（v4 に対応しないもの）でも読めるため、互換性を優先した。IEC 61966-2-1 の
+/// 伝達関数は 4096 点の表になるが、v4 との差は ΔE2000 で 0.05 未満（この crate のテスト）。
+/// プロファイルは数 KB 大きくなる。PoC-1 の色の比較（IQ-06）で見直す。
+///
+/// genzo-media（ファイルへの書き出し）と genzo-pipeline（書き出しの結果に付けるプロファイル）が
+/// 同じ値を使うよう、ここに置く（両者は互いに依存しない）。
+pub const EXPORT_ICC_VERSION: IccVersion = IccVersion::V2_4;
+
 impl IccVersion {
     fn as_f64(self) -> f64 {
         match self {

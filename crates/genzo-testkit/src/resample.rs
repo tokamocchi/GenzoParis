@@ -15,6 +15,12 @@
 use crate::image::{FloatImage, ImageError};
 
 /// 面積平均で `width` × `height` に縮小する。拡大（出力が入力より大きい）はしない。
+///
+/// **精度**: 重みと足し込みは f64 で計算し、最後に f32 に丸める（比較の基準なので、f32 の和の
+/// 丸めの誤差を持ち込まないため）。genzo-pipeline のプレビューの縮小（`genzo_pipeline::resample`）は
+/// 同じ面積平均を f32 で足し込むので、両者はビット単位では一致しない（genzo-pipeline の結合テスト
+/// `sensor_pipeline.rs` では、差が「絶対 1e−6 ＋ 相対 1e−5」以内であることを確かめている）。
+/// ビット単位の一致を確かめる用途には使わない。
 pub fn downscale_area(
     image: &FloatImage,
     width: u32,
