@@ -406,6 +406,9 @@ pub fn info(out: Output, file: &Path) -> CliResult<Status> {
                     opt(probe.profile.as_ref().map(|p| {
                         if p.embedded {
                             "埋め込みの ICC プロファイル".to_owned()
+                        } else if p.assumed_adobe_rgb_reason.is_some() {
+                            // ICC がなく、Exif が DCF のオプション色空間を示す（指摘 F28）。
+                            "Adobe RGB (1998) とみなした（Exif の色空間）".to_owned()
                         } else {
                             "sRGB とみなした".to_owned()
                         }

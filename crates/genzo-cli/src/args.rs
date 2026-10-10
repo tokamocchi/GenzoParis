@@ -17,7 +17,7 @@ use genzo_model::{ConflictPolicy, ExportFormat, OutputColorSpace};
 /// 読む）で標準出力に出す。進捗・警告は標準エラーに出す。
 ///
 /// 終了コード: 0 = 成功、1 = エラー（一部の失敗・確認の中止・チェックで問題が見つかった場合を含む）、
-/// 2 = 使い方の誤り。
+/// 2 = 使い方の誤り、130 = Ctrl+C で中断した。
 #[derive(Debug, Parser)]
 #[command(name = "genzo", version, about, long_about = None, max_term_width = 100)]
 pub struct Cli {
@@ -80,8 +80,9 @@ pub enum Command {
     Catalog(CatalogCommand),
     /// フォルダを取り込む（進捗は標準エラー）
     Import(ImportArgs),
+    // 条件が多く大きいので、ほかのサブコマンドと大きさをそろえるため箱に入れる。
     /// 検索する（条件はすべて AND）
-    Search(SearchArgs),
+    Search(Box<SearchArgs>),
     /// variant のメタデータ・評価・現像設定を表示する
     Show {
         /// variant の ID
@@ -231,6 +232,27 @@ pub struct SearchArgs {
     /// 種別
     #[arg(long, value_enum)]
     pub kind: Option<KindArg>,
+    /// 長辺の画素数の下限（幅と高さの大きいほう。写真にも動画にも効く。例: 4K の動画は 3840）
+    #[arg(long, value_name = "PX")]
+    pub min_long_edge: Option<u32>,
+    /// 長辺の画素数の上限
+    #[arg(long, value_name = "PX")]
+    pub max_long_edge: Option<u32>,
+    /// 動画の長さ（秒）の下限（含む。動画の条件を指定すると写真は除く）
+    #[arg(long, value_name = "SEC", value_parser = parse_non_negative)]
+    pub min_duration: Option<f64>,
+    /// 動画の長さ（秒）の上限（含む）
+    #[arg(long, value_name = "SEC", value_parser = parse_non_negative)]
+    pub max_duration: Option<f64>,
+    /// 動画のフレームレートの下限（含む）
+    #[arg(long, value_name = "FPS", value_parser = parse_non_negative)]
+    pub min_fps: Option<f64>,
+    /// 動画のフレームレートの上限（含む）
+    #[arg(long, value_name = "FPS", value_parser = parse_non_negative)]
+    pub max_fps: Option<f64>,
+    /// 動画のコーデック（hevc・h264 など。大文字・小文字を区別しない。複数指定でいずれか）
+    #[arg(long)]
+    pub codec: Vec<String>,
     /// テキスト（ファイル名とキャプション。3.6 節）
     #[arg(long)]
     pub text: Option<String>,
@@ -258,6 +280,14 @@ pub struct SearchArgs {
     /// variant の ID だけを 1 行に 1 つずつ出す（--json と一緒なら --json を優先する）
     #[arg(long)]
     pub ids: bool,
+}
+
+/// 0 以上の有限の数（動画の長さ・fps の条件）。
+fn parse_non_negative(s: &str) -> Result<f64, String> {
+    match s.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
+        _ => Err(format!("0 以上の数を指定してください: {s}")),
+    }
 }
 
 /// `search` で表示する件数の既定値（**仮置き**: 100。端末で読める量。`--limit 0` で全件）。

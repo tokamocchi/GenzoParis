@@ -458,6 +458,26 @@ fn end_to_end_catalog_workflow() {
             names(&env.json(&["search", "--kind", "video"])),
             vec!["V.mp4"]
         );
+        // 動画の長さ・fps・コーデック・寸法（VID-03。F40。テスト用の動画は mpeg4・1 秒・10 fps・96×64）。
+        assert_eq!(
+            names(&env.json(&[
+                "search",
+                "--codec",
+                "MPEG4",
+                "--max-duration",
+                "5",
+                "--min-fps",
+                "9.5",
+            ])),
+            vec!["V.mp4"]
+        );
+        assert_eq!(env.json(&["search", "--min-duration", "5"])["count"], 0);
+        assert_eq!(
+            names(&env.json(&["search", "--kind", "video", "--min-long-edge", "96",])),
+            vec!["V.mp4"]
+        );
+        let bad = env.run(&["search", "--max-duration", "-1"]);
+        assert_eq!(bad.code, 2, "{}", bad.stderr);
         // 動画の表示は項目ごと（Rust の Debug の形にしない）。現像設定は出さない。
         let v = id_of(&all, "V.mp4");
         let shown = env.run(&["show", &v.to_string()]);
@@ -1393,4 +1413,446 @@ fn app_data_and_unrelated_files_are_not_touched() {
     let displaced = PathBuf::from(r.json()["displaced"].as_str().unwrap());
     assert!(displaced.is_file());
     assert_eq!(ok_json(&["catalog", "info"])["counts"]["variants"], 2);
+}
+
+/// 異常終了で `-wal`・`-shm` が残り、カタログの本体だけを失った状態からの復元（指摘 F01）。残った
+/// `-wal`（別の DB のページ）を退避しないと、次に開いたときに復元したカタログへ適用されて壊れる。
+#[test]
+fn restore_moves_a_leftover_wal_aside_when_the_catalog_is_gone() {
+    let env = Env::new();
+    write_jpeg(
+        &env.photos.join("A.jpg"),
+        (32, 24),
+        1,
+        Some("2024-05-01 10:00:00"),
+        false,
+    );
+    write_jpeg(
+        &env.photos.join("B.jpg"),
+        (32, 24),
+        2,
+        Some("2024-05-01 11:00:00"),
+        false,
+    );
+    env.json(&["catalog", "init"]);
+    assert_eq!(
+        env.json(&["import", env.photos.to_str().unwrap()])["added"],
+        2
+    );
+    let backup = env.json(&[
+        "catalog",
+        "backup",
+        "--to",
+        env.path("bk").to_str().unwrap(),
+    ]);
+    let backup_path = backup["path"].as_str().unwrap().to_owned();
+    let side = |suffix: &str| {
+        let mut s = env.catalog.as_os_str().to_owned();
+        s.push(suffix);
+        PathBuf::from(s)
+    };
+    // 確定済みの更新を `-wal` に残したまま異常終了した状態を作る（開いて書き込み、閉じる前に `-wal`・
+    // `-shm` を写しておき、閉じた後に戻す。OS によらず同じ状態を作れる）。
+    {
+        let mut cat = genzo_catalog::Catalog::open(&env.catalog).unwrap();
+        let ids: Vec<genzo_model::VariantId> = (1..=2).map(genzo_model::VariantId::new).collect();
+        cat.set_rating(&ids, genzo_model::Rating::new(5).unwrap())
+            .unwrap();
+        assert!(side("-wal").is_file(), "WAL が使われている前提");
+        std::fs::copy(side("-wal"), env.path("saved-wal")).unwrap();
+        std::fs::copy(side("-shm"), env.path("saved-shm")).unwrap();
+        cat.close().unwrap();
+    }
+    // カタログの本体だけを失う（誤って削除した、同期ツールで消えたなど）。
+    std::fs::remove_file(&env.catalog).unwrap();
+    for (saved, suffix) in [("saved-wal", "-wal"), ("saved-shm", "-shm")] {
+        let _ = std::fs::remove_file(side(suffix));
+        std::fs::rename(env.path(saved), side(suffix)).unwrap();
+    }
+    let cat = env.catalog.to_str().unwrap().to_owned();
+    let rs = env.json(&["catalog", "restore", &backup_path, "--to", &cat]);
+    assert_eq!(rs["displaced"], Value::Null, "本体はなかった: {rs}");
+    let displaced: Vec<PathBuf> = rs["displaced_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| PathBuf::from(v.as_str().unwrap()))
+        .collect();
+    assert_eq!(displaced.len(), 2, "{rs}");
+    assert!(displaced.iter().all(|p| p.is_file()), "{displaced:?}");
+    assert!(!side("-wal").exists(), "古い -wal は退避した");
+    assert!(!side("-shm").exists());
+    // 復元したカタログは壊れていない（古い -wal が適用されていない）。
+    let check = env.json(&["catalog", "check"]);
+    assert_eq!(check["ok"], true, "{check}");
+    let info = env.json(&["catalog", "info"]);
+    assert_eq!(info["counts"]["variants"], 2, "{info}");
+}
+
+// ---------------------------------------------------------------------------
+// Ctrl+C（K3）
+// ---------------------------------------------------------------------------
+
+/// Ctrl+C（SIGINT）の扱い（K3）。Unix だけ: 端末で Ctrl+C を押したときと同じく、`genzo` を別の
+/// プロセスグループで起動し、そのグループ全体（`genzo` と、同じグループにいればワーカー）に SIGINT を
+/// 送る。Windows の Ctrl+C（コンソールのイベント）はテストから送れないため飛ばす。
+///
+/// 結果は終了コード・出力の内容・カタログの状態で決め、時間では決めない（[`ctrl_c::WAIT_LIMIT`] は、
+/// 止まったまま終わらないテストにしないための上限）。
+#[cfg(unix)]
+mod ctrl_c {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::process::CommandExt;
+    use std::process::Child;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// 待つ上限（過ぎたら失敗にする）。
+    pub const WAIT_LIMIT: Duration = Duration::from_secs(120);
+
+    /// 終了コード: Ctrl+C で中断した。
+    const EXIT_INTERRUPTED: i32 = genzo_cli::EXIT_INTERRUPTED as i32;
+
+    /// 別のプロセスグループで実行中の `genzo`。
+    struct Running {
+        child: Child,
+        /// 標準エラーの行（読んだ順に届く）。
+        lines: mpsc::Receiver<String>,
+        /// これまでに受け取った標準エラーの行。
+        seen: Vec<String>,
+        stdout: Option<std::thread::JoinHandle<String>>,
+    }
+
+    impl Running {
+        /// `genzo` を別のプロセスグループ（グループの ID は `genzo` のプロセス ID）で起動する（カタログを
+        /// 指定し、GPU は使わない。`--quiet` は付けないので、進捗が標準エラーに出る）。
+        fn spawn(env: &Env, args: &[&str]) -> Self {
+            let catalog = env.catalog.to_string_lossy().into_owned();
+            let mut child = Command::new(GENZO)
+                .args(args)
+                .args(["--catalog", &catalog, "--gpu", "off"])
+                .env_remove("GENZO_CATALOG")
+                .env_remove("GENZO_DATA_DIR")
+                .env_remove("GENZO_LOG")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .expect("genzo を起動できる");
+            let mut out = child.stdout.take().unwrap();
+            let stdout = std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = out.read_to_string(&mut s);
+                s
+            });
+            let err = child.stderr.take().unwrap();
+            let (tx, lines) = mpsc::channel();
+            std::thread::spawn(move || {
+                for line in BufReader::new(err).lines() {
+                    let Ok(line) = line else { break };
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            Self {
+                child,
+                lines,
+                seen: Vec::new(),
+                stdout: Some(stdout),
+            }
+        }
+
+        fn pgid(&self) -> libc::pid_t {
+            libc::pid_t::try_from(self.child.id()).unwrap()
+        }
+
+        /// 標準エラーに `pred` に合う行が出るまで待つ。
+        fn wait_stderr(&mut self, what: &str, pred: impl Fn(&str) -> bool) {
+            let deadline = Instant::now() + WAIT_LIMIT;
+            loop {
+                let Some(rest) = deadline.checked_duration_since(Instant::now()) else {
+                    self.fail(&format!("{what}が標準エラーに出ない"));
+                };
+                match self.lines.recv_timeout(rest) {
+                    Ok(line) => {
+                        let hit = pred(&line);
+                        self.seen.push(line);
+                        if hit {
+                            return;
+                        }
+                    }
+                    Err(_) => self.fail(&format!("{what}が標準エラーに出ないまま終わった")),
+                }
+            }
+        }
+
+        /// プロセスグループ全体に SIGINT を送る（端末で Ctrl+C を押したときと同じ）。
+        fn ctrl_c(&self) {
+            // SAFETY: シグナルを送るだけで、メモリを扱わない。
+            let r = unsafe { libc::kill(-self.pgid(), libc::SIGINT) };
+            assert_eq!(
+                r,
+                0,
+                "SIGINT を送れない: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        /// 終了を待ち、結果を返す（シグナルで終わった場合の終了コードは -1）。
+        fn finish(mut self) -> Run {
+            let deadline = Instant::now() + WAIT_LIMIT;
+            let status = loop {
+                if let Some(s) = self.child.try_wait().unwrap() {
+                    break s;
+                }
+                if Instant::now() > deadline {
+                    self.fail("終了しない");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            // 標準エラーの残り（読み取りのスレッドは、パイプが閉じると終わる）。
+            while let Some(rest) = deadline.checked_duration_since(Instant::now()) {
+                match self.lines.recv_timeout(rest) {
+                    Ok(line) => self.seen.push(line),
+                    Err(_) => break,
+                }
+            }
+            let stdout = self.stdout.take().unwrap().join().unwrap();
+            Run {
+                code: status.code().unwrap_or(-1),
+                stdout,
+                stderr: format!("（終了の状態: {status:?}）\n{}", self.seen.join("\n")),
+            }
+        }
+
+        /// プロセスグループを強制終了させて失敗にする。
+        fn fail(&mut self, why: &str) -> ! {
+            self.kill_group();
+            panic!("{why}\nstderr:\n{}", self.seen.join("\n"));
+        }
+
+        fn kill_group(&mut self) {
+            if matches!(self.child.try_wait(), Ok(None)) {
+                // SAFETY: シグナルを送るだけ。
+                unsafe { libc::kill(-self.pgid(), libc::SIGKILL) };
+                let _ = self.child.wait();
+            }
+        }
+    }
+
+    impl Drop for Running {
+        /// テストが途中で失敗しても、プロセスを残さない。
+        fn drop(&mut self) {
+            self.kill_group();
+        }
+    }
+
+    /// 取り込みの対象の、小さな JPEG を `n` 枚作る。
+    fn photos(env: &Env, n: usize) {
+        for i in 0..n {
+            write_jpeg(
+                &env.photos.join(format!("P{i:03}.jpg")),
+                (32, 24),
+                i as u8,
+                None,
+                false,
+            );
+        }
+    }
+
+    fn count(v: &Value, key: &str) -> u64 {
+        v[key]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{key} がない: {v}"))
+    }
+
+    /// 取り込みの途中の Ctrl+C: 取り込みを取り消し、カタログを正常に閉じてから終了コード 130 で終わる。
+    /// ワーカーは巻き込まれない（端末の Ctrl+C はプロセスグループ全体に届くが、ワーカーが死ぬと、処理中の
+    /// ファイルが `status = error` で登録されたり、サムネイルの失敗になったりする）。取り込み直すと続きから
+    /// 処理する。
+    #[test]
+    fn ctrl_c_cancels_the_import_and_closes_the_catalog() {
+        const N: u64 = 300;
+        let env = Env::new();
+        photos(&env, N as usize);
+        env.json(&["catalog", "init"]);
+        let dir = env.photos.to_str().unwrap();
+        let mut r = Running::spawn(&env, &["import", dir, "--json"]);
+        // 取り込みが始まった（最初の進捗が出た）ところで Ctrl+C を押す。
+        r.wait_stderr("取り込みの進捗", |l| l.starts_with("取り込み: "));
+        r.ctrl_c();
+        let run = r.finish();
+        assert_eq!(
+            run.code, EXIT_INTERRUPTED,
+            "stdout: {}\nstderr: {}",
+            run.stdout, run.stderr
+        );
+        assert!(run.stderr.contains("中断"), "{}", run.stderr);
+        // 途中までの結果を JSON で出す。
+        let report = run.json();
+        assert_eq!(report["cancelled"], true, "{report}");
+        assert!(count(&report, "added") < N, "{report}");
+        for key in ["errors", "not_registered", "thumbnail_failures"] {
+            assert_eq!(
+                report[key].as_array().map(Vec::len),
+                Some(0),
+                "ワーカーは Ctrl+C で終了しない（{key}）: {report}\n{}",
+                run.stderr
+            );
+        }
+        // カタログを正常に閉じた（次に開いたときに「正常に終了しなかった」にならない。ロックも外れている）。
+        let info = env.json(&["catalog", "info"]);
+        assert_eq!(info["previous_shutdown"], "clean", "{info}");
+        // 取り込み直すと、続きから処理して全件がそろう。読めないファイルとして登録したものはない。
+        let again = env.json(&["import", dir, "--no-previews"]);
+        assert_eq!(again["cancelled"], false, "{again}");
+        assert_eq!(
+            count(&again, "added") + count(&again, "unchanged"),
+            N,
+            "{again}"
+        );
+        let all = env.json(&["search", "--limit", "0"]);
+        assert_eq!(items(&all).len() as u64, N);
+        assert!(
+            items(&all).iter().all(|v| v["file_status"] == "ok"),
+            "status = error で登録されたファイルがない: {all}"
+        );
+    }
+
+    /// 取り込みの後のサムネイルの作り直し（バックグラウンドのジョブ）を待っている間の Ctrl+C: 最後まで
+    /// 待たずに取り消し、カタログを正常に閉じて終了コード 130 で終わる（作り直せなかったものは、次に
+    /// 開いたときに作り直す。genzo-api）。
+    #[test]
+    fn ctrl_c_while_waiting_for_background_jobs_cancels_them() {
+        const N: u64 = 150;
+        let env = Env::new();
+        photos(&env, N as usize);
+        env.json(&["catalog", "init"]);
+        let dir = env.photos.to_str().unwrap();
+        let mut r = Running::spawn(&env, &["import", dir, "--json"]);
+        r.wait_stderr("サムネイルの作り直しの進捗", |l| {
+            l.starts_with("サムネイルの作り直し: ")
+        });
+        r.ctrl_c();
+        let run = r.finish();
+        assert_eq!(
+            run.code, EXIT_INTERRUPTED,
+            "stdout: {}\nstderr: {}",
+            run.stdout, run.stderr
+        );
+        // 取り込み自体は終わっていた。
+        let report = run.json();
+        assert_eq!(report["cancelled"], false, "{report}");
+        assert_eq!(count(&report, "added"), N, "{report}");
+        // 作り直しは途中でやめた（最後の進捗が全件に届いていない）。
+        let last = run
+            .stderr
+            .lines()
+            .filter_map(|l| l.strip_prefix("サムネイルの作り直し: "))
+            .filter_map(|s| s.split('/').next()?.parse::<u64>().ok())
+            .max()
+            .unwrap();
+        assert!(last < N, "作り直しを最後まで待った: {}", run.stderr);
+        let info = env.json(&["catalog", "info"]);
+        assert_eq!(info["previous_shutdown"], "clean", "{info}");
+    }
+
+    /// 書き出しの途中の Ctrl+C: 書き出しを取り消し、途中までの結果を出して、カタログを正常に閉じてから
+    /// 終了コード 130 で終わる。書き出し先には、書き終えたファイルだけが残る（途中のファイル・一時ファイルを
+    /// 残さない）。
+    #[test]
+    fn ctrl_c_cancels_the_export_and_leaves_only_complete_files() {
+        const N: u64 = 120;
+        let env = Env::new();
+        photos(&env, N as usize);
+        env.json(&["catalog", "init"]);
+        env.json(&["import", env.photos.to_str().unwrap(), "--no-previews"]);
+        let ids: Vec<String> = items(&env.json(&["search", "--limit", "0"]))
+            .iter()
+            .map(|v| v["variant_id"].to_string())
+            .collect();
+        assert_eq!(ids.len() as u64, N);
+        let out = env.path("out");
+        let mut args: Vec<&str> = vec!["export"];
+        args.extend(ids.iter().map(String::as_str));
+        args.extend(["--out", out.to_str().unwrap(), "--json"]);
+        let mut r = Running::spawn(&env, &args);
+        r.wait_stderr("書き出しの進捗", |l| l.starts_with("書き出し: "));
+        r.ctrl_c();
+        let run = r.finish();
+        assert_eq!(
+            run.code, EXIT_INTERRUPTED,
+            "stdout: {}\nstderr: {}",
+            run.stdout, run.stderr
+        );
+        let v = run.json();
+        let report = &v["report"];
+        assert_eq!(report["cancelled"], true, "{v}");
+        assert_eq!(count(report, "failed"), 0, "{v}");
+        let written = count(report, "written");
+        assert!(written < N, "{v}");
+        // 書き出し先には、書き終えたファイルだけがある（どれも読める JPEG）。
+        let files: Vec<PathBuf> = std::fs::read_dir(&out)
+            .map(|d| d.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        assert_eq!(files.len() as u64, written, "{files:?}");
+        for f in &files {
+            image::open(f).unwrap_or_else(|e| panic!("{} を読めない: {e}", f.display()));
+        }
+        let info = env.json(&["catalog", "info"]);
+        assert_eq!(info["previous_shutdown"], "clean", "{info}");
+    }
+
+    /// カタログを開く前（現像設定の JSON を読んでいる間）の Ctrl+C: 取り消すものがないので、すぐに終了
+    /// コード 130 で終わる（2 回目の Ctrl+C と同じ、すぐに終了する経路）。読み取りで止まる状態は、名前付き
+    /// パイプ（FIFO）で作る。
+    #[test]
+    fn ctrl_c_before_opening_the_catalog_exits_at_once() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let env = Env::new();
+        let fifo = env.path("settings.fifo");
+        let made = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            eprintln!("mkfifo を使えないため飛ばす");
+            return;
+        }
+        let mut r = Running::spawn(
+            &env,
+            &["develop", "set", "1", "--json", fifo.to_str().unwrap()],
+        );
+        // 書き込み側を開けたら、genzo が読み取り側を開いている（Ctrl+C の扱いは、その前に用意している）。
+        // genzo は書き込みを待って止まる。
+        let deadline = Instant::now() + WAIT_LIMIT;
+        let writer = loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo)
+            {
+                Ok(f) => break f,
+                Err(e) if e.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => r.fail(&format!("名前付きパイプを開けない: {e}")),
+            }
+        };
+        r.ctrl_c();
+        let run = r.finish();
+        drop(writer);
+        assert_eq!(
+            run.code, EXIT_INTERRUPTED,
+            "stdout: {}\nstderr: {}",
+            run.stdout, run.stderr
+        );
+        assert!(
+            !env.catalog.exists(),
+            "カタログは作らない（開く前に終わった）"
+        );
+    }
 }

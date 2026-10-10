@@ -113,6 +113,8 @@ fn print_report(out: Output, settings: &ExportSettings, report: &ExportReport) {
                 path,
                 replaced,
                 backend,
+                warnings,
+                ..
             } => t.row([
                 item.variant_id.to_string(),
                 if *replaced {
@@ -122,7 +124,11 @@ fn print_report(out: Output, settings: &ExportSettings, report: &ExportReport) {
                 }
                 .to_owned(),
                 backend_text(*backend).to_owned(),
-                path.display().to_string(),
+                if warnings.is_empty() {
+                    path.display().to_string()
+                } else {
+                    format!("{}（警告: {}）", path.display(), warnings.join(" / "))
+                },
             ]),
             ExportOutcome::Skipped { reason, existing } => t.row([
                 item.variant_id.to_string(),

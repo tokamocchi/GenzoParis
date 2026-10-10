@@ -286,7 +286,6 @@ fn restore(out: Output, backup: &Path, to: &Path) -> CliResult<Status> {
         ))));
     }
     check_restore_target(to)?;
-    let existed = to.exists();
     let plan = genzo_api::prepare_restore(backup, to).map_err(|e| {
         // バックアップが壊れている・カタログでない場合の genzo-api の案内（「バックアップから復元して
         // ください」）は、復元の場面では合わないため置き換える。
@@ -295,11 +294,23 @@ fn restore(out: Output, backup: &Path, to: &Path) -> CliResult<Status> {
                 e,
                 "バックアップのファイルを確かめてください（カタログ・既存のファイルは変更していません）",
             )
+        } else if e.kind() == ErrorKind::IncompatibleVersion {
+            CliError::with_hint(
+                e,
+                "新しい版のアプリで作られたバックアップです。アプリを更新してから復元してください（カタログ・既存のファイルは変更していません）",
+            )
         } else {
             CliError::from(e)
         }
     })?;
-    genzo_api::apply_restore(&plan).map_err(|e| {
+    // 退避したファイル（カタログの本体と、付随する -wal・-shm など。本体がなくても -wal だけを退避する
+    // ことがある）。差し替え（名前の変更）の途中では止めない（1 回目の Ctrl+C は、差し替えを終えてから
+    // 終了する。K3）。
+    let displaced = {
+        let _graceful = crate::interrupt::Graceful::begin();
+        genzo_api::apply_restore(&plan)
+    }
+    .map_err(|e| {
         CliError::with_hint(
             e,
             format!(
@@ -312,7 +323,11 @@ fn restore(out: Output, backup: &Path, to: &Path) -> CliResult<Status> {
         out.print_json(&json!({
             "backup": plan.backup,
             "catalog": plan.catalog_path,
-            "displaced": existed.then_some(&plan.displaced_path),
+            "displaced": displaced
+                .iter()
+                .any(|p| p == &plan.displaced_path)
+                .then_some(&plan.displaced_path),
+            "displaced_files": &displaced,
         }));
     } else {
         out.line(format!(
@@ -320,10 +335,16 @@ fn restore(out: Output, backup: &Path, to: &Path) -> CliResult<Status> {
             backup.display(),
             to.display()
         ));
-        if existed {
+        if displaced.iter().any(|p| p == &plan.displaced_path) {
             out.line(format!(
                 "元のカタログは {} に退避しました（確かめてから削除してください）",
                 plan.displaced_path.display()
+            ));
+        }
+        for p in displaced.iter().filter(|p| **p != plan.displaced_path) {
+            out.line(format!(
+                "復元先に残っていた付随するファイルを {} に退避しました（確かめてから削除してください）",
+                p.display()
             ));
         }
     }

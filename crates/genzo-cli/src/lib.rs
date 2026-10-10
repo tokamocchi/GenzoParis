@@ -23,20 +23,33 @@
 //!   JSON の文書** だけ（失敗は `{"error": {"kind", "message", "user_actionable", "retryable", "hint"}}`。
 //!   引数の解釈の誤り（clap）も同じ形で出す）。`kind` は genzo-api の `ErrorKind`（snake_case）か、使い方の
 //!   誤りの `usage` だけ（[`CliError`]）。進捗・警告は標準エラー（`--quiet` で進捗を止める）。
-//! - 終了コード: [`EXIT_SUCCESS`]（0）成功、[`EXIT_ERROR`]（1）エラー、[`EXIT_USAGE`]（2）使い方の誤り。
+//! - 終了コード: [`EXIT_SUCCESS`]（0）成功、[`EXIT_ERROR`]（1）エラー、[`EXIT_USAGE`]（2）使い方の誤り、
+//!   [`EXIT_INTERRUPTED`]（130）Ctrl+C で中断した（下の「Ctrl+C」）。
 //!   次も 1 にする: 書き出し・削除・サムネイルの作り直しで一部が失敗した、取り込みで読めずに登録
-//!   できなかったファイルがある・取り消された（メタデータを読めずに `status = error` で登録したものは 0）、
+//!   できなかったファイルがある（メタデータを読めずに `status = error` で登録したものは 0）、
 //!   `catalog check` で問題が見つかった、`trash` を `--yes` なしで中止した（端末では確認を求める）、
 //!   `bench` で前回より悪化した（今回の回数が 1.8 節の規則を満たす計測だけ）。
 //! - 入力の JSON（`develop set`・`render --settings`）は UTF-8（BOM 付きも）と BOM 付きの UTF-16 を読む
 //!   （Windows のメモ帳・PowerShell 5.1 の `>` で保存したファイル）。
+//!
+//! # Ctrl+C（K3。`interrupt` の doc）
+//!
+//! - カタログを開いている間の 1 回目の Ctrl+C: 実行中のジョブ（取り込み・書き出しなど）を取り消し、
+//!   バックグラウンドのジョブ（取り込みの後のサムネイルの作り直しなど）は待たずに取り消して、カタログを
+//!   正常に閉じてから終了する。取り込み・書き出しは途中までの結果（`cancelled: true`）を出す。取り込みは、
+//!   もう一度実行すると続きから処理する。端末での確認（`trash`）は「いいえ」にする。
+//! - 2 回目の Ctrl+C、またはカタログを開いていないとき（`render`・`bench`・`info` など）: すぐに終了する
+//!   （カタログを開いていれば、次に開いたときに「正常に終了しなかった」と出る）。
+//! - どちらも終了コードは [`EXIT_INTERRUPTED`]（130。Unix の慣習の 128 + SIGINT。Windows でも同じ値）。
+//! - ワーカーは本体の Ctrl+C を受け取らない（genzo-worker が別のプロセスグループで起動する）。
 //!
 //! # 構成
 //!
 //! | モジュール | 内容 |
 //! |---|---|
 //! | [`args`] | clap の定義、値の解釈（評価・日付・寸法など）、`develop set --json <FILE>` の書き換え |
-//! | `session` | カタログを使うコマンドの共通の処理（コアを開く・ジョブの進捗・閉じる） |
+//! | `session` | カタログを使うコマンドの共通の処理（コアを開く・ジョブの進捗・閉じる・Ctrl+C での取り消し） |
+//! | `interrupt` | Ctrl+C の受け取り（1 回目は取り消して閉じる、2 回目はすぐに終了） |
 //! | `catalog` | `catalog init / info / check / backup / restore` |
 //! | `library` | `import`・`search`・`show`・`rate / flag / label / caption`・`thumbs`・`remove`・`trash` |
 //! | `develop` | `develop get / set / reset / undo / redo / history / copy / virtual-copy / delete-copy` |
@@ -74,6 +87,7 @@ mod catalog;
 mod develop;
 mod error;
 mod export;
+mod interrupt;
 mod library;
 pub mod output;
 mod session;
@@ -96,6 +110,8 @@ pub const EXIT_SUCCESS: u8 = 0;
 pub const EXIT_ERROR: u8 = 1;
 /// 終了コード: 使い方の誤り（引数の誤り・カタログの指定がない）。
 pub const EXIT_USAGE: u8 = 2;
+/// 終了コード: Ctrl+C で中断した（Unix の慣習の 128 + SIGINT。`interrupt` の doc）。
+pub const EXIT_INTERRUPTED: u8 = 130;
 
 /// コマンドの結果（出力は済んでいる）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,11 +164,12 @@ pub fn main_entry() -> ExitCode {
         }
     };
     init_logging(&cli.global);
+    interrupt::install();
     let out = Output {
         json: cli.global.json,
         quiet: cli.global.quiet,
     };
-    match run(cli) {
+    let code = match run(cli) {
         Ok(Status::Success) => ExitCode::from(EXIT_SUCCESS),
         Ok(Status::Failure) => ExitCode::from(EXIT_ERROR),
         Err(e) => {
@@ -162,7 +179,13 @@ pub fn main_entry() -> ExitCode {
             eprintln!("{}", e.human());
             ExitCode::from(e.exit_code())
         }
+    };
+    // Ctrl+C で中断した（実行中のジョブを取り消し、カタログを閉じた後。結果・エラーは上で出した）。
+    if interrupt::requested() {
+        eprintln!("中断しました");
+        return ExitCode::from(EXIT_INTERRUPTED);
     }
+    code
 }
 
 /// tracing のログを標準エラーに出す（`--log`、環境変数 `GENZO_LOG`、既定は [`DEFAULT_LOG`]）。
@@ -193,7 +216,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
     match cli.command {
         Command::Catalog(c) => catalog::run(&g, out, c),
         Command::Import(a) => library::import(&g, out, a),
-        Command::Search(a) => library::search(&g, out, a),
+        Command::Search(a) => library::search(&g, out, *a),
         Command::Show { variant } => library::show(&g, out, variant),
         Command::Rate { variants, rating } => {
             library::mark(&g, out, &variants, Mark::Rating(rating))

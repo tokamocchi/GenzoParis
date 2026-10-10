@@ -146,6 +146,13 @@ fn filter_of(s: &Session, a: &SearchArgs) -> CliResult<SearchFilter> {
             KindArg::Photo => AssetKind::Photo,
             KindArg::Video => AssetKind::Video,
         }),
+        long_edge_min: a.min_long_edge,
+        long_edge_max: a.max_long_edge,
+        duration_min_s: a.min_duration,
+        duration_max_s: a.max_duration,
+        fps_min: a.min_fps,
+        fps_max: a.max_fps,
+        codecs: (!a.codec.is_empty()).then(|| a.codec.clone()),
         text: a.text.clone(),
         folder_id,
         include_subfolders: !a.no_subfolders,
@@ -505,6 +512,13 @@ pub fn thumbs(g: &GlobalArgs, out: Output, cmd: ThumbsCommand) -> CliResult<Stat
                 one_line(&f.reason)
             ));
         }
+        for w in &report.warnings {
+            out.line(format!(
+                "  variant {}（警告）: {}",
+                w.variant_id,
+                one_line(&w.reason)
+            ));
+        }
     }
     Ok(if failed {
         Status::Failure
@@ -573,6 +587,12 @@ fn print_delete_report(out: Output, plan: &DeletePlan, report: &DeleteReport) {
     for p in &report.trashed_files {
         out.line(format!("  ゴミ箱へ移しました: {}", p.display()));
     }
+    for p in &report.skipped_missing {
+        out.line(format!(
+            "  元の場所になかったため、移しませんでした: {}",
+            p.display()
+        ));
+    }
     for f in &report.failed {
         out.line(format!(
             "  失敗: {}: {}",
@@ -622,6 +642,9 @@ pub fn delete(
 }
 
 /// 端末で確認を求める（標準入力と標準エラーが端末のときだけ。それ以外は「いいえ」）。
+///
+/// Ctrl+C を押されたら「いいえ」にする（K3）。Unix では Ctrl+C で端末の読み取りが戻らないため、読み取りは
+/// 別のスレッドで行い、答えを待つ間に中断を求められたかを確かめる（[`answer_is_yes`]）。
 fn ask_yes_no(prompt: &str) -> bool {
     use std::io::{BufRead, IsTerminal, Write};
     if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
@@ -629,11 +652,38 @@ fn ask_yes_no(prompt: &str) -> bool {
     }
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
-    let mut line = String::new();
-    if std::io::stdin().lock().read_line(&mut line).is_err() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::Builder::new()
+        .name("genzo-confirm".to_owned())
+        .spawn(move || {
+            let mut line = String::new();
+            let r = std::io::stdin().lock().read_line(&mut line).map(|_| line);
+            let _ = tx.send(r);
+        });
+    if reader.is_err() {
         return false;
     }
-    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    answer_is_yes(&rx, crate::interrupt::requested)
+}
+
+/// 確認の答えを待つ（`y` / `yes` なら真）。読めない・`interrupted` が真になったら「いいえ」。
+fn answer_is_yes(
+    rx: &std::sync::mpsc::Receiver<std::io::Result<String>>,
+    interrupted: impl Fn() -> bool,
+) -> bool {
+    use std::sync::mpsc::RecvTimeoutError;
+    loop {
+        if interrupted() {
+            return false;
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                return matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+            }
+            Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => return false,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -656,6 +706,36 @@ mod tests {
         assert_eq!(shutter_text(f64::from(0.004_f32)), "1/250 秒");
         assert_eq!(shutter_text(f64::from(1.3_f32)), "1.3 秒");
         assert_eq!(shutter_text(30.0), "30 秒");
+    }
+
+    #[test]
+    fn confirmation_answers() {
+        let answer = |text: &str| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(Ok(text.to_owned())).unwrap();
+            answer_is_yes(&rx, || false)
+        };
+        assert!(answer("y\n"));
+        assert!(answer(" YES \r\n"));
+        assert!(!answer("n\n"));
+        assert!(!answer(""));
+        // 読めない・入力が終わった。
+        let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<String>>();
+        drop(tx);
+        assert!(!answer_is_yes(&rx, || false));
+    }
+
+    /// 答えを待っている間に Ctrl+C を押されたら「いいえ」で戻る（読み取りが戻らなくても。K3）。
+    #[test]
+    fn confirmation_stops_waiting_on_ctrl_c() {
+        let (_tx, rx) = std::sync::mpsc::channel::<std::io::Result<String>>();
+        let calls = std::cell::Cell::new(0);
+        let interrupted = || {
+            calls.set(calls.get() + 1);
+            calls.get() > 2
+        };
+        assert!(!answer_is_yes(&rx, interrupted));
+        assert_eq!(calls.get(), 3);
     }
 
     #[test]

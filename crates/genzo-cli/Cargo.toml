@@ -49,12 +49,18 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 # 計測用の合成 DNG を置く一時フォルダ。
 tempfile.workspace = true
+# Ctrl+C の受け取り（Unix の SIGINT、Windows の CTRL_C_EVENT。K3。`interrupt` の doc）。
+ctrlc = "3.5.2"
 
 [dev-dependencies]
 # 結合テストの入力（合成の PNG / TIFF）と、書き出したファイルの寸法の確認。
 image.workspace = true
 # 書き出したファイルの Exif（GPS の有無）の確認。
 kamadak-exif.workspace = true
+
+# Ctrl+C の結合テストで、プロセスグループに SIGINT を送る（Unix だけ。K3）。
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2.190"
 
 [lints]
 workspace = true

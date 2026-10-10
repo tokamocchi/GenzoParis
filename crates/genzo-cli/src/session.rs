@@ -8,15 +8,22 @@
 //!   カタログを作らないため）。
 //! - 閉じる前に、バックグラウンドのジョブ（現像設定の変更・取り込みの後のサムネイルの作り直しなど）が
 //!   終わるのを待つ（[`Core::wait_idle`]）。待たずに閉じると、それらのジョブは取り消される。
+//! - Ctrl+C（K3。`interrupt` の doc）: 開いている間は 1 回目の Ctrl+C ですぐには終了しない。ジョブを
+//!   待っていれば取り消して終わるのを待ち（取り込み・書き出しは途中までの結果を返す）、閉じるときは
+//!   バックグラウンドのジョブを待たずに閉じる（[`Core::close`] が取り消す）。開いている途中で押された
+//!   場合は、開き終えたらすぐに閉じて「取り消し」のエラーにする。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
-use genzo_api::{ApiError, Core, CoreConfig, Event, JobInfo, JobKind, JobState, WorkerLaunch};
+use genzo_api::{
+    ApiError, Core, CoreConfig, Event, JobInfo, JobKind, JobResult, JobState, WorkerLaunch,
+};
 
 use crate::args::GlobalArgs;
 use crate::error::{CliError, CliResult};
+use crate::interrupt::{self, Graceful};
 use crate::output::Output;
 
 /// カタログのパスを指定する環境変数。
@@ -83,6 +90,9 @@ pub struct Session {
     events: Receiver<Event>,
     /// 出力。
     pub out: Output,
+    /// 開いている間の印（1 回目の Ctrl+C ではすぐに終了しない）。フィールドはこの順に drop するので、
+    /// コアを閉じた後に外れる。
+    _graceful: Graceful,
 }
 
 impl Session {
@@ -104,9 +114,22 @@ impl Session {
         if let Some(d) = &opts.backup_dir {
             config.backup_dir = Some(d.clone());
         }
+        // 開いている途中（終わっていないファイル操作の確定・ワーカーの起動など）の Ctrl+C でも、
+        // 開き終えてから正常に閉じる。
+        let graceful = Graceful::begin();
         let core = Core::open(config)?;
         let events = core.subscribe();
-        Ok(Self { core, events, out })
+        let s = Self {
+            core,
+            events,
+            out,
+            _graceful: graceful,
+        };
+        if interrupt::requested() {
+            s.close()?;
+            return Err(CliError::Api(ApiError::Cancelled));
+        }
+        Ok(s)
     }
 
     /// 溜まっているイベントのうち、警告を標準エラーに出す。
@@ -135,10 +158,19 @@ impl Session {
         }
     }
 
-    /// ジョブが終わるまで待つ。進捗と警告を標準エラーに出す。
+    /// ジョブが終わるまで待つ。進捗と警告を標準エラーに出す。Ctrl+C で中断を求められたら、ジョブを
+    /// 取り消して、終わるのを待つ（途中までの結果を受け取るため）。
     pub fn wait_job(&self, job_id: u64, what: &str) -> CliResult<JobInfo> {
         let mut last: Option<(u64, u64)> = None;
+        let mut cancelled = false;
         loop {
+            if !cancelled && interrupt::requested() {
+                cancelled = true;
+                // 既に終わって記録から外れていれば、取り消すものはない（下の状態の確認で分かる）。
+                if let Err(e) = self.core.cancel_job(job_id) {
+                    tracing::debug!(error = %e, job_id, "ジョブを取り消せない");
+                }
+            }
             match self.events.recv_timeout(POLL_INTERVAL) {
                 Ok(Event::JobProgress {
                     job_id: id,
@@ -172,10 +204,21 @@ impl Session {
     }
 
     /// ジョブを待ち、成功しなければエラーにする。
+    ///
+    /// 取り消された取り込み・書き出しは、途中までの結果を返す（結果に `cancelled: true` の印がある。
+    /// 呼び出し側は結果を出し、一部が終わらなかったものとして扱う）。
     pub fn wait_job_ok(&self, job_id: u64, what: &str) -> CliResult<JobInfo> {
         let info = self.wait_job(job_id, what)?;
         match info.state {
             JobState::Succeeded => Ok(info),
+            JobState::Cancelled
+                if matches!(
+                    info.result,
+                    Some(JobResult::Import(_) | JobResult::Export(_))
+                ) =>
+            {
+                Ok(info)
+            }
             JobState::Cancelled => Err(CliError::Api(ApiError::Cancelled)),
             JobState::Failed | JobState::Running => match info.error {
                 Some(error) => Err(CliError::Job {
@@ -192,13 +235,16 @@ impl Session {
     /// バックグラウンドのジョブを待ってから閉じる（閉じるときのエラーも返す）。
     ///
     /// 待っている間も、ジョブの進捗（取り込みの後のサムネイルの作り直しなど。枚数が多いと長くかかる）と
-    /// 警告を標準エラーに出す（何も出さずに止まって見えないように）。
+    /// 警告を標準エラーに出す（何も出さずに止まって見えないように）。Ctrl+C で中断を求められたら、待つのを
+    /// やめて閉じる（[`Core::close`] が実行中・待機中のジョブを取り消す。作り直せなかったサムネイルは、
+    /// 次に開いたときに作り直す）。
     pub fn close(self) -> CliResult<()> {
-        if self.core.running_jobs() > 0 {
+        if self.core.running_jobs() > 0 && !interrupt::requested() {
             self.out
                 .progress("バックグラウンドの処理（サムネイルの作り直しなど）を待っています…");
         }
         let idle = std::sync::atomic::AtomicBool::new(false);
+        let mut closed: Option<Result<(), ApiError>> = None;
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 self.core.wait_idle();
@@ -206,6 +252,14 @@ impl Session {
             });
             let mut last: std::collections::HashMap<u64, (u64, u64)> = Default::default();
             while !idle.load(std::sync::atomic::Ordering::Acquire) {
+                if closed.is_none() && interrupt::requested() {
+                    self.out.progress(
+                        "カタログを閉じています（バックグラウンドの処理は取り消します）…",
+                    );
+                    // 閉じるとスケジューラが止まり、ジョブが取り消されるので、待っているスレッド
+                    // （wait_idle）も戻る。
+                    closed = Some(self.core.close());
+                }
                 match self.events.recv_timeout(POLL_INTERVAL) {
                     Ok(Event::JobProgress {
                         job_id,
@@ -227,7 +281,7 @@ impl Session {
             }
         });
         self.drain_warnings();
-        let r = self.core.close();
+        let r = closed.unwrap_or_else(|| self.core.close());
         self.drain_warnings();
         r.map_err(CliError::from)
     }
