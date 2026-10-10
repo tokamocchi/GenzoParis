@@ -71,6 +71,39 @@ fn populate(env: &Env) -> Fixture {
     }
 }
 
+/// 取り込むフォルダに、シンボリックリンクの後の `..` を含むパスを渡したとき、OS の解釈（リンク先の親）の
+/// フォルダを取り込む。字面でリンクの親へ戻して、別のフォルダを取り込まない（`L` が `A/sub` を指すとき、
+/// `L/../lib` は `A/lib`。`L` の親の `lib` ではない）。
+#[cfg(unix)]
+#[test]
+fn import_path_with_parent_dir_after_a_symlink_reads_the_folder_the_os_means() {
+    let env = Env::new();
+    let root = env.dir.path();
+    let a = root.join("A");
+    std::fs::create_dir_all(a.join("sub")).unwrap();
+    std::os::unix::fs::symlink(a.join("sub"), root.join("L")).unwrap();
+    // OS の解釈（A/lib）に IMG_0001、字面で畳んだ先（root/lib）に別の写真 IMG_0002。
+    write_jpeg(&a.join("lib").join("IMG_0001.jpg"), (64, 48), 1, None);
+    write_jpeg(&root.join("lib").join("IMG_0002.jpg"), (48, 64), 2, None);
+    let before = (hashes(&a), hashes(&root.join("lib")));
+    let core = env.open();
+
+    let report = import(&core, &root.join("L").join("..").join("lib"));
+    assert_eq!((report.files_found, report.added), (1, 1), "{report:?}");
+    assert!(
+        same_file::is_same_file(&report.root, a.join("lib")).unwrap_or(false),
+        "取り込んだフォルダが OS の解釈と違う: {:?}",
+        report.root
+    );
+    assert_eq!(names(&all_items(&core)), ["IMG_0001.jpg"]);
+    core.close().unwrap();
+    assert_eq!(
+        (hashes(&a), hashes(&root.join("lib"))),
+        before,
+        "元ファイルは変わらない（DATA-01）"
+    );
+}
+
 /// テスト 1: 混在したフォルダを取り込み、撮影日時順に写真と動画が並ぶ（撮影日時のないものは最後）。
 /// もう一度取り込んでも件数が増えない。元ファイルは変わらない（DATA-01）。
 #[test]

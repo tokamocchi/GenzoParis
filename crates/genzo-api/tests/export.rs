@@ -286,6 +286,49 @@ fn overwrite_refuses_originals_registered_through_a_linked_folder() {
     );
 }
 
+/// 書き出し先に、シンボリックリンクの後の `..` を含むパスを渡したとき、OS の解釈（リンク先の親）の
+/// フォルダへ書き出す。字面でリンクの親へ戻して、別のフォルダのファイルを上書きしない
+/// （`L` が `A/sub` を指すとき、`L/../out` は `A/out`。`L` の親の `out` ではない）。
+#[cfg(unix)]
+#[test]
+fn export_destination_with_parent_dir_after_a_symlink_uses_the_folder_the_os_means() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("IMG_0001.jpg"), (64, 48), 1, None);
+    let root = env.dir.path();
+    let a = root.join("A");
+    std::fs::create_dir_all(a.join("sub")).unwrap();
+    std::os::unix::fs::symlink(a.join("sub"), root.join("L")).unwrap();
+    // 字面で畳むと選ばれてしまう別のフォルダ（root/out）に、カタログにない同じ名前のファイルがある。
+    let other = root.join("out");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("IMG_0001.jpg"), b"not in the catalog").unwrap();
+    let core = env.open();
+    import(&core, &env.photos);
+    let v = variant_in(&core, &env.photos);
+
+    let dest = root.join("L").join("..").join("out");
+    let r = export(&core, &[v], &overwrite_original_size(), &dest);
+    assert_eq!((r.written, r.failed), (1, 0), "{r:?}");
+    // 別のフォルダのファイルは変わらない。
+    assert!(
+        std::fs::read(other.join("IMG_0001.jpg")).unwrap() == b"not in the catalog",
+        "リンクの親の out（OS の解釈ではない別のフォルダ）を上書きした: {r:?}"
+    );
+    // 書き出し先は OS の解釈の A/out（実在しなければ、別の場所へ書いている）。
+    let same = |x: &Path, y: &Path| same_file::is_same_file(x, y).unwrap_or(false);
+    assert!(
+        same(&r.dest_dir, &a.join("out")),
+        "書き出し先が OS の解釈と違う: {:?}",
+        r.dest_dir
+    );
+    let written = written_path(&r, 0);
+    assert!(
+        same(&written, &a.join("out").join("IMG_0001.jpg")),
+        "書き出したファイルの場所が OS の解釈と違う: {written:?}"
+    );
+    core.close().unwrap();
+}
+
 /// 大文字・小文字を区別しないファイルシステム（Windows・macOS の既定）では、書き出し先のフォルダ名の
 /// 大文字・小文字が違っても、上書きの設定でカタログの原本を置き換えない（6.4 節）。区別するファイル
 /// システム（Linux の既定など）では、別のフォルダになるので飛ばす。
