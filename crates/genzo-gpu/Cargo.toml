@@ -12,10 +12,23 @@ publish.workspace = true
 genzo-pipeline.workspace = true
 genzo-model.workspace = true
 genzo-color.workspace = true
+# センサー処理の GPU 版（RAW の画素と CFA の並び）。
+genzo-raw.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
+# 書き出しの縮小（CPU 側の足し込み）の並列化。
+rayon.workspace = true
+# GPU から CPU 版への切り替えなどの記録。
+tracing.workspace = true
+
+[dev-dependencies]
+# 合成のテストデータ（ベイヤー配列）と計測（Bench）。
+genzo-testkit.workspace = true
+# WGSL を Metal（MSL）・DirectX（HLSL）のシェーダーに変換できるかを、Linux のテストでも確かめるため
+# （wgpu が内部で使う naga と同じ版。workspace の依存にはないので、この crate に版を書く）。
+naga = { version = "30.0.1", features = ["wgsl-in", "msl-out", "hlsl-out"] }
 
 [lints]
 workspace = true
