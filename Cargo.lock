@@ -621,6 +621,7 @@ name = "genzo-color"
 version = "0.1.0"
 dependencies = [
  "lcms2",
+ "proptest",
  "thiserror",
 ]
 
@@ -694,9 +695,12 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "genzo-model",
+ "image",
+ "kamadak-exif",
  "pkg-config",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
