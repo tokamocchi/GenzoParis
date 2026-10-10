@@ -83,12 +83,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,6 +567,8 @@ name = "genzo-api"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "chrono",
+ "crossbeam-channel",
  "genzo-catalog",
  "genzo-color",
  "genzo-gpu",
@@ -581,10 +577,16 @@ dependencies = [
  "genzo-model",
  "genzo-pipeline",
  "genzo-raw",
+ "genzo-testkit",
  "genzo-worker",
+ "image",
+ "kamadak-exif",
+ "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
+ "tracing",
  "trash",
 ]
 
@@ -607,11 +609,25 @@ dependencies = [
 name = "genzo-cli"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "chrono",
  "clap",
+ "crossbeam-channel",
  "genzo-api",
+ "genzo-catalog",
+ "genzo-gpu",
+ "genzo-jobs",
+ "genzo-media",
+ "genzo-model",
+ "genzo-pipeline",
+ "genzo-raw",
+ "genzo-testkit",
  "genzo-worker",
+ "image",
+ "kamadak-exif",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]

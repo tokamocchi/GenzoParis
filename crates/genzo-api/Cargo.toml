@@ -17,6 +17,15 @@ default = []
 # 共有ライブラリに依存しうる）。本体に LibRaw を入れない構成は、LibRaw の FFI の作業で確認する。
 libraw = ["genzo-worker/libraw"]
 
+[lib]
+path = "src/lib.rs"
+
+# 本体の実行ファイル自身を隠しサブコマンド（`__worker`）でワーカーとして起動する構成（genzo-cli と同じ形）を
+# 確かめる最小の実行ファイル。結合テスト（tests/）が `CARGO_BIN_EXE_genzo-api-worker` で使う。
+[[bin]]
+name = "genzo-api-worker"
+path = "src/bin/genzo-api-worker.rs"
+
 [dependencies]
 genzo-model.workspace = true
 genzo-catalog.workspace = true
@@ -32,6 +41,23 @@ serde_json.workspace = true
 thiserror.workspace = true
 trash.workspace = true
 blake3.workspace = true
+# 撮影日時・バックアップの日時。
+chrono.workspace = true
+# イベントのチャネル（コア → UI。04 の 1.5 節）。
+crossbeam-channel.workspace = true
+# 状態のロック（毒されない Mutex と、自動保存の待ち合わせの Condvar）。
+parking_lot.workspace = true
+# GPU から CPU への切り替えなどの記録。
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# 合成の JPEG / PNG / TIFF（テストの入力）と、書き出したファイルの寸法の確認。
+image.workspace = true
+# 書き出したファイルの Exif（GPS の有無）の確認。
+kamadak-exif.workspace = true
+# 合成 DNG（ベイヤー配列のモザイク化と DNG の書き出し）。
+genzo-testkit.workspace = true
 
 [lints]
 workspace = true
