@@ -38,9 +38,20 @@ thiserror.workspace = true
 # 応答・取り消し・タイムアウトを同時に待つ（select）。
 crossbeam-channel.workspace = true
 
-# ワーカーのメモリの上限（setrlimit。04 の 1.2 節、AR-10）。Linux だけで使う。
-[target.'cfg(target_os = "linux")'.dependencies]
+# ワーカーのメモリの上限（setrlimit。Linux だけ。04 の 1.2 節、AR-10）と、ワーカーと孫プロセスを
+# プロセスグループでまとめて終わらせる（killpg。Linux・macOS。決定 No.12）。
+[target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
+
+# Windows: ワーカーと孫プロセスをジョブオブジェクトでまとめて終わらせ、メモリの上限をかける
+# （決定 No.12）。Microsoft の Win32 API の宣言だけの crate。版は依存の木に既にあるもの（Cargo.lock）と同じ。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [lints]
 workspace = true

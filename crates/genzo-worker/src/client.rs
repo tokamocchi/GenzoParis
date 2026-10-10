@@ -5,6 +5,11 @@
 //!   確かめる（握手）。ワーカーは本体と別のプロセスグループで起動する（Unix は `process_group(0)`、
 //!   Windows は `CREATE_NEW_PROCESS_GROUP`）。端末の Ctrl+C が本体と一緒にワーカーへ届かないようにする
 //!   ため（本体が取り消して終わらせる。genzo-cli の Ctrl+C の扱い。K3）。
+//! - 孫プロセス: ワーカーを回収するとき（下の強制終了・異常終了・終了の依頼・drop のすべて）は、ワーカーが
+//!   起動した子プロセス（ffmpeg など）もまとめて終わらせる（Unix はプロセスグループ、Windows は
+//!   ジョブオブジェクト。[`crate::tree`]。決定 No.12）。
+//! - メモリの上限: 既定は [`crate::limits::DEFAULT_MEMORY_LIMIT_BYTES`]（2 GiB。仮置き）。Linux はワーカーの
+//!   `RLIMIT_DATA`、Windows はジョブオブジェクト、macOS は設けない（[`crate::limits`]）。
 //! - 依頼: 1 つのワーカーには同時に 1 件だけ依頼する（[`WorkerClient`] のメソッドは `&mut self`）。
 //!   複数のワーカーを並行して使うときは [`crate::WorkerPool`] を使う。
 //! - タイムアウト: ジョブの種類ごと（[`JobTimeouts`]）。超えたらワーカーを強制終了して再起動し、
@@ -51,6 +56,7 @@ use crate::protocol::{
     ThumbnailSource, VideoFrameInfo, WorkerError, WorkerErrorKind, read_line_limited,
 };
 use crate::shm::{BufferError, PayloadKind, SHM_HEADER_LEN, ShmArena, ShmBuffer};
+use crate::tree::ProcessTree;
 use crate::validate::{self, MAX_THUMBNAIL_EDGE, MAX_THUMBNAIL_JPEG_BYTES};
 use crate::{ENV_TEST_HOOKS, ENV_WORKER_PATH, WORKER_EXE_NAME};
 
@@ -258,11 +264,13 @@ pub struct WorkerConfig {
     pub timeouts: JobTimeouts,
     /// 起動と握手のタイムアウト。
     pub startup_timeout: Duration,
-    /// ワーカーのメモリの上限（バイト。04 の 1.2 節、AR-10）。`None` なら設定しない。
+    /// ワーカーのメモリの上限（バイト。04 の 1.2 節、AR-10、決定 No.12）。`None` なら設定しない。
     ///
-    /// Linux だけで有効（`RLIMIT_DATA`。[`crate::limits`]）。他の OS では設定されない
-    /// （[`crate::protocol::MemoryLimitStatus::NotApplied`]。PoC-2 で確認する）。既定値は `None`
-    /// （**仮置き**。ワーカー 1 つが使う量を PoC-2 で計測して決める）。
+    /// 既定値は [`crate::limits::DEFAULT_MEMORY_LIMIT_BYTES`]（2 GiB。**仮置き**）。Linux はワーカーの
+    /// `RLIMIT_DATA`、Windows はジョブオブジェクトの `JOB_OBJECT_LIMIT_PROCESS_MEMORY`（実機で未確認）。
+    /// macOS では設けない（[`crate::protocol::MemoryLimitStatus::NotApplied`]）。Linux・Windows では、
+    /// ワーカーが起動する子プロセス（ffmpeg など）にも同じ上限がかかる。状態は握手の応答
+    /// （[`WorkerClient::worker_info`]）の `memory_limit` で分かる。
     pub memory_limit_bytes: Option<u64>,
     /// テスト用の口を有効にするか（ワーカーに環境変数 `GENZO_WORKER_TEST_HOOKS=1` を渡す）。
     /// `false` なら、本体の環境にその変数があってもワーカーには渡さない。
@@ -289,7 +297,7 @@ impl Default for WorkerConfig {
             args: Vec::new(),
             timeouts: JobTimeouts::default(),
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
-            memory_limit_bytes: None,
+            memory_limit_bytes: Some(crate::limits::DEFAULT_MEMORY_LIMIT_BYTES),
             test_hooks: false,
             verify_checksum: false,
             shm_root: None,
@@ -576,11 +584,15 @@ enum ReaderEvent {
     Error(String),
 }
 
-/// 起動中のワーカープロセス。drop すると強制終了して回収する。
+/// 起動中のワーカープロセス。drop すると、ワーカーが起動した子プロセスも含めて強制終了して回収する。
 struct WorkerProcess {
     /// 回収を別のスレッドに任せた後は `None`。
     child: Option<Child>,
     pid: u32,
+    /// ワーカーと、ワーカーが起動した子プロセス（孫プロセス）のまとまり（[`crate::tree`]）。
+    tree: ProcessTree,
+    /// まとまりに強制終了を送ったか（送るのは 1 回だけ。[`crate::tree`] の「注意」）。
+    tree_killed: bool,
     stdin: Option<ChildStdin>,
     events: Receiver<ReaderEvent>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
@@ -626,9 +638,19 @@ impl WorkerProcess {
         self.exited
     }
 
-    /// 強制終了して回収する。[`KILL_REAP_GRACE`] の間に終わらなければ、回収を別のスレッドに
-    /// 任せて `None` を返す（本体は待たない）。
+    /// ワーカーと、ワーカーが起動した子プロセスをまとめて強制終了する（1 回だけ。終わるのは待たない）。
+    /// ワーカーが既に終わっていても、残った孫プロセスを終わらせる。
+    fn kill_tree(&mut self) {
+        if !self.tree_killed {
+            self.tree_killed = true;
+            self.tree.kill_all();
+        }
+    }
+
+    /// 子プロセスも含めて強制終了して回収する。[`KILL_REAP_GRACE`] の間に終わらなければ、回収を別の
+    /// スレッドに任せて `None` を返す（本体は待たない）。
     fn kill(&mut self) -> Option<ExitStatus> {
+        self.kill_tree();
         if self.exited.is_some() {
             return self.exited;
         }
@@ -901,7 +923,10 @@ impl WorkerClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         cmd.args(&self.config.args);
-        if let Some(limit) = self.config.memory_limit_bytes {
+        // Windows では本体がジョブオブジェクトで上限をかける（ワーカーの側では設定しない。crate::tree）。
+        if let Some(limit) = self.config.memory_limit_bytes
+            && !cfg!(windows)
+        {
             cmd.arg("--memory-limit-bytes").arg(limit.to_string());
         }
         for (k, v) in &self.config.env {
@@ -938,9 +963,13 @@ impl WorkerClient {
             .spawn()
             .map_err(|e| spawn_err(format!("{}: {e}", self.executable.display())))?;
         self.stats.spawns += 1;
+        // 依頼（握手を含む）を送る前に、ワーカーをまとまり（Windows ではジョブオブジェクト）に入れる。
+        // ワーカーは依頼を受けるまで子プロセスを作らない。
+        let (tree, host_memory_limit) = ProcessTree::attach(&child, self.config.memory_limit_bytes);
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
+            tree.kill_all();
             let _ = child.kill();
             let _ = child.wait();
             return Err(spawn_err("標準入出力のパイプを作れない".to_owned()));
@@ -951,6 +980,8 @@ impl WorkerClient {
         let mut proc = WorkerProcess {
             pid: child.id(),
             child: Some(child),
+            tree,
+            tree_killed: false,
             stdin: Some(stdin),
             events,
             stderr_tail: Arc::clone(&tail),
@@ -984,6 +1015,11 @@ impl WorkerClient {
                         pong.protocol_version,
                         self.executable.display()
                     )));
+                }
+                let mut pong = pong;
+                // Windows では、上限は本体がかけた（ワーカーは知らない）。
+                if let Some(status) = host_memory_limit {
+                    pong.memory_limit = status;
                 }
                 proc.pong = Some(pong);
                 Ok(proc)
@@ -1072,6 +1108,8 @@ impl WorkerClient {
                 self.stats.crashes += 1;
                 let mut p = self.process.take().expect("起動している");
                 let status = p.reap(CRASH_REAP_GRACE);
+                // 残った孫プロセス（標準エラー出力を引き継いでいる場合も）を終わらせてから読む。
+                p.kill_tree();
                 let stderr_tail = p.stderr_tail();
                 drop(p);
                 self.recycle();
@@ -1467,6 +1505,25 @@ impl WorkerClient {
         match track_path {
             Some(p) => self.file_job(p, JobKind::TestHook, run),
             None => run(self),
+        }
+    }
+
+    /// テスト用: ワーカーに、`hold_while` のファイルがある間動き続ける子プロセス（本体から見ると孫
+    /// プロセス。ffmpeg の代わり）を作らせ、そのプロセス ID を返す（ワーカーを `test_hooks` 付きで
+    /// 起動した場合だけ動く）。ワーカーを終わらせたときに孫プロセスも終わることの確認に使う
+    /// （[`crate::tree`]）。
+    pub fn spawn_test_child(
+        &mut self,
+        hold_while: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<u32, WorkerClientError> {
+        let job = Job::TestSpawnChild {
+            hold_while: hold_while.to_path_buf(),
+        };
+        match self.call(job, cancel)? {
+            Ok(JobOutput::Spawned { pid }) => Ok(pid),
+            Ok(other) => self.unexpected(&other),
+            Err(e) => Err(WorkerClientError::Job(e)),
         }
     }
 

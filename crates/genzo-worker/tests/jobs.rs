@@ -420,6 +420,8 @@ mod dng {
             data,
             black_level: [512.0; 4],
             white_level: 16383.0,
+            saturation_level: 16383.0,
+            default_crop: None,
             as_shot_wb: [2.25, 1.0, 1.625, 1.0],
             cam_xyz: Some([
                 [0.7424, -0.2329, -0.0466],

@@ -188,7 +188,8 @@ impl io::Read for StdinChannel {
 
 /// 標準入力を別のスレッドで読む。入力が終わったら（本体が標準入力を閉じた・本体が終了した）、処理中の
 /// 依頼があってもプロセスをすぐに終える（本体は [`Job::Shutdown`] の応答を受け取ってから閉じるので、
-/// 正常な終了の手順は変わらない）。
+/// 正常な終了の手順は変わらない）。自分が起動した子プロセス（ffmpeg など）も終わらせる
+/// （[`exit_with_children`]）。
 fn watch_stdin() -> io::Result<StdinChannel> {
     use std::io::Read;
     let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
@@ -199,14 +200,14 @@ fn watch_stdin() -> io::Result<StdinChannel> {
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 match stdin.read(&mut buf) {
-                    Ok(0) => std::process::exit(0),
+                    Ok(0) => exit_with_children(),
                     Ok(n) => {
                         if tx.send(buf[..n].to_vec()).is_err() {
                             return;
                         }
                     }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => std::process::exit(0),
+                    Err(_) => exit_with_children(),
                 }
             }
         })?;
@@ -215,6 +216,13 @@ fn watch_stdin() -> io::Result<StdinChannel> {
         chunk: Vec::new(),
         pos: 0,
     })
+}
+
+/// 入力が終わった（本体が終わった）ので、起動した子プロセス（ffmpeg など）も含めて終わる
+/// （Unix: 自分が先頭のプロセスグループごと。[`crate::tree::kill_own_group`]。決定 No.12）。
+fn exit_with_children() -> ! {
+    crate::tree::kill_own_group();
+    std::process::exit(0)
 }
 
 /// 環境変数でテスト用の口が有効にされているか。
@@ -405,7 +413,8 @@ impl<'a> Worker<'a> {
             | Job::TestHang { .. }
             | Job::TestGarbage { .. }
             | Job::TestOversize { .. }
-            | Job::TestAllocate { .. } => return self.test_hook(id, job, out),
+            | Job::TestAllocate { .. }
+            | Job::TestSpawnChild { .. } => return self.test_hook(id, job, out),
         };
         Ok(Some(result))
     }
@@ -483,6 +492,8 @@ impl<'a> Worker<'a> {
             cfa: image.cfa,
             black_level: image.black_level,
             white_level: image.white_level,
+            saturation_level: image.saturation_level,
+            default_crop: image.default_crop,
             as_shot_wb: image.as_shot_wb,
             cam_xyz: image.cam_xyz,
             metadata,
@@ -674,6 +685,7 @@ impl<'a> Worker<'a> {
             }
             Job::TestOversize { mode, shm } => Ok(Some(oversize(mode, &shm))),
             Job::TestAllocate { bytes } => Ok(Some(allocate(bytes))),
+            Job::TestSpawnChild { hold_while } => Ok(Some(spawn_holding_child(&hold_while, false))),
             _ => unreachable!("test_hook にはテスト用のジョブだけを渡す"),
         }
     }
@@ -1068,20 +1080,38 @@ const TEST_CHILD_POLL: Duration = Duration::from_millis(20);
 /// [`run_worker`] の `relaunch_prefix` と [`TEST_HOLD_WHILE_ARG`] 付きで起動したもの）を残す。子プロセスは待たない（ワーカーはこの後
 /// 異常終了する）。
 fn leave_child_holding_pipes(hold_while: &Path) {
-    let prefix = RELAUNCH_PREFIX.get().cloned().unwrap_or_default();
-    let spawned = std::env::current_exe().and_then(|exe| {
-        std::process::Command::new(exe)
-            .args(prefix)
-            .arg(TEST_HOLD_WHILE_ARG)
-            .arg(hold_while)
-            .stdin(std::process::Stdio::null())
-            .spawn()
-    });
-    match spawned {
-        // 子プロセスは、ワーカーが終わった後に OS（init など）が回収する。
-        Ok(child) => drop(child),
-        Err(e) => eprintln!("genzo-worker: テスト用の子プロセスを作れない: {e}"),
+    if let Err(e) = spawn_holding_child(hold_while, true) {
+        eprintln!(
+            "genzo-worker: テスト用の子プロセスを作れない: {}",
+            e.message
+        );
     }
+}
+
+/// テスト用: このワーカーの実行ファイルを [`run_worker`] の `relaunch_prefix` と [`TEST_HOLD_WHILE_ARG`]
+/// 付きで起動し、`hold_while` のファイルがある間（最長 [`TEST_CHILD_HOLD_MAX`]）動き続ける子プロセスを作る
+/// （ffmpeg などの孫プロセスの代わり）。子プロセスは待たない（ワーカーが終わった後は OS が回収する）。
+///
+/// `inherit_output` なら標準出力・標準エラー出力を引き継ぐ（制御のパイプを持ったままにする）。
+/// 子プロセスは、特にプロセスグループ・ジョブを変えずに起動する（ffmpeg と同じく、ワーカーのグループ・
+/// ジョブに入る。[`crate::tree`]）。
+fn spawn_holding_child(hold_while: &Path, inherit_output: bool) -> JobResult {
+    use std::process::{Command, Stdio};
+    let prefix = RELAUNCH_PREFIX.get().cloned().unwrap_or_default();
+    let exe = std::env::current_exe()
+        .map_err(|e| internal(format!("実行ファイルの場所が分からない: {e}")))?;
+    let mut cmd = Command::new(exe);
+    cmd.args(prefix)
+        .arg(TEST_HOLD_WHILE_ARG)
+        .arg(hold_while)
+        .stdin(Stdio::null());
+    if !inherit_output {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let child = cmd
+        .spawn()
+        .map_err(|e| internal(format!("テスト用の子プロセスを作れない: {e}")))?;
+    Ok(JobOutput::Spawned { pid: child.id() })
 }
 
 /// テスト用の子プロセスの本体: `path` のファイルがある間（最長 [`TEST_CHILD_HOLD_MAX`]）待つ。
@@ -1128,6 +1158,8 @@ fn oversize(mode: OversizeMode, shm: &ShmRef) -> JobResult {
         cfa: CfaPattern::RGGB,
         black_level: [512.0; 4],
         white_level: 16383.0,
+        saturation_level: 16383.0,
+        default_crop: None,
         as_shot_wb: [2.0, 1.0, 1.5, 1.0],
         cam_xyz: None,
         metadata: PhotoMetadata::default(),

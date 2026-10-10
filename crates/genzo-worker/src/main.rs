@@ -4,7 +4,8 @@
 //! ジョブを受け取る（docs/04_architecture.md の 1.2 節）。処理の本体はライブラリ側の
 //! [`genzo_worker::worker`] に置く。
 //!
-//! 引数: `--memory-limit-bytes <N>`（メモリの上限。Linux だけ。`genzo_worker::limits`）。
+//! 引数: `--memory-limit-bytes <N>`（メモリの上限。ワーカーの側で設定するのは Linux だけ。Windows は本体が
+//! ジョブオブジェクトで設定する。`genzo_worker::limits`）。
 
 fn main() -> std::process::ExitCode {
     genzo_worker::worker::main_entry()

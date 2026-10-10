@@ -33,10 +33,35 @@ fn ping_reports_version_and_pid() {
     assert_ne!(pong.pid, std::process::id(), "別のプロセス");
     assert!(pong.test_hooks);
     assert_eq!(pong.raw_decoder, genzo_raw::decoder_id());
-    assert_eq!(pong.memory_limit, MemoryLimitStatus::NotRequested);
+    // 既定ではメモリの上限（2 GiB。仮置き）を指定する（決定 No.12）。Linux は RLIMIT_DATA、Windows は
+    // ジョブオブジェクト、macOS は設けない。
+    const DEFAULT: u64 = genzo_worker::limits::DEFAULT_MEMORY_LIMIT_BYTES;
+    match &pong.memory_limit {
+        // Linux: ハードの上限がこれより低い環境では、その値になる。
+        MemoryLimitStatus::Applied { bytes } if cfg!(target_os = "linux") => {
+            assert!(*bytes <= DEFAULT, "{bytes}");
+        }
+        MemoryLimitStatus::Applied { bytes } if cfg!(windows) => assert_eq!(*bytes, DEFAULT),
+        // macOS は設けない。Windows でジョブオブジェクトを使えない環境も、理由付きでここに来る
+        // （実機で未確認のため、失敗にはしない）。
+        MemoryLimitStatus::NotApplied { bytes, reason } if !cfg!(target_os = "linux") => {
+            assert_eq!(*bytes, DEFAULT);
+            eprintln!("メモリの上限は設定されない: {reason}");
+        }
+        other => panic!("{other:?}"),
+    }
     assert_eq!(c.worker_info().unwrap().pid, pong.pid);
     let s = c.stats();
     assert_eq!((s.spawns, s.restarts, s.responses), (1, 0, 1));
+    c.shutdown().unwrap();
+    // 上限を指定しなければ、設定しない。
+    let mut cfg = config(root.path());
+    cfg.memory_limit_bytes = None;
+    let c = WorkerClient::spawn(cfg).unwrap();
+    assert_eq!(
+        c.worker_info().unwrap().memory_limit,
+        MemoryLimitStatus::NotRequested
+    );
     c.shutdown().unwrap();
 }
 
@@ -46,6 +71,8 @@ fn ping_reports_version_and_pid() {
 fn extra_args_are_passed_to_the_worker() {
     let root = tempfile::tempdir().unwrap();
     let mut cfg = config(root.path());
+    // 設定の上限（既定 2 GiB）は渡さず、args の上限だけを渡す。
+    cfg.memory_limit_bytes = None;
     cfg.args = vec![
         "--memory-limit-bytes".into(),
         (256u64 * 1024 * 1024).to_string().into(),
@@ -552,7 +579,8 @@ fn memory_limit_is_applied_on_linux() {
     );
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS ではメモリの上限を設けない（決定 No.12）。
+#[cfg(target_os = "macos")]
 #[test]
 fn memory_limit_is_reported_as_not_applied() {
     let root = tempfile::tempdir().unwrap();
@@ -563,6 +591,41 @@ fn memory_limit_is_reported_as_not_applied() {
         c.worker_info().unwrap().memory_limit,
         MemoryLimitStatus::NotApplied { .. }
     ));
+}
+
+/// Windows では、本体がジョブオブジェクトでメモリの上限をかける（決定 No.12。**実機で未確認**のため、
+/// ジョブオブジェクトを使えなかった環境では、理由を表示してスキップする）。
+#[cfg(windows)]
+#[test]
+fn memory_limit_is_applied_by_the_job_object_on_windows() {
+    let root = tempfile::tempdir().unwrap();
+    let mut cfg = config(root.path());
+    cfg.memory_limit_bytes = Some(256 * 1024 * 1024);
+    let mut c = WorkerClient::spawn(cfg).unwrap();
+    match c.worker_info().unwrap().memory_limit.clone() {
+        MemoryLimitStatus::Applied { bytes } => assert_eq!(bytes, 256 * 1024 * 1024),
+        MemoryLimitStatus::NotApplied { reason, .. } => {
+            eprintln!("ジョブオブジェクトを使えないのでスキップ: {reason}");
+            return;
+        }
+        other => panic!("{other:?}"),
+    }
+    // 上限を超える確保は失敗する（ワーカーは無事）。
+    let pid = c.pid();
+    let err = c
+        .run_test_hook(TestHook::Allocate(1024 * 1024 * 1024), None, &token())
+        .unwrap_err();
+    assert_eq!(
+        err.worker_error_kind(),
+        Some(&WorkerErrorKind::TooLarge),
+        "{err:?}"
+    );
+    assert_eq!(c.pid(), pid);
+    assert_eq!(
+        c.run_test_hook(TestHook::Allocate(16 * 1024 * 1024), None, &token())
+            .unwrap(),
+        TestHookOutput::Allocated(16 * 1024 * 1024)
+    );
 }
 
 #[test]
@@ -674,5 +737,286 @@ fn purge_removes_only_arenas_of_finished_owners() {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(live.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+    }
+}
+
+/// メモリの上限（Linux の `RLIMIT_DATA`）に当たっても、RAW の展開はワーカーの異常終了ではなく
+/// 通常のエラーになる（実機の ARW の不具合 A-4）。
+///
+/// 修正の前は、LibRaw の確保（CFA 1 枚分）は通り、genzo-raw が CFA を取り出す `Vec` の確保
+/// （もう 1 枚分）で Rust の確保の失敗になり、ワーカーが中断（SIGABRT）していた（実機の α7C の ARW と
+/// 64 MiB の上限で確認）。ここでは合成 DNG（CFA 48 MiB）で、上限を「ワーカーの使用量 ＋ 72 MiB」に
+/// して同じ状況を作る（使用量はテスト用の確保の口で測る。上限は 64 MiB 以上にする必要がある）。
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_decode_hitting_the_memory_limit_is_an_ordinary_error() {
+    if !genzo_raw::LIBRAW_ENABLED {
+        eprintln!("LibRaw が無効なのでスキップ");
+        return;
+    }
+    const MIB: u64 = 1024 * 1024;
+    let root = tempfile::tempdir().unwrap();
+    // CFA 6144 × 4096（u16 で 48 MiB）の合成 DNG。
+    let (w, h) = (6144u32, 4096u32);
+    let raw = genzo_raw::RawImage {
+        width: w,
+        height: h,
+        cfa: genzo_raw::CfaPattern::RGGB,
+        data: (0..w * h).map(|i| 600 + (i % 3000) as u16).collect(),
+        black_level: [512.0; 4],
+        white_level: 16383.0,
+        saturation_level: 16383.0,
+        default_crop: None,
+        as_shot_wb: [2.0, 1.0, 1.5, 1.0],
+        cam_xyz: None,
+        metadata: genzo_model::PhotoMetadata {
+            make: Some("GenzoTest".to_owned()),
+            model: Some("Synth-1".to_owned()),
+            ..Default::default()
+        },
+    };
+    let dng = root.path().join("big.dng");
+    genzo_raw::dng::write_file(&dng, &raw, &Default::default()).unwrap();
+    drop(raw);
+    // 上限 256 MiB で、テスト用の確保が通る大きさ（8 MiB 刻み）を測り、ワーカーの使用量を求める。
+    let probe_limit = 256 * MIB;
+    let mut cfg = config(root.path());
+    cfg.memory_limit_bytes = Some(probe_limit);
+    let mut c = WorkerClient::spawn(cfg).unwrap();
+    let mut room = 0;
+    for mib in (8..=256).rev().step_by(8) {
+        if c.run_test_hook(TestHook::Allocate(mib * MIB), None, &token())
+            .is_ok()
+        {
+            room = mib * MIB;
+            break;
+        }
+    }
+    c.shutdown().unwrap();
+    assert!(
+        room > 64 * MIB,
+        "上限 256 MiB で確保できる量が少ない（{room}）"
+    );
+    let used = probe_limit - room;
+    // CFA 1 枚分（48 MiB）は通り、2 枚分（96 MiB）は通らない上限。
+    let limit = used + 72 * MIB;
+    let mut cfg = config(root.path());
+    cfg.memory_limit_bytes = Some(limit);
+    let mut c = WorkerClient::spawn(cfg).unwrap();
+    let pid = c.pid();
+    let err = c.decode_raw(&dng, &token()).unwrap_err();
+    assert!(
+        !matches!(err, WorkerClientError::Crashed { .. }),
+        "ワーカーが異常終了した: {err:?}（上限 {} MiB）",
+        limit / MIB
+    );
+    assert_eq!(
+        err.worker_error_kind(),
+        Some(&WorkerErrorKind::Decode),
+        "{err:?}"
+    );
+    assert_eq!(c.pid(), pid, "ワーカーは再起動されない");
+    assert_eq!(c.stats().crashes, 0);
+    c.shutdown().unwrap();
+}
+
+/// ワーカーを終わらせたときに、孫プロセス（ffmpeg を模した、長く動く子プロセス）も終わることの確認
+/// （決定 No.12。`genzo_worker::tree`）。孫プロセスは標準入出力を引き継がず、目印のファイルがある間
+/// （最長 `TEST_CHILD_HOLD_MAX`、120 秒）動き続ける。まとめて終わらせる仕組みがなければ、ワーカーが
+/// 終わっても残る（修正の前は、ここのテストはすべて待ちの上限で失敗した）。
+///
+/// プロセスの状態は Linux の `/proc` で調べるので Linux だけ（macOS も同じプロセスグループの仕組みを
+/// 使うが、実機では未確認。Windows のジョブオブジェクトも実機では未確認）。
+#[cfg(target_os = "linux")]
+mod grandchildren {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    /// 孫プロセスが終わるのを待つ上限（時間は上限にだけ使い、結果は状態で決める）。
+    const GONE_LIMIT: Duration = Duration::from_secs(20);
+
+    /// 目印のファイル（drop で消し、残った孫プロセスも終わらせる）。
+    struct Hold(PathBuf);
+
+    impl Hold {
+        fn new(dir: &Path) -> Self {
+            let path = dir.join("hold-grandchild");
+            std::fs::write(&path, b"").unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// `/proc/<pid>/stat` の状態の文字（なければ `None`）。
+    fn state(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // 形式は「pid (comm) state ...」。comm に括弧や空白が入りうるので、最後の ')' の後を見る。
+        let (_, rest) = stat.rsplit_once(')')?;
+        rest.split_whitespace().next()?.chars().next()
+    }
+
+    /// 終わったか（回収されていないゾンビも終わったとみなす）。
+    fn is_gone(pid: u32) -> bool {
+        matches!(state(pid), None | Some('Z' | 'X'))
+    }
+
+    /// プロセスグループの ID。
+    fn group_of(pid: u32) -> libc::pid_t {
+        let pid = libc::pid_t::try_from(pid).unwrap();
+        // SAFETY: プロセスグループの ID を読むだけで、メモリを扱わない。
+        unsafe { libc::getpgid(pid) }
+    }
+
+    /// 孫プロセスを作らせ、動いていてワーカーのプロセスグループに入っていることを確かめる。
+    fn spawn_grandchild(c: &mut WorkerClient, hold: &Hold) -> u32 {
+        let grandchild = c.spawn_test_child(&hold.0, &token()).unwrap();
+        let worker = c.pid().unwrap();
+        assert!(!is_gone(grandchild), "孫プロセスが動いていない");
+        assert_eq!(
+            group_of(grandchild),
+            libc::pid_t::try_from(worker).unwrap(),
+            "孫プロセスはワーカーのプロセスグループに入る（ffmpeg と同じ）"
+        );
+        grandchild
+    }
+
+    fn assert_gone(pid: u32, what: &str) {
+        let deadline = std::time::Instant::now() + GONE_LIMIT;
+        while !is_gone(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what}: 孫プロセス {pid} が {GONE_LIMIT:?} たっても残っている（状態 {:?}）",
+                state(pid)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// 強制終了（タイムアウト・取り消し・不正な応答の後の再起動と同じ経路）。
+    #[test]
+    fn grandchildren_end_when_the_worker_is_killed() {
+        let root = tempfile::tempdir().unwrap();
+        let hold = Hold::new(root.path());
+        let mut c = WorkerClient::spawn(config(root.path())).unwrap();
+        let grandchild = spawn_grandchild(&mut c, &hold);
+        c.restart().unwrap();
+        assert_gone(grandchild, "再起動");
+        c.ping().unwrap();
+    }
+
+    /// タイムアウト（応答しないワーカーを強制終了して再起動する）。
+    #[test]
+    fn grandchildren_end_when_the_worker_times_out() {
+        let root = tempfile::tempdir().unwrap();
+        let hold = Hold::new(root.path());
+        let mut cfg = config(root.path());
+        // ハングは応答しないので、タイムアウトの長さは結果に影響しない（孫プロセスを作る依頼は、
+        // 握手と同じく十分に短い時間で終わる）。
+        cfg.timeouts.test_hook = Duration::from_secs(5);
+        let mut c = WorkerClient::spawn(cfg).unwrap();
+        let grandchild = spawn_grandchild(&mut c, &hold);
+        let err = c
+            .run_test_hook(TestHook::Hang { with_shm: false }, None, &token())
+            .unwrap_err();
+        assert!(matches!(err, WorkerClientError::Timeout { .. }), "{err:?}");
+        assert_gone(grandchild, "タイムアウト");
+    }
+
+    /// ワーカーの異常終了。
+    #[test]
+    fn grandchildren_end_when_the_worker_crashes() {
+        let root = tempfile::tempdir().unwrap();
+        let hold = Hold::new(root.path());
+        let mut c = WorkerClient::spawn(config(root.path())).unwrap();
+        let grandchild = spawn_grandchild(&mut c, &hold);
+        let err = c
+            .run_test_hook(TestHook::Crash { with_shm: false }, None, &token())
+            .unwrap_err();
+        assert!(matches!(err, WorkerClientError::Crashed { .. }), "{err:?}");
+        assert_gone(grandchild, "異常終了");
+        c.ping().unwrap();
+    }
+
+    /// 終了の依頼（Shutdown）と、[`WorkerClient`] の drop。
+    #[test]
+    fn grandchildren_end_after_shutdown_and_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let hold = Hold::new(root.path());
+        let mut c = WorkerClient::spawn(config(root.path())).unwrap();
+        let first = spawn_grandchild(&mut c, &hold);
+        c.shutdown().unwrap();
+        assert_gone(first, "終了の依頼");
+        let mut c = WorkerClient::spawn(config(root.path())).unwrap();
+        let second = spawn_grandchild(&mut c, &hold);
+        drop(c);
+        assert_gone(second, "drop");
+    }
+
+    /// 本体が異常終了した（標準入力が閉じた）場合: ワーカーは自分のプロセスグループごと終わる。
+    /// 本体と同じく、ワーカーを新しいプロセスグループで起動する。
+    #[test]
+    fn grandchildren_end_when_the_host_closes_the_input() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        use genzo_worker::protocol::{Job, JobOutput, Request, Response};
+
+        let root = tempfile::tempdir().unwrap();
+        let hold = Hold::new(root.path());
+        let mut child = Command::new(env!("CARGO_BIN_EXE_genzo-worker"))
+            .env(genzo_worker::ENV_TEST_HOOKS, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let job = Job::TestSpawnChild {
+            hold_while: hold.0.clone(),
+        };
+        let mut line = serde_json::to_vec(&Request { id: 1, job }).unwrap();
+        line.push(b'\n');
+        stdin.write_all(&line).unwrap();
+        stdin.flush().unwrap();
+        let mut reply = String::new();
+        stdout.read_line(&mut reply).unwrap();
+        let response: Response = serde_json::from_str(&reply).unwrap();
+        let Ok(JobOutput::Spawned { pid: grandchild }) = response.result else {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{reply}");
+        };
+        assert!(!is_gone(grandchild));
+        assert_eq!(
+            group_of(grandchild),
+            libc::pid_t::try_from(child.id()).unwrap()
+        );
+        // 本体の異常終了の代わりに、標準入力を閉じる。
+        drop(stdin);
+        let deadline = std::time::Instant::now() + GONE_LIMIT;
+        let exited = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if std::time::Instant::now() > deadline {
+                break None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        if exited.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(exited.is_some(), "入力が閉じたらワーカーは終わる");
+        assert_gone(grandchild, "本体の異常終了（入力が閉じた）");
     }
 }

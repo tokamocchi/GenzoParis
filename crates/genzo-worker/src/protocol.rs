@@ -26,7 +26,10 @@ use serde::{Deserialize, Serialize};
 /// プロトコルの版。本体は起動直後の [`Job::Ping`] の応答で一致を確かめる。
 ///
 /// メッセージの形を互換性のない形で変えたら上げる。
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// - 2: [`RawFrameInfo`] に飽和の閾値（`saturation_level`）と既定の切り抜き（`default_crop`）を
+///   加えた（実機の ARW の不具合 A-2・A-3）。
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// 1 行（1 メッセージ）の長さの上限（バイト。改行を除く）。
 ///
@@ -186,6 +189,16 @@ pub enum Job {
         /// 確保する量（バイト）。
         bytes: u64,
     },
+    /// テスト用: ffmpeg を模した、長く動く子プロセス（本体から見ると孫プロセス）を作り、そのプロセス ID を
+    /// 返す（ワーカーを終わらせたときに孫プロセスも終わることの確認。決定 No.12）。
+    ///
+    /// 子プロセスは標準入出力を引き継がず（ffmpeg と違って制御のパイプを持たない）、`hold_while` の
+    /// ファイルがある間（最長 [`crate::worker::TEST_CHILD_HOLD_MAX`]）待ってから終わる。
+    TestSpawnChild {
+        /// このファイルがある間、子プロセスは動き続ける。
+        #[serde(with = "wire_path")]
+        hold_while: PathBuf,
+    },
 }
 
 impl Job {
@@ -204,7 +217,8 @@ impl Job {
             | Job::TestHang { .. }
             | Job::TestGarbage { .. }
             | Job::TestOversize { .. }
-            | Job::TestAllocate { .. } => JobKind::TestHook,
+            | Job::TestAllocate { .. }
+            | Job::TestSpawnChild { .. } => JobKind::TestHook,
         }
     }
 
@@ -314,6 +328,11 @@ pub enum JobOutput {
         /// 確保できた量（バイト）。
         bytes: u64,
     },
+    /// [`Job::TestSpawnChild`] の結果。
+    Spawned {
+        /// 作った子プロセスのプロセス ID。
+        pid: u32,
+    },
 }
 
 /// [`Job::Ping`] の結果。
@@ -339,12 +358,13 @@ pub struct PongInfo {
 pub enum MemoryLimitStatus {
     /// 上限を指定していない。
     NotRequested,
-    /// 上限を設定した（Linux の `RLIMIT_DATA`）。
+    /// 上限を設定した（Linux はワーカーの `RLIMIT_DATA`、Windows は本体のジョブオブジェクト。
+    /// [`crate::limits`]）。
     Applied {
         /// 上限（バイト）。
         bytes: u64,
     },
-    /// 上限を指定したが、設定できなかった（この OS では未対応、または失敗）。
+    /// 上限を指定したが、設定できなかった（macOS では設けない、または失敗）。
     NotApplied {
         /// 指定した上限（バイト）。
         bytes: u64,
@@ -410,11 +430,15 @@ pub struct RawFrameInfo {
     pub black_level: [f32; 4],
     /// 白レベル。
     pub white_level: f32,
+    /// 飽和の閾値（`genzo_raw::RawImage::saturation_level`）。
+    pub saturation_level: f32,
+    /// 既定の切り抜き（有効画素の座標。`genzo_raw::RawImage::default_crop`。`None` は全体）。
+    pub default_crop: Option<genzo_raw::PixelRect>,
     /// 撮影時の WB の係数（G を 1 に正規化したもの）。
     pub as_shot_wb: [f32; 4],
     /// XYZ（D65）→ カメラ RGB の行列。
     pub cam_xyz: Option<[[f32; 3]; 3]>,
-    /// 撮影情報。
+    /// 撮影情報（寸法は既定の切り抜きの寸法）。
     pub metadata: PhotoMetadata,
     /// デコーダの識別子（04 の 2.5 節の `render_deps.raw_decoder`。例: `"libraw-0.21.2"`）。
     pub decoder_id: Option<String>,
@@ -718,6 +742,9 @@ mod tests {
                 shm: shm(),
             },
             Job::TestAllocate { bytes: 1 << 20 },
+            Job::TestSpawnChild {
+                hold_while: "hold".into(),
+            },
         ];
         for (i, job) in jobs.into_iter().enumerate() {
             let req = Request { id: i as u64, job };
@@ -809,6 +836,8 @@ mod tests {
                 cfa: CfaPattern::GBRG,
                 black_level: [510.0, 512.0, 514.0, 516.0],
                 white_level: 16383.0,
+                saturation_level: 16303.0,
+                default_crop: Some(genzo_raw::PixelRect::new(2, 2, 60, 40)),
                 as_shot_wb: [2.25, 1.0, 1.625, 1.0],
                 cam_xyz: Some([
                     [0.7424, -0.2329, -0.0466],
@@ -844,6 +873,7 @@ mod tests {
                 }),
             }),
             JobOutput::Allocated { bytes: 7 },
+            JobOutput::Spawned { pid: 42 },
         ];
         for (i, out) in outputs.into_iter().enumerate() {
             let resp = Response {

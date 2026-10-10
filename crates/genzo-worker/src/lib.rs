@@ -13,7 +13,8 @@
 //! | [`client`] | 本体側: 1 つのワーカーの起動・タイムアウト・再起動・取り消し・バッファの検証 | 1.2 節、6.1 節、6.3 節 |
 //! | [`pool`] | 本体側: 対話用 1 個とバッチ用 1〜2 個のワーカー | 1.2 節のプロセス構成 |
 //! | [`failures`] | 同じファイルで 2 回続けて失敗したらスキップ | 1.2 節、6.3 節 |
-//! | [`limits`] | ワーカーのメモリの上限（Linux だけ） | 1.2 節、AR-10 |
+//! | [`limits`] | ワーカーのメモリの上限（既定 2 GiB。Linux は `RLIMIT_DATA`、Windows は [`tree`] のジョブオブジェクト、macOS は設けない） | 1.2 節、AR-10、決定 No.12 |
+//! | [`tree`] | ワーカーと孫プロセス（ffmpeg など）をまとめて終わらせる（Unix はプロセスグループ、Windows はジョブオブジェクト） | 1.2 節、決定 No.12 |
 //!
 //! # ジョブ
 //!
@@ -52,12 +53,14 @@
 //!   本体が SIGBUS で落ちないため）。OS ごとの名前付き共有メモリとの比較は PoC-2 で行う。
 //! - 本体は受け取ったデータを自分のメモリに複製してから検証して使う（その後でワーカーが書き換えても
 //!   影響しない）。複製の費用は PoC-2 で計測する。
-//! - ワーカーのメモリの上限は Linux でだけ設定する（Windows・macOS は PoC-2 で確認）。
-//! - ワーカーが ffmpeg を実行中に強制終了された場合、ffmpeg は出力先が閉じた時点で終わる
-//!   （孫プロセスをまとめて終了させる仕組み（ジョブオブジェクト・プロセスグループ）は PoC-2 で検討。
-//!   ワーカーは 2026-10-10 から別のプロセスグループで起動し（端末の Ctrl+C を受け取らないため。K3）、
-//!   Unix では孫プロセスも同じグループに入るが、グループごとの終了はまだ使っていない）。
-//!   孫プロセスがパイプを持ったままでも、本体はワーカーのプロセスの終了で異常終了に気づく
+//! - ワーカーのメモリの上限は、既定で 2 GiB（仮置き）。Linux はワーカー自身の `RLIMIT_DATA`、Windows は
+//!   本体のジョブオブジェクト（実機で未確認）、macOS は設けない（[`limits`]。決定 No.12）。
+//! - ワーカーを回収するとき（タイムアウト・取り消し・異常終了・終了の依頼・drop）は、ワーカーが起動した
+//!   子プロセス（ffmpeg など）もまとめて強制終了する（[`tree`]。Unix はワーカーのプロセスグループ
+//!   （端末の Ctrl+C を受け取らないために別のグループで起動している。K3）への `killpg`、Windows は
+//!   ジョブオブジェクト。決定 No.12）。本体が異常終了した場合も、Unix ではワーカーが標準入力の終わりで
+//!   自分のグループごと終わり、Windows ではジョブのハンドルが閉じて終わる。macOS・Windows は実機で
+//!   未確認。孫プロセスがパイプを持ったままでも、本体はワーカーのプロセスの終了で異常終了に気づく
 //!   （[`client`]）。
 
 pub mod client;
@@ -66,6 +69,7 @@ pub mod limits;
 pub mod pool;
 pub mod protocol;
 pub mod shm;
+pub mod tree;
 mod validate;
 pub mod worker;
 
@@ -74,6 +78,7 @@ pub use client::{
     WorkerClient, WorkerClientError, WorkerConfig, WorkerStats, locate_worker_executable,
 };
 pub use failures::{FailureTracker, MAX_CONSECUTIVE_FAILURES};
+pub use limits::DEFAULT_MEMORY_LIMIT_BYTES;
 pub use pool::{Lane, MAX_BATCH_WORKERS, PoolConfig, WorkerLease, WorkerPool};
 pub use protocol::{
     GarbageMode, JobKind, LinearImageInfo, MemoryLimitStatus, OversizeMode, PROTOCOL_VERSION,

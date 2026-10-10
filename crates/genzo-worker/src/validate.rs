@@ -102,6 +102,8 @@ pub(crate) fn raw_image(
         data,
         black_level: info.black_level,
         white_level: info.white_level,
+        saturation_level: info.saturation_level,
+        default_crop: info.default_crop,
         as_shot_wb: info.as_shot_wb,
         cam_xyz: info.cam_xyz,
         metadata,
@@ -277,6 +279,8 @@ mod tests {
             cfa: CfaPattern::RGGB,
             black_level: [512.0; 4],
             white_level: 16383.0,
+            saturation_level: 16383.0,
+            default_crop: None,
             as_shot_wb: [2.0, 1.0, 1.5, 1.0],
             cam_xyz: None,
             metadata: PhotoMetadata::default(),
@@ -316,6 +320,36 @@ mod tests {
         let mut bad = raw_info(6, 4);
         bad.white_level = 0.0;
         assert!(matches!(raw_image(&p, bad), Err(BufferError::Invalid(_))));
+        // 飽和の閾値と既定の切り抜きも検証する（乗っ取られたワーカーが範囲外の値を送っても使わない）。
+        let mut ok = raw_info(6, 4);
+        ok.saturation_level = 16300.0;
+        ok.default_crop = Some(genzo_raw::PixelRect::new(1, 1, 4, 2));
+        let img = raw_image(&p, ok).unwrap();
+        assert_eq!(img.saturation_level, 16300.0);
+        assert_eq!(
+            img.default_crop,
+            Some(genzo_raw::PixelRect::new(1, 1, 4, 2))
+        );
+        for sat in [16384.0, 512.0, f32::NAN] {
+            let mut bad = raw_info(6, 4);
+            bad.saturation_level = sat;
+            assert!(
+                matches!(raw_image(&p, bad), Err(BufferError::Invalid(_))),
+                "{sat}"
+            );
+        }
+        for crop in [
+            genzo_raw::PixelRect::new(3, 0, 4, 4),
+            genzo_raw::PixelRect::new(0, 0, 0, 4),
+            genzo_raw::PixelRect::new(0, 1, 6, 4),
+        ] {
+            let mut bad = raw_info(6, 4);
+            bad.default_crop = Some(crop);
+            assert!(
+                matches!(raw_image(&p, bad), Err(BufferError::Invalid(_))),
+                "{crop:?}"
+            );
+        }
 
         let buf = f.buffer(PayloadKind::CfaU16, 6, 5, &data);
         let p = buf.open_payload(PayloadKind::CfaU16, false).unwrap();
