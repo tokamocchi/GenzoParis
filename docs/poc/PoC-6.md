@@ -29,6 +29,7 @@
 | 6-4 | サムネイルを SQLite の BLOB に保存する方式と、配信方式（AR-9） | サムネイル DB（`thumbs.db`）に BLOB で保存 | `genzo-catalog` の `thumbs.rs`、04 の 4 章 | |
 | 6-5 | SQLite のページキャッシュの大きさと、ロックを待つ時間 | 64 MiB、5 秒（どちらも仮置き） | `genzo-catalog` の `schema.rs`（`CACHE_SIZE_KIB`・`BUSY_TIMEOUT`） | |
 | 6-6 | ダミーデータの割合（実際のカタログの統計がないため仮置き） | 動画 5%、RAW に JPEG が付く写真 20%、仮想コピー 10%、現像した variant 30%（履歴 5 件）、撮影日時なし 1%、同じ撮影日時（連写）10%、キャプション 20%、キーワード 30%、1 フォルダ 500 件、1 トランザクション 5000 件 | `genzo-catalog` の `dummy.rs`（`DummySpec`） | |
+| 6-7 | SQLite 以外のファイルの同期（2026-10-10 の指摘 F19）: (1) macOS 実機で、書き出し先・バックアップの置き場・`preview_cache_dir` を SMB の NAS と外付けの exFAT にして、書き出し・バックアップ・L1 が成功するか（`F_FULLFSYNC` が返すエラーと、fsync に戻ること）、(2) L1 の大量生成（取り込み直後）の時間を `F_FULLFSYNC` と fsync で比べる | 書き出し・バックアップは `F_FULLFSYNC`、失敗したら理由によらず fsync に戻す（SQLite と同じ。EIO などの本当の失敗でも戻す点は要確認）。L1 は fsync。L1 の保存はカタログとキャッシュのロックを持ったまま行う（進捗表の「人の判断・確認が必要な事項」No.46） | `genzo-model` の `fs_sync.rs`、`genzo-media` の `safe_write.rs`、`genzo-catalog` の `backup.rs`・`preview_cache.rs`、`genzo-api` の `previews.rs`（`store_if_current`） | |
 
 ## 3. この環境で AI が確認した事項（参考: 実機ではない）
 
@@ -41,7 +42,7 @@
   - 日本語の部分一致（「京都」「海」「夕焼け」「京都旅行」などの語）、英数字の混在と複数の語の AND、全角・半角と大文字・小文字を区別しない（濁点の有無は区別する）、FTS の特殊な文字でエラーにならない、制御文字を区切りとして扱う（`text_search.rs`）。
   - 接続が WAL・`synchronous = FULL`・外部キーの有効で開かれる（`schema.rs`）。
   - ダミー 3000 件の登録と代表的な検索、同じ設定での 2 回目の登録で件数が増えない（`dummy.rs`）。
-- **未確認**: 50 万件での計測（計測用のテスト `poc6_scale_measurement` はあるが、この資料の作成時には実行していない。コマンドは [README](README.md) の 4.1 節）、検索中の評価の変更や削除（検索結果の世代は `genzo-api` が管理する。04 の 3.7 節）、グリッドの表示とスクロール（UI が必要）、macOS の `fullfsync`、起動時間。
+- **未確認**: 50 万件での計測（計測用のテスト `poc6_scale_measurement` はあるが、この資料の作成時には実行していない。コマンドは [README](README.md) の 4.1 節）、検索中の評価の変更や削除（検索結果の世代は `genzo-api` が管理する。04 の 3.7 節）、グリッドの表示とスクロール（UI が必要）、macOS の `fullfsync`、起動時間、macOS の SMB・exFAT での書き出し・バックアップ・L1 の同期（6-7。Linux では `F_FULLFSYNC` の経路を通らないため、戻す処理の単体テスト（`genzo-model` の `fs_sync.rs`）だけ）。
 
 ## 4. 記録
 

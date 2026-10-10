@@ -28,7 +28,7 @@
 | 2-4 | 共有メモリの方式と受け渡しの時間（AR-10）。本体側の複製の費用、チェックサムを既定で確かめるか | 本体の一時ディレクトリのファイルを使う方式。本体はマップせずに読み取りで複製する。チェックサムは既定で確かめない（仮置き） | `genzo-worker` の `shm.rs`・`client.rs`（`verify_checksum`） | |
 | 2-5 | ワーカーのメモリの上限を OS の機能で設定できるか（AR-10）と、上限の値 | Linux だけ `RLIMIT_DATA` で設定する。Windows（Job Object）・macOS は未対応で「設定しなかった」と返す。上限の既定値は設定なし（仮置き） | `genzo-worker` の `limits.rs`・`client.rs`（`memory_limit_bytes`） | |
 | 2-6 | 孫プロセス（ワーカーが実行する ffmpeg など）をまとめて終了させる仕組み（Windows のジョブオブジェクト、Unix のプロセスグループ）と、依頼の書き込みのタイムアウト | どちらも未実装。ワーカーが強制終了されると、ffmpeg は出力先が閉じた時点で終わる。孫プロセスがパイプを持ったままでも、本体はワーカーのプロセスの終了で異常終了に気づく | `genzo-worker` の `lib.rs`・`client.rs`、進捗表 No.10 | |
-| 2-7 | Windows で共有メモリのファイルが残りうる件の確認（**要確認**） | Windows では開いているファイルを削除できない（`genzo-worker` の `shm.rs` のコメント）。ファイルを開いたままのプロセス（ワーカーや、ハンドルを引き継いだ孫プロセスなど）が残ると削除できない可能性がある。本体が異常終了した場合の掃除（`purge_stale_arenas`）はある。実機で未確認 | `genzo-worker` の `shm.rs` | |
+| 2-7 | Windows で共有メモリのファイルが残りうる件の確認（**要確認**） | Windows では開いているファイルを削除できない（`genzo-worker` の `shm.rs` のコメント）。ファイルを開いたままのプロセス（ワーカーや、ハンドルを引き継いだ孫プロセスなど）が残ると削除できない可能性がある。本体が異常終了・強制終了した場合は、次の起動時に、持ち主の終わった一時ディレクトリを掃除する（`purge_stale_arenas`。持ち主のロックファイルで判断する。2026-10-10 から一時ディレクトリを作る前に呼ぶ。それまでは呼ばれていなかった）。ワーカーは本体の終了（標準入力が閉じた）ですぐに終わる。Windows の実機で未確認 | `genzo-worker` の `shm.rs` | |
 | 2-8 | ジョブごとのタイムアウトと共有メモリの最初の大きさ | 仮置き: RAW の展開 30 秒、メタデータ 10 秒、画像のデコード 30 秒、サムネイル 20 秒、動画のサムネイル 90 秒、起動と握手 10 秒。共有メモリは RAW 72 MiB、画像 64 MiB、サムネイル 4 MiB | `genzo-worker` の `client.rs` | |
 | 2-9 | バッチ用のワーカーの数（並行して展開できるか。AR-7） | 論理 CPU が 8 以上なら 2、それ未満なら 1（仮置き） | `genzo-worker` の `pool.rs`、04 の 1.2 節 | |
 | 2-10 | Windows での LibRaw の入手方法とビルドの設定（スレッドセーフな版か、Unicode のパスに対応するか） | 未定。環境変数 `LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR` で指定する方法を用意したが未確認。CI の Windows は LibRaw なし | `crates/genzo-raw/build.rs`、`genzo-raw` の `decode.rs`、[README](../../README.md)、[第三者の台帳](../third_party.md) の 3.1 節 | |
@@ -36,6 +36,7 @@
 | 2-12 | 本体の実行ファイルを LibRaw に依存させるか（ワーカーを本体と同じ実行ファイルにするか、別の実行ファイルにするか） | CLI の `genzo` はワーカーを兼ねる（`genzo __worker`）ため、`libraw` を有効にすると LibRaw に依存する（Linux の `ldd` で確認。3 章）。本体を依存させない場合は、ワーカーを別の実行ファイル（`genzo-worker`）にする（[implementation_status](../implementation_status.md) の「人の判断・確認が必要な事項」の No.4） | [第三者の台帳](../third_party.md) の 3.1 節 | |
 | 2-13 | ワーカーのプロセスに 2 つの版の lcms2（LibRaw が使うものと、アプリが静的リンクするもの）が入る場合のシンボルの衝突 | 未確認 | [第三者の台帳](../third_party.md) の 3.1 節・3.2 節 | |
 | 2-14 | 大きなバッファ以外のメモリ使用量（ワーカーの常駐分を含む）の見込み | 1GB（仮置き。PoC-1・PoC-2 で計測して見直す） | `genzo-jobs` の `memory.rs`（`NON_BUFFER_OVERHEAD_BYTES`） | |
+| 2-15 | ICC のない Adobe RGB の JPEG の扱い（2026-10-10 の指摘 F28。進捗表の「人の判断・確認が必要な事項」No.47）: α7 IV / α7C で色空間を AdobeRGB にして撮った JPEG に ICC が入るか（Exif の ColorSpace・InteropIndex の値）、ARW の埋め込み JPEG がカメラの色空間の設定に従うか | ICC がなく、Exif が DCF のオプション色空間（ColorSpace=0xFFFF かつ InteropIndex=`R03`、または ColorSpace=2）を示せば Adobe RGB (1998) とみなす。埋め込み JPEG は JPEG 自体の Exif だけを見る（ARW 側の Exif は見ない） | `genzo-media` の `decode.rs`・`exif_read.rs`、04 の 2.6 節 | |
 
 ## 3. この環境で AI が確認した事項（参考: 実機ではない）
 

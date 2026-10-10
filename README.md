@@ -54,7 +54,7 @@ CLI の `genzo` は、自分自身を `genzo __worker` で起動してワーカ�
 
 ### CLI（`genzo`）
 
-検証用の CLI です（ORG-05。UI なしで登録・検索・現像・書き出し・計測を行う）。結果は表か `--json`、進捗と警告は標準エラー、終了コードは 0（成功）・1（エラー）・2（使い方の誤り）です。詳しくは `genzo --help` と `crates/genzo-cli/src/lib.rs` の doc を見てください。
+検証用の CLI です（ORG-05。UI なしで登録・検索・現像・書き出し・計測を行う）。結果は表か `--json`、進捗と警告は標準エラー、終了コードは 0（成功）・1（エラー）・2（使い方の誤り）・130（Ctrl+C で中断。1 回目は実行中の処理を取り消してカタログを閉じてから、2 回目はすぐに終了）です。詳しくは `genzo --help` と `crates/genzo-cli/src/lib.rs` の doc を見てください。
 
 ```sh
 export GENZO_CATALOG=/path/to/catalog.db      # または --catalog

@@ -19,7 +19,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - CI: [.github/workflows/ci.yml](../.github/workflows/ci.yml) の `lint` ジョブで、push と pull request のたびに実行します。
   - ローカル: `cargo install cargo-deny --locked` で入れて、`cargo deny check` を実行します。ライセンスごとの一覧は `cargo deny list` で出せます。
 - 2026-10-09 の確認結果: cargo-deny 0.20.2 で `cargo deny check` を実行し、advisories・bans・licenses・sources がすべて通りました。警告は、同じクレートの複数の版（hashbrown・miniz_oxide・syn）の 3 件だけです。
-- 2026-10-10 の確認結果: `genzo-color`・`genzo-raw`・`genzo-media`・`genzo-catalog`・`genzo-jobs`・`genzo-testkit` の実装の後に再実行し、同じ結果でした（すべて通り、警告は同じ 3 件）。同日、`genzo-pipeline`・`genzo-worker`・`genzo-gpu` の実装の後（`naga` 30.0.1 を `genzo-gpu` の開発用の依存に、`libc` を `genzo-worker` の Linux 用の依存に追加）にも再実行し、同じ結果でした。
+- 2026-10-10 の確認結果: `genzo-color`・`genzo-raw`・`genzo-media`・`genzo-catalog`・`genzo-jobs`・`genzo-testkit` の実装の後に再実行し、同じ結果でした（すべて通り、警告は同じ 3 件）。同日、`genzo-pipeline`・`genzo-worker`・`genzo-gpu` の実装の後（`naga` 30.0.1 を `genzo-gpu` の開発用の依存に、`libc` を `genzo-worker` の Linux 用の依存に追加）にも再実行し、同じ結果でした。同日、全体レビューの修正の後（`ctrlc` 3.5.2 を `genzo-cli` の依存に追加し、`nix` 0.31.3 が新しく依存に入った。あわせて、既に依存のツリーにあった `rustix` を `genzo-media`（Unix）・`genzo-model`（macOS など Apple）の、`sha2`・`same-file` を `genzo-api` の、`libc` を `genzo-cli` の Unix の開発用の直接の依存にした）にも再実行し、同じ結果でした（すべて通り、警告は同じ 3 件）。
 - **cargo-deny が見るのは、各クレートの `Cargo.toml` の `license` と、ライセンスのファイルだけです。** C のソースを同梱してビルドするクレートについて、同梱したソースの版やファイルのヘッダは確認しません。現在の依存では次の 3 つが該当します。
   - `lcms2-sys`（Little CMS 2）と `libsqlite3-sys`（SQLite）: 2 章の一覧に記録します。
   - `blake3`: BLAKE3 の作者たち自身による C とアセンブリの実装を同梱しています（`c/` ディレクトリ）。crate のライセンスは `Cargo.toml` で CC0-1.0 / Apache-2.0 / Apache-2.0 WITH LLVM-exception の選択です。`c/blake3.c` の先頭にはライセンスの表示がなく（1.8.7 で確認）、C の部分にも crate と同じライセンスが及ぶと考えていますが、要確認です。
