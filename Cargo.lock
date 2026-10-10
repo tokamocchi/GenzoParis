@@ -708,6 +708,7 @@ dependencies = [
 name = "genzo-testkit"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "genzo-color",
  "genzo-model",
  "genzo-raw",
@@ -715,6 +716,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

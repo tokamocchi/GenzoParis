@@ -10,3 +10,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# genzo-testkit の計測の記録（既定の出力先。cargo test では各 crate のディレクトリの下にできる）
+bench-results/

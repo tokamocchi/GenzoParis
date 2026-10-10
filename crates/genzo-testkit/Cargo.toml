@@ -8,6 +8,11 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# 合成 DNG を LibRaw で展開して確かめるテストを有効にする（genzo-raw の機能フラグ libraw を有効にする）。
+libraw = ["genzo-raw/libraw"]
+
 [dependencies]
 genzo-color.workspace = true
 genzo-raw.workspace = true
@@ -16,6 +21,12 @@ image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+thiserror.workspace = true
+# 計測の記録の時刻（RFC 3339、UTC）。
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
