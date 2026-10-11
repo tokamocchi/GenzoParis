@@ -1,0 +1,35 @@
+[package]
+name = "genzo-raw"
+description = "GenzoParis の RAW 展開（LibRaw の FFI）と、展開結果の型"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# LibRaw の FFI を有効にする（システムの LibRaw を pkg-config で探し、C++ のシムをビルドする。
+# build.rs）。
+libraw = []
+
+[dependencies]
+genzo-model.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# 合成 DNG を、この crate と独立した TIFF / EXIF の読み取りで確かめる（src/dng/tests.rs）。
+kamadak-exif.workspace = true
+# 合成 DNG に埋め込む JPEG のプレビューを作る（tests/libraw.rs）。
+image.workspace = true
+tempfile.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+pkg-config.workspace = true
+
+[lints]
+workspace = true

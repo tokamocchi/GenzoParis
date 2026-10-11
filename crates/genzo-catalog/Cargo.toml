@@ -1,0 +1,31 @@
+[package]
+name = "genzo-catalog"
+description = "GenzoParis のカタログ（SQLite のスキーマ・マイグレーション・検索・バックアップ）とサムネイル DB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# 他の crate の結合テストで古い版のカタログを作るための関数（`testing`）。配布するビルドでは使わない
+# （genzo-api などの dev-dependencies だけで有効にする）。
+test-support = []
+
+[dependencies]
+genzo-model.workspace = true
+rusqlite.workspace = true
+unicode-normalization.workspace = true
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+# バックアップ・復元の公開を「上書きしない」名前の変更にする（`persist_noclobber`。genzo-media の
+# safe_write と同じ。テストでも使う）。
+tempfile.workspace = true
+
+[lints]
+workspace = true

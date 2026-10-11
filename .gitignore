@@ -1,0 +1,20 @@
+# Cargo のビルド出力
+/target
+
+# rustfmt のバックアップ
+**/*.rs.bk
+
+# エディタ・OS が作るファイル
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# genzo-testkit の計測の記録（既定の出力先。cargo test では各 crate のディレクトリの下にできる）
+bench-results/
+
+# 実機のサンプル（利用者の私的な写真）を誤ってコミットしないため（crates/genzo-pipeline/tests/private_samples.rs）。
+# 合成の RAW・DNG はテストの中で一時ディレクトリに作るので、リポジトリには置かない。
+*.ARW
+*.arw

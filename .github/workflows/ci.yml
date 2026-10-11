@@ -1,0 +1,78 @@
+# GenzoParis の CI（個人開発のため最小限）。
+#
+# - lint: フォーマットの確認と、依存クレートのライセンス・脆弱性・重複・取得元の確認（cargo-deny。設定は deny.toml）
+# - test: Windows と macOS（Apple Silicon）で、clippy（警告をエラーとして扱う）とテスト
+#
+# 対応する要件: docs/02 の MAINT-04（静的な検査）・MAINT-06（両 OS での CI）・SEC-04（依存ライブラリの管理）、
+# docs/05 の 3 章 M0 タスク 5・6。
+# C / C++ のライブラリ・同梱データ・外部の実行ファイルは cargo-deny では確認できないため、docs/third_party.md で管理する。
+# GPU のない CI では CPU 基準実装でテストする（MAINT-02）。
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# 同じ ref で新しい実行が始まったら、古い実行を取り消す。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # dtolnay/rust-toolchain は、参照（@stable）が Rust の版の指定を兼ねる（メジャー版のタグはない）。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: フォーマットの確認
+        run: cargo fmt --all --check
+      - name: 依存クレートの確認（cargo-deny）
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories bans sources
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest は Apple Silicon（arm64）のランナー。
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: テスト
+        run: cargo test --workspace --locked
+
+      # macOS だけ、Homebrew の LibRaw を入れて、機能フラグ libraw を有効にしても確認する。
+      # genzo-cli/libraw を指定すると genzo-api・genzo-worker・genzo-raw の libraw も有効になる。
+      # Windows での LibRaw の入手方法は未定のため、Windows は既定の機能フラグ（LibRaw なし）だけ。
+      - name: LibRaw を入れる（macOS）
+        if: runner.os == 'macOS'
+        # pkg-config は genzo-raw の build.rs が LibRaw を探すために使う。ランナーに既にある場合は
+        # そのまま使う（Homebrew の pkg-config@0.29.2 と pkgconf は同時に入れられないため）。
+        run: |
+          brew install libraw
+          command -v pkg-config >/dev/null || brew install pkgconf
+          pkg-config --modversion libraw
+      - name: clippy（libraw）
+        if: runner.os == 'macOS'
+        run: cargo clippy --workspace --all-targets --locked --features genzo-cli/libraw -- -D warnings
+      - name: テスト（libraw）
+        if: runner.os == 'macOS'
+        run: cargo test --workspace --locked --features genzo-cli/libraw

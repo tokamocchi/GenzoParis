@@ -1,0 +1,28 @@
+{
+  "format_version": 1,
+  "spec": {
+    "name": "colorchecker_after_nov2014_srgb",
+    "description": "ColorChecker Classic（2014 年 11 月以降）を D65 に順応してリニア sRGB にし、IEC 61966-2-1 で符号化した画像（色域外は負の値のまま）",
+    "inputs": [
+      {
+        "id": "synthetic:colorchecker_after_nov2014",
+        "sha256": "020f804c1c533e4f4bdd3b91769f76c4d0e884ce6dc71151112311a220fa9236"
+      }
+    ],
+    "develop": null,
+    "process_version": 1,
+    "tolerance": {
+      "metric": "diff_8bit",
+      "threshold": 0.01,
+      "max_pixels_over": 0,
+      "max_mean": null
+    }
+  },
+  "image": {
+    "file": "colorchecker_after_nov2014_srgb.gzf",
+    "width": 62,
+    "height": 42,
+    "channels": 3,
+    "sha256": "a9d9148871842f47e5bfeb32c7850e4b2a79403c7dd977c95b6b23c122459ab3"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "format_version": 1,
+  "spec": {
+    "name": "zone_plate_bayer_b0",
+    "description": "ゾーンプレートを逆 WB・GRBG でモザイク化・14bit に量子化し、黒レベル 0・白レベル 1 に正規化した CFA（B0）",
+    "inputs": [
+      {
+        "id": "synthetic:zone_plate_bayer",
+        "sha256": "96f796f30c188f11c31c99b681df8b0d476999689078d88ea806458494144d1a"
+      }
+    ],
+    "develop": null,
+    "process_version": 1,
+    "tolerance": {
+      "metric": "diff_8bit",
+      "threshold": 0.01,
+      "max_pixels_over": 0,
+      "max_mean": null
+    }
+  },
+  "image": {
+    "file": "zone_plate_bayer_b0.gzf",
+    "width": 48,
+    "height": 40,
+    "channels": 1,
+    "sha256": "48ffca0391432db79c2998dbaf6de2b6e82a408096477015ed7ae172e3fbe4ba"
+  }
+}

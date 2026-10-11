@@ -1,0 +1,3 @@
+# 基準画像（genzo-testkit の .gzf。リトルエンディアンの f32）はバイナリとして扱う。
+# Windows の core.autocrlf などで改行の変換が起きると、ハッシュが一致しなくなるため。
+*.gzf binary

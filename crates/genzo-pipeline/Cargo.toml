@@ -1,0 +1,32 @@
+[package]
+name = "genzo-pipeline"
+description = "GenzoParis の現像パイプライン（処理ステージと CPU 基準実装、段階 A0〜C、タイル処理）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# LibRaw の FFI を有効にする（genzo-raw の機能フラグ。実機のサンプルの回帰テスト
+# tests/private_samples.rs で RAW を展開するため。パイプラインそのものは LibRaw を使わない）。
+libraw = ["genzo-raw/libraw"]
+
+[dependencies]
+genzo-model.workspace = true
+genzo-color.workspace = true
+genzo-raw.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# 合成のテストデータ（ベイヤー配列・ゾーンプレート・ColorChecker）と、画像の差（PSNR 用の値・ΔE2000）、
+# 比較の基準の縮小（downscale_area）。テストでだけ使う（genzo-testkit は genzo-pipeline に依存しない）。
+genzo-testkit.workspace = true
+# 実機のサンプルの回帰テストで、壊したファイルを一時ディレクトリに作る（tests/private_samples.rs）。
+tempfile.workspace = true
+
+[lints]
+workspace = true

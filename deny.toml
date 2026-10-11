@@ -1,0 +1,74 @@
+# cargo-deny の設定（docs/02 の SEC-04、docs/05 の 3 章 M0 タスク 6）。
+#
+# 確認する内容:
+# - licenses:   依存クレートのライセンスが、アプリのライセンス（GPL-3.0-or-later）と両立するか
+# - advisories: RustSec の脆弱性・メンテナンス終了・取り下げ（yanked）の情報（既定の設定）
+# - bans:       同じクレートの複数の版（警告のみ）
+# - sources:    取得元が crates.io だけか
+#
+# cargo-deny が確認するのは Rust のクレートだけです。C / C++ のライブラリ（LibRaw など）、
+# 同梱データ（カメラ行列など）、外部の実行ファイル（FFmpeg）は docs/third_party.md の台帳で管理します。
+# ライセンスの判断は人が最終確認します（この設定は機械的な確認のためのものです）。
+#
+# 実行: cargo deny check（CI では .github/workflows/ci.yml の lint ジョブで実行）
+
+[graph]
+# 配布の対象（Windows / macOS の Apple Silicon）と、開発環境（Linux）だけを確認する。
+# 対象外のプラットフォーム（Android・WebAssembly など）だけで使う依存は確認しない。
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+# 機能フラグ（libraw など）で増える依存も確認する。
+all-features = true
+
+[advisories]
+# 既定の設定のまま（何をエラーにするかは cargo-deny の既定に従う。脆弱性はエラー）。
+# 例外を加える場合は、理由と見直す時期を書く。
+ignore = []
+
+[licenses]
+# GPL-3.0-or-later と両立するライセンスだけを許可する。
+# - GPL-2.0-only は GPL-3.0 と両立しないため許可しない。
+# - Apache-2.0 は GPL-3.0 とは両立する（GPL-2.0 とは両立しない）。
+# - MPL-2.0 は「Incompatible With Secondary Licenses」の表示があるファイルを含む場合は両立しないため、
+#   あらかじめ許可しない（必要になったときに、その crate のファイルの表示を確認してから追加する）。
+# 新しいライセンスを追加するときは、GPL-3.0 と両立するかを人が確認する。
+allow = [
+    # 現在の依存で使われているもの（右のコメントは例。2026-10-09 時点の Cargo.lock で確認）
+    "MIT",                            # lcms2, lcms2-sys, libsqlite3-sys など
+    "Apache-2.0",                     # spirv, codespan-reporting など
+    "Apache-2.0 WITH LLVM-exception", # blake3 などの選択肢の 1 つ
+    "BSD-2-Clause",                   # kamadak-exif など
+    "BSD-3-Clause",                   # moxcms など（Apache-2.0 との選択）
+    "ISC",                            # libloading
+    "Zlib",                           # foldhash, slotmap, zlib-rs など
+    "Unicode-3.0",                    # unicode-ident
+    "CC0-1.0",                        # blake3 などの選択肢の 1 つ
+    "GPL-3.0-or-later",               # アプリ自体（workspace の crate）
+    # 現在は使われていないが、将来の依存のためにあらかじめ許可するもの
+    "BSL-1.0",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-or-later",
+]
+confidence-threshold = 0.8
+# 許可したライセンスのうち、現在の依存で使われていないものがあっても警告しない
+# （将来の依存のために、GPL と両立するものをあらかじめ許可しているため）。
+unused-allowed-license = "allow"
+
+[licenses.private]
+# workspace の crate（publish = false）もライセンスを確認する（GPL-3.0-or-later であること）。
+ignore = false
+
+[bans]
+# 同じクレートの複数の版は警告にとどめる（依存先ごとに更新の時期が違い、避けにくいため）。
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# crates.io 以外（未知のレジストリ・git）からの取得はエラーにする。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

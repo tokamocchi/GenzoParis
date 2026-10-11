@@ -1,0 +1,32 @@
+[package]
+name = "genzo-testkit"
+description = "GenzoParis の回帰テストと計測の基盤、合成テスト画像"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# 合成 DNG を LibRaw で展開して確かめるテストを有効にする（genzo-raw の機能フラグ libraw を有効にする）。
+libraw = ["genzo-raw/libraw"]
+
+[dependencies]
+genzo-color.workspace = true
+genzo-raw.workspace = true
+genzo-model.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+# 計測の記録の時刻（RFC 3339、UTC）。
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

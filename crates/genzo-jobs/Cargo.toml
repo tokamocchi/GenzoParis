@@ -1,0 +1,17 @@
+[package]
+name = "genzo-jobs"
+description = "GenzoParis の優先度付きジョブスケジューラ（取り消し・メモリの予算）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
