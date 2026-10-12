@@ -59,7 +59,10 @@ export function sameShown(format: (v: number) => string, received: number, curre
   return format(received) === format(current);
 }
 
-/** 入力欄の文字を数にする（単位を含んでよい。"5500 K" → 5500。読めなければ NaN）。 */
+/**
+ * 入力欄の文字を数にする（単位を含んでよい。"5500 K" → 5500。読めなければ NaN）。IME の全角の数字・記号
+ * （"１２"・"－０．５"・"＋"・"，"）も読む（NFKC で半角にしてから、"−" を "-" に読み替える）。
+ */
 export function parseNumber(s: string): number {
-  return Number.parseFloat(s.replace(/[＋+]/g, "").replace(/[−－]/g, "-").replace(/[，,]/g, ""));
+  return Number.parseFloat(s.normalize("NFKC").replace(/\+/g, "").replace(/−/g, "-").replace(/,/g, ""));
 }

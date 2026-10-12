@@ -58,6 +58,17 @@ describe("書式", () => {
     expect(parseNumber("+0.35")).toBe(0.35);
     expect(parseNumber("abc")).toBeNaN();
   });
+  it("IME の全角の数字・記号を読む", () => {
+    expect(parseNumber("１２")).toBe(12);
+    expect(parseNumber("－０．５")).toBe(-0.5);
+    expect(parseNumber("−０．５ EV")).toBe(-0.5);
+    expect(parseNumber("＋２５")).toBe(25);
+    expect(parseNumber("５５００ Ｋ")).toBe(5500);
+    expect(parseNumber("１，０００")).toBe(1000);
+    expect(parseNumber("　１２　")).toBe(12);
+    expect(parseNumber("ａｂｃ")).toBeNaN();
+    expect(parseNumber("")).toBeNaN();
+  });
 });
 
 describe("クリッピングの表示", () => {

@@ -1,4 +1,5 @@
-// ルーペ・フィルムストリップで使う React のフック（DOM の大きさ・コアのイベント）。
+// ルーペ・フィルムストリップで使う React のフック（DOM の大きさ・devicePixelRatio・コアのイベント）。
+// devicePixelRatio のフックは現像の画面（develop/DevelopView.tsx）でも使う。
 
 import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from "react";
 
@@ -23,6 +24,42 @@ function sameRect(a: ViewRect, b: ViewRect): boolean {
 }
 
 /**
+ * devicePixelRatio の変化（別のモニターへの移動・表示倍率の変更）を見張り、変わったら `onChange` を呼ぶ。
+ * 値ごとに問い合わせ（matchMedia の resolution）を作り直す。戻り値の関数で見張りをやめる。
+ */
+export function watchDevicePixelRatio(onChange: () => void): () => void {
+  let mq: MediaQueryList | null = null;
+  const onDprChange = () => {
+    onChange();
+    listenDpr();
+  };
+  const listenDpr = () => {
+    mq?.removeEventListener("change", onDprChange);
+    mq = window.matchMedia(`(resolution: ${currentDpr()}dppx)`);
+    mq.addEventListener("change", onDprChange);
+  };
+  listenDpr();
+  return () => mq?.removeEventListener("change", onDprChange);
+}
+
+/** devicePixelRatio を追う（ウィンドウの大きさの変化・モニター間の移動・表示倍率の変更で読み直す）。 */
+export function useDevicePixelRatio(): number {
+  const [dpr, setDpr] = useState(currentDpr);
+  useEffect(() => {
+    const update = () => setDpr(currentDpr());
+    // 最初の描画からここまでの間に変わった場合も拾う（問い合わせは今の値で作るため）。
+    update();
+    window.addEventListener("resize", update);
+    const unwatch = watchDevicePixelRatio(update);
+    return () => {
+      window.removeEventListener("resize", update);
+      unwatch();
+    };
+  }, []);
+  return dpr;
+}
+
+/**
  * 要素の大きさ・位置と devicePixelRatio を追う（大きさの変化・ウィンドウの大きさの変化・モニター間の移動で
  * devicePixelRatio が変わったとき）。
  */
@@ -40,22 +77,12 @@ export function useViewRect(ref: RefObject<HTMLElement | null>): ViewRect {
     const ro = new ResizeObserver(update);
     ro.observe(el);
     window.addEventListener("resize", update);
-    // devicePixelRatio の変化（別のモニターへの移動・表示倍率の変更）。値ごとに問い合わせを作り直す。
-    let mq: MediaQueryList | null = null;
-    const onDprChange = () => {
-      update();
-      listenDpr();
-    };
-    const listenDpr = () => {
-      mq?.removeEventListener("change", onDprChange);
-      mq = window.matchMedia(`(resolution: ${currentDpr()}dppx)`);
-      mq.addEventListener("change", onDprChange);
-    };
-    listenDpr();
+    // devicePixelRatio の変化（別のモニターへの移動・表示倍率の変更）。
+    const unwatchDpr = watchDevicePixelRatio(update);
     return () => {
       ro.disconnect();
       window.removeEventListener("resize", update);
-      mq?.removeEventListener("change", onDprChange);
+      unwatchDpr();
     };
   }, [ref]);
   return rect;

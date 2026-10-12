@@ -4,6 +4,8 @@
 //   ショートカットを処理しない（日本語の入力を妨げない。UX-01）。
 // - キーの書き方: "g"、"shift+g"、"mod+z"（mod は macOS で ⌘、それ以外で Ctrl）、"ArrowRight"、"Delete"、
 //   "Space"。
+// - mod に使わない側の修飾キー（macOS の Control、それ以外の Windows キー・Super キー）を押したままの
+//   ときは、どの割り当てにも一致させない（macOS の Control+Z を Z として扱わないように）。
 
 import { useEffect, useRef } from "react";
 
@@ -24,10 +26,23 @@ export function isTyping(target: EventTarget | null): boolean {
   return el.isContentEditable;
 }
 
-/** キーの組み合わせの文字列（"shift+mod+z" の順は mod・alt・shift・キー）。 */
-export function comboOf(e: KeyboardEvent): string {
+/** スライダー（type=range）が値を変えるのに使うキー（フォーカスがあるときは全体のショートカットに通さない）。 */
+const RANGE_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
+
+/** スライダー（type=range）が値を変えるのに使うキーか（isTyping は range を入力欄とみなさないため）。 */
+export function isRangeKey(key: string): boolean {
+  return RANGE_KEYS.has(key);
+}
+
+/**
+ * キーの組み合わせの文字列（"shift+mod+z" の順は mod・alt・shift・キー）。mod に使わない側の修飾キー
+ * （macOS の Control、それ以外の Windows キー・Super キー）が押されているときは null（どの割り当てにも
+ * 一致させない）。`mac` はテストのため（既定は実行している環境）。
+ */
+export function comboOf(e: KeyboardEvent, mac: boolean = IS_MAC): string | null {
+  if (mac ? e.ctrlKey : e.metaKey) return null;
   const parts: string[] = [];
-  const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+  const mod = mac ? e.metaKey : e.ctrlKey;
   if (mod) parts.push("mod");
   if (e.altKey) parts.push("alt");
   if (e.shiftKey) parts.push("shift");
@@ -65,6 +80,7 @@ export function useHotkeys(bindings: Bindings, enabled = true): void {
       if (e.defaultPrevented) return;
       if (isTyping(e.target)) return;
       const combo = comboOf(e);
+      if (combo === null) return;
       for (const [k, fn] of Object.entries(ref.current)) {
         if (normalizeCombo(k) === combo) {
           e.preventDefault();

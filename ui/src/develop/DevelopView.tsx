@@ -28,6 +28,7 @@ import { isTyping, useHotkeys } from "../keyboard";
 import { actions, appStore, useApp } from "../state/app";
 import { developStore, openDevelopFor, useDevelop } from "../state/develop";
 import { regionFor, renderRegion } from "../state/region";
+import { useDevicePixelRatio } from "../viewer/hooks";
 import { type CropHandle, cropFractionAspect, dragCrop, rotatedImageCorners } from "./cropMath";
 import { useGeometryInfo, useLoadedSummary } from "./hooks";
 import { activatesOnEnter } from "./keyTargets";
@@ -75,17 +76,6 @@ function useElementSize(ref: RefObject<HTMLElement | null>): { width: number; he
     return () => ro.disconnect();
   }, [ref]);
   return size;
-}
-
-function useDevicePixelRatio(): number {
-  const [dpr, setDpr] = useState(() => (typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1));
-  useEffect(() => {
-    // モニターをまたいだときなどに変わる。
-    const onResize = () => setDpr(window.devicePixelRatio || 1);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-  return dpr;
 }
 
 /** 画素を描く canvas（frame が変わったら描き直す）。 */
@@ -232,6 +222,7 @@ function Stage() {
   const rootRef = useRef<HTMLDivElement>(null);
   const fitCanvasRef = useRef<HTMLDivElement>(null);
   const size = useElementSize(rootRef);
+  // モニター間の移動・表示倍率の変更でも読み直す（ルーペと同じ。viewer/hooks.ts）。
   const dpr = useDevicePixelRatio();
   const variantId = useDevelop((s) => s.variantId);
   const frame = useDevelop((s) => s.frame);

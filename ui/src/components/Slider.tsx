@@ -2,8 +2,28 @@
 //
 // - ドラッグ中は onChange(value, true)、離したら onCommit()（コアの end_drag。履歴に 1 件）。
 // - キーボード（矢印）・数値の入力は onChange(value, false)（コアが 1 秒後に保存して履歴に記録）。
+// - スライダーにフォーカスがあるときの矢印・Home・End・PageUp・PageDown は、スライダーの値を変えるだけに
+//   する（window の全体のショートカット（←→ の写真の移動など）まで届かないようにする。数字キーの評価などは
+//   全体に通す）。
+// - 数値の入力欄は IME の全角の数字・記号（"１２"・"－０．５"）も読む。IME の変換中の Enter・Esc では何もしない。
 
 import { useEffect, useRef, useState } from "react";
+
+import { isRangeKey } from "../keyboard";
+
+/**
+ * 入力欄の文字を読む前に整える（IME の全角の数字・記号（"１２"・"－０．５"・"＋"）を NFKC で半角にし、"+" を
+ * 除き、負の記号 "−" を "-" に読み替える）。
+ */
+export function normalizeNumberText(s: string): string {
+  return s.normalize("NFKC").replace(/\+/g, "").replace(/−/g, "-");
+}
+
+/** 入力欄の既定の読み方（空・読めなければ NaN。NaN のときは元の値に戻す）。 */
+export function parseSliderText(s: string): number {
+  const t = normalizeNumberText(s).trim();
+  return t === "" ? Number.NaN : Number(t);
+}
 
 export interface SliderProps {
   label: string;
@@ -15,7 +35,7 @@ export interface SliderProps {
   defaultValue?: number;
   /** 表示の書式。 */
   format?: (v: number) => string;
-  /** 入力欄の値を数値にする（既定は Number）。 */
+  /** 入力欄の値を数値にする（既定は parseSliderText。どちらも normalizeNumberText で整えた文字を受ける）。 */
   parse?: (s: string) => number;
   onChange: (value: number, dragging: boolean) => void;
   /** ドラッグの終了。 */
@@ -77,11 +97,13 @@ export function Slider(p: SliderProps) {
           setEditing(false);
           if (!edited.current) return;
           edited.current = false;
-          const v = (p.parse ?? Number)(text.replace(/[+＋]/g, "").replace("−", "-"));
+          const v = (p.parse ?? parseSliderText)(normalizeNumberText(text));
           if (Number.isFinite(v)) p.onChange(clamp(v), false);
           else setText(fmt(p.value));
         }}
         onKeyDown={(e) => {
+          // IME の変換中（変換を確定する Enter・取り消す Esc を含む）は何もしない。
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           if (e.key === "Escape") {
             // 書き換えを取り消す（フォーカスを外しても値を送らない）。
@@ -107,6 +129,11 @@ export function Slider(p: SliderProps) {
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
         onDoubleClick={() => p.defaultValue !== undefined && p.onChange(p.defaultValue, false)}
+        // 矢印・Home・End などはスライダーの値を変える（window の全体のショートカット（←→ の写真の移動）まで
+        // 届かないようにする）。値の変化は下の onChange で知らせる（ドラッグ中でなければ onChange(value, false)）。
+        onKeyDown={(e) => {
+          if (isRangeKey(e.key)) e.stopPropagation();
+        }}
         onChange={(e) => {
           const raw = Number(e.target.value);
           const v = usePos ? p.fromPosition!(raw) : raw;
