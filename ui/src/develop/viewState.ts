@@ -125,6 +125,8 @@ export async function pickWhiteBalance(x: number, y: number): Promise<void> {
 
 /** 編集の世代（取り消し・完了の後に届いた古い結果を捨てる）。 */
 let cropSeq = 0;
+/** 編集中の枠の版（制限の結果が届く前に枠が動いていたら、その結果を捨てる）。 */
+let draftRev = 0;
 
 /** 切り抜く前の全体を描くかをコアに伝える（設定の送信の後に。失敗は返す）。 */
 async function setUncropped(uncropped: boolean): Promise<unknown> {
@@ -206,6 +208,7 @@ export async function cancelCrop(): Promise<void> {
 
 /** 編集中の枠を変える。 */
 export function setDraftCrop(crop: CropRect): void {
+  draftRev++;
   viewStore.set((s) => (s.crop ? { crop: { ...s.crop, crop } } : {}));
 }
 
@@ -215,11 +218,12 @@ export async function constrainDraft(): Promise<void> {
   const d = developStore.get();
   if (!draft || !d.settings || d.variantId !== draft.variantId) return;
   const seq = cropSeq;
+  const rev = draftRev;
   try {
     const c = sanitizeCrop(
       await core.constrainCrop(draft.variantId, sanitizeCrop(draft.crop), d.settings.geometry.angle_deg),
     );
-    if (seq === cropSeq) setDraftCrop(c);
+    if (seq === cropSeq && rev === draftRev) setDraftCrop(c);
   } catch (e) {
     console.warn("切り抜きを画像の内側に制限できません", e);
   }
@@ -242,6 +246,7 @@ export async function chooseAspect(aspect: AspectRatio | null, info: GeometryInf
   const k = cropFractionAspect(aspect, info);
   const draft = viewStore.get().crop;
   if (draft) {
+    draftRev++;
     viewStore.set({
       crop: { ...draft, aspect, crop: k === null ? draft.crop : sanitizeCrop(maxAspectCrop(draft.crop, k)) },
     });

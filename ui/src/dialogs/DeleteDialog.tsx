@@ -71,15 +71,14 @@ export function DeleteDialog(props: { deleteKind: DeleteKind; variantIds: Varian
   }, [kind, makePlan]);
 
   // 選んでいる種類の計画だけを見せ・実行する（古い応答が残っても、別の種類の計画は使わない）。
-  const current = plan && plan.kind === kind ? plan : null;
+  const shown = plan && plan.kind === kind ? plan : null;
 
   const execute = async () => {
-    const plan = current;
-    if (!plan) return;
+    if (!shown) return;
     setBusy(true);
     setError(null);
     try {
-      const report = await core.executeDelete(plan.plan_id);
+      const report = await core.executeDelete(shown.plan_id);
       actions.closeDialog();
       const n = describeDeleteReport(kind, report);
       actions.notify(n.level, n.message, n.detail);
@@ -98,10 +97,10 @@ export function DeleteDialog(props: { deleteKind: DeleteKind; variantIds: Varian
     }
   };
 
-  const summary = current ? summarizeDeletePlan(current, ids) : null;
+  const summary = shown ? summarizeDeletePlan(shown, ids) : null;
   const option = DELETE_KIND_OPTIONS.find((o) => o.kind === kind);
   const danger = option?.danger ?? false;
-  const list = current ? (kind === "virtual_copies" ? planVariantLines(current) : planFileLines(current)) : null;
+  const list = shown ? (kind === "virtual_copies" ? planVariantLines(shown) : planFileLines(shown)) : null;
 
   return (
     <Dialog
@@ -117,7 +116,7 @@ export function DeleteDialog(props: { deleteKind: DeleteKind; variantIds: Varian
           <button
             className={`btn ${danger ? "danger" : "primary"}`}
             onClick={() => void execute()}
-            disabled={busy || planning || !current}
+            disabled={busy || planning || !shown}
           >
             {busy ? "実行中…" : deleteKindLabel(kind)}
           </button>
@@ -143,7 +142,7 @@ export function DeleteDialog(props: { deleteKind: DeleteKind; variantIds: Varian
       <div className="dlg-section">
         <h3>影響の一覧</h3>
         {planning && <Busy>影響を受けるファイルを確かめています…</Busy>}
-        {replanned && current && (
+        {replanned && shown && (
           <div className="dlg-warn">
             確認の後にカタログが変わったため、もう一度確かめました。内容を確かめてから、もう一度実行してください。
           </div>
@@ -158,7 +157,7 @@ export function DeleteDialog(props: { deleteKind: DeleteKind; variantIds: Varian
             }
           />
         )}
-        {current && summary && (
+        {shown && summary && (
           <>
             <div className={danger ? "dlg-warn" : "dlg-note"}>{describeDeletePlan(kind, summary).join("\n")}</div>
             {list && <PlanList lines={list.lines} rest={list.rest} />}

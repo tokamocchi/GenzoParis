@@ -36,7 +36,10 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
     () => preparePasteTargets(props.targets, clipboard?.from ?? null, (id) => searchCache.getLoadedById(id)),
     [props.targets, clipboard],
   );
-  const sourceName = clipboard ? (searchCache.getLoadedById(clipboard.from)?.file_name ?? `ID ${clipboard.from}`) : null;
+  const source = clipboard ? searchCache.getLoadedById(clipboard.from) : undefined;
+  const sourceName = clipboard ? (source?.file_name ?? `ID ${clipboard.from}`) : null;
+  // 動画には現像設定がない（コピーしても既定の設定になる）ので、貼り付けない。
+  const sourceIsVideo = source?.kind === "video";
 
   const toggle = (key: keyof PasteSelection, v: boolean) => {
     const next = { ...sel, [key]: v };
@@ -45,7 +48,7 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
   };
 
   const paste = async () => {
-    if (!clipboard || prepared.ids.length === 0 || !anySelected(sel)) return;
+    if (!clipboard || sourceIsVideo || prepared.ids.length === 0 || !anySelected(sel)) return;
     setBusy(true);
     setError(null);
     const groups = toSettingGroups(sel);
@@ -97,7 +100,7 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
           <button
             className="btn primary"
             onClick={() => void paste()}
-            disabled={busy || !clipboard || prepared.ids.length === 0 || !anySelected(sel)}
+            disabled={busy || !clipboard || sourceIsVideo || prepared.ids.length === 0 || !anySelected(sel)}
           >
             {busy ? "貼り付け中…" : "貼り付ける"}
           </button>
@@ -111,6 +114,11 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
           <p className="muted" style={{ marginTop: 0 }}>
             コピー元: {sourceName}
           </p>
+          {sourceIsVideo && (
+            <div className="dlg-warn">
+              コピー元は動画です。動画には現像設定がないため貼り付けられません。写真を選んで、もう一度コピーしてください。
+            </div>
+          )}
           <div className="dlg-section">
             <h3>写す項目</h3>
             {PASTE_GROUP_ITEMS.map((item) => (

@@ -4,7 +4,8 @@
 // - テキストは、IME の変換中は検索しない。変換の確定（compositionend）・入力から 300 ms 後・Enter で反映する。
 // - 撮影日は、カタログの既定のタイムゾーン（CoreSettings の default_utc_offset_minutes）の日付とみなし、
 //   UTC の境界にする（開始日はその日の 0 時を含む、終了日は翌日の 0 時を含まない。filterLogic.ts の冒頭）。
-// - カメラ・レンズの候補は core.facets()。カタログが変わったら読み直す。読めなければ候補なしで動く。
+// - カメラ・レンズ・動画のコーデックの候補は core.facets()。カタログが変わったら読み直す。読めなければ
+//   候補なしで動く（コーデックの欄は候補があるときだけ出す）。
 
 import { useEffect, useRef, useState } from "react";
 
@@ -143,6 +144,17 @@ export function FilterBar() {
         onChange={(v) => actions.setFilter({ lenses: v })}
       />
 
+      {(facets.codecs.length > 0 || (filter.codecs?.length ?? 0) > 0) && (
+        <FacetSelect
+          label="コーデック"
+          title="動画のコーデック（指定すると写真は除く。VID-03）"
+          values={facets.codecs}
+          selected={filter.codecs}
+          failed={failed}
+          onChange={(v) => actions.setFilter({ codecs: v })}
+        />
+      )}
+
       <DateRange filter={filter} offset={offset} />
 
       <span className="spacer" />
@@ -268,6 +280,7 @@ function useFacets(): { facets: Facets; failed: boolean } {
 
 function FacetSelect(props: {
   label: string;
+  title?: string;
   values: FacetValue[];
   selected: string[] | null | undefined;
   failed: boolean;
@@ -281,7 +294,9 @@ function FacetSelect(props: {
       value={value}
       aria-label={props.label}
       disabled={empty}
-      title={empty ? (props.failed ? `${props.label}の候補を読めません` : `${props.label}の候補がありません`) : undefined}
+      title={
+        empty ? (props.failed ? `${props.label}の候補を読めません` : `${props.label}の候補がありません`) : props.title
+      }
       onChange={(e) => props.onChange(choiceToList(e.target.value))}
     >
       <option value="">{props.label}: すべて</option>
