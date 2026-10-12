@@ -559,6 +559,41 @@ impl Histogram {
         Ok(*total)
     }
 
+    /// [`compute`](Self::compute) と同じだが、`include(x, y)`（画像の中の画素の位置）が真の画素だけを
+    /// 数える（切り抜く前の全体の表示で、回転で画像の外になった四隅を除くため）。
+    pub fn compute_where(
+        image: &RgbImage,
+        luma: [f32; 3],
+        include: impl Fn(u32, u32) -> bool + Sync,
+    ) -> Result<Histogram> {
+        check_encoded(image)?;
+        let w = image.width() as usize;
+        // compute と同じく、分割ごとに足し込み、分割どうしを足す（途中の値はヒープに置く）。
+        let total = image
+            .data()
+            .par_chunks(w)
+            .enumerate()
+            .fold(
+                || Box::new(Histogram::default()),
+                |mut h, (y, row)| {
+                    for (x, p) in row.iter().enumerate() {
+                        if include(x as u32, y as u32) {
+                            h.add_pixel(*p, luma);
+                        }
+                    }
+                    h
+                },
+            )
+            .reduce(
+                || Box::new(Histogram::default()),
+                |mut a, b| {
+                    a.merge(&b);
+                    a
+                },
+            );
+        Ok(*total)
+    }
+
     fn add_pixel(&mut self, p: [f32; 3], luma: [f32; 3]) {
         let b = [
             histogram_bin(p[0]),

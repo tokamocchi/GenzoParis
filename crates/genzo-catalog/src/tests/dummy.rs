@@ -206,6 +206,25 @@ fn poc6_scale_measurement() {
             eprintln!("    {line}");
         }
     }
+    // 絞り込みの候補（カメラ・レンズは索引だけを読む。コーデックは video_meta を読む）。
+    f.cat.facets().unwrap();
+    let t = Instant::now();
+    let facets = f.cat.facets().unwrap();
+    eprintln!(
+        "絞り込みの候補: カメラ {} 件・レンズ {} 件・コーデック {} 件、{:?}",
+        facets.cameras.len(),
+        facets.lenses.len(),
+        facets.codecs.len(),
+        t.elapsed()
+    );
+    for (label, plan) in ["カメラ", "レンズ", "コーデック"]
+        .iter()
+        .zip(f.cat.explain_facets().unwrap())
+    {
+        for line in plan {
+            eprintln!("    {label}: {line}");
+        }
+    }
     let ids = f.cat.search(&Filter::default(), &Sort::default()).unwrap();
     let t = Instant::now();
     let mid = ids.len() / 2;

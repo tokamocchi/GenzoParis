@@ -9,6 +9,8 @@
 //! - キーワードは子のキーワードを含めて探す（再帰 CTE）。フォルダは配下を含めるかを選べる。
 //! - 動画の長さ・fps・コーデック（video_meta）と、寸法（長辺の画素数）で絞り込める（VID-03）。索引は
 //!   まだない（動画の件数が少ないうちは不要とみる。PoC-6 の実行計画で判断する）。
+//! - 絞り込みの候補（カメラ・レンズ・動画のコーデックと件数。[`Catalog::facets`]）は、[`Filter`] の
+//!   `cameras`・`lenses`・`codecs` にそのまま渡して一致する値を返す。件数は asset の数（[`Facets`]）。
 //! - 利用者の入力はすべてバインドする値として渡し、SQL の文字列に埋め込まない。
 
 use chrono::{DateTime, Utc};
@@ -427,23 +429,87 @@ impl Catalog {
         variant_summaries(&self.conn, ids)
     }
 
-    /// 登録されているカメラの一覧と件数（フィルターの選択肢用。asset の件数）。
+    /// 登録されているカメラの一覧と件数（フィルターの選択肢用。asset の件数。[`Catalog::facets`] の
+    /// `cameras` と同じ）。
     pub fn distinct_cameras(&self) -> Result<Vec<(String, u64)>> {
-        distinct_values(&self.conn, "camera")
+        facet_values(&self.conn, FACET_CAMERAS_SQL)
     }
 
-    /// 登録されているレンズの一覧と件数（フィルターの選択肢用。asset の件数）。
+    /// 登録されているレンズの一覧と件数（フィルターの選択肢用。asset の件数。[`Catalog::facets`] の
+    /// `lenses` と同じ）。
     pub fn distinct_lenses(&self) -> Result<Vec<(String, u64)>> {
-        distinct_values(&self.conn, "lens")
+        facet_values(&self.conn, FACET_LENSES_SQL)
+    }
+
+    /// 登録されている動画のコーデックの一覧と件数（ASCII の小文字にそろえた値と asset の件数。
+    /// [`Catalog::facets`] の `codecs` と同じ）。
+    pub fn distinct_codecs(&self) -> Result<Vec<(String, u64)>> {
+        facet_values(&self.conn, FACET_CODECS_SQL)
+    }
+
+    /// 絞り込みの候補（カメラ・レンズ・動画のコーデックと、それぞれの件数。[`Facets`]）。
+    ///
+    /// カメラ・レンズは索引だけを読むので、50 万件でも asset の表の行を引かない（PERF-07。テストで
+    /// 実行計画を確かめる）。
+    pub fn facets(&self) -> Result<Facets> {
+        Ok(Facets {
+            cameras: facet_values(&self.conn, FACET_CAMERAS_SQL)?,
+            lenses: facet_values(&self.conn, FACET_LENSES_SQL)?,
+            codecs: facet_values(&self.conn, FACET_CODECS_SQL)?,
+        })
+    }
+
+    /// 絞り込みの候補の問い合わせの実行計画（問い合わせごとの `EXPLAIN QUERY PLAN` の各行の説明。
+    /// カメラ・レンズ・コーデックの順）。PoC-6 の確認用。
+    pub fn explain_facets(&self) -> Result<[Vec<String>; 3]> {
+        let plan = |sql: &str| -> Result<Vec<String>> {
+            let mut stmt = self.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(3))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        Ok([
+            plan(FACET_CAMERAS_SQL)?,
+            plan(FACET_LENSES_SQL)?,
+            plan(FACET_CODECS_SQL)?,
+        ])
     }
 }
 
-fn distinct_values(conn: &Connection, column: &str) -> Result<Vec<(String, u64)>> {
-    // column は呼び出し元の固定の文字列だけ（利用者の入力ではない）。
-    let sql = format!(
-        "SELECT {column}, count(*) FROM asset WHERE {column} IS NOT NULL GROUP BY {column} ORDER BY {column}"
-    );
-    let mut stmt = conn.prepare(&sql)?;
+/// 絞り込みの候補（[`Catalog::facets`]）。値と件数の組を、値の順（バイト列の順）に並べたもの。
+///
+/// - **件数は asset（写真・動画 1 つ）の数**で、仮想コピー（variant）は数えない。variant を数えると、
+///   variant と asset を結合して 50 万件の行を引くことになり、索引だけを読む問い合わせにできないため
+///   （PERF-07）。そのため、仮想コピーがあると、その値で絞り込んだ検索の件数（variant の数）は、ここの
+///   件数より多くなる。
+/// - 値が NULL・空の文字列のものは候補にしない。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Facets {
+    /// カメラ（`asset.camera` の値そのもの。[`Filter::cameras`] にそのまま渡すと一致する）。
+    pub cameras: Vec<(String, u64)>,
+    /// レンズ（`asset.lens` の値そのもの。[`Filter::lenses`] にそのまま渡すと一致する）。
+    pub lenses: Vec<(String, u64)>,
+    /// 動画のコーデック（`video_meta.codec` を ASCII の小文字にそろえてまとめたもの。[`Filter::codecs`]
+    /// は大文字・小文字を区別しないので、この値で一致する）。
+    pub codecs: Vec<(String, u64)>,
+}
+
+/// カメラの候補。`asset_camera` の索引だけを順に読む（表の行を引かない。`camera > ''` で NULL と空の
+/// 文字列を除く）。
+const FACET_CAMERAS_SQL: &str =
+    "SELECT camera, count(*) FROM asset WHERE camera > '' GROUP BY camera ORDER BY camera";
+
+/// レンズの候補（`asset_lens` の索引だけを順に読む）。
+const FACET_LENSES_SQL: &str =
+    "SELECT lens, count(*) FROM asset WHERE lens > '' GROUP BY lens ORDER BY lens";
+
+/// 動画のコーデックの候補。video_meta（動画の行だけ）を読む。コーデックの索引はまだない（検索の
+/// コーデックの条件と同じく、動画の件数が少ないうちは不要とみる。モジュールの doc）。
+const FACET_CODECS_SQL: &str = "SELECT lower(codec) AS c, count(*) FROM video_meta \
+     WHERE codec > '' GROUP BY c ORDER BY c";
+
+/// 候補の問い合わせ（値と件数の 2 列）を実行する。
+fn facet_values(conn: &Connection, sql: &str) -> Result<Vec<(String, u64)>> {
+    let mut stmt = conn.prepare_cached(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
     })?;
