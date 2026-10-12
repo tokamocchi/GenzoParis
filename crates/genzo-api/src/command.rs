@@ -230,10 +230,14 @@ pub enum Command {
     WhiteBalanceAt {
         /// 現像中の写真。
         variant_id: VariantId,
-        /// 点の x（今のプレビューの画像の幅に対する割合。0〜1）。
+        /// 点の x（UI が表示しているプレビューの画像の幅に対する割合。0〜1）。
         x: f64,
         /// 点の y（高さに対する割合。0〜1）。
         y: f64,
+        /// クリックした画像（UI が表示しているプレビュー）の `FrameInfo::uncropped`（省略可。省略時は
+        /// 最新に公開したプレビューの表示とみなす。[`crate::Core::white_balance_at`]）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uncropped: Option<bool>,
     },
     /// 切り抜きの編集中の表示を切り替える（`uncropped` の間は切り抜く前の全体を描く。
     /// [`crate::Core::set_develop_view`]）。→ [`Response::Ok`]
@@ -549,9 +553,12 @@ impl Core {
             C::CreateVirtualCopy { variant_id, name } => R::VariantCreated {
                 variant_id: self.create_virtual_copy(variant_id, name.as_deref())?,
             },
-            C::WhiteBalanceAt { variant_id, x, y } => {
-                R::WhiteBalance(self.white_balance_at(variant_id, x, y)?)
-            }
+            C::WhiteBalanceAt {
+                variant_id,
+                x,
+                y,
+                uncropped,
+            } => R::WhiteBalance(self.white_balance_at(variant_id, x, y, uncropped)?),
             C::SetDevelopView { uncropped } => {
                 self.set_develop_view(uncropped)?;
                 R::Ok
@@ -681,8 +688,33 @@ mod tests {
             Command::WhiteBalanceAt {
                 variant_id: VariantId::new(1),
                 x: 0.5,
-                y: 0.25
+                y: 0.25,
+                uncropped: None,
             }
+        );
+        // クリックした画像の表示（省略可）。省略したものは書き出さない（画面の型と同じ形）。
+        let c: Command = serde_json::from_value(json!({
+            "type": "white_balance_at", "variant_id": 1, "x": 0.5, "y": 0.25, "uncropped": true
+        }))
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::WhiteBalanceAt {
+                variant_id: VariantId::new(1),
+                x: 0.5,
+                y: 0.25,
+                uncropped: Some(true),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(Command::WhiteBalanceAt {
+                variant_id: VariantId::new(1),
+                x: 0.5,
+                y: 0.25,
+                uncropped: None,
+            })
+            .unwrap(),
+            json!({"type": "white_balance_at", "variant_id": 1, "x": 0.5, "y": 0.25})
         );
         let c: Command =
             serde_json::from_value(json!({"type": "set_develop_view", "uncropped": true})).unwrap();
@@ -808,6 +840,13 @@ mod tests {
                 variant_id: VariantId::new(1),
                 x: 0.5,
                 y: 0.25,
+                uncropped: None,
+            },
+            Command::WhiteBalanceAt {
+                variant_id: VariantId::new(1),
+                x: 0.0,
+                y: 1.0,
+                uncropped: Some(false),
             },
             Command::SetDevelopView { uncropped: true },
             Command::ConstrainCrop {

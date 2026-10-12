@@ -621,6 +621,10 @@ pub(crate) struct SessionSnapshot {
     pub generation: u64,
     /// 切り抜く前の全体の表示か（[`Core::set_develop_view`]）。
     pub uncropped: bool,
+    /// 最新に公開したプレビュー（[`Core::develop_frame`]）が切り抜く前の全体の表示か（[`FrameInfo::uncropped`]。
+    /// まだ描けていなければ `None`）。表示を切り替えた直後は、新しい表示のプレビューが届くまで
+    /// [`uncropped`](Self::uncropped) と違う。
+    pub frame_uncropped: Option<bool>,
 }
 
 /// 表示範囲の描画・WB のスポイトなどに使う、現像中の写真の状態の写し。`variant_id` の写真を開いて
@@ -639,7 +643,16 @@ pub(crate) fn session_snapshot(
         settings: s.settings.clone(),
         generation: s.generation,
         uncropped: s.uncropped,
+        frame_uncropped: s.frame.as_ref().map(|f| f.info.uncropped),
     })
+}
+
+/// WB のスポイトの点を解釈する表示（切り抜く前の全体の表示か。[`Core::white_balance_at`]）。
+///
+/// UI が送った表示（クリックした画像の [`FrameInfo::uncropped`]）があればそれ。なければ、最新に公開した
+/// プレビューの表示（UI が表示しているのは、それかそれより前のプレビュー）。プレビューがまだなければ今の表示。
+fn pick_view(requested: Option<bool>, frame: Option<bool>, current: bool) -> bool {
+    requested.or(frame).unwrap_or(current)
 }
 
 /// 動画の variant が含まれていればエラーにする（動画には現像設定を保存しない。implementation_status の
@@ -1333,21 +1346,30 @@ impl Core {
     /// （色温度と tint）を求める。**適用はしない**（UI が `WhiteBalance::Custom` として
     /// [`Core::set_settings`] する）。
     ///
-    /// - `x`・`y`: 今のプレビュー（[`FrameInfo`] の画像）の幅・高さに対する割合（0〜1。左上が (0, 0)）。
-    ///   ふだんは出力の画像（C。切り抜いた後）。切り抜く前の全体の表示（[`Core::set_develop_view`]）の間は、
-    ///   その全体の画像に対する割合（UI が表示中のプレビューの上でクリックした位置をそのまま送れるように）。
+    /// - `x`・`y`: UI が表示しているプレビュー（[`FrameInfo`] の画像）の幅・高さに対する割合（0〜1。左上が
+    ///   (0, 0)）。ふだんは出力の画像（C。切り抜いた後）。切り抜く前の全体の表示
+    ///   （[`Core::set_develop_view`]。[`FrameInfo::uncropped`] が真）のプレビューなら、その全体の画像に
+    ///   対する割合（UI が表示中のプレビューの上でクリックした位置をそのまま送れるように）。
+    /// - `uncropped`: クリックした画像（UI が表示しているプレビュー）の [`FrameInfo::uncropped`]。`x`・`y` を
+    ///   どちらの画像の割合として解釈するかを決める（今の表示とは違ってよい）。表示を切り替えた直後は、
+    ///   新しい表示のプレビューが届くまで UI は前の表示の画像を見せているので、UI はこれを送る。`None` なら
+    ///   最新に公開したプレビュー（[`Core::develop_frame`]）の表示（まだなければ今の表示）とみなす。この
+    ///   ときは、新しいプレビューを公開してから UI が描き直すまでの短い間にクリックした点を、別の画像の
+    ///   割合として解釈しうる。
     /// - 今の設定（保存待ち・ドラッグ中の値を含む）の段階 A1 の出力から求める。今の WB によらず、同じ点なら
     ///   同じ値になる。平均する範囲（見える範囲の長辺の 0.4%。仮置き）・計算の方法・範囲の外の値の丸めは
     ///   genzo-pipeline の `engine::pick` の doc（推定が設定できる範囲の外なら、範囲に丸めて返す）。
     ///
     /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。RAW 以外の写真（WB の
-    /// 設定を使わない）、点が 0〜1 の外・画像の外（回転で画像の外になった四隅）、暗すぎる・色が極端な点は
-    /// [`ApiError::InvalidArgument`]。
+    /// 設定を使わない）、点が 0〜1 の外、切り抜く前の全体の表示で回転で画像の外になった四隅（黒く塗った
+    /// 画素）の点、暗すぎる・色が極端な点は [`ApiError::InvalidArgument`]。切り抜いた後の画像では、端
+    /// （0・1 ちょうど）の点も選べる。
     pub fn white_balance_at(
         &self,
         variant_id: VariantId,
         x: f64,
         y: f64,
+        uncropped: Option<bool>,
     ) -> Result<PickedWhiteBalance, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
@@ -1358,9 +1380,10 @@ impl Core {
                     .to_owned(),
             ));
         }
+        let view = pick_view(uncropped, snap.frame_uncropped, snap.uncropped);
         let pick = inner
             .engine
-            .white_balance_at(&snap.source, &snap.settings, (x, y), snap.uncropped)
+            .white_balance_at(&snap.source, &snap.settings, (x, y), view)
             .map_err(|e| match e {
                 genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
                 e => e.into(),
@@ -1409,6 +1432,21 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WB のスポイトの点は、UI が送った表示 → 最新に公開したプレビューの表示 → 今の表示の順に決めた画像の
+    /// 割合として解釈する（表示を切り替えた直後に、UI がまだ見せている前の表示の画像の上の点を、新しい表示の
+    /// 割合として解釈しない）。
+    #[test]
+    fn the_wb_pick_point_is_read_in_the_view_of_the_clicked_frame() {
+        // 切り抜きの編集を終えた直後（今は切り抜いた表示、プレビューはまだ全体の表示）。
+        assert!(pick_view(None, Some(true), false));
+        // UI がクリックした画像の表示を送れば、それを使う（新しいプレビューの公開の後でも）。
+        assert!(pick_view(Some(true), Some(false), false));
+        assert!(!pick_view(Some(false), Some(true), true));
+        // プレビューがまだなければ今の表示。
+        assert!(pick_view(None, None, true));
+        assert!(!pick_view(None, None, false));
+    }
 
     #[test]
     fn frames_from_other_sessions_or_older_generations_are_not_shown() {

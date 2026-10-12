@@ -360,12 +360,12 @@ fn white_balance_picker_neutralizes_the_picked_point() {
     let items = all_items(&core);
     let jpeg = by_name(&items, "J.jpg").variant_id;
     assert!(matches!(
-        core.white_balance_at(jpeg, 0.5, 0.5),
+        core.white_balance_at(jpeg, 0.5, 0.5, None),
         Err(ApiError::NoDevelopSession)
     ));
     // RAW 以外は WB の設定を使わないので、エラー（日本語の説明）。
     core.open_develop(jpeg).unwrap();
-    match core.white_balance_at(jpeg, 0.5, 0.5) {
+    match core.white_balance_at(jpeg, 0.5, 0.5, None) {
         Err(ApiError::InvalidArgument(m)) => assert!(m.contains("RAW"), "{m}"),
         other => panic!("{other:?}"),
     }
@@ -378,7 +378,7 @@ fn white_balance_picker_neutralizes_the_picked_point() {
     assert!(state.source.is_raw);
     let as_shot = state.source.as_shot_white_balance.expect("撮影時の WB");
     assert!(matches!(
-        core.white_balance_at(jpeg, 0.5, 0.5),
+        core.white_balance_at(jpeg, 0.5, 0.5, None),
         Err(ApiError::NoDevelopSession)
     ));
     let near_as_shot = |p: genzo_api::PickedWhiteBalance, what: &str| {
@@ -389,9 +389,12 @@ fn white_balance_picker_neutralizes_the_picked_point() {
         );
     };
     // 灰色の面（左半分）。
-    near_as_shot(core.white_balance_at(v, 0.25, 0.5).unwrap(), "撮影時の WB");
+    near_as_shot(
+        core.white_balance_at(v, 0.25, 0.5, None).unwrap(),
+        "撮影時の WB",
+    );
     // 青みのある面（右半分）は、それを中立にする値（光源が青寄りとみなすので色温度が高い）。
-    let blue = core.white_balance_at(v, 0.75, 0.5).unwrap();
+    let blue = core.white_balance_at(v, 0.75, 0.5, None).unwrap();
     eprintln!("撮影時の WB {as_shot:?}、青みの面を選んだ WB {blue:?}");
     assert!(
         blue.temperature_k > as_shot.temperature_k + 300.0,
@@ -406,7 +409,10 @@ fn white_balance_picker_neutralizes_the_picked_point() {
         ..Default::default()
     };
     render(&core, &custom);
-    near_as_shot(core.white_balance_at(v, 0.25, 0.5).unwrap(), "Custom の WB");
+    near_as_shot(
+        core.white_balance_at(v, 0.25, 0.5, None).unwrap(),
+        "Custom の WB",
+    );
     assert_eq!(
         core.develop_state()
             .unwrap()
@@ -426,7 +432,10 @@ fn white_balance_picker_neutralizes_the_picked_point() {
         },
     );
     render(&core, &left);
-    near_as_shot(core.white_balance_at(v, 0.5, 0.5).unwrap(), "左を切り抜き");
+    near_as_shot(
+        core.white_balance_at(v, 0.5, 0.5, None).unwrap(),
+        "左を切り抜き",
+    );
     let right = rotated_crop(
         -4.0,
         CropRect {
@@ -437,24 +446,60 @@ fn white_balance_picker_neutralizes_the_picked_point() {
         },
     );
     render(&core, &right);
-    let p = core.white_balance_at(v, 0.5, 0.5).unwrap();
+    let p = core.white_balance_at(v, 0.5, 0.5, None).unwrap();
     assert!(
         (p.temperature_k - blue.temperature_k).abs() < 20.0,
         "{p:?} / {blue:?}"
     );
+    let near_blue = |p: genzo_api::PickedWhiteBalance, what: &str| {
+        assert!(
+            (p.temperature_k - blue.temperature_k).abs() < 20.0,
+            "{what}: {p:?} / {blue:?}"
+        );
+    };
+    // 切り抜いた後の画像（角度補正あり）の四隅・端（0・1 ちょうど）も選べる（画像の内側に収めて求める）。
+    for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 1.0)] {
+        near_blue(
+            core.white_balance_at(v, x, y, None).unwrap(),
+            &format!("切り抜いた後の端 ({x}, {y})"),
+        );
+    }
     // 切り抜く前の全体の表示では、全体の画像に対する割合（左の 4 分の 1 は灰色の面）。回転で画像の外に
     // なった角はエラー。
     let g = core.set_develop_view(true).unwrap();
-    wait_frame(&core, g);
-    near_as_shot(core.white_balance_at(v, 0.25, 0.5).unwrap(), "全体の表示");
+    assert!(wait_frame(&core, g).uncropped);
+    near_as_shot(
+        core.white_balance_at(v, 0.25, 0.5, None).unwrap(),
+        "全体の表示",
+    );
     assert!(matches!(
-        core.white_balance_at(v, 0.0, 0.0),
+        core.white_balance_at(v, 0.0, 0.0, None),
         Err(ApiError::InvalidArgument(_))
     ));
-    core.set_develop_view(false).unwrap();
+    // 表示を切り替えた直後: UI がクリックした画像（まだ見せている全体の表示のプレビュー）の表示を送れば、
+    // その画像の上の点として求める（切り抜いた表示のプレビューが届く前でも後でも）。
+    let g = core.set_develop_view(false).unwrap();
+    near_as_shot(
+        core.white_balance_at(v, 0.25, 0.5, Some(true)).unwrap(),
+        "切り替えの直後に全体の表示の上で選んだ点",
+    );
+    assert!(!wait_frame(&core, g).uncropped);
+    near_as_shot(
+        core.white_balance_at(v, 0.25, 0.5, Some(true)).unwrap(),
+        "切り抜いた表示が届いた後に、前の全体の表示の上で選んだ点",
+    );
+    // 省略すると最新のプレビュー（切り抜いた表示。右半分だけ）の上の点（同じ割合でも青みの面）。
+    near_blue(
+        core.white_balance_at(v, 0.25, 0.5, None).unwrap(),
+        "切り抜いた表示",
+    );
+    near_blue(
+        core.white_balance_at(v, 0.25, 0.5, Some(false)).unwrap(),
+        "切り抜いた表示（明示）",
+    );
     // 範囲の外の点。
     assert!(matches!(
-        core.white_balance_at(v, 1.5, 0.5),
+        core.white_balance_at(v, 1.5, 0.5, None),
         Err(ApiError::InvalidArgument(_))
     ));
     // JSON のコマンド（UI の形）。
@@ -466,5 +511,17 @@ fn white_balance_picker_neutralizes_the_picked_point() {
     assert_eq!(json["ok"]["type"], "white_balance", "{json}");
     assert!(json["ok"]["temperature_k"].as_f64().unwrap() > 0.0);
     assert!(json["ok"]["tint"].is_number());
+    // クリックした画像の表示を送る形（省略可）。
+    let json: serde_json::Value = serde_json::from_str(&core.execute_json(&format!(
+        r#"{{"type":"white_balance_at","variant_id":{},"x":0.25,"y":0.5,"uncropped":true}}"#,
+        v.get()
+    )))
+    .unwrap();
+    assert_eq!(json["ok"]["type"], "white_balance", "{json}");
+    assert!(
+        (json["ok"]["temperature_k"].as_f64().unwrap() - f64::from(as_shot.temperature_k)).abs()
+            < 20.0,
+        "{json} / {as_shot:?}"
+    );
     core.close().unwrap();
 }

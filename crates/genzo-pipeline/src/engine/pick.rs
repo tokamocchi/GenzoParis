@@ -8,7 +8,10 @@
 //! 2. 指定した点（プレビューの出力の画像の幅・高さに対する割合）を、プレビューと同じ C の格子
 //!    （[`GeometryPlan::from_settings`]。切り抜く前の全体の表示ならその格子）で C → G → O → S とたどり、
 //!    A1 の画素の座標にする（ステージ 9 と同じ変換なので、切り抜き・回転・向きがあっても同じ被写体の点を
-//!    指す）。O の外（切り抜く前の全体の表示で、回転で画像の外になった四隅）ならエラー。
+//!    指す）。点のある C の画素が、表示で塗る画素（切り抜く前の全体の表示で、回転で画像の外になった四隅。
+//!    [`GeometryPlan::c_pixel_outside_image`]）ならエラー。そうでなければ、O の外にわずかにかかる点（端の
+//!    画素の中心より外側。C の格子の丸め・切り抜きの制限で、出力の端が O の外にかかることがある）は、O の
+//!    内側に収めてから進める（表示では、そこにも鏡映で埋めた画像が見えているため）。
 //! 3. その点のまわりの正方形（S の軸にそろえる。半径は見える範囲（RAW の既定の切り抜き）の長辺の
 //!    [`WB_PICK_RADIUS`]、A1 の 1 画素以上）にある A1 の画素のうち、中心が既定の切り抜きの内側にある
 //!    ものを平均する。
@@ -74,8 +77,9 @@ impl Engine {
     ///   （各 0〜1。左上が (0, 0)）。
     /// - `uncropped`: プレビューが切り抜く前の全体の表示か（[`crate::PreviewRequest::uncropped`]）。
     ///
-    /// エラー（[`PipelineError::InvalidArgument`]）: RAW 以外の入力、点が 0〜1 の外・有限でない、点が画像の
-    /// 外、平均した色から係数を作れない。
+    /// エラー（[`PipelineError::InvalidArgument`]）: RAW 以外の入力、点が 0〜1 の外・有限でない、点が表示で
+    /// 塗る画素（`uncropped` で、回転で画像の外になった四隅）にある、平均した色から係数を作れない。
+    /// ふつうの表示（切り抜いた後）では、0〜1 の点はすべて画像の上として扱う（端の点も選べる）。
     pub fn white_balance_at(
         &self,
         source: &PhotoSource,
@@ -104,17 +108,23 @@ impl Engine {
         )?;
         let ctx = a1.finish_context(settings)?.with_uncropped(uncropped);
         let geometry = GeometryPlan::from_settings(settings, &ctx)?;
-        // C → G → O。
         let (cw, ch) = geometry.output_size();
-        let (gx, gy) = geometry.c_to_g_px(px * f64::from(cw), py * f64::from(ch));
-        let frames = geometry.frames();
-        let (u, v) = frames.g_to_oriented(gx, gy);
-        let (ow, oh) = frames.oriented_size();
-        if !((0.0..=f64::from(ow)).contains(&u) && (0.0..=f64::from(oh)).contains(&v)) {
+        let (cx, cy) = (px * f64::from(cw), py * f64::from(ch));
+        // 表示で塗る画素（切り抜く前の全体の表示で、回転で画像の外になった四隅）を指したらエラー。描画と
+        // 同じ画素の単位で判定する（0・1 ちょうどの点は端の画素）。
+        let pixel = |c: f64, n: u32| (c.floor() as i64).clamp(0, i64::from(n) - 1);
+        if geometry.c_pixel_outside_image(pixel(cx, cw), pixel(cy, ch)) {
             return Err(PipelineError::InvalidArgument(
                 "指定した点は画像の外です（回転で画像の外になった部分）".to_owned(),
             ));
         }
+        // C → G → O。画像の内側に収める（端の画素の中心より外側は、C の格子の丸め・切り抜きの制限で
+        // O の外にわずかにかかることがあるが、表示ではそこにも鏡映で埋めた画像が見えているため）。
+        let (gx, gy) = geometry.c_to_g_px(cx, cy);
+        let frames = geometry.frames();
+        let (u, v) = frames.g_to_oriented(gx, gy);
+        let (ow, oh) = frames.oriented_size();
+        let (u, v) = (u.clamp(0.0, f64::from(ow)), v.clamp(0.0, f64::from(oh)));
         // O → S → A1 の画素の座標。
         let (sx, sy) = frames.oriented_to_sensor(u, v);
         let (kx, ky) = a1.sensor_pixels_per_pixel();
@@ -491,6 +501,104 @@ mod tests {
             engine.white_balance_at(&dark, &s, (0.5, 0.5), false),
             Err(PipelineError::InvalidArgument(_))
         ));
+    }
+
+    /// ふつうの表示（切り抜いた後）では、角度補正があっても出力の画像の四隅・四辺（0・1 ちょうど）を
+    /// 選べる。出力の端は、C の格子の丸め・切り抜きの制限（四隅が画像の辺にちょうど接する）で画像（O）の外に
+    /// わずかにかかることがあるが、表示ではそこも鏡映の値で埋めた画像が見えているため。
+    #[test]
+    fn edges_of_the_cropped_output_can_be_picked_at_any_angle() {
+        let engine = engine();
+        let crops = [
+            CropRect::FULL,
+            CropRect {
+                left: 0.1,
+                top: 0.05,
+                right: 0.97,
+                bottom: 0.9,
+            },
+        ];
+        let points = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+            (0.5, 0.0),
+            (0.0, 0.5),
+            (1.0, 0.5),
+            (0.5, 1.0),
+        ];
+        for (id, orientation) in [
+            (30, genzo_model::Orientation::Normal),
+            (31, genzo_model::Orientation::Rotate90Cw),
+        ] {
+            let source = source_with(id, |raw| raw.metadata.orientation = orientation);
+            for angle in [7.0f32, 15.0, 30.0, 44.0, -7.0, -44.0] {
+                for crop in crops {
+                    let mut s = DevelopSettings::default();
+                    s.geometry.angle_deg = angle;
+                    s.geometry.crop = crop;
+                    for p in points {
+                        let r = engine.white_balance_at(&source, &s, p, false);
+                        assert!(r.is_ok(), "{orientation:?} {angle}° {crop:?} {p:?}: {r:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// 切り抜く前の全体の表示では、表示で塗る画素（回転で画像の外になった四隅。
+    /// [`GeometryPlan::c_pixel_outside_image`]）を指したときだけエラーになる。塗らない画素なら、端
+    /// （0・1 ちょうど）でも選べる。
+    #[test]
+    fn only_the_filled_corners_of_the_uncropped_view_are_rejected() {
+        let (engine, source) = (engine(), source());
+        for angle in [0.0f32, 7.0, 30.0, -44.0] {
+            let mut s = DevelopSettings::default();
+            s.geometry.angle_deg = angle;
+            // 切り抜く前の全体の表示では、設定の切り抜きは使わない。
+            s.geometry.crop = CropRect {
+                left: 0.2,
+                top: 0.2,
+                right: 0.8,
+                bottom: 0.8,
+            };
+            let a1 = engine.a1(&source, &s, RenderQuality::Final, 120).unwrap();
+            let ctx = a1.finish_context(&s).unwrap().with_uncropped(true);
+            let g = GeometryPlan::from_settings(&s, &ctx).unwrap();
+            let (cw, ch) = g.output_size();
+            let (fw, fh) = (f64::from(cw), f64::from(ch));
+            // 四辺の上の点（各画素の中心の位置で、辺にちょうど接する点）。
+            let mut points = Vec::new();
+            for i in 0..cw {
+                let x = (f64::from(i) + 0.5) / fw;
+                points.extend([(x, 0.0), (x, 1.0)]);
+            }
+            for j in 0..ch {
+                let y = (f64::from(j) + 0.5) / fh;
+                points.extend([(0.0, y), (1.0, y)]);
+            }
+            let mut rejected = 0;
+            for (x, y) in points {
+                let ix = ((x * fw).floor() as i64).min(i64::from(cw) - 1);
+                let iy = ((y * fh).floor() as i64).min(i64::from(ch) - 1);
+                let r = engine.white_balance_at(&source, &s, (x, y), true);
+                if g.c_pixel_outside_image(ix, iy) {
+                    assert!(
+                        matches!(r, Err(PipelineError::InvalidArgument(_))),
+                        "{angle}° ({x}, {y}): {r:?}"
+                    );
+                    rejected += 1;
+                } else {
+                    assert!(r.is_ok(), "{angle}° ({x}, {y}): {r:?}");
+                }
+            }
+            if angle == 0.0 {
+                assert_eq!(rejected, 0);
+            } else {
+                assert!(rejected > 0, "{angle}°");
+            }
+        }
     }
 
     /// 推定が設定できる範囲の外なら、範囲に丸めて返す。

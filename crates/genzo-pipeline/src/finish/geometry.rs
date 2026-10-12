@@ -40,7 +40,7 @@
 //! 回転すると外接矩形の四隅に画像のない部分ができる。ステージ 9 はそこも鏡映で計算するが（GPU 版と
 //! 同じ式のまま）、意味のない値なので、エンジンがステージ 16 の後（と画面の出力の後）に、画素の中心が
 //! O の外にある画素を [`OUTSIDE_IMAGE_FILL`] で塗り（[`GeometryPlan::fill_outside_image`]）、
-//! ヒストグラムからも除く（[`GeometryPlan::c_pixel_in_image`]）。保存する設定・書き出し・キャッシュは
+//! ヒストグラムからも除く（[`GeometryPlan::c_pixel_outside_image`]）。保存する設定・書き出し・キャッシュは
 //! この表示を使わない。
 //!
 //! # 補間（GPU 版も同じ式。2.3 節）
@@ -229,11 +229,24 @@ impl GeometryPlan {
         (0.0..=f64::from(ow)).contains(&u) && (0.0..=f64::from(oh)).contains(&v)
     }
 
+    /// C の画素 (x, y)（格子の番号）が、切り抜く前の全体の表示で画像の外として塗る画素か
+    /// （[`fill_outside_image`](Self::fill_outside_image) が塗り、ヒストグラムに数えない画素）。
+    /// 設定の切り抜きのプラン・回転のないプランでは常に偽。
+    pub fn c_pixel_outside_image(&self, x: i64, y: i64) -> bool {
+        self.fills_outside_image() && !self.c_pixel_in_image(x, y)
+    }
+
+    /// 画像の外を塗るプランか（切り抜く前の全体の表示で、回転している）。
+    fn fills_outside_image(&self) -> bool {
+        self.uncropped && self.frames.rotation_deg != 0.0
+    }
+
     /// 切り抜く前の全体の表示（[`uncropped`](Self::uncropped)）で、画素の中心が画像の外にある画素を
-    /// `value` で塗る（`tile` の範囲は C の格子の座標）。塗った画素の数を返す。設定の切り抜きの
+    /// `value` で塗る（`tile` の範囲は C の格子の座標。塗る画素は
+    /// [`c_pixel_outside_image`](Self::c_pixel_outside_image)）。塗った画素の数を返す。設定の切り抜きの
     /// プラン・回転のないプランでは何もしない（画像の外の画素はない）。
     pub fn fill_outside_image(&self, tile: &mut ImageTile, value: [f32; 3]) -> u64 {
-        if !self.uncropped || self.frames.rotation_deg == 0.0 || tile.roi.is_empty() {
+        if !self.fills_outside_image() || tile.roi.is_empty() {
             return 0;
         }
         let roi = tile.roi;

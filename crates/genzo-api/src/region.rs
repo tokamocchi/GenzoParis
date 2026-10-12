@@ -82,6 +82,7 @@ impl Core {
             settings,
             generation,
             uncropped,
+            ..
         } = crate::develop::session_snapshot(inner, request.variant_id)?;
         let req = *request;
         // 要求の番号の割り当て・スケジューラへの投入・取り消しトークンの公開を、1 つの区間（`region` の

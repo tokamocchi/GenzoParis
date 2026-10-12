@@ -725,7 +725,7 @@ impl Engine {
                 histogram = Some(if geometry.is_uncropped() {
                     // 画像の外の四隅は数えない。
                     Histogram::compute_where(&out.image, luma, |x, y| {
-                        geometry.c_pixel_in_image(i64::from(x), i64::from(y))
+                        !geometry.c_pixel_outside_image(i64::from(x), i64::from(y))
                     })?
                 } else {
                     Histogram::compute(&out.image, luma)?

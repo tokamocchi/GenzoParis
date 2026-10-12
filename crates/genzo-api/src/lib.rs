@@ -82,8 +82,9 @@
 //! - 絞り込みの候補（[`Core::facets`]・[`Command::Facets`]）: カメラ・レンズ・動画のコーデックと件数
 //!   （件数は asset の数。値は [`SearchFilter`] にそのまま渡して一致する）。
 //! - WB のスポイト（DEV-03。[`Core::white_balance_at`]・[`Command::WhiteBalanceAt`]）: プレビューの上の点を
-//!   中立にする色温度・tint を返す（適用はしない）。撮影時の WB の色温度・tint は
-//!   [`SourceInfo::as_shot_white_balance`] で返す。
+//!   中立にする色温度・tint を返す（適用はしない）。点は UI が表示しているプレビューの割合で、その画像の
+//!   表示（[`FrameInfo::uncropped`]。省略可）も送れる（表示を切り替えた直後に、前の表示の画像の上の点を
+//!   取り違えないため）。撮影時の WB の色温度・tint は [`SourceInfo::as_shot_white_balance`] で返す。
 //! - 切り抜きの編集中の表示（[`Core::set_develop_view`]・[`Command::SetDevelopView`]）: 切り抜く前の全体
 //!   （G の外接矩形）を描く（[`FrameInfo::uncropped`]）。描画が実際に使う切り抜き
 //!   （[`Core::constrain_crop`]・[`Command::ConstrainCrop`]）。
