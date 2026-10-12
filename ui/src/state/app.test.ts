@@ -767,3 +767,29 @@ describe("カラーラベルを続けて押す（PR #2 の Codex の指摘）", 
     expect(labels[3]).toBeNull();
   });
 });
+
+describe("選んでいる途中の表示の切り替え（E2E で見つけた競合）", () => {
+  it("クリックの選択の途中に E を押しても、先頭の写真を選び直さず、クリックした写真をルーペで開く", async () => {
+    const big = 1000;
+    overrides.range = (c) => {
+      const start = c.start as number;
+      const items: VariantSummary[] = [];
+      for (let i = start; i < Math.min(big, start + (c.len as number)); i++) {
+        items.push({ variant_id: idAt(i), kind: "photo", file_name: `${i}.ARW`, color_label: null } as VariantSummary);
+      }
+      return { type: "range", generation: c.generation, start, items };
+    };
+    searchCache.reset(1, big);
+    appStore.set({ search: { generation: 1, count: big }, mode: "grid" });
+    mock.delay = (call) => {
+      const cmd = call.args?.command as { type: string; start?: number } | undefined;
+      return cmd?.type === "range" && cmd.start === 400 ? 30 : 0;
+    };
+    const click = actions.selectIndex(500);
+    actions.setMode("loupe");
+    await click;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(appStore.get().selection.current).toBe(idAt(500));
+    expect(appStore.get().mode).toBe("loupe");
+  });
+});

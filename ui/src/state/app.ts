@@ -531,9 +531,21 @@ async function changeSelectionKeepingCurrent(
  *
  * 戻り値は選んだ（選択を変えた）か。選べなかったとき（写真が見つからない・読めない）は false。
  */
-async function selectIndex(
+/** 最後に始めた選ぶ操作（表示の切り替えが、選んでいる途中の結果を待つため）。 */
+let pendingSelect: Promise<unknown> = Promise.resolve();
+
+function selectIndex(
   index: number,
   opts: { extend?: boolean; toggle?: boolean; keepCurrent?: boolean; expect?: VariantId } = {},
+): Promise<boolean> {
+  const p = selectIndexNow(index, opts);
+  pendingSelect = p.catch(() => undefined);
+  return p;
+}
+
+async function selectIndexNow(
+  index: number,
+  opts: { extend?: boolean; toggle?: boolean; keepCurrent?: boolean; expect?: VariantId },
 ): Promise<boolean> {
   if (index < 0 || index >= searchCache.count) return false;
   const seq = ++selectSeq;
@@ -1110,10 +1122,18 @@ export const actions = {
     const seq = ++modeSeq;
     const s = appStore.get();
     if (mode !== "grid" && s.selection.current === null && searchCache.count > 0) {
-      // 先頭の写真を選んでから切り替える。選べなかった・その間に別の切り替えがあったときは切り替えない。
-      void selectIndex(0).then((ok) => {
-        if (ok && seq === modeSeq) appStore.set({ mode });
-      });
+      // 写真を選んでいる途中（クリックの直後など）なら、その結果を待つ。まだ何も選ばれていなければ先頭の写真を
+      // 選んでから切り替える（先に先頭を選び直すと、選んでいる途中の写真を打ち消してしまう）。選べなかった・
+      // その間に別の切り替えがあったときは切り替えない。
+      void (async () => {
+        await pendingSelect;
+        if (seq !== modeSeq) return;
+        if (appStore.get().selection.current === null) {
+          const ok = await selectIndex(0);
+          if (!ok || seq !== modeSeq) return;
+        }
+        appStore.set({ mode });
+      })();
       return;
     }
     appStore.set({ mode });
