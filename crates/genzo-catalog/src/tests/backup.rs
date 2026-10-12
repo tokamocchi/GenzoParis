@@ -6,7 +6,8 @@ use super::Fixture;
 use crate::backup::vacuum_into_file_with;
 use crate::{
     BackupOwner, Catalog, CatalogError, DEFAULT_BACKUP_GENERATIONS, Filter, PreviousShutdown, Sort,
-    backup_catalog_file, create_backup, list_backups, prune_backups, restore_backup,
+    backup_catalog_file, create_backup, list_backups, list_backups_by_stem, prune_backups,
+    restore_backup,
 };
 
 #[test]
@@ -367,6 +368,14 @@ fn catalogs_with_the_same_name_do_not_touch_each_others_backups() {
     let lb = list_backups(&shared, &ob).unwrap();
     assert_eq!(lb.len(), DEFAULT_BACKUP_GENERATIONS);
     assert!(lb.iter().all(|x| x.catalog_tag == ob.tag));
+    // 印を問わない一覧（壊れて開けないカタログの復元の候補）は、同じファイル名の両方のカタログのものを返す。
+    let all = list_backups_by_stem(&shared, &oa.stem).unwrap();
+    assert_eq!(all.len(), 1 + DEFAULT_BACKUP_GENERATIONS);
+    assert!(
+        all.windows(2).all(|w| w[0].created_at >= w[1].created_at),
+        "新しい順"
+    );
+    assert!(list_backups_by_stem(&shared, "other").unwrap().is_empty());
 
     let legacy = shared.join("catalog-backup-20000101T000000000Z.db");
     a.backup_to(&legacy).unwrap();

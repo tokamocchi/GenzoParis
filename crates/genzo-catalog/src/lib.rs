@@ -52,7 +52,8 @@ pub mod testing;
 
 pub use backup::{
     BackupInfo, BackupOwner, DEFAULT_BACKUP_GENERATIONS, ForeignKeyViolation, IntegrityReport,
-    RestoreReport, backup_catalog_file, create_backup, list_backups, prune_backups, restore_backup,
+    RestoreReport, backup_catalog_file, create_backup, list_backups, list_backups_by_stem,
+    prune_backups, restore_backup,
 };
 pub use catalog::{
     Catalog, ConnectionSettings, OpenOptions, OpenReport, PreviousShutdown,
