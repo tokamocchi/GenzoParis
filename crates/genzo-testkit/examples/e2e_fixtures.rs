@@ -2,8 +2,10 @@
 //!
 //! `cargo run -p genzo-testkit --example e2e_fixtures -- <フォルダ>`
 //!
-//! - `チャート 01.dng`: ColorChecker の合成 DNG（ベイヤー配列。撮影時の WB は genzo-testkit の既定値）。
-//!   LibRaw を有効にしたワーカーで RAW として開ける。WB のスポイト（DEV-03）を灰色のパッチで試せる。
+//! - `チャート 01.dng`: ColorChecker の合成 DNG（ベイヤー配列。撮影時の WB は genzo-testkit の既定値。
+//!   カメラ行列は genzo-api のテストと同じ仮の値。埋め込みのプレビューはない）。
+//!   LibRaw を有効にしたワーカーで RAW として開ける。WB のスポイト（DEV-03）を灰色のパッチで試せる
+//!   （灰色のパッチは撮影時の WB で中立）。
 //! - `チャート 02.dng`: 同じチャートを 2 段暗く撮ったもの（露光量の補正を試す）。
 //! - `グラデーション 01.jpg`〜`03.jpg`、`色の帯.png`: RAW 以外の入力。
 //!
@@ -12,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use genzo_color::RgbColorSpace;
-use genzo_testkit::bayer::{BayerParams, mosaic, write_dng};
+use genzo_testkit::bayer::{BayerParams, mosaic, working_to_camera, write_dng};
 use genzo_testkit::colorchecker::{ColorCheckerEdition, ColorCheckerLayout, color_checker_image};
 
 fn write_chart(path: &Path, exposure: f32) -> Result<(), Box<dyn std::error::Error>> {
@@ -23,7 +25,13 @@ fn write_chart(path: &Path, exposure: f32) -> Result<(), Box<dyn std::error::Err
         patch_size: 320,
         gap: 40,
     };
-    // カメラ行列なし（BT.2020 の原色とみなされる）。B1 の値は作業色空間の値と同じになる。
+    // 作業色空間（BT.2020）のチャートを、カメラ行列でカメラ RGB に戻してから並べる（ステージ 8 で元に
+    // 戻る）。カメラ行列がないと、撮影時の WB を色温度・色かぶり補正で表せない。
+    const CAM_XYZ: [[f32; 3]; 3] = [
+        [0.7424, -0.2329, -0.0466],
+        [-0.4598, 1.2471, 0.2347],
+        [-0.0715, 0.1505, 0.6066],
+    ];
     let scene = color_checker_image(
         ColorCheckerEdition::AfterNov2014,
         RgbColorSpace::Bt2020,
@@ -31,7 +39,12 @@ fn write_chart(path: &Path, exposure: f32) -> Result<(), Box<dyn std::error::Err
         [0.03, 0.03, 0.03],
         exposure,
     )?;
-    let raw = mosaic(&scene, &BayerParams::default())?;
+    let camera = working_to_camera(&scene, &CAM_XYZ)?;
+    let params = BayerParams {
+        cam_xyz: Some(CAM_XYZ),
+        ..BayerParams::default()
+    };
+    let raw = mosaic(&camera, &params)?;
     write_dng(path, &raw)?;
     Ok(())
 }

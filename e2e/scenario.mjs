@@ -257,7 +257,7 @@ try {
 
   await run("11. 切り抜き（1:1）を編集して確定する（DEV-15）", async () => {
     const opt = await wd.exec(
-      "const s = document.querySelector('select[aria-label=\"縦横比\"]'); const o = [...s.options].find((o) => o.textContent.includes('1:1')); return o ? o.value : null;",
+      "const s = document.querySelector('select[aria-label=\"縦横比\"]'); const o = [...s.options].find((o) => o.textContent.replace(/\\s/g, '') === '1:1'); return o ? o.value : null;",
     );
     assert(opt !== null, "1:1 の選択肢");
     const option = await wd.find("css selector", `select[aria-label="縦横比"] option[value="${opt}"]`);
