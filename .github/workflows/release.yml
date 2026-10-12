@@ -14,9 +14,10 @@
 # 再頒布用のフォルダから。決定事項ログ No.73）。
 # 確認に通らなかった配布物は、配る用の artifact には置かない（調べるために「-unverified」の名前で置く）。
 #
-# **未確認**: このワークフローは GitHub Actions でまだ実行していない（2026-10-12 に作成。Linux の .deb で同じ
-# スクリプトが通ることだけ確かめた）。Windows の vcpkg の LibRaw、macOS の dylib の書き換え・署名・.dmg の作成、
-# NSIS の無人インストール（/S）は、最初の実行で確かめる。
+# 実行の記録: 2026-10-12 に main（c0681eb）で 2 回実行した。1 回目（run 38263152398）は Windows が通り、macOS は
+# 同梱する dylib が macOS 26.0 向け（minos 26.0）のため止まった。2 回目（run 38276847388。allow_newer_macos_libs に
+# 印を付けた。配る相手の Mac はすべて macOS 26 以降。決定事項ログ No.74）で、両 OS の配布物ができ、確認の手順が
+# 通った。Windows・macOS の実機での確認はまだ（docs/m5_acceptance.md）。
 
 name: Release
 
@@ -153,7 +154,7 @@ jobs:
 
       # 確認: 配布物の中のワーカーが、同梱の LibRaw で起動できるか（DLL・dylib が見つからなければ起動しない）。
       # 成果物を置く前に行い、通らなければ配る用の artifact に置かない。
-      # **未確認**: 両 OS とも、Actions で一度も実行していない。
+      # 2026-10-12 の実行（run 38276847388）で、両 OS とも通った（上の「実行の記録」）。
       - name: 確認（Windows。無人インストールしてワーカーを起動する）
         if: runner.os == 'Windows'
         shell: pwsh
