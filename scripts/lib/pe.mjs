@@ -1,7 +1,7 @@
 // Windows の実行ファイル・DLL（PE 形式）から、読み込む DLL の名前を取り出す（純粋な処理）。
 //
 // 配布用のビルドで、ワーカー（genzo-worker.exe）が読み込む LibRaw の DLL と、その DLL が読み込む DLL を
-// たどって集めるために使う（scripts/prepare-worker.mjs）。dumpbin（Visual Studio の開発者用の環境が要る）を
+// たどって集めるために使う（scripts/lib/worker.mjs）。dumpbin（Visual Studio の開発者用の環境が要る）を
 // 使わずに済むよう、PE のヘッダを直接読む。
 //
 // 読むもの（Microsoft の「PE Format」の仕様）:
@@ -180,7 +180,7 @@ export function isWindowsSystemDll(name) {
 
 /**
  * OS の DLL の名前（小文字）。ここにない DLL も、LibRaw のフォルダで見つからなければ同梱せずに一覧に出す
- * （prepare-worker.mjs）。一覧は網羅ではない（仮置き）。
+ * （scripts/lib/worker.mjs）。一覧は網羅ではない（仮置き）。
  */
 const WINDOWS_SYSTEM_DLLS = new Set([
   "advapi32.dll",

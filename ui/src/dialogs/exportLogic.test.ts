@@ -146,9 +146,35 @@ describe("書き出しの結果", () => {
     );
     expect(n.level).toBe("warning");
     expect(n.message).toBe("書き出し: 1 枚を書き出しました、2 枚は飛ばしました、2 枚は失敗しました");
-    expect(n.detail).toContain("原本と同じ場所・同じ名前になるため書き出しませんでした（原本は変更していません）（2 枚）");
+    expect(n.detail).toContain("・原本と同じ場所・同じ名前（2 枚）");
+    expect(n.detail).toContain("例: 原本と同じ場所・同じ名前になるため書き出しませんでした（原本は変更していません）");
     expect(n.detail).toContain("同じ名前のファイルがあるため、書き出しませんでした（1 枚）");
     expect(n.detail).toContain("連番");
+  });
+
+  it("失敗はエラーの種類ごとにまとめる（パスの違う文を別の理由にしない）", () => {
+    const items: ExportReport["items"] = Array.from({ length: 300 }, (_, i) => ({
+      variant_id: i + 1,
+      outcome: {
+        status: "failed" as const,
+        error: {
+          ...err("file_access", `ファイルにアクセスできません（/m/ext/IMG_${i}.ARW）: 見つかりません`),
+          hint: "ドライブの接続・権限を確かめてください",
+        },
+      },
+    }));
+    items.push({ variant_id: 999, outcome: { status: "failed", error: err("storage", "空き容量が足りません") } });
+    const n = describeExportReport(report({ failed: 301, items }));
+    expect(n.detail?.split("\n")).toEqual([
+      "失敗:",
+      "・ファイルにアクセスできない（300 枚）",
+      "　例: ファイルにアクセスできません（/m/ext/IMG_0.ARW）: 見つかりません",
+      "　例: ファイルにアクセスできません（/m/ext/IMG_1.ARW）: 見つかりません",
+      "　→ ドライブの接続・権限を確かめてください",
+      "・空き容量・書き込みの問題（1 枚）",
+      "　例: 空き容量が足りません",
+      "書き出し先: /out",
+    ]);
   });
 
   it("1 枚も書けなければエラー、取り消しは警告", () => {

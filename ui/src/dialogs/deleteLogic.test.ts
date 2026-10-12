@@ -4,9 +4,11 @@ import type { DeletePlan, ErrorInfo } from "../api/types";
 import {
   describeDeletePlan,
   describeDeleteReport,
+  groupFileIssues,
   isOutdatedPlanError,
   planFileLines,
   planVariantLines,
+  stripPathFromReason,
   summarizeDeletePlan,
 } from "./deleteLogic";
 
@@ -44,6 +46,8 @@ describe("削除の計画", () => {
       assets: 2,
       files: 3,
       filesWithoutPath: 1,
+      assetsWithoutPath: 1,
+      trashableFiles: 2,
       includesUnselected: true,
     });
     expect(summarizeDeletePlan(plan, [1, 2, 3]).includesUnselected).toBe(false);
@@ -52,13 +56,22 @@ describe("削除の計画", () => {
   it("説明の文", () => {
     const s = summarizeDeletePlan(plan, [1, 3]);
     const trash = describeDeletePlan("trash", s);
-    expect(trash[0]).toBe("3 個のファイルを OS のゴミ箱へ移します。");
-    expect(trash[1]).toBe("2 枚の写真・動画をカタログから除去します（仮想コピー 1 件を含む 3 件）。");
+    // 場所の分からないファイルを含む写真（asset 11）は移せずに残るので、移す数・除去する数に入れない。
+    expect(trash[0]).toBe("2 個のファイルを OS のゴミ箱へ移します。");
+    expect(trash[1]).toBe("1 枚の写真・動画をカタログから除去します。");
     expect(trash.join("\n")).toContain("まとめて対象");
-    expect(trash.join("\n")).toContain("1 個のファイルは場所が分かりません");
+    expect(trash.join("\n")).toContain(
+      "1 枚は、場所の分からないファイル（1 個。ドライブが接続されていない可能性があります）を含むため、ゴミ箱へは移せず、失敗としてカタログに残します。",
+    );
+    // 場所がすべて分かれば、すべて移す。
+    const known = summarizeDeletePlan({ ...plan, files: plan.files.map((f) => ({ ...f, path: f.path ?? "/p/b.ARW" })) }, [1, 3]);
+    const all = describeDeletePlan("trash", known);
+    expect(all[0]).toBe("3 個のファイルを OS のゴミ箱へ移します。");
+    expect(all[1]).toBe("2 枚の写真・動画をカタログから除去します（仮想コピー 1 件を含む 3 件）。");
+    expect(all.join("\n")).not.toContain("場所の分からない");
     const remove = describeDeletePlan("remove_from_catalog", s);
     expect(remove[1]).toBe("元のファイル 3 個は残ります。");
-    expect(remove.join("\n")).not.toContain("場所が分かりません");
+    expect(remove.join("\n")).not.toContain("場所の分からない");
     expect(describeDeletePlan("virtual_copies", { ...s, variants: 2 })[0]).toBe(
       "2 件の仮想コピーを削除します。元のファイルは変わりません。",
     );
@@ -95,6 +108,32 @@ describe("削除の結果", () => {
     expect(n.detail).toContain("・a.JPG");
     expect(n.detail).toContain("1 枚はゴミ箱へ移せなかったため、カタログに残しています");
     expect(n.detail).toContain("ゴミ箱へ移動できません（1 枚）");
+  });
+
+  it("失敗の理由はパスを除いてまとめる（同じ原因が別の理由に分かれない）", () => {
+    expect(stripPathFromReason("ゴミ箱へ移動できません（/m/x/a.ARW）: 権限がありません", "/m/x/a.ARW")).toBe(
+      "ゴミ箱へ移動できません: 権限がありません",
+    );
+    expect(stripPathFromReason("ファイルにアクセスできません（）: ボリュームのマウント先が分かりません", "")).toBe(
+      "ファイルにアクセスできません: ボリュームのマウント先が分かりません",
+    );
+    const failed = Array.from({ length: 300 }, (_, i) => ({
+      path: `/m/ext/IMG_${i}.ARW`,
+      reason: `ファイルにアクセスできません（/m/ext/IMG_${i}.ARW）: ファイルのフォルダが見つかりません（ドライブが外れている可能性があります）。移していません`,
+    }));
+    const lines = groupFileIssues(failed, "枚", 3);
+    expect(lines).toEqual([
+      "・ファイルにアクセスできません: ファイルのフォルダが見つかりません（ドライブが外れている可能性があります）。移していません（300 枚）: IMG_0.ARW、IMG_1.ARW、IMG_2.ARW ほか 297 枚",
+    ]);
+    const n = describeDeleteReport("trash", {
+      removed_variants: [],
+      removed_assets: [],
+      trashed_files: [],
+      skipped_missing: [],
+      failed,
+    });
+    expect(n.detail).not.toContain("種類の理由");
+    expect(n.detail).toContain("ドライブの接続・権限を確かめてから");
   });
 
   it("すべて失敗ならエラー、問題がなければ成功", () => {

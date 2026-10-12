@@ -14,7 +14,7 @@ export const UI_DIR = path.join(REPO_ROOT, "ui");
 export const BINARIES_DIR = path.join(APP_DIR, "binaries");
 /** 配布のビルドのときだけ足す Tauri の設定。 */
 export const BUNDLE_CONFIG = path.join(APP_DIR, "tauri.bundle.conf.json");
-/** prepare-worker.mjs が作る、同梱するライブラリの Tauri の設定。 */
+/** prepare-worker.mjs（scripts/lib/worker.mjs）が作る、同梱するライブラリの Tauri の設定。 */
 export const LIBS_CONFIG = path.join(BINARIES_DIR, "tauri.libs.conf.json");
 /** Tauri の CLI（ui の devDependencies の @tauri-apps/cli）の入口。 */
 export const TAURI_CLI = path.join(UI_DIR, "node_modules", "@tauri-apps", "cli", "tauri.js");

@@ -2,7 +2,7 @@
 //
 // 配布用のビルドで、ワーカー（genzo-worker）が読み込む Homebrew の LibRaw（libraw_r.*.dylib）と、その依存
 // （libomp・little-cms2・jpeg-turbo など。Homebrew の libraw の formula の依存）を集め、.app の
-// Contents/Frameworks に置くために使う（scripts/prepare-worker.mjs）。
+// Contents/Frameworks に置くために使う（scripts/lib/worker.mjs）。
 //
 // - 依存は `otool -l` の出力（Load command の一覧）から読む。otool・install_name_tool・codesign は
 //   Xcode の Command Line Tools に含まれる。
