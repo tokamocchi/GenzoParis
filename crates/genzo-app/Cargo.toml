@@ -1,0 +1,58 @@
+[package]
+name = "genzo-app"
+description = "GenzoParis のデスクトップアプリ（Tauri 2。案 A。UI は ui/ の React / TypeScript）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+default-run = "genzo-paris"
+
+[features]
+default = []
+# 画面（ui/dist）を実行ファイルに埋め込み、カスタムプロトコルで配信する（配布するアプリ）。
+# 無効のとき（既定）は tauri.conf.json の devUrl（Vite の開発サーバー）を開く。`npx tauri build` は
+# この機能を自動で有効にする。手元で埋め込みのアプリを作るときは、先に `npm --prefix ui run build` を
+# 実行してから `cargo build -p genzo-app --features custom-protocol` を実行する。
+custom-protocol = ["tauri/custom-protocol"]
+
+[lib]
+name = "genzo_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "genzo-paris"
+path = "src/main.rs"
+test = false
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+genzo-api.workspace = true
+genzo-model.workspace = true
+genzo-color.workspace = true
+# 壊れて開けないカタログのバックアップの一覧（カタログを開かずに探す。SYS-04）。
+genzo-catalog.workspace = true
+# Tauri 2（案 A。決定事項ログ No.14・No.60）。版は公開から 2 週間以上たった 2.11 系に固定する（Cargo.lock）。
+tauri = { version = "2.11.6", features = [] }
+# フォルダ・ファイルを選ぶダイアログ（取り込み・書き出し先・カタログの場所）と確認のダイアログ。
+tauri-plugin-dialog = "2.7.3"
+# 元ファイルを OS のファイル管理（エクスプローラー・Finder）で表示する、動画を OS のアプリで開く。
+tauri-plugin-opener = "2.5.5"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true

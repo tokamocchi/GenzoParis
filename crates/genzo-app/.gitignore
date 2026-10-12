@@ -1,0 +1,4 @@
+# tauri-build が生成するスキーマ（capabilities の補完用）
+/gen/schemas
+# 配布用にワーカーなどを置くフォルダ（リリースのワークフローが作る）
+/binaries

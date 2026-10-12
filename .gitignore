@@ -18,3 +18,7 @@ bench-results/
 # 合成の RAW・DNG はテストの中で一時ディレクトリに作るので、リポジトリには置かない。
 *.ARW
 *.arw
+
+# 画面（ui/）の依存と、ビルドの出力（genzo-app が埋め込む）
+/ui/node_modules/
+/ui/dist/
