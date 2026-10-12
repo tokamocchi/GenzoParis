@@ -22,3 +22,6 @@ bench-results/
 # 画面（ui/）の依存と、ビルドの出力（genzo-app が埋め込む）
 /ui/node_modules/
 /ui/dist/
+
+# Claude Code の作業用の worktree（並列の作業で一時的に作る）
+/.claude/worktrees/
