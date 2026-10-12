@@ -2434,6 +2434,8 @@ fn a_failed_save_keeps_the_develop_session_when_closing_or_switching_photos() {
 /// serde_json が「path contains invalid UTF-8 characters」のエラーにしていた（Tauri は promise を reject し、
 /// 画面は取り込みの完了を待ち続けた）。画面に返すパスは、表せない部分を U+FFFD に置き換えた文字列にする
 /// （読み込みは今までどおり `PathBuf`）。Unix だけ（Windows の名前は UTF-16 で、このバイト列を作れない）。
+/// macOS の APFS のように、UTF-8 でない名前のファイルを作れないファイルシステムでは飛ばす（作れなければ、
+/// 取り込みでこの名前に出会うこともない）。
 #[cfg(unix)]
 #[test]
 fn a_file_name_not_in_utf8_does_not_break_the_json_of_the_results() {
@@ -2446,7 +2448,10 @@ fn a_file_name_not_in_utf8_does_not_break_the_json_of_the_results() {
     write_jpeg(&env.photos.join("A.jpg"), (32, 24), 1, None);
     // Latin-1 の「café.jpg」（0xE9 だけのバイトは UTF-8 として不正）。
     let bad = env.photos.join(OsStr::from_bytes(b"caf\xe9.jpg"));
-    std::fs::copy(env.photos.join("A.jpg"), &bad).unwrap();
+    if let Err(e) = std::fs::copy(env.photos.join("A.jpg"), &bad) {
+        eprintln!("UTF-8 でない名前のファイルを作れないファイルシステムのため飛ばす: {e}");
+        return;
+    }
     let core = env.open();
     let rx = core.subscribe();
     let job_id = match core
