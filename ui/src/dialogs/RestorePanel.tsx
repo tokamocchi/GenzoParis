@@ -109,7 +109,7 @@ export function RestorePanel(props: {
     listRef.current?.querySelectorAll<HTMLButtonElement>("button[role=radio]")[next]?.focus();
   };
 
-  /** 結果を知らせる（`discard` は、保存せずに閉じてから復元したか）。 */
+  /** 結果を知らせる。 */
   const finish = (r: RestoreResult, when: string) => {
     if (r.ok) {
       const detail =
@@ -146,10 +146,8 @@ export function RestorePanel(props: {
     finish(r, when);
   };
 
-  const focusIndex = Math.max(
-    0,
-    backups ? backups.findIndex((b) => b.path === selected) : 0,
-  );
+  // Tab で入ったときにフォーカスする項目（選んだもの。なければ先頭）。
+  const focusIndex = Math.max(0, backups ? backups.findIndex((b) => b.path === selected) : 0);
 
   return (
     <div>
