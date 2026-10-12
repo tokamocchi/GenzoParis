@@ -545,6 +545,12 @@ export interface FrameInfo {
    * 古いコアでは無い（false とみなす）。
    */
   uncropped?: boolean;
+  /**
+   * この描画の設定での出力の画像（C。切り抜いた後）のフル解像度の幅と高さ（表示範囲の描画の座標に使う）。
+   * `uncropped` のときは切り抜く前の全体（G の外接矩形）のフル解像度の大きさ。古いコアでは無い。
+   */
+  output_width?: number;
+  output_height?: number;
 }
 
 export type RegionSpace = "output" | "geometry";
