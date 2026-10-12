@@ -9,7 +9,8 @@
 //!   防ぐ）。別のカタログを開くときは、今のカタログを閉じてから開く。
 //! - 閉じるときに保存待ちの現像設定を保存できなかった場合（ディスクの空き容量の不足など）は、閉じずに
 //!   エラーを返す（[`CloseError::SaveFailed`]）。画面は「再試行」と「保存せずに閉じる」を選ばせる
-//!   （genzo-api の `Core::close` の doc。決定事項ログ No.61 の閉じ方）。
+//!   （genzo-api の `Core::close` の doc。決定事項ログ No.61 の閉じ方）。ただし、アプリが終わる間際
+//!   （画面に選択肢を出せない。[`AppState::close_at_exit`]）は、保存できなければ捨てて閉じる。
 //! - 開く・閉じる・復元は 1 つずつ行う（`lifecycle` のロック）。開いていないカタログのファイルを調べる処理
 //!   （[`AppState::inspect_catalog`]・[`AppState::list_backups`]）も同じロックを持つ（復元の差し替えと
 //!   重ならないように）。閉じている途中に届いた要求は、閉じ始めた時点でカタログが開いていない扱いになり、
@@ -428,6 +429,37 @@ impl AppState {
     pub fn close_catalog(&self, discard_unsaved: bool) -> Result<(), CloseError> {
         let _guard = self.lifecycle.lock();
         self.close_locked(discard_unsaved)
+    }
+
+    /// アプリが終わる間際（画面に選択肢を出せない）に、開いているカタログを閉じる（lib.rs の
+    /// `RunEvent::Exit`。macOS の Dock の「終了」・ログアウト、Windows のシャットダウン・サインアウトなど、
+    /// 終了の要求を経ずに終わる場合）。開いていなければ何もしない。
+    ///
+    /// まず通常どおり保存待ちの現像設定を保存して閉じ、保存できなければ、捨てて閉じる（`close_locked` の
+    /// `discard_unsaved`。genzo-api の `Core::close_discarding` が最後にもう一度だけ保存を試す）。開いたまま
+    /// にせずに捨てる理由:
+    ///
+    /// - この呼び出しから戻ると、すぐにプロセスが終わる（macOS は `applicationWillTerminate:` の後、Windows は
+    ///   `WM_ENDSESSION` の後に OS が終わらせる）。メモリの中の未保存の設定は、どちらにしても失われる。
+    /// - 開いたまま終わると、ジョブの取り消し・ワーカーの終了・終了時のバックアップ・ロックファイルの解放が
+    ///   行われない。捨てて閉じれば、これらを済ませる。
+    /// - 保存できなかった設定を捨てたときは、カタログに「正常に終了した」印を付けない（genzo-api の
+    ///   `Core::close_discarding`）。次に開いたとき、前回の異常終了として警告するので、設定が失われたことを
+    ///   利用者に知らせられる。
+    ///
+    /// 開く・閉じる・復元の途中なら、終わるのを待ってから閉じる（`lifecycle` のロック）。
+    pub fn close_at_exit(&self) -> Result<(), CloseError> {
+        let _guard = self.lifecycle.lock();
+        match self.close_locked(false) {
+            Err(CloseError::SaveFailed(e)) => {
+                tracing::error!(
+                    error = ?e,
+                    "アプリが終わる間際に保存待ちの現像設定を保存できないので、捨てて閉じる"
+                );
+                self.close_locked(true)
+            }
+            r => r,
+        }
     }
 
     fn close_locked(&self, discard_unsaved: bool) -> Result<(), CloseError> {

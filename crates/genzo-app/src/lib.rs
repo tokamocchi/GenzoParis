@@ -35,6 +35,25 @@
 //! - カタログを閉じた後は、そのカタログのイベントを送らない（溜まっていても。次に開いたカタログの画面に
 //!   前のカタログのイベントが届かないように。[`state`] の doc）。
 //!
+//! # 終了
+//!
+//! 終わる前に、開いているカタログを閉じる（保存待ちの現像設定の保存・終了時のバックアップ・正常に終了した
+//! 印。genzo-api の `Core::close`）。終わり方ごとに次のように通す。
+//!
+//! | 終わり方 | 通る処理 |
+//! |---|---|
+//! | ウィンドウを閉じる（閉じるボタン・Alt+F4・macOS の ⌘W） | `CloseRequested` を止めて `request_quit` |
+//! | macOS のメニューの「GenzoParis を終了」（⌘Q） | メニューの項目（`app_menu`。[`QUIT_MENU_ID`]）から `request_quit` |
+//! | `AppHandle::exit` など（`ExitRequested`） | 止めて `request_quit` |
+//! | macOS の Dock の「終了」・ログアウト、Windows のシャットダウン・サインアウト | `RunEvent::Exit` で `close_at_exit` |
+//!
+//! `request_quit` は、保存できなければ終わらずに画面に知らせる（`app-close-failed`。画面が再試行か、捨てて
+//! 終わるかを選ばせる）。最後の行は、終了の要求を経ずに、すぐにプロセスが終わる（macOS の NSApp の
+//! `terminate:` は、tao 0.35.3 が `applicationShouldTerminate:` を実装していないので止められず、
+//! `applicationWillTerminate:` の後に終わる。Windows の `WM_ENDSESSION` も、戻ると OS が終わらせる）ので、
+//! 画面に選択肢を出せない。その場で同期して閉じ、保存できなければ捨てて閉じる
+//! （[`state::AppState::close_at_exit`] の doc）。
+//!
 //! # テスト
 //!
 //! `tests/app` の結合テストは、本物のコアとワーカーで [`state::AppState`] を動かす。テストの実行ファイル
@@ -52,7 +71,8 @@ pub mod tools;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, WINDOW_SUBMENU_ID};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime, WindowEvent};
 
 use crate::state::AppState;
 
@@ -63,6 +83,8 @@ pub(crate) static QUITTING: AtomicBool = AtomicBool::new(false);
 pub const CORE_EVENT: &str = "core-event";
 /// 終了のときに保存できなかったことを知らせるイベントの名前。
 pub const CLOSE_FAILED_EVENT: &str = "app-close-failed";
+/// macOS のアプリのメニューの「GenzoParis を終了」（⌘Q）の ID（`app_menu`）。
+pub const QUIT_MENU_ID: &str = "genzo-quit";
 
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
@@ -74,7 +96,7 @@ fn init_tracing() {
 }
 
 /// 終了の要求を受けたとき: カタログを閉じてから終わる。保存できなければ画面に知らせて終わらない。
-fn request_quit(app: &tauri::AppHandle) {
+fn request_quit(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let state = Arc::clone(&app.state::<Arc<AppState>>());
@@ -97,10 +119,109 @@ fn request_quit(app: &tauri::AppHandle) {
     });
 }
 
+/// 終了の要求を経ずにプロセスが終わるとき（`RunEvent::Exit`。モジュールの doc の「終了」）: 終了の処理を
+/// 済ませていなければ、その場で同期してカタログを閉じる（[`AppState::close_at_exit`]。保存できなければ
+/// 捨てて閉じる）。失敗は記録だけ（もう終わるので、画面には知らせられない）。
+///
+/// `request_quit` が閉じている途中なら、閉じ終えるのを待つ（`AppState` の開く・閉じるのロック）。
+fn close_at_exit(app: &AppHandle) {
+    if QUITTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Some(state) = app.try_state::<Arc<AppState>>() else {
+        return;
+    };
+    if let Err(e) = state.close_at_exit() {
+        tracing::error!(error = ?e.info(), "アプリが終わる間際にカタログを閉じる処理でエラー");
+    }
+}
+
+/// macOS のメニュー（Tauri 2.11.6 の `Menu::default` の macOS の分を元に、文言を日本語にし、「終了」を通常の
+/// 項目にしたもの）。
+///
+/// - `Menu::default` の「終了」（`PredefinedMenuItem::quit`）は、NSApp に `terminate:` を直接送る。tao 0.35.3 は
+///   `applicationShouldTerminate:` を実装していないので、終了の要求（`ExitRequested`）もウィンドウを閉じる
+///   要求（`CloseRequested`）も来ずに終わり、保存できなかったときに画面で選ばせられない。そこで「GenzoParis を
+///   終了」（⌘Q）は通常の項目（[`QUIT_MENU_ID`]）にし、`run` の `on_menu_event` で `request_quit` を通す。
+///   ショートカットは `CmdOrCtrl+Q` と書く（muda 0.19.3 の macOS では `CmdOrCtrl` だけが ⌘ になり、`Cmd` は
+///   ⌘ にならない）。
+/// - 編集のメニューの取り消す・やり直す・カット・コピー・貼り付け・すべてを選択は、入力欄で ⌘Z・⌘C などを
+///   使えるように、OS の項目（`PredefinedMenuItem`）のまま残す。
+/// - ウィンドウのメニューは、ID を [`WINDOW_SUBMENU_ID`] にして、Tauri に macOS のウィンドウのメニューとして
+///   登録させる（`Menu::default` と同じ）。`Menu::default` の「表示」のフルスクリーンは、表示のメニューを
+///   作らずにウィンドウのメニューに置く。ファイルのメニュー（ウィンドウを閉じるだけ）と、空のヘルプの
+///   メニューは作らない。
+///
+/// macOS でだけ付ける（Windows・Linux はメニューを付けない。Tauri も `Menu::default` を macOS でだけ付ける）。
+/// macOS 以外でもコンパイルするのは、この関数の型を Linux の clippy・テストのビルドでも確かめるため。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let pkg = app.package_info();
+    let config = app.config();
+    let name = pkg.name.clone();
+    let about = AboutMetadata {
+        name: Some(name.clone()),
+        version: Some(pkg.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+    let app_submenu = Submenu::with_items(
+        app,
+        &name,
+        true,
+        &[
+            &PredefinedMenuItem::about(app, Some(&format!("{name} について")), Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, Some("サービス"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, Some(&format!("{name} を隠す")))?,
+            &PredefinedMenuItem::hide_others(app, Some("ほかを隠す"))?,
+            &PredefinedMenuItem::show_all(app, Some("すべてを表示"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                QUIT_MENU_ID,
+                format!("{name} を終了"),
+                true,
+                Some("CmdOrCtrl+Q"),
+            )?,
+        ],
+    )?;
+    let edit = Submenu::with_items(
+        app,
+        "編集",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, Some("取り消す"))?,
+            &PredefinedMenuItem::redo(app, Some("やり直す"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, Some("カット"))?,
+            &PredefinedMenuItem::copy(app, Some("コピー"))?,
+            &PredefinedMenuItem::paste(app, Some("貼り付け"))?,
+            &PredefinedMenuItem::select_all(app, Some("すべてを選択"))?,
+        ],
+    )?;
+    let window = Submenu::with_id_and_items(
+        app,
+        WINDOW_SUBMENU_ID,
+        "ウィンドウ",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, Some("最小化"))?,
+            &PredefinedMenuItem::maximize(app, Some("拡大／縮小"))?,
+            &PredefinedMenuItem::fullscreen(app, Some("フルスクリーンにする"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, Some("ウィンドウを閉じる"))?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_submenu, &edit, &window])
+}
+
 /// アプリを起動する。
 pub fn run() {
     init_tracing();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -140,15 +261,24 @@ pub fn run() {
                 api.prevent_close();
                 request_quit(window.app_handle());
             }
-        })
+        });
+    // macOS だけ、Tauri の既定のメニューの代わりに app_menu を付ける（「終了」を request_quit に通すため）。
+    // Windows・Linux は今までどおりメニューを付けない。
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(app_menu).on_menu_event(|app, event| {
+        if event.id() == QUIT_MENU_ID && !QUITTING.load(Ordering::SeqCst) {
+            request_quit(app);
+        }
+    });
+    let app = builder
         .build(tauri::generate_context!())
         .expect("GenzoParis を起動できません");
-    app.run(|handle, event| {
-        if let RunEvent::ExitRequested { api, .. } = event
-            && !QUITTING.load(Ordering::SeqCst)
-        {
+    app.run(|handle, event| match event {
+        RunEvent::ExitRequested { api, .. } if !QUITTING.load(Ordering::SeqCst) => {
             api.prevent_exit();
             request_quit(handle);
         }
+        RunEvent::Exit => close_at_exit(handle),
+        _ => {}
     });
 }

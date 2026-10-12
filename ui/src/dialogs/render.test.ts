@@ -19,7 +19,7 @@ import { PasteSettingsDialog } from "./PasteSettingsDialog";
 import { clearResults, recordResult } from "./resultLog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
-import { WelcomeScreen } from "./WelcomeScreen";
+import { oneDriveNotice, WelcomeScreen } from "./WelcomeScreen";
 
 const status: AppStatus = {
   version: "0.1.0",
@@ -34,6 +34,7 @@ const status: AppStatus = {
   },
   notice: null,
   default_catalog: "/home/u/Pictures/GenzoParis/catalog.db",
+  default_catalog_in_onedrive: false,
   catalog: null,
   tools: { ffmpeg: null, ffprobe: null },
 };
@@ -79,6 +80,27 @@ describe("起動の画面", () => {
     expect(html).toContain("カタログを選んでください");
     expect(html).toContain("最近開いたカタログ");
     expect(html).toContain("old.db");
+    expect(html).not.toContain("OneDrive");
+  });
+
+  it("既定の場所が OneDrive で同期されるフォルダの中なら注意を出す", () => {
+    appStore.set({
+      status: {
+        ...status,
+        platform: "windows",
+        default_catalog: "C:\\Users\\u\\OneDrive\\Pictures\\GenzoParis\\catalog.db",
+        default_catalog_in_onedrive: true,
+      },
+    });
+    const html = render(createElement(WelcomeScreen));
+    expect(html).toContain(oneDriveNotice(false));
+    expect(html).toContain("最大 20 GB");
+    // 案内するボタンの見出しは、画面にある文言と同じ。
+    expect(html).toContain("別の場所に新しいカタログを作る");
+    expect(oneDriveNotice(false)).toContain("「別の場所に新しいカタログを作る」");
+    // 既にカタログがあるときは、作る場所の案内はしない。
+    expect(oneDriveNotice(true)).toContain("最大 20 GB");
+    expect(oneDriveNotice(true)).not.toContain("おすすめします");
   });
 
   it("開けないとき（理由ごと）", () => {

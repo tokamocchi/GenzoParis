@@ -1,6 +1,7 @@
 // カタログの選択の画面（カタログを開いていないとき。初回の起動など）。決定事項ログ No.63。
 //
-// - 既定の場所（ピクチャの GenzoParis/catalog.db）に作って開く（あれば開く）。
+// - 既定の場所（ピクチャの GenzoParis/catalog.db）に作って開く（あれば開く）。Windows で既定の場所が
+//   OneDrive で同期されるフォルダの中なら、注意を出す（oneDriveNotice）。
 // - 別の場所に作る（保存のダイアログ。使えなければフォルダと名前で選ぶ。カタログでないファイルは上書き
 //   しない）。
 // - 既存のカタログを開く。最近開いたカタログを開く。
@@ -18,6 +19,19 @@ import { baseName, parentDir } from "./dialogFormat";
 import "./dialogs.css";
 import { useNewCatalogPicker } from "./NewCatalogPicker";
 import { Busy } from "./parts";
+
+/**
+ * 既定の場所が OneDrive で同期されるフォルダの中のときの注意（Windows の「PC フォルダーのバックアップ」で
+ * ピクチャが OneDrive の下に移った場合。アプリの app_status の default_catalog_in_onedrive）。既定の場所
+ * （決定事項ログ No.63）を変えるかは人が決めるので、ここでは注意を出すだけにする。20 GB は標準プレビューの
+ * キャッシュの上限の既定値（genzo-catalog の DEFAULT_PREVIEW_CAPACITY_BYTES）。`exists` なら、既にカタログが
+ * ある（作る場所の案内はしない）。
+ */
+export function oneDriveNotice(exists: boolean): string {
+  const base =
+    "この場所は OneDrive で同期されるフォルダの中です。カタログとプレビューのキャッシュ（既定で最大 20 GB）が同期の対象になります。";
+  return exists ? base : `${base}同期しない場所に作ることをおすすめします（「別の場所に新しいカタログを作る」）。`;
+}
 
 export function WelcomeScreen() {
   const status = useApp((s) => s.status);
@@ -95,6 +109,9 @@ export function WelcomeScreen() {
                   <span className="warn-text">
                     {"\n"}この場所にはカタログでないファイル（またはフォルダ）があるため使えません。別の場所に作ってください。
                   </span>
+                )}
+                {status?.default_catalog_in_onedrive && defaultState !== "not_catalog" && (
+                  <span className="warn-text">{"\n" + oneDriveNotice(defaultState === "catalog")}</span>
                 )}
               </span>
               <button

@@ -2426,3 +2426,85 @@ fn a_failed_save_keeps_the_develop_session_when_closing_or_switching_photos() {
     assert_eq!(history_labels(&core, a), vec!["読み込み", "露光量 +0.50"]);
     core.close().unwrap();
 }
+
+/// UTF-8 で表せない名前のファイルを含むフォルダを取り込んでも、ジョブの結果（`Response::Job`）とイベントを
+/// JSON にできる（独立レビューの指摘）。
+///
+/// 以前は、登録できなかったファイル（`not_registered`）のパスに UTF-8 でないバイト列がそのまま入り、
+/// serde_json が「path contains invalid UTF-8 characters」のエラーにしていた（Tauri は promise を reject し、
+/// 画面は取り込みの完了を待ち続けた）。画面に返すパスは、表せない部分を U+FFFD に置き換えた文字列にする
+/// （読み込みは今までどおり `PathBuf`）。Unix だけ（Windows の名前は UTF-16 で、このバイト列を作れない）。
+#[cfg(unix)]
+#[test]
+fn a_file_name_not_in_utf8_does_not_break_the_json_of_the_results() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    use genzo_api::{Command, JobInfo, JobResult, Response};
+
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (32, 24), 1, None);
+    // Latin-1 の「café.jpg」（0xE9 だけのバイトは UTF-8 として不正）。
+    let bad = env.photos.join(OsStr::from_bytes(b"caf\xe9.jpg"));
+    std::fs::copy(env.photos.join("A.jpg"), &bad).unwrap();
+    let core = env.open();
+    let rx = core.subscribe();
+    let job_id = match core
+        .execute(Command::ImportFolder {
+            path: env.photos.clone(),
+            recursive: true,
+        })
+        .unwrap()
+    {
+        Response::JobStarted { job_id } => job_id,
+        other => panic!("{other:?}"),
+    };
+    core.wait_job(job_id, Some(common::WAIT_LIMIT)).unwrap();
+
+    let response = core.execute(Command::Job { job_id }).unwrap();
+    let Response::Job(info) = &response else {
+        panic!("{response:?}");
+    };
+    let Some(JobResult::Import(report)) = &info.result else {
+        panic!("{info:?}");
+    };
+    assert_eq!(report.added, 1, "{report:?}");
+    assert_eq!(report.not_registered.len(), 1, "{report:?}");
+    assert_eq!(
+        report.not_registered[0].path, bad,
+        "コアの中ではバイト列のまま"
+    );
+    let json = serde_json::to_string(&response).expect("ジョブの結果を JSON にできる");
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let lossy = format!("{}/caf\u{FFFD}.jpg", env.photos.display());
+    assert_eq!(
+        value["result"]["not_registered"][0]["path"],
+        serde_json::json!(lossy),
+        "{json}"
+    );
+    // 読み込みは今までどおり PathBuf（置き換えた後の名前になる）。
+    match serde_json::from_str::<Response>(&json).unwrap() {
+        Response::Job(JobInfo {
+            result: Some(JobResult::Import(r)),
+            ..
+        }) => assert_eq!(r.not_registered[0].path, PathBuf::from(&lossy)),
+        other => panic!("{other:?}"),
+    }
+    // JSON の文字列のコマンド（CLI などが使う）も、応答を返す（以前は JSON にできずに panic した）。
+    let text = core.execute_json(&format!(r#"{{"type":"job","job_id":{job_id}}}"#));
+    assert!(text.contains("caf\u{FFFD}.jpg"), "{text}");
+
+    // イベント（取り込みの間に届いたもの・ファイルに関する警告）も JSON にできる。
+    for event in rx.try_iter() {
+        serde_json::to_string(&event).unwrap_or_else(|e| panic!("{event:?}: {e}"));
+    }
+    let warning = Event::Warning {
+        code: WarningCode::BackupFailed,
+        message: "テスト".to_owned(),
+        variant_id: None,
+        path: Some(bad.clone()),
+    };
+    let json = serde_json::to_string(&warning).expect("警告を JSON にできる");
+    assert!(json.contains("caf\u{FFFD}.jpg"), "{json}");
+    core.close().unwrap();
+}

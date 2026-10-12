@@ -11,9 +11,64 @@ use genzo_model::{
     RenderQuality, VariantId, VideoMetadata, VolumeId,
 };
 use genzo_pipeline::ImageTile;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::error::ErrorInfo;
+
+// ---------------------------------------------------------------------------
+// パス（JSON の文字列）
+// ---------------------------------------------------------------------------
+
+/// パスを JSON の文字列にする（UI に返す型の `PathBuf`・`Option<PathBuf>`・`Vec<PathBuf>` の項目に
+/// `#[serde(serialize_with = "lossy_path")]` で付ける）。
+///
+/// UTF-8 で表せない名前（Linux などの UTF-8 でないバイト列・Windows の対にならないサロゲート）は、その部分を
+/// U+FFFD に置き換える（`to_string_lossy`）。serde の既定の `Path` の Serialize はエラーにするため、1 つの
+/// ファイルの名前のせいで応答全体（取り込みの結果など）を JSON にできなくなる。置き換えた名前は表示用で、
+/// そのパスでファイルを開けるとは限らない。UTF-8 で表せるパスは今までと同じ文字列になる。読み込み
+/// （Deserialize）は今までどおり `PathBuf` として読む。
+pub(crate) fn lossy_path<P, S>(path: &P, serializer: S) -> Result<S::Ok, S::Error>
+where
+    P: LossyPath + ?Sized,
+    S: Serializer,
+{
+    path.serialize_lossy(serializer)
+}
+
+/// [`lossy_path`] で文字列にできるパス（とその `Option`・`Vec`）。
+pub(crate) trait LossyPath {
+    fn serialize_lossy<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error>;
+}
+
+impl LossyPath for PathBuf {
+    fn serialize_lossy<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string_lossy())
+    }
+}
+
+impl<T: LossyPath> LossyPath for Option<T> {
+    fn serialize_lossy<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Some(p) => serializer.serialize_some(&Lossy(p)),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<T: LossyPath> LossyPath for Vec<T> {
+    fn serialize_lossy<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter().map(Lossy))
+    }
+}
+
+/// `Option`・`Vec` の中身を [`LossyPath`] で書く。
+struct Lossy<'a, T: ?Sized>(&'a T);
+
+impl<T: LossyPath + ?Sized> Serialize for Lossy<'_, T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize_lossy(serializer)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ジョブ
@@ -108,7 +163,9 @@ pub enum JobResult {
 /// ファイルの問題（読めない・登録できないなど）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileIssue {
-    /// ファイル。
+    /// ファイル（UTF-8 で表せない名前のファイルもそのまま入る。JSON では、表せない部分を U+FFFD に
+    /// 置き換える。`lossy_path`）。
+    #[serde(serialize_with = "lossy_path")]
     pub path: PathBuf,
     /// 理由。
     pub reason: String,
@@ -131,6 +188,7 @@ pub struct VariantIssue {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ImportReport {
     /// 取り込んだフォルダ。
+    #[serde(serialize_with = "lossy_path")]
     pub root: PathBuf,
     /// 対象の拡張子のファイルの数。
     pub files_found: u64,
@@ -490,6 +548,7 @@ pub struct FileInfo {
     /// 役割。
     pub role: FileRole,
     /// 絶対パス（マウント先が分からなければ `None`）。
+    #[serde(serialize_with = "lossy_path")]
     pub path: Option<PathBuf>,
     /// 大きさ（バイト）。
     pub size: u64,
@@ -511,6 +570,7 @@ pub struct FolderInfo {
     /// ボリューム内の相対パス（'/' 区切り）。
     pub rel_path: String,
     /// 絶対パス（マウント先が分からなければ `None`）。
+    #[serde(serialize_with = "lossy_path")]
     pub path: Option<PathBuf>,
 }
 
@@ -524,6 +584,7 @@ pub struct FileCheckReport {
     /// 見つからなかったファイル（`status = missing` にした）。
     pub missing: Vec<FileIssue>,
     /// 内容の変化を検知した（リビジョンを上げた）ファイル。
+    #[serde(serialize_with = "lossy_path")]
     pub changed: Vec<PathBuf>,
 }
 
@@ -939,6 +1000,7 @@ pub enum ExportOutcome {
     /// 書き出した。
     Written {
         /// 書き出したファイル（連番を付けた場合は付けた後の名前）。
+        #[serde(serialize_with = "lossy_path")]
         path: PathBuf,
         /// 既存のファイルを置き換えたか。
         replaced: bool,
@@ -957,6 +1019,7 @@ pub enum ExportOutcome {
         /// 理由。
         reason: String,
         /// 既にあったファイル（衝突の場合）。
+        #[serde(serialize_with = "lossy_path")]
         existing: Option<PathBuf>,
     },
     /// 失敗した。
@@ -979,6 +1042,7 @@ pub struct ExportItem {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ExportReport {
     /// 書き出し先のフォルダ。
+    #[serde(serialize_with = "lossy_path")]
     pub dest_dir: PathBuf,
     /// 1 件ずつの結果（要求の順）。
     pub items: Vec<ExportItem>,
@@ -1031,6 +1095,7 @@ pub struct PlannedFile {
     /// 役割（RAW と JPEG のペアなど）。
     pub role: FileRole,
     /// 絶対パス（マウント先が分からなければ `None`）。
+    #[serde(serialize_with = "lossy_path")]
     pub path: Option<PathBuf>,
 }
 
@@ -1057,10 +1122,11 @@ pub struct DeleteReport {
     /// カタログから除いた asset。
     pub removed_assets: Vec<AssetId>,
     /// ゴミ箱へ移したファイル。
+    #[serde(serialize_with = "lossy_path")]
     pub trashed_files: Vec<PathBuf>,
     /// ゴミ箱へ移す対象だったが、元の場所になかった（フォルダはあり、アプリの外で削除・移動された）
     /// ため、移さなかったファイル（その asset はカタログから除いた）。
-    #[serde(default)]
+    #[serde(default, serialize_with = "lossy_path")]
     pub skipped_missing: Vec<PathBuf>,
     /// 失敗（ゴミ箱へ移せなかった asset のファイル、元の場所が見えない（ドライブが外れているなど）
     /// ファイル、登録の後に別の内容に置き換わったファイルなど。その asset はカタログに残る）。
@@ -1075,6 +1141,7 @@ pub struct DeleteReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoreSettings {
     /// L1 プレビューのキャッシュの場所（変更は次に開いたときに有効になる）。
+    #[serde(serialize_with = "lossy_path")]
     pub preview_cache_dir: PathBuf,
     /// L1 プレビューのキャッシュの上限（バイト。SCL-04）。
     pub preview_cache_bytes: u64,
@@ -1104,6 +1171,7 @@ pub struct SettingsUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupEntry {
     /// ファイル。
+    #[serde(serialize_with = "lossy_path")]
     pub path: PathBuf,
     /// 作った日時。
     pub created_at: DateTime<Utc>,

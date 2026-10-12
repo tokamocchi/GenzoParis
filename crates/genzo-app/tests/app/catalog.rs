@@ -527,3 +527,78 @@ pub fn errors_after_the_catalog_closed_do_not_stop_opening_another() {
     assert_eq!(all_items(&state).len(), 1);
     state.close_catalog(false).unwrap();
 }
+
+/// アプリが終わる間際（lib.rs の `RunEvent::Exit`。macOS の Dock の「終了」・ログアウト、Windows の
+/// シャットダウン・サインアウトなど、終了の要求を経ずに終わる場合。[`AppState::close_at_exit`]）に、閉じて
+/// いないカタログを閉じる: 保存待ちの現像設定を保存し、終了時のバックアップを作り、正常に終了した印を付けて、
+/// ロックを外す。保存できなければ、開いたままにせず捨てて閉じる（次に開いたとき、前回の異常終了として扱う）。
+///
+/// [`AppState::close_at_exit`]: genzo_app::state::AppState::close_at_exit
+pub fn exit_closes_the_catalog_left_open() {
+    let env = Env::new();
+    let path = env.catalog("終了.db");
+    let state = env.state();
+    // 開いていなければ何もしない。
+    state.close_at_exit().unwrap();
+
+    state.update_settings(|s| s.backup_on_close = true).unwrap();
+    let photos = env.photos("終了");
+    write_image(&photos.join("一 枚.jpg"), (64, 48), 5);
+    state.open_catalog(&path, true).unwrap();
+    import(&state, &photos);
+    let id = all_items(&state)[0].variant_id.get();
+    ok(&state, json!({"type": "open_develop", "variant_id": id}));
+    let settings = exposure(&state, 0.5);
+    let backups = state.list_backups(&path).unwrap().len();
+    let core = state.core().unwrap();
+    ok(
+        &state,
+        json!({"type": "set_settings", "settings": settings, "dragging": false}),
+    );
+    // 自動保存（1 秒後）を待たずに終わる。
+    state.close_at_exit().unwrap();
+    assert!(core.is_closed());
+    assert!(state.session().is_none());
+    assert_kind(state.core(), ErrorKind::Closed);
+    drop(core);
+    assert_eq!(
+        state.list_backups(&path).unwrap().len(),
+        backups + 1,
+        "終了時のバックアップを作った"
+    );
+    // 別のアプリとして開き直せる（ロックが外れている）。
+    let next = env.state();
+    let reopened = next.open_catalog(&path, false).unwrap();
+    assert_eq!(reopened.startup.previous_shutdown, PreviousShutdown::Clean);
+    assert_eq!(
+        saved_exposure(&next, id),
+        0.5,
+        "保存待ちの現像設定を保存してから閉じた"
+    );
+    next.close_catalog(false).unwrap();
+    drop((state, next));
+
+    // 保存できない: 開いたままにせず、捨てて閉じる。
+    let env = Env::new();
+    let path = env.catalog("終了 保存できない.db");
+    let (state, id) = open_with_failing_saves(&env, &path);
+    let core = state.core().unwrap();
+    state.close_at_exit().unwrap();
+    assert!(core.is_closed(), "保存できなくても閉じた");
+    assert!(state.session().is_none());
+    drop(core);
+    genzo_catalog::testing::allow_develop_writes(&path).unwrap();
+    let next = env.state();
+    let reopened = next.open_catalog(&path, false).unwrap();
+    assert_eq!(
+        reopened.startup.previous_shutdown,
+        PreviousShutdown::Unclean,
+        "保存できなかった編集があるので、正常に終了した印を付けない"
+    );
+    assert_eq!(
+        saved_exposure(&next, id),
+        0.0,
+        "保存できなかった設定は捨てた"
+    );
+    next.close_catalog(false).unwrap();
+}

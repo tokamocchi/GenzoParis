@@ -56,6 +56,10 @@ pub struct AppStatus {
     pub notice: Option<String>,
     /// 既定のカタログの場所（初回の起動で案内する）。
     pub default_catalog: Option<PathBuf>,
+    /// 既定のカタログの場所が OneDrive で同期されるフォルダの下か（Windows だけ。ほかの OS では常に
+    /// `false`。[`under_onedrive`]）。画面は、同期しない場所に作るよう注意を出す（既定の場所（決定事項ログ
+    /// No.63）を変えるかは人が決めるので、注意を出すだけにする）。
+    pub default_catalog_in_onedrive: bool,
     /// 開いているカタログ。
     pub catalog: Option<CatalogStatus>,
     /// 今の設定で見つかる ffmpeg・ffprobe。
@@ -74,11 +78,50 @@ fn default_catalog(app: &AppHandle) -> Option<PathBuf> {
         })
 }
 
+/// OneDrive の同期フォルダを示す環境変数（個人用・職場や学校用。OneDrive のクライアントが設定する）。
+const ONEDRIVE_VARS: [&str; 3] = ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"];
+
+/// OneDrive の同期フォルダ（[`ONEDRIVE_VARS`] の値）。Windows 以外では空（ほかの OS で同じ名前の環境変数が
+/// あっても使わない）。
+fn onedrive_roots() -> Vec<std::ffi::OsString> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    ONEDRIVE_VARS.iter().filter_map(std::env::var_os).collect()
+}
+
+/// `path` が OneDrive の同期フォルダ（`roots`。環境変数 OneDrive・OneDriveConsumer・OneDriveCommercial
+/// の値）のどれかの下か（そのフォルダ自身を含む）。
+///
+/// Windows のパスとして比べる: 大文字・小文字を区別せず、区切り（`\`・`/`）の違いと末尾の区切りを無視し、
+/// フォルダの単位で比べる（`C:\Users\a\OneDrive` は `C:\Users\a\OneDriveBackup` の親ではない）。空の値は
+/// 無視する。環境変数は読まず、値を引数で受ける（単体テストのため）。
+///
+/// 「PC フォルダーのバックアップ」が有効だと、ピクチャ・ドキュメント（既定のカタログの場所。
+/// `default_catalog`）が OneDrive の下に移り、カタログ（SQLite の WAL）と標準プレビューのキャッシュ（既定で
+/// 最大 20 GB。genzo-catalog の `DEFAULT_PREVIEW_CAPACITY_BYTES`）が同期の対象になる。
+pub fn under_onedrive(path: &Path, roots: &[std::ffi::OsString]) -> bool {
+    fn normalize(p: &str) -> String {
+        p.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    }
+    let path = normalize(&path.to_string_lossy());
+    roots.iter().any(|root| {
+        let root = normalize(&root.to_string_lossy());
+        !root.is_empty()
+            && path
+                .strip_prefix(&root)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'))
+    })
+}
+
 /// アプリの状態。
 #[tauri::command]
 pub async fn app_status(app: AppHandle, state: Shared<'_>) -> Result<AppStatus, ErrorInfo> {
     let state = Arc::clone(&state);
     let default_catalog = default_catalog(&app);
+    let default_catalog_in_onedrive = default_catalog
+        .as_deref()
+        .is_some_and(|p| under_onedrive(p, &onedrive_roots()));
     blocking(move || {
         let settings = state.settings();
         let tools = tools::locate(settings.ffmpeg_dir.as_deref());
@@ -95,6 +138,7 @@ pub async fn app_status(app: AppHandle, state: Shared<'_>) -> Result<AppStatus, 
             catalog: state.status()?,
             settings,
             default_catalog,
+            default_catalog_in_onedrive,
             tools,
         })
     })
@@ -379,7 +423,7 @@ fn openable_media(path: &Path) -> bool {
 }
 
 /// 元ファイルを OS の既定のアプリで開く（動画の再生など。VID-04 は v1 のため OS のアプリを使う）。
-/// 取り込む対象の拡張子の写真・動画だけを開く（[`openable_media`]）。
+/// 取り込む対象の拡張子の写真・動画だけを開く（`openable_media`）。
 #[tauri::command]
 pub async fn open_variant_file(
     app: AppHandle,
@@ -434,6 +478,53 @@ pub async fn quit_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_catalog_under_onedrive_is_detected_by_folder() {
+        let roots = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        let personal = roots(&[r"C:\Users\taro\OneDrive"]);
+        let catalog = Path::new(r"C:\Users\taro\OneDrive\ピクチャ\GenzoParis\catalog.db");
+        assert!(under_onedrive(catalog, &personal));
+        // 大文字・小文字、区切り（/）、末尾の区切りの違いは無視する。
+        assert!(under_onedrive(
+            Path::new(r"c:\users\TARO\onedrive\Pictures\GenzoParis\catalog.db"),
+            &roots(&[r"C:/Users/taro/OneDrive/"]),
+        ));
+        assert!(under_onedrive(
+            Path::new("C:/Users/taro/OneDrive"),
+            &personal
+        ));
+        // フォルダの単位で比べる（名前の先頭が同じだけの別のフォルダは下ではない）。
+        assert!(!under_onedrive(
+            Path::new(r"C:\Users\taro\OneDriveBackup\GenzoParis\catalog.db"),
+            &personal
+        ));
+        assert!(!under_onedrive(
+            Path::new(r"C:\Users\taro\Pictures\GenzoParis\catalog.db"),
+            &personal
+        ));
+        // 環境変数が複数ある（個人用と職場や学校用）ときは、どれかの下なら下。空の値は無視する（空を
+        // 比べると、何でも下になってしまう）。
+        let both = roots(&["", r"C:\Users\taro\OneDrive", r"D:\OneDrive - 会社"]);
+        assert!(under_onedrive(
+            Path::new(r"D:\OneDrive - 会社\画像\GenzoParis\catalog.db"),
+            &both
+        ));
+        assert!(!under_onedrive(
+            Path::new(r"D:\写真\GenzoParis\catalog.db"),
+            &both
+        ));
+        assert!(!under_onedrive(catalog, &roots(&[""])));
+        assert!(!under_onedrive(catalog, &[]));
+    }
+
+    #[test]
+    fn onedrive_folders_are_only_looked_up_on_windows() {
+        // Windows 以外では、同じ名前の環境変数があっても使わない（既定の場所は OneDrive の下とみなさない）。
+        if !cfg!(windows) {
+            assert!(onedrive_roots().is_empty());
+        }
+    }
 
     #[test]
     fn only_media_files_are_opened_with_the_default_app() {

@@ -75,6 +75,10 @@ const TESTS: &[(&str, fn())] = &[
         catalog::errors_after_the_catalog_closed_do_not_stop_opening_another,
     ),
     (
+        "catalog::exit_closes_the_catalog_left_open",
+        catalog::exit_closes_the_catalog_left_open,
+    ),
+    (
         "library::import_thumbnails_and_previews_over_the_uri_scheme",
         library::import_thumbnails_and_previews_over_the_uri_scheme,
     ),

@@ -889,6 +889,8 @@ export interface AppStatus {
   settings: AppSettings;
   notice: string | null;
   default_catalog: string | null;
+  /** 既定のカタログの場所が OneDrive で同期されるフォルダの中か（Windows だけ。ほかの OS では常に false）。 */
+  default_catalog_in_onedrive: boolean;
   catalog: CatalogStatus | null;
   tools: ExternalTools;
 }
