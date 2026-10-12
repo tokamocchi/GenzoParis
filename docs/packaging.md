@@ -2,8 +2,8 @@
 
 GenzoParis を社内の数名に配るための、配布物の作り方・入れ方・注意をまとめます。
 
-- 作成: AI（2026-10-12）。**この Linux の開発環境で確かめたのは、同じスクリプトで Linux の .deb を作り、本体とワーカーが入ることまで** です（6 章）。Windows・macOS の配布物は、実機でも GitHub Actions でもまだ作っていません（7 章の「未確認の事項」）。
-- 関係する決定: [決定事項ログ](decision_log.md) の No.32（ワーカーを別の実行ファイルにし、本体を LibRaw に依存させない）・No.62（FFmpeg を同梱しない）・No.63（既定のカタログの場所）。
+- 作成: AI（2026-10-12）。この Linux の開発環境では、同じスクリプトで Linux の .deb を作り、本体とワーカーが入ることを確かめました（6.1）。**Windows・macOS の配布物は、2026-10-12 に GitHub Actions（`release.yml`）で作り、ワーカーが同梱の LibRaw で起動することまで確かめました**（6.2）。**実機ではまだ確かめていません**（7 章の「未確認の事項」）。
+- 関係する決定: [決定事項ログ](decision_log.md) の No.32（ワーカーを別の実行ファイルにし、本体を LibRaw に依存させない）・No.62（FFmpeg を同梱しない）・No.63（既定のカタログの場所）・No.73（Visual C++ のランタイムを同梱する）・No.74（macOS の配布物は macOS 26 以降向け）。
 - **法的な事項**: LibRaw の LGPL の扱いと依存ライブラリのライセンスは、利用者が確認済みと回答しました（2026-10-12。implementation_status の判断の表 No.61・62）。**Visual C++ のランタイムの再頒布の条件（同梱するようにした。2.2）と FFmpeg は、人・専門家の確認待ちです**（8 章）。
 - 署名・公証はしません（社内の数名への配布のため）。署名が必要かどうかは人が判断します（[01 の SYS-08](01_feature_inventory.md)）。
 
@@ -113,6 +113,7 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
 - 配る相手の Mac がすべてその版以降なら、環境変数 `GENZO_ALLOW_NEWER_MINOS=1` を付けて実行すると通ります。このとき、`.app` の最小の版（Info.plist の `LSMinimumSystemVersion`）を、同梱するものの `minos` の最大に上げます（`binaries/tauri.libs.conf.json` に書く。`tauri.conf.json` は変えない。Tauri はこの版を Info.plist と、本体のビルドの `MACOSX_DEPLOYMENT_TARGET` に使う。@tauri-apps/cli 2.11.5 の `config.schema.json` の説明）。それより古い Mac では、アプリが起動せず、OS がその旨を知らせます（文言は要確認）。
 - どちらの場合も、`.app` の最小の版と同梱したものの `minos` の最大を `binaries/bundled-libs.txt` の先頭に書きます。
 - 配る相手に古い macOS の人がいる場合は、LibRaw とその依存を `MACOSX_DEPLOYMENT_TARGET=12.0` でソースからビルドしたものが要ります（スクリプトは未対応。手順は未整備）。どうするかは人が決めてください（8 章）。
+- **決定（2026-10-12。決定事項ログ No.74）**: 配る相手の Mac はすべて macOS 26 以降なので、`.app` の最小の版を上げて配ります。GitHub Actions の macos-latest で入る dylib は 4 つとも `minos` 26.0 で、`.app` の最小の版は 26.0 になりました（6.2）。
 
 Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。作る場合は Intel の Mac か、x86_64 の Homebrew の LibRaw が要る）。
 
@@ -133,7 +134,7 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 - 外部のアクション（actions/checkout など）は、コミットの SHA で固定しています（ci.yml も同じ。タグの付け替えで、配布物を作る処理が変わらないように）。SHA は 2026-10-12 に `git ls-remote` で、その時点の各タグ（コメントに書いた版）が指すコミットを調べたものです。更新するときは、新しい版のタグが指す SHA を同じ方法で調べ、差分を確かめてから書き換えてください。
 - 成果物は Actions の artifact（`genzoparis-windows-x64`・`genzoparis-macos-arm64`。30 日で消える。仮置き）に置きます。GitHub の Releases には出しません。**artifact は、リポジトリを読める人なら誰でも取得できます。リポジトリの公開の範囲を確かめてから実行してください。**
 - 途中で失敗したときは、調べるために `<名前>-unverified` の artifact（7 日で消える。仮置き）に、できたところまでの配布物と確認の記録を置きます。**`-unverified` の配布物は配らないでください。**
-- **一度も実行していません**（7 章）。最初の実行の結果を見て、ワークフローとこの資料を直してください。
+- 2026-10-12 に main で 2 回実行しました。2 回目（「allow_newer_macos_libs」にも印）で、両 OS の配布物ができ、確認が通りました（6.2）。**GitHub の macos-latest・windows-latest のランナーの版は変わります**。次に実行したときも、artifact の名前の `-macos<版>-or-later` が 26.0 のままか、ジョブの記録に警告・エラーがないかを確かめてください。
 
 ### 2.6 配る前の確認
 
@@ -199,7 +200,9 @@ FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくて�
   - カタログも消す場合は、`Pictures/GenzoParis` を手で消してください（写真の元ファイルは消えませんが、評価・現像の設定は失われます。消す前に、必要ならフォルダごとコピーしてバックアップしてください）。
 - 入れ直し・新しい版への更新の前にも、念のためカタログのフォルダ（`Pictures/GenzoParis`）をコピーしてバックアップしておくことを勧めます。
 
-## 6. この環境（Linux）での確認の結果
+## 6. 確認の結果
+
+### 6.1 この環境（Linux）
 
 2026-10-12、Ubuntu 24.04 のコンテナ（4 コア）で、LibRaw（apt の libraw-dev。`pkg-config --modversion libraw_r` は 0.21.2）を入れて確かめました。
 
@@ -211,22 +214,58 @@ FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくて�
 6. `.deb` の依存（`Depends`）は `libwebkit2gtk-4.1-0, libgtk-3-0` だけで、LibRaw は入っていない（2.4 のとおり）。
 7. スクリプトを入口と `scripts/lib/` に分けた後（1.3）、`ui/` で `npm run app:build -- --bundles deb` を差し替えなし（`beforeBuildCommand` の `npm run build` で型の検査を含む）で実行し直し、通ることを確かめた（2 分 3 秒。本体は増分のビルド）。`dpkg -c` で本体とワーカーが入り、取り出したワーカーの `--version` が終了コード 0 で、`binaries` の中のファイルと `cmp` で一致した。シンボリックリンクを含むパスで `scripts/tauri.mjs` を起動しても処理が実行されることも確かめた（`scripts/entry.test.mjs`）。
 
+### 6.2 GitHub Actions（`release.yml`。2026-10-12）
+
+main の c0681eb（PR #2 をマージしたもの）で、手動で 2 回実行しました。リポジトリは公開で、artifact は GitHub にログインした誰でも取得できます（2.5。利用者の指示で、「allow_public_artifacts」に印を付けて実行した）。数値・ファイル名は、ジョブの記録から写したものです。
+
+1. 1 回目（run 38263152398。「allow_newer_macos_libs」は印なし）
+   - Windows: 成功（artifact `genzoparis-windows-x64`）。
+   - macOS: 「ワーカーのビルドと LibRaw の収集」で止まった。同梱する 4 つの dylib（`libraw_r.25.dylib`・`libomp.dylib`・`libjpeg.8.dylib`・`liblcms2.2.dylib`）が、いずれも `minos` 26.0 だったため（2.3 のとおり）。
+   - 配布物ができる前に止まったので、`-unverified` の artifact には何も置かれなかった。
+2. 2 回目（run 38276847388。「allow_newer_macos_libs」にも印を付けた。決定事項ログ No.74）: 両 OS とも成功。
+   - **Windows**（windows-latest）
+     - 配布物: `GenzoParis_0.1.0_x64-setup.exe`。artifact は `genzoparis-windows-x64`（zip で 7,778,435 バイト）。
+     - 同梱した DLL は 6 つ。
+       - vcpkg の `C:\vcpkg\installed\x64-windows\bin` から: `raw_r.dll`・`lcms2-2.dll`・`z.dll`
+       - Visual Studio 18 Enterprise の `VC\Redist\MSVC\14.51.36231\x64\Microsoft.VC145.CRT` から: `VCRUNTIME140.dll`・`VCRUNTIME140_1.dll`・`MSVCP140.dll`
+     - 確認: `/S` で無人インストールし、`%LOCALAPPDATA%\GenzoParis` に次のものが入った。
+       - `genzo-paris.exe`・`genzo-worker.exe`・`uninstall.exe`
+       - 上の 6 つの DLL
+     - `PATH` を OS のフォルダだけにした `genzo-worker.exe --version` が「genzo-worker 0.1.0」を出した。
+   - **macOS**（macos-latest。Xcode 26.6）
+     - 配布物: `GenzoParis_0.1.0_aarch64.dmg` と `GenzoParis.app.tar.gz`。artifact は `genzoparis-macos-arm64-macos26.0-or-later`（zip で 21,019,829 バイト）。
+     - 同梱した dylib は 4 つで、いずれも `minos` 26.0。元は Homebrew の次の版。
+       - `libraw_r.25.dylib`: libraw 0.22.2
+       - `libomp.dylib`: libomp 23.1.0
+       - `libjpeg.8.dylib`: jpeg-turbo 3.2.0
+       - `liblcms2.2.dylib`: little-cms2 2.19.1
+     - `GENZO_ALLOW_NEWER_MINOS=1` により、`.app` の最小の版を 12.0 から 26.0 に上げた（ジョブの警告として出る）。
+     - 確認で通ったこと:
+       - `codesign --verify --deep --strict`（valid on disk・satisfies its Designated Requirement）
+       - Info.plist の最小の版が 26.0 であること
+       - `hdiutil verify`（VALID）
+       - `DYLD_PRINT_LIBRARIES=1` で起動したワーカーが「genzo-worker 0.1.0」を出し、4 つの dylib を `.app` の `Contents/Frameworks` から読み込んだこと（Homebrew の場所からは読み込んでいない）
+     - dyld の記録の形は `dyld[<pid>]: <UUID> <パス>` で、展開したパスは `…/GenzoParis.app/Contents/Frameworks/<名前>` の形だった（7 章の No.7a）。
+     - 公証は行わない（Tauri は「skipping app notarization」の警告を出す。3.2）。
+     - 確認の記録の「LSMinimumSystemVersion: …」の行には、版が出なかった。macOS のランナーの bash が、変数名のすぐ後の全角の括弧の先頭のバイトまで変数名として読んだため（1 バイトの文字を Latin-1 として分類するロケールの bash で、同じ出力になることを確かめた。macOS で起きる仕組みは推測）。比べる処理は引用符で囲んだ変数で行うので、正しく行われている。2026-10-12 に `${名前}` で囲むよう直し、ワークフローを調べるテスト（`scripts/workflows.test.mjs`）を足した。
+3. artifact は、30 日で消える（2 回目のものは 2026-11-11 の 16:29〜16:32 UTC。1 回目の Windows の artifact は同じ日の 14:46 UTC）。
+
 ## 7. 未確認の事項
 
 | No | 事項 | 確かめ方 |
 |---|---|---|
-| 1 | release.yml を GitHub Actions で一度も実行していない | 手動で実行し、両 OS の成果物と最後の確認の手順が通るかを見る |
-| 2 | Windows: vcpkg の libraw の `.lib`・DLL の名前（`raw_r`）と、スレッドセーフな版であること（vcpkg の port のファイルで確認しただけ） | 2.2 の手順で作り、`bundled-libs.txt` と ARW の展開を確かめる |
+| 1 | ~~release.yml を GitHub Actions で一度も実行していない~~ **確認済み（2026-10-12。6.2）**: 両 OS の成果物ができ、最後の確認の手順が通った | — |
+| 2 | Windows: vcpkg の libraw の `.lib`・DLL の名前（`raw_r`）と、スレッドセーフな版であること（vcpkg の port のファイルで確認しただけ）。**名前は 2026-10-12 の Actions で確認**（`raw_r.dll`。6.2）。スレッドセーフな版であることは未確認 | 2.2 の手順で作り、`bundled-libs.txt` と ARW の展開を確かめる |
 | 3 | Windows: 集めた DLL だけで、別の PC（vcpkg のない PC）でワーカーが起動するか | 別の PC に入れて ARW を開く。release.yml の確認は vcpkg のあるランナーで、DLL は PATH にないが、OS の DLL の一覧の漏れは見つけられない |
 | 4 | Windows: Visual C++ のランタイムがない PC での動き（2.2。ランタイムの DLL を同梱するようにした。決定事項ログ No.73） | 再頒布可能パッケージを入れていない PC か、新しく入れた Windows で、RAW を開けるか確かめる |
-| 5 | Windows: NSIS のインストーラーの `/S`（無人インストール）、インストール先、アンインストーラーの「アプリのデータを削除する」の動き | 実機で確かめる |
+| 5 | Windows: NSIS のインストーラーの `/S`（無人インストール）、インストール先、アンインストーラーの「アプリのデータを削除する」の動き。**`/S` とインストール先（`%LOCALAPPDATA%\GenzoParis`）は 2026-10-12 の Actions で確認**（6.2） | アンインストーラーを実機で確かめる |
 | 6 | Windows: SmartScreen・スマート アプリ コントロールでの動き（3.1） | 実機で確かめる |
-| 7 | macOS: `otool -l` の出力の読み取り、dylib の書き換え・署名（スクリプトは出力の例でテストしただけ） | 2.3 の手順で作り、`otool -L` と `DYLD_PRINT_LIBRARIES=1 …/genzo-worker --version` で、`.app` の中の dylib を読むことを確かめる |
-| 7a | macOS: release.yml の確認が前提とする `DYLD_PRINT_LIBRARIES` の出力の形（`dyld[<pid>]: <UUID> <パス>`）と、`@executable_path/../Frameworks` を展開したパスの形（`MacOS/../Frameworks` のままか）。形が違うと、正しい配布物でも確認で止まる（壊れた配布物を通すことはない） | release.yml を実行し、確認のステップの記録（`target/verify-logs/`）を見る |
-| 8 | macOS: Tauri のアドホック署名と `hardenedRuntime: false` で、`codesign --verify --deep --strict` が通るか、Gatekeeper の手順（3.2）のとおりに開けるか | 実機で確かめる |
-| 9 | macOS: Homebrew の dylib の実際の最小の版（2.3。macos-latest のランナーの版向けなら 12.0 より新しく、既定では止まる見込み）と、配る相手の macOS の版。`GENZO_ALLOW_NEWER_MINOS=1` で Info.plist の最小の版が上がること | release.yml を実行し、ジョブの summary と `bundled-libs.txt` の先頭の行を見る |
-| 10 | macOS: GitHub Actions のランナーでの .dmg の作成（Finder の操作を使う） | release.yml を実行する |
-| 11 | Tauri の出力のファイル名（`GenzoParis_<版>_x64-setup.exe`・`_aarch64.dmg`） | 実機・Actions で作る |
+| 7 | macOS: `otool -l` の出力の読み取り、dylib の書き換え・署名（スクリプトは出力の例でテストしただけ）。**2026-10-12 の Actions で確認**（6.2。ワーカーが `.app` の中の dylib だけを読み込んだ） | 2.3 の手順で作り、`otool -L` と `DYLD_PRINT_LIBRARIES=1 …/genzo-worker --version` で、`.app` の中の dylib を読むことを確かめる |
+| 7a | macOS: release.yml の確認が前提とする `DYLD_PRINT_LIBRARIES` の出力の形（`dyld[<pid>]: <UUID> <パス>`）と、`@executable_path/../Frameworks` を展開したパスの形（`MacOS/../Frameworks` のままか）。形が違うと、正しい配布物でも確認で止まる（壊れた配布物を通すことはない）。**2026-10-12 の Actions（macOS 26 のランナー）で確認**: `dyld[<pid>]: <UUID> <パス>` の形で、パスは `Contents/Frameworks/<名前>` の形だった（6.2） | release.yml を実行し、確認のステップの記録（`target/verify-logs/`）を見る |
+| 8 | macOS: Tauri のアドホック署名と `hardenedRuntime: false` で、`codesign --verify --deep --strict` が通るか、Gatekeeper の手順（3.2）のとおりに開けるか。**`codesign --verify` は 2026-10-12 の Actions で通った**（6.2）。Gatekeeper の手順は未確認 | 実機で確かめる |
+| 9 | ~~macOS: Homebrew の dylib の実際の最小の版と、配る相手の macOS の版~~ **確認済み（2026-10-12）**: 4 つとも `minos` 26.0 で、既定では止まった。配る相手はすべて macOS 26 以降（決定事項ログ No.74）。`GENZO_ALLOW_NEWER_MINOS=1` で Info.plist の最小の版が 26.0 に上がった（6.2） | 次に実行したときも、artifact の名前の版を確かめる（2.5） |
+| 10 | ~~macOS: GitHub Actions のランナーでの .dmg の作成（Finder の操作を使う）~~ **確認済み（2026-10-12。6.2）**: .dmg ができ、`hdiutil verify` が通った | — |
+| 11 | ~~Tauri の出力のファイル名~~ **確認済み（2026-10-12。6.2）**: `GenzoParis_0.1.0_x64-setup.exe`・`GenzoParis_0.1.0_aarch64.dmg` | — |
 | 12 | 画面（WebView）のデータの場所（5 章の表） | 実機で確かめる |
 | 13 | winget の FFmpeg のパッケージの名前（4 章） | `winget search ffmpeg` |
 | 14 | ピクチャのフォルダが同期のフォルダのときの、カタログの扱い（5 章） | 実機で確かめる。必要ならアプリで警告するかを決める |
@@ -236,9 +275,9 @@ FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくて�
 **次の事項は AI では決められません。社外に配る前（社内でも、必要と判断した場合は配る前）に、人（必要なら専門家）が確認し、結果を [決定事項ログ](decision_log.md) と [第三者の台帳](third_party.md) に書いてください。**
 
 1. **LibRaw の同梱と LGPL-2.1**（決定 No.32、台帳の 3.1 節）: 配布物に LibRaw の共有ライブラリを入れるときに、LGPL の条件を満たす方法（ライセンスの文書を同梱するか、対応するソースの提供の方法、利用者がライブラリを差し替えられること）。今の配布物には **ライセンスの文書を入れていません**。macOS では、`.app` の中の dylib を差し替えると署名が壊れるため、差し替えた人がアドホック署名し直す必要がある点も含めて確認してください。
-2. **LibRaw の依存ライブラリのライセンス**: Windows（vcpkg）は jasper・lcms・zlib・libjpeg-turbo、macOS（Homebrew）は libomp・little-cms2・jpeg-turbo（実際に同梱したものは `bundled-libs.txt`）。それぞれのライセンスと、表記の要否を確認し、台帳に追加してください。
+2. **LibRaw の依存ライブラリのライセンス**: 2026-10-12 の配布物で同梱したのは、Windows（vcpkg）は lcms2（`lcms2-2.dll`）・zlib（`z.dll`）、macOS（Homebrew）は libomp・little-cms2・jpeg-turbo（6.2。一覧と SHA-256 は artifact の中の `bundled-libs.txt`）。それぞれのライセンスと、表記の要否を確認し、台帳に追加してください。
 3. **Visual C++ のランタイムの扱い**（2.2）: DLL をインストール先に同梱する（決定事項ログ No.73。利用者の指示、2026-10-12）。Microsoft の再頒布の条件（`REDIST.TXT`）の確認と、Windows Update で更新されないことの扱い（ビルドし直して配る）は人が判断する。
 4. **FFmpeg**（決定 No.62、台帳の 3.4 節）: 各自が入れる FFmpeg のビルドの構成と、H.264 / H.265 の特許の扱い。
-5. **macOS の最小の版**（2.3）: 配る相手の Mac の macOS の版を確かめ、`.app` の最小の版を上げる（`GENZO_ALLOW_NEWER_MINOS=1`）か、LibRaw とその依存を古い版向けにビルドするかを決める。
+5. ~~**macOS の最小の版**（2.3）~~ **決定済み（2026-10-12。決定事項ログ No.74）**: 配る相手の Mac はすべて macOS 26 以降なので、`.app` の最小の版を 26.0 に上げて配る。
 6. **署名・公証の要否**（SYS-08）: 社内の数名への配布なら不要としていますが、配る範囲が広がる場合や、会社の規則で署名が求められる場合は、Windows のコード署名の証明書（有償の場合あり）と、Apple Developer Program（有償）が要ります。費用・手続きは確認していません。
 7. **成果物を置く場所の公開の範囲**（2.5・2.6）: GitHub Actions の artifact、社内の共有フォルダなどを、配る相手だけが見られるか。
