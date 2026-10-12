@@ -685,3 +685,50 @@ describe("選ぶ操作の競合（PR #2 の Codex の指摘）", () => {
     expect(appStore.get().selection.current).toBe(idAt(10));
   });
 });
+
+describe("カタログを切り替えた後の古い処理（PR #2 の Codex の指摘）", () => {
+  it("列に入れた選別の操作は、カタログを閉じたら行わない", async () => {
+    await loadResults();
+    appStore.set({ mode: "loupe", autoAdvance: false });
+    await show(1);
+    let ratings = 0;
+    overrides.set_rating = (c) => {
+      ratings++;
+      return { type: "updated", count: (c.variant_ids as number[]).length };
+    };
+    mock.delay = (call) => ((call.args?.command as { type: string } | undefined)?.type === "set_rating" ? 20 : 0);
+    const first = actions.setRating(3);
+    await flush(); // 1 つ目はコアに送られている（往復の途中）
+    const queued = actions.setRating(4);
+    actions.catalogClosed();
+    // 新しいカタログで写真を選んだ（1 つ目の往復が終わる前）。
+    appStore.set({
+      selection: { ids: [999], current: 999, currentIndex: 0, anchorIndex: 0, anchorId: 999 },
+    });
+    await Promise.all([first, queued]);
+    expect(ratings).toBe(1);
+  });
+
+  it("終わったジョブを消すタイマーは、切り替えた後のカタログの同じ番号のジョブを消さない", async () => {
+    vi.useFakeTimers();
+    overrides.job = (c) => ({
+      type: "job",
+      job_id: c.job_id,
+      kind: "import",
+      state: "succeeded",
+      done: 1,
+      total: 1,
+      result: null,
+      error: null,
+    });
+    actions.trackJob(1, "import", "取り込み: 前のカタログ");
+    dispatchCoreEventForTest({ type: "job_finished", job_id: 1, kind: "import", state: "succeeded", message: null });
+    await flush();
+    expect(appStore.get().jobs[1]?.state).toBe("succeeded");
+    // カタログを切り替え、新しいカタログで同じ番号のジョブが始まる。
+    actions.catalogClosed();
+    actions.trackJob(1, "export", "書き出し: 新しいカタログ");
+    vi.advanceTimersByTime(6000);
+    expect(appStore.get().jobs[1]?.label).toBe("書き出し: 新しいカタログ");
+  });
+});

@@ -258,9 +258,14 @@ function finishJob(info: JobInfo): void {
     };
   });
   for (const w of waiters ?? []) w(info);
-  // 終わったジョブは少し後に一覧から消す。
+  // 終わったジョブは少し後に一覧から消す。ジョブの番号はカタログごとに 1 から数え直すので、その間にカタログを
+  // 切り替えていたら消さない（新しいカタログの同じ番号のジョブを消さないように。一覧はカタログの開閉で空になる）。
+  const session = catalogSession;
   setTimeout(() => {
+    if (session !== catalogSession) return;
     appStore.set((s) => {
+      const cur = s.jobs[info.job_id];
+      if (!cur || cur.state === "running") return {};
       const { [info.job_id]: _removed, ...rest } = s.jobs;
       return { jobs: rest };
     });
@@ -700,9 +705,14 @@ let modeSeq = 0;
  */
 let markQueue: Promise<void> = Promise.resolve();
 
-/** 選別の操作を列に入れる（`run` は自分の番が来てから対象を決める）。 */
+/**
+ * 選別の操作を列に入れる（`run` は自分の番が来てから対象を決める）。列に入れた後でカタログを切り替えたら
+ * 行わない（新しいカタログの選択に、前のカタログで押した操作を付けないように）。
+ */
 function enqueueMark(run: () => Promise<void>): Promise<void> {
-  const next = markQueue.then(run, run);
+  const session = catalogSession;
+  const guarded = () => (session === catalogSession ? run() : Promise.resolve());
+  const next = markQueue.then(guarded, guarded);
   markQueue = next.catch(() => undefined);
   return next;
 }
