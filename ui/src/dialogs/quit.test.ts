@@ -4,6 +4,7 @@ import { installBridge } from "../api/bridge";
 import { MockBridge } from "../api/mock";
 import type { DevelopSettings, DevelopState } from "../api/types";
 import * as core from "../api/core";
+import { appStore } from "../state/app";
 import { applySettings, openDevelopFor } from "../state/develop";
 import { registerFlush } from "../state/flush";
 import { quitOnRequest } from "./catalogActions";
@@ -85,6 +86,19 @@ describe("終了の要求", () => {
       )
       .filter((x) => x === "set_caption" || x === "quit_app");
     expect(seq).toEqual(["set_caption", "quit_app"]);
+  });
+
+  it("登録された書き込みに失敗したら、終了しない（編集中の内容を黙って捨てない）", async () => {
+    const unregister = registerFlush(async () => {
+      throw new Error("書けません");
+    });
+    try {
+      await quitOnRequest(11);
+    } finally {
+      unregister();
+    }
+    expect(mock.calls.some((c) => c.command === "quit_app")).toBe(false);
+    expect(appStore.get().toasts.some((t) => t.message.includes("終了しません"))).toBe(true);
   });
 
   it("処理の途中に来た 2 つめの要求には答えるだけで、終了を 2 回は始めない", async () => {

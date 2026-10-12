@@ -732,3 +732,27 @@ describe("カタログを切り替えた後の古い処理（PR #2 の Codex の
     expect(appStore.get().jobs[1]?.label).toBe("書き出し: 新しいカタログ");
   });
 });
+
+describe("ジョブの結果の問い合わせとカタログの切り替え（PR #2 の Codex の指摘）", () => {
+  it("問い合わせの間にカタログを切り替えたら、新しいカタログの同じ番号のジョブを終わったことにしない", async () => {
+    overrides.job = (c) => ({
+      type: "job",
+      job_id: c.job_id,
+      kind: "import",
+      state: "succeeded",
+      done: 1,
+      total: 1,
+      result: null,
+      error: null,
+    });
+    mock.delay = (call) => ((call.args?.command as { type: string } | undefined)?.type === "job" ? 20 : 0);
+    actions.trackJob(1, "import", "取り込み: 前のカタログ");
+    dispatchCoreEventForTest({ type: "job_finished", job_id: 1, kind: "import", state: "succeeded", message: null });
+    // 問い合わせの往復の間に、カタログを切り替えて同じ番号のジョブが始まる。
+    actions.catalogClosed();
+    actions.trackJob(1, "export", "書き出し: 新しいカタログ");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(appStore.get().jobs[1]?.label).toBe("書き出し: 新しいカタログ");
+    expect(appStore.get().jobs[1]?.state).toBe("running");
+  });
+});

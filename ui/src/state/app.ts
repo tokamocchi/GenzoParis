@@ -845,10 +845,16 @@ function handleEvent(e: CoreEvent): void {
         importVersionsThrottle.flush();
       }
       if (e.state === "failed") notify("error", `${JOB_LABEL[e.kind]}に失敗しました`, e.message ?? undefined);
+      // 結果の問い合わせの間にカタログを切り替えたら、結果を捨てる（ジョブの番号はカタログごとに 1 から数え直す
+      // ので、新しいカタログの同じ番号のジョブを終わったことにしないように）。
+      const session = catalogSession;
       void core
         .job(e.job_id)
-        .then(finishJob)
+        .then((info) => {
+          if (session === catalogSession) finishJob(info);
+        })
         .catch((err) => {
+          if (session !== catalogSession) return;
           // 結果を読めなくても、イベントの状態で終わらせる（待っている処理（取り込みの完了待ちなど）を
           // 止めたままにせず、一覧からも消す）。結果は null、読めなかった理由は error に入れる。
           const cur = appStore.get().jobs[e.job_id];

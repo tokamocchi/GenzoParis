@@ -408,6 +408,8 @@ function CaptionEditor(props: { id: VariantId; caption: string | null; disabled:
   latest.current = { id: props.id, draft, caption: props.caption };
   /** 保存の列（保存が重なっても、後に保存した値が最後に書かれるように順に送る）。 */
   const chain = useRef<Promise<void>>(Promise.resolve());
+  /** 最後の保存の失敗（成功したら null）。閉じる前の書き込みで、失敗を伝えるため。 */
+  const failure = useRef<unknown>(null);
 
   // 保存した値（読み直した詳細）が届いたら、編集していなければ合わせる。
   useEffect(() => {
@@ -425,8 +427,10 @@ function CaptionEditor(props: { id: VariantId; caption: string | null; disabled:
           setSaving(true);
           try {
             await core.setCaption([id], value);
+            failure.current = null;
           } catch (e) {
             dirty.current = true;
+            failure.current = e;
             actions.reportError(e, "キャプションを保存できません");
           } finally {
             setSaving(false);
@@ -442,7 +446,11 @@ function CaptionEditor(props: { id: VariantId; caption: string | null; disabled:
   const commitRef = useRef(commit);
   commitRef.current = commit;
   useEffect(() => {
-    const unregister = registerFlush(() => commitRef.current());
+    // 閉じる前の書き込み: 保存を済ませ、保存できていなければ失敗を伝える（閉じるのをやめさせる）。
+    const unregister = registerFlush(async () => {
+      await commitRef.current();
+      if (dirty.current && failure.current !== null) throw failure.current;
+    });
     return () => {
       unregister();
       void commitRef.current();

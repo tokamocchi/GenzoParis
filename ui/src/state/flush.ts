@@ -15,7 +15,20 @@ export function registerFlush(flush: () => Promise<void>): () => void {
   };
 }
 
-/** 登録された書き込みをすべて済ませる（失敗したものは、それぞれの部品が知らせる。ここでは待つだけ）。 */
+/** 閉じる前の書き込みに失敗した（閉じる・終了するのをやめる。`causes` は失敗した書き込みのエラー）。 */
+export class FlushError extends Error {
+  constructor(readonly causes: unknown[]) {
+    super("閉じる前の書き込みに失敗しました");
+    this.name = "FlushError";
+  }
+}
+
+/**
+ * 登録された書き込みをすべて済ませる。1 つでも失敗したら FlushError を投げる（呼び出し側は閉じるのをやめる。
+ * 失敗したことは、それぞれの部品も知らせる）。
+ */
 export async function flushPendingWrites(): Promise<void> {
-  await Promise.allSettled([...flushers].map((f) => f()));
+  const results = await Promise.allSettled([...flushers].map((f) => f()));
+  const causes = results.filter((r) => r.status === "rejected").map((r) => (r as PromiseRejectedResult).reason);
+  if (causes.length > 0) throw new FlushError(causes);
 }

@@ -9,7 +9,7 @@ import { toApiError } from "../api/errors";
 import type { CoreSettings, ErrorInfo, JobInfo } from "../api/types";
 import { actions, appStore } from "../state/app";
 import { closeDevelopSession } from "../state/develop";
-import { flushPendingWrites } from "../state/flush";
+import { FlushError, flushPendingWrites } from "../state/flush";
 import { isCloseSaveFailure, retryShouldCreate } from "./catalogLogic";
 import { baseName } from "./dialogFormat";
 import { clearResults } from "./resultLog";
@@ -110,13 +110,18 @@ export async function retryOpenCatalog(path: string): Promise<boolean> {
 /**
  * 画面の送信待ちの変更を送り切る（カタログを閉じる・切り替える・復元する・終了する前。保存待ちはコアが保存する）:
  * 編集中のキャプションなど登録された書き込み（state/flush.ts）を済ませ、現像の送信待ちの値を送り、現像の写真を
- * 閉じる。
+ * 閉じる。登録された書き込みに失敗したら FlushError を投げる（呼び出し側は閉じるのをやめ、FLUSH_FAILED_HINT で
+ * 知らせる。編集した内容は欄に残る）。
  */
 async function settleDevelop(): Promise<void> {
   await flushPendingWrites();
   if (appStore.get().mode !== "grid") actions.setMode("grid");
   await closeDevelopSession();
 }
+
+/** 閉じる前の書き込みに失敗したときの案内。 */
+export const FLUSH_FAILED_HINT =
+  "もう一度試すか、編集中のキャプションを Esc で取り消してから、もう一度操作してください（編集した内容は欄に残っています）";
 
 /** 終了の前に、現像の送信待ちを送り切るのを待つ時間の上限（コアが止まっていても終われるように）。 */
 export const QUIT_SETTLE_TIMEOUT_MS = 5000;
@@ -150,6 +155,11 @@ export async function quitOnRequest(id: number): Promise<void> {
     try {
       await Promise.race([settleDevelop(), timeout]);
     } catch (e) {
+      if (e instanceof FlushError) {
+        // 編集中のキャプションなどを保存できなかった: 終了しない（黙って捨てない）。
+        actions.notify("error", "編集中の内容を保存できないため、終了しません", FLUSH_FAILED_HINT);
+        return;
+      }
       console.warn("現像の送信待ちを送れない", e);
     } finally {
       clearTimeout(timer);
@@ -190,7 +200,13 @@ export async function switchCatalog(path: string, create: boolean): Promise<void
     return;
   }
   if (cur) {
-    await settleDevelop();
+    try {
+      await settleDevelop();
+    } catch (e) {
+      if (!(e instanceof FlushError)) throw e;
+      actions.notify("error", "編集中の内容を保存できないため、カタログを切り替えません", FLUSH_FAILED_HINT);
+      return;
+    }
     const r = await app.closeCatalog(false);
     if (!r.ok) {
       if (r.failure.still_open) {
@@ -236,7 +252,15 @@ export type RestoreResult =
 export async function restoreFromBackup(catalogPath: string, backupPath: string): Promise<RestoreResult> {
   const open = appStore.get().catalog;
   const wasOpen = open !== null && open.catalog_path === catalogPath;
-  if (wasOpen) await settleDevelop();
+  if (wasOpen) {
+    try {
+      await settleDevelop();
+    } catch (e) {
+      if (!(e instanceof FlushError)) throw e;
+      // 編集中の内容を保存できなかった: 復元しない（カタログは開いたまま）。
+      return { ok: false, error: toApiError(e.causes[0]).info, closeFailed: false };
+    }
+  }
   try {
     const outcome = await app.restoreCatalog(catalogPath, backupPath);
     if (outcome.status) {
