@@ -13,8 +13,10 @@ import { DeleteDialog } from "./DeleteDialog";
 import { Dialogs } from "./Dialogs";
 import { ExportDialog } from "./ExportDialog";
 import { ImportDialog } from "./ImportDialog";
+import { offerImportFolders } from "./importDrop";
 import { JobsIndicator } from "./JobsIndicator";
 import { PasteSettingsDialog } from "./PasteSettingsDialog";
+import { clearResults, recordResult } from "./resultLog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { WelcomeScreen } from "./WelcomeScreen";
@@ -100,6 +102,14 @@ describe("ダイアログ", () => {
     expect(html).toContain("ffprobe");
   });
 
+  it("取り込み（ドロップしたものにファイルらしい名前があれば注意）", () => {
+    offerImportFolders(["/p/DCIM", "/p/clip.xyz"]);
+    const html = render(createElement(ImportDialog));
+    expect(html).toContain("フォルダ（2 個）");
+    expect(html).toContain("フォルダではない（ファイルの）可能性があります: clip.xyz");
+    expect(html).toContain("除く");
+  });
+
   it("書き出し", () => {
     const html = render(createElement(ExportDialog, { variantIds: [1, 2, 3] }));
     expect(html).toContain("書き出し（3 枚）");
@@ -129,7 +139,11 @@ describe("ダイアログ", () => {
   });
 
   it("ショートカット", () => {
-    expect(render(createElement(ShortcutsDialog))).toContain("ショートカット");
+    const html = render(createElement(ShortcutsDialog));
+    expect(html).toContain("ショートカット");
+    expect(html).toContain("ルーペで開く");
+    expect(html).toContain("写真の情報の表示・非表示（ルーペ）");
+    expect(html).toContain("選択を表示中の 1 枚だけにする");
   });
 
   it("閉じられなかったとき", () => {
@@ -150,6 +164,13 @@ describe("ダイアログ", () => {
 });
 
 describe("ジョブの表示", () => {
+  it("結果だけがあるとき", () => {
+    clearResults();
+    recordResult({ level: "warning", message: "書き出し: 1 枚は失敗しました", detail: "失敗:\n・x（1 枚）" });
+    expect(render(createElement(JobsIndicator))).toContain("結果（1）");
+    clearResults();
+  });
+
   it("実行中のジョブ", () => {
     expect(render(createElement(JobsIndicator))).toBe("");
     appStore.set({

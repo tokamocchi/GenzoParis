@@ -10,7 +10,14 @@ import * as core from "../api/core";
 import { Progress } from "../components/Progress";
 import { type JobView, actions, useApp } from "../state/app";
 import "./dialogs.css";
-import { JOB_KIND_LABEL, JOB_STATE_LABEL, formatCount, formatJobProgress, formatLocalDateTime, sortJobs } from "./dialogFormat";
+import {
+  JOB_KIND_LABEL,
+  JOB_STATE_LABEL,
+  formatCount,
+  formatJobProgress,
+  formatLocalDateTime,
+  sortJobs,
+} from "./dialogFormat";
 import { type ResultEntry, clearResults, removeResult, useResults } from "./resultLog";
 
 function JobRow(props: { job: JobView }) {

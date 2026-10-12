@@ -99,7 +99,7 @@ export function useNewCatalogPicker(
           やめる
         </button>
         <button className="btn primary" onClick={() => void create()} disabled={disabled || checking}>
-          作って開く
+          このフォルダに作って開く
         </button>
       </div>
     </div>

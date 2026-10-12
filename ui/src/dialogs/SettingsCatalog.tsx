@@ -53,12 +53,13 @@ export function SettingsCatalog() {
   const [switching, setSwitching] = useState(false);
   const [gcRunning, setGcRunning] = useState(false);
   const mounted = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // StrictMode の開発版では、付け直し（cleanup → もう一度）があるので、ここで立て直す。
+    mounted.current = true;
+    return () => {
       mounted.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   const handlePick = async (pick: CatalogPick) => {
     if (pick.kind === "cancel" || pick.kind === "no_save_dialog") return;
@@ -75,11 +76,7 @@ export function SettingsCatalog() {
       if (mounted.current) setSwitching(false);
     }
   };
-  const newPicker = useNewCatalogPicker(
-    catalog ? parentDir(catalog.catalog_path) : null,
-    handlePick,
-    switching,
-  );
+  const newPicker = useNewCatalogPicker(catalog ? parentDir(catalog.catalog_path) : null, handlePick, switching);
 
   // 開いた時点の値は古いことがあるので、コアから読み直す。
   useEffect(() => {

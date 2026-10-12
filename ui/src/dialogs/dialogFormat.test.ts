@@ -1,15 +1,21 @@
 import { describe, expect, it } from "vitest";
 
+import type { ErrorInfo } from "../api/types";
+
 import {
   baseName,
   describeIntegrity,
   ensureDbExtension,
   formatJobProgress,
   formatLocalDateTime,
+  groupErrors,
   groupReasons,
+  joinPath,
   parentDir,
+  shortenDetail,
   sortJobs,
 } from "./dialogFormat";
+import { MAX_RESULTS, clearResults, recordResult, removeResult, resultEntries } from "./resultLog";
 
 describe("日時", () => {
   it("現地時刻で表示する", () => {
@@ -36,6 +42,15 @@ describe("パス", () => {
     expect(parentDir("C:\\catalog.db")).toBe("C:\\");
     expect(parentDir("/catalog.db")).toBe("/");
     expect(parentDir("catalog.db")).toBeNull();
+  });
+
+  it("フォルダと名前をつなぐ（区切りはフォルダの書き方に合わせる）", () => {
+    expect(joinPath("/home/u/Pictures", "a.db")).toBe("/home/u/Pictures/a.db");
+    expect(joinPath("/", "a.db")).toBe("/a.db");
+    expect(joinPath("C:\\Users\\me", "a.db")).toBe("C:\\Users\\me\\a.db");
+    expect(joinPath("D:\\", "a.db")).toBe("D:\\a.db");
+    expect(joinPath(" /x/ ", "a.db")).toBe("/x/a.db");
+    expect(joinPath("", "a.db")).toBe("a.db");
   });
 
   it(".db を付ける", () => {
@@ -84,6 +99,53 @@ describe("結果のまとめ", () => {
       "・row 1 missing",
       "テキスト検索の索引の問題: 索引が壊れています",
     ]);
+  });
+
+  it("エラーの種類ごとにまとめる（例の文は違うものだけ・案内は最初のもの・上限）", () => {
+    const e = (kind: ErrorInfo["kind"], message: string, hint: string | null = null): ErrorInfo => ({
+      kind,
+      message,
+      user_actionable: true,
+      retryable: false,
+      hint,
+    });
+    const errors = [
+      e("worker", "w"),
+      e("file_access", "a", null),
+      e("file_access", "a", "接続を確かめてください"),
+      e("file_access", "b", "別の案内"),
+      e("file_access", "c"),
+      e("gpu", "g"),
+    ];
+    expect(groupErrors(errors, "枚", 2)).toEqual([
+      "・ファイルにアクセスできない（4 枚）",
+      "　例: a",
+      "　例: b",
+      "　→ 接続を確かめてください",
+      "・画像の処理（ワーカー）のエラー（1 枚）",
+      "　例: w",
+      "・ほか 1 種類の理由",
+    ]);
+  });
+
+  it("通知の詳細を短くする", () => {
+    expect(shortenDetail(undefined)).toBeUndefined();
+    expect(shortenDetail("a\nb", 2)).toBe("a\nb");
+    expect(shortenDetail("a\nb\nc", 2)).toBe("a\nb\n…（続きは上の帯の「結果」で見られます）");
+  });
+
+  it("結果の記録（詳細があるものだけ・新しい順・上限）", () => {
+    clearResults();
+    recordResult({ level: "success", message: "詳細なし" });
+    expect(resultEntries()).toEqual([]);
+    for (let i = 0; i < MAX_RESULTS + 2; i++) recordResult({ level: "warning", message: `m${i}`, detail: "d" }, 1000 + i);
+    const list = resultEntries();
+    expect(list).toHaveLength(MAX_RESULTS);
+    expect(list[0].message).toBe(`m${MAX_RESULTS + 1}`);
+    removeResult(list[0].id);
+    expect(resultEntries()[0].message).toBe(`m${MAX_RESULTS}`);
+    clearResults();
+    expect(resultEntries()).toEqual([]);
   });
 
   it("理由ごとの件数（多い順・上限）", () => {
