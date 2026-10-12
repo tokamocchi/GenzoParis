@@ -873,7 +873,9 @@ function VideoView(props: { summary: VariantSummary; details: VariantDetails | n
             <p>動画のサムネイルがありません</p>
             {tools && !tools.ffmpeg && (
               <>
-                <p className="hint">ffmpeg が見つからないため、サムネイルを作れません。</p>
+                <p className="hint">
+                  ffmpeg が見つからないため、サムネイルを作れません。FFmpeg を入れて（見つからなければ設定で場所を指定して）アプリを再起動し、動画のフォルダを取り込み直してください。
+                </p>
                 <button className="btn small" onClick={openSettings}>
                   設定で FFmpeg の場所を指定する
                 </button>

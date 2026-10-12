@@ -6,7 +6,9 @@
 //   MAX_FILMSTRIP_SCROLL_PX までに抑え、スクロールの位置（物理）と内容の位置（仮想）を比例させる
 //   （react-virtual の observeElementOffset・scrollToFn の間に入る。上限に収まるときは同じ値）。
 // - 表示中の写真（selection.current）を枠で強調し、見える位置に保つ（端に寄ったら中央に置く）。
-// - クリックで選ぶ（Shift で範囲、Ctrl / ⌘ で追加・解除）。縦のホイールで横に送る。
+// - クリックでその写真を表示し、選択をその 1 枚にする。Ctrl / ⌘ + クリックは選択に足す・外す、Shift + クリックは
+//   表示中の写真からの範囲を選択に足す（どちらも表示中の写真は変えない。Lightroom と同じ。state/app.ts の
+//   selectIndex の keepCurrent）。縦のホイールで横に送る。
 // - 横のスクロールバーは常に場所を取る（viewer.css の overflow-x: scroll）。項目の大きさを内側の高さから
 //   決めるので、スクロールバーが出入りすると大きさが変わり、内容の幅が変わって、またスクロールバーが
 //   出入りする、を繰り返すため。
@@ -178,7 +180,8 @@ function FilmstripCell(props: {
   const url = v && rev ? thumbUrl(v.variant_id, rev) : null;
 
   const onClick = (e: MouseEvent) => {
-    void actions.selectIndex(props.index, { extend: e.shiftKey, toggle: e.ctrlKey || e.metaKey });
+    // 修飾キー付きのクリックで表示中の写真を移さない（現像の画面が開き直し、同期のコピー元が入れ替わるため）。
+    void actions.selectIndex(props.index, { extend: e.shiftKey, toggle: e.ctrlKey || e.metaKey, keepCurrent: true });
   };
 
   const cls = ["filmstrip-cell", isCurrent ? "current" : "", isSelected ? "selected" : ""].join(" ");

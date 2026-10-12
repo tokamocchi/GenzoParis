@@ -102,11 +102,13 @@ describe("ダイアログ", () => {
     expect(html).toContain("ffprobe");
   });
 
-  it("取り込み（ドロップしたものにファイルらしい名前があれば注意）", () => {
-    offerImportFolders(["/p/DCIM", "/p/clip.xyz"]);
+  it("取り込み（点を含む名前のフォルダに、名前だけで注意を出さない）", () => {
+    // 種類はアプリの path_kinds で確かめてから注意を出す（useEffect は動かないので、ここでは確かめる前）。
+    offerImportFolders(["/p/DCIM", "/p/2024.Kyoto"]);
     const html = render(createElement(ImportDialog));
     expect(html).toContain("フォルダ（2 個）");
-    expect(html).toContain("フォルダではない（ファイルの）可能性があります: clip.xyz");
+    expect(html).toContain("2024.Kyoto");
+    expect(html).not.toContain("フォルダではありません");
     expect(html).toContain("除く");
   });
 

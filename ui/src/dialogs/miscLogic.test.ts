@@ -14,7 +14,7 @@ import {
   restoreTargetNote,
   retryShouldCreate,
 } from "./catalogLogic";
-import { likelyFileNames, splitDroppedPaths, videoToolsWarning } from "./importLogic";
+import { type PathKind, nonFolderPaths, splitDroppedPaths, videoToolsWarning } from "./importLogic";
 import {
   DEFAULT_PASTE_SELECTION,
   type LoadedItem,
@@ -48,10 +48,17 @@ describe("取り込み", () => {
     ).toHaveLength(7);
   });
 
-  it("フォルダではない可能性がある名前（数字だけの拡張子は除く）", () => {
-    expect(
-      likelyFileNames(["/p/2024.05.01", "/p/DCIM", "C:\\x\\clip.xyz", "/p/Trip.Paris", "/p/a.b-c", "/p/.hidden"]),
-    ).toEqual(["C:\\x\\clip.xyz", "/p/Trip.Paris"]);
+  it("注意を出すのは、アプリで確かめてファイル・見つからないと分かったものだけ（名前からは推定しない）", () => {
+    const folders = ["/p/2024.Kyoto", "/p/Trip.Paris", "/p/clip.mp4", "/p/gone", "/p/unchecked.xyz"];
+    const kinds = new Map<string, PathKind>([
+      ["/p/2024.Kyoto", "dir"],
+      ["/p/Trip.Paris", "dir"],
+      ["/p/clip.mp4", "file"],
+      ["/p/gone", "missing"],
+      // "/p/unchecked.xyz" は確かめていない（「参照…」で選んだもの・確かめている途中・確かめられなかったもの）。
+    ]);
+    expect(nonFolderPaths(folders, kinds)).toEqual({ files: ["/p/clip.mp4"], missing: ["/p/gone"] });
+    expect(nonFolderPaths(folders, new Map())).toEqual({ files: [], missing: [] });
   });
 
   it("ffmpeg・ffprobe がないときの注意", () => {

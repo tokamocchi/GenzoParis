@@ -78,16 +78,24 @@ function copySettings(): void {
   actions.notify("info", "現像設定をコピーしました");
 }
 
+/**
+ * コピーした設定を、表示中の写真とフィルムストリップで選んだ写真に貼り付ける（Ctrl / ⌘ + Shift + V と同じ
+ * 対象。理由は state/app.ts の pasteTargets）。コピー元の写真は貼り付けのダイアログで除く。
+ */
 function pasteSettings(): void {
   if (!appStore.get().clipboard) {
     actions.notify("info", `先に現像設定をコピーしてください（${comboLabel("mod+shift+c")}）`);
     return;
   }
-  const targets = actions.targets();
+  const targets = actions.pasteTargets();
   if (targets.length > 0) actions.openDialog({ kind: "paste_settings", targets });
 }
 
-/** 選んだ他の写真に、今の写真の設定を写す（コピーして貼り付けのダイアログを開く）。 */
+/**
+ * 選んだ他の写真に、今の写真（現像中の写真）の設定を写す（コピーして貼り付けのダイアログを開く）。コピー元は
+ * 現像中の写真で、貼り付け先からは除く（ダイアログの preparePasteTargets でも除く）。フィルムストリップの
+ * Ctrl / ⌘・Shift + クリックでは表示中の写真が変わらないので、選び足した写真がコピー元になることはない。
+ */
 function syncToSelection(ids: VariantId[]): void {
   const c = currentSettings();
   if (!c) return;

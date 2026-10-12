@@ -297,8 +297,8 @@ function Details(props: { details: VariantDetails; stale: boolean; multi: boolea
               {ffprobe === null ? (
                 <>
                   <p>
-                    FFmpeg（ffprobe）が見つからないため、動画の長さ・コーデックなどを読めません。設定で FFmpeg
-                    の場所を指定してから、取り込み直してください。
+                    FFmpeg（ffprobe）が見つからないため、動画の長さ・コーデックなどを読めません。FFmpeg
+                    を入れて（見つからなければ設定で場所を指定して）アプリを再起動し、動画のフォルダを取り込み直してください。
                   </p>
                   <button
                     type="button"

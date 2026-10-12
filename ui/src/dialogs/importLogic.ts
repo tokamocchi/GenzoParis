@@ -3,15 +3,18 @@
 import type { ExternalTools } from "../api/types";
 import { baseName } from "./dialogFormat";
 
+/** パスの種類（アプリの path_kinds。api/app.ts の pathKinds）。 */
+export type PathKind = "dir" | "file" | "missing";
+
 /**
  * フォルダではないと分かる拡張子（小文字）。ドロップしたものがファイルなら取り込まない（取り込みはフォルダ
  * 単位）。genzo-api の import.rs の RAW_EXTENSIONS・IMAGE_EXTENSIONS・VIDEO_EXTENSIONS に、よく一緒に
  * 扱うファイル（カタログ・サイドカー・ほかの RAW・画像・動画・文書など）を加えたもの。
  *
- * 画面からはパスがフォルダかファイルかを確かめられない（アプリにそのコマンドがない）ので、ここにない拡張子の
- * 名前（"2024.05.01" のようなフォルダもある）はフォルダとみなす。実際はファイルなら、取り込みのジョブが
- * 「フォルダではありません」で失敗する。取り込みのダイアログは、拡張子らしいものが付いた名前に注意を出す
- * （likelyFileNames）。
+ * ドロップしたものの種類は、アプリの path_kinds（api/app.ts の pathKinds）で確かめる（Dialogs.tsx）。これは
+ * それを確かめられなかったときの、名前からの推定（splitDroppedPaths）にだけ使う。ここにない拡張子の名前
+ * （"2024.05.01"・"2024.Kyoto" のようなフォルダもある）はフォルダとみなす。実際はファイルなら、取り込みの
+ * ジョブが「フォルダではありません」で失敗する。
  */
 const FILE_EXTENSIONS = new Set([
   // GenzoParis が取り込むもの
@@ -121,14 +124,19 @@ export function splitDroppedPaths(paths: readonly string[]): { folders: string[]
 }
 
 /**
- * フォルダではない（ファイルの）可能性がある名前（英字を含む 1〜5 文字の拡張子らしいものが付いたもの。
- * "2024.05.01" のように数字だけのものは除く）。取り込みのダイアログで注意を出す。
+ * 取り込みのダイアログで注意を出すもの: アプリの path_kinds で確かめて、フォルダではなかったもの（`files`）と
+ * 見つからなかったもの（`missing`）。`kinds` にないもの（「参照…」で OS のフォルダの選択から選んだもの・
+ * 確かめている途中のもの・確かめられなかったもの）には出さない（名前からは推定しない。"2024.Kyoto" のような
+ * フォルダもあるため）。
  */
-export function likelyFileNames(folders: readonly string[]): string[] {
-  return folders.filter((p) => {
-    const ext = extensionOf(p);
-    return ext.length >= 1 && ext.length <= 5 && /[a-z]/.test(ext) && /^[a-z0-9]+$/.test(ext);
-  });
+export function nonFolderPaths(
+  folders: readonly string[],
+  kinds: ReadonlyMap<string, PathKind>,
+): { files: string[]; missing: string[] } {
+  return {
+    files: folders.filter((p) => kinds.get(p) === "file"),
+    missing: folders.filter((p) => kinds.get(p) === "missing"),
+  };
 }
 
 /** ffmpeg・ffprobe が見つからないときの注意（見つかっていれば null）。決定事項ログ No.62。 */

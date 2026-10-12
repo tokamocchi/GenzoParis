@@ -33,7 +33,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["p"], label: "採用" },
       { keys: ["x"], label: "不採用" },
       { keys: ["u"], label: "フラグを外す" },
-      { keys: ["6", "7", "8", "9"], label: "カラーラベル（赤・黄・緑・青）" },
+      { keys: ["6", "7", "8", "9"], label: "カラーラベル（赤・黄・緑・青。すべて同じラベルなら外す）" },
     ],
   },
   {

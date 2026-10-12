@@ -1,5 +1,10 @@
-// 設定の「一般」（アプリの設定。カタログの外の settings.json に保存し、次にカタログを開いたときから使う）:
-// FFmpeg のフォルダ（決定事項ログ No.62）・GPU・終了時に毎回バックアップ。
+// 設定の「一般」（アプリの設定。カタログの外の settings.json に保存する）: FFmpeg のフォルダ（決定事項ログ
+// No.62）・GPU・終了時に毎回バックアップ。
+//
+// アプリはこれらをカタログを開くときにだけ読む（crates/genzo-app/src/state.rs の open_locked で ffmpeg・ffprobe を
+// 探してワーカーの環境に渡す。保存してもワーカーの環境は変えない）。同じカタログは開き直せないので、カタログを
+// 開いている間に保存したものは、アプリを再起動すると有効になる（FFmpeg は、その後に動画のフォルダを取り込み
+// 直すと、サムネイルと情報を作る）。
 
 import { useEffect, useState } from "react";
 
@@ -28,8 +33,16 @@ function ToolLine(props: { name: string; path: string | null | undefined; checki
   );
 }
 
+/** 保存した設定がいつ有効になるかの案内（カタログを開いていなければ、開いたときから使う）。 */
+function whenEffective(catalogOpen: boolean): string {
+  return catalogOpen
+    ? "アプリを再起動すると有効になります（FFmpeg を変えたときは、その後、動画のフォルダを取り込み直してください）"
+    : "カタログを開くと有効になります";
+}
+
 export function SettingsGeneral() {
   const status = useApp((s) => s.status);
+  const catalogOpen = useApp((s) => s.catalog !== null);
   const openTools = useApp((s) => s.catalog?.tools ?? null);
   const saved = status?.settings ?? null;
   const [ffmpegDir, setFfmpegDir] = useState<string | null>(saved?.ffmpeg_dir ?? null);
@@ -80,7 +93,7 @@ export function SettingsGeneral() {
       const settings = await app.updateAppSettings({ ffmpeg_dir: ffmpegDir, gpu, backup_on_close: backupOnClose });
       const cur = appStore.get().status;
       if (cur) actions.setStatus({ ...cur, settings, tools: tools ?? cur.tools });
-      actions.notify("success", "設定を保存しました", "次にカタログを開いたときから有効です");
+      actions.notify("success", "設定を保存しました", whenEffective(appStore.get().catalog !== null));
     } catch (e) {
       setError(toApiError(e).info);
     } finally {
@@ -117,7 +130,9 @@ export function SettingsGeneral() {
           <ToolLine name="ffprobe" path={tools?.ffprobe} checking={checking} />
         </div>
         {openDiffers && (
-          <div className="dlg-note">今開いているカタログは、開いたときに見つけたもの（または見つからなかった状態）を使っています。</div>
+          <div className="dlg-note">
+            今開いているカタログは、開いたときに見つけたもの（または見つからなかった状態）を使っています。保存してアプリを再起動すると、上のものを使います（その後、動画のフォルダを取り込み直してください）。
+          </div>
         )}
       </div>
 
@@ -152,7 +167,7 @@ export function SettingsGeneral() {
       <ErrorBox error={error} title="保存できません" />
       <div className="dlg-row end">
         {busy && <Busy>保存しています…</Busy>}
-        <span className="hint">次にカタログを開いたときから有効です</span>
+        <span className="hint">{whenEffective(catalogOpen)}</span>
         <button className="btn primary" onClick={() => void save()} disabled={busy || !dirty}>
           保存
         </button>

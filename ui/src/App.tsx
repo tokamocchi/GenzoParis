@@ -76,10 +76,11 @@ function useGlobalHotkeys(enabled: boolean) {
       p: () => actions.setFlag(1),
       x: () => actions.setFlag(-1),
       u: () => actions.setFlag(0),
-      "6": () => actions.setColorLabel("red"),
-      "7": () => actions.setColorLabel("yellow"),
-      "8": () => actions.setColorLabel("green"),
-      "9": () => actions.setColorLabel("blue"),
+      // カラーラベル（すべて同じラベルなら外す）。
+      "6": () => actions.toggleColorLabel("red"),
+      "7": () => actions.toggleColorLabel("yellow"),
+      "8": () => actions.toggleColorLabel("green"),
+      "9": () => actions.toggleColorLabel("blue"),
       ...(mode !== "grid"
         ? {
             ArrowLeft: () => actions.moveSelection(-1),
@@ -123,8 +124,9 @@ function useGlobalHotkeys(enabled: boolean) {
           actions.reportError(e, "現像設定をコピーできません");
         }
       },
+      // 貼り付けは、ルーペ・現像でもフィルムストリップで選んだ写真を含める（state/app.ts の pasteTargets）。
       "mod+shift+v": () => {
-        const targets = actions.targets();
+        const targets = actions.pasteTargets();
         if (!appStore.get().clipboard) {
           actions.notify("info", "先に現像設定をコピーしてください（Ctrl / ⌘ + Shift + C）");
           return;

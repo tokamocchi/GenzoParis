@@ -86,7 +86,7 @@ export interface AppState {
   search: { generation: number; count: number } | null;
   searching: boolean;
   selection: Selection;
-  /** 評価・フラグを付けたら次の写真へ進む（LIB-05）。 */
+  /** 評価・フラグ・カラーラベルを付けたら次の写真へ進む（LIB-05）。 */
   autoAdvance: boolean;
   dialog: DialogState | null;
   toasts: Toast[];
@@ -258,8 +258,17 @@ async function runSearch(): Promise<void> {
   try {
     const r = await core.search(filter, sort);
     if (seq !== searchSeq) return;
-    searchCache.reset(r.generation, r.count);
-    appStore.set({ search: r, searching: false });
+    // 応答より新しい世代（コアは search の直後に、次の世代の search_updated を送りうる。イベントとコマンドの
+    // 応答は別の経路なので、イベントが先に届くことがある）を既に受け取っていれば、そちらのままにする。古い世代に
+    // 戻すと、コアは今の世代以外の range を stale にするので、一覧が空のまま止まる。同じ世代なら、イベントで
+    // 同じ結果にしてあるので、キャッシュを捨て直さない。コアの世代は 1 つのコアの中で増え続ける（別の
+    // カタログを開いたときは catalogOpened が 0 に戻す）。
+    if (r.generation > searchCache.generation) {
+      searchCache.reset(r.generation, r.count);
+      appStore.set({ search: r, searching: false });
+    } else {
+      appStore.set({ searching: false });
+    }
     await relocateSelection();
   } catch (e) {
     if (seq === searchSeq) appStore.set({ searching: false });
@@ -295,28 +304,72 @@ async function relocateSelection(): Promise<void> {
   }
 }
 
-/** 位置で選ぶ（`extend`: Shift で範囲、`toggle`: Ctrl / ⌘ で追加・解除）。 */
+/**
+ * `from` から `to` までの範囲の id を集める（大きすぎる範囲は `to` の側から 10,000 件まで。`to` は必ず
+ * 含める）。
+ */
+async function rangeIds(from: number, to: number): Promise<VariantId[]> {
+  const [a, end] =
+    from <= to
+      ? [Math.max(from, to - (MAX_RANGE_SELECTION - 1)), to]
+      : [to, Math.min(from, to + (MAX_RANGE_SELECTION - 1))];
+  await searchCache.ensure(a, end + 1);
+  const ids: VariantId[] = [];
+  for (let i = a; i <= end; i++) {
+    const v = searchCache.get(i);
+    if (v) ids.push(v.variant_id);
+  }
+  return ids;
+}
+
+/**
+ * 表示中の写真を変えずに、選択に足す・選択から外す（ルーペ・現像のフィルムストリップの Ctrl / ⌘・Shift +
+ * クリック）。`extend` なら表示中の写真からその写真までの範囲を足し、そうでなければその写真を足す・外す
+ * （表示中の写真は外さない。外すと、表示中の写真が選択に入っていない状態になる）。
+ */
+async function changeSelectionKeepingCurrent(index: number, id: VariantId, extend: boolean): Promise<void> {
+  const sel = appStore.get().selection;
+  if (!extend && id === sel.current) return;
+  // 表示中の写真の位置が分からなければ、範囲ではなくその写真だけを足す。
+  const added = extend && sel.currentIndex !== null ? await rangeIds(sel.currentIndex, index) : [id];
+  appStore.set((s) => {
+    const cur = s.selection;
+    // 表示中の写真は、常に選択に含める。
+    const base = cur.current !== null && !cur.ids.includes(cur.current) ? [cur.current, ...cur.ids] : cur.ids;
+    if (!extend && base.includes(id)) {
+      if (id === cur.current) return {};
+      return { selection: { ...cur, ids: base.filter((x) => x !== id) } };
+    }
+    const has = new Set(base);
+    return { selection: { ...cur, ids: [...base, ...added.filter((x) => !has.has(x))] } };
+  });
+}
+
+/**
+ * 位置で選ぶ（`extend`: Shift で範囲、`toggle`: Ctrl / ⌘ で追加・解除）。
+ *
+ * グリッドでは、操作の対象（current）もその写真に移る。`keepCurrent`（ルーペ・現像のフィルムストリップ）
+ * なら、Ctrl / ⌘・Shift では選択だけを変え、表示中の写真（current）は変えない（Lightroom と同じ。Shift の
+ * 範囲の起点は表示中の写真）。表示中の写真が移ると、現像の画面がその写真を開き直し、「選んだ…に同期」の
+ * コピー元が最後にクリックした写真に入れ替わって、現像していた写真を上書きしてしまうため。修飾キーなしの
+ * クリックは、どちらでもその写真を表示し、選択をその 1 枚にする。
+ */
 async function selectIndex(
   index: number,
-  opts: { extend?: boolean; toggle?: boolean } = {},
+  opts: { extend?: boolean; toggle?: boolean; keepCurrent?: boolean } = {},
 ): Promise<void> {
   if (index < 0 || index >= searchCache.count) return;
   const item = await searchCache.fetch(index);
   if (!item) return;
   const id = item.variant_id;
   const sel = appStore.get().selection;
+  if (opts.keepCurrent && sel.current !== null && (opts.extend || opts.toggle)) {
+    await changeSelectionKeepingCurrent(index, id, !!opts.extend);
+    return;
+  }
   if (opts.extend && sel.anchorIndex !== null) {
     // 範囲の id を集める（大きすぎる範囲は、操作の対象（index）の側から 10,000 件まで。対象は必ず含める）。
-    const [a, end] =
-      sel.anchorIndex <= index
-        ? [Math.max(sel.anchorIndex, index - (MAX_RANGE_SELECTION - 1)), index]
-        : [index, Math.min(sel.anchorIndex, index + (MAX_RANGE_SELECTION - 1))];
-    await searchCache.ensure(a, end + 1);
-    const ids: VariantId[] = [];
-    for (let i = a; i <= end; i++) {
-      const v = searchCache.get(i);
-      if (v) ids.push(v.variant_id);
-    }
+    const ids = await rangeIds(sel.anchorIndex, index);
     appStore.set({ selection: { ids, current: id, currentIndex: index, anchorIndex: sel.anchorIndex } });
     return;
   }
@@ -347,10 +400,67 @@ function targets(): VariantId[] {
   return selection.current !== null ? [selection.current] : [];
 }
 
+/**
+ * 現像設定の貼り付け（Ctrl / ⌘ + Shift + V・現像の画面の「貼り付け」）の対象: グリッドでは targets() と同じ。
+ * ルーペ・現像では、表示中の写真とフィルムストリップで選んだ写真のすべて。
+ *
+ * 評価・フラグなどと違い、ルーペ・現像でも選択中のすべてにする: ショートカットの一覧（「現像設定を貼り付け
+ * （選んだ写真へ）」）とグリッドでの動きに合わせ、Lightroom のように、フィルムストリップで選んだ写真へまとめて
+ * 写せるようにするため（表示中の 1 枚だけにしたいときは、普通のクリックで選び直す）。どの写真に写すかは
+ * 貼り付けのダイアログに枚数を出して確かめてもらい、コピー元の写真はダイアログで除く（pasteLogic.ts の
+ * preparePasteTargets）。
+ */
+function pasteTargets(): VariantId[] {
+  const { mode, selection } = appStore.get();
+  if (mode === "grid" || selection.current === null) return targets();
+  return selection.ids.includes(selection.current) ? selection.ids : [selection.current, ...selection.ids];
+}
+
+/** 評価・フラグ・カラーラベルを付けた後（「自動で次へ」がオンなら次の写真へ）。 */
 async function afterMark(): Promise<void> {
   const s = appStore.get();
   if (s.autoAdvance && s.mode !== "grid") await moveSelection(1);
   else if (s.autoAdvance && s.mode === "grid" && s.selection.ids.length <= 1) await moveSelection(1);
+}
+
+/**
+ * カラーラベルのキーで付けるラベル: 対象がすべて `label` なら null（外す）、そうでなければ `label`。今の
+ * ラベルが分からないもの（undefined。読み込んでいない）があれば付ける。
+ */
+export function nextColorLabel(
+  label: ColorLabel,
+  current: readonly (ColorLabel | null | undefined)[],
+): ColorLabel | null {
+  return current.length > 0 && current.every((c) => c === label) ? null : label;
+}
+
+/**
+ * `ids` の今のカラーラベル（読み込み済みの検索結果から。読み込んでいないものは undefined）。読み込み済みの
+ * 項目を 1 回だけ順に見る（写真ごとに探すと、選択の数 × 読み込み済みの件数になる）。
+ */
+function loadedColorLabels(ids: readonly VariantId[]): (ColorLabel | null | undefined)[] {
+  const wanted = new Set(ids);
+  const found = new Map<VariantId, ColorLabel | null>();
+  if (wanted.size > 0) {
+    for (const v of searchCache.loaded()) {
+      if (wanted.has(v.variant_id) && !found.has(v.variant_id)) {
+        found.set(v.variant_id, v.color_label);
+        if (found.size === wanted.size) break;
+      }
+    }
+  }
+  return ids.map((id) => found.get(id));
+}
+
+/** カラーラベルを付ける・外す（評価・フラグと同じく、「自動で次へ」がオンなら次の写真へ）。 */
+async function applyColorLabel(ids: VariantId[], label: ColorLabel | null): Promise<void> {
+  if (ids.length === 0) return;
+  try {
+    await core.setColorLabel(ids, label);
+    await afterMark();
+  } catch (e) {
+    reportError(e, "カラーラベルを変えられません");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +525,20 @@ function handleEvent(e: CoreEvent): void {
       void core
         .job(e.job_id)
         .then(finishJob)
-        .catch(() => undefined);
+        .catch((err) => {
+          // 結果を読めなくても、イベントの状態で終わらせる（待っている処理（取り込みの完了待ちなど）を
+          // 止めたままにせず、一覧からも消す）。結果は null、読めなかった理由は error に入れる。
+          const cur = appStore.get().jobs[e.job_id];
+          finishJob({
+            job_id: e.job_id,
+            kind: e.kind,
+            state: e.state,
+            done: cur?.done ?? 0,
+            total: cur?.total ?? 0,
+            result: null,
+            error: toApiError(err).info,
+          });
+        });
       break;
     }
     case "warning":
@@ -439,8 +562,15 @@ function installEventHandlers(): void {
 // カタログ
 // ---------------------------------------------------------------------------
 
+/**
+ * カタログを開く・閉じるたびに増える番号。複数のフォルダの取り込みのような続きのある処理が、始めたときと
+ * 同じカタログかを確かめる（閉じた・切り替えた・復元した後に、残りを別のカタログへ送らないため）。
+ */
+let catalogSession = 0;
+
 /** カタログを開いた後の状態にする。 */
 async function catalogOpened(status: CatalogStatus): Promise<void> {
+  catalogSession++;
   // 新しく開いたコアの検索の世代は 1 から数え直すので、前のカタログの世代を残さない（残すと、新しい
   // カタログの search_updated を古いものとして捨てる）。
   searchCache.reset(0, 0);
@@ -469,6 +599,8 @@ async function catalogOpened(status: CatalogStatus): Promise<void> {
  * そのため、待っているもの（actions.waitJob）には取り消しとして返す。
  */
 function catalogClosed(): void {
+  // 待ちを返す前に増やす（返された待ちの続きが、閉じたことを分かるように）。
+  catalogSession++;
   searchCache.reset(0, 0);
   const jobs = appStore.get().jobs;
   appStore.set({
@@ -524,6 +656,77 @@ async function openCatalog(path: string, create: boolean): Promise<boolean> {
     }
     appStore.set({ catalogOpening: null, catalogError: { path, error } });
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 取り込み
+// ---------------------------------------------------------------------------
+
+/**
+ * フォルダを取り込み、終わったら結果を知らせて検索し直す（失敗は通知して null）。
+ *
+ * 待っている間にカタログを閉じた（切り替え・復元を含む）ときは、閉じたカタログの結果なので、知らせも検索の
+ * し直しもせずに返す（catalogClosed が待ちを取り消しとして返す）。
+ */
+async function importFolder(path: string, recursive: boolean): Promise<JobInfo | null> {
+  const session = catalogSession;
+  try {
+    const jobId = await core.importFolder(path, recursive);
+    if (session !== catalogSession) return null;
+    const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+    trackJob(jobId, "import", `取り込み: ${name}`);
+    const info = await waitJob(jobId);
+    if (session !== catalogSession) return info;
+    const r = info.result;
+    if (r && r.type === "import") {
+      const problems = r.errors.length + r.not_registered.length;
+      const text = `取り込み: ${r.added.toLocaleString()} 件を追加、${r.updated.toLocaleString()} 件を更新${
+        r.unchanged ? `、${r.unchanged.toLocaleString()} 件は変更なし` : ""
+      }`;
+      notify(problems > 0 ? "warning" : "success", text, problems > 0 ? `${problems} 件のファイルを登録できませんでした` : undefined);
+    } else if (info.state === "succeeded" && info.error) {
+      // 終わったが結果を読めなかった（失敗は job_finished のイベントで知らせるので、ここでは知らせない）。
+      notify("warning", "取り込みは終わりましたが、結果を読めません", info.error.message);
+    }
+    appStore.set((s) => ({ foldersVersion: s.foldersVersion + 1 }));
+    await runSearch();
+    return info;
+  } catch (e) {
+    if (session !== catalogSession) return null;
+    reportError(e, "取り込めません");
+    return null;
+  }
+}
+
+/**
+ * フォルダを順に取り込む（1 つずつ。結果は importFolder が知らせる）。
+ *
+ * 各フォルダの前と、取り込みが終わった後に、始めたときと同じカタログが開いているかを確かめ、違えば残りを
+ * やめる（閉じた・切り替えた・復元した後に、残りを別のカタログへ送らないため）。取り込みが取り消された
+ * ときも残りをやめる（利用者の取り消しのほか、カタログを閉じるときにコアが取り消して、閉じ終わる前に
+ * 知らせてくることがあるため）。
+ */
+async function importFolders(folders: readonly string[], recursive: boolean): Promise<void> {
+  const session = catalogSession;
+  const stop = (reason: string, rest: number) => {
+    if (rest > 0) notify("info", `${reason}ため、残りの ${rest.toLocaleString()} 個のフォルダは取り込みませんでした`);
+  };
+  for (let i = 0; i < folders.length; i++) {
+    if (session !== catalogSession || appStore.get().catalog === null) {
+      stop("カタログを閉じた", folders.length - i);
+      return;
+    }
+    const info = await importFolder(folders[i], recursive);
+    const rest = folders.length - i - 1;
+    if (session !== catalogSession) {
+      stop("カタログを閉じた", rest);
+      return;
+    }
+    if (info?.state === "cancelled") {
+      stop("取り込みが取り消された", rest);
+      return;
+    }
   }
 }
 
@@ -598,6 +801,7 @@ export const actions = {
       selection: { ...s.selection, ids: s.selection.current !== null ? [s.selection.current] : [] },
     })),
   targets,
+  pasteTargets,
   // 選別（LIB-04・05）
   async setRating(rating: Rating) {
     const ids = targets();
@@ -619,37 +823,20 @@ export const actions = {
       reportError(e, "フラグを変えられません");
     }
   },
-  async setColorLabel(label: ColorLabel | null) {
+  setColorLabel(label: ColorLabel | null) {
+    return applyColorLabel(targets(), label);
+  },
+  /**
+   * カラーラベルのキー（6〜9）: 対象の写真がすべてそのラベルなら外し（なしにする）、そうでなければ付ける
+   * （Lightroom と同じ。混在するときは付ける）。今のラベルは読み込み済みの検索結果で調べる（読み込んで
+   * いない写真があれば、付ける）。
+   */
+  toggleColorLabel(label: ColorLabel) {
     const ids = targets();
-    if (ids.length === 0) return;
-    try {
-      await core.setColorLabel(ids, label);
-    } catch (e) {
-      reportError(e, "カラーラベルを変えられません");
-    }
+    return applyColorLabel(ids, nextColorLabel(label, loadedColorLabels(ids)));
   },
   // 取り込み
-  async importFolder(path: string, recursive: boolean) {
-    try {
-      const jobId = await core.importFolder(path, recursive);
-      const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
-      trackJob(jobId, "import", `取り込み: ${name}`);
-      const info = await waitJob(jobId);
-      const r = info.result;
-      if (r && r.type === "import") {
-        const problems = r.errors.length + r.not_registered.length;
-        const text = `取り込み: ${r.added.toLocaleString()} 件を追加、${r.updated.toLocaleString()} 件を更新${
-          r.unchanged ? `、${r.unchanged.toLocaleString()} 件は変更なし` : ""
-        }`;
-        notify(problems > 0 ? "warning" : "success", text, problems > 0 ? `${problems} 件のファイルを登録できませんでした` : undefined);
-      }
-      appStore.set((s) => ({ foldersVersion: s.foldersVersion + 1 }));
-      await runSearch();
-      return info;
-    } catch (e) {
-      reportError(e, "取り込めません");
-      return null;
-    }
-  },
+  importFolder,
+  importFolders,
   setClipboard: (clipboard: AppState["clipboard"]) => appStore.set({ clipboard }),
 };
