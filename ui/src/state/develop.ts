@@ -67,8 +67,9 @@ export function openDevelopFor(variantId: VariantId): Promise<DevelopState | nul
     error: null,
     frame: null,
   });
-  // 前の写真の送信待ちの値は捨てる（別の写真に送らない）。
-  pending = null;
+  // 前の写真の送信待ちの値（送信中に来た最新の値）は、捨てずに列の後ろへ移して前の写真に送る（列が空いて
+  // から開くので、別の写真には届かない）。
+  flushPending();
   const p = (async () => {
     // 前の写真への送信が終わってから開く（順序を保つ）。
     await queueIdle();
@@ -96,7 +97,8 @@ export function openDevelopFor(variantId: VariantId): Promise<DevelopState | nul
 /** 写真を閉じる（保存待ちの変更を保存する）。 */
 export async function closeDevelopSession(): Promise<void> {
   openSeq++;
-  pending = null;
+  // 送信待ちの最新の値は、閉じる前に送る（コアは閉じるときに保存する）。
+  flushPending();
   await queueIdle();
   developStore.set({ variantId: null, state: null, settings: null, opening: false, error: null, frame: null });
   try {
@@ -121,6 +123,15 @@ let pending: Op | null = null;
 /** 設定の後に順に実行する操作（end_drag・Undo など）。 */
 const tail: Op[] = [];
 const idleWaiters: (() => void)[] = [];
+
+/** 送信待ちの設定を、列の後ろ（今の写真への操作の続き）へ移して送り始める。 */
+function flushPending(): void {
+  if (pending) {
+    tail.push(pending);
+    pending = null;
+    void pump();
+  }
+}
 
 function queueIdle(): Promise<void> {
   if (!running && !pending && tail.length === 0) return Promise.resolve();

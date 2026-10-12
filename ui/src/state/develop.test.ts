@@ -66,4 +66,19 @@ describe("現像の設定の送信", () => {
     expect(sent).toEqual(["set:0.1", "set:0.3", "end_drag", "set:0.4", "undo"]);
     expect(developStore.get().settings?.exposure_ev).toBe(-1);
   });
+
+  it("写真を切り替える前に、送信中に来た最新の値を前の写真に送る（捨てない）", async () => {
+    await openDevelopFor(1);
+    mock.delay = (c) => ((c.args?.command as { type: string })?.type === "set_settings" ? 20 : 0);
+    mock.calls.length = 0;
+    applySettings(settings(0.1), false);
+    applySettings(settings(0.2), false); // 0.1 の送信中に来る（送信待ち）
+    await openDevelopFor(2);
+    const sent = mock.calls
+      .filter((c) => c.command === "core_execute")
+      .map((c) => c.args?.command as { type: string; variant_id?: number; settings?: { exposure_ev: number } })
+      .filter((c) => c.type === "set_settings" || c.type === "open_develop")
+      .map((c) => (c.type === "set_settings" ? `set:${c.settings?.exposure_ev}` : `open:${c.variant_id}`));
+    expect(sent).toEqual(["set:0.1", "set:0.2", "open:2"]);
+  });
 });

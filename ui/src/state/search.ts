@@ -98,13 +98,15 @@ class SearchCache {
     return this.get(index);
   }
 
-  private inflight = new Map<number, Promise<void>>();
+  /** 読み込み中の要求（世代とページで引く。前の世代の読み込みの途中で世代が変わっても、新しい世代の
+   * ページを要求し直せるように、世代をキーに含める）。 */
+  private inflight = new Map<string, Promise<void>>();
 
   private load(page: number, keepWhileLoading?: VariantSummary[]): Promise<void> {
-    const key = page;
+    const generation = this.generation;
+    const key = `${generation}:${page}`;
     const existing = this.inflight.get(key);
     if (existing) return existing;
-    const generation = this.generation;
     if (keepWhileLoading) this.pages.set(page, keepWhileLoading);
     else this.pages.set(page, "loading");
     const p = core
