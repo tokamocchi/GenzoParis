@@ -2,7 +2,7 @@
 
 Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカタログ管理を行う、Windows / macOS 向けのデスクトップアプリです。
 
-現在は開発の初期段階です。コアの crate（現像エンジン・カタログ・ワーカー・コア API）と検証用の CLI（`genzo`）を実装しましたが、UI はまだなく、アプリとしてはまだ使えません。Windows / macOS の実機での確認と PoC の計測もこれからです。進捗は [docs/implementation_status.md](docs/implementation_status.md) にあります。
+現在は MVP（ロードマップの M5）の実装を終え、**人による実機での受け入れの確認の前** の段階です。コアの crate（現像エンジン・カタログ・ワーカー・コア API）、検証用の CLI（`genzo`）、デスクトップアプリ（`genzo-app`。Tauri 2 ＋ React / TypeScript。取り込み・選別・絞り込み・現像・書き出し・バックアップと復元）を実装しました。動作は Linux（Xvfb と WebKitWebDriver）の E2E のシナリオで確かめていますが、**Windows / macOS の実機での確認、配布物（インストーラー）の作成、PoC の計測はこれから** です（手順は [docs/m5_acceptance.md](docs/m5_acceptance.md)・[docs/packaging.md](docs/packaging.md)）。進捗と、人の判断・確認が必要な事項は [docs/implementation_status.md](docs/implementation_status.md) にあります。
 
 ## 設計資料
 
@@ -20,6 +20,8 @@ Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカ�
 | [docs/implementation_status.md](docs/implementation_status.md) | 実装の進め方と進捗、人の判断・確認が必要な事項 |
 | [docs/third_party.md](docs/third_party.md) | 第三者のコード・データ・同梱物の台帳 |
 | [docs/poc/README.md](docs/poc/README.md) | PoC の記録（計測と記録のルール、PoC-1〜7 の記録欄） |
+| [docs/m5_acceptance.md](docs/m5_acceptance.md) | M5（MVP）の受け入れの確認の手順（Windows / macOS の実機で人が行う） |
+| [docs/packaging.md](docs/packaging.md) | 配布物（インストーラー）の作り方・入れ方・注意 |
 
 ## 開発
 
@@ -70,6 +72,24 @@ cargo build -p genzo-cli --features libraw
 `GENZO_PRIVATE_SAMPLES=<フォルダ> cargo test -p genzo-pipeline --features libraw --release --test private_samples -- --nocapture`（未指定なら何もせずに成功。`GENZO_REQUIRE_PRIVATE_SAMPLES=1` で実行できない場合を失敗に、`GENZO_UPDATE_PRIVATE_EXPECT=1` で期待値を書き直し）。
 Windows（PowerShell）では `$env:GENZO_PRIVATE_SAMPLES="<フォルダ>"` を先に設定してください。期待値を書き直したときは、git の差分を確かめ、数値を別の人が確認してからコミットしてください。CI では実行しません（手で実行するか自前のランナーに入れるかは未決。[docs/implementation_status.md](docs/implementation_status.md) の表 No.58）。
 
+### デスクトップアプリ（`genzo-app`）
+
+Tauri 2（`crates/genzo-app`）と React / TypeScript の画面（`ui/`）です（[決定事項ログ](docs/decision_log.md) No.60〜66）。Node 22 と、Tauri の前提のパッケージ（Linux は GTK・WebKitGTK の開発用のパッケージ。Tauri の資料の「Prerequisites」）が要ります。
+
+```sh
+cd ui
+npm ci
+npm test                 # 画面のテスト（vitest）
+npm run build            # 型の検査と画面のビルド（ui/dist）
+# 開発用の起動: ワーカー（LibRaw あり）を先にビルドしておく（本体は LibRaw に依存しない。決定事項ログ No.32）
+cargo build -p genzo-worker --features libraw
+npm run app:dev
+```
+
+- 本体（`genzo-paris`）は、ワーカー（`genzo-worker`）を「環境変数 `GENZO_WORKER_PATH` → 本体と同じフォルダ」の順に探します。開発用の起動では、同じ `target/debug` に置かれたものを使います。
+- 配布物の作り方（`npm run app:worker`・`npm run app:build`、GitHub Actions の `release.yml`）と、FFmpeg・署名・ライセンスの注意は [docs/packaging.md](docs/packaging.md) を見てください。**`release.yml` は手動でだけ動き、公開のリポジトリでは、成果物を誰でも取得できる状態にしてよいかの確認の印がないと止まります**（2.5 節）。
+- E2E（Linux の開発環境用）: `e2e/run.sh <アプリの実行ファイル> e2e/scenario.mjs [出力のフォルダ]`。Xvfb・WebKitWebDriver・`tauri-driver` が要ります（`e2e/run.sh` の冒頭）。写真のフォルダは `cargo run -p genzo-testkit --example e2e_fixtures -- <フォルダ>` で作り、環境変数 `E2E_PHOTOS` で渡します。アプリは `npm --prefix ui run build` の後に `cargo build -p genzo-app --features custom-protocol` で、ワーカーは同じフォルダに `cargo build -p genzo-worker --features libraw` でビルドします。Windows・macOS の WebView の確認の代わりにはなりません。
+
 ### CLI（`genzo`）
 
 検証用の CLI です（ORG-05。UI なしで登録・検索・現像・書き出し・計測を行う）。結果は表か `--json`、進捗と警告は標準エラー、終了コードは 0（成功）・1（エラー。`trash` を `--yes` なしで中止した場合を含む）・2（使い方の誤り）・3（結果は出したが一部が失敗した・問題が見つかった: 書き出し・削除・サムネイルの作り直しの一部の失敗、取り込みで登録できなかったファイル、`catalog check` で見つかった問題、`bench` での悪化）・130（Ctrl+C で中断。1 回目は実行中の処理を取り消してカタログを閉じてから、2 回目はすぐに終了。Windows でも 130）です（[決定事項ログ](docs/decision_log.md) No.52）。スクリプトからは、3 のときに結果の JSON を確かめてください。詳しくは `genzo --help` と `crates/genzo-cli/src/lib.rs` の doc を見てください。
@@ -105,8 +125,10 @@ cargo deny check
 
 GitHub Actions（[.github/workflows/ci.yml](.github/workflows/ci.yml)）で、push と pull request のたびに次を実行します。
 
-- Linux: フォーマットの確認と cargo-deny
-- Windows と macOS（Apple Silicon）: clippy（警告をエラーとして扱う）とテスト。macOS では LibRaw を入れて、機能フラグ `libraw` を有効にした確認も行う
+- Linux: フォーマットの確認と cargo-deny。画面（`ui/`）の型の検査・テスト・ビルドと、配布のスクリプト（`scripts/`）のテスト
+- Windows と macOS（Apple Silicon）: clippy（警告をエラーとして扱う）とテスト（デスクトップアプリの `genzo-app` を含む）。macOS では LibRaw を入れて、機能フラグ `libraw` を有効にした確認も行う
+
+外部のアクションはコミットの SHA で固定しています（[docs/packaging.md](docs/packaging.md) の 2.5 節）。配布物は別のワークフロー（`release.yml`。手動で実行）で作ります。
 
 ## ライセンス
 

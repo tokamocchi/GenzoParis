@@ -26,7 +26,20 @@ all-features = true
 [advisories]
 # 既定の設定のまま（何をエラーにするかは cargo-deny の既定に従う。脆弱性はエラー）。
 # 例外を加える場合は、理由と見直す時期を書く。
-ignore = []
+#
+# 2026-10-12 追加（genzo-app の Tauri 2.11 の依存の木。どれも「メンテナンス終了」の通知で、脆弱性ではない。
+# 更新先がない（No safe upgrade is available）。Tauri を上げるときに見直す。遅くとも 2027-01 に見直す）:
+# - proc-macro-error: Linux の GTK のバインディング（glib-macros）のビルド時のマクロ。配布の対象
+#   （Windows・macOS）の実行ファイルには入らない。
+# - unic-*: tauri-utils の urlpattern（権限の URL の照合）。Unicode の識別子の表で、入力は自分の設定だけ。
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error（Tauri の Linux の GTK の依存。ビルド時のみ）。Tauri の更新時に見直す" },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range（Tauri の urlpattern）。Tauri の更新時に見直す" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common（Tauri の urlpattern）。Tauri の更新時に見直す" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property（Tauri の urlpattern）。Tauri の更新時に見直す" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version（Tauri の urlpattern）。Tauri の更新時に見直す" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident（Tauri の urlpattern）。Tauri の更新時に見直す" },
+]
 
 [licenses]
 # GPL-3.0-or-later と両立するライセンスだけを許可する。
@@ -53,6 +66,19 @@ allow = [
     "LGPL-3.0-or-later",
 ]
 confidence-threshold = 0.8
+# MPL-2.0 の crate は、crate ごとに確認して許可する（上の allow の注）。
+# 2026-10-12 確認: Tauri 2（genzo-app。tauri-utils の HTML 処理・dirs の依存）が使う次の 5 つは、
+# ソース・付属のファイルに MPL-2.0 の Exhibit B（"Incompatible With Secondary Licenses"）の表示がない
+# （その文言は LICENSE の全文の中の定義とひな形にだけある）。MPL-2.0 は Exhibit B のないファイルなら
+# GPL と組み合わせられる（MPL-2.0 の 3.3 節）。法的な最終確認は人が行う（docs/third_party.md）。
+# 版を上げたときは、同じ確認をし直す。
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "cssparser" },
+    { allow = ["MPL-2.0"], crate = "cssparser-macros" },
+    { allow = ["MPL-2.0"], crate = "selectors" },
+    { allow = ["MPL-2.0"], crate = "dtoa-short" },
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+]
 # 許可したライセンスのうち、現在の依存で使われていないものがあっても警告しない
 # （将来の依存のために、GPL と両立するものをあらかじめ許可しているため）。
 unused-allowed-license = "allow"

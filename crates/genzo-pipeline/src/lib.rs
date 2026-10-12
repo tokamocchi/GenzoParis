@@ -37,7 +37,7 @@
 //! | [`finish::tone_curve`] | ステージ 16: トーンカーブ（単調な 3 次スプライン → 1D LUT） | DEV-07・2.6 節 |
 //! | [`finish::output`] | ステージ 17a 画面・17b 書き出し（量子化とディザリング）・17c ヒストグラム | 2.6 節・DEV-26 |
 //! | [`finish::reserved`] | v1 のステージ 6・7・12・14 の予約と、v1 で無視する設定の一覧 | 2.1 節 |
-//! | [`engine`] | エンジン: 段階 A0 / A1 / B のキャッシュ（[`Engine`]・ヒット・ミスの回数）、プレビュー（[`Engine::render_preview`]）、等倍・書き出しのタイル処理（[`FullResolutionJob`]）、ルーペの範囲（[`Engine::render_region`]）、書き出し（[`Engine::export`]）、取り消し（[`RenderControl`]） | 2.2 節・2.4 節・2.7 節・4.1 節・6.1 節 |
+//! | [`engine`] | エンジン: 段階 A0 / A1 / B のキャッシュ（[`Engine`]・ヒット・ミスの回数）、プレビュー（[`Engine::render_preview`]）、等倍・書き出しのタイル処理（[`FullResolutionJob`]）、ルーペの範囲（[`Engine::render_region`]）、書き出し（[`Engine::export`]）、取り消し（[`RenderControl`]）、切り抜く前の全体の表示（[`PreviewRequest::uncropped`]・[`Engine::full_resolution_with`]）、WB のスポイト（[`Engine::white_balance_at`]） | 2.2 節・2.4 節・2.7 節・4.1 節・6.1 節、DEV-03・DEV-15 |
 //! | [`input`] | RAW 以外の入力: 符号化した RGB と ICC からリニア BT.2020（B2）へ（[`working_image_from_encoded`]） | 2.6 節 |
 //!
 //! # データの流れ
@@ -207,10 +207,12 @@
 //! # 残りの担当（このファイルの一覧を更新すること）
 //!
 //! **genzo-gpu / genzo-api**: GPU 版のステージの実行（エンジンは CPU 版だけを実行する。どのステージを
-//! GPU で処理できるかは [`FullResolutionJob::stage_backends`]）、ジョブの優先度とメモリの予算
-//! （genzo-jobs。タイルの作業領域の概算は [`FullResolutionJob::estimate_tile_bytes`]）、取り消しの
-//! トークンの受け渡し（[`RenderControl`]）、キャッシュ L0 / L1 の符号化と保存（B5 は
-//! [`OutputTarget::CacheDisplayP3`] の出力を量子化したもの）、書き出しのファイル（genzo-media）。
+//! GPU で処理できるかは [`FullResolutionJob::stage_backends`]）、GPU 版のプレビューでの切り抜く前の全体の
+//! 表示（[`PreviewRequest::uncropped`]。今は genzo-gpu が見ないので、genzo-api はその間 CPU 版で描く）、
+//! ジョブの優先度とメモリの予算（genzo-jobs。タイルの作業領域の概算は
+//! [`FullResolutionJob::estimate_tile_bytes`]）、取り消しのトークンの受け渡し（[`RenderControl`]）、
+//! キャッシュ L0 / L1 の符号化と保存（B5 は [`OutputTarget::CacheDisplayP3`] の出力を量子化したもの）、
+//! 書き出しのファイル（genzo-media）。
 //!
 //! **v1 / PoC で決めること**: 歪曲補正（ステージ 9 の G → O を画素ごとの式にする）、ステージ 4・6・7・
 //! 12・14、HSL・カラーグレーディング、トーンカーブの効果（周辺光量・粒子）。仮置きの式と定数
@@ -255,7 +257,8 @@ pub use coords::{CoordinateFrames, SensorGrid};
 pub use engine::{
     CacheCounters, DEFAULT_TILE_SIZE, Engine, EngineConfig, EngineStats, ExportOptions,
     ExportPixels, ExportedImage, FullResolutionJob, NeverCancel, OutputTarget, PhotoSource,
-    PreviewRender, PreviewRequest, RegionRender, RenderControl, SourceId,
+    PreviewRender, PreviewRequest, RegionRender, RenderControl, SourceId, WB_PICK_RADIUS,
+    WhiteBalancePick,
 };
 pub use error::{PipelineError, Result};
 pub use finish::{FinishPlan, finish_context};

@@ -666,3 +666,107 @@ fn videos_are_filtered_by_duration_fps_codec_and_size() {
         sorted(vec![short_4k, long_hd, portrait, photo, unknown])
     );
 }
+
+/// 絞り込みの候補（[`crate::Catalog::facets`]）: 値は検索の条件にそのまま渡して一致し、件数は asset の
+/// 数（仮想コピーは数えない。マスターだけの検索の件数と同じ）。NULL・空の値は候補にしない。コーデックは
+/// 小文字にそろえてまとめる。カメラ・レンズは索引だけを読む（PERF-07）。
+#[test]
+fn facets_match_filter_values_and_count_assets() {
+    use crate::{MediaMetadata, RegisterFile};
+    let mut f = Fixture::new();
+    let folder = f.folder;
+    // A・B: 7M4・24-70mm、C: 7RM5・50mm、D: カメラ・レンズの分からない写真。
+    let a = f.photo("A.ARW", 1, None);
+    f.photo("B.ARW", 2, None);
+    let mut req = photo_req(folder, "C.ARW", 3, None);
+    req.metadata = MediaMetadata::Photo(super::photo_meta("ILCE-7RM5", "FE 50mm F1.2 GM"));
+    f.cat.register_file(&req).unwrap();
+    let mut req = photo_req(folder, "D.JPG", 4, None);
+    req.metadata = MediaMetadata::Photo(genzo_model::PhotoMetadata::default());
+    f.cat.register_file(&req).unwrap();
+    // 動画: hevc・HEVC（大文字で記録）・h264・空・分からないもの・メタデータを読めなかったもの。
+    for (name, n, codec) in [
+        ("V1.MP4", 5, Some("hevc")),
+        ("V2.MP4", 6, Some("HEVC")),
+        ("V3.MP4", 7, Some("h264")),
+        ("V4.MP4", 8, Some("")),
+        ("V5.MP4", 9, None),
+    ] {
+        let mut r = video_req(folder, name, n, None);
+        if let MediaMetadata::Video(v) = &mut r.metadata {
+            v.codec = codec.map(str::to_owned);
+        }
+        f.cat.register_file(&r).unwrap();
+    }
+    f.cat
+        .register_file(&RegisterFile {
+            folder_id: folder,
+            name: "V6.MP4".to_owned(),
+            facts: super::facts(10),
+            kind: AssetKind::Video,
+            metadata: MediaMetadata::None,
+            capture: super::capture(None),
+            error: Some("読めません".to_owned()),
+        })
+        .unwrap();
+    // 仮想コピーは件数に数えない。
+    f.cat
+        .create_virtual_copy(a.master_variant_id, None)
+        .unwrap();
+
+    let facets = f.cat.facets().unwrap();
+    let pairs = |v: &[(&str, u64)]| -> Vec<(String, u64)> {
+        v.iter().map(|(s, n)| ((*s).to_owned(), *n)).collect()
+    };
+    assert_eq!(
+        facets.cameras,
+        pairs(&[("SONY ILCE-7M4", 2), ("SONY ILCE-7RM5", 1)])
+    );
+    assert_eq!(
+        facets.lenses,
+        pairs(&[("FE 24-70mm F2.8 GM II", 2), ("FE 50mm F1.2 GM", 1)])
+    );
+    assert_eq!(facets.codecs, pairs(&[("h264", 1), ("hevc", 2)]));
+    assert_eq!(f.cat.distinct_cameras().unwrap(), facets.cameras);
+    assert_eq!(f.cat.distinct_lenses().unwrap(), facets.lenses);
+    assert_eq!(f.cat.distinct_codecs().unwrap(), facets.codecs);
+
+    // 値をそのまま条件にすると一致する。件数はマスターだけの検索の件数（asset の数）と同じで、仮想
+    // コピーを含む検索では、その分だけ多い。
+    let count = |filter: Filter| f.cat.count(&filter).unwrap();
+    for (value, n) in &facets.cameras {
+        let filter = |masters_only| Filter {
+            cameras: Some(vec![value.clone()]),
+            masters_only,
+            ..Default::default()
+        };
+        assert_eq!(count(filter(true)), *n, "{value}");
+        let copies = u64::from(value == "SONY ILCE-7M4");
+        assert_eq!(count(filter(false)), n + copies, "{value}");
+    }
+    for (value, n) in &facets.lenses {
+        let filter = Filter {
+            lenses: Some(vec![value.clone()]),
+            masters_only: true,
+            ..Default::default()
+        };
+        assert_eq!(count(filter), *n, "{value}");
+    }
+    for (value, n) in &facets.codecs {
+        let filter = Filter {
+            codecs: Some(vec![value.clone()]),
+            masters_only: true,
+            ..Default::default()
+        };
+        assert_eq!(count(filter), *n, "{value}");
+    }
+
+    // カメラ・レンズは索引だけを読み（表の行を引かない）、並べ替えの一時的な B 木を作らない。
+    let [cameras, lenses, codecs] = f.cat.explain_facets().unwrap();
+    for (plan, index) in [(&cameras, "asset_camera"), (&lenses, "asset_lens")] {
+        let text = plan.join(" / ");
+        assert!(text.contains(&format!("COVERING INDEX {index}")), "{text}");
+        assert!(!text.contains("TEMP B-TREE"), "{text}");
+    }
+    assert!(!codecs.is_empty());
+}

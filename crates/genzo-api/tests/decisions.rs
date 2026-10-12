@@ -449,6 +449,57 @@ fn previews_are_not_rendered_after_import_by_default_and_made_on_request() {
     core.close().unwrap();
 }
 
+/// No.24: 表示のための L1 の要求（`request_preview`）が続いても、実行中の作り直しを取り消して作り直し
+/// 続けない（ルーペ・先読みが同じ写真を何度も要求するため）。
+#[test]
+fn repeated_preview_requests_do_not_restart_regeneration() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let env = Env::new();
+    common::write_jpeg(&env.photos.join("A.jpg"), (120, 80), 1, None);
+    let starts = Arc::new(AtomicUsize::new(0));
+    let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(0);
+    let core = {
+        let starts = Arc::clone(&starts);
+        env.open_with_hooks(move |h| {
+            h.on_regenerate_start = Some(Arc::new(move |_| {
+                // 1 回目は、テストが要求を続けて送り終えるまで止める（実行中の作り直しにする）。
+                if starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let _ = release_rx.recv_timeout(Duration::from_secs(30));
+                }
+            }));
+        })
+    };
+    common::import(&core, &env.photos);
+    core.wait_idle();
+    let v = all_items(&core)[0].variant_id;
+    assert!(core.preview_path(v).unwrap().is_none());
+
+    assert!(core.request_preview(v).unwrap().is_none());
+    wait_until("作り直しが始まる", || {
+        starts.load(Ordering::SeqCst) == 1
+    });
+    for _ in 0..10 {
+        assert!(core.request_preview(v).unwrap().is_none());
+    }
+    release_tx.send(()).unwrap();
+    wait_until("L1 ができる", || {
+        core.preview_path(v).unwrap().is_some()
+    });
+    core.wait_idle();
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        1,
+        "実行中の作り直しを置き換えない"
+    );
+    // できた後の要求は、作り直さずにファイルを返す。
+    assert!(core.request_preview(v).unwrap().is_some());
+    core.wait_idle();
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    core.close().unwrap();
+}
+
 /// No.31: 動画の variant には現像設定を保存しない（一括適用・Undo / Redo はエラーで、何も保存しない）。
 #[test]
 fn develop_settings_cannot_be_saved_for_videos() {

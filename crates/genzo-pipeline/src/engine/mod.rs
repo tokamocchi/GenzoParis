@@ -95,6 +95,7 @@ pub mod cache;
 pub mod control;
 pub mod export;
 pub mod full;
+pub mod pick;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -111,13 +112,14 @@ pub use self::export::{
     EXPORT_ICC_VERSION, ExportOptions, ExportPixels, ExportedImage, export_icc_profile,
 };
 pub use self::full::{FullResolutionJob, RegionRender, StageBackend, TileRois};
+pub use self::pick::{WB_PICK_RADIUS, WhiteBalancePick};
 
 use self::cache::Lru;
 use crate::border::mirror_index;
 use crate::contract::ColorContract;
 use crate::coords::CoordinateFrames;
 use crate::error::{PipelineError, Result};
-use crate::finish::geometry::GeometryPlan;
+use crate::finish::geometry::{GeometryPlan, OUTSIDE_IMAGE_FILL};
 use crate::finish::output::{DisplayTransform, output_space};
 use crate::finish::{
     DisplayStage, ExportStage, FinishPlan, Histogram, UnimplementedSetting, unimplemented_settings,
@@ -360,6 +362,11 @@ pub struct PreviewRequest {
     pub output: Option<OutputTarget>,
     /// 17c のヒストグラムを求めるか（`output` が必要。出力の符号化した値で数える）。
     pub histogram: bool,
+    /// 切り抜く前の全体（G の外接矩形）を描くか（切り抜きの編集中の表示。[`crate::finish::geometry`] の
+    /// doc の「切り抜く前の全体の表示」）。回転で画像の外になった四隅は
+    /// [`crate::finish::geometry::OUTSIDE_IMAGE_FILL`] で塗り、ヒストグラムから除く。既定は `false`。
+    /// **GPU 版（genzo-gpu の `render_preview`）はまだこの指定を見ない**（呼び出し側は CPU 版で描く）。
+    pub uncropped: bool,
 }
 
 impl PreviewRequest {
@@ -370,7 +377,14 @@ impl PreviewRequest {
             long_edge,
             output: None,
             histogram: false,
+            uncropped: false,
         }
+    }
+
+    /// 切り抜く前の全体を描くか（[`PreviewRequest::uncropped`]）を変える。
+    pub fn with_uncropped(mut self, uncropped: bool) -> Self {
+        self.uncropped = uncropped;
+        self
     }
 
     /// ステージ 17 の出力先を付ける。
@@ -683,7 +697,9 @@ impl Engine {
         }
         let quality = source.effective_quality(request.quality);
         let a1 = self.a1(source, settings, quality, request.long_edge)?;
-        let base: StageContext<'static> = a1.finish_context(settings)?;
+        let base: StageContext<'static> = a1
+            .finish_context(settings)?
+            .with_uncropped(request.uncropped);
         let (plan, guide) = plan_with_guide(settings, &base, || {
             self.guide_with(source, settings, quality, request.long_edge, Some(&a1))
         })?;
@@ -694,14 +710,26 @@ impl Engine {
         let (w, h) = plan.output_size();
         let rois = plan.stage_rois(&ctx, Roi::full(w, h));
         let input = gather_mirror_from(&a1.image, rois[0])?;
-        let (b3, mut replaced) = run_scene_stages(&plan, &ctx, &rois, input)?;
+        let (mut b3, mut replaced) = run_scene_stages(&plan, &ctx, &rois, input)?;
+        // 切り抜く前の全体の表示: 回転で画像の外になった四隅を塗る（設定の切り抜きでは何もしない）。
+        let geometry = plan.geometry();
+        geometry.fill_outside_image(&mut b3, OUTSIDE_IMAGE_FILL);
         let mut output = None;
         let mut histogram = None;
         if let Some(target) = &request.output {
-            let (out, n) = target.apply(settings, &ctx, &b3)?;
+            let (mut out, n) = target.apply(settings, &ctx, &b3)?;
             replaced += n;
+            geometry.fill_outside_image(&mut out, OUTSIDE_IMAGE_FILL);
             if request.histogram {
-                histogram = Some(Histogram::compute(&out.image, target.luma_coefficients())?);
+                let luma = target.luma_coefficients();
+                histogram = Some(if geometry.is_uncropped() {
+                    // 画像の外の四隅は数えない。
+                    Histogram::compute_where(&out.image, luma, |x, y| {
+                        !geometry.c_pixel_outside_image(i64::from(x), i64::from(y))
+                    })?
+                } else {
+                    Histogram::compute(&out.image, luma)?
+                });
             }
             output = Some(out.image);
         }

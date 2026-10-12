@@ -26,6 +26,72 @@ fn labels(core: &genzo_api::Core, v: VariantId) -> Vec<String> {
         .collect()
 }
 
+/// 履歴の項目へ 1 回で移る（DEV-27。履歴のパネル）: 保存・変更の知らせは 1 回だけで、Undo / Redo を繰り返した
+/// のと同じ設定になる。項目がない・すでにその位置なら何もしない。保存待ちの変更は先に保存し、そのときに
+/// 消えた項目へは移らない。
+#[test]
+fn go_to_history_moves_in_one_step() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (96, 64), 1, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let v = all_items(&core)[0].variant_id;
+    core.open_develop(v).unwrap();
+    for ev in [0.5, 1.0, 1.5] {
+        core.set_settings(&exposure(ev), true).unwrap();
+        core.end_drag().unwrap();
+    }
+    let entries = core.history(v).unwrap();
+    assert_eq!(entries.len(), 4);
+    assert!(entries[3].is_current);
+
+    let events = core.subscribe();
+    assert_eq!(
+        core.go_to_history(v, entries[0].id).unwrap(),
+        Some(DevelopSettings::default())
+    );
+    let state = core.develop_state().unwrap().unwrap();
+    assert_eq!(state.settings, DevelopSettings::default());
+    assert!(!state.can_undo && state.can_redo);
+    let develop_changes = drain(&events)
+        .into_iter()
+        .filter(|e| matches!(e, Event::CatalogChanged { change, .. } if *change == genzo_api::CatalogChange::Develop))
+        .count();
+    assert_eq!(develop_changes, 1, "変更の知らせは 1 回だけ");
+    let after = core.history(v).unwrap();
+    assert_eq!(after.len(), 4, "移るだけでは履歴は消えない");
+    assert!(after[0].is_current);
+
+    // 先へ移る（Redo を 2 回したのと同じ）。
+    assert_eq!(
+        core.go_to_history(v, entries[2].id).unwrap(),
+        Some(exposure(1.0))
+    );
+    // すでにその位置・ない項目は何もしない。
+    assert_eq!(core.go_to_history(v, entries[2].id).unwrap(), None);
+    assert_eq!(
+        core.go_to_history(v, genzo_model::HistoryEntryId::new(i64::MAX))
+            .unwrap(),
+        None
+    );
+    assert_eq!(core.develop_settings(v).unwrap(), exposure(1.0));
+
+    // 保存待ちの変更があると先に保存する（今の位置より後の項目は消える）ので、消えた項目へは移らない。
+    core.set_settings(&exposure(2.0), false).unwrap();
+    assert_eq!(core.go_to_history(v, entries[3].id).unwrap(), None);
+    assert_eq!(core.develop_settings(v).unwrap(), exposure(2.0));
+    assert_eq!(
+        labels(&core, v),
+        vec!["読み込み", "露光量 +0.50", "露光量 +1.00", "露光量 +2.00"]
+    );
+    // 残っている項目へは移れる。
+    assert_eq!(
+        core.go_to_history(v, entries[1].id).unwrap(),
+        Some(exposure(0.5))
+    );
+    core.close().unwrap();
+}
+
 /// テスト 3: 露光量を変えて保存 → 元ファイルのハッシュが変わらない → Undo / Redo → Core を開き直しても
 /// 設定が残り、Undo できる（DEV-27「再起動後も可能」）。
 #[test]
@@ -366,6 +432,30 @@ fn develop_with_default_gpu_setting() {
         core.set_settings(&exposure(0.1), false),
         Err(ApiError::NoDevelopSession)
     ));
+    core.close().unwrap();
+}
+
+/// 埋め込みのサムネイルがない RAW（プレビューを埋め込まない DNG）は、取り込みの後に現像結果から L0 を作る
+/// （取り込みの後の作り直しを止める既定（No.24）でも。L0 がないとグリッドに何も出ないため）。サムネイルの
+/// 失敗には数えない。
+#[test]
+fn raw_without_embedded_thumbnail_gets_a_rendered_thumbnail() {
+    let env = Env::new();
+    if !common::make_dng_with(&env.photos.join("R.dng"), "2024:05:01 08:00:00", false) {
+        return;
+    }
+    let core = env.open();
+    let report = import(&core, &env.photos);
+    assert_eq!(report.added, 1, "{report:?}");
+    assert!(report.thumbnail_failures.is_empty(), "{report:?}");
+    core.wait_idle();
+    let v = all_items(&core)[0].variant_id;
+    let t = core.thumbnail(v).unwrap().expect("現像結果から作った L0");
+    assert!(!t.jpeg.is_empty());
+    assert!(
+        all_items(&core)[0].thumb_rev.is_some(),
+        "検索結果にもサムネイルの rev が出る"
+    );
     core.close().unwrap();
 }
 

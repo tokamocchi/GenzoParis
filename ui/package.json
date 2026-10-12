@@ -1,0 +1,35 @@
+{
+  "name": "genzo-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "GenzoParis の画面（Tauri 2 の WebView で動く React / TypeScript）",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "app:dev": "node ../scripts/tauri.mjs dev",
+    "app:worker": "node ../scripts/prepare-worker.mjs",
+    "app:build": "node ../scripts/build-app.mjs"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "3.14.13",
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "2.7.3",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

@@ -22,6 +22,8 @@
 //! - Undo / Redo（DEV-27）はカタログの履歴で行うので、再起動の後もできる。
 //! - 設定のコピーと複数の variant への一括適用（DEV-30。[`Core::paste_settings`]）、仮想コピーの作成
 //!   （LIB-13。[`Core::create_virtual_copy`]）。
+//! - 切り抜きの編集の支え（DEV-15）: 切り抜く前の全体の表示（[`Core::set_develop_view`]）と、描画が実際に
+//!   使う切り抜き（[`Core::constrain_crop`]）。WB のスポイト（DEV-03。[`Core::white_balance_at`]）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,9 +32,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use genzo_jobs::{JobOptions, Priority, SupersedePolicy};
-use genzo_model::{DevelopSettings, Phase, RenderQuality, VariantId};
+use genzo_model::{CropRect, DevelopSettings, HistoryEntryId, Phase, RenderQuality, VariantId};
 use genzo_pipeline::finish::output::{Dither, quantize_u8};
-use genzo_pipeline::{PhotoSource, PreviewRequest};
+use genzo_pipeline::{PhotoSource, PreviewRequest, SourceImage};
 use genzo_worker::Lane;
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
@@ -43,7 +45,8 @@ use crate::events::{CatalogChange, Event, WarningCode};
 use crate::previews::{load_source, schedule_regenerate, variant_file};
 use crate::render::display_target;
 use crate::types::{
-    DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem, SettingGroups, SourceInfo,
+    DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem, PickedWhiteBalance,
+    SettingGroups, SourceInfo,
 };
 
 /// 自動保存に失敗したときに、もう一度試すまでの時間（**仮置き**: 10 秒。ディスクの容量不足などで
@@ -89,6 +92,8 @@ pub(crate) struct Session {
     drag_base_a1: Option<[u8; 32]>,
     /// 最後に要求した描画の品質。
     requested_quality: RenderQuality,
+    /// 切り抜く前の全体の表示か（[`Core::set_develop_view`]。写真を開き直すと `false`）。
+    uncropped: bool,
     /// 最新の描画の結果。
     frame: Option<Arc<DevelopFrame>>,
 }
@@ -464,6 +469,7 @@ fn submit_render(inner: &Arc<Inner>, s: &mut Session, quality: RenderQuality) {
         settings: s.settings.clone(),
         generation: s.generation,
         quality,
+        uncropped: s.uncropped,
     };
     let weak = Arc::downgrade(inner);
     let _ = inner.interactive.submit_latest_with(
@@ -497,15 +503,33 @@ struct RenderJob {
     settings: DevelopSettings,
     generation: u64,
     quality: RenderQuality,
+    /// 切り抜く前の全体を描くか（[`Core::set_develop_view`]）。
+    uncropped: bool,
 }
 
 /// プレビューを描く（17a・17c まで）。
+///
+/// 切り抜く前の全体の表示（[`Core::set_develop_view`]）では、設定の切り抜きを使わず G の外接矩形の全体を
+/// 描く（回転で画像の外になった四隅は黒で塗り、ヒストグラムに数えない。[`FrameInfo::uncropped`]）。
 fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFrame, ApiError> {
     let (target, assumed_srgb) = display_target(inner);
     let request = PreviewRequest::new(job.quality, inner.engine.config().preview_long_edge)
         .with_output(target)
-        .with_histogram();
+        .with_histogram()
+        .with_uncropped(job.uncropped);
     let r = inner.render_preview(&job.source, &job.settings, &request, Some(job.variant_id))?;
+    // 表示範囲の描画（render_region）と同じ格子の、フル解像度の出力の寸法。
+    let (output_width, output_height) =
+        match inner
+            .engine
+            .full_resolution_geometry(&job.source, &job.settings, job.uncropped)
+        {
+            Ok(g) => g.output_size(),
+            Err(e) => {
+                tracing::warn!(error = %e, "フル解像度の出力の寸法を求められない");
+                (0, 0)
+            }
+        };
     let output = r
         .output
         .ok_or_else(|| ApiError::Internal("画面の出力がない".to_owned()))?;
@@ -527,6 +551,9 @@ fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFrame, ApiError
             histogram,
             display_assumed_srgb: assumed_srgb,
             warnings: r.warnings,
+            uncropped: job.uncropped,
+            output_width,
+            output_height,
         },
         b3: Arc::new(r.b3),
         display_rgb8: Arc::new(display_rgb8),
@@ -569,28 +596,63 @@ fn publish_frame(inner: &Inner, frame: DevelopFrame) {
 pub(crate) fn rerender(inner: &Arc<Inner>) {
     let mut state = inner.develop.state.lock();
     if let Some(s) = state.as_mut() {
-        s.generation = inner.develop.next_generation();
-        let q = if s.dragging {
-            s.requested_quality
-        } else {
-            RenderQuality::Final
-        };
-        submit_render(inner, s, q);
+        redraw(inner, s);
     }
 }
 
-/// 表示範囲の描画に使う、現像中の写真の入力・今の設定（保存待ちの変更を含む）・設定の世代。
-/// `variant_id` の写真を開いていなければ [`ApiError::NoDevelopSession`]。
+/// 設定の世代を進めて描き直す（ドラッグ中なら最後に要求した品質、そうでなければ最終品質）。
+fn redraw(inner: &Arc<Inner>, s: &mut Session) {
+    s.generation = inner.develop.next_generation();
+    let q = if s.dragging {
+        s.requested_quality
+    } else {
+        RenderQuality::Final
+    };
+    submit_render(inner, s, q);
+}
+
+/// 現像中の写真の状態の写し（[`session_snapshot`]）。
+pub(crate) struct SessionSnapshot {
+    /// 入力。
+    pub source: PhotoSource,
+    /// 今の設定（保存待ちの変更・ドラッグ中の値を含む）。
+    pub settings: DevelopSettings,
+    /// 設定の世代。
+    pub generation: u64,
+    /// 切り抜く前の全体の表示か（[`Core::set_develop_view`]）。
+    pub uncropped: bool,
+    /// 最新に公開したプレビュー（[`Core::develop_frame`]）が切り抜く前の全体の表示か（[`FrameInfo::uncropped`]。
+    /// まだ描けていなければ `None`）。表示を切り替えた直後は、新しい表示のプレビューが届くまで
+    /// [`uncropped`](Self::uncropped) と違う。
+    pub frame_uncropped: Option<bool>,
+}
+
+/// 表示範囲の描画・WB のスポイトなどに使う、現像中の写真の状態の写し。`variant_id` の写真を開いて
+/// いなければ [`ApiError::NoDevelopSession`]。
 pub(crate) fn session_snapshot(
     inner: &Inner,
     variant_id: VariantId,
-) -> Result<(PhotoSource, DevelopSettings, u64), ApiError> {
+) -> Result<SessionSnapshot, ApiError> {
     let state = inner.develop.state.lock();
     let s = state
         .as_ref()
         .filter(|s| s.variant_id == variant_id)
         .ok_or(ApiError::NoDevelopSession)?;
-    Ok((s.source.clone(), s.settings.clone(), s.generation))
+    Ok(SessionSnapshot {
+        source: s.source.clone(),
+        settings: s.settings.clone(),
+        generation: s.generation,
+        uncropped: s.uncropped,
+        frame_uncropped: s.frame.as_ref().map(|f| f.info.uncropped),
+    })
+}
+
+/// WB のスポイトの点を解釈する表示（切り抜く前の全体の表示か。[`Core::white_balance_at`]）。
+///
+/// UI が送った表示（クリックした画像の [`FrameInfo::uncropped`]）があればそれ。なければ、最新に公開した
+/// プレビューの表示（UI が表示しているのは、それかそれより前のプレビュー）。プレビューがまだなければ今の表示。
+fn pick_view(requested: Option<bool>, frame: Option<bool>, current: bool) -> bool {
+    requested.or(frame).unwrap_or(current)
 }
 
 /// 動画の variant が含まれていればエラーにする（動画には現像設定を保存しない。implementation_status の
@@ -797,6 +859,11 @@ impl Core {
             let mut state = inner.develop.state.lock();
             if let Some(s) = state.as_mut() {
                 if s.variant_id == variant_id {
+                    // 開き直したら、切り抜く前の全体の表示をやめる（[`Core::set_develop_view`]）。
+                    if std::mem::replace(&mut s.uncropped, false) {
+                        redraw(inner, s);
+                        inner.develop.cv.notify_all();
+                    }
                     let (u, r) = self.undo_redo_flags(variant_id)?;
                     return Ok(state_of(s, u, r));
                 }
@@ -863,6 +930,7 @@ impl Core {
             dragging: false,
             drag_base_a1: None,
             requested_quality: RenderQuality::Final,
+            uncropped: false,
             frame: None,
         };
         submit_render(inner, &mut session, RenderQuality::Final);
@@ -1018,6 +1086,7 @@ impl Core {
                 settings: s.settings.clone(),
                 generation: s.generation,
                 quality: RenderQuality::Final,
+                uncropped: s.uncropped,
             }
         };
         let frame = render_frame(inner, &job)?;
@@ -1067,10 +1136,38 @@ impl Core {
         self.step_history(variant_id, true)
     }
 
+    /// 履歴の項目 `entry` の位置へ 1 回で移る（DEV-27。履歴のパネルで項目を選んだとき）。保存待ちの変更が
+    /// あれば、先に保存してから移る（保存で、今の位置より後の項目は消える）。移った後の設定を返し、その項目が
+    /// ない（保存で消えた・別の variant の項目）・すでにその位置にいるときは `None`（何も変えない）。
+    ///
+    /// Undo / Redo を繰り返すのと同じ結果になるが、保存・変更の知らせ・描き直しは 1 回だけ。
+    pub fn go_to_history(
+        &self,
+        variant_id: VariantId,
+        entry: HistoryEntryId,
+    ) -> Result<Option<DevelopSettings>, ApiError> {
+        self.move_history(variant_id, HistoryMove::To(entry))
+    }
+
     fn step_history(
         &self,
         variant_id: VariantId,
         forward: bool,
+    ) -> Result<Option<DevelopSettings>, ApiError> {
+        self.move_history(
+            variant_id,
+            if forward {
+                HistoryMove::Redo
+            } else {
+                HistoryMove::Undo
+            },
+        )
+    }
+
+    fn move_history(
+        &self,
+        variant_id: VariantId,
+        to: HistoryMove,
     ) -> Result<Option<DevelopSettings>, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
@@ -1086,10 +1183,16 @@ impl Core {
             let _write = inner.develop.save.lock();
             let result = inner.with_catalog_api(|c| {
                 reject_videos(c, &[variant_id])?;
-                Ok(if forward {
-                    c.redo_develop(variant_id)?
-                } else {
-                    c.undo_develop(variant_id)?
+                Ok(match to {
+                    HistoryMove::Undo => c.undo_develop(variant_id)?,
+                    HistoryMove::Redo => c.redo_develop(variant_id)?,
+                    HistoryMove::To(entry) => {
+                        let history = c.history(variant_id)?;
+                        match history.iter().find(|h| h.id == entry) {
+                            Some(h) if !h.is_current => Some(c.go_to_history(variant_id, entry)?),
+                            _ => None,
+                        }
+                    }
                 })
             })?;
             if result.is_some() {
@@ -1247,11 +1350,145 @@ impl Core {
         schedule_regenerate(inner, new_id);
         Ok(new_id)
     }
+
+    /// 切り抜きの編集中の表示を切り替える。設定の世代（描き直したなら新しい世代）を返す。
+    ///
+    /// - `uncropped` が真の間、現像のプレビュー（[`Core::develop_frame`]・[`Event::PreviewUpdated`]）と
+    ///   表示範囲の描画（[`Core::render_region`]）は、設定の切り抜きを使わず、**切り抜く前の全体**（G の
+    ///   外接矩形。`CropRect::FULL` の範囲。回転は今の設定の角度）を描く。UI は、その上に設定の切り抜き
+    ///   （G の外接矩形の各軸の割合）をそのまま重ねられる（[`FrameInfo::uncropped`]）。
+    /// - 回転で画像の外になった四隅は黒（0。genzo-pipeline の `OUTSIDE_IMAGE_FILL`。仮置き）で塗り、
+    ///   ヒストグラムには数えない。
+    /// - GPU 版はまだこの表示に対応していないので、この間のプレビューは CPU 版で描く。
+    /// - 設定（保存・履歴・書き出し・サムネイル）は変えない。写真を開き直す（[`Core::open_develop`]）と
+    ///   `false` に戻る。値が変われば描き直す（世代を進める）。
+    /// - 写真を開いていなければ [`ApiError::NoDevelopSession`]。
+    pub fn set_develop_view(&self, uncropped: bool) -> Result<u64, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let mut state = inner.develop.state.lock();
+        let s = state.as_mut().ok_or(ApiError::NoDevelopSession)?;
+        if s.uncropped != uncropped {
+            s.uncropped = uncropped;
+            redraw(inner, s);
+            inner.develop.cv.notify_all();
+        }
+        Ok(s.generation)
+    }
+
+    /// WB のスポイト（DEV-03）: 現像中の写真の、プレビューの上の点 `(x, y)` のまわりを中立にする WB
+    /// （色温度と tint）を求める。**適用はしない**（UI が `WhiteBalance::Custom` として
+    /// [`Core::set_settings`] する）。
+    ///
+    /// - `x`・`y`: UI が表示しているプレビュー（[`FrameInfo`] の画像）の幅・高さに対する割合（0〜1。左上が
+    ///   (0, 0)）。ふだんは出力の画像（C。切り抜いた後）。切り抜く前の全体の表示
+    ///   （[`Core::set_develop_view`]。[`FrameInfo::uncropped`] が真）のプレビューなら、その全体の画像に
+    ///   対する割合（UI が表示中のプレビューの上でクリックした位置をそのまま送れるように）。
+    /// - `uncropped`: クリックした画像（UI が表示しているプレビュー）の [`FrameInfo::uncropped`]。`x`・`y` を
+    ///   どちらの画像の割合として解釈するかを決める（今の表示とは違ってよい）。表示を切り替えた直後は、
+    ///   新しい表示のプレビューが届くまで UI は前の表示の画像を見せているので、UI はこれを送る。`None` なら
+    ///   最新に公開したプレビュー（[`Core::develop_frame`]）の表示（まだなければ今の表示）とみなす。この
+    ///   ときは、新しいプレビューを公開してから UI が描き直すまでの短い間にクリックした点を、別の画像の
+    ///   割合として解釈しうる。
+    /// - 今の設定（保存待ち・ドラッグ中の値を含む）の段階 A1 の出力から求める。今の WB によらず、同じ点なら
+    ///   同じ値になる。平均する範囲（見える範囲の長辺の 0.4%。仮置き）・計算の方法・範囲の外の値の丸めは
+    ///   genzo-pipeline の `engine::pick` の doc（推定が設定できる範囲の外なら、範囲に丸めて返す）。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。RAW 以外の写真（WB の
+    /// 設定を使わない）、点が 0〜1 の外、切り抜く前の全体の表示で回転で画像の外になった四隅（黒く塗った
+    /// 画素）の点、暗すぎる・色が極端な点は [`ApiError::InvalidArgument`]。切り抜いた後の画像では、端
+    /// （0・1 ちょうど）の点も選べる。
+    pub fn white_balance_at(
+        &self,
+        variant_id: VariantId,
+        x: f64,
+        y: f64,
+        uncropped: Option<bool>,
+    ) -> Result<PickedWhiteBalance, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let snap = session_snapshot(inner, variant_id)?;
+        if !matches!(snap.source.image, SourceImage::Raw(_)) {
+            return Err(ApiError::InvalidArgument(
+                "RAW 以外の写真（JPEG など）は WB の設定を使わないため、WB のスポイトは使えません"
+                    .to_owned(),
+            ));
+        }
+        let view = pick_view(uncropped, snap.frame_uncropped, snap.uncropped);
+        let pick = inner
+            .engine
+            .white_balance_at(&snap.source, &snap.settings, (x, y), view)
+            .map_err(|e| match e {
+                genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
+                e => e.into(),
+            })?;
+        Ok(PickedWhiteBalance {
+            temperature_k: pick.temperature_k as f32,
+            tint: pick.tint as f32,
+        })
+    }
+
+    /// 切り抜き `crop` を、現像中の写真の寸法と角度 `angle_deg` で、描画が実際に使う範囲にする（回転で画像の
+    /// 外に出る切り抜きは、中心と縦横比を保って画像の内側に収まる最大の大きさに縮める。genzo-pipeline の
+    /// `finish::geometry::constrain_crop`。描画のステージ 9 と同じ計算）。設定は変えない。
+    ///
+    /// 値は保存するときと同じく丸めてから使う（`DevelopSettings::normalized`: 各軸を 0〜1 に収め、
+    /// 左右・上下が逆なら入れ替え、幅・高さが最小値より小さければその軸を全体にする。角度は ±45 度に
+    /// 収める）。NaN・無限大は [`ApiError::InvalidArgument`]。写真を開いていない・別の variant なら
+    /// [`ApiError::NoDevelopSession`]。
+    pub fn constrain_crop(
+        &self,
+        variant_id: VariantId,
+        crop: &CropRect,
+        angle_deg: f32,
+    ) -> Result<CropRect, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let values = [crop.left, crop.top, crop.right, crop.bottom, angle_deg];
+        if !values.iter().all(|v| v.is_finite()) {
+            return Err(ApiError::InvalidArgument(format!(
+                "切り抜き・角度に数でない値（NaN・無限大）があります（{crop:?}、{angle_deg}）"
+            )));
+        }
+        let snap = session_snapshot(inner, variant_id)?;
+        let mut s = DevelopSettings::default();
+        s.geometry.crop = *crop;
+        s.geometry.angle_deg = angle_deg;
+        let g = s.normalized().geometry;
+        let frames = snap
+            .source
+            .frames()?
+            .with_rotation(f64::from(g.angle_deg))?;
+        Ok(genzo_pipeline::finish::constrain_crop(&frames, &g.crop))
+    }
+}
+
+/// 履歴の移動のしかた（[`Core::undo`]・[`Core::redo`]・[`Core::go_to_history`]）。
+#[derive(Debug, Clone, Copy)]
+enum HistoryMove {
+    Undo,
+    Redo,
+    To(HistoryEntryId),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WB のスポイトの点は、UI が送った表示 → 最新に公開したプレビューの表示 → 今の表示の順に決めた画像の
+    /// 割合として解釈する（表示を切り替えた直後に、UI がまだ見せている前の表示の画像の上の点を、新しい表示の
+    /// 割合として解釈しない）。
+    #[test]
+    fn the_wb_pick_point_is_read_in_the_view_of_the_clicked_frame() {
+        // 切り抜きの編集を終えた直後（今は切り抜いた表示、プレビューはまだ全体の表示）。
+        assert!(pick_view(None, Some(true), false));
+        // UI がクリックした画像の表示を送れば、それを使う（新しいプレビューの公開の後でも）。
+        assert!(pick_view(Some(true), Some(false), false));
+        assert!(!pick_view(Some(false), Some(true), true));
+        // プレビューがまだなければ今の表示。
+        assert!(pick_view(None, None, true));
+        assert!(!pick_view(None, None, false));
+    }
 
     #[test]
     fn frames_from_other_sessions_or_older_generations_are_not_shown() {
@@ -1313,6 +1550,7 @@ mod tests {
             dragging: false,
             drag_base_a1: None,
             requested_quality: RenderQuality::Final,
+            uncropped: false,
             frame: None,
         };
         let (delay, max) = (Duration::from_secs(1), Duration::from_secs(3));

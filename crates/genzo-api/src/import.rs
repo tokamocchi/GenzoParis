@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use genzo_catalog::{FileFacts, RegisterFile, RegisterStatus};
 use genzo_media::CacheSpec;
 use genzo_model::{AssetKind, CaptureTime, FileRole, FileStatus, FolderId, VariantId};
-use genzo_worker::{Lane, WorkerClientError};
+use genzo_worker::{Lane, WorkerClientError, WorkerErrorKind};
 use parking_lot::Mutex;
 
 use crate::config::{IMPORT_BATCH_FILES, SKIP_HIDDEN_FILES};
@@ -603,6 +603,9 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
     let total = files.len() as u64;
     let mut done = 0u64;
     let mut regenerate: Vec<VariantId> = Vec::new();
+    // 埋め込みのサムネイルがない写真（プレビューを埋め込まない DNG など）。L0 がないとグリッドに何も出ない
+    // ので、`render_previews_after_import` によらず、現像結果から作る。
+    let mut no_embedded: Vec<VariantId> = Vec::new();
     ctx.progress(0, total);
     for chunk in files.chunks(IMPORT_BATCH_FILES) {
         if ctx.is_cancelled() {
@@ -714,6 +717,11 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
             match r {
                 Ok(()) => report.thumbnails += 1,
                 Err(e) if e.is_cancelled() => report.cancelled = true,
+                Err(ApiError::Worker(WorkerClientError::Job(job)))
+                    if t.kind == AssetKind::Photo && job.kind == WorkerErrorKind::Unsupported =>
+                {
+                    no_embedded.push(t.variant);
+                }
                 Err(e) => report.thumbnail_failures.push(FileIssue {
                     path: t.path.clone(),
                     reason: e.to_string(),
@@ -726,7 +734,13 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
             break;
         }
     }
-    if inner.config.render_previews_after_import && !report.cancelled && !regenerate.is_empty() {
+    if !inner.config.render_previews_after_import {
+        regenerate.clear();
+    }
+    if !report.cancelled {
+        regenerate.extend(no_embedded);
+    }
+    if !report.cancelled && !regenerate.is_empty() {
         regenerate.sort();
         regenerate.dedup();
         spawn_regenerate(inner, regenerate);

@@ -29,6 +29,20 @@
 //! 補間のタップが画像の端の外に出る部分（画像の端から 2 画素以内）は、2.7 節の決めごとどおり
 //! 入力の格子の鏡映で拡張する。
 //!
+//! # 切り抜く前の全体の表示（切り抜きの編集中。決めごと）
+//!
+//! UI が切り抜き枠を編集している間は、切り抜く前の全体の上に枠を重ねる。そのため、文脈の
+//! [`StageContext::uncropped`] が真なら、設定の切り抜きの代わりに **G の外接矩形の全体**
+//! （`CropRect::FULL`。回転は設定の角度のまま）を C の格子にする（[`GeometryPlan::uncropped`]）。
+//! このときは [`constrain_crop`] で画像の内側に制限しない。UI は、この画像の上に設定の切り抜き
+//! （G の外接矩形の各軸の割合）をそのまま重ねられる。
+//!
+//! 回転すると外接矩形の四隅に画像のない部分ができる。ステージ 9 はそこも鏡映で計算するが（GPU 版と
+//! 同じ式のまま）、意味のない値なので、エンジンがステージ 16 の後（と画面の出力の後）に、画素の中心が
+//! O の外にある画素を [`OUTSIDE_IMAGE_FILL`] で塗り（[`GeometryPlan::fill_outside_image`]）、
+//! ヒストグラムからも除く（[`GeometryPlan::c_pixel_outside_image`]）。保存する設定・書き出し・キャッシュは
+//! この表示を使わない。
+//!
 //! # 補間（GPU 版も同じ式。2.3 節）
 //!
 //! 出力の画素ごとの入力の格子の座標（連続座標。画素の中心が +0.5）を f32 で
@@ -77,6 +91,11 @@ const CROP_SCALE_TOLERANCE: f64 = 1e-9;
 /// タップが 1 画素ずれても入力の範囲に収まるようにする。
 const INPUT_ROI_SAFETY: i64 = 1;
 
+/// 切り抜く前の全体の表示（[`GeometryPlan::uncropped`]）で、回転で画像の外になった四隅の画素を塗る値
+/// （B3 と、画面・書き出しの符号化した値のどちらにも使う）。**仮置き**: 黒（0）。UI の背景との区別は
+/// 画面の担当が決める。
+pub const OUTSIDE_IMAGE_FILL: [f32; 3] = [0.0; 3];
+
 /// 回転・切り抜き・向きをまとめた、C の格子 → 入力の格子の対応（ステージ 9 のパラメータ。
 /// ステージ 11 もガイドを引くために使う）。
 ///
@@ -92,6 +111,7 @@ pub struct GeometryPlan {
     crop_lattice: Roi,
     to_input: [[f64; 3]; 2],
     to_input_f32: [[f32; 3]; 2],
+    uncropped: bool,
 }
 
 impl GeometryPlan {
@@ -103,6 +123,26 @@ impl GeometryPlan {
     /// 出力（C の格子）の画素数が genzo-raw の `MAX_PIXELS` を超える場合（極端に細長い画像を
     /// 回転したときなど）は [`PipelineError::InvalidDimensions`]。
     pub fn new(geometry: &Geometry, frames: CoordinateFrames, grid: SensorGrid) -> Result<Self> {
+        Self::build(geometry, frames, grid, false)
+    }
+
+    /// 切り抜く前の全体の表示（モジュールの doc の「切り抜く前の全体の表示」）: [`new`](Self::new) と
+    /// 同じだが、C の格子を G の外接矩形の全体にする（設定の切り抜きは [`requested_crop`](Self::requested_crop)
+    /// に残し、[`crop`](Self::crop) は `CropRect::FULL`。画像の内側への制限はしない）。
+    pub fn uncropped(
+        geometry: &Geometry,
+        frames: CoordinateFrames,
+        grid: SensorGrid,
+    ) -> Result<Self> {
+        Self::build(geometry, frames, grid, true)
+    }
+
+    fn build(
+        geometry: &Geometry,
+        frames: CoordinateFrames,
+        grid: SensorGrid,
+        uncropped: bool,
+    ) -> Result<Self> {
         let grid = SensorGrid::new(grid.width, grid.height, grid.extent)?;
         if f64::from(geometry.angle_deg) != frames.rotation_deg {
             return Err(PipelineError::InvalidArgument(format!(
@@ -111,7 +151,11 @@ impl GeometryPlan {
             )));
         }
         let requested_crop = geometry.crop;
-        let crop = constrain_crop(&frames, &requested_crop);
+        let crop = if uncropped {
+            CropRect::FULL
+        } else {
+            constrain_crop(&frames, &requested_crop)
+        };
         // G の格子の密度（向きで縦横が入れ替わる場合は入れ替える）。
         let (sx, sy) = grid.density();
         let density = if frames.orientation.swaps_dimensions() {
@@ -158,13 +202,71 @@ impl GeometryPlan {
             crop_lattice,
             to_input,
             to_input_f32,
+            uncropped,
         })
     }
 
-    /// 現像設定と文脈から作る（設定は丸めてから使う）。
+    /// 現像設定と文脈から作る（設定は丸めてから使う）。文脈の [`StageContext::uncropped`] が真なら
+    /// 切り抜く前の全体（[`uncropped`](Self::uncropped)）。
     pub fn from_settings(settings: &DevelopSettings, ctx: &StageContext<'_>) -> Result<Self> {
         let s = settings.normalized();
-        Self::new(&s.geometry, ctx.frames, ctx.sensor_grid)
+        Self::build(&s.geometry, ctx.frames, ctx.sensor_grid, ctx.uncropped)
+    }
+
+    /// 切り抜く前の全体の表示か（[`uncropped`](Self::uncropped) で作ったか）。
+    pub fn is_uncropped(&self) -> bool {
+        self.uncropped
+    }
+
+    /// C の画素 (x, y)（格子の番号）の中心が、画像（O。RAW の既定の切り抜きの範囲）の内側にあるか。
+    ///
+    /// 設定の切り抜きは画像の内側に制限するので（[`constrain_crop`]）、ふつうは丸めの誤差を除いて
+    /// 常に真。切り抜く前の全体の表示で回転していると、外接矩形の四隅の画素が偽になる。
+    pub fn c_pixel_in_image(&self, x: i64, y: i64) -> bool {
+        let (gx, gy) = self.c_to_g_px(x as f64 + 0.5, y as f64 + 0.5);
+        let (u, v) = self.frames.g_to_oriented(gx, gy);
+        let (ow, oh) = self.frames.oriented_size();
+        (0.0..=f64::from(ow)).contains(&u) && (0.0..=f64::from(oh)).contains(&v)
+    }
+
+    /// C の画素 (x, y)（格子の番号）が、切り抜く前の全体の表示で画像の外として塗る画素か
+    /// （[`fill_outside_image`](Self::fill_outside_image) が塗り、ヒストグラムに数えない画素）。
+    /// 設定の切り抜きのプラン・回転のないプランでは常に偽。
+    pub fn c_pixel_outside_image(&self, x: i64, y: i64) -> bool {
+        self.fills_outside_image() && !self.c_pixel_in_image(x, y)
+    }
+
+    /// 画像の外を塗るプランか（切り抜く前の全体の表示で、回転している）。
+    fn fills_outside_image(&self) -> bool {
+        self.uncropped && self.frames.rotation_deg != 0.0
+    }
+
+    /// 切り抜く前の全体の表示（[`uncropped`](Self::uncropped)）で、画素の中心が画像の外にある画素を
+    /// `value` で塗る（`tile` の範囲は C の格子の座標。塗る画素は
+    /// [`c_pixel_outside_image`](Self::c_pixel_outside_image)）。塗った画素の数を返す。設定の切り抜きの
+    /// プラン・回転のないプランでは何もしない（画像の外の画素はない）。
+    pub fn fill_outside_image(&self, tile: &mut ImageTile, value: [f32; 3]) -> u64 {
+        if !self.fills_outside_image() || tile.roi.is_empty() {
+            return 0;
+        }
+        let roi = tile.roi;
+        let width = roi.width as usize;
+        tile.image
+            .data_mut()
+            .par_chunks_mut(width)
+            .enumerate()
+            .map(|(j, row)| {
+                let y = i64::from(roi.y) + j as i64;
+                let mut n = 0u64;
+                for (i, px) in row.iter_mut().enumerate() {
+                    if !self.c_pixel_in_image(i64::from(roi.x) + i as i64, y) {
+                        *px = value;
+                        n += 1;
+                    }
+                }
+                n
+            })
+            .sum()
     }
 
     /// 座標系。

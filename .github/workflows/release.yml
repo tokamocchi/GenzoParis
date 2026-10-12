@@ -1,0 +1,278 @@
+# GenzoParis の配布物（インストーラー）を作る（SYS-08。手順と注意は docs/packaging.md）。
+#
+# - 起動: 手動（workflow_dispatch）だけ。タグ（v0.1.0 など）を選んで実行すると版を確かめる。タグの push では
+#   動かさない（成果物の置き場の公開の範囲を、実行する人がその都度確かめるため。下の「公開の範囲の確認」）
+# - Windows（windows-latest）: NSIS のインストーラー（ユーザーごとのインストール。tauri.conf.json）
+# - macOS（macos-latest。Apple Silicon）: .dmg（と、.app を tar.gz にしたもの）
+# - 署名・公証はしない（社内の数名への配布。macOS はアドホック署名だけ。tauri.bundle.conf.json）
+# - 成果物は Actions の artifact に置く（GitHub の Releases には出さない。誰に・どこで配るかは人の判断）
+#
+# 手順（OS ごと）: 公開の範囲の確認 →（タグのときは版の確認）→ 画面のビルド → LibRaw を入れる → ワーカーのビルドと LibRaw の収集
+# （scripts/prepare-worker.mjs）→ tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json
+# （scripts/build-app.mjs）→ 確認（ワーカーが同梱の LibRaw で起動できるか）→ artifact に置く。
+# Windows は、ワーカーと LibRaw の DLL が使う Visual C++ のランタイムの DLL も同梱する（ランナーの Visual Studio の
+# 再頒布用のフォルダから。決定事項ログ No.73）。
+# 確認に通らなかった配布物は、配る用の artifact には置かない（調べるために「-unverified」の名前で置く）。
+#
+# **未確認**: このワークフローは GitHub Actions でまだ実行していない（2026-10-12 に作成。Linux の .deb で同じ
+# スクリプトが通ることだけ確かめた）。Windows の vcpkg の LibRaw、macOS の dylib の書き換え・署名・.dmg の作成、
+# NSIS の無人インストール（/S）は、最初の実行で確かめる。
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      # macOS: Homebrew の dylib は、ランナーの macOS の版向けの bottle なので、tauri.conf.json の
+      # minimumSystemVersion（12.0）より新しい macOS 向けになりうる。その場合、既定ではエラーにする（配る相手の
+      # macOS の版は人の判断。docs/packaging.md の 2.3）。印を付けると通し、.app の最小の版を同梱したものに合わせて
+      # 上げる（artifact の名前に「-macos<版>-or-later」が付く）。
+      allow_newer_macos_libs:
+        description: "macOS: 同梱する dylib に合わせて、.app の最小の macOS の版を上げてよい（配る相手の Mac がすべてその版以降のときだけ）"
+        type: boolean
+        default: false
+      # 公開（public）のリポジトリでは、Actions の artifact は GitHub にログインした誰でも取得できる。配布物を
+      # 社外に出してよいか（LibRaw の LGPL などの条件、署名のない配布物）の確認が済んでいなければ、実行しない。
+      # 印がないと、公開のリポジトリでは最初の段階で止める（非公開のリポジトリでは見ない）。
+      allow_public_artifacts:
+        description: "公開のリポジトリで実行する: 配布物（artifact）を GitHub にログインした誰でも取得できる状態にしてよいことを、配布の責任者が確認した"
+        type: boolean
+        default: false
+
+# 同じ ref の配布物の作成は、新しいものが始まっても取り消さない（途中の成果物を捨てないため）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: nsis
+            artifact: genzoparis-windows-x64
+          # macos-latest は Apple Silicon（arm64）のランナー。Intel の Mac 向けは作らない（要るかは人の判断）。
+          - os: macos-latest
+            bundles: app,dmg
+            artifact: genzoparis-macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      # 公開のリポジトリでは、artifact を誰でも取得できる（上の allow_public_artifacts）。印がなければ、何も
+      # 作らずに止める（docs/packaging.md の 2.5）。
+      - name: 公開の範囲の確認
+        if: github.event.repository.private == false && !inputs.allow_public_artifacts
+        shell: bash
+        run: |
+          echo "::error::このリポジトリは公開（public）です。作った配布物（artifact）は GitHub にログインした誰でも取得できます。配布の責任者が公開の範囲を確認してから、allow_public_artifacts に印を付けて実行してください（docs/packaging.md の 2.5）。"
+          exit 1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      # Rust の版は rust-toolchain.toml（1.97.0）が決める。
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable（2026-10-12 のブランチの先頭）
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # setup-node は ci.yml と同じ版の系列（v5）。
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # タグ（v0.2.0 など）を選んで実行したときは、タグの版と配布物の版（tauri.conf.json の version。ファイル名・
+      # Info.plist・インストーラーの版になる）と Cargo の版（本体・ワーカーの版）が同じかを確かめる
+      # （違う版の名前の配布物を作らないため）。
+      - name: タグと版を比べる
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          conf=$(node -p "require('./crates/genzo-app/tauri.conf.json').version")
+          crates=$(cargo metadata --format-version 1 --no-deps --locked | node -e '
+            let s = "";
+            process.stdin.on("data", (d) => (s += d)).on("end", () => {
+              const m = JSON.parse(s);
+              console.log(["genzo-app", "genzo-worker"].map((n) => m.packages.find((p) => p.name === n).version).join(" "));
+            });')
+          echo "タグ: $tag / tauri.conf.json: $conf / Cargo（genzo-app genzo-worker）: $crates"
+          for v in $conf $crates; do
+            if [ "$v" != "$tag" ]; then
+              echo "::error::タグの版（$tag）と、tauri.conf.json・Cargo の版（$conf / $crates）が違う。版を直してからタグを付け直す"
+              exit 1
+            fi
+          done
+
+      - name: 画面の依存を入れる
+        working-directory: ui
+        run: npm ci
+      # 型の検査を含む（npm run build）。tauri build も beforeBuildCommand で同じビルドをもう一度行うが、
+      # 時間のかかる Rust のビルドの前に画面の誤りで止めるため、先に実行する。
+      - name: 画面のビルド
+        working-directory: ui
+        run: npm run build
+
+      # vcpkg はランナーに入っている（VCPKG_INSTALLATION_ROOT）。libraw の port は、スレッドセーフな版を
+      # lib/raw_r.lib・bin/raw_r.dll に置く（scripts/lib/bundle.mjs）。依存（jasper・lcms・zlib・libjpeg-turbo）も
+      # ソースからビルドするため時間がかかる（バイナリのキャッシュは未設定）。
+      - name: LibRaw を入れる（Windows。vcpkg）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libraw:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install が失敗した" }
+          Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib\*.lib", "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin\*.dll"
+      # pkg-config は genzo-raw の build.rs が LibRaw を探すために使う（ci.yml と同じ）。
+      - name: LibRaw を入れる（macOS。Homebrew）
+        if: runner.os == 'macOS'
+        run: |
+          brew install libraw
+          command -v pkg-config >/dev/null || brew install pkgconf
+          pkg-config --modversion libraw_r
+
+      # LIBRAW_INCLUDE_DIR などがなければ、VCPKG_INSTALLATION_ROOT の installed/x64-windows を使う（Windows）。
+      # macOS では、同梱するものの最小の版をステップの出力（macos_min_version・macos_min_raised）と summary に書く。
+      - name: ワーカーのビルドと LibRaw の収集
+        id: worker
+        env:
+          GENZO_ALLOW_NEWER_MINOS: ${{ inputs.allow_newer_macos_libs && '1' || '0' }}
+        run: node scripts/prepare-worker.mjs
+      # cargo には --locked を付ける（Cargo.lock を変えずにビルドする。scripts/lib/build.mjs）。
+      - name: インストーラーを作る
+        run: node scripts/build-app.mjs --skip-worker --bundles ${{ matrix.bundles }}
+
+      # upload-artifact はファイルの実行の権限を保たないため、.app はそのまま置かずに tar.gz にする。
+      - name: .app をまとめる（macOS）
+        if: runner.os == 'macOS'
+        run: tar -czf target/release/bundle/GenzoParis.app.tar.gz -C target/release/bundle/macos GenzoParis.app
+
+      # 確認: 配布物の中のワーカーが、同梱の LibRaw で起動できるか（DLL・dylib が見つからなければ起動しない）。
+      # 成果物を置く前に行い、通らなければ配る用の artifact に置かない。
+      # **未確認**: 両 OS とも、Actions で一度も実行していない。
+      - name: 確認（Windows。無人インストールしてワーカーを起動する）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw "インストーラーがない" }
+          $p = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "インストーラーが失敗した（終了コード $($p.ExitCode)）" }
+          # インストール先（ユーザーごとのインストールの既定。実機で未確認）。
+          $dir = Join-Path $env:LOCALAPPDATA 'GenzoParis'
+          Get-ChildItem $dir
+          # 同梱の一覧（scripts/prepare-worker.mjs が作る bundled-libs.txt）の DLL が、すべてインストール先にあるか。
+          # Visual C++ のランタイムはランナーの OS のフォルダにもあるので、起動の確認だけでは同梱の漏れを見逃す。
+          $listed = Get-Content crates/genzo-app/binaries/bundled-libs.txt |
+            Where-Object { $_ -notmatch '^#' -and $_.Trim() -ne '' } |
+            ForEach-Object { ($_ -split "`t")[0] } |
+            Where-Object { $_ -like '*.dll' }
+          if (-not ($listed | Where-Object { $_ -match '^vcruntime\d+\.dll$' })) { throw "同梱の一覧に Visual C++ のランタイムがない" }
+          foreach ($name in $listed) {
+            if (-not (Test-Path (Join-Path $dir $name))) { throw "同梱したはずの $name がインストール先にない" }
+          }
+          Write-Output "インストール先にある同梱の DLL: $($listed -join ', ')"
+          # DLL をインストール先と OS のフォルダからだけ探すよう、PATH を OS のフォルダだけにして起動する
+          # （ランナーの PATH に LibRaw などの DLL があると、同梱の漏れを見逃すため）。
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $out = & (Join-Path $dir 'genzo-worker.exe') --version
+          $code = $LASTEXITCODE
+          Write-Output $out
+          # DLL が見つからないときは、終了コードが -1073741515（0xC0000135）になる。
+          if ($code -ne 0) { throw "genzo-worker.exe が起動しない（終了コード $code）" }
+          if (-not (@($out) -match '^genzo-worker \d')) { throw "genzo-worker.exe の版が出ない" }
+      # shell: bash を指定する（-o pipefail も付く。指定しないと bash -e だけで動く）。
+      - name: 確認（macOS。署名とワーカーの起動）
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 10
+        env:
+          # .app の最小の版（tauri.conf.json の版、または allow_newer_macos_libs で上げた版。scripts/lib/worker.mjs）。
+          EXPECTED_MIN_MACOS: ${{ steps.worker.outputs.macos_min_version }}
+        run: |
+          # 絶対パスで起動する（dyld の記録のパスを、下の比べる形に合わせるため）。
+          app="$PWD/target/release/bundle/macos/GenzoParis.app"
+          logs=target/verify-logs
+          mkdir -p "$logs"
+          ls -la "$app/Contents/MacOS" "$app/Contents/Frameworks"
+          otool -L "$app/Contents/MacOS/genzo-worker"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          # .app の最小の版が、同梱した dylib に合っているか（上げ忘れると、古い macOS で RAW を開けない）。
+          min_actual=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")
+          echo "LSMinimumSystemVersion: $min_actual（期待: $EXPECTED_MIN_MACOS）"
+          if [ "$min_actual" != "$EXPECTED_MIN_MACOS" ]; then
+            echo "::error::.app の最小の版（$min_actual）が、同梱するものに合わせた版（$EXPECTED_MIN_MACOS）と違う"; exit 1
+          fi
+          shopt -s nullglob
+          dmgs=(target/release/bundle/dmg/*.dmg)
+          if [ ${#dmgs[@]} -eq 0 ]; then echo "::error::.dmg がない"; exit 1; fi
+          for dmg in "${dmgs[@]}"; do hdiutil verify "$dmg"; done
+
+          # ワーカーを起動する。標準出力（版）と標準エラー（DYLD_PRINT_LIBRARIES の記録・dyld のエラー）を分けて取る。
+          rc=0
+          DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/genzo-worker" --version >"$logs/worker-stdout.log" 2>"$logs/worker-dyld.log" || rc=$?
+          cat "$logs/worker-stdout.log" "$logs/worker-dyld.log"
+          fail=0
+          if [ "$rc" -ne 0 ]; then echo "::error::ワーカーが起動しない（終了コード $rc）"; fail=1; fi
+          if grep -q "Library not loaded" "$logs/worker-dyld.log"; then
+            echo "::error::ワーカーの依存の dylib が見つからない（Library not loaded）"; fail=1
+          fi
+          if ! grep -Eq '^genzo-worker [0-9]' "$logs/worker-stdout.log"; then echo "::error::ワーカーの版が出ない"; fail=1; fi
+
+          # 読み込みの記録の行だけを取り出してパスにする。dyld4（macOS 12 以降）の形は "dyld[<pid>]: <UUID> <パス>"、
+          # 古い形は "dyld: loaded: <UUID> <パス>"（どちらも実機で未確認）。dyld のエラーの文言
+          # （"dyld[<pid>]: Library not loaded: …"・"  Referenced from: …"・"  Reason: tried: '…'"）は、この形に当たらない。
+          sed -nE 's/^dyld(\[[0-9]+\])?: (loaded: )?(<[^>]*> )?(\/.*)$/\4/p' "$logs/worker-dyld.log" >"$logs/worker-loaded.txt"
+          echo "読み込んだもの:"; cat "$logs/worker-loaded.txt"
+          # Contents/Frameworks のすべての dylib を、.app の中から読み込んだか（@executable_path・@loader_path を
+          # 展開したパスは「MacOS/../Frameworks」の形のこともあるので、両方を受け付ける）。
+          libs=("$app"/Contents/Frameworks/*.dylib)
+          if [ ${#libs[@]} -eq 0 ]; then echo "::error::Contents/Frameworks に dylib がない"; fail=1; fi
+          raw=0
+          for lib in "${libs[@]}"; do
+            name=$(basename "$lib")
+            case "$name" in libraw*) raw=1 ;; esac
+            if ! grep -Fxq -e "$app/Contents/Frameworks/$name" -e "$app/Contents/MacOS/../Frameworks/$name" "$logs/worker-loaded.txt"; then
+              echo "::error::$name を .app の中から読み込んでいない"; fail=1
+            fi
+          done
+          if [ "$raw" -ne 1 ]; then echo "::error::Contents/Frameworks に LibRaw の dylib がない"; fail=1; fi
+          # ランナーには Homebrew の LibRaw もあるため、.app の外（Homebrew の場所）から読み込んでいないかも見る。
+          if grep -E '^(/opt/homebrew|/usr/local)/' "$logs/worker-loaded.txt"; then
+            echo "::error::.app の外（Homebrew の場所）の dylib を読み込んでいる"; fail=1
+          fi
+          exit "$fail"
+
+      # upload-artifact は Node 24 で動く最初の版の系列（v6）を使う（v5 は Node 20）。
+      # macOS で .app の最小の版を上げたとき（allow_newer_macos_libs）は、名前に「-macos<版>-or-later」を付ける。
+      - name: 成果物を置く
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ matrix.artifact }}${{ steps.worker.outputs.macos_min_raised == '1' && format('-macos{0}-or-later', steps.worker.outputs.macos_min_version) || '' }}
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/GenzoParis.app.tar.gz
+            crates/genzo-app/binaries/bundled-libs.txt
+          if-no-files-found: error
+          # 仮置き: 30 日（配布が済んだら消えてよい）。
+          retention-days: 30
+      # 途中で失敗したときは、調べるために「-unverified」の名前で置く（配らない。仮置き: 7 日で消える）。
+      - name: 成果物を置く（失敗したとき。調べる用）
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ matrix.artifact }}-unverified
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/GenzoParis.app.tar.gz
+            crates/genzo-app/binaries/bundled-libs.txt
+            target/verify-logs/
+          if-no-files-found: ignore
+          retention-days: 7

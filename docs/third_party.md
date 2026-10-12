@@ -25,9 +25,30 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - `libc`（既存の版）を、`genzo-worker` の Linux 用の依存から Unix 用の依存に広げた（`killpg`。macOS でも使う）。
   - `tempfile`（既存の版）を、`genzo-pipeline` の開発用の依存に追加（実機のサンプルの回帰テスト）。
   - 新しい機能フラグ: `genzo-pipeline` の `libraw`（実機のサンプルの回帰テスト用）、`genzo-catalog` の `test-support`（`genzo-api` の開発用の依存だけで有効）。
+- 2026-10-12（M4 の着手。デスクトップアプリ `genzo-app` の追加）: Tauri 2（`tauri` 2.11.6・`tauri-build` 2.6.3・`tauri-plugin-dialog` 2.7.3・`tauri-plugin-opener` 2.5.5。どれも `Cargo.toml` の `license` は Apache-2.0 OR MIT）を加えた。版は、公開から 2 週間以上たったもので、workspace の最小の Rust の版（1.88）に合う 2.11 系（Cargo の解決が MSRV に合わせて選んだ版）。`cargo deny check` の結果（cargo-deny 0.20.2）: advisories・bans・licenses・sources がすべて通った。ただし `deny.toml` に次の 2 つを加えた（理由と見直しの時期は `deny.toml` に書いた）。警告（同じクレートの複数の版）は Tauri の依存で 20 件ほどに増えた。
+  - **MPL-2.0 の 5 crate を crate ごとに許可**（`cssparser`・`cssparser-macros`・`selectors`・`dtoa-short`・`option-ext`。Tauri の `tauri-utils` の HTML の処理と `dirs` の依存）。5 つとも、ソース・付属のファイルに MPL-2.0 の Exhibit B（"Incompatible With Secondary Licenses"）の表示がないことを確かめた（その文言は LICENSE の全文の中の定義とひな形にだけある）。MPL-2.0 は Exhibit B のないファイルなら GPL と組み合わせられる（MPL-2.0 の 3.3 節）とされるが、**法的な最終確認は人が行う**。
+  - **メンテナンス終了の通知 6 件を除外**（RUSTSEC-2024-0370 `proc-macro-error`: Linux の GTK のバインディングのビルド時のマクロで、Windows・macOS の配布物には入らない。RUSTSEC-2025-0075・0080・0081・0098・0100 `unic-*`: `tauri-utils` の `urlpattern`）。どれも脆弱性ではなく、更新先がない。Tauri を上げるときに見直す。
 - **cargo-deny が見るのは、各クレートの `Cargo.toml` の `license` と、ライセンスのファイルだけです。** C のソースを同梱してビルドするクレートについて、同梱したソースの版やファイルのヘッダは確認しません。現在の依存では次の 3 つが該当します。
   - `lcms2-sys`（Little CMS 2）と `libsqlite3-sys`（SQLite）: 2 章の一覧に記録します。
   - `blake3`: BLAKE3 の作者たち自身による C とアセンブリの実装を同梱しています（`c/` ディレクトリ）。crate のライセンスは `Cargo.toml` で CC0-1.0 / Apache-2.0 / Apache-2.0 WITH LLVM-exception の選択です。`c/blake3.c` の先頭にはライセンスの表示がなく（1.8.7 で確認）、C の部分にも crate と同じライセンスが及ぶと考えていますが、要確認です。
+
+### 1.1a 画面（`ui/`）の npm の依存（cargo-deny の対象外）
+
+- 画面は React / TypeScript（Vite でビルド）。npm の依存は cargo-deny では確認できないため、次のルールで管理する（2026-10-12、AI 記入）。
+  - `ui/package.json` で版を固定し（`save-exact`）、`ui/package-lock.json` をコミットする。CI は `npm ci` で lock のとおりに入れる。
+  - 版は、公開から 2 週間以上たったものを選ぶ（公開の直後に乗っ取られた版を避けるため）。`legacy-peer-deps`（npm 10 の依存の解決の不具合の回避。`ui/.npmrc`）。
+  - 新しい依存を足すときは、この節の表に追記し、ライセンスを確かめる。
+- **配布物（`ui/dist` に入り、アプリに埋め込まれるもの）**: 次の 7 つ（2026-10-12 の `package-lock.json` と、各パッケージの `package.json` の `license` で確認。ファイルのヘッダ・LICENSE の本文は未確認）。
+
+| パッケージ | 版 | ライセンス（package.json） | 用途 |
+|---|---|---|---|
+| react / react-dom / scheduler | 19.3.0 / 19.3.0 / 0.28.0 | MIT | 画面の部品 |
+| @tanstack/react-virtual / @tanstack/virtual-core | 3.14.13 / 3.17.11 | MIT | グリッド・フィルムストリップの仮想スクロール |
+| @tauri-apps/api | 2.11.1 | Apache-2.0 OR MIT | Tauri のコマンド・イベントの呼び出し |
+| @tauri-apps/plugin-dialog | 2.7.3 | MIT OR Apache-2.0 | フォルダ・ファイルの選択と確認のダイアログ |
+
+- **開発・ビルドだけで使うもの（配布物に入らない）**: Vite 8.3.1（Rolldown・lightningcss など）、@vitejs/plugin-react 6.1.1、TypeScript 6.0.3、vitest 5.0.2、@tauri-apps/cli 2.11.5 ほか。ライセンスは MIT が大半で、ほかに Apache-2.0（TypeScript・detect-libc・expect-type）、MPL-2.0（lightningcss。CSS の変換で、出力に lightningcss のコードは入らないと考えるが要確認）、ISC（picocolors）、BSD-3-Clause（source-map-js）。
+- 配布物のライセンス表記（DIST-05）に、上の配布物の 7 つを含める必要がある（未対応。4 章）。
 
 ### 1.2 この台帳で管理するもの
 
@@ -58,6 +79,13 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | ColorChecker Classic の基準値 | PoC-4 の色の評価の基準とテスト（`crates/genzo-testkit/src/colorchecker.rs`。2014 年 11 月以降の版と、より前の版の 24 色 × L\*a\*b\*（D50）） | X-Rite の公表値（CGATS のファイル。2014 年 11 月以降の版の測定日は 2015-04-28）。値は colour-science 0.4.6 のデータから写したもの | X-Rite（現在は Calibrite）の公表資料。2026-10-10 の照合には、GitHub 上の第三者のリポジトリにある CGATS ファイルの写しを使った（3.8 節） | 利用条件は未確認（**要確認**） | 該当なし（テストのデータ） | `genzo-testkit` はテストと計測用の crate。開発用の CLI（`genzo`）は計測の記録のために依存するが、配布するアプリに含めるかは未定（含める場合は利用条件の確認が要る） | 出典（X-Rite）を doc に記載 | AI 記入（2026-10-10）。値は写しと一致、一次資料とは未照合（人の確認待ち） |
 | カメラ行列（α7 IV / α7C） | カメラ RGB から XYZ への変換（04 の 2.5 節の `render_deps`、2.6 節） | 未作成 | 候補は LibRaw の内蔵の表、DNG の ColorMatrix、カラーチャートからの自作（3.6 節） | 要確認（出典ごとに利用条件を確認する） | アプリのデータファイルとして持ち、ID とハッシュで参照する | アプリに同梱する予定 | 出典による（要確認） | 未着手 |
 | Mesa（llvmpipe） | 開発環境（Linux のコンテナ）で wgpu を動かすための、ソフトウェアの Vulkan | 25.2.8（`mesa-vulkan-drivers` 25.2.8-0ubuntu0.24.04.4）。Vulkan のローダーは `libvulkan1` 1.3.275.0 | Ubuntu 24.04 の apt | 主に MIT とされる（未確認。配布しないため優先度は低い） | wgpu が実行時に Vulkan のローダー経由で読み込む。ビルド時のリンクはない | **配布物に含めない** | 不要（配布しない） | 開発環境だけで使う |
+| LibRaw の同梱（配布物） | 配布物のワーカーが読み込む LibRaw と、その依存の共有ライブラリ（決定事項ログ No.64） | 配布のビルドで入る版（vcpkg の libraw の port・Homebrew の libraw は 2026-10-12 の時点で 0.22.2。要確認）。実際に入ったファイルと SHA-256 は `crates/genzo-app/binaries/bundled-libs.txt`（配布のビルドが作る） | Windows: vcpkg（`raw_r.dll`。依存は jasper・lcms2・zlib・libjpeg-turbo）。macOS: Homebrew（`libraw_r.*.dylib`。依存は libomp・little-cms2・jpeg-turbo） | LibRaw は LGPL-2.1 / CDDL-1.0 の選択（3.1 節）。依存はそれぞれのライセンス（未確認） | 動的リンク（ワーカーだけ。本体は依存しない） | Windows: インストール先のフォルダ。macOS: `.app` の `Contents/Frameworks`（参照を書き換えてアドホック署名） | **ライセンスの文書を同梱していない（未対応）**。LGPL のソースの入手方法の案内も要る（人・専門家の確認待ち） | AI 記入（2026-10-12）。配布物は未作成（release.yml は未実行） |
+| Visual C++ のランタイム | ワーカーと LibRaw の DLL が使う（Windows） | ビルドした Visual Studio の版による（同梱の一覧 `bundled-libs.txt` に元の場所と SHA-256 を書く） | Visual Studio の再頒布用のフォルダ（`VC\Redist\MSVC\<版>\x64\Microsoft.VC*.CRT` など） | Microsoft のライセンス（Visual Studio の `REDIST.TXT` の再頒布可能なファイル。条件は人が確認） | **インストール先に同梱する**（決定事項ログ No.73。本体は静的にリンク）。Windows Update では更新されない | 同梱する（`VCRUNTIME140.dll`・`MSVCP140.dll` など、ワーカーと LibRaw の DLL が読み込むもの） | — | AI 記入（2026-10-12）。利用者の指示で同梱に変更。再頒布の条件は人の確認待ち |
+| WebView（Windows: WebView2、macOS: WKWebView） | アプリの画面の表示（Tauri 2。決定事項ログ No.60） | OS のもの（同梱しない） | Windows 10 / 11 の WebView2 ランタイム（Microsoft）、macOS の WebKit | OS の構成要素。WebView2 のランタイムがない Windows では、インストーラー（NSIS）が Microsoft の配布元から入れる（Tauri の既定の `downloadBootstrapper`。要確認） | 動的に使う（同梱しない） | 同梱しない | 要確認（WebView2 の配布の条件） | AI 記入（2026-10-12） |
+| NSIS（Windows のインストーラー） | Windows のインストーラーの作成（`npx tauri build`。SYS-08） | Tauri の CLI がビルドのときに取得する版（未記録） | Tauri の CLI が GitHub の tauri-apps/binary-releases から取得（要確認） | zlib/libpng のライセンスとされる（要確認） | インストーラーの実行ファイルに NSIS のスタブが入る | インストーラー | 要確認 | AI 記入（2026-10-12）。版と取得元は配布のビルドの記録で確かめる |
+| WebKitGTK・WebKitWebDriver | 開発環境（Linux のコンテナ）でアプリを動かす・E2E（`e2e/`） | 2.52.6（`libwebkit2gtk-4.1-dev`・`webkit2gtk-driver` 2.52.6-0ubuntu0.24.04.1） | Ubuntu 24.04 の apt | LGPL-2.1 / BSD とされる（要確認） | 開発環境だけ | 配布しない | — | AI 記入（2026-10-12） |
+| tauri-driver | E2E の WebDriver の中継（開発環境だけ） | 2.0.6（`cargo install tauri-driver --version 2.0.6 --locked`） | crates.io | Apache-2.0 OR MIT（crates.io の表示） | 開発環境だけ | 配布しない | — | AI 記入（2026-10-12） |
+| アプリのアイコン | アプリ・インストーラーのアイコン（`crates/genzo-app/icons/icon.svg` から `tauri icon` で作成） | — | このリポジトリ（自作） | アプリと同じ GPL-3.0-or-later | 同梱 | アプリ・インストーラー | — | AI 記入（2026-10-12） |
 
 ## 3. 項目ごとの詳細と要確認の点
 
@@ -209,7 +237,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 - Exiv2（使う場合。GPL-2.0-or-later とされる。03 の 2.1 節）
 - LibRaw が依存するライブラリ（libjpeg、OpenMP のランタイム、lcms2 など）を同梱する場合
 - Windows の DirectX のシェーダーコンパイラ（wgpu の Direct3D 12 のバックエンドで、DXC のライブラリを同梱するか。要確認）
-- UI（案 A の場合）の npm の依存。cargo-deny の対象外なので、別の確認方法が必要
+- UI の npm の依存の、配布物のライセンス表記への反映（確認の方法は 1.1a 節。2026-10-12）
 - OS のランタイム（Visual C++ のランタイムなど）を同梱する場合
 - ONNX Runtime（将来の ML 推論）
 - 配布物のライセンス表記の自動生成（02 の DIST-05）。Rust のクレートについては、生成するツールを検討する（要検討）

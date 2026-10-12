@@ -91,7 +91,9 @@ pub enum Event {
         message: String,
         /// 関係する variant（あれば）。
         variant_id: Option<VariantId>,
-        /// 関係するファイル（あれば）。
+        /// 関係するファイル（あれば。UTF-8 で表せない部分は U+FFFD に置き換えて JSON にする。
+        /// `lossy_path`）。
+        #[serde(serialize_with = "crate::types::lossy_path")]
         path: Option<PathBuf>,
     },
 }

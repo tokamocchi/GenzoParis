@@ -164,6 +164,10 @@ pub struct StageContext<'a> {
     pub sensor_grid: SensorGrid,
     /// 入力の種類（RAW か、RAW 以外か）。既定は [`InputKind::SceneReferred`]。ステージ 15 が使う。
     pub input_kind: InputKind,
+    /// 切り抜く前の全体（G の外接矩形）を出力（C の格子）にするか（切り抜きの編集中の表示）。既定は
+    /// `false`（設定の切り抜き）。ステージ 9・11 の [`crate::finish::geometry::GeometryPlan`] が見る
+    /// （[`crate::finish::geometry`] の doc の「切り抜く前の全体の表示」）。
+    pub uncropped: bool,
 }
 
 impl<'a> StageContext<'a> {
@@ -177,7 +181,14 @@ impl<'a> StageContext<'a> {
             guide: None,
             sensor_grid: SensorGrid::full_resolution(&frames),
             input_kind: InputKind::SceneReferred,
+            uncropped: false,
         }
+    }
+
+    /// 切り抜く前の全体を出力にするか（[`StageContext::uncropped`]）を変えたもの。
+    pub fn with_uncropped(mut self, uncropped: bool) -> Self {
+        self.uncropped = uncropped;
+        self
     }
 
     /// 入力の種類を変えたもの。

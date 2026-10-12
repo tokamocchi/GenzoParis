@@ -11,9 +11,64 @@ use genzo_model::{
     RenderQuality, VariantId, VideoMetadata, VolumeId,
 };
 use genzo_pipeline::ImageTile;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::error::ErrorInfo;
+
+// ---------------------------------------------------------------------------
+// パス（JSON の文字列）
+// ---------------------------------------------------------------------------
+
+/// パスを JSON の文字列にする（UI に返す型の `PathBuf`・`Option<PathBuf>`・`Vec<PathBuf>` の項目に
+/// `#[serde(serialize_with = "lossy_path")]` で付ける）。
+///
+/// UTF-8 で表せない名前（Linux などの UTF-8 でないバイト列・Windows の対にならないサロゲート）は、その部分を
+/// U+FFFD に置き換える（`to_string_lossy`）。serde の既定の `Path` の Serialize はエラーにするため、1 つの
+/// ファイルの名前のせいで応答全体（取り込みの結果など）を JSON にできなくなる。置き換えた名前は表示用で、
+/// そのパスでファイルを開けるとは限らない。UTF-8 で表せるパスは今までと同じ文字列になる。読み込み
+/// （Deserialize）は今までどおり `PathBuf` として読む。
+pub(crate) fn lossy_path<P, S>(path: &P, serializer: S) -> Result<S::Ok, S::Error>
+where
+    P: LossyPath + ?Sized,
+    S: Serializer,
+{
+    path.serialize_lossy(serializer)
+}
+
+/// [`lossy_path`] で文字列にできるパス（とその `Option`・`Vec`）。
+pub(crate) trait LossyPath {
+    fn serialize_lossy<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error>;
+}
+
+impl LossyPath for PathBuf {
+    fn serialize_lossy<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string_lossy())
+    }
+}
+
+impl<T: LossyPath> LossyPath for Option<T> {
+    fn serialize_lossy<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Some(p) => serializer.serialize_some(&Lossy(p)),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<T: LossyPath> LossyPath for Vec<T> {
+    fn serialize_lossy<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter().map(Lossy))
+    }
+}
+
+/// `Option`・`Vec` の中身を [`LossyPath`] で書く。
+struct Lossy<'a, T: ?Sized>(&'a T);
+
+impl<T: LossyPath + ?Sized> Serialize for Lossy<'_, T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize_lossy(serializer)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ジョブ
@@ -108,7 +163,9 @@ pub enum JobResult {
 /// ファイルの問題（読めない・登録できないなど）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileIssue {
-    /// ファイル。
+    /// ファイル（UTF-8 で表せない名前のファイルもそのまま入る。JSON では、表せない部分を U+FFFD に
+    /// 置き換える。`lossy_path`）。
+    #[serde(serialize_with = "lossy_path")]
     pub path: PathBuf,
     /// 理由。
     pub reason: String,
@@ -131,6 +188,7 @@ pub struct VariantIssue {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ImportReport {
     /// 取り込んだフォルダ。
+    #[serde(serialize_with = "lossy_path")]
     pub root: PathBuf,
     /// 対象の拡張子のファイルの数。
     pub files_found: u64,
@@ -410,6 +468,46 @@ pub struct RangeResult {
     pub items: Vec<VariantSummary>,
 }
 
+/// 絞り込みの候補の値と件数（[`Facets`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FacetValue {
+    /// 値（[`SearchFilter`] の `cameras`・`lenses`・`codecs` にそのまま渡すと一致する文字列）。
+    pub value: String,
+    /// 件数（**asset（写真・動画 1 つ）の数**。仮想コピーは数えない。genzo-catalog の `Facets` の doc）。
+    pub count: u64,
+}
+
+/// 絞り込みの候補（[`crate::Core::facets`]。カタログ全体の、カメラ・レンズ・動画のコーデックと件数）。
+///
+/// - 値の順（バイト列の順）に並べる。値が分からない（NULL・空の文字列）ものは候補にしない。
+/// - 件数は asset の数（[`FacetValue::count`]）。その値で絞り込んだ検索の件数（variant の数）は、仮想
+///   コピーの分だけ多くなりうる（マスターだけの検索の件数と同じ）。
+/// - 今の検索の条件にはよらない（カタログ全体の候補）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Facets {
+    /// カメラ（メーカーと機種。`asset.camera` の値）。
+    pub cameras: Vec<FacetValue>,
+    /// レンズ。
+    pub lenses: Vec<FacetValue>,
+    /// 動画のコーデック（ASCII の小文字にそろえた値。`hevc`・`h264` など）。
+    pub codecs: Vec<FacetValue>,
+}
+
+impl From<genzo_catalog::Facets> for Facets {
+    fn from(f: genzo_catalog::Facets) -> Self {
+        let values = |v: Vec<(String, u64)>| {
+            v.into_iter()
+                .map(|(value, count)| FacetValue { value, count })
+                .collect()
+        };
+        Self {
+            cameras: values(f.cameras),
+            lenses: values(f.lenses),
+            codecs: values(f.codecs),
+        }
+    }
+}
+
 /// variant の位置（[`crate::Core::index_of`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexOf {
@@ -450,6 +548,7 @@ pub struct FileInfo {
     /// 役割。
     pub role: FileRole,
     /// 絶対パス（マウント先が分からなければ `None`）。
+    #[serde(serialize_with = "lossy_path")]
     pub path: Option<PathBuf>,
     /// 大きさ（バイト）。
     pub size: u64,
@@ -471,6 +570,7 @@ pub struct FolderInfo {
     /// ボリューム内の相対パス（'/' 区切り）。
     pub rel_path: String,
     /// 絶対パス（マウント先が分からなければ `None`）。
+    #[serde(serialize_with = "lossy_path")]
     pub path: Option<PathBuf>,
 }
 
@@ -484,6 +584,7 @@ pub struct FileCheckReport {
     /// 見つからなかったファイル（`status = missing` にした）。
     pub missing: Vec<FileIssue>,
     /// 内容の変化を検知した（リビジョンを上げた）ファイル。
+    #[serde(serialize_with = "lossy_path")]
     pub changed: Vec<PathBuf>,
 }
 
@@ -556,6 +657,16 @@ pub struct AsShotWhiteBalance {
     /// 色温度（K）。
     pub temperature_k: f32,
     /// 色かぶり補正（tint）。
+    pub tint: f32,
+}
+
+/// WB のスポイトの結果（[`crate::Core::white_balance_at`]。DEV-03）。`WhiteBalance::Custom` にそのまま
+/// 使える（適用はしない。UI が `set_settings` する）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PickedWhiteBalance {
+    /// 色温度（K。設定できる範囲 2000〜50000 K に丸めた値）。
+    pub temperature_k: f32,
+    /// 色かぶり補正（tint。設定できる範囲 ±150 に丸めた値）。
     pub tint: f32,
 }
 
@@ -674,6 +785,20 @@ pub struct FrameInfo {
     pub display_assumed_srgb: bool,
     /// 現像の警告。
     pub warnings: Vec<String>,
+    /// 切り抜く前の全体（G の外接矩形）を描いたものか（切り抜きの編集中の表示。
+    /// [`crate::Core::set_develop_view`]）。真なら、画像は設定の切り抜きを使わず G の外接矩形の全体で、
+    /// 回転で画像の外になった四隅は黒（0）で塗ってある（ヒストグラムには数えない）。UI は、この画像の上に
+    /// 設定の切り抜き（`CropRect`。G の外接矩形の各軸の割合）をそのまま重ねられる。
+    #[serde(default)]
+    pub uncropped: bool,
+    /// この描画の設定での出力の画像（C。切り抜いた後）のフル解像度の幅（`uncropped` なら G の外接矩形の
+    /// フル解像度の幅）。表示範囲の描画（[`crate::Core::render_region`] の [`RegionSpace::Output`]）の座標・
+    /// [`RegionInfo::full_width`] と同じ格子。求められなければ 0。
+    #[serde(default)]
+    pub output_width: u32,
+    /// 出力の画像のフル解像度の高さ（`output_width` と同じ）。
+    #[serde(default)]
+    pub output_height: u32,
 }
 
 /// 現像のプレビュー（ピクセルを含む。[`crate::Core::develop_frame`]）。
@@ -692,7 +817,8 @@ pub struct DevelopFrame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegionSpace {
-    /// C：出力座標（切り抜いた後の画像。フル解像度の画素の単位。左上が (0, 0)）。
+    /// C：出力座標（切り抜いた後の画像。フル解像度の画素の単位。左上が (0, 0)）。切り抜く前の全体の表示
+    /// （[`crate::Core::set_develop_view`]）の間は、G の外接矩形の全体の画像の座標（[`FrameInfo::uncropped`]）。
     #[default]
     Output,
     /// G：ジオメトリ補正後の全体（切り抜く前の画像全体）。G の外接矩形の長辺を 1 とした値。
@@ -874,6 +1000,7 @@ pub enum ExportOutcome {
     /// 書き出した。
     Written {
         /// 書き出したファイル（連番を付けた場合は付けた後の名前）。
+        #[serde(serialize_with = "lossy_path")]
         path: PathBuf,
         /// 既存のファイルを置き換えたか。
         replaced: bool,
@@ -892,6 +1019,7 @@ pub enum ExportOutcome {
         /// 理由。
         reason: String,
         /// 既にあったファイル（衝突の場合）。
+        #[serde(serialize_with = "lossy_path")]
         existing: Option<PathBuf>,
     },
     /// 失敗した。
@@ -914,6 +1042,7 @@ pub struct ExportItem {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ExportReport {
     /// 書き出し先のフォルダ。
+    #[serde(serialize_with = "lossy_path")]
     pub dest_dir: PathBuf,
     /// 1 件ずつの結果（要求の順）。
     pub items: Vec<ExportItem>,
@@ -966,6 +1095,7 @@ pub struct PlannedFile {
     /// 役割（RAW と JPEG のペアなど）。
     pub role: FileRole,
     /// 絶対パス（マウント先が分からなければ `None`）。
+    #[serde(serialize_with = "lossy_path")]
     pub path: Option<PathBuf>,
 }
 
@@ -992,10 +1122,11 @@ pub struct DeleteReport {
     /// カタログから除いた asset。
     pub removed_assets: Vec<AssetId>,
     /// ゴミ箱へ移したファイル。
+    #[serde(serialize_with = "lossy_path")]
     pub trashed_files: Vec<PathBuf>,
     /// ゴミ箱へ移す対象だったが、元の場所になかった（フォルダはあり、アプリの外で削除・移動された）
     /// ため、移さなかったファイル（その asset はカタログから除いた）。
-    #[serde(default)]
+    #[serde(default, serialize_with = "lossy_path")]
     pub skipped_missing: Vec<PathBuf>,
     /// 失敗（ゴミ箱へ移せなかった asset のファイル、元の場所が見えない（ドライブが外れているなど）
     /// ファイル、登録の後に別の内容に置き換わったファイルなど。その asset はカタログに残る）。
@@ -1010,6 +1141,7 @@ pub struct DeleteReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoreSettings {
     /// L1 プレビューのキャッシュの場所（変更は次に開いたときに有効になる）。
+    #[serde(serialize_with = "lossy_path")]
     pub preview_cache_dir: PathBuf,
     /// L1 プレビューのキャッシュの上限（バイト。SCL-04）。
     pub preview_cache_bytes: u64,
@@ -1039,6 +1171,7 @@ pub struct SettingsUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupEntry {
     /// ファイル。
+    #[serde(serialize_with = "lossy_path")]
     pub path: PathBuf,
     /// 作った日時。
     pub created_at: DateTime<Utc>,

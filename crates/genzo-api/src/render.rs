@@ -200,6 +200,9 @@ impl Inner {
     }
 
     /// プレビューを描く（GPU → 失敗したら CPU。6.3 節）。
+    ///
+    /// 切り抜く前の全体の表示（[`PreviewRequest::uncropped`]）は、GPU 版がまだ対応していないので、CPU 版で
+    /// 描く（GPU の失敗としては数えない）。
     pub(crate) fn render_preview(
         &self,
         source: &PhotoSource,
@@ -207,7 +210,8 @@ impl Inner {
         request: &PreviewRequest,
         variant_id: Option<VariantId>,
     ) -> Result<Rendered, ApiError> {
-        if let Some(gpu) = self.gpu() {
+        let gpu = if request.uncropped { None } else { self.gpu() };
+        if let Some(gpu) = gpu {
             let options = GpuPreviewOptions {
                 download_b3: true,
                 download_output: true,

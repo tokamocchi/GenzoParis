@@ -172,7 +172,8 @@ impl Stage for ToneStage {
             return Ok(None);
         }
         let guide = checked_guide(ctx, Self::ID)?;
-        let plan = GeometryPlan::new(&s.geometry, ctx.frames, ctx.sensor_grid)?;
+        // ステージ 9 と同じ C の格子（切り抜く前の全体の表示を含む）でガイドを引く。
+        let plan = GeometryPlan::from_settings(&s, ctx)?;
         Ok(Some(StageParams::new(ToneStageParams {
             highlights: t.highlights / 100.0,
             shadows: t.shadows / 100.0,

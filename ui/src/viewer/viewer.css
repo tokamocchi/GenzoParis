@@ -1,0 +1,325 @@
+/* ルーペとフィルムストリップ（viewer/）。
+ * 写真の色の判断に影響しないよう、画像のまわりは色みのない灰色だけにする（base.css の変数）。重ねて出す
+ * 情報の下地も、色みのない半透明の黒にする。 */
+
+/* ---------------------------------------------------------------------------
+ * ルーペ
+ * ------------------------------------------------------------------------ */
+
+.loupe {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-0);
+}
+
+.loupe-view {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-0);
+  /* ドラッグでパンする（タッチパッド・ペンでもスクロールにしない）。 */
+  touch-action: none;
+}
+.loupe-view.fit {
+  cursor: zoom-in;
+}
+.loupe-view.preparing {
+  cursor: progress;
+}
+.loupe-view.zoomed {
+  cursor: grab;
+}
+.loupe-view.zoomed.dragging {
+  cursor: grabbing;
+}
+.loupe-view.video {
+  cursor: default;
+}
+
+/* 全体表示の画像の枠（位置と大きさは Loupe.tsx が決める）。 */
+.loupe-photo {
+  position: absolute;
+}
+
+.loupe-img {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* 等倍表示の層（拡大した標準プレビューと、描いた範囲の canvas）。 */
+.loupe-zoom {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+.loupe-region {
+  position: absolute;
+  display: block;
+  /* 物理画素の境界に合わせて置くが、わずかなずれでもぼかさない。 */
+  image-rendering: pixelated;
+}
+
+.loupe-center-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--fg-2);
+  text-align: center;
+  pointer-events: none;
+}
+.loupe-center-note p {
+  margin: 0;
+}
+.loupe-center-note button {
+  pointer-events: auto;
+}
+
+/* 重ねて出す情報 */
+.loupe-info,
+.loupe-notice,
+.loupe-status,
+.loupe-badge {
+  position: absolute;
+  z-index: 2;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  background: rgb(0 0 0 / 0.62);
+  color: var(--fg-0);
+  font-size: 12px;
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+.loupe-info {
+  top: 10px;
+  left: 10px;
+  max-width: min(420px, 55%);
+}
+.loupe-info-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loupe-info-marks {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.loupe-notice {
+  top: 10px;
+  right: 10px;
+  max-width: min(360px, 45%);
+  border-left: 3px solid var(--warn);
+}
+.loupe-notice strong {
+  color: var(--warn);
+}
+
+.loupe-status {
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.loupe-status .spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
+}
+
+.loupe-badge {
+  left: 10px;
+  bottom: 12px;
+  color: var(--fg-1);
+}
+
+/* 動画 */
+.loupe-video {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.loupe-video-mark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 0.5);
+  color: var(--fg-0);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  padding-left: 4px;
+  pointer-events: none;
+}
+.loupe-video-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 12px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.loupe-video-meta {
+  display: flex;
+  gap: 22px;
+  margin: 0;
+}
+.loupe-video-meta dt {
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.loupe-video-meta dd {
+  margin: 0;
+  color: var(--fg-0);
+}
+.loupe-video-spacer {
+  flex: 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * フィルムストリップ
+ * ------------------------------------------------------------------------ */
+
+.filmstrip {
+  position: relative;
+  height: var(--filmstrip-h);
+  min-width: 0;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+  overflow: hidden;
+}
+.filmstrip-scroll {
+  position: relative;
+  height: 100%;
+  /* スクロールバーの場所を常に取る（auto だと、項目の大きさ → 内容の幅 → スクロールバーの有無 → 内側の
+   * 高さ → 項目の大きさ、が止まらずに繰り返す件数がある。Filmstrip.tsx）。 */
+  overflow-x: scroll;
+  overflow-y: hidden;
+}
+.filmstrip-content {
+  position: relative;
+  height: 100%;
+}
+.filmstrip-cell {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 3px;
+  cursor: pointer;
+}
+.filmstrip-frame {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--bg-2);
+  border: 2px solid transparent;
+  border-radius: 3px;
+}
+.filmstrip-cell:hover .filmstrip-frame {
+  background: var(--bg-3);
+}
+.filmstrip-cell.selected .filmstrip-frame {
+  background: var(--bg-4);
+  border-color: var(--line-strong);
+}
+.filmstrip-cell.current .filmstrip-frame {
+  border-color: var(--select);
+}
+.filmstrip-frame img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+}
+.filmstrip-ph {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.filmstrip-marks {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: 1px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9px;
+  line-height: 1.2;
+  pointer-events: none;
+}
+.filmstrip-marks .label-dot {
+  width: 7px;
+  height: 7px;
+}
+.filmstrip-rating {
+  color: var(--fg-0);
+  letter-spacing: -1px;
+  text-shadow: 0 0 2px rgb(0 0 0 / 0.9);
+}
+.filmstrip-marks .flag-picked,
+.filmstrip-marks .flag-rejected {
+  text-shadow: 0 0 2px rgb(0 0 0 / 0.9);
+}
+.filmstrip-kind,
+.filmstrip-missing {
+  position: absolute;
+  top: 2px;
+  padding: 0 3px;
+  border-radius: 2px;
+  font-size: 9px;
+  line-height: 1.4;
+  background: rgb(0 0 0 / 0.6);
+  pointer-events: none;
+}
+.filmstrip-kind {
+  left: 2px;
+  color: var(--fg-0);
+}
+.filmstrip-missing {
+  right: 2px;
+  color: var(--warn);
+  font-weight: 700;
+}
+.filmstrip-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-2);
+  pointer-events: none;
+}

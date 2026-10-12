@@ -1,0 +1,532 @@
+/* ライブラリの画面（グリッド・絞り込み・フォルダ・メタデータ）。
+ * 写真の色の判断に影響しないよう、サムネイルのまわり（セル・選択の表示）は色みのない灰色だけにする。
+ * 色は、評価・フラグ・カラーラベル・ファイルの状態の小さな印にだけ使う（base.css の変数）。 */
+
+/* ------------------------------------------------------------------ グリッド */
+
+.lib-grid {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lib-grid-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  /* 縦のスクロールバーの幅を常に取る（出たり消えたりで列の数が揺れないように）。 */
+  overflow-x: hidden;
+  overflow-y: scroll;
+  background: var(--bg-0);
+  outline: none;
+}
+.lib-grid-spacer {
+  position: relative;
+  width: 100%;
+}
+.lib-grid-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 0;
+}
+.lib-grid-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+}
+.lib-cell {
+  position: relative;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: default;
+}
+.lib-cell:hover {
+  background: var(--bg-2);
+}
+.lib-cell.selected {
+  background: var(--bg-3);
+  border-color: var(--line-strong);
+}
+/* 操作の対象（selection.current）は明るい灰色の太い枠。 */
+.lib-cell.current {
+  background: var(--bg-4);
+  border-color: var(--fg-1);
+  box-shadow: inset 0 0 0 1px var(--fg-1);
+}
+.lib-cell.loading {
+  background: var(--bg-1);
+}
+.lib-cell-thumb {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  min-height: 0;
+}
+.lib-cell-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.lib-cell-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  color: var(--fg-3);
+  font-size: 11px;
+  text-align: center;
+  overflow: hidden;
+}
+.lib-cell-placeholder .ext {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--fg-2);
+}
+.lib-cell-placeholder .name {
+  max-width: 100%;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lib-cell-badges {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  right: 3px;
+  display: flex;
+  gap: 3px;
+  pointer-events: none;
+}
+.lib-cell-badges .spacer {
+  flex: 1;
+}
+.lib-badge {
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-0);
+  border: 1px solid var(--line-strong);
+  color: var(--fg-1);
+  white-space: nowrap;
+  pointer-events: auto;
+}
+.lib-badge.danger {
+  color: var(--danger);
+}
+.lib-cell-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--fg-2);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.lib-cell-foot .stars {
+  font-size: 10px;
+}
+.lib-cell-foot .name {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-3);
+}
+
+.lib-grid-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.lib-grid-toolbar .spacer {
+  flex: 1;
+}
+.lib-grid-toolbar input[type="range"] {
+  width: 140px;
+  accent-color: var(--fg-1);
+}
+.lib-grid-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.lib-grid-empty .empty-state {
+  pointer-events: auto;
+}
+.lib-grid-empty .btn:not(.primary) {
+  color: var(--fg-0);
+}
+.lib-grid-empty .actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* ------------------------------------------------------------------ 絞り込み */
+
+.lib-filterbar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 6px 10px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.lib-filterbar select,
+.lib-filterbar input {
+  font-size: 12px;
+  height: 24px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.lib-filterbar select {
+  max-width: 180px;
+}
+.lib-filter-search {
+  width: 170px;
+}
+.lib-filter-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.lib-filter-group .label {
+  color: var(--fg-2);
+}
+.lib-filter-dates input[type="date"] {
+  width: 128px;
+}
+.lib-filter-dates input[type="date"].empty {
+  color: var(--fg-3);
+}
+.lib-filter-dates.reversed input[type="date"] {
+  border-color: var(--warn);
+}
+.lib-labels {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.lib-label-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 3px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--bg-2);
+  cursor: pointer;
+  color: var(--fg-2);
+  font-size: 10px;
+}
+.lib-label-btn .label-dot {
+  width: 10px;
+  height: 10px;
+}
+.lib-label-btn:disabled {
+  cursor: default;
+}
+.lib-label-btn.on {
+  border-color: var(--fg-0);
+  box-shadow: inset 0 0 0 1px var(--fg-0);
+  color: var(--fg-0);
+}
+.lib-filter-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--bg-4);
+  color: var(--fg-0);
+  font-size: 11px;
+  font-weight: 600;
+}
+.lib-filterbar .spacer {
+  flex: 1;
+}
+/* 詳しい条件（長辺の画素数・動画の長さ・フレームレート） */
+.lib-filter-more {
+  position: relative;
+  display: inline-flex;
+}
+.lib-filter-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: max-content;
+  max-width: min(420px, 90vw);
+  padding: 8px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+.lib-filter-pop .hint {
+  margin: 2px 0 0;
+  font-size: 11px;
+  white-space: normal;
+}
+.lib-filter-range {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.lib-filter-range > .label:first-child {
+  width: 96px;
+  color: var(--fg-1);
+}
+.lib-filter-range .label {
+  color: var(--fg-2);
+}
+.lib-filterbar input.lib-filter-number {
+  width: 84px;
+  text-align: right;
+}
+.lib-filterbar input.lib-filter-number.invalid,
+.lib-filter-range.reversed input.lib-filter-number {
+  border-color: var(--warn);
+}
+
+/* ------------------------------------------------------------------ 左のパネル（フォルダ） */
+
+.lib-left {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+.lib-nav-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 -6px;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--fg-1);
+}
+.lib-nav-row:hover {
+  background: var(--bg-3);
+}
+.lib-nav-row.on {
+  background: var(--bg-4);
+  color: var(--fg-0);
+}
+.lib-nav-row .count {
+  margin-left: auto;
+  color: var(--fg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.lib-tree {
+  margin: 0 -10px;
+}
+.lib-tree-row {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  padding-right: 8px;
+}
+.lib-tree-row:hover {
+  background: var(--bg-2);
+}
+.lib-tree-chev {
+  flex: none;
+  width: 16px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  font-size: 11px;
+}
+.lib-tree-chev:disabled {
+  cursor: default;
+}
+.lib-tree-segs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.lib-tree-seg {
+  flex: 0 4 auto;
+  min-width: 1.6em;
+  padding: 1px 4px;
+  border-radius: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-1);
+  cursor: pointer;
+}
+/* まとめた行では、手前の区切りから先に縮める（最後の名前を残す）。縮める重みの合計が 1 より小さいと
+ * はみ出しの一部しか縮めないので、1 以上の重みにする。 */
+.lib-tree-seg:last-child {
+  flex-shrink: 1;
+}
+.lib-tree-seg:hover {
+  background: var(--bg-3);
+  color: var(--fg-0);
+}
+.lib-tree-seg.on {
+  background: var(--bg-4);
+  color: var(--fg-0);
+  font-weight: 600;
+}
+.lib-tree-sep {
+  flex: none;
+  color: var(--fg-3);
+}
+.lib-left .check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 2px;
+  color: var(--fg-1);
+  font-size: 12px;
+}
+.lib-left .actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* ------------------------------------------------------------------ メタデータ */
+
+.lib-meta {
+  font-size: 12px;
+}
+.lib-meta-head {
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.lib-meta-head .title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-0);
+  overflow-wrap: anywhere;
+}
+.lib-meta-head .sub {
+  color: var(--fg-2);
+  margin-top: 2px;
+}
+.lib-meta-head.stale {
+  opacity: 0.6;
+}
+.lib-kv {
+  display: grid;
+  grid-template-columns: minmax(72px, max-content) 1fr;
+  gap: 3px 8px;
+  margin: 0;
+}
+.lib-kv dt {
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.lib-kv dd {
+  margin: 0;
+  color: var(--fg-0);
+  overflow-wrap: anywhere;
+}
+.lib-kv dd .note {
+  display: block;
+  color: var(--fg-2);
+  font-size: 11px;
+}
+.lib-mark-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.lib-mark-row .label {
+  width: 72px;
+  color: var(--fg-2);
+}
+.lib-mark-row .stars {
+  font-size: 16px;
+}
+.lib-caption {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+}
+.lib-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.lib-files li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+.lib-files li:last-child {
+  border-bottom: none;
+}
+.lib-files .path {
+  color: var(--fg-0);
+  overflow-wrap: anywhere;
+}
+.lib-files .meta {
+  color: var(--fg-2);
+}
+.lib-meta .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.lib-meta .status-warn {
+  color: var(--warn);
+}
+.lib-meta .status-error {
+  color: var(--danger);
+}

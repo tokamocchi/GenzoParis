@@ -349,6 +349,23 @@ fn parse_backup_name(name: &str, stem: &str) -> Option<(DateTime<Utc>, Option<St
 /// 同じカタログの印のものと、印のない古い形式の名前のもの（どのカタログのものか分からない）を返す。
 /// 印の違うもの（同じファイル名の別のカタログのもの）は返さない（F10）。
 pub fn list_backups(dir: &Path, owner: &BackupOwner) -> Result<Vec<BackupInfo>> {
+    list_backups_matching(dir, &owner.stem, |tag| tag.is_none() || *tag == owner.tag)
+}
+
+/// `dir` にある、カタログのファイル名が `stem` のバックアップを、カタログの印によらずすべて新しい順に返す。
+///
+/// カタログが壊れていて開けず、カタログの ID（印）が分からないときの復元の候補の一覧に使う（SYS-04。
+/// 同じファイル名の別のカタログのものも含みうるので、画面で印（[`BackupInfo::catalog_tag`]）と時刻を
+/// 見せて選んでもらう）。
+pub fn list_backups_by_stem(dir: &Path, stem: &str) -> Result<Vec<BackupInfo>> {
+    list_backups_matching(dir, stem, |_| true)
+}
+
+fn list_backups_matching(
+    dir: &Path,
+    stem: &str,
+    accept_tag: impl Fn(&Option<String>) -> bool,
+) -> Result<Vec<BackupInfo>> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -359,10 +376,10 @@ pub fn list_backups(dir: &Path, owner: &BackupOwner) -> Result<Vec<BackupInfo>> 
         let entry = entry.map_err(|e| CatalogError::io(dir, e))?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some((created_at, catalog_tag)) = parse_backup_name(name, &owner.stem) else {
+        let Some((created_at, catalog_tag)) = parse_backup_name(name, stem) else {
             continue;
         };
-        if catalog_tag.is_some() && catalog_tag != owner.tag {
+        if !accept_tag(&catalog_tag) {
             continue;
         }
         let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
