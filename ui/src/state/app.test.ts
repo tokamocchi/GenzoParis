@@ -604,3 +604,57 @@ describe("選んだ写真の種類（M5）", () => {
     expect(html).toContain("コピー元: 4.MOV");
   });
 });
+
+describe("選別の操作の順序（PR #2 の Codex の指摘）", () => {
+  beforeEach(async () => {
+    await loadResults();
+  });
+
+  it("「自動で次へ」で素早く続けて評価すると、2 つめは次の写真に付き、1 枚ずつ進む", async () => {
+    appStore.set({ mode: "loupe", autoAdvance: true });
+    await show(3);
+    const rated: Record<number, number> = {};
+    overrides.set_rating = (c) => {
+      for (const id of c.variant_ids as number[]) rated[id] = c.rating as number;
+      return { type: "updated", count: (c.variant_ids as number[]).length };
+    };
+    // 評価のコマンドを遅くして、1 つめの往復の間に 2 つめを押した状況にする。
+    mock.delay = (call) => ((call.args?.command as { type: string } | undefined)?.type === "set_rating" ? 20 : 0);
+    await Promise.all([actions.setRating(3), actions.setRating(4)]);
+    expect(rated).toEqual({ [idAt(3)]: 3, [idAt(4)]: 4 });
+    expect(appStore.get().selection.currentIndex).toBe(5);
+  });
+
+  it("前の操作が失敗しても、次の操作は行う", async () => {
+    appStore.set({ mode: "loupe", autoAdvance: false });
+    await show(2);
+    let calls = 0;
+    overrides.set_flag = () => {
+      calls++;
+      if (calls === 1) throw new ApiError({ ...closedError, message: "書けません" });
+      return { type: "updated", count: 1 };
+    };
+    await Promise.all([actions.setFlag(1), actions.setFlag(-1)]);
+    expect(calls).toBe(2);
+  });
+});
+
+describe("表示の切り替え（PR #2 の Codex の指摘）", () => {
+  it("先頭の写真を選んでいる間にグリッドへ戻したら、ルーペに切り替えない", async () => {
+    searchCache.reset(1, COUNT);
+    appStore.set({ search: { generation: 1, count: COUNT }, mode: "grid" });
+    mock.delay = (call) => ((call.args?.command as { type: string } | undefined)?.type === "range" ? 20 : 0);
+    actions.setMode("loupe");
+    actions.setMode("grid");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(appStore.get().mode).toBe("grid");
+  });
+
+  it("選べたときだけ切り替える", async () => {
+    await loadResults();
+    actions.setMode("develop");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(appStore.get().mode).toBe("develop");
+    expect(appStore.get().selection.current).toBe(idAt(0));
+  });
+});

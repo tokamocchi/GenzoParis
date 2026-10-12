@@ -65,6 +65,11 @@ export async function closeCatalog(discardUnsaved: boolean): Promise<CloseResult
   }
 }
 
+/** 終了の要求（番号 `id`）を受け取ったとアプリに答える（答えがないと、アプリは数秒後に画面を待たずに閉じる）。 */
+export function ackQuitRequest(id: number): Promise<void> {
+  return bridge().invoke<void>("ack_quit_request", { id });
+}
+
 export async function quitApp(discardUnsaved: boolean): Promise<CloseResult> {
   try {
     await bridge().invoke<void>("quit_app", { discardUnsaved });

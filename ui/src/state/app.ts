@@ -672,6 +672,25 @@ function pasteTargets(): VariantId[] {
 }
 
 /** 評価・フラグ・カラーラベルを付けた後（「自動で次へ」がオンなら次の写真へ）。 */
+/**
+ * 表示の切り替え（setMode・openInLoupe・カタログの開閉）の通し番号。写真を選んでから切り替えるとき、選び
+ * 終わるまでに新しい切り替えがあれば、古い切り替えを行わない。
+ */
+let modeSeq = 0;
+
+/**
+ * 選別の操作（評価・フラグ・カラーラベル）の列。前の操作と「自動で次へ」が済んでから、次の操作の対象を決める
+ * （素早く続けて押したとき、同じ写真に付けて 2 枚進んだり、評価の順が入れ替わったりしないように）。
+ */
+let markQueue: Promise<void> = Promise.resolve();
+
+/** 選別の操作を列に入れる（`run` は自分の番が来てから対象を決める）。 */
+function enqueueMark(run: () => Promise<void>): Promise<void> {
+  const next = markQueue.then(run, run);
+  markQueue = next.catch(() => undefined);
+  return next;
+}
+
 async function afterMark(): Promise<void> {
   const s = appStore.get();
   if (s.autoAdvance && s.mode !== "grid") await moveSelection(1);
@@ -876,6 +895,7 @@ async function catalogOpened(status: CatalogStatus): Promise<void> {
     dialog: null,
     clipboard: null,
   });
+  modeSeq++;
   appStore.set((s) => ({ foldersVersion: s.foldersVersion + 1 }));
   for (const w of status.warnings) handleEvent(w);
   await runSearch();
@@ -904,6 +924,7 @@ function catalogClosed(): void {
     clipboard: null,
     jobs: {},
   });
+  modeSeq++;
   for (const [id, waiters] of [...jobWaiters]) {
     jobWaiters.delete(id);
     const job = jobs[id];
@@ -1040,9 +1061,13 @@ export const actions = {
   setStatus: (status: AppStatus) => appStore.set({ status }),
   // 表示
   setMode(mode: Mode) {
+    const seq = ++modeSeq;
     const s = appStore.get();
     if (mode !== "grid" && s.selection.current === null && searchCache.count > 0) {
-      void selectIndex(0).then(() => appStore.set({ mode }));
+      // 先頭の写真を選んでから切り替える。選べなかった・その間に別の切り替えがあったときは切り替えない。
+      void selectIndex(0).then((ok) => {
+        if (ok && seq === modeSeq) appStore.set({ mode });
+      });
       return;
     }
     appStore.set({ mode });
@@ -1076,9 +1101,10 @@ export const actions = {
   moveSelection,
   /** 位置の写真を選んでルーペで開く（グリッドのダブルクリック）。選べなかったら開かない（戻り値は開いたか）。 */
   async openInLoupe(index: number, expect?: VariantId): Promise<boolean> {
+    const seq = ++modeSeq;
     const ok = await selectIndex(index, { expect });
-    if (ok) appStore.set({ mode: "loupe" });
-    return ok;
+    if (ok && seq === modeSeq) appStore.set({ mode: "loupe" });
+    return ok && seq === modeSeq;
   },
   kindOf,
   /** 選択中の写真の概要（選んだときの項目。順は決まっていない）。 */
@@ -1099,28 +1125,32 @@ export const actions = {
   targets,
   pasteTargets,
   // 選別（LIB-04・05）
-  async setRating(rating: Rating) {
-    const ids = targets();
-    if (ids.length === 0) return;
-    try {
-      await core.setRating(ids, rating);
-      await afterMark();
-    } catch (e) {
-      reportError(e, "評価を変えられません");
-    }
+  setRating(rating: Rating) {
+    return enqueueMark(async () => {
+      const ids = targets();
+      if (ids.length === 0) return;
+      try {
+        await core.setRating(ids, rating);
+        await afterMark();
+      } catch (e) {
+        reportError(e, "評価を変えられません");
+      }
+    });
   },
-  async setFlag(flag: Flag) {
-    const ids = targets();
-    if (ids.length === 0) return;
-    try {
-      await core.setFlag(ids, flag);
-      await afterMark();
-    } catch (e) {
-      reportError(e, "フラグを変えられません");
-    }
+  setFlag(flag: Flag) {
+    return enqueueMark(async () => {
+      const ids = targets();
+      if (ids.length === 0) return;
+      try {
+        await core.setFlag(ids, flag);
+        await afterMark();
+      } catch (e) {
+        reportError(e, "フラグを変えられません");
+      }
+    });
   },
   setColorLabel(label: ColorLabel | null) {
-    return applyColorLabel(targets(), label);
+    return enqueueMark(() => applyColorLabel(targets(), label));
   },
   /**
    * カラーラベルのキー（6〜9）: 対象の写真がすべてそのラベルなら外し（なしにする）、そうでなければ付ける
@@ -1128,8 +1158,10 @@ export const actions = {
    * いない写真があれば、付ける）。
    */
   toggleColorLabel(label: ColorLabel) {
-    const ids = targets();
-    return applyColorLabel(ids, nextColorLabel(label, loadedColorLabels(ids)));
+    return enqueueMark(() => {
+      const ids = targets();
+      return applyColorLabel(ids, nextColorLabel(label, loadedColorLabels(ids)));
+    });
   },
   // 取り込み
   importFolder,

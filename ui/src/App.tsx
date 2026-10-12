@@ -11,7 +11,7 @@
 import { useEffect, useState } from "react";
 
 import * as appApi from "./api/app";
-import { onCloseFailed, startCoreEvents } from "./api/events";
+import { onCloseFailed, onQuitRequested, startCoreEvents } from "./api/events";
 import { displayTarget } from "./api/frames";
 import { StatusBar } from "./components/StatusBar";
 import { Toasts } from "./components/Toasts";
@@ -20,6 +20,7 @@ import { DevelopLeftPanel } from "./develop/DevelopLeftPanel";
 import { DevelopPanel } from "./develop/DevelopPanel";
 import { DevelopView } from "./develop/DevelopView";
 import { CatalogErrorScreen } from "./dialogs/CatalogErrorScreen";
+import { quitOnRequest } from "./dialogs/catalogActions";
 import { Dialogs } from "./dialogs/Dialogs";
 import { WelcomeScreen } from "./dialogs/WelcomeScreen";
 import { useHotkeys } from "./keyboard";
@@ -39,6 +40,7 @@ async function boot(setFatal: (m: string) => void): Promise<void> {
   try {
     await startCoreEvents();
     await onCloseFailed((failure) => actions.openDialog({ kind: "close_failed", failure, quitting: true }));
+    await onQuitRequested((id) => void quitOnRequest(id));
     await appApi.setDisplayTarget(displayTarget());
     const status = await appApi.appStatus();
     actions.setStatus(status);

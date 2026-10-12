@@ -5,6 +5,8 @@ import type { CloseFailure, CoreEvent } from "./types";
 
 export const CORE_EVENT = "core-event";
 export const CLOSE_FAILED_EVENT = "app-close-failed";
+/** 終了の要求（値は要求の番号。genzo-app の lib.rs の QUIT_REQUESTED_EVENT）。 */
+export const QUIT_REQUESTED_EVENT = "app-quit-requested";
 
 type Handler = (e: CoreEvent) => void;
 
@@ -36,6 +38,11 @@ export function onCoreEvent(handler: Handler): () => void {
 /** テスト用: 受け取ったことにしてイベントを流す。 */
 export function dispatchCoreEventForTest(e: CoreEvent): void {
   for (const h of [...handlers]) h(e);
+}
+
+/** 終了の要求（ウィンドウを閉じる・macOS の ⌘Q）を受け取る。値は要求の番号。 */
+export function onQuitRequested(handler: (id: number) => void): Promise<Unlisten> {
+  return bridge().listen<number>(QUIT_REQUESTED_EVENT, handler);
 }
 
 /** 終了のときに保存できなかったことを受け取る。 */

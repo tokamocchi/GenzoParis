@@ -112,6 +112,49 @@ async function settleDevelop(): Promise<void> {
   await closeDevelopSession();
 }
 
+/** 終了の前に、現像の送信待ちを送り切るのを待つ時間の上限（コアが止まっていても終われるように）。 */
+export const QUIT_SETTLE_TIMEOUT_MS = 5000;
+
+/** 終了の要求を処理している途中か（続けて要求が来ても、もう一度は始めない）。 */
+let quitInProgress = false;
+
+/**
+ * 終了の要求（ウィンドウを閉じる・macOS の ⌘Q。genzo-app の lib.rs の request_quit）を処理する。
+ *
+ * 受け取ったとアプリに答えてから（答えがないと、アプリは画面を待たずに閉じる）、現像の送信待ちの設定をコアに
+ * 送り切り（スライダーを動かした直後の最新の値を失わないように。DATA-03）、カタログを閉じて終わる。保存
+ * できなければ、閉じられなかったときのダイアログを出す（決定事項ログ No.61）。
+ */
+export async function quitOnRequest(id: number): Promise<void> {
+  try {
+    await app.ackQuitRequest(id);
+  } catch (e) {
+    console.warn("終了の要求に答えられない", e);
+  }
+  if (quitInProgress) return;
+  quitInProgress = true;
+  try {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        console.warn("現像の送信待ちを送り切れないまま終了する");
+        resolve();
+      }, QUIT_SETTLE_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([settleDevelop(), timeout]);
+    } catch (e) {
+      console.warn("現像の送信待ちを送れない", e);
+    } finally {
+      clearTimeout(timer);
+    }
+    const r = await app.quitApp(false);
+    if (!r.ok) actions.openDialog({ kind: "close_failed", failure: r.failure, quitting: true });
+  } finally {
+    quitInProgress = false;
+  }
+}
+
 /** カタログを閉じた後に続けること（切り替え先を開く）。閉じられなかったときのダイアログが使う。 */
 let afterClose: (() => Promise<void>) | null = null;
 

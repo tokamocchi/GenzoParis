@@ -456,6 +456,13 @@ pub async fn open_variant_file(
     .await
 }
 
+/// 画面が終了の要求（lib.rs の `QUIT_REQUESTED_EVENT`。値は要求の番号）を受け取ったと答える。答えがあれば、
+/// アプリは画面を待たずに閉じるのをやめ、画面が送信待ちの設定を送ってから呼ぶ `quit_app` を待つ。
+#[tauri::command]
+pub fn ack_quit_request(id: u64) {
+    crate::QUIT_REQUESTS.ack(id);
+}
+
 /// アプリを終了する（カタログを閉じてから。`discard_unsaved` なら保存できなかった設定を捨てる）。
 #[tauri::command]
 pub async fn quit_app(

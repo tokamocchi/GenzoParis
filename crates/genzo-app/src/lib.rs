@@ -47,8 +47,9 @@
 //! | `AppHandle::exit` など（`ExitRequested`） | 止めて `request_quit` |
 //! | macOS の Dock の「終了」・ログアウト、Windows のシャットダウン・サインアウト | `RunEvent::Exit` で `close_at_exit` |
 //!
-//! `request_quit` は、保存できなければ終わらずに画面に知らせる（`app-close-failed`。画面が再試行か、捨てて
-//! 終わるかを選ばせる）。最後の行は、終了の要求を経ずに、すぐにプロセスが終わる（macOS の NSApp の
+//! `request_quit` は、まず画面に終了の要求を知らせ（`app-quit-requested`）、画面が現像の送信待ちの設定をコアに
+//! 送り切ってから `quit_app` を呼ぶ（画面が答えなければ、数秒後に画面を待たずに閉じる）。保存できなければ
+//! 終わらずに画面に知らせる（`app-close-failed`。画面が再試行か、捨てて終わるかを選ばせる）。最後の行は、終了の要求を経ずに、すぐにプロセスが終わる（macOS の NSApp の
 //! `terminate:` は、tao 0.35.3 が `applicationShouldTerminate:` を実装していないので止められず、
 //! `applicationWillTerminate:` の後に終わる。Windows の `WM_ENDSESSION` も、戻ると OS が終わらせる）ので、
 //! 画面に選択肢を出せない。その場で同期して閉じ、保存できなければ捨てて閉じる
@@ -69,7 +70,8 @@ pub mod state;
 pub mod tools;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, WINDOW_SUBMENU_ID};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime, WindowEvent};
@@ -83,6 +85,44 @@ pub(crate) static QUITTING: AtomicBool = AtomicBool::new(false);
 pub const CORE_EVENT: &str = "core-event";
 /// 終了のときに保存できなかったことを知らせるイベントの名前。
 pub const CLOSE_FAILED_EVENT: &str = "app-close-failed";
+/// 終了の要求を画面に知らせるイベントの名前（値は要求の通し番号）。画面は `ack_quit_request` で受け取ったと
+/// 答え、現像の送信待ちの設定をコアに送り切ってから `quit_app` を呼ぶ（`request_quit`）。
+pub const QUIT_REQUESTED_EVENT: &str = "app-quit-requested";
+/// 画面が終了の要求を受け取ったと答えるまで待つ時間（過ぎたら、画面を待たずに閉じる。画面を読み込めて
+/// いない・止まっているときに、終われなくならないように）。
+const QUIT_ACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 終了の要求の通し番号と、画面が受け取ったと答えた番号（`request_quit`・`commands::ack_quit_request`）。
+pub(crate) struct QuitRequests {
+    seq: AtomicU64,
+    acked: AtomicU64,
+}
+
+impl QuitRequests {
+    const fn new() -> Self {
+        Self {
+            seq: AtomicU64::new(0),
+            acked: AtomicU64::new(0),
+        }
+    }
+
+    /// 新しい要求の番号（1 から）。
+    fn next(&self) -> u64 {
+        self.seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// 画面が要求 `id` を受け取った（それより前の要求も受け取ったとみなす）。
+    pub(crate) fn ack(&self, id: u64) {
+        self.acked.fetch_max(id, Ordering::SeqCst);
+    }
+
+    /// 要求 `id` を画面が受け取ったか。
+    fn acked(&self, id: u64) -> bool {
+        self.acked.load(Ordering::SeqCst) >= id
+    }
+}
+
+pub(crate) static QUIT_REQUESTS: QuitRequests = QuitRequests::new();
 /// macOS のアプリのメニューの「GenzoParis を終了」（⌘Q）の ID（`app_menu`）。
 pub const QUIT_MENU_ID: &str = "genzo-quit";
 
@@ -95,10 +135,38 @@ fn init_tracing() {
         .try_init();
 }
 
-/// 終了の要求を受けたとき: カタログを閉じてから終わる。保存できなければ画面に知らせて終わらない。
+/// 終了の要求を受けたとき（ウィンドウを閉じる・macOS の ⌘Q・`ExitRequested`）。
+///
+/// まず画面に知らせる（[`QUIT_REQUESTED_EVENT`]）。画面は、現像の送信待ちの設定（スライダーを動かした直後の
+/// 最新の値など。`ui/src/state/develop.ts` の送信の列）をコアに送り切ってから `quit_app` を呼ぶ。ここで
+/// 直接閉じると、送信待ちの値が届く前にコアを閉じて、最後の変更を失うため（DATA-03）。
+///
+/// 画面が [`QUIT_ACK_TIMEOUT`] のうちに受け取ったと答えなければ（読み込めていない・止まっている）、画面を
+/// 待たずに閉じる: カタログを閉じてから終わる。保存できなければ画面に知らせて終わらない。
 fn request_quit(app: &AppHandle) {
+    let id = QUIT_REQUESTS.next();
+    let delivered = match app.emit(QUIT_REQUESTED_EVENT, id) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "終了の要求を画面に知らせられない");
+            false
+        }
+    };
     let app = app.clone();
     std::thread::spawn(move || {
+        if delivered {
+            let deadline = Instant::now() + QUIT_ACK_TIMEOUT;
+            while Instant::now() < deadline {
+                if QUIT_REQUESTS.acked(id) || QUITTING.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if QUIT_REQUESTS.acked(id) || QUITTING.load(Ordering::SeqCst) {
+                return;
+            }
+            tracing::warn!("画面が終了の要求に答えないので、画面を待たずにカタログを閉じる");
+        }
         let state = Arc::clone(&app.state::<Arc<AppState>>());
         match state.close_catalog(false) {
             Ok(()) => {}
@@ -253,6 +321,7 @@ pub fn run() {
             commands::reveal_variant_file,
             commands::open_variant_file,
             commands::quit_app,
+            commands::ack_quit_request,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event
@@ -281,4 +350,25 @@ pub fn run() {
         RunEvent::Exit => close_at_exit(handle),
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_requests_are_numbered_and_acknowledged_in_order() {
+        let q = QuitRequests::new();
+        let first = q.next();
+        let second = q.next();
+        assert_eq!((first, second), (1, 2));
+        assert!(!q.acked(first));
+        // 新しい要求に答えたら、前の要求も受け取ったとみなす。
+        q.ack(second);
+        assert!(q.acked(first) && q.acked(second));
+        // 古い番号の答えが後から来ても戻らない。
+        q.ack(first);
+        assert!(q.acked(second));
+        assert!(!q.acked(q.next()));
+    }
 }
