@@ -36,7 +36,9 @@ DRIVER_PID=$!
 cleanup() {
   kill "$DRIVER_PID" 2>/dev/null || true
   kill "$XVFB_PID" 2>/dev/null || true
-  pkill -f "$APP" 2>/dev/null || true
+  # アプリは tauri-driver がセッションの終わりに終わらせる。残っていれば名前で終わらせる
+  # （-f はこのスクリプト自身の引数にも一致するので使わない）。
+  pkill -x "$(basename "$APP" | cut -c1-15)" 2>/dev/null || true
 }
 trap cleanup EXIT
 
