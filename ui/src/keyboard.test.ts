@@ -25,6 +25,9 @@ describe("keyboard", () => {
     expect(comboOf(key({ key: "Z", ctrlKey: true, shiftKey: true }))).toBe("mod+shift+z");
     // Shift で記号になる数字は数字のまま。
     expect(comboOf(key({ key: "!", code: "Digit1", shiftKey: true }))).toBe("shift+1");
+    // スペースは "Space" と書く。
+    expect(comboOf(key({ key: " ", code: "Space" }))).toBe("Space");
+    expect(normalizeCombo("shift+Space")).toBe("shift+Space");
   });
   it("入力欄ではショートカットを処理しない", () => {
     expect(isTyping({ tagName: "INPUT", type: "text" } as unknown as EventTarget)).toBe(true);

@@ -33,6 +33,8 @@ export function Slider(p: SliderProps) {
   const dragging = useRef(false);
   const [text, setText] = useState(fmt(p.value));
   const [editing, setEditing] = useState(false);
+  // 入力欄を利用者が書き換えたか（書き換えずにフォーカスを外したときは値を送らない。Esc で取り消す）。
+  const edited = useRef(false);
   useEffect(() => {
     if (!editing) setText(fmt(p.value));
     // fmt は描画ごとに作られる。値が変わったときだけ表示を更新する。
@@ -63,10 +65,18 @@ export function Slider(p: SliderProps) {
         inputMode="decimal"
         value={text}
         disabled={p.disabled}
-        onFocus={() => setEditing(true)}
-        onChange={(e) => setText(e.target.value)}
+        onFocus={() => {
+          edited.current = false;
+          setEditing(true);
+        }}
+        onChange={(e) => {
+          edited.current = true;
+          setText(e.target.value);
+        }}
         onBlur={() => {
           setEditing(false);
+          if (!edited.current) return;
+          edited.current = false;
           const v = (p.parse ?? Number)(text.replace(/[+＋]/g, "").replace("−", "-"));
           if (Number.isFinite(v)) p.onChange(clamp(v), false);
           else setText(fmt(p.value));
@@ -74,6 +84,8 @@ export function Slider(p: SliderProps) {
         onKeyDown={(e) => {
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           if (e.key === "Escape") {
+            // 書き換えを取り消す（フォーカスを外しても値を送らない）。
+            edited.current = false;
             setText(fmt(p.value));
             setEditing(false);
             (e.target as HTMLInputElement).blur();

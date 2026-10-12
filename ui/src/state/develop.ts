@@ -141,6 +141,9 @@ async function pump(): Promise<void> {
       if (!op) break;
       try {
         await runOp(op);
+        // 操作が成功したら、前の操作の失敗の表示を消す（開けなかったときのエラーは state が null のときだけ
+        // なので消さない）。
+        if (developStore.get().error && developStore.get().state) developStore.set({ error: null });
       } catch (e) {
         const err = toApiError(e);
         if (err.kind !== "cancelled") {
@@ -253,9 +256,15 @@ export function redo(): Promise<void> {
 export function reloadState(): Promise<void> {
   return enqueue(async () => {
     const state = await core.developState();
-    if (state && state.variant_id === developStore.get().variantId) {
-      developStore.set((s) => ({ state, settings: state.settings, historyVersion: s.historyVersion + 1 }));
-    }
+    if (!state || state.variant_id !== developStore.get().variantId) return;
+    // 読み直しの間に利用者が値を変えていたら（送信待ちがある・ドラッグ中）、画面の値は上書きしない
+    // （古い値に戻って見えるため）。履歴・Undo / Redo の可否だけを更新する。
+    const busy = pending !== null || tail.length > 0 || state.dragging;
+    developStore.set((s) => ({
+      state,
+      settings: busy ? s.settings : state.settings,
+      historyVersion: s.historyVersion + 1,
+    }));
   });
 }
 
@@ -308,8 +317,9 @@ export function installDevelopEvents(): void {
       developStore.get().variantId !== null &&
       (e.all || e.variant_ids.includes(developStore.get().variantId as VariantId))
     ) {
-      // 一括適用などで、開いている写真の設定が外から変わった可能性がある。
-      developStore.set((s) => ({ historyVersion: s.historyVersion + 1 }));
+      // 自動保存・一括適用などで、開いている写真の設定・履歴が変わった。コアの状態（設定・Undo / Redo の
+      // 可否・保存待ち）を読み直す（送信の列の後ろで。送信待ちの値は上書きしない）。
+      void reloadState().catch(() => undefined);
     }
   });
 }

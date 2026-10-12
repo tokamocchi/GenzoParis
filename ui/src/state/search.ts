@@ -65,6 +65,14 @@ class SearchCache {
     return p[index - page * PAGE_SIZE];
   }
 
+  /** 位置 `index` の項目を、読み込みを起こさずに返す（読み込み済みでなければ undefined）。 */
+  peek(index: number): VariantSummary | undefined {
+    if (index < 0 || index >= this.count) return undefined;
+    const page = Math.floor(index / PAGE_SIZE);
+    const p = this.pages.get(page);
+    return p === undefined || p === "loading" ? undefined : p[index - page * PAGE_SIZE];
+  }
+
   /** 範囲のページを読み込む（届いたら解決）。 */
   async ensure(start: number, end: number): Promise<void> {
     const first = Math.max(0, Math.floor(start / PAGE_SIZE));

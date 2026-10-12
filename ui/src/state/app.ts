@@ -243,6 +243,9 @@ function finishJob(info: JobInfo): void {
 
 let searchSeq = 0;
 
+/** Shift で範囲を選ぶときの件数の上限（**仮置き**: 10,000。コマンドの大きさと応答の時間のため）。 */
+export const MAX_RANGE_SELECTION = 10_000;
+
 /** 今の条件で検索し直す（選択中の写真の位置を求め直す）。 */
 async function runSearch(): Promise<void> {
   const seq = ++searchSeq;
@@ -299,9 +302,11 @@ async function selectIndex(
   const id = item.variant_id;
   const sel = appStore.get().selection;
   if (opts.extend && sel.anchorIndex !== null) {
-    const [a, b] = sel.anchorIndex <= index ? [sel.anchorIndex, index] : [index, sel.anchorIndex];
-    // 範囲の id を集める（大きすぎる範囲は 10,000 件まで）。
-    const end = Math.min(b, a + 9_999);
+    // 範囲の id を集める（大きすぎる範囲は、操作の対象（index）の側から 10,000 件まで。対象は必ず含める）。
+    const [a, end] =
+      sel.anchorIndex <= index
+        ? [Math.max(sel.anchorIndex, index - (MAX_RANGE_SELECTION - 1)), index]
+        : [index, Math.min(sel.anchorIndex, index + (MAX_RANGE_SELECTION - 1))];
     await searchCache.ensure(a, end + 1);
     const ids: VariantId[] = [];
     for (let i = a; i <= end; i++) {
@@ -348,6 +353,18 @@ async function afterMark(): Promise<void> {
 // イベント
 // ---------------------------------------------------------------------------
 
+/** 検索結果のキャッシュの読み直しをまとめる時間（**仮置き**: 100 ms）。 */
+const INVALIDATE_DELAY_MS = 100;
+let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleInvalidate(): void {
+  if (invalidateTimer !== null) return;
+  invalidateTimer = setTimeout(() => {
+    invalidateTimer = null;
+    searchCache.invalidate();
+  }, INVALIDATE_DELAY_MS);
+}
+
 function handleEvent(e: CoreEvent): void {
   switch (e.type) {
     case "search_updated":
@@ -358,8 +375,9 @@ function handleEvent(e: CoreEvent): void {
       }
       break;
     case "catalog_changed":
-      // 評価・キャプション・現像設定など、同じ世代のまま内容が変わるもの。
-      searchCache.invalidate();
+      // 評価・キャプション・現像設定など、同じ世代のまま内容が変わるもの。続けて来る変更（履歴の移動・
+      // 一括適用など）は、短い間まとめて 1 回だけ読み直す。
+      scheduleInvalidate();
       appStore.set((s) => ({
         detailsVersion: s.detailsVersion + 1,
         foldersVersion:

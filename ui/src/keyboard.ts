@@ -2,7 +2,8 @@
 //
 // - 入力欄（input・textarea・select・contenteditable）にフォーカスがあるときと、IME の変換中は
 //   ショートカットを処理しない（日本語の入力を妨げない。UX-01）。
-// - キーの書き方: "g"、"shift+g"、"mod+z"（mod は macOS で ⌘、それ以外で Ctrl）、"ArrowRight"、"Delete"。
+// - キーの書き方: "g"、"shift+g"、"mod+z"（mod は macOS で ⌘、それ以外で Ctrl）、"ArrowRight"、"Delete"、
+//   "Space"。
 
 import { useEffect, useRef } from "react";
 
@@ -31,6 +32,8 @@ export function comboOf(e: KeyboardEvent): string {
   if (e.altKey) parts.push("alt");
   if (e.shiftKey) parts.push("shift");
   let key = e.key;
+  // スペースは "Space" と書く（" " は区切りの空白と見分けられないため）。
+  if (key === " ") key = "Space";
   if (key.length === 1) key = key.toLowerCase();
   // Shift で記号が変わるキー（数字）は、物理的なキーの数字で表す。
   if (e.shiftKey && /^Digit[0-9]$/.test(e.code)) key = e.code.slice(5);
