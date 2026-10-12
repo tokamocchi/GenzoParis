@@ -5,8 +5,10 @@
 //   historyVersion（ドラッグの終了・Undo / Redo・保存のイベントで増える）で読み直す。
 // - 項目をクリックすると、その位置まで Undo / Redo を繰り返して戻る。保存待ちの変更があると Undo の前に
 //   保存されて履歴が 1 件増えるので、先に保存してから履歴を読み直して回数を決める（送信の列の中で行う）。
+//   コアは 1 回ごとに保存して変更を知らせるので、移っている間は履歴を読み直さず、終わってから 1 回だけ読む
+//   （1 回で移るコマンド go_to_history の公開はコアに依頼中）。
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import * as core from "../api/core";
 import type { DevelopSettings, HistoryEntryId, HistoryItem, VariantId } from "../api/types";
@@ -15,14 +17,21 @@ import { actions, appStore, useApp } from "../state/app";
 import { developStore, enqueue, redo, undo, useDevelop } from "../state/develop";
 import { shallowEqual } from "../state/store";
 import { Section } from "../components/Section";
-import { historyAvailability, historyRows, historySteps } from "./historyMath";
+import { historyAvailability, historyRows, historySteps, redoAvailable } from "./historyMath";
 import "./develop.css";
+
+/** 履歴を読み直すまでの待ち（ミリ秒。仮置き）。続けて届く変更の知らせ（Undo / Redo のたびの保存など）をまとめる。 */
+const HISTORY_RELOAD_DELAY_MS = 80;
+
+/** 履歴の位置へ移っている途中か（その間は履歴を読み直さない）。 */
+let historyMoving = false;
 
 /** 履歴の項目の位置まで戻る（進む）。 */
 function goToHistory(variantId: VariantId, target: HistoryEntryId): Promise<void> {
   return enqueue(async () => {
     if (developStore.get().variantId !== variantId) return;
     let settings: DevelopSettings | null = null;
+    historyMoving = true;
     try {
       // 保存待ちの変更を先に保存する（Undo の前の保存で履歴が増え、回数がずれないように）。
       await core.flushDevelop();
@@ -37,7 +46,8 @@ function goToHistory(variantId: VariantId, target: HistoryEntryId): Promise<void
     } catch (e) {
       actions.reportError(e, "履歴の位置に戻せません");
     } finally {
-      // 途中で失敗しても、動いたところまでの状態を画面に反映する。
+      historyMoving = false;
+      // 途中で失敗しても、動いたところまでの状態を画面に反映する（履歴もここで 1 回だけ読み直す）。
       try {
         const state = await core.developState();
         developStore.set((cur) => {
@@ -121,7 +131,10 @@ async function createVirtualCopy(variantId: VariantId): Promise<void> {
   }
 }
 
-/** 履歴を読む（historyVersion が増えたら読み直す）。 */
+/**
+ * 履歴を読む（historyVersion が増えたら、少し待ってから読み直す）。履歴の位置へ移っている途中は読まない
+ * （移り終えたときに historyVersion が増える）。
+ */
 function useHistory(variantId: VariantId | null): { entries: HistoryItem[] | null; error: string | null } {
   const historyVersion = useDevelop((s) => s.historyVersion);
   const [result, setResult] = useState<{ id: VariantId | null; entries: HistoryItem[] | null; error: string | null }>({
@@ -132,16 +145,20 @@ function useHistory(variantId: VariantId | null): { entries: HistoryItem[] | nul
   useEffect(() => {
     if (variantId === null) return;
     let alive = true;
-    core
-      .history(variantId)
-      .then((entries) => {
-        if (alive) setResult({ id: variantId, entries, error: null });
-      })
-      .catch((e) => {
-        if (alive) setResult({ id: variantId, entries: null, error: actions.describeError(e) });
-      });
+    const timer = setTimeout(() => {
+      if (historyMoving) return;
+      core
+        .history(variantId)
+        .then((entries) => {
+          if (alive) setResult({ id: variantId, entries, error: null });
+        })
+        .catch((e) => {
+          if (alive) setResult({ id: variantId, entries: null, error: actions.describeError(e) });
+        });
+    }, HISTORY_RELOAD_DELAY_MS);
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
   }, [variantId, historyVersion]);
   // 別の写真の履歴は出さない。
@@ -173,6 +190,22 @@ function HistoryList(props: { variantId: VariantId; entries: HistoryItem[] | nul
   );
 }
 
+/**
+ * コアの状態を読み直した後（開く・ドラッグの終了・Undo / Redo・読み直し）か履歴の読み直しの合図の後に、
+ * 画面で設定を変えたか（まだ保存していない変更があるか。送信前を含む）。
+ */
+function useUnsavedSinceSync(): boolean {
+  const settings = useDevelop((s) => s.settings);
+  const state = useDevelop((s) => s.state);
+  const historyVersion = useDevelop((s) => s.historyVersion);
+  // コアの状態か合図が変わったときの設定を覚える（同じ更新で設定も変わる: Undo / Redo・開く・読み直し）。
+  const synced = useRef<{ state: unknown; historyVersion: number; settings: DevelopSettings | null } | null>(null);
+  if (!synced.current || synced.current.state !== state || synced.current.historyVersion !== historyVersion) {
+    synced.current = { state, historyVersion, settings };
+  }
+  return settings !== synced.current.settings;
+}
+
 export function DevelopLeftPanel() {
   const current = useApp((s) => s.selection.current);
   const selected = useApp((s) => s.selection.ids, shallowEqual);
@@ -183,11 +216,12 @@ export function DevelopLeftPanel() {
   const ready = state !== null && !opening && variantId !== null && variantId === current;
   const others = selected.filter((id) => id !== current).length;
   const history = useHistory(ready ? variantId : null);
+  const unsaved = useUnsavedSinceSync();
   // コアの状態の can_undo / can_redo はドラッグの終了・Undo / Redo のときにしか読み直さないので、
   // 保存のたびに読み直す履歴からも判断する。
   const avail = historyAvailability(history.entries);
   const canUndo = !!state?.can_undo || !!avail?.canUndo;
-  const canRedo = avail ? avail.canRedo : !!state?.can_redo;
+  const canRedo = redoAvailable(!!state?.can_redo, avail, unsaved);
 
   return (
     <div>

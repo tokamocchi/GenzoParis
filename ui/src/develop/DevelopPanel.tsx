@@ -15,7 +15,7 @@ import { Slider } from "../components/Slider";
 import { comboLabel } from "../keyboard";
 import { useApp } from "../state/app";
 import { applySettings, developStore, endDrag, useDevelop } from "../state/develop";
-import { ASPECT_CHOICES, type GeometryInfo, aspectKey, gBoxSize } from "./cropMath";
+import { ASPECT_CHOICES, aspectKey } from "./cropMath";
 import { CURVE_CHANNELS, type CurveChannel, withChannel } from "./curveMath";
 import { Histogram } from "./Histogram";
 import { useGeometryInfo, useLoadedSummary } from "./hooks";
@@ -26,16 +26,17 @@ import {
   formatSigned,
   parseNumber,
   positionToTemperature,
+  sameShown,
   temperatureToPosition,
 } from "./scales";
 import { type WbMode, customWb, defaultGeometry, effectiveWb, resetAll, wbFromMode, wbMode } from "./settingsLogic";
 import { ToneCurveEditor } from "./ToneCurveEditor";
 import {
   cancelCrop,
+  changeAngle,
   chooseAspect,
+  commitAngle,
   commitCrop,
-  constrainDraft,
-  refitDraftForAngle,
   startCrop,
   toggleWbTool,
   useDevelopView,
@@ -58,11 +59,16 @@ const PLACEHOLDER: DevelopSettings = resetAll({
 
 const NO_WARNINGS: string[] = [];
 
-/** 設定を変えて送る（最新の値から作る。写真を開いていなければ何もしない）。 */
-function update(fn: (s: DevelopSettings) => DevelopSettings, dragging: boolean): void {
+/**
+ * 設定を変えて送る（最新の値から作る。写真を開いていなければ何もしない）。`fn` が null を返したら
+ * 変えない（値を変えずに入力欄を離れたときなど）。
+ */
+function update(fn: (s: DevelopSettings) => DevelopSettings | null, dragging: boolean): void {
   const d = developStore.get();
   if (!d.state || !d.settings) return;
-  applySettings(fn(d.settings), dragging);
+  const next = fn(d.settings);
+  if (next === null || next === d.settings) return;
+  applySettings(next, dragging);
 }
 
 /** −100〜100 のスライダーの書式。 */
@@ -150,7 +156,7 @@ function SliderRows(props: { defs: SliderDef[]; settings: DevelopSettings; disab
           format={signed0}
           parse={parseNumber}
           disabled={props.disabled}
-          onChange={(v, dragging) => update((s) => d.set(s, v), dragging)}
+          onChange={(v, dragging) => update((s) => (sameShown(signed0, v, d.get(s)) ? null : d.set(s, v)), dragging)}
           onCommit={endDrag}
         />
       ))}
@@ -228,6 +234,8 @@ function WhiteBalanceRows(props: { settings: DevelopSettings; disabled: boolean 
         onChange={(v, dragging) =>
           update((s) => {
             const cur = effectiveWb(s.white_balance, asShot);
+            // 表示が変わらない値（入力欄を編集せずに離れたときなど）では、撮影時の設定・プリセットのままにする。
+            if (sameShown(formatKelvin, v, cur.temperature_k)) return null;
             return { ...s, white_balance: customWb(Math.round(v), cur.tint) };
           }, dragging)
         }
@@ -246,6 +254,7 @@ function WhiteBalanceRows(props: { settings: DevelopSettings; disabled: boolean 
         onChange={(v, dragging) =>
           update((s) => {
             const cur = effectiveWb(s.white_balance, asShot);
+            if (sameShown(signed0, v, cur.tint)) return null;
             return { ...s, white_balance: customWb(cur.temperature_k, v) };
           }, dragging)
         }
@@ -272,7 +281,12 @@ function BasicSection(props: { settings: DevelopSettings; disabled: boolean }) {
         format={formatEv}
         parse={parseNumber}
         disabled={disabled}
-        onChange={(v, dragging) => update((s) => ({ ...s, exposure_ev: Math.round(v * 100) / 100 }), dragging)}
+        onChange={(v, dragging) =>
+          update(
+            (s) => (sameShown(formatEv, v, s.exposure_ev) ? null : { ...s, exposure_ev: Math.round(v * 100) / 100 }),
+            dragging,
+          )
+        }
         onCommit={endDrag}
       />
       <SliderRows defs={TONE_SLIDERS} settings={settings} disabled={disabled} />
@@ -334,13 +348,6 @@ function CurveSection(props: { settings: DevelopSettings; disabled: boolean }) {
 // 切り抜きと角度
 // ---------------------------------------------------------------------------
 
-/** 角度を変えたときの、縦横比の計算に使う大きさ（O は同じで、外接矩形だけ変わる）。 */
-function infoAtAngle(info: GeometryInfo | null, angle: number): GeometryInfo | null {
-  if (!info) return null;
-  const g = gBoxSize(info.ow, info.oh, angle);
-  return { ow: info.ow, oh: info.oh, gw: g.width, gh: g.height };
-}
-
 function CropSection(props: { settings: DevelopSettings; disabled: boolean }) {
   const { settings, disabled } = props;
   const draft = useDevelopView((s) => s.crop);
@@ -381,19 +388,9 @@ function CropSection(props: { settings: DevelopSettings; disabled: boolean }) {
         format={formatAngle}
         parse={parseNumber}
         disabled={disabled}
-        onChange={(v, dragging) => {
-          const angle = Math.round(v * 100) / 100;
-          update((s) => ({ ...s, geometry: { ...s.geometry, angle_deg: angle } }), dragging);
-          if (viewStore.get().crop) {
-            refitDraftForAngle(infoAtAngle(info, angle));
-            if (!dragging) void constrainDraft();
-          }
-        }}
-        onCommit={() => {
-          endDrag();
-          if (viewStore.get().crop) void constrainDraft();
-        }}
-        title="正の値で反時計回りに回転します"
+        onChange={(v, dragging) => changeAngle(Math.round(v * 100) / 100, dragging, info)}
+        onCommit={commitAngle}
+        title="正の値で反時計回りに回転します。縦横比を固定していれば、切り抜きの枠もその比に合わせ直します"
       />
       <div className="dp-row">
         {draft ? (
@@ -538,7 +535,11 @@ export function DevelopPanel() {
         <button
           className="btn"
           disabled={disabled}
-          onClick={() => update((s) => resetAll(s), false)}
+          onClick={() => {
+            // 編集中の枠を後で保存して、リセットした切り抜きを上書きしないように、先に編集を取り消す。
+            if (viewStore.get().crop) void cancelCrop();
+            update((s) => resetAll(s), false);
+          }}
           title="切り抜きを含むすべての調整を元に戻す（レンズ補正・ディテール・部分補正は保つ）"
         >
           すべてリセット

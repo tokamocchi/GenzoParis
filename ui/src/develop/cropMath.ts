@@ -183,10 +183,12 @@ export function dragCrop(
     let nr = r;
     let nt = t;
     let nb = b;
-    if (west) nl = clamp(l + dx, 0, r - min);
-    if (east) nr = clamp(r + dx, l + min, 1);
-    if (north) nt = clamp(t + dy, 0, b - min);
-    if (south) nb = clamp(b + dy, t + min, 1);
+    // 反対の辺までが `min` より狭い枠（保存済み・貼り付けた設定ではありうる）でも 0〜1 の外に出ないよう、
+    // 上限・下限を 0〜1 に収めてから比べる。
+    if (west) nl = clamp(l + dx, 0, Math.max(0, r - min));
+    if (east) nr = clamp(r + dx, Math.min(1, l + min), 1);
+    if (north) nt = clamp(t + dy, 0, Math.max(0, b - min));
+    if (south) nb = clamp(b + dy, Math.min(1, t + min), 1);
     return { left: Math.min(nl, nr), top: Math.min(nt, nb), right: Math.max(nl, nr), bottom: Math.max(nt, nb) };
   }
 
@@ -332,4 +334,68 @@ export function geometryInfo(opts: {
 export function cropFractionAspect(aspect: AspectRatio | null | undefined, info: GeometryInfo | null): number | null {
   if (!info) return null;
   return fractionAspect(pixelAspect(aspect, info.ow, info.oh), info.gw, info.gh);
+}
+
+/** 角度を変えたときの大きさ（O は同じで、G の外接矩形だけが変わる）。 */
+export function infoAtAngle(info: GeometryInfo | null, angleDeg: number): GeometryInfo | null {
+  if (!info) return null;
+  const g = gBoxSize(info.ow, info.oh, angleDeg);
+  return { ow: info.ow, oh: info.oh, gw: g.width, gh: g.height };
+}
+
+/** 切り抜きの画素の縦横比（幅 / 高さ。`gw`・`gh` は G の外接矩形の大きさ）。 */
+export function cropPixelAspect(c: CropRect, gw: number, gh: number): number {
+  return ((c.right - c.left) * gw) / ((c.bottom - c.top) * gh);
+}
+
+/** 端（0・1）とみなす差（浮動小数点の誤差の範囲。仮置き）。 */
+const EDGE_SNAP = 1e-9;
+
+/**
+ * 角度を変えたときの切り抜き（縦横比を固定しているとき。DEV-15）。
+ *
+ * 切り抜き（CropRect）は G の外接矩形の各軸の割合なので、割合のまま角度を変えると、外接矩形の比が
+ * 変わった分だけ画素の縦横比が選んだ比からずれる（パイプラインは geometry.aspect を読まない）。そこで、
+ * 角度 `fromDeg` のときの枠の大きさと、外接矩形の中心からの位置を画素で保ち（画面では枠が止まって画像が
+ * その下で回る）、角度 `toDeg` の外接矩形の割合に直す。高さは幅と選んだ比から決め直す（元の枠の比が
+ * ずれていても直す）。外接矩形に収まらなければ、比を保って縮め、内側へずらす。
+ *
+ * 角度 `fromDeg` → `toDeg` → `fromDeg` と変えると、縮めなかった限り元の枠に戻る。回転した画像の内側への
+ * 制限はしない（コアの constrain_crop。パイプラインも描画のときに比を保って同じ制限をかける）。
+ * 自由・大きさが分からないときは `crop` をそのまま返す。
+ */
+export function refitCropForAngle(
+  crop: CropRect,
+  aspect: AspectRatio | null | undefined,
+  size: { ow: number; oh: number } | null,
+  fromDeg: number,
+  toDeg: number,
+): CropRect {
+  if (!size || !(size.ow > 0) || !(size.oh > 0)) return crop;
+  const p = pixelAspect(aspect, size.ow, size.oh);
+  if (p === null) return crop;
+  const g0 = gBoxSize(size.ow, size.oh, fromDeg);
+  const g1 = gBoxSize(size.ow, size.oh, toDeg);
+  // 画素（G の外接矩形の単位）での幅・高さと、外接矩形の中心からの位置。
+  const wPx = (crop.right - crop.left) * g0.width;
+  const hPx = wPx / p;
+  const dxPx = ((crop.left + crop.right) / 2 - 0.5) * g0.width;
+  const dyPx = ((crop.top + crop.bottom) / 2 - 0.5) * g0.height;
+  let w = wPx / g1.width;
+  let h = hPx / g1.height;
+  if (!(w > 0) || !(h > 0)) return crop;
+  // 外接矩形に収まらなければ、比を保って縮める。
+  const shrink = Math.min(1, 1 / w, 1 / h);
+  w *= shrink;
+  h *= shrink;
+  const cx = clamp(0.5 + dxPx / g1.width, w / 2, 1 - w / 2);
+  const cy = clamp(0.5 + dyPx / g1.height, h / 2, 1 - h / 2);
+  // 浮動小数点の誤差で端からわずかにずれた値は端に戻す（全体の枠が「切り抜きあり」にならないように）。
+  const snap = (v: number) => (Math.abs(v) < EDGE_SNAP ? 0 : Math.abs(1 - v) < EDGE_SNAP ? 1 : v);
+  return sanitizeCrop({
+    left: snap(cx - w / 2),
+    top: snap(cy - h / 2),
+    right: snap(cx + w / 2),
+    bottom: snap(cy + h / 2),
+  });
 }

@@ -4,6 +4,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 
 import * as core from "../api/core";
 import type { Orientation, VariantId, VariantSummary } from "../api/types";
+import { appStore } from "../state/app";
 import { searchCache } from "../state/search";
 import { useDevelop } from "../state/develop";
 import { type GeometryInfo, geometryInfo } from "./cropMath";
@@ -27,6 +28,35 @@ function loadOrientation(id: VariantId): Promise<void> {
   return p;
 }
 
+/** 読み込み済みの概要の探索の結果（searchCache.version が同じ間は使い回す）。 */
+const summaryMemo = { version: -1, byId: new Map<VariantId, VariantSummary | undefined>() };
+
+/**
+ * 検索結果のキャッシュに読み込み済みの、写真の概要（なければ undefined）。
+ *
+ * useSyncExternalStore は描画のたびに値を読むので、全ページの線形探索（searchCache.getLoadedById。
+ * 50 万件を読み込んだ後では数 ms）を毎回しないようにする: 選択中の位置（selection.currentIndex）の項目が
+ * その写真なら位置から引き（O(1)）、そうでなければ探索して、キャッシュの更新（version）までは結果を使い回す。
+ */
+function loadedSummary(id: VariantId): VariantSummary | undefined {
+  const version = searchCache.version;
+  if (summaryMemo.version !== version) {
+    summaryMemo.version = version;
+    summaryMemo.byId.clear();
+  }
+  if (summaryMemo.byId.has(id)) return summaryMemo.byId.get(id);
+  let found: VariantSummary | undefined;
+  const sel = appStore.get().selection;
+  if (sel.current === id && sel.currentIndex !== null) {
+    const s = searchCache.get(sel.currentIndex);
+    if (s && s.variant_id === id) found = s;
+  }
+  if (!found) found = searchCache.getLoadedById(id);
+  // 見つからないときも覚える（ページが届けば version が変わって探し直す）。
+  summaryMemo.byId.set(id, found);
+  return found;
+}
+
 /**
  * 検索結果のキャッシュに読み込み済みの、写真の概要の一部（`pick` は数・文字などの値を返すこと）。
  * キャッシュのページが届くたびに全体を描き直さないよう、値が変わったときだけ再描画する。
@@ -37,7 +67,7 @@ export function useLoadedSummary<T extends string | number | boolean | null>(
 ): T | undefined {
   return useSyncExternalStore(searchCache.subscribe, () => {
     if (id === null) return undefined;
-    const s = searchCache.getLoadedById(id);
+    const s = loadedSummary(id);
     return s ? pick(s) : undefined;
   });
 }

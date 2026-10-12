@@ -7,25 +7,28 @@
 //   設定する。RAW だけ。
 // - 切り抜きの編集（DEV-15）: コアに切り抜く前の全体を描かせ（set_develop_view(true)）、その上で枠を
 //   動かす。完了で枠を画像の内側に制限して（constrain_crop）設定に入れ、取り消しでは保存しない。
-//   どちらでも全体の表示を戻す（set_develop_view(false)）。
+//   どちらでも全体の表示を戻す（set_develop_view(false)）。編集中に設定の切り抜きが外から変わったら
+//   （Undo など）、編集中の枠をその値で置き換える。
+// - 角度（DEV-15）: 縦横比を固定していれば、角度と一緒に枠も合わせ直す（出力の縦横比を保つ）。
 // - これらのコマンドはコアに追加中のため、失敗しても画面が壊れないようにする（切り抜きの編集を始められ
 //   なければ知らせて元に戻る。制限できなければ、制限しない枠で保存する（コアが描画で同じ制限をかける））。
 
 import * as core from "../api/core";
 import type { AspectRatio, CropRect, VariantId } from "../api/types";
 import { actions } from "../state/app";
-import { applySettings, developStore, enqueue, refreshFrame } from "../state/develop";
+import { applySettings, developStore, endDrag, enqueue, refreshFrame } from "../state/develop";
 import { cancelRegionRender } from "../state/region";
 import { createStore, useStore } from "../state/store";
 import {
   type GeometryInfo,
   aspectKey,
   cropFractionAspect,
-  matchAspect,
   maxAspectCrop,
+  refitCropForAngle,
   sameCrop,
   sanitizeCrop,
 } from "./cropMath";
+import { formatAngle, sameShown } from "./scales";
 import { customWb } from "./settingsLogic";
 import { clamp01 } from "./zoomMath";
 
@@ -36,6 +39,11 @@ export interface CropDraft {
   variantId: VariantId;
   crop: CropRect;
   aspect: AspectRatio | null;
+  /**
+   * 設定の切り抜きと縦横比（編集を始めたとき・外から変わったときの値）。編集中に設定のほうが変わったか
+   * （Undo / Redo・履歴の移動・貼り付けの後の読み直し）を見分ける。
+   */
+  saved: { crop: CropRect; aspect: AspectRatio | null };
 }
 
 export interface DevelopViewState {
@@ -149,10 +157,14 @@ export async function startCrop(): Promise<void> {
   if (!d.state || !d.settings || d.variantId === null) return;
   const seq = ++cropSeq;
   if (s.zoom) cancelRegionRender();
+  watchSavedGeometry();
+  angleBase = null;
+  const g = d.settings.geometry;
+  const aspect = g.aspect ?? null;
   viewStore.set({
     tool: "crop",
     zoom: null,
-    crop: { variantId: d.variantId, crop: { ...d.settings.geometry.crop }, aspect: d.settings.geometry.aspect ?? null },
+    crop: { variantId: d.variantId, crop: { ...g.crop }, aspect, saved: { crop: g.crop, aspect } },
   });
   const error = await setUncropped(true);
   if (seq !== cropSeq) return;
@@ -163,6 +175,9 @@ export async function startCrop(): Promise<void> {
   }
   // 切り抜く前の全体の描画は preview_updated で届く。念のため今の最新も取りにいく。
   void refreshFrame();
+  // 保存済みの切り抜きが回転した画像の外にかかっていれば（編集の外で角度を変えたとき）、描画で使われる
+  // 枠（コアの constrain_crop。パイプラインと同じ制限）を出す。角度 0 では制限はかからない。
+  if (g.angle_deg !== 0) void constrainDraft();
 }
 
 /** 全体の表示に戻す（失敗しても編集は終える。次に写真を開けば戻る）。 */
@@ -229,13 +244,34 @@ export async function constrainDraft(): Promise<void> {
   }
 }
 
-/** 角度を変えたとき: 縦横比を固定していれば、編集中の枠の比を合わせ直す（外接矩形の比が変わるため）。 */
-export function refitDraftForAngle(info: GeometryInfo | null): void {
+/**
+ * 編集中に、設定の切り抜き・縦横比が外から変わったら（Undo / Redo・履歴の移動・貼り付けの後の読み直し）、
+ * 編集中の枠をその値で置き換える（前の枠を完了で保存して、戻した切り抜きを上書きしないように）。
+ *
+ * 編集中にこの画面が設定に送るのは角度だけで（枠は完了まで送らない。完了では先に編集を終える）、
+ * 切り抜き・縦横比の変化は外からの変更とみなせる。
+ */
+function onSavedGeometryChange(): void {
   const draft = viewStore.get().crop;
   if (!draft) return;
-  const k = cropFractionAspect(draft.aspect, info);
-  if (k === null) return;
-  setDraftCrop(sanitizeCrop(matchAspect(draft.crop, k)));
+  const d = developStore.get();
+  if (d.variantId !== draft.variantId || !d.settings) return;
+  const g = d.settings.geometry;
+  const aspect = g.aspect ?? null;
+  if (g.crop === draft.saved.crop && aspect === draft.saved.aspect) return;
+  if (sameCrop(g.crop, draft.saved.crop, 0) && aspectKey(aspect) === aspectKey(draft.saved.aspect)) return;
+  draftRev++;
+  angleBase = null;
+  viewStore.set({ crop: { ...draft, crop: { ...g.crop }, aspect, saved: { crop: g.crop, aspect } } });
+}
+
+let watching = false;
+
+/** 設定の切り抜き・縦横比の変化を見張る（最初に切り抜きの編集を始めたときから。編集中でなければ何もしない）。 */
+function watchSavedGeometry(): void {
+  if (watching) return;
+  watching = true;
+  developStore.subscribe(onSavedGeometryChange);
 }
 
 /**
@@ -271,11 +307,63 @@ export async function chooseAspect(aspect: AspectRatio | null, info: GeometryInf
 }
 
 // ---------------------------------------------------------------------------
+// 角度
+// ---------------------------------------------------------------------------
+
+/**
+ * 角度を変え始めたときの枠と角度（ドラッグの間は、毎回ここから枠を合わせ直す。途中で縮めた分が
+ * たまらないように）。ドラッグでない変更・ドラッグの終了・写真が変わったときに捨てる。
+ */
+let angleBase: { variantId: VariantId; editing: boolean; crop: CropRect; angle: number } | null = null;
+
+/**
+ * 角度を変える（パネルのスライダー。DEV-15）。
+ *
+ * 縦横比を固定していれば、切り抜きの枠も合わせ直す（cropMath の refitCropForAngle。割合のままだと
+ * 外接矩形の比が変わった分だけ、出力の画像の縦横比が選んだ比からずれるため）。切り抜きの編集中は
+ * 編集中の枠を合わせ直し（設定には角度だけを送る）、そうでなければ設定の切り抜きを角度と一緒に送る。
+ * `size` は元の画像の大きさ（useGeometryInfo。分からなければ枠は合わせ直さない）。
+ */
+export function changeAngle(angleDeg: number, dragging: boolean, size: GeometryInfo | null): void {
+  const d = developStore.get();
+  if (!d.state || !d.settings || d.variantId === null) return;
+  const g = d.settings.geometry;
+  const draft = viewStore.get().crop;
+  const editing = draft !== null && draft.variantId === d.variantId;
+  // 値を変えずに入力欄を離れたとき（Slider は編集しなくても表示の値で onChange を呼ぶ）は何もしない。
+  if (!dragging && angleBase === null && sameShown(formatAngle, angleDeg, g.angle_deg)) return;
+  if (angleBase === null || angleBase.variantId !== d.variantId || angleBase.editing !== editing) {
+    angleBase = { variantId: d.variantId, editing, crop: editing ? draft.crop : g.crop, angle: g.angle_deg };
+  }
+  const base = angleBase;
+  if (!dragging) angleBase = null;
+  if (editing) {
+    applySettings({ ...d.settings, geometry: { ...g, angle_deg: angleDeg } }, dragging);
+    if (draft.aspect) {
+      const crop = refitCropForAngle(base.crop, draft.aspect, size, base.angle, angleDeg);
+      if (!sameCrop(crop, draft.crop, 0)) setDraftCrop(crop);
+    }
+    if (!dragging) void constrainDraft();
+    return;
+  }
+  const crop = g.aspect ? refitCropForAngle(base.crop, g.aspect, size, base.angle, angleDeg) : g.crop;
+  applySettings({ ...d.settings, geometry: { ...g, angle_deg: angleDeg, crop } }, dragging);
+}
+
+/** 角度のドラッグを終える（履歴に 1 件。切り抜きの編集中は、枠を回転した画像の内側に制限する）。 */
+export function commitAngle(): void {
+  angleBase = null;
+  endDrag();
+  if (viewStore.get().crop) void constrainDraft();
+}
+
+// ---------------------------------------------------------------------------
 // 写真が変わったとき・画面を離れたとき
 // ---------------------------------------------------------------------------
 
 /** 道具をすべて終える（切り抜きは保存しない。等倍表示の描画は取り消す）。 */
 export function endAllTools(): void {
+  angleBase = null;
   const s = viewStore.get();
   if (s.crop) void cancelCrop();
   if (s.zoom) cancelRegionRender();

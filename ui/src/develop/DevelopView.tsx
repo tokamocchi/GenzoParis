@@ -30,6 +30,7 @@ import { developStore, openDevelopFor, useDevelop } from "../state/develop";
 import { regionFor, renderRegion } from "../state/region";
 import { type CropHandle, cropFractionAspect, dragCrop, rotatedImageCorners } from "./cropMath";
 import { useGeometryInfo, useLoadedSummary } from "./hooks";
+import { activatesOnEnter } from "./keyTargets";
 import { clippingOverlay } from "./pixels";
 import {
   cancelCrop,
@@ -498,7 +499,8 @@ function useDevelopKeys(enabled: boolean) {
         if (s.crop) void cancelCrop();
         else if (s.tool === "wb") cancelWbTool();
         else if (s.zoom) setZoom(null);
-      } else if (e.key === "Enter" && s.crop) {
+      } else if (e.key === "Enter" && s.crop && !activatesOnEnter(e.target)) {
+        // ボタンなどにフォーカスがあるときは、その要素の動作に任せる（横取りして保存しない）。
         e.preventDefault();
         e.stopPropagation();
         void commitCrop();

@@ -51,6 +51,14 @@ export function formatAngle(v: number): string {
   return `${formatSigned(v, 2)}°`;
 }
 
+/**
+ * 受けた値が、今出している値と同じ表示か（components/Slider.tsx は、入力欄を編集せずに離れたときも
+ * 表示の値で onChange を呼ぶ。そのときに設定を変えないように使う）。
+ */
+export function sameShown(format: (v: number) => string, received: number, current: number): boolean {
+  return format(received) === format(current);
+}
+
 /** 入力欄の文字を数にする（単位を含んでよい。"5500 K" → 5500。読めなければ NaN）。 */
 export function parseNumber(s: string): number {
   return Number.parseFloat(s.replace(/[＋+]/g, "").replace(/[−－]/g, "-").replace(/[，,]/g, ""));

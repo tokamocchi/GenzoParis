@@ -7,13 +7,16 @@ import {
   aspectKey,
   dragCrop,
   fractionAspect,
+  cropPixelAspect,
   gBoxSize,
   geometryInfo,
+  infoAtAngle,
   matchAspect,
   maxAspectCrop,
   cropFractionAspect,
   orientedSize,
   pixelAspect,
+  refitCropForAngle,
   rotatedImageCorners,
   sanitizeCrop,
 } from "./cropMath";
@@ -90,6 +93,96 @@ describe("縦横比", () => {
   });
 });
 
+describe("角度を変えたときの切り抜き（縦横比の固定）", () => {
+  const size = { ow: 6000, oh: 4000 };
+  const pixelRatioAt = (c: CropRect, angle: number) => {
+    const g = gBoxSize(size.ow, size.oh, angle);
+    return cropPixelAspect(c, g.width, g.height);
+  };
+  const oneToOne = { ratio: { w: 1, h: 1 } } as const;
+  const square = maxAspectCrop(
+    rect(0, 0, 1, 1),
+    cropFractionAspect(
+      oneToOne,
+      infoAtAngle(
+        geometryInfo({
+          source: { width: 6000, height: 4000 },
+          orientation: 1,
+          angleDeg: 0,
+          uncropped: null,
+        }),
+        0,
+      ),
+    ),
+  );
+
+  it("割合のまま角度だけ変えると、画素の縦横比が選んだ比からずれる（直す前の振る舞いの確認）", () => {
+    // 6000×4000・角度 0 で 1:1 の枠（left 0.1667〜right 0.8333・top 0〜bottom 1）。
+    expect(square.left).toBeCloseTo(1 / 6, 12);
+    expect(square.right).toBeCloseTo(5 / 6, 12);
+    expect(pixelRatioAt(square, 0)).toBeCloseTo(1, 12);
+    // そのまま 10° にすると、外接矩形は 6603.4×4981.1 で、画素の比は 0.884。
+    const g = gBoxSize(6000, 4000, 10);
+    expect(g.width).toBeCloseTo(6603.4, 1);
+    expect(g.height).toBeCloseTo(4981.1, 1);
+    expect(pixelRatioAt(square, 10)).toBeCloseTo(0.884, 3);
+    // 元の比率（切り抜きなし）も 10° で 1.326 になる（本来は 1.5）。
+    expect(pixelRatioAt(rect(0, 0, 1, 1), 10)).toBeCloseTo(1.326, 3);
+  });
+  it("合わせ直すと、どの角度でも選んだ比になる", () => {
+    for (const angle of [10, -10, 3.5, 30, 45, -45]) {
+      const c = refitCropForAngle(square, oneToOne, size, 0, angle);
+      expect(pixelRatioAt(c, angle)).toBeCloseTo(1, 9);
+      expect(inside(c)).toBe(true);
+      const o = refitCropForAngle(rect(0, 0, 1, 1), "original", size, 0, angle);
+      expect(pixelRatioAt(o, angle)).toBeCloseTo(1.5, 9);
+      expect(inside(o)).toBe(true);
+    }
+  });
+  it("枠の大きさと外接矩形の中心からの位置を画素で保つ（0° → 10° → 0° で元に戻る）", () => {
+    const start = rect(0.3, 0.1, 0.6, 0.55); // 1800×1800 画素（1:1）
+    expect(pixelRatioAt(start, 0)).toBeCloseTo(1, 12);
+    const at10 = refitCropForAngle(start, oneToOne, size, 0, 10);
+    const g = gBoxSize(6000, 4000, 10);
+    expect(w(at10) * g.width).toBeCloseTo(1800, 6);
+    expect(h(at10) * g.height).toBeCloseTo(1800, 6);
+    expect(((at10.left + at10.right) / 2 - 0.5) * g.width).toBeCloseTo((0.45 - 0.5) * 6000, 6);
+    expect(((at10.top + at10.bottom) / 2 - 0.5) * g.height).toBeCloseTo((0.325 - 0.5) * 4000, 6);
+    const back = refitCropForAngle(at10, oneToOne, size, 10, 0);
+    expect(back.left).toBeCloseTo(start.left, 9);
+    expect(back.top).toBeCloseTo(start.top, 9);
+    expect(back.right).toBeCloseTo(start.right, 9);
+    expect(back.bottom).toBeCloseTo(start.bottom, 9);
+  });
+  it("縦長の画像の元の比率も、行って戻ると全体に戻る", () => {
+    const portrait = { ow: 4000, oh: 6000 };
+    const at10 = refitCropForAngle(rect(0, 0, 1, 1), "original", portrait, 0, 10);
+    const g = gBoxSize(4000, 6000, 10);
+    expect(cropPixelAspect(at10, g.width, g.height)).toBeCloseTo(4000 / 6000, 9);
+    // 誤差で端からずれず、ちょうど全体に戻る（「切り抜きあり」にならない）。
+    expect(refitCropForAngle(at10, "original", portrait, 10, 0)).toEqual(rect(0, 0, 1, 1));
+    const landscape = refitCropForAngle(rect(0, 0, 1, 1), "original", size, 0, -10);
+    expect(refitCropForAngle(landscape, "original", size, -10, 0)).toEqual(rect(0, 0, 1, 1));
+  });
+  it("外接矩形に収まらなければ、比を保って縮め、内側へずらす", () => {
+    // 30° の外接矩形いっぱいの 16:9 の枠を 0° に戻すと、O より大きいので縮める。
+    const k = cropFractionAspect(
+      { ratio: { w: 16, h: 9 } },
+      infoAtAngle({ ow: 6000, oh: 4000, gw: 6000, gh: 4000 }, 30),
+    );
+    const big = maxAspectCrop(rect(0.5, 0.5, 0.9, 0.9), k);
+    const c = refitCropForAngle(big, { ratio: { w: 16, h: 9 } }, size, 30, 0);
+    expect(inside(c)).toBe(true);
+    expect(pixelRatioAt(c, 0)).toBeCloseTo(16 / 9, 9);
+    expect(Math.max(w(c), h(c))).toBeCloseTo(1, 9);
+  });
+  it("自由・大きさが分からないときはそのまま", () => {
+    const c = rect(0.1, 0.2, 0.7, 0.9);
+    expect(refitCropForAngle(c, null, size, 0, 10)).toBe(c);
+    expect(refitCropForAngle(c, oneToOne, null, 0, 10)).toBe(c);
+  });
+});
+
 describe("枠のドラッグ", () => {
   const start = rect(0.2, 0.2, 0.8, 0.8);
   it("移動は大きさを保ち、0〜1 に収める", () => {
@@ -107,6 +200,20 @@ describe("枠のドラッグ", () => {
     const tiny = dragCrop(start, "w", 0.9, 0, null);
     expect(w(tiny)).toBeCloseTo(MIN_CROP_FRACTION, 12);
     expect(tiny.right).toBe(0.8);
+  });
+  it("自由: 最小より狭い枠を端の方向へ動かしても 0〜1 の外に出ない", () => {
+    // コアの下限（0.001）は画面の下限（MIN_CROP_FRACTION）より小さいので、保存済みの枠ではありうる。
+    const narrow = rect(0, 0.2, 0.005, 0.8);
+    const a = dragCrop(narrow, "w", -0.1, 0, null);
+    expect(inside(a)).toBe(true);
+    expect(a.left).toBe(0);
+    expect(a.right).toBe(0.005);
+    const b = dragCrop(rect(0.996, 0.2, 1, 0.8), "e", 0.1, 0, null);
+    expect(inside(b)).toBe(true);
+    const c = dragCrop(rect(0.2, 0, 0.8, 0.004), "nw", -0.1, -0.1, null);
+    expect(inside(c)).toBe(true);
+    const d = dragCrop(rect(0.2, 0.997, 0.8, 1), "s", 0, 0.3, null);
+    expect(inside(d)).toBe(true);
   });
   it("縦横比の固定: 角は反対の角を固定し、比を保つ", () => {
     const k = 1.5;

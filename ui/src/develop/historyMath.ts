@@ -35,3 +35,12 @@ export function historyAvailability(
   const cur = entries.findIndex((e) => e.is_current);
   return { canUndo: cur > 0, canRedo: cur >= 0 && cur < entries.length - 1 };
 }
+
+/**
+ * 「やり直す」を押せるか。コアの状態（can_redo。保存待ちがあれば偽）と履歴の両方がやり直せて、その後に
+ * 画面で設定を変えていない（`unsaved` が偽）とき。保存待ちの変更があると、コアは Redo の前に保存して
+ * やり直せる項目を消し、何もしない（ドラッグでない変更は保存まで約 1 秒かかり、その間コアの状態は古い）。
+ */
+export function redoAvailable(stateCanRedo: boolean, avail: { canRedo: boolean } | null, unsaved: boolean): boolean {
+  return stateCanRedo && (avail ? avail.canRedo : true) && !unsaved;
+}

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { DevelopSettings, HistogramData, HistoryItem } from "../api/types";
-import { historyAvailability, historyRows, historySteps } from "./historyMath";
+import { historyAvailability, historyRows, historySteps, redoAvailable } from "./historyMath";
+import { activatesOnEnter } from "./keyTargets";
 import { clipIndicators, clippingOverlay, histogramHeights, histogramScale } from "./pixels";
 import {
   formatAngle,
@@ -10,6 +11,7 @@ import {
   formatSigned,
   parseNumber,
   positionToTemperature,
+  sameShown,
   temperatureToPosition,
 } from "./scales";
 import { effectiveWb, resetAll, wbFromMode, wbMode } from "./settingsLogic";
@@ -130,6 +132,17 @@ describe("履歴の移動", () => {
     expect(historyAvailability([item(1), item(2, true)])).toEqual({ canUndo: true, canRedo: false });
     expect(historyAvailability(null)).toBeNull();
   });
+  it("やり直せるのは、コアの状態と履歴の両方がやり直せて、その後に画面で設定を変えていないとき", () => {
+    expect(redoAvailable(true, { canRedo: true }, false)).toBe(true);
+    // Undo の後にドラッグでない変更をして、まだ保存していない（コアの状態・履歴は古いまま）。
+    expect(redoAvailable(true, { canRedo: true }, true)).toBe(false);
+    // 保存の後に読み直した履歴にはやり直せる項目がない。
+    expect(redoAvailable(true, { canRedo: false }, false)).toBe(false);
+    // コアの状態（保存待ちがあれば偽）。
+    expect(redoAvailable(false, { canRedo: true }, false)).toBe(false);
+    // 履歴をまだ読んでいなければ、コアの状態で判断する。
+    expect(redoAvailable(true, null, false)).toBe(true);
+  });
   it("表示は新しい順で、今の位置より後はやり直せる項目", () => {
     const rows = historyRows(entries);
     expect(rows.map((r) => r.item.id)).toEqual([5, 4, 3, 2, 1]);
@@ -212,5 +225,42 @@ describe("全体表示と等倍表示の配置", () => {
     expect(clampCenter(800, 1000, 100)).toBe(400);
     expect(zoomOrigin(6000, 1000, 3000)).toBe(2500);
     expect(zoomOrigin(800, 1000, 100)).toBe(-100);
+  });
+});
+
+describe("入力欄を編集せずに離れたとき", () => {
+  it("表示が同じ値なら変えない（色温度は 1 K、tint・スライダーは整数、露光量は 0.01 EV の表示で比べる）", () => {
+    const signed0 = (v: number) => formatSigned(v, 0);
+    expect(sameShown(formatKelvin, 5124, 5123.6)).toBe(true);
+    expect(sameShown(formatKelvin, 5125, 5123.6)).toBe(false);
+    // 撮影時の tint が小数でも、表示（"−3"）を読み直した値は同じとみなす。
+    expect(sameShown(signed0, parseNumber(signed0(-2.5)), -2.5)).toBe(true);
+    expect(sameShown(signed0, 7, 7.4)).toBe(true);
+    expect(sameShown(signed0, 8, 7.4)).toBe(false);
+    expect(sameShown(formatEv, parseNumber(formatEv(0.333)), 0.333)).toBe(true);
+    expect(sameShown(formatEv, 0.34, 0.333)).toBe(false);
+  });
+});
+
+describe("Enter を横取りしない要素", () => {
+  const el = (tagName: string, extra: { type?: string; role?: string } = {}) => ({
+    tagName,
+    type: extra.type,
+    getAttribute: (name: string) => (name === "role" ? (extra.role ?? null) : null),
+  });
+  it("ボタン・リンク・チェックボックス・ボタンの役割の要素", () => {
+    expect(activatesOnEnter(el("BUTTON") as unknown as EventTarget)).toBe(true);
+    expect(activatesOnEnter(el("A") as unknown as EventTarget)).toBe(true);
+    expect(activatesOnEnter(el("INPUT", { type: "checkbox" }) as unknown as EventTarget)).toBe(true);
+    expect(activatesOnEnter(el("INPUT", { type: "submit" }) as unknown as EventTarget)).toBe(true);
+    expect(activatesOnEnter(el("DIV", { role: "button" }) as unknown as EventTarget)).toBe(true);
+    expect(activatesOnEnter(el("DIV", { role: "tab" }) as unknown as EventTarget)).toBe(true);
+  });
+  it("それ以外（本体・スライダー・ステージ）では切り抜きの完了に使う", () => {
+    expect(activatesOnEnter(null)).toBe(false);
+    expect(activatesOnEnter(el("BODY") as unknown as EventTarget)).toBe(false);
+    expect(activatesOnEnter(el("INPUT", { type: "range" }) as unknown as EventTarget)).toBe(false);
+    expect(activatesOnEnter(el("DIV") as unknown as EventTarget)).toBe(false);
+    expect(activatesOnEnter({} as EventTarget)).toBe(false);
   });
 });
