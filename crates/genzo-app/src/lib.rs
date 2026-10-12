@@ -128,6 +128,7 @@ pub fn run() {
             commands::restore_catalog,
             commands::update_app_settings,
             commands::locate_tools,
+            commands::path_kinds,
             commands::reveal_variant_file,
             commands::open_variant_file,
             commands::quit_app,

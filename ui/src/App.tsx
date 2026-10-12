@@ -29,6 +29,7 @@ import { Grid } from "./library/Grid";
 import { LibraryLeftPanel } from "./library/LibraryLeftPanel";
 import { MetadataPanel } from "./library/MetadataPanel";
 import { actions, appStore, useApp } from "./state/app";
+import { searchCache } from "./state/search";
 import { developStore, installDevelopEvents, redo, undo } from "./state/develop";
 import { Filmstrip } from "./viewer/Filmstrip";
 import { Loupe } from "./viewer/Loupe";
@@ -106,6 +107,12 @@ function useGlobalHotkeys(enabled: boolean) {
       "mod+shift+c": async () => {
         const id = appStore.get().selection.current;
         if (id === null) return;
+        // 動画には現像設定がない（既定の設定を写すと、貼り付け先を既定に戻してしまう）。
+        const item = searchCache.getLoadedById(id);
+        if (item?.kind === "video") {
+          actions.notify("info", "動画の設定はコピーできません");
+          return;
+        }
         try {
           // 現像中の写真なら、画面の最新の値（送信前を含む）をコピーする。
           const d = developStore.get();
@@ -169,6 +176,7 @@ export function App() {
   const status = useApp((s) => s.status);
   const catalog = useApp((s) => s.catalog);
   const catalogError = useApp((s) => s.catalogError);
+  const catalogOpening = useApp((s) => s.catalogOpening);
   const [fatal, setFatal] = useState<string | null>(null);
 
   useEffect(() => {
@@ -190,6 +198,16 @@ export function App() {
     body = (
       <div className="empty-state">
         <div className="spinner" style={{ margin: "0 auto" }} />
+      </div>
+    );
+  } else if (!catalog && catalogOpening) {
+    body = (
+      <div className="empty-state">
+        <div className="spinner" style={{ margin: "0 auto 12px" }} />
+        <div>カタログを開いています…</div>
+        <div className="hint" title={catalogOpening}>
+          {catalogOpening}
+        </div>
       </div>
     );
   } else if (!catalog && catalogError) {

@@ -12,6 +12,7 @@ import type {
   CloseFailure,
   ColorLabel,
   CoreEvent,
+  CoreSettings,
   DeleteKind,
   DevelopSettings,
   ErrorInfo,
@@ -76,6 +77,8 @@ export interface AppState {
   catalog: CatalogStatus | null;
   /** カタログを開けなかったとき（壊れている・他のアプリが使っているなど）。 */
   catalogError: { path: string; error: ErrorInfo } | null;
+  /** 開いている途中のカタログ（起動時に前回のカタログを開く間など。画面は最初の画面を出さずに待つ）。 */
+  catalogOpening: string | null;
   mode: Mode;
   filter: SearchFilter;
   sort: SearchSort;
@@ -114,6 +117,7 @@ export const appStore = createStore<AppState>({
   status: null,
   catalog: null,
   catalogError: null,
+  catalogOpening: null,
   mode: "grid",
   filter: {},
   sort: DEFAULT_SORT,
@@ -169,7 +173,7 @@ function reportError(e: unknown, context?: string): void {
 // ジョブ
 // ---------------------------------------------------------------------------
 
-const JOB_LABEL: Record<JobKind, string> = {
+export const JOB_LABEL: Record<JobKind, string> = {
   import: "取り込み",
   export: "書き出し",
   regenerate_previews: "プレビューの作り直し",
@@ -437,9 +441,13 @@ function installEventHandlers(): void {
 
 /** カタログを開いた後の状態にする。 */
 async function catalogOpened(status: CatalogStatus): Promise<void> {
+  // 新しく開いたコアの検索の世代は 1 から数え直すので、前のカタログの世代を残さない（残すと、新しい
+  // カタログの search_updated を古いものとして捨てる）。
+  searchCache.reset(0, 0);
   appStore.set({
     catalog: status,
     catalogError: null,
+    catalogOpening: null,
     search: null,
     selection: { ids: [], current: null, currentIndex: null, anchorIndex: null },
     filter: {},
@@ -447,20 +455,74 @@ async function catalogOpened(status: CatalogStatus): Promise<void> {
     mode: "grid",
     dialog: null,
     thumbRevs: {},
+    clipboard: null,
   });
   appStore.set((s) => ({ foldersVersion: s.foldersVersion + 1 }));
   for (const w of status.warnings) handleEvent(w);
   await runSearch();
 }
 
+/**
+ * カタログを閉じた後の状態にする（カタログの選択の画面に戻る）。
+ *
+ * コアは閉じるときに実行中のジョブを取り消すが、閉じた後はイベントを送らず、ジョブの状態も問い合わせられない。
+ * そのため、待っているもの（actions.waitJob）には取り消しとして返す。
+ */
+function catalogClosed(): void {
+  searchCache.reset(0, 0);
+  const jobs = appStore.get().jobs;
+  appStore.set({
+    catalog: null,
+    catalogOpening: null,
+    search: null,
+    searching: false,
+    selection: { ids: [], current: null, currentIndex: null, anchorIndex: null },
+    mode: "grid",
+    dialog: null,
+    thumbRevs: {},
+    clipboard: null,
+    jobs: {},
+  });
+  for (const [id, waiters] of [...jobWaiters]) {
+    jobWaiters.delete(id);
+    const job = jobs[id];
+    const info: JobInfo = {
+      job_id: id,
+      kind: job?.kind ?? "import",
+      state: "cancelled",
+      done: job?.done ?? 0,
+      total: job?.total ?? 0,
+      result: null,
+      error: null,
+    };
+    for (const w of waiters) w(info);
+  }
+}
+
 /** カタログを開く（失敗は catalogError に入れる）。 */
 async function openCatalog(path: string, create: boolean): Promise<boolean> {
+  appStore.set({ catalogOpening: path });
   try {
     const status = await app.openCatalog(path, create);
     await catalogOpened(status);
     return true;
   } catch (e) {
-    appStore.set({ catalogError: { path, error: toApiError(e).info } });
+    const error = toApiError(e).info;
+    // アプリは別のカタログを開く前に今のカタログを閉じる。開けなかったときは、今のカタログが閉じたか
+    // （検証の段階での失敗なら開いたまま）をアプリに確かめて、画面の状態を合わせる。
+    if (appStore.get().catalog) {
+      const still = await app
+        .appStatus()
+        .then((st) => st.catalog)
+        .catch(() => null);
+      if (still) {
+        appStore.set({ catalogOpening: null });
+        reportError(e, "カタログを開けません");
+        return false;
+      }
+      catalogClosed();
+    }
+    appStore.set({ catalogOpening: null, catalogError: { path, error } });
     return false;
   }
 }
@@ -478,6 +540,11 @@ export const actions = {
   installEventHandlers,
   openCatalog,
   catalogOpened,
+  catalogClosed,
+  clearCatalogError: () => appStore.set({ catalogError: null }),
+  /** 開いているカタログの設定を、保存した値にする（書き出しの既定の色空間などを使う画面のため）。 */
+  setCoreSettings: (settings: CoreSettings) =>
+    appStore.set((s) => (s.catalog ? { catalog: { ...s.catalog, core_settings: settings } } : {})),
   setStatus: (status: AppStatus) => appStore.set({ status }),
   // 表示
   setMode(mode: Mode) {

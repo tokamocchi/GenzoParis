@@ -1,15 +1,14 @@
 // カタログの切り替え・閉じる・復元（設定のダイアログ・カタログの選択の画面・カタログを開けないときの画面・
 // 閉じられなかったときのダイアログが使う）。
 //
-// 土台の actions にない状態の変更（カタログを閉じた後の状態・開けなかった理由の消去・カタログの設定の更新）は、
-// ここで appStore を直接変える。土台に同じ操作（actions.catalogClosed など）ができたら置き換える。
+// カタログを閉じた後の状態・開けなかった理由の消去・カタログの設定の更新は、土台の actions（catalogClosed・
+// clearCatalogError・setCoreSettings）で行い、ここではこの画面の部品の後始末（結果の記録・待ちの解除・通知）を足す。
 
 import * as app from "../api/app";
 import { toApiError } from "../api/errors";
 import type { CoreSettings, ErrorInfo, JobInfo } from "../api/types";
 import { actions, appStore } from "../state/app";
 import { closeDevelopSession } from "../state/develop";
-import { searchCache } from "../state/search";
 import { isCloseSaveFailure, retryShouldCreate } from "./catalogLogic";
 import { baseName } from "./dialogFormat";
 import { clearResults } from "./resultLog";
@@ -22,24 +21,11 @@ const closeListeners = new Set<() => void>();
  *
  * コアは閉じるときに実行中のジョブを取り消すが、閉じた後はイベント（job_finished）を送らず、ジョブの状態も
  * 問い合わせられない。そのため、実行中だったジョブは取り消したと知らせ、この画面の部品の待ち
- * （waitJobUntilClosed）を終わらせる。土台の actions.waitJob の待ちは終わらない（土台への依頼）。
+ * （waitJobUntilClosed）を終わらせる。土台の actions.waitJob の待ちは、actions.catalogClosed が取り消しとして返す。
  */
 export function markCatalogClosed(): void {
   const running = Object.values(appStore.get().jobs).filter((j) => j.state === "running");
-  // 新しく開くカタログの検索の世代は 1 から数え直すので、古い世代を残さない（search_updated を捨てないため）。
-  searchCache.reset(0, 0);
-  appStore.set({
-    catalog: null,
-    search: null,
-    searching: false,
-    selection: { ids: [], current: null, currentIndex: null, anchorIndex: null },
-    mode: "grid",
-    dialog: null,
-    thumbRevs: {},
-    // コピーした設定の元の写真の ID・前のカタログのジョブは、別のカタログでは意味がない。
-    clipboard: null,
-    jobs: {},
-  });
+  actions.catalogClosed();
   // 前のカタログの結果（書き出し・削除）は、別のカタログでは見直しても意味がないので消す。
   clearResults();
   for (const l of [...closeListeners]) l();
@@ -78,7 +64,7 @@ export function waitJobUntilClosed(jobId: number): Promise<JobInfo | "closed"> {
 
 /** カタログを開けなかった理由を消す（カタログの選択の画面に戻る）。 */
 export function clearCatalogError(): void {
-  appStore.set({ catalogError: null });
+  actions.clearCatalogError();
 }
 
 function setCatalogError(path: string, error: ErrorInfo): void {
@@ -87,7 +73,7 @@ function setCatalogError(path: string, error: ErrorInfo): void {
 
 /** 開いているカタログの設定を、保存した値にする（書き出しの既定の色空間などを使う画面のため）。 */
 export function setCoreSettings(settings: CoreSettings): void {
-  appStore.set((s) => (s.catalog ? { catalog: { ...s.catalog, core_settings: settings } } : {}));
+  actions.setCoreSettings(settings);
 }
 
 /**

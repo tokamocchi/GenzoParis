@@ -73,6 +73,13 @@ class SearchCache {
     return p === undefined || p === "loading" ? undefined : p[index - page * PAGE_SIZE];
   }
 
+  /** 読み込み済みの項目を、読み込みを起こさずに順に返す（ページの順は決まっていない）。 */
+  *loaded(): Generator<VariantSummary> {
+    for (const items of this.pages.values()) {
+      if (items !== "loading") yield* items;
+    }
+  }
+
   /** 範囲のページを読み込む（届いたら解決）。 */
   async ensure(start: number, end: number): Promise<void> {
     const first = Math.max(0, Math.floor(start / PAGE_SIZE));

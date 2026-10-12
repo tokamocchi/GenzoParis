@@ -296,6 +296,33 @@ pub async fn locate_tools(dir: Option<PathBuf>) -> Result<ExternalTools, ErrorIn
     blocking(move || Ok(tools::locate(dir.as_deref()))).await
 }
 
+/// パスの種類（ドロップしたものがフォルダかの判定）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathKind {
+    /// フォルダ（シンボリックリンクの先がフォルダのものを含む）。
+    Dir,
+    /// フォルダ以外（ファイルなど）。
+    File,
+    /// ない・調べられない。
+    Missing,
+}
+
+/// パスの種類を調べる（シンボリックリンクはたどる）。
+pub fn path_kind(path: &std::path::Path) -> PathKind {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => PathKind::Dir,
+        Ok(_) => PathKind::File,
+        Err(_) => PathKind::Missing,
+    }
+}
+
+/// パスの種類をまとめて調べる（ウィンドウへドロップしたものからフォルダだけを取り込むため）。
+#[tauri::command]
+pub async fn path_kinds(paths: Vec<PathBuf>) -> Result<Vec<PathKind>, ErrorInfo> {
+    blocking(move || Ok(paths.iter().map(|p| path_kind(p)).collect())).await
+}
+
 /// variant の元ファイル（主なファイル）のパス。
 fn primary_path(state: &AppState, variant_id: VariantId) -> Result<PathBuf, ErrorInfo> {
     let details = state
@@ -372,4 +399,23 @@ pub async fn quit_app(
     crate::QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
     app.exit(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_kinds_tell_folders_from_files() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("a.jpg");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(path_kind(d.path()), PathKind::Dir);
+        assert_eq!(path_kind(&file), PathKind::File);
+        assert_eq!(path_kind(&d.path().join("none")), PathKind::Missing);
+        // 拡張子のようなものが付いたフォルダもフォルダ（名前では判断しない）。
+        let dotted = d.path().join("2024.05.01 京都");
+        std::fs::create_dir(&dotted).unwrap();
+        assert_eq!(path_kind(&dotted), PathKind::Dir);
+    }
 }

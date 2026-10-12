@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from "react";
 
+import * as appApi from "../api/app";
 import { actions, appStore, useApp } from "../state/app";
 import { CloseFailedDialog } from "./CloseFailedDialog";
 import { DeleteDialog } from "./DeleteDialog";
@@ -22,6 +23,26 @@ function canAcceptDrop(): boolean {
   return s.catalog !== null && (s.dialog === null || s.dialog.kind === "import");
 }
 
+/** ドロップしたパスのうちフォルダを取り込みのダイアログに渡す（種類はアプリに問い合わせる。失敗したら名前で推定）。 */
+async function acceptDrop(paths: string[]): Promise<void> {
+  let folders: string[];
+  let files: string[];
+  try {
+    const kinds = await appApi.pathKinds(paths);
+    folders = paths.filter((_, i) => kinds[i] === "dir");
+    files = paths.filter((_, i) => kinds[i] !== "dir");
+  } catch {
+    ({ folders, files } = splitDroppedPaths(paths));
+  }
+  if (folders.length === 0) {
+    if (files.length > 0) actions.notify("info", "フォルダをドロップしてください（ファイルは 1 つずつ取り込めません）");
+    return;
+  }
+  offerImportFolders(folders);
+  if (appStore.get().dialog === null) actions.openDialog({ kind: "import" });
+  if (files.length > 0) actions.notify("info", `ファイル ${files.length} 個は除きました（取り込みはフォルダ単位です）`);
+}
+
 /** フォルダのドラッグ＆ドロップを受け取る（ドラッグ中は案内を出す）。 */
 function useFolderDrop(): boolean {
   const [over, setOver] = useState(false);
@@ -39,14 +60,7 @@ function useFolderDrop(): boolean {
       }
       setOver(false);
       if (!canAcceptDrop()) return;
-      const { folders, files } = splitDroppedPaths(e.paths);
-      if (folders.length === 0) {
-        if (files.length > 0) actions.notify("info", "フォルダをドロップしてください（ファイルは 1 つずつ取り込めません）");
-        return;
-      }
-      offerImportFolders(folders);
-      if (appStore.get().dialog === null) actions.openDialog({ kind: "import" });
-      if (files.length > 0) actions.notify("info", `ファイル ${files.length} 個は除きました（取り込みはフォルダ単位です）`);
+      void acceptDrop(e.paths);
     })
       .then((un) => {
         if (disposed) un();

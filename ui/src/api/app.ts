@@ -39,6 +39,8 @@ export const restoreCatalog = (catalogPath: string, backup: string) =>
 export const updateAppSettings = (update: AppSettingsUpdate) =>
   call<AppSettings>("update_app_settings", { update });
 export const locateTools = (dir: string | null) => call<ExternalTools>("locate_tools", { dir });
+/** パスの種類（フォルダ・ファイル・ない）。ドロップしたものからフォルダを選ぶのに使う。 */
+export const pathKinds = (paths: string[]) => call<("dir" | "file" | "missing")[]>("path_kinds", { paths });
 export const revealVariantFile = (variantId: VariantId) =>
   call<void>("reveal_variant_file", { variantId });
 export const openVariantFile = (variantId: VariantId) =>
