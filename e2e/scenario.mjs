@@ -256,26 +256,51 @@ try {
   });
 
   await run("11. 切り抜き（1:1）を編集して確定する（DEV-15）", async () => {
-    const opt = await wd.exec(
-      "const s = document.querySelector('select[aria-label=\"縦横比\"]'); const o = [...s.options].find((o) => o.textContent.replace(/\\s/g, '') === '1:1'); return o ? o.value : null;",
-    );
-    assert(opt !== null, "1:1 の選択肢");
-    const option = await wd.find("css selector", `select[aria-label="縦横比"] option[value="${opt}"]`);
-    await wd.click(option);
+    // R → 枠 → 縦横比 → Enter で確定し、Esc で取り消せることを確かめる（縦横比の選択肢は、編集の外で選ぶと
+    // その場で保存するので、必ず編集を始めてから選ぶ）。
+    const ratio = (g) => ((g.crop.right - g.crop.left) * 2200) / ((g.crop.bottom - g.crop.top) * 1480);
+    const blur = () => wd.exec("if (document.activeElement) document.activeElement.blur();");
+    const cropShown = () => wd.exec("return !!document.querySelector('svg.dv-crop');");
+    const chooseAspect = async (label) => {
+      const value = await wd.exec(
+        "const s = document.querySelector('select[aria-label=\"縦横比\"]'); const o = [...s.options].find((o) => o.textContent.replace(/\\s/g, '') === arguments[0]); return o ? o.value : null;",
+        [label],
+      );
+      assert(value !== null, `${label} の選択肢`);
+      await wd.click(await wd.find("css selector", `select[aria-label="縦横比"] option[value="${value}"]`));
+    };
+    const before = (await developState()).settings.geometry;
+
+    await blur();
     await wd.keys("r");
-    await sleep(1500);
-    await screenshot(wd, "develop-crop");
-    await wd.keys(KEY.ENTER);
-    await wd.waitFor(
-      async () => {
-        const g = (await developState()).settings.geometry;
-        const w = (g.crop.right - g.crop.left) * 2200;
-        const h = (g.crop.bottom - g.crop.top) * 1480;
-        return Math.abs(w / h - 1) < 0.02;
-      },
-      { what: "1:1 の切り抜き" },
+    await wd.waitFor(cropShown, { what: "切り抜きの枠（R）" });
+    await chooseAspect("1:1");
+    await sleep(800);
+    assert(
+      JSON.stringify((await developState()).settings.geometry.crop) === JSON.stringify(before.crop),
+      "確定する前は切り抜きを保存しない",
     );
-    await sleep(1500);
+    await screenshot(wd, "develop-crop");
+    await blur();
+    await wd.keys(KEY.ENTER);
+    await wd.waitFor(async () => Math.abs(ratio((await developState()).settings.geometry) - 1) < 0.02, {
+      what: "1:1 の切り抜き（Enter で確定）",
+    });
+    await wd.waitFor(async () => !(await cropShown()), { what: "枠が閉じる" });
+    const committed = (await developState()).settings.geometry;
+
+    // Esc: 編集の途中の変更を捨てる。
+    await blur();
+    await wd.keys("r");
+    await wd.waitFor(cropShown, { what: "切り抜きの枠（2 回目）" });
+    await chooseAspect("16:9");
+    await sleep(500);
+    await blur();
+    await wd.keys(KEY.ESC);
+    await wd.waitFor(async () => !(await cropShown()), { what: "枠が閉じる（Esc）" });
+    await sleep(1200);
+    const after = (await developState()).settings.geometry;
+    assert(JSON.stringify(after.crop) === JSON.stringify(committed.crop), "Esc で取り消すと切り抜きは変わらない");
     await screenshot(wd, "develop-cropped");
   });
 
