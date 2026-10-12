@@ -3,7 +3,7 @@
 // tauri-driver（既定の http://127.0.0.1:4444）に接続し、WebKitWebDriver（Linux）経由で
 // Tauri のアプリの WebView を操作する。
 
-const ELEMENT = "element-6066-11e4-a52e-4f735466cecc";
+const ELEMENT = "element-6066-11e4-a52e-4f735466cecf";
 
 export class WebDriver {
   constructor(base = "http://127.0.0.1:4444") {
