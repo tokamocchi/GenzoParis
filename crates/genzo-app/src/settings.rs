@@ -32,7 +32,7 @@ pub struct AppSettings {
     /// 最近開いたカタログ（新しい順）。
     pub recent_catalogs: Vec<PathBuf>,
     /// ffmpeg・ffprobe のあるフォルダ（`None` なら PATH と既定の場所を探す。動画のサムネイル・
-    /// メタデータに使う。FFmpeg は同梱しない。決定事項ログ No.60）。
+    /// メタデータに使う。FFmpeg は同梱しない。決定事項ログ No.62）。
     pub ffmpeg_dir: Option<PathBuf>,
     /// GPU の使用。
     pub gpu: GpuMode,
