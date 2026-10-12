@@ -5,6 +5,9 @@
 //! - 範囲は C（出力座標。切り抜いた後の画像のフル解像度の画素）か G（ジオメトリ補正後の全体。長辺を 1
 //!   とした値）で指定する（04 の 2.7 節。[`RegionSpace`]）。G の範囲は C の格子に写し、外側へ丸めて
 //!   出力の画像の内側に収める。
+//! - 切り抜く前の全体の表示（[`Core::set_develop_view`]）の間は、現像のプレビューと同じく、C の格子を
+//!   G の外接矩形の全体にする（出力の寸法は [`crate::FrameInfo::output_width`] と同じ。回転で画像の外に
+//!   なった四隅は黒で塗る）。
 //! - 描画は genzo-pipeline の `Engine::full_resolution` で作るフル解像度の処理（`Engine::render_region`
 //!   と同じ）の `render_region` で行う（座標の変換に処理のジオメトリが要るため、`Engine::render_region`
 //!   が内部で作る処理を自分で作って使う）。GPU 版はまだない（CPU 版だけ）。
@@ -74,8 +77,13 @@ impl Core {
         let inner = &self.inner;
         inner.check_open()?;
         validate(request)?;
-        let (source, settings, generation) =
-            crate::develop::session_snapshot(inner, request.variant_id)?;
+        let crate::develop::SessionSnapshot {
+            source,
+            settings,
+            generation,
+            uncropped,
+            ..
+        } = crate::develop::session_snapshot(inner, request.variant_id)?;
         let req = *request;
         // 要求の番号の割り当て・スケジューラへの投入・取り消しトークンの公開を、1 つの区間（`region` の
         // ロックを持ったまま）にする。別々にすると、先に番号を取った古い要求が、止まっている間に追い越した
@@ -115,7 +123,12 @@ impl Core {
                     }
                     let token = ctx.token().clone();
                     let control = move || token.is_cancelled();
-                    let job = match inner.engine.full_resolution(&source, &settings) {
+                    // 切り抜く前の全体の表示（Core::set_develop_view）なら、出力（C の格子）は G の外接矩形の
+                    // 全体（現像のプレビューと同じ。FrameInfo::output_width と同じ格子）。
+                    let job = match inner
+                        .engine
+                        .full_resolution_with(&source, &settings, uncropped)
+                    {
                         Ok(j) => j,
                         Err(e) => return Ok(Err(ApiError::from(e))),
                     };

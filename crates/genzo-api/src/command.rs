@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use genzo_model::{ColorLabel, DevelopSettings, ExportSettings, Flag, Rating, VariantId};
+use genzo_model::{ColorLabel, CropRect, DevelopSettings, ExportSettings, Flag, Rating, VariantId};
 use serde::{Deserialize, Serialize};
 
 use crate::core::Core;
@@ -21,9 +21,10 @@ use crate::error::ApiError;
 use crate::maintenance::RestorePlan;
 use crate::types::{
     BackupEntry, Capabilities, CatalogStats, CoreSettings, DeleteKind, DeletePlan, DeleteReport,
-    DevelopState, DisplayInfo, FileCheckReport, FolderInfo, FrameInfo, HistoryItem, IndexOf,
-    JobInfo, RangeResult, RegionInfo, RegionRequest, SearchFilter, SearchResult, SearchSort,
-    SettingGroups, SettingsUpdate, StartupReport, ThumbnailData, VariantDetails,
+    DevelopState, DisplayInfo, Facets, FileCheckReport, FolderInfo, FrameInfo, HistoryItem,
+    IndexOf, JobInfo, PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest, SearchFilter,
+    SearchResult, SearchSort, SettingGroups, SettingsUpdate, StartupReport, ThumbnailData,
+    VariantDetails,
 };
 
 /// コマンド（UI → コア）。
@@ -81,6 +82,9 @@ pub enum Command {
         /// variant。
         variant_id: VariantId,
     },
+    /// 絞り込みの候補（カメラ・レンズ・動画のコーデックと件数。[`crate::Core::facets`]）。
+    /// → [`Response::Facets`]
+    Facets,
     /// 評価を変える。→ [`Response::Updated`]
     SetRating {
         /// variant。
@@ -221,6 +225,36 @@ pub enum Command {
         /// 名前（省略時は「コピー n」）。
         name: Option<String>,
     },
+    /// WB のスポイト: プレビューの上の点を中立にする WB（適用はしない。[`crate::Core::white_balance_at`]）。
+    /// → [`Response::WhiteBalance`]
+    WhiteBalanceAt {
+        /// 現像中の写真。
+        variant_id: VariantId,
+        /// 点の x（UI が表示しているプレビューの画像の幅に対する割合。0〜1）。
+        x: f64,
+        /// 点の y（高さに対する割合。0〜1）。
+        y: f64,
+        /// クリックした画像（UI が表示しているプレビュー）の `FrameInfo::uncropped`（省略可。省略時は
+        /// 最新に公開したプレビューの表示とみなす。[`crate::Core::white_balance_at`]）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uncropped: Option<bool>,
+    },
+    /// 切り抜きの編集中の表示を切り替える（`uncropped` の間は切り抜く前の全体を描く。
+    /// [`crate::Core::set_develop_view`]）。→ [`Response::Ok`]
+    SetDevelopView {
+        /// 切り抜く前の全体を描くか。
+        uncropped: bool,
+    },
+    /// 描画が実際に使う切り抜き（回転で画像の外に出ないよう制限したもの。[`crate::Core::constrain_crop`]）。
+    /// → [`Response::Crop`]
+    ConstrainCrop {
+        /// 現像中の写真。
+        variant_id: VariantId,
+        /// 切り抜き（G の外接矩形の各軸の割合）。
+        crop: CropRect,
+        /// 角度補正（度）。
+        angle_deg: f32,
+    },
     /// 画面の ICC プロファイルを設定する。→ [`Response::Display`]
     SetDisplayProfile {
         /// ICC プロファイルのバイト列（`null` なら取得できないとして sRGB とみなす）。
@@ -300,6 +334,8 @@ pub enum Response {
     Range(RangeResult),
     /// variant の位置。
     IndexOf(IndexOf),
+    /// 絞り込みの候補。
+    Facets(Facets),
     /// 変更した数。
     Updated {
         /// 数。
@@ -370,6 +406,13 @@ pub enum Response {
         /// variant。
         variant_id: VariantId,
     },
+    /// WB のスポイトの結果（色温度と tint）。
+    WhiteBalance(PickedWhiteBalance),
+    /// 切り抜き。
+    Crop {
+        /// 切り抜き（G の外接矩形の各軸の割合）。
+        crop: CropRect,
+    },
     /// 画面のプロファイルの情報。
     Display(DisplayInfo),
     /// 削除の計画。
@@ -421,6 +464,7 @@ impl Core {
                 len,
             } => R::Range(self.range(generation, start, len)?),
             C::IndexOf { variant_id } => R::IndexOf(self.index_of(variant_id)?),
+            C::Facets => R::Facets(self.facets()?),
             C::SetRating {
                 variant_ids,
                 rating,
@@ -508,6 +552,23 @@ impl Core {
             },
             C::CreateVirtualCopy { variant_id, name } => R::VariantCreated {
                 variant_id: self.create_virtual_copy(variant_id, name.as_deref())?,
+            },
+            C::WhiteBalanceAt {
+                variant_id,
+                x,
+                y,
+                uncropped,
+            } => R::WhiteBalance(self.white_balance_at(variant_id, x, y, uncropped)?),
+            C::SetDevelopView { uncropped } => {
+                self.set_develop_view(uncropped)?;
+                R::Ok
+            }
+            C::ConstrainCrop {
+                variant_id,
+                crop,
+                angle_deg,
+            } => R::Crop {
+                crop: self.constrain_crop(variant_id, &crop, angle_deg)?,
             },
             C::SetDisplayProfile { icc } => R::Display(self.set_display_profile(icc.as_deref())?),
             C::Export {
@@ -611,6 +672,130 @@ mod tests {
         );
     }
 
+    /// 画面（ui/src/api/types.ts）が使う形: 絞り込みの候補・WB のスポイト・切り抜きの編集中の表示・
+    /// 切り抜きの制限と、FrameInfo の追加の項目（古い形の JSON も読める）。
+    #[test]
+    fn develop_and_facet_commands_have_the_ui_forms() {
+        use serde_json::json;
+        let c: Command = serde_json::from_value(json!({"type": "facets"})).unwrap();
+        assert_eq!(c, Command::Facets);
+        let c: Command = serde_json::from_value(
+            json!({"type": "white_balance_at", "variant_id": 1, "x": 0.5, "y": 0.25}),
+        )
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::WhiteBalanceAt {
+                variant_id: VariantId::new(1),
+                x: 0.5,
+                y: 0.25,
+                uncropped: None,
+            }
+        );
+        // クリックした画像の表示（省略可）。省略したものは書き出さない（画面の型と同じ形）。
+        let c: Command = serde_json::from_value(json!({
+            "type": "white_balance_at", "variant_id": 1, "x": 0.5, "y": 0.25, "uncropped": true
+        }))
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::WhiteBalanceAt {
+                variant_id: VariantId::new(1),
+                x: 0.5,
+                y: 0.25,
+                uncropped: Some(true),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(Command::WhiteBalanceAt {
+                variant_id: VariantId::new(1),
+                x: 0.5,
+                y: 0.25,
+                uncropped: None,
+            })
+            .unwrap(),
+            json!({"type": "white_balance_at", "variant_id": 1, "x": 0.5, "y": 0.25})
+        );
+        let c: Command =
+            serde_json::from_value(json!({"type": "set_develop_view", "uncropped": true})).unwrap();
+        assert_eq!(c, Command::SetDevelopView { uncropped: true });
+        let c: Command = serde_json::from_value(json!({
+            "type": "constrain_crop",
+            "variant_id": 1,
+            "crop": {"left": 0, "top": 0, "right": 1, "bottom": 1},
+            "angle_deg": 5.0
+        }))
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::ConstrainCrop {
+                variant_id: VariantId::new(1),
+                crop: CropRect::FULL,
+                angle_deg: 5.0
+            }
+        );
+
+        let facets = Response::Facets(Facets {
+            cameras: vec![crate::types::FacetValue {
+                value: "ILCE-7M4".to_owned(),
+                count: 12,
+            }],
+            lenses: Vec::new(),
+            codecs: Vec::new(),
+        });
+        assert_eq!(
+            serde_json::to_value(&facets).unwrap(),
+            json!({
+                "type": "facets",
+                "cameras": [{"value": "ILCE-7M4", "count": 12}],
+                "lenses": [],
+                "codecs": []
+            })
+        );
+        let wb = Response::WhiteBalance(PickedWhiteBalance {
+            temperature_k: 5321.0,
+            tint: 4.5,
+        });
+        assert_eq!(
+            serde_json::to_value(&wb).unwrap(),
+            json!({"type": "white_balance", "temperature_k": 5321.0, "tint": 4.5})
+        );
+        let crop = Response::Crop {
+            crop: CropRect::FULL,
+        };
+        assert_eq!(
+            serde_json::to_value(&crop).unwrap(),
+            json!({"type": "crop", "crop": {"left": 0.0, "top": 0.0, "right": 1.0, "bottom": 1.0}})
+        );
+        for r in [facets, wb, crop, Response::Ok] {
+            let back: Response = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+            assert_eq!(back, r);
+        }
+
+        // FrameInfo: 追加の項目は省略できる（古い形）。
+        let mut frame = json!({
+            "variant_id": 1,
+            "generation": 3,
+            "quality": "final",
+            "width": 120,
+            "height": 80,
+            "backend": "cpu",
+            "histogram": crate::types::HistogramData::default(),
+            "display_assumed_srgb": true,
+            "warnings": []
+        });
+        let old: FrameInfo = serde_json::from_value(frame.clone()).unwrap();
+        assert!(!old.uncropped);
+        assert_eq!((old.output_width, old.output_height), (0, 0));
+        frame["uncropped"] = json!(true);
+        frame["output_width"] = json!(7008);
+        frame["output_height"] = json!(4672);
+        let new: FrameInfo = serde_json::from_value(frame.clone()).unwrap();
+        assert!(new.uncropped);
+        assert_eq!((new.output_width, new.output_height), (7008, 4672));
+        assert_eq!(serde_json::to_value(&new).unwrap(), frame);
+    }
+
     #[test]
     fn every_command_round_trips() {
         let commands = vec![
@@ -650,6 +835,30 @@ mod tests {
             Command::Folders,
             Command::Capabilities,
             Command::CatalogStats,
+            Command::Facets,
+            Command::WhiteBalanceAt {
+                variant_id: VariantId::new(1),
+                x: 0.5,
+                y: 0.25,
+                uncropped: None,
+            },
+            Command::WhiteBalanceAt {
+                variant_id: VariantId::new(1),
+                x: 0.0,
+                y: 1.0,
+                uncropped: Some(false),
+            },
+            Command::SetDevelopView { uncropped: true },
+            Command::ConstrainCrop {
+                variant_id: VariantId::new(1),
+                crop: CropRect {
+                    left: 0.1,
+                    top: 0.2,
+                    right: 0.9,
+                    bottom: 0.8,
+                },
+                angle_deg: 5.0,
+            },
         ];
         for c in commands {
             let json = serde_json::to_string(&c).unwrap();

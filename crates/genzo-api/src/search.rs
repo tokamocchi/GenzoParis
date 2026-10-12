@@ -15,6 +15,8 @@
 //!   - 作り直すまでは、今の世代のまま [`Core::range`] に答える（世代が変わるのは作り直した結果を入れた
 //!     ときだけ）。
 //!   - 作り直しが終わるのを待つ [`Core::wait_search_refreshed`]（CLI・テスト用。UI はイベントで知る）。
+//! - 絞り込みの候補（カメラ・レンズ・動画のコーデックと件数）は [`Core::facets`]（カタログ全体。件数は
+//!   asset の数。[`Facets`]）。
 //! - 「★3 以上」で表示中に評価を 2 に下げた写真は、次に [`Core::search`] で条件を適用し直すまで
 //!   結果に残す（3.7 節。Lightroom と同様）。選別の操作で変えた variant を（カタログに書く前に）覚えて
 //!   おき、選別の条件（評価・フラグ・カラーラベル）を除いた条件で並べた中に残す。
@@ -33,7 +35,9 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 use crate::core::{Core, Inner};
 use crate::error::ApiError;
 use crate::events::Event;
-use crate::types::{IndexOf, RangeResult, SearchFilter, SearchResult, SearchSort, VariantSummary};
+use crate::types::{
+    Facets, IndexOf, RangeResult, SearchFilter, SearchResult, SearchSort, VariantSummary,
+};
 
 /// 1 回の [`Core::range`] で返す件数の上限（**仮置き**: 2,000。グリッドの表示範囲と先読みに十分で、
 /// 応答が大きくなりすぎない数）。
@@ -329,6 +333,18 @@ impl Core {
         drop(state);
         inner.search.changed.notify_all();
         Ok(SearchResult { generation, count })
+    }
+
+    /// 絞り込みの候補（カタログ全体のカメラ・レンズ・動画のコーデックと、それぞれの asset の数。LIB-07）。
+    ///
+    /// 値は [`SearchFilter`] の `cameras`・`lenses`・`codecs` にそのまま渡すと一致する（[`Facets`] の
+    /// doc）。カメラ・レンズは索引だけを読む問い合わせ（genzo-catalog の `Catalog::facets`）。50 万件の
+    /// ダミーのカタログ（PoC-6 の `populate_dummy`）で 3 つ合わせて約 58ms（2026-10-12 にこのコンテナの
+    /// release ビルドで計測した参考値）。
+    pub fn facets(&self) -> Result<Facets, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        Ok(inner.with_catalog(|c| c.facets())?.into())
     }
 
     /// これまでに要求した検索結果の作り直しが終わるまで待ち、表示中の検索結果の世代と件数を返す

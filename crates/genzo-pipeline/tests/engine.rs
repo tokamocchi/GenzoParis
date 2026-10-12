@@ -294,6 +294,137 @@ fn crop_does_not_change_pixels_inside_the_crop() {
     );
 }
 
+/// 切り抜く前の全体の表示（切り抜きの編集中。finish::geometry の doc）: 出力は G の外接矩形の全体で、
+/// 設定の切り抜き（G の外接矩形の各軸の割合）をそのまま重ねた範囲の画素は、切り抜いた結果とビット単位で
+/// 同じ。回転で画像の外になった四隅は塗り、ヒストグラムから除く。プレビューとフル解像度（ルーペ）の両方。
+#[test]
+fn uncropped_view_shows_the_whole_g_with_the_crop_inside() {
+    use genzo_pipeline::finish::geometry::{GeometryPlan, OUTSIDE_IMAGE_FILL};
+    let source = raw_source(raw_from(&busy_scene(240, 160)));
+    let mut s = strong_settings();
+    rotate_and_crop(
+        &mut s,
+        5.0,
+        CropRect {
+            left: 0.2,
+            top: 0.15,
+            right: 0.7,
+            bottom: 0.8,
+        },
+    );
+    let e = engine(120, 64);
+    let request = PreviewRequest::new(RenderQuality::Final, 120)
+        .with_output(OutputTarget::assumed_srgb_display().unwrap())
+        .with_histogram();
+    let cropped = e.render_preview_with(&source, &s, &request).unwrap();
+    let whole = e
+        .render_preview_with(&source, &s, &request.clone().with_uncropped(true))
+        .unwrap();
+    let g = &whole.geometry;
+    assert!(g.is_uncropped() && !cropped.geometry.is_uncropped());
+    assert_eq!(g.crop(), CropRect::FULL);
+    assert_eq!(g.requested_crop(), s.geometry.crop);
+    assert_eq!(g.output_size(), g.lattice_size());
+    assert_eq!(whole.b3.image.dimensions(), g.lattice_size());
+    // 設定の切り抜きの割合を全体の画像に重ねた枠は、切り抜いた結果の範囲と 1 画素以内で一致する。
+    let (lw, lh) = g.lattice_size();
+    let c = cropped.geometry.crop_lattice();
+    let crop = cropped.geometry.crop();
+    for (frac, len, at) in [
+        (crop.left, lw, c.x as f64),
+        (crop.right, lw, f64::from(c.x) + f64::from(c.width)),
+        (crop.top, lh, c.y as f64),
+        (crop.bottom, lh, f64::from(c.y) + f64::from(c.height)),
+    ] {
+        assert!(
+            (f64::from(frac) * f64::from(len) - at).abs() <= 1.0,
+            "{crop:?} {c:?}"
+        );
+    }
+    let check = |whole: &ImageTile, part: &ImageTile, offset: Roi, geometry: &GeometryPlan| {
+        let mut compared = 0;
+        for y in 0..offset.height {
+            for x in 0..offset.width {
+                let (wx, wy) = (x as i32 + offset.x, y as i32 + offset.y);
+                if !geometry.c_pixel_in_image(i64::from(wx), i64::from(wy)) {
+                    continue;
+                }
+                let p = part.image.pixel(x, y).unwrap();
+                let q = whole.image.pixel(wx as u32, wy as u32).unwrap();
+                assert_eq!(p.map(f32::to_bits), q.map(f32::to_bits), "({x}, {y})");
+                compared += 1;
+            }
+        }
+        assert!(compared as u64 > offset.pixel_count() * 9 / 10);
+    };
+    check(&whole.b3, &cropped.b3, c, g);
+    // 四隅（回転で画像の外）は塗り、ヒストグラムから除く。
+    let inside: u64 = (0..lh)
+        .flat_map(|y| (0..lw).map(move |x| (x, y)))
+        .filter(|&(x, y)| g.c_pixel_in_image(i64::from(x), i64::from(y)))
+        .count() as u64;
+    assert!(inside < u64::from(lw) * u64::from(lh));
+    let out = whole.output.as_ref().unwrap();
+    for (x, y) in [(0, 0), (lw - 1, 0), (0, lh - 1), (lw - 1, lh - 1)] {
+        assert!(!g.c_pixel_in_image(i64::from(x), i64::from(y)));
+        assert_eq!(whole.b3.image.pixel(x, y).unwrap(), OUTSIDE_IMAGE_FILL);
+        assert_eq!(out.pixel(x, y).unwrap(), OUTSIDE_IMAGE_FILL);
+    }
+    assert_eq!(whole.histogram.as_ref().unwrap().pixel_count, inside);
+    assert_eq!(
+        cropped.histogram.as_ref().unwrap().pixel_count,
+        cropped.output.as_ref().unwrap().pixel_count()
+    );
+
+    // フル解像度（ルーペ）: 出力の寸法は full_resolution_geometry と同じで、切り抜いた結果と同じ画素。
+    let job = e.full_resolution_with(&source, &s, true).unwrap();
+    let plain = e.full_resolution(&source, &s).unwrap();
+    assert_eq!(
+        job.output_size(),
+        e.full_resolution_geometry(&source, &s, true)
+            .unwrap()
+            .output_size()
+    );
+    assert_eq!(
+        plain.output_size(),
+        e.full_resolution_geometry(&source, &s, false)
+            .unwrap()
+            .output_size()
+    );
+    let (fw, fh) = job.output_size();
+    assert_eq!((fw, fh), job.geometry().lattice_size());
+    let target = OutputTarget::assumed_srgb_display().unwrap();
+    let full = job
+        .render_region(Roi::full(fw, fh), 64, Some(&target), &NeverCancel)
+        .unwrap();
+    let (pw, ph) = plain.output_size();
+    let part = plain
+        .render_region(Roi::full(pw, ph), 64, None, &NeverCancel)
+        .unwrap();
+    check(
+        &full.b3,
+        &part.b3,
+        plain.geometry().crop_lattice(),
+        job.geometry(),
+    );
+    let fout = full.output.as_ref().unwrap();
+    assert_eq!(full.b3.image.pixel(0, 0).unwrap(), OUTSIDE_IMAGE_FILL);
+    assert_eq!(
+        fout.image.pixel(fw - 1, fh - 1).unwrap(),
+        OUTSIDE_IMAGE_FILL
+    );
+    // 回転がなければ、切り抜く前の全体は画像そのもの（塗る画素はない）。
+    let mut flat = s.clone();
+    flat.geometry.angle_deg = 0.0;
+    let p = e
+        .render_preview_with(&source, &flat, &request.clone().with_uncropped(true))
+        .unwrap();
+    assert_eq!(
+        p.histogram.unwrap().pixel_count,
+        p.output.unwrap().pixel_count()
+    );
+}
+
 /// 切り抜いた結果 `b`（G の格子の位置 `cb`）の画素が、広い結果 `a`（位置 `ca`）の同じ位置の画素と
 /// ビット単位で同じか確かめる。
 fn check_crop(a: &ImageTile, ca: Roi, b: &ImageTile, cb: Roi) {

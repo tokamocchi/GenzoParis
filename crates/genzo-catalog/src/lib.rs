@@ -14,7 +14,8 @@
 //!   移行する。閉じる（[`Catalog::close`]）と「正常に終了した」印を付ける。
 //! - 登録: [`Catalog::ensure_volume`]、[`Catalog::ensure_folder`]、[`Catalog::register_batch`]、
 //!   [`Catalog::find_file`]（登録済みのファイルの確認）
-//! - 検索: [`Filter`]、[`Sort`]、[`Catalog::search`]、[`Catalog::variant_summaries`]
+//! - 検索: [`Filter`]、[`Sort`]、[`Catalog::search`]、[`Catalog::variant_summaries`]、絞り込みの候補
+//!   （[`Catalog::facets`]）
 //! - 選別: [`Catalog::set_rating`]、[`Catalog::set_flag`]、[`Catalog::set_color_label`]
 //! - 現像設定・履歴: [`Catalog::save_develop`]、[`Catalog::apply_develop_to_many`]、
 //!   [`Catalog::save_develop_batch`]、[`Catalog::undo_develop`]、[`Catalog::redo_develop`]
@@ -86,5 +87,5 @@ pub use schema::{
     BUSY_TIMEOUT, CACHE_SIZE_KIB, CATALOG_APPLICATION_ID, CATALOG_SCHEMA_VERSION,
     THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, UTC_ONLY_SCHEMA_VERSION,
 };
-pub use search::{Filter, FolderFilter, Sort, SortDirection, SortKey, VariantSummary};
+pub use search::{Facets, Filter, FolderFilter, Sort, SortDirection, SortKey, VariantSummary};
 pub use thumbs::{ThumbStore, Thumbnail};

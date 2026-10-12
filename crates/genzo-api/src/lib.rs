@@ -50,10 +50,10 @@
 //! | [`error`] | [`ApiError`] と UI に見せる分類（[`ErrorInfo`]・[`ErrorKind`]） | 6.3 節 |
 //! | [`types`] | 引数・応答の型（serde の素直な形） | 1.5 節 |
 //! | `import` | 取り込み（[`Core::import_folder`]） | IMP-01・VID-01・PRV-01、3.5 節 |
-//! | `search` | 検索と世代（[`Core::search`]・[`Core::range`]・[`Core::index_of`]）、結果のバックグラウンドの作り直し | LIB-07・08、3.2 節・3.7 節 |
+//! | `search` | 検索と世代（[`Core::search`]・[`Core::range`]・[`Core::index_of`]）、結果のバックグラウンドの作り直し、絞り込みの候補（[`Core::facets`]） | LIB-07・08、3.2 節・3.7 節 |
 //! | `library` | 選別（[`Core::set_rating`] など）・詳細・フォルダ・ファイルの状態（[`Core::check_files`]） | LIB-04・14、3.3 節 |
 //! | `previews` | サムネイル（[`Core::thumbnail`]）・L1（[`Core::preview_path`]）と、現像結果からの作り直し | 4 章・4.1 節、PRV-01・02・04 |
-//! | `develop` | 現像のセッション（[`Core::open_develop`]・[`Core::set_settings`]・Undo / Redo・一括適用・仮想コピー） | DEV-00〜08・15・26・27・30、6.2 節 |
+//! | `develop` | 現像のセッション（[`Core::open_develop`]・[`Core::set_settings`]・Undo / Redo・一括適用・仮想コピー）、WB のスポイト（[`Core::white_balance_at`]）、切り抜きの編集の支え（[`Core::set_develop_view`]・[`Core::constrain_crop`]） | DEV-00〜08・15・26・27・30、6.2 節 |
 //! | `render` | GPU → CPU の切り替え、画面のプロファイル（[`Core::set_display_profile`]） | 2.4 節・6.3 節、IQ-05 |
 //! | `region` | 表示範囲の描画（[`Core::render_region`]。ルーペの等倍表示・拡大とパン。P0 の最新の 1 件だけ、取り消しあり） | PRV-03・LIB-02、2.7 節・6.1 節 |
 //! | `export` | 書き出し（[`Core::export`]） | EXP-01・04、2.4 節・6.4 節 |
@@ -77,12 +77,26 @@
 //!   ため。カメラ行列は機種とデコーダの版、またはファイルの内容で決まる。`deps` の doc）。キーには
 //!   キャッシュの世代（カタログの `cache_generation`。復元の後に変わる）も入れる（`previews` の doc）。
 //!
+//! # M4（UI）のために足したもの
+//!
+//! - 絞り込みの候補（[`Core::facets`]・[`Command::Facets`]）: カメラ・レンズ・動画のコーデックと件数
+//!   （件数は asset の数。値は [`SearchFilter`] にそのまま渡して一致する）。
+//! - WB のスポイト（DEV-03。[`Core::white_balance_at`]・[`Command::WhiteBalanceAt`]）: プレビューの上の点を
+//!   中立にする色温度・tint を返す（適用はしない）。点は UI が表示しているプレビューの割合で、その画像の
+//!   表示（[`FrameInfo::uncropped`]。省略可）も送れる（表示を切り替えた直後に、前の表示の画像の上の点を
+//!   取り違えないため）。撮影時の WB の色温度・tint は [`SourceInfo::as_shot_white_balance`] で返す。
+//! - 切り抜きの編集中の表示（[`Core::set_develop_view`]・[`Command::SetDevelopView`]）: 切り抜く前の全体
+//!   （G の外接矩形）を描く（[`FrameInfo::uncropped`]）。描画が実際に使う切り抜き
+//!   （[`Core::constrain_crop`]・[`Command::ConstrainCrop`]）。
+//! - [`FrameInfo::output_width`]・[`FrameInfo::output_height`]: フル解像度の出力の寸法（表示範囲の描画の
+//!   座標の格子）。
+//!
 //! # まだないもの（implementation_status の進捗表 No.12）
 //!
 //! - 表示範囲の描画（[`Core::render_region`]）の GPU 版（今は CPU 版だけ）と、ビューポートへの直接の描画
 //!   （04 の 1.5 節。UI の方式と合わせて決める）。
-//! - WB のスポイト（DEV-03。指定した点を中立にする WB を求めるコマンド）。撮影時の WB の色温度・tint は
-//!   [`SourceInfo::as_shot_white_balance`] で返す。
+//! - 切り抜く前の全体の表示（[`Core::set_develop_view`]）の GPU 版（今は、その間のプレビューを CPU 版で
+//!   描く。genzo-gpu の `render_preview` が [`genzo_pipeline::PreviewRequest::uncropped`] を見ないため）。
 
 pub mod command;
 pub mod config;

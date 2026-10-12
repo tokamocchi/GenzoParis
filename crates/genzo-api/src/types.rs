@@ -410,6 +410,46 @@ pub struct RangeResult {
     pub items: Vec<VariantSummary>,
 }
 
+/// 絞り込みの候補の値と件数（[`Facets`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FacetValue {
+    /// 値（[`SearchFilter`] の `cameras`・`lenses`・`codecs` にそのまま渡すと一致する文字列）。
+    pub value: String,
+    /// 件数（**asset（写真・動画 1 つ）の数**。仮想コピーは数えない。genzo-catalog の `Facets` の doc）。
+    pub count: u64,
+}
+
+/// 絞り込みの候補（[`crate::Core::facets`]。カタログ全体の、カメラ・レンズ・動画のコーデックと件数）。
+///
+/// - 値の順（バイト列の順）に並べる。値が分からない（NULL・空の文字列）ものは候補にしない。
+/// - 件数は asset の数（[`FacetValue::count`]）。その値で絞り込んだ検索の件数（variant の数）は、仮想
+///   コピーの分だけ多くなりうる（マスターだけの検索の件数と同じ）。
+/// - 今の検索の条件にはよらない（カタログ全体の候補）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Facets {
+    /// カメラ（メーカーと機種。`asset.camera` の値）。
+    pub cameras: Vec<FacetValue>,
+    /// レンズ。
+    pub lenses: Vec<FacetValue>,
+    /// 動画のコーデック（ASCII の小文字にそろえた値。`hevc`・`h264` など）。
+    pub codecs: Vec<FacetValue>,
+}
+
+impl From<genzo_catalog::Facets> for Facets {
+    fn from(f: genzo_catalog::Facets) -> Self {
+        let values = |v: Vec<(String, u64)>| {
+            v.into_iter()
+                .map(|(value, count)| FacetValue { value, count })
+                .collect()
+        };
+        Self {
+            cameras: values(f.cameras),
+            lenses: values(f.lenses),
+            codecs: values(f.codecs),
+        }
+    }
+}
+
 /// variant の位置（[`crate::Core::index_of`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexOf {
@@ -559,6 +599,16 @@ pub struct AsShotWhiteBalance {
     pub tint: f32,
 }
 
+/// WB のスポイトの結果（[`crate::Core::white_balance_at`]。DEV-03）。`WhiteBalance::Custom` にそのまま
+/// 使える（適用はしない。UI が `set_settings` する）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PickedWhiteBalance {
+    /// 色温度（K。設定できる範囲 2000〜50000 K に丸めた値）。
+    pub temperature_k: f32,
+    /// 色かぶり補正（tint。設定できる範囲 ±150 に丸めた値）。
+    pub tint: f32,
+}
+
 /// 現像のセッションの状態（[`crate::Core::open_develop`] など）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DevelopState {
@@ -674,6 +724,20 @@ pub struct FrameInfo {
     pub display_assumed_srgb: bool,
     /// 現像の警告。
     pub warnings: Vec<String>,
+    /// 切り抜く前の全体（G の外接矩形）を描いたものか（切り抜きの編集中の表示。
+    /// [`crate::Core::set_develop_view`]）。真なら、画像は設定の切り抜きを使わず G の外接矩形の全体で、
+    /// 回転で画像の外になった四隅は黒（0）で塗ってある（ヒストグラムには数えない）。UI は、この画像の上に
+    /// 設定の切り抜き（`CropRect`。G の外接矩形の各軸の割合）をそのまま重ねられる。
+    #[serde(default)]
+    pub uncropped: bool,
+    /// この描画の設定での出力の画像（C。切り抜いた後）のフル解像度の幅（`uncropped` なら G の外接矩形の
+    /// フル解像度の幅）。表示範囲の描画（[`crate::Core::render_region`] の [`RegionSpace::Output`]）の座標・
+    /// [`RegionInfo::full_width`] と同じ格子。求められなければ 0。
+    #[serde(default)]
+    pub output_width: u32,
+    /// 出力の画像のフル解像度の高さ（`output_width` と同じ）。
+    #[serde(default)]
+    pub output_height: u32,
 }
 
 /// 現像のプレビュー（ピクセルを含む。[`crate::Core::develop_frame`]）。
@@ -692,7 +756,8 @@ pub struct DevelopFrame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegionSpace {
-    /// C：出力座標（切り抜いた後の画像。フル解像度の画素の単位。左上が (0, 0)）。
+    /// C：出力座標（切り抜いた後の画像。フル解像度の画素の単位。左上が (0, 0)）。切り抜く前の全体の表示
+    /// （[`crate::Core::set_develop_view`]）の間は、G の外接矩形の全体の画像の座標（[`FrameInfo::uncropped`]）。
     #[default]
     Output,
     /// G：ジオメトリ補正後の全体（切り抜く前の画像全体）。G の外接矩形の長辺を 1 とした値。

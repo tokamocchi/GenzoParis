@@ -45,7 +45,7 @@ use super::{
 use crate::contract::ColorContract;
 use crate::coords::{CoordinateFrames, SensorGrid};
 use crate::error::{PipelineError, Result};
-use crate::finish::geometry::GeometryPlan;
+use crate::finish::geometry::{GeometryPlan, OUTSIDE_IMAGE_FILL};
 use crate::finish::{FinishPlan, UnimplementedSetting, finish_context, unimplemented_settings};
 use crate::image::{ImageTile, RgbImage, Roi};
 use crate::resample::{AreaWeights, downscale_column_row};
@@ -327,8 +327,11 @@ impl FullResolutionJob {
             }
             _ => unreachable!("RAW のときだけセンサー処理の設定を持つ（作るときに決まる）"),
         };
-        let (b3, n) = run_scene_stages(&self.plan, &ctx, &rois, input)?;
+        let (mut b3, n) = run_scene_stages(&self.plan, &ctx, &rois, input)?;
         replaced += n;
+        // 切り抜く前の全体の表示: 回転で画像の外になった四隅を塗る（設定の切り抜きでは何もしない）。
+        self.geometry()
+            .fill_outside_image(&mut b3, OUTSIDE_IMAGE_FILL);
         self.tiles_rendered.fetch_add(1, Ordering::Relaxed);
         Ok((b3, replaced))
     }
@@ -378,7 +381,9 @@ impl FullResolutionJob {
         let replaced = self.for_each_tile(region, tile_size, control, |tile| {
             blit(&mut b3, region, tile.roi, tile.image.data(), 1);
             if let (Some(target), Some(buf)) = (output, out.as_mut()) {
-                let (o, n) = self.apply_output(target, &tile)?;
+                let (mut o, n) = self.apply_output(target, &tile)?;
+                self.geometry()
+                    .fill_outside_image(&mut o, OUTSIDE_IMAGE_FILL);
                 extra += n;
                 blit(buf, region, o.roi, o.image.data(), 1);
             }
@@ -569,8 +574,77 @@ impl Engine {
         source: &PhotoSource,
         settings: &DevelopSettings,
     ) -> Result<FullResolutionJob> {
+        self.full_resolution_with(source, settings, false)
+    }
+
+    /// [`full_resolution`](Self::full_resolution) と同じ。`uncropped` が真なら、出力（C の格子）を切り抜く前の
+    /// 全体（G の外接矩形）にする（切り抜きの編集中のルーペ。[`crate::finish::geometry`] の doc の「切り抜く
+    /// 前の全体の表示」）。回転で画像の外になった四隅は、タイルの B3（と [`FullResolutionJob::render_region`]
+    /// の 17a / 17b の出力）で [`crate::finish::geometry::OUTSIDE_IMAGE_FILL`] にする。書き出しには使わない。
+    pub fn full_resolution_with(
+        &self,
+        source: &PhotoSource,
+        settings: &DevelopSettings,
+        uncropped: bool,
+    ) -> Result<FullResolutionJob> {
         let version = ProcessVersion::from_u32(settings.process_version)?;
-        let (sensor, frames, grid, warnings) = match &source.image {
+        let (sensor, frames, grid, warnings) = self.full_resolution_input(source, settings)?;
+        let base: StageContext<'static> =
+            finish_context(settings, frames, grid, RenderQuality::Final)?
+                .with_input_kind(source.image.input_kind())
+                .with_uncropped(uncropped);
+        let (plan, guide) = plan_with_guide(settings, &base, || {
+            self.guide(
+                source,
+                settings,
+                RenderQuality::Final,
+                self.config.preview_long_edge,
+            )
+        })?;
+        Ok(FullResolutionJob {
+            source: source.image.clone(),
+            sensor,
+            base,
+            guide,
+            plan,
+            settings: settings.clone(),
+            process_version: version,
+            warnings,
+            unimplemented: unimplemented_settings(settings),
+            tile_size: self.config.tile_size,
+            tiles_rendered: Arc::clone(&self.tiles_rendered),
+        })
+    }
+
+    /// フル解像度の処理のジオメトリ（C の格子とフル解像度の出力の寸法 [`GeometryPlan::output_size`]）だけを
+    /// 求める（[`full_resolution_with`](Self::full_resolution_with) の [`FullResolutionJob::geometry`] と同じ
+    /// もの。ガイド・段階 C のパラメータは作らないので軽い）。
+    pub fn full_resolution_geometry(
+        &self,
+        source: &PhotoSource,
+        settings: &DevelopSettings,
+        uncropped: bool,
+    ) -> Result<GeometryPlan> {
+        ProcessVersion::from_u32(settings.process_version)?;
+        let (_, frames, grid, _) = self.full_resolution_input(source, settings)?;
+        let ctx: StageContext<'static> =
+            finish_context(settings, frames, grid, RenderQuality::Final)?.with_uncropped(uncropped);
+        GeometryPlan::from_settings(settings, &ctx)
+    }
+
+    /// フル解像度の処理の入力の情報（RAW ならセンサー処理の設定、座標系、ステージ 9 の入力の格子、
+    /// センサー処理の警告）。
+    fn full_resolution_input(
+        &self,
+        source: &PhotoSource,
+        settings: &DevelopSettings,
+    ) -> Result<(
+        Option<SensorPlan>,
+        CoordinateFrames,
+        SensorGrid,
+        Vec<SensorWarning>,
+    )> {
+        Ok(match &source.image {
             SourceImage::Raw(raw) => {
                 let plan =
                     SensorPlan::new(raw, settings, &self.sensor_options(RenderQuality::Final))?;
@@ -594,30 +668,6 @@ impl Engine {
                     Vec::new(),
                 )
             }
-        };
-        let base: StageContext<'static> =
-            finish_context(settings, frames, grid, RenderQuality::Final)?
-                .with_input_kind(source.image.input_kind());
-        let (plan, guide) = plan_with_guide(settings, &base, || {
-            self.guide(
-                source,
-                settings,
-                RenderQuality::Final,
-                self.config.preview_long_edge,
-            )
-        })?;
-        Ok(FullResolutionJob {
-            source: source.image.clone(),
-            sensor,
-            base,
-            guide,
-            plan,
-            settings: settings.clone(),
-            process_version: version,
-            warnings,
-            unimplemented: unimplemented_settings(settings),
-            tile_size: self.config.tile_size,
-            tiles_rendered: Arc::clone(&self.tiles_rendered),
         })
     }
 
