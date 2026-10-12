@@ -7,6 +7,9 @@
 // - 自分で書いた物理の位置のスクロールのイベントでは、仮想の位置（小数を含む）をそのまま保つ
 //   （物理の位置の丸めで、見せたいセルの位置がずれないように）。
 // - @tanstack/react-virtual の observeElementOffset・scrollToFn に、この位置（仮想）を渡す（Grid.tsx）。
+// - 速いスクロールの判定（FastScrollDetector）はフィルムストリップ（viewer/Filmstrip.tsx）でも使う。速さが
+//   閾値（gridMath の isFastScroll）を超えたら印を付け、閾値の半分を FAST_RELEASE_MS 続けて下回るか、
+//   止まって FAST_IDLE_MS たったら外す（決定事項ログ No.66・PERF-06）。
 
 import {
   type GridLayout,
@@ -29,6 +32,93 @@ export interface ScrollElement {
 /** スクロールが止まったとみなすまでの時間（ms。react-virtual の isScrollingResetDelay の既定値と同じ）。 */
 export const SCROLL_IDLE_MS = 150;
 
+/**
+ * 止まってから速いスクロールの印を外すまでの時間（ms。**仮置き**）。PERF-06（キャッシュ済みのサムネイルは
+ * 表示範囲に入ってから 0.1 秒以内）の予算の半分にし、残りを検索結果のページとサムネイルの読み込みに使う。
+ * スクロールのイベントは 1 フレーム（約 16 ms）ごとに来るので、動いている間に外れないよう 3 フレーム分にする。
+ */
+export const FAST_IDLE_MS = 50;
+
+/**
+ * 速いスクロールの印を外す遅さが続く時間（ms。**仮置き**）。速さが閾値の半分をこの時間続けて下回ったら、
+ * 止まるのを待たずに外す（トラックパッドの慣性で減速していくとき・速く動かしてからゆっくり探すとき）。
+ * 閾値と半分の間では印を変えない（ヒステリシス。速さの揺れで付いたり外れたりしないように）。
+ */
+export const FAST_RELEASE_MS = 50;
+
+/**
+ * 速いスクロールの判定（グリッド・フィルムストリップ）。位置が変わるたびに move を呼ぶ。速い間は、検索結果の
+ * ページとサムネイルを要求しない（決定事項ログ No.66）。
+ */
+export class FastScrollDetector {
+  /** 速いスクロールが始まった・終わったとき。 */
+  onChange: ((fast: boolean) => void) | null = null;
+
+  private last = { time: Number.NEGATIVE_INFINITY, pos: 0 };
+  /** 閾値の半分より遅い動きが続いている始まり（続いていなければ null）。 */
+  private slowSince: number | null = null;
+  private fast = false;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private now: () => number;
+
+  constructor(now: () => number = () => performance.now()) {
+    this.now = now;
+  }
+
+  /** 速いスクロールの間か。 */
+  get isFast(): boolean {
+    return this.fast;
+  }
+
+  /**
+   * 内容の位置 `pos`（仮想。px）に動いた。`viewSize` は表示の大きさ（スクロールの向きの px）。`user` は
+   * 利用者のスクロール（スクロールのイベント・ホイール）か。
+   */
+  move(pos: number, viewSize: number, user: boolean): void {
+    const t = this.now();
+    const distance = Math.abs(pos - this.last.pos);
+    const elapsed = t - this.last.time;
+    this.last = { time: t, pos };
+    // 利用者が続けてスクロールしている間だけ速さを見る（止まった後の 1 回の移動と、キーボードの移動など
+    // プログラムからの移動は速いとみなさない）。
+    if (user && elapsed < SCROLL_IDLE_MS) {
+      if (isFastScroll(distance, elapsed, viewSize)) {
+        this.slowSince = null;
+        this.set(true);
+      } else if (this.fast && !isFastScroll(distance * 2, elapsed, viewSize)) {
+        // 閾値の半分より遅い（前のイベントからの間）。
+        this.slowSince ??= t - elapsed;
+        if (t - this.slowSince >= FAST_RELEASE_MS) this.set(false);
+      } else {
+        this.slowSince = null;
+      }
+    }
+    if (!this.fast) return;
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      this.set(false);
+    }, FAST_IDLE_MS);
+  }
+
+  /** 速くない状態に戻す（スクロールの要素を外したときなど）。 */
+  reset(): void {
+    this.last = { time: Number.NEGATIVE_INFINITY, pos: 0 };
+    this.set(false);
+  }
+
+  private set(fast: boolean): void {
+    if (!fast) {
+      this.slowSince = null;
+      if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    if (this.fast === fast) return;
+    this.fast = fast;
+    this.onChange?.(fast);
+  }
+}
+
 export class ScrollMapper {
   layout: GridLayout = gridLayout(0, 0, 1);
   viewHeight = 0;
@@ -43,12 +133,11 @@ export class ScrollMapper {
   private written: number | null = null;
   private listener: ((virtual: number, scrolling: boolean) => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
-  private last = { time: Number.NEGATIVE_INFINITY, virtual: 0 };
-  private fast = false;
-  private now: () => number;
+  private detector: FastScrollDetector;
 
   constructor(now: () => number = () => performance.now()) {
-    this.now = now;
+    this.detector = new FastScrollDetector(now);
+    this.detector.onChange = (fast) => this.onFastChange?.(fast);
   }
 
   /** 今の物理の位置（仮想の位置から求めたもの）。 */
@@ -83,7 +172,7 @@ export class ScrollMapper {
       this.written = null;
       if (this.idleTimer !== null) clearTimeout(this.idleTimer);
       this.idleTimer = null;
-      this.setFast(false);
+      this.detector.reset();
     };
     this.release = release;
     return release;
@@ -134,26 +223,13 @@ export class ScrollMapper {
 
   /** 位置を知らせる。`user` は利用者のスクロール（スクロールのイベント・ホイール）か。 */
   private emit(user: boolean): void {
-    const t = this.now();
-    const distance = Math.abs(this.virtual - this.last.virtual);
-    const elapsed = t - this.last.time;
-    this.last = { time: t, virtual: this.virtual };
-    // 利用者が続けてスクロールしている間だけ速さを見る（止まった後の 1 回の移動と、キーボードの移動など
-    // プログラムからの移動は速いとみなさない）。
-    if (user && elapsed < SCROLL_IDLE_MS && isFastScroll(distance, elapsed, this.viewHeight)) this.setFast(true);
+    this.detector.move(this.virtual, this.viewHeight, user);
     this.onMove?.();
     this.listener?.(this.virtual, true);
     if (this.idleTimer !== null) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
-      this.setFast(false);
       this.listener?.(this.virtual, false);
     }, SCROLL_IDLE_MS);
-  }
-
-  private setFast(fast: boolean): void {
-    if (this.fast === fast) return;
-    this.fast = fast;
-    this.onFastChange?.(fast);
   }
 }

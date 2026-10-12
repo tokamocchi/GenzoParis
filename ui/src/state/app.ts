@@ -25,7 +25,7 @@ import type {
   SearchSort,
   VariantId,
 } from "../api/types";
-import { searchCache } from "./search";
+import { type CatalogChangeSet, searchCache, thumbRevs } from "./search";
 import { createStore, useStore } from "./store";
 
 /** 表示モード（G: グリッド、E: ルーペ、D: 現像）。 */
@@ -91,8 +91,14 @@ export interface AppState {
   dialog: DialogState | null;
   toasts: Toast[];
   jobs: Record<number, JobView>;
-  /** サムネイルの新しい rev（thumbnail_updated のイベント）。 */
-  thumbRevs: Record<number, string>;
+  /**
+   * サムネイルの新しい rev（thumbnail_updated のイベント）を id で引く、読み取り専用の見え方。中身は
+   * state/search.ts の thumbRevs（Map）で、受け取るたびに複製しない（50 万件の取り込みで件数の 2 乗の手間に
+   * しないため）。ルーペ（viewer/Loupe.tsx）が `s.thumbRevs[id]` で読む。
+   */
+  thumbRevs: Readonly<Record<VariantId, string | undefined>>;
+  /** サムネイルの新しい rev の変化の通し番号（まとめて知らせるたびに増える。Grid・Filmstrip が描き直す）。 */
+  thumbRevsVersion: number;
   /** 現像設定のコピー（DEV-30）。 */
   clipboard: { settings: DevelopSettings; from: VariantId } | null;
   /** フォルダの一覧を読み直す合図（取り込み・削除の後に増える）。 */
@@ -113,6 +119,17 @@ function loadAutoAdvance(): boolean {
   }
 }
 
+/**
+ * サムネイルの新しい rev の見え方（AppState.thumbRevs）。`[id]` で thumbRevs（Map）を引く（複製しない。
+ * 書き込みはしない）。
+ */
+const thumbRevsView: Readonly<Record<VariantId, string | undefined>> = new Proxy(
+  Object.create(null) as Record<VariantId, string | undefined>,
+  {
+    get: (_target, key) => (typeof key === "string" ? thumbRevs.get(Number(key)) : undefined),
+  },
+);
+
 export const appStore = createStore<AppState>({
   status: null,
   catalog: null,
@@ -128,11 +145,16 @@ export const appStore = createStore<AppState>({
   dialog: null,
   toasts: [],
   jobs: {},
-  thumbRevs: {},
+  thumbRevs: thumbRevsView,
+  thumbRevsVersion: 0,
   clipboard: null,
   foldersVersion: 0,
   detailsVersion: 0,
 });
+
+// サムネイルの新しい rev は、まとめて（1 フレームに 1 回）知らせる。ルーペの `s.thumbRevs[id]` の購読も
+// これで読み直す。
+thumbRevs.subscribe(() => appStore.set({ thumbRevsVersion: thumbRevs.version }));
 
 /** アプリの状態の一部を購読する。 */
 export function useApp<T>(selector: (s: AppState) => T, equal?: (a: T, b: T) => boolean): T {
@@ -250,6 +272,94 @@ let searchSeq = 0;
 /** Shift で範囲を選ぶときの件数の上限（**仮置き**: 10,000。コマンドの大きさと応答の時間のため）。 */
 export const MAX_RANGE_SELECTION = 10_000;
 
+/**
+ * 取り込み中に、検索結果（search_updated）・フォルダ・カタログの件数・絞り込みの候補を読み直す間隔（ms。
+ * **仮置き**: 1 秒）。コアは取り込みの 64 件ごとに新しい世代とカタログの変更を知らせるので、そのたびに
+ * 読み直すと、表示の作り直し（件数が変わると仮想スクロールの配置の計算もし直す）と、カタログの Mutex を
+ * 取り込みと取り合う要求が増える。
+ */
+export const IMPORT_REFRESH_MS = 1000;
+
+/** 間隔 `ms` に 1 回までにまとめて呼ぶ（間隔が空いていればすぐ、間隔の中なら間隔の終わりに 1 回）。 */
+class Throttle {
+  private last = Number.NEGATIVE_INFINITY;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  constructor(
+    private readonly ms: number,
+    private readonly run: () => void,
+  ) {}
+
+  request(): void {
+    // 時計が戻っても、間隔より長くは待たない。
+    const wait = Math.min(this.ms, this.last + this.ms - Date.now());
+    if (wait <= 0) this.fire();
+    else if (this.timer === null) this.timer = setTimeout(() => this.fire(), wait);
+  }
+
+  /** すぐ呼ぶ（待たせている分もまとめて）。 */
+  fire(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.last = Date.now();
+    this.run();
+  }
+
+  /** 待たせている分があれば、すぐ呼ぶ。 */
+  flush(): void {
+    if (this.timer !== null) this.fire();
+  }
+
+  /** 待たせている分を、ほかで済ませた（今呼んだことにして、次は間隔の後にする）。 */
+  done(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.last = Date.now();
+  }
+
+  /** 待たせている分を捨て、間隔を数え直す（カタログを開いた・閉じたとき）。 */
+  cancel(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.last = Number.NEGATIVE_INFINITY;
+  }
+}
+
+/** 取り込みのジョブが実行中か。 */
+function importRunning(): boolean {
+  return Object.values(appStore.get().jobs).some((j) => j.kind === "import" && j.state === "running");
+}
+
+/** 使うのを待たせている新しい世代（取り込み中の search_updated。searchThrottle が使う）。 */
+let pendingSearch: { generation: number; count: number } | null = null;
+
+const searchThrottle = new Throttle(IMPORT_REFRESH_MS, () => {
+  const p = pendingSearch;
+  pendingSearch = null;
+  if (p && applySearch(p)) void relocateSelection();
+});
+
+/** 新しい世代の検索結果にする（今より新しい世代のときだけ。したら true）。 */
+function applySearch(r: { generation: number; count: number }): boolean {
+  if (r.generation <= searchCache.generation) return false;
+  searchCache.reset(r.generation, r.count);
+  appStore.set({ search: { generation: r.generation, count: r.count } });
+  return true;
+}
+
+/** 新しい世代の知らせ（search_updated）。取り込み中は IMPORT_REFRESH_MS に 1 回にまとめる。 */
+function searchUpdated(generation: number, count: number): void {
+  if (generation <= searchCache.generation || (pendingSearch && generation <= pendingSearch.generation)) return;
+  pendingSearch = { generation, count };
+  if (importRunning()) searchThrottle.request();
+  else searchThrottle.fire();
+}
+
+// 待たせている間に今の世代の range が stale になった（コアは次の世代に進んでいる。選択などの操作が読もうと
+// した）: 待たせている世代をすぐ使う（読み込みの続きは searchCache.items が新しい世代で読み直す）。
+searchCache.onStale = () => {
+  if (pendingSearch) searchThrottle.fire();
+};
+
 /** 今の条件で検索し直す（選択中の写真の位置を求め直す）。 */
 async function runSearch(): Promise<void> {
   const seq = ++searchSeq;
@@ -262,13 +372,12 @@ async function runSearch(): Promise<void> {
     // 応答は別の経路なので、イベントが先に届くことがある）を既に受け取っていれば、そちらのままにする。古い世代に
     // 戻すと、コアは今の世代以外の range を stale にするので、一覧が空のまま止まる。同じ世代なら、イベントで
     // 同じ結果にしてあるので、キャッシュを捨て直さない。コアの世代は 1 つのコアの中で増え続ける（別の
-    // カタログを開いたときは catalogOpened が 0 に戻す）。
-    if (r.generation > searchCache.generation) {
-      searchCache.reset(r.generation, r.count);
-      appStore.set({ search: r, searching: false });
-    } else {
-      appStore.set({ searching: false });
-    }
+    // カタログを開いたときは catalogOpened が 0 に戻す）。取り込み中に待たせている世代が応答より新しければ、
+    // そちらを使う（古ければ捨てる）。
+    const pending = pendingSearch;
+    pendingSearch = null;
+    if (applySearch(pending && pending.generation > r.generation ? pending : r)) searchThrottle.done();
+    appStore.set({ searching: false });
     await relocateSelection();
   } catch (e) {
     if (seq === searchSeq) appStore.set({ searching: false });
@@ -313,13 +422,8 @@ async function rangeIds(from: number, to: number): Promise<VariantId[]> {
     from <= to
       ? [Math.max(from, to - (MAX_RANGE_SELECTION - 1)), to]
       : [to, Math.min(from, to + (MAX_RANGE_SELECTION - 1))];
-  await searchCache.ensure(a, end + 1);
-  const ids: VariantId[] = [];
-  for (let i = a; i <= end; i++) {
-    const v = searchCache.get(i);
-    if (v) ids.push(v.variant_id);
-  }
-  return ids;
+  // 今の世代の項目だけを使う（キャッシュのページの数には上限があるので、読んだ値をそのまま使う）。
+  return (await searchCache.items(a, end + 1)).map((v) => v.variant_id);
 }
 
 /**
@@ -353,13 +457,24 @@ async function changeSelectionKeepingCurrent(index: number, id: VariantId, exten
  * 範囲の起点は表示中の写真）。表示中の写真が移ると、現像の画面がその写真を開き直し、「選んだ…に同期」の
  * コピー元が最後にクリックした写真に入れ替わって、現像していた写真を上書きしてしまうため。修飾キーなしの
  * クリックは、どちらでもその写真を表示し、選択をその 1 枚にする。
+ *
+ * `expect` はクリックしたセルに出していた写真（グリッド・フィルムストリップ）。セルは新しい世代のページが
+ * 届くまで古い世代の項目を出すので、今の世代のその位置が別の写真なら、その写真の位置を求め直して選ぶ
+ * （見つからなければ選ばない）。
  */
 async function selectIndex(
   index: number,
-  opts: { extend?: boolean; toggle?: boolean; keepCurrent?: boolean } = {},
+  opts: { extend?: boolean; toggle?: boolean; keepCurrent?: boolean; expect?: VariantId } = {},
 ): Promise<void> {
   if (index < 0 || index >= searchCache.count) return;
-  const item = await searchCache.fetch(index);
+  let item = await searchCache.fetch(index);
+  if (opts.expect !== undefined && item?.variant_id !== opts.expect) {
+    const r = await core.indexOf(opts.expect).catch(() => null);
+    if (!r || r.index === null || r.generation !== searchCache.generation) return;
+    index = r.index;
+    item = await searchCache.fetch(index);
+    if (item?.variant_id !== opts.expect) return;
+  }
   if (!item) return;
   const id = item.variant_id;
   const sel = appStore.get().selection;
@@ -470,28 +585,45 @@ async function applyColorLabel(ids: VariantId[], label: ColorLabel | null): Prom
 /** 検索結果のキャッシュの読み直しをまとめる時間（**仮置き**: 100 ms）。 */
 const INVALIDATE_DELAY_MS = 100;
 let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
+/** まとめている変更（変わった variant・影響が広いか・最後の変更を受け取ったときの要求の通し番号）。 */
+let pendingChange: { ids: Set<VariantId>; all: boolean; since: number } | null = null;
 
-function scheduleInvalidate(): void {
+function scheduleInvalidate(e: Extract<CoreEvent, { type: "catalog_changed" }>): void {
+  const change = pendingChange ?? { ids: new Set<VariantId>(), all: false, since: 0 };
+  for (const id of e.variant_ids) change.ids.add(id);
+  change.all ||= e.all;
+  change.since = searchCache.requestMark();
+  pendingChange = change;
   if (invalidateTimer !== null) return;
   invalidateTimer = setTimeout(() => {
     invalidateTimer = null;
-    searchCache.invalidate();
+    const c: CatalogChangeSet | null = pendingChange;
+    pendingChange = null;
+    // 新しい世代を待たせている（取り込み中）なら読み直さない: その世代にするときに表示中の範囲のページを
+    // 読み直し、ほかのページは古い世代として、次に見たときに読み直す。
+    if (c && !pendingSearch) searchCache.invalidate(c);
   }, INVALIDATE_DELAY_MS);
 }
+
+/** 取り込み中のカタログの変更で、フォルダ・件数・候補・詳細を読み直す合図（IMPORT_REFRESH_MS に 1 回）。 */
+const importVersionsThrottle = new Throttle(IMPORT_REFRESH_MS, () =>
+  appStore.set((s) => ({ detailsVersion: s.detailsVersion + 1, foldersVersion: s.foldersVersion + 1 })),
+);
 
 function handleEvent(e: CoreEvent): void {
   switch (e.type) {
     case "search_updated":
-      if (e.generation > searchCache.generation) {
-        searchCache.reset(e.generation, e.count);
-        appStore.set({ search: { generation: e.generation, count: e.count } });
-        void relocateSelection();
-      }
+      searchUpdated(e.generation, e.count);
       break;
     case "catalog_changed":
       // 評価・キャプション・現像設定など、同じ世代のまま内容が変わるもの。続けて来る変更（履歴の移動・
       // 一括適用など）は、短い間まとめて 1 回だけ読み直す。
-      scheduleInvalidate();
+      scheduleInvalidate(e);
+      if (e.change === "imported" && importRunning()) {
+        // 取り込みの途中（64 件ごと）の変更は、フォルダ・件数・候補の読み直しを間引く。
+        importVersionsThrottle.request();
+        break;
+      }
       appStore.set((s) => ({
         detailsVersion: s.detailsVersion + 1,
         foldersVersion:
@@ -499,7 +631,8 @@ function handleEvent(e: CoreEvent): void {
       }));
       break;
     case "thumbnail_updated":
-      appStore.set((s) => ({ thumbRevs: { ...s.thumbRevs, [e.variant_id]: e.rev } }));
+      // 受け取るたびに状態を作り直さない（知らせは 1 フレームにまとめる。search.ts の ThumbRevs）。
+      thumbRevs.set(e.variant_id, e.rev);
       break;
     case "job_progress":
       appStore.set((s) => {
@@ -521,6 +654,11 @@ function handleEvent(e: CoreEvent): void {
         if (!cur) return {};
         return { jobs: { ...s.jobs, [e.job_id]: { ...cur, state: e.state, message: e.message } } };
       });
+      if (e.kind === "import") {
+        // 取り込みが終わった: 間引いて待たせている読み直しを、すぐする。
+        searchThrottle.flush();
+        importVersionsThrottle.flush();
+      }
       if (e.state === "failed") notify("error", `${JOB_LABEL[e.kind]}に失敗しました`, e.message ?? undefined);
       void core
         .job(e.job_id)
@@ -568,11 +706,23 @@ function installEventHandlers(): void {
  */
 let catalogSession = 0;
 
+/** 前のカタログの、待たせている読み直しとサムネイルの rev を捨てる（カタログを開いた・閉じたとき）。 */
+function forgetCatalogState(): void {
+  pendingSearch = null;
+  searchThrottle.cancel();
+  importVersionsThrottle.cancel();
+  pendingChange = null;
+  if (invalidateTimer !== null) clearTimeout(invalidateTimer);
+  invalidateTimer = null;
+  thumbRevs.clear();
+}
+
 /** カタログを開いた後の状態にする。 */
 async function catalogOpened(status: CatalogStatus): Promise<void> {
   catalogSession++;
   // 新しく開いたコアの検索の世代は 1 から数え直すので、前のカタログの世代を残さない（残すと、新しい
   // カタログの search_updated を古いものとして捨てる）。
+  forgetCatalogState();
   searchCache.reset(0, 0);
   appStore.set({
     catalog: status,
@@ -584,7 +734,6 @@ async function catalogOpened(status: CatalogStatus): Promise<void> {
     sort: DEFAULT_SORT,
     mode: "grid",
     dialog: null,
-    thumbRevs: {},
     clipboard: null,
   });
   appStore.set((s) => ({ foldersVersion: s.foldersVersion + 1 }));
@@ -601,6 +750,7 @@ async function catalogOpened(status: CatalogStatus): Promise<void> {
 function catalogClosed(): void {
   // 待ちを返す前に増やす（返された待ちの続きが、閉じたことを分かるように）。
   catalogSession++;
+  forgetCatalogState();
   searchCache.reset(0, 0);
   const jobs = appStore.get().jobs;
   appStore.set({
@@ -611,7 +761,6 @@ function catalogClosed(): void {
     selection: { ids: [], current: null, currentIndex: null, anchorIndex: null },
     mode: "grid",
     dialog: null,
-    thumbRevs: {},
     clipboard: null,
     jobs: {},
   });
@@ -787,12 +936,8 @@ export const actions = {
   moveSelection,
   async selectAll() {
     const n = Math.min(searchCache.count, 10_000);
-    await searchCache.ensure(0, n);
-    const ids: VariantId[] = [];
-    for (let i = 0; i < n; i++) {
-      const v = searchCache.get(i);
-      if (v) ids.push(v.variant_id);
-    }
+    // 今の世代の項目だけを使う（キャッシュのページの数には上限があるので、読んだ値をそのまま使う）。
+    const ids = (await searchCache.items(0, n)).map((v) => v.variant_id);
     appStore.set((s) => ({ selection: { ...s.selection, ids } }));
     if (searchCache.count > n) notify("info", `先頭の ${n.toLocaleString()} 件を選びました`);
   },

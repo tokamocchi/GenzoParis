@@ -8,8 +8,8 @@ import { ApiError } from "../api/errors";
 import { dispatchCoreEventForTest } from "../api/events";
 import { MockBridge } from "../api/mock";
 import type { CatalogStatus, ColorLabel, ErrorInfo, JobInfo, VariantSummary } from "../api/types";
-import { actions, appStore, nextColorLabel } from "./app";
-import { searchCache } from "./search";
+import { actions, appStore, IMPORT_REFRESH_MS, nextColorLabel } from "./app";
+import { searchCache, thumbRevs } from "./search";
 
 /** 検索結果の件数（variant_id は 100 + 位置）。 */
 const COUNT = 30;
@@ -309,5 +309,145 @@ describe("検索", () => {
     await actions.runSearch();
     expect(searchCache.generation).toBe(6);
     expect(appStore.get().search).toEqual({ generation: 6, count: COUNT });
+  });
+});
+
+describe("サムネイルの新しい rev（performance-1）", () => {
+  it("5 万件の thumbnail_updated を受けても状態を作り直さず、知らせは 1 フレームに 1 回にまとめる", async () => {
+    await loadResults();
+    let notified = 0;
+    const off = appStore.subscribe(() => {
+      notified++;
+    });
+    try {
+      const state = appStore.get();
+      for (let i = 0; i < 50_000; i++) {
+        dispatchCoreEventForTest({ type: "thumbnail_updated", variant_id: 10_000 + i, rev: `r${i}` });
+      }
+      dispatchCoreEventForTest({ type: "thumbnail_updated", variant_id: idAt(3), rev: "fresh" });
+      // 受け取るたびに状態（と、全件の rev）を作り直さない。ルーペが読む見え方は、すぐ新しい rev を返す。
+      expect(notified).toBe(0);
+      expect(appStore.get()).toBe(state);
+      expect(appStore.get().thumbRevs[idAt(3)]).toBe("fresh");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(notified).toBe(1);
+      expect(appStore.get().thumbRevsVersion).toBe(thumbRevs.version);
+      // 読み込み済みのページの写真の rev は残す。
+      expect(appStore.get().thumbRevs[idAt(3)]).toBe("fresh");
+    } finally {
+      off();
+    }
+  });
+});
+
+describe("取り込み中の読み直しの間引き（performance-4）", () => {
+  const running = {
+    9: { jobId: 9, kind: "import" as const, state: "running" as const, done: 0, total: 0, message: null, label: "取り込み" },
+  };
+
+  beforeEach(async () => {
+    // 前のテストの間引きの間隔を数え直す（カタログを閉じると捨てる）。
+    actions.catalogClosed();
+    appStore.set({ catalog: { catalog_path: "/p/catalog.db" } as unknown as CatalogStatus });
+    await loadResults(1);
+    appStore.set({ jobs: running });
+  });
+
+  it("search_updated は IMPORT_REFRESH_MS に 1 回にまとめる（最初はすぐ、間の分は最後の世代を間隔の終わりに）", () => {
+    vi.useFakeTimers();
+    const reset = vi.spyOn(searchCache, "reset");
+    try {
+      dispatchCoreEventForTest({ type: "search_updated", generation: 2, count: 31 });
+      expect(searchCache.generation).toBe(2);
+      vi.advanceTimersByTime(100);
+      dispatchCoreEventForTest({ type: "search_updated", generation: 3, count: 32 });
+      vi.advanceTimersByTime(100);
+      dispatchCoreEventForTest({ type: "search_updated", generation: 4, count: 33 });
+      vi.advanceTimersByTime(IMPORT_REFRESH_MS - 201);
+      expect(searchCache.generation).toBe(2);
+      expect(appStore.get().search).toEqual({ generation: 2, count: 31 });
+      vi.advanceTimersByTime(1);
+      expect(searchCache.generation).toBe(4);
+      expect(appStore.get().search).toEqual({ generation: 4, count: 33 });
+      expect(reset).toHaveBeenCalledTimes(2);
+    } finally {
+      reset.mockRestore();
+    }
+  });
+
+  it("取り込みが終わったら、待たせている世代をすぐ使う", () => {
+    vi.useFakeTimers();
+    dispatchCoreEventForTest({ type: "search_updated", generation: 2, count: 31 });
+    dispatchCoreEventForTest({ type: "search_updated", generation: 3, count: 32 });
+    expect(searchCache.generation).toBe(2);
+    dispatchCoreEventForTest({ type: "job_finished", job_id: 9, kind: "import", state: "succeeded", message: null });
+    expect(searchCache.generation).toBe(3);
+  });
+
+  it("待たせている間に選ぶと（今の世代の range が stale）、新しい世代にして選ぶ", async () => {
+    let coreGeneration = 1;
+    overrides.range = (c) => {
+      if ((c.generation as number) < coreGeneration) {
+        return new ApiError({ kind: "stale", message: "古い世代", user_actionable: false, retryable: true, hint: null });
+      }
+      const start = c.start as number;
+      const items: VariantSummary[] = [];
+      for (let i = start; i < Math.min(COUNT, start + (c.len as number)); i++) items.push(summary(i));
+      return { type: "range", generation: c.generation, start, items };
+    };
+    coreGeneration = 2;
+    dispatchCoreEventForTest({ type: "search_updated", generation: 2, count: COUNT });
+    coreGeneration = 3;
+    dispatchCoreEventForTest({ type: "search_updated", generation: 3, count: COUNT });
+    expect(searchCache.generation).toBe(2);
+    await actions.selectIndex(5);
+    expect(searchCache.generation).toBe(3);
+    expect(appStore.get().selection).toMatchObject({ current: idAt(5), currentIndex: 5 });
+  });
+
+  it("取り込みのカタログの変更で、フォルダ・件数・候補の読み直しの合図を間引く（評価などはすぐ）", () => {
+    vi.useFakeTimers();
+    const v0 = appStore.get().foldersVersion;
+    const d0 = appStore.get().detailsVersion;
+    for (let k = 0; k < 5; k++) {
+      dispatchCoreEventForTest({ type: "catalog_changed", change: "imported", variant_ids: [idAt(k)], all: false });
+      vi.advanceTimersByTime(150);
+    }
+    expect(appStore.get().foldersVersion).toBe(v0 + 1);
+    vi.advanceTimersByTime(IMPORT_REFRESH_MS);
+    expect(appStore.get().foldersVersion).toBe(v0 + 2);
+    expect(appStore.get().detailsVersion).toBe(d0 + 2);
+    dispatchCoreEventForTest({ type: "catalog_changed", change: "marks", variant_ids: [idAt(1)], all: false });
+    expect(appStore.get().detailsVersion).toBe(d0 + 3);
+  });
+});
+
+describe("古い世代の項目を出しているセルのクリック（performance-4）", () => {
+  it("今の世代のその位置が別の写真なら、出していた写真の位置を求め直して選ぶ", async () => {
+    await loadResults(1);
+    // 世代 2 では先頭に 1 枚増え、位置が 1 つずつずれる。
+    const idAt2 = (i: number) => (i === 0 ? 999 : idAt(i - 1));
+    overrides.range = (c) => {
+      const start = c.start as number;
+      const items: VariantSummary[] = [];
+      for (let i = start; i < Math.min(COUNT, start + (c.len as number)); i++) {
+        items.push({ ...summary(i), variant_id: c.generation === 2 ? idAt2(i) : idAt(i) });
+      }
+      return { type: "range", generation: c.generation, start, items };
+    };
+    overrides.index_of = (c) => {
+      const id = c.variant_id as number;
+      return { type: "index_of", generation: searchCache.generation, index: id === 999 ? 0 : id - 100 + 1 };
+    };
+    searchCache.setView("grid", 0, COUNT);
+    try {
+      dispatchCoreEventForTest({ type: "search_updated", generation: searchCache.generation + 1, count: COUNT });
+      // セルは、新しい世代のページが届くまで古い世代の項目（位置 5 は 105）を出す。
+      expect(searchCache.get(5)?.variant_id).toBe(idAt(5));
+      await actions.selectIndex(5, { expect: idAt(5) });
+      expect(appStore.get().selection).toMatchObject({ current: idAt(5), currentIndex: 6 });
+    } finally {
+      searchCache.clearView("grid");
+    }
   });
 });

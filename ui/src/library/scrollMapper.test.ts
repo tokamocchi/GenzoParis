@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { gridLayout, MAX_SCROLL_PX, toPhysical } from "./gridMath";
-import { SCROLL_IDLE_MS, ScrollMapper, type ScrollElement } from "./scrollMapper";
+import {
+  FAST_IDLE_MS,
+  FAST_RELEASE_MS,
+  FastScrollDetector,
+  SCROLL_IDLE_MS,
+  ScrollMapper,
+  type ScrollElement,
+} from "./scrollMapper";
 
 /** スクロールの要素の代わり（scrollTop の書き込みは、ブラウザと同じく整数に丸めてイベントを出す）。 */
 class FakeElement implements ScrollElement {
@@ -155,6 +162,77 @@ describe("ScrollMapper", () => {
     expect(fast).toEqual([true]);
   });
 
+  it("速く動いた後に遅くなったら、止まるのを待たずに速いスクロールの印を外す（performance-3）", () => {
+    // 縮めていない配置（物理と仮想が同じ）。表示の高さ 800 px なので、速さの閾値は 10 px/ms。
+    const { m, el } = mapper(1000, 160);
+    const fast: boolean[] = [];
+    m.onFastChange = (f) => fast.push(f);
+    clock = 1000;
+    el.userScroll(0);
+    clock += 16;
+    el.userScroll(2000);
+    expect(fast).toEqual([true]);
+    // 1 px/ms（閾値の半分より遅い）で動き続ける。タイマーは進めない（止まってはいない）。
+    let top = 2000;
+    let t = 0;
+    while (fast.length === 1 && t < 1000) {
+      clock += 16;
+      t += 16;
+      top += 16;
+      el.userScroll(top);
+    }
+    expect(fast).toEqual([true, false]);
+    // 遅い動きが FAST_RELEASE_MS 続いたところで外す（3〜4 回のイベント）。
+    expect(t).toBeLessThanOrEqual(FAST_RELEASE_MS + 16);
+    // 遅くなった後も動いていれば、見えている範囲を要求できる（速い印は付かない）。
+    clock += 16;
+    el.userScroll(top + 16);
+    expect(fast).toEqual([true, false]);
+  });
+
+  it("閾値と半分の間の速さでは、速いスクロールの印を変えない（ヒステリシス）", () => {
+    const { m, el } = mapper(1000, 160);
+    const fast: boolean[] = [];
+    m.onFastChange = (f) => fast.push(f);
+    clock = 1000;
+    el.userScroll(0);
+    clock += 16;
+    el.userScroll(2000);
+    // 7.5 px/ms（閾値 10 と半分 5 の間）で 0.5 秒動く。
+    let top = 2000;
+    for (let i = 0; i < 30; i++) {
+      clock += 16;
+      top += 120;
+      el.userScroll(top);
+    }
+    expect(fast).toEqual([true]);
+    // 印が付いていない状態から同じ速さで動いても、付けない。
+    vi.advanceTimersByTime(FAST_IDLE_MS);
+    expect(fast).toEqual([true, false]);
+    for (let i = 0; i < 10; i++) {
+      clock += 16;
+      top += 120;
+      el.userScroll(top);
+    }
+    expect(fast).toEqual([true, false]);
+  });
+
+  it("止まってから PERF-06 の予算（0.1 秒）の内側で、速いスクロールの印を外す", () => {
+    const { m, el } = mapper(500_000, 160);
+    const fast: boolean[] = [];
+    m.onFastChange = (f) => fast.push(f);
+    clock = 1000;
+    el.userScroll(1_000_000);
+    clock += 16;
+    el.userScroll(1_002_000);
+    expect(fast).toEqual([true]);
+    expect(FAST_IDLE_MS).toBeLessThan(100);
+    vi.advanceTimersByTime(FAST_IDLE_MS - 1);
+    expect(fast).toEqual([true]);
+    vi.advanceTimersByTime(1);
+    expect(fast).toEqual([true, false]);
+  });
+
   it("範囲の外へは動かさず、解除した後はイベントを受けない", () => {
     const { m, el, calls, release } = mapper(10, 160);
     m.scrollTo(1e9);
@@ -164,5 +242,39 @@ describe("ScrollMapper", () => {
     el.userScroll(5);
     expect(calls).toEqual([]);
     expect(el.listeners.get("scroll")?.size).toBe(0);
+  });
+});
+
+describe("FastScrollDetector（フィルムストリップの横のスクロール）", () => {
+  it("表示の幅を 80 ms より短い間に動いたら速いとし、プログラムからの移動は速いとみなさない", () => {
+    const d = new FastScrollDetector(() => clock);
+    const fast: boolean[] = [];
+    d.onChange = (f) => fast.push(f);
+    clock = 1000;
+    d.move(0, 1500, true);
+    // プログラムからの移動（表示中の写真を見える位置に保つ）は、大きくても速いとみなさない。
+    clock += 16;
+    d.move(1_000_000, 1500, false);
+    expect(fast).toEqual([]);
+    // つまみのドラッグ（50 万件では 1 px で約 3 万 px 進む）。
+    clock += 16;
+    d.move(1_031_000, 1500, true);
+    expect(d.isFast).toBe(true);
+    vi.advanceTimersByTime(FAST_IDLE_MS);
+    expect(fast).toEqual([true, false]);
+  });
+
+  it("reset で速くない状態に戻す", () => {
+    const d = new FastScrollDetector(() => clock);
+    const fast: boolean[] = [];
+    d.onChange = (f) => fast.push(f);
+    clock = 1000;
+    d.move(0, 800, true);
+    clock += 16;
+    d.move(5000, 800, true);
+    d.reset();
+    expect(fast).toEqual([true, false]);
+    vi.advanceTimersByTime(FAST_IDLE_MS);
+    expect(fast).toEqual([true, false]);
   });
 });

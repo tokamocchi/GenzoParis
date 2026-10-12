@@ -5,7 +5,8 @@
 // - コアが描いたプレビュー（developStore.frame。Display P3 か sRGB の 8bit）を canvas に描き、枠の中央に
 //   全体を表示する（CSS の大きさで縮小する。HiDPI では画像の 1 画素を画面の 1 物理画素より大きくしない）。
 // - クリッピングの表示（J）: 白飛びを赤、黒つぶれを青で、別の canvas に重ねる（表示中の画素から計算）。
-// - 等倍表示（Z・クリック）: 見えている範囲だけをコアにフル解像度で描かせる（state/region.ts）。ドラッグで
+// - 等倍表示（Z・クリック）: 見えている範囲だけをコアにフル解像度で描かせる（state/region.ts。画素数は上限
+//   までに抑え、外れた部分はプレビューの拡大のまま見せる。zoomRegionRequest）。ドラッグで
 //   パン、設定が変わったらプレビューの更新の後に描き直す。Esc・Z・クリックで全体表示に戻す。
 // - スポイト（W）: クリックした点を中立にする WB にする。
 // - 切り抜きの編集（R）: 切り抜く前の全体の上に枠を重ねる（四隅・四辺・中を動かせる、外側を暗く、三分割の
@@ -29,6 +30,7 @@ import { actions, appStore, useApp } from "../state/app";
 import { developStore, openDevelopFor, useDevelop } from "../state/develop";
 import { regionFor, renderRegion } from "../state/region";
 import { useDevicePixelRatio } from "../viewer/hooks";
+import { expandRegion, limitRegion, MAX_REGION_PIXELS, type Rect } from "../viewer/viewerMath";
 import { type CropHandle, cropFractionAspect, dragCrop, rotatedImageCorners } from "./cropMath";
 import { useGeometryInfo, useLoadedSummary } from "./hooks";
 import { activatesOnEnter } from "./keyTargets";
@@ -59,6 +61,17 @@ const REGION_PAN_DELAY_MS = 60;
 const CLICK_SLOP_PX = 4;
 /** 切り抜きの編集中に画像のまわりに空ける幅（CSS の画素。仮置き）。枠の端のつまみをつかめるようにする。 */
 const CROP_INSET_PX = 24;
+
+/**
+ * 等倍表示で要求する範囲（出力の画素）。見えている範囲を 1 画素ずつ広げ（端の丸めで外れないように）、
+ * 画素数を上限（MAX_REGION_PIXELS。コアの region.rs の MAX_REGION_SOURCE_PIXELS）までに抑える。ルーペと
+ * 同じ。大きな画面（8K など）では見えている範囲が上限を超え、そのまま要求するとコアがエラーにするので、
+ * 中心を保って縮め、外れた部分は現像のプレビューの拡大のまま見せる。
+ */
+export function zoomRegionRequest(opts: Parameters<typeof regionFor>[0]): Rect {
+  const visible = regionFor(opts);
+  return limitRegion(expandRegion(visible, 1, opts.fullWidth, opts.fullHeight), MAX_REGION_PIXELS);
+}
 
 /** 要素の大きさ（CSS の画素）を見張る。 */
 function useElementSize(ref: RefObject<HTMLElement | null>): { width: number; height: number } {
@@ -272,7 +285,7 @@ function Stage() {
     const delay =
       lastGen.current !== null && lastGen.current !== generation ? REGION_REDRAW_DELAY_MS : REGION_PAN_DELAY_MS;
     lastGen.current = generation;
-    const req = regionFor({
+    const req = zoomRegionRequest({
       fullWidth: outW,
       fullHeight: outH,
       centerX: zoom.centerX,

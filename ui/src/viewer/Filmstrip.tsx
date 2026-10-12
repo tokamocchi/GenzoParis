@@ -1,7 +1,11 @@
 // フィルムストリップ（ルーペ・現像の下の、検索結果のサムネイルの横の列。LIB-02）。
 //
 // - 件数だけで横に仮想スクロールする（@tanstack/react-virtual の horizontal）。見えている範囲のページを
-//   検索結果のキャッシュ（state/search.ts）に要求する。
+//   検索結果のキャッシュ（state/search.ts）に要求し、描いている範囲を知らせる（searchCache.setView）。
+// - 速いスクロール（つまみのドラッグ・トラックの連打など）の間は、グリッドと同じ判定（scrollMapper.ts の
+//   FastScrollDetector）で、検索結果のページとサムネイルを要求せず、読み込み済みの項目だけを出す（決定事項
+//   ログ No.66）。遅くなるか止まったら、見えている範囲を要求する。
+// - 項目（FilmstripCell）は memo にし、その項目の値（サムネイルの rev・表示中か・選択中か）だけを渡す。
 // - 50 万件では内容の幅がブラウザの要素の大きさの上限を超えうるので、スクロールの領域の幅を
 //   MAX_FILMSTRIP_SCROLL_PX までに抑え、スクロールの位置（物理）と内容の位置（仮想）を比例させる
 //   （react-virtual の observeElementOffset・scrollToFn の間に入る。上限に収まるときは同じ値）。
@@ -14,14 +18,15 @@
 //   出入りする、を繰り返すため。
 
 import { elementScroll, observeElementOffset, useVirtualizer } from "@tanstack/react-virtual";
-import { type MouseEvent, type WheelEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type MouseEvent, type WheelEvent, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import type { VariantSummary } from "../api/types";
+import type { VariantId, VariantSummary } from "../api/types";
 import { thumbUrl } from "../api/uri";
 import { FlagMark, LabelDot } from "../components/Marks";
 import { formatCaptureTime } from "../format";
+import { FastScrollDetector } from "../library/scrollMapper";
 import { actions, useApp } from "../state/app";
-import { searchCache, useSearchVersion } from "../state/search";
+import { searchCache, thumbRevs, useSearchVersion } from "../state/search";
 import {
   MAX_FILMSTRIP_SCROLL_PX,
   accumulateWheel,
@@ -48,12 +53,28 @@ export function Filmstrip() {
   const currentIndex = useApp((s) => s.selection.currentIndex);
   const current = useApp((s) => s.selection.current);
   const ids = useApp((s) => s.selection.ids);
-  const thumbRevs = useApp((s) => s.thumbRevs);
+  // サムネイルの新しい rev が届いたら描き直す（rev は描いている項目の分だけ引く）。
+  useApp((s) => s.thumbRevsVersion);
   useSearchVersion();
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ cell: DEFAULT_CELL, viewport: 0 });
   const { cell, viewport } = size;
+  const viewportRef = useRef(viewport);
+  viewportRef.current = viewport;
+
+  // 速いスクロールの判定（グリッドと同じ）。プログラムで書いた位置のスクロールのイベントは、利用者の
+  // スクロールとみなさない（programLeft）。
+  const [fast, setFast] = useState(false);
+  const [detector] = useState(() => new FastScrollDetector());
+  const programLeft = useRef<number | null>(null);
+  useEffect(() => {
+    detector.onChange = setFast;
+    return () => {
+      detector.onChange = null;
+      detector.reset();
+    };
+  }, [detector]);
 
   // 項目は正方形（高さはスクロールバーを除いた内側の高さ。スクロールバーは常に場所を取るので、件数で
   // 変わらない）。
@@ -85,15 +106,25 @@ export function Filmstrip() {
     estimateSize: () => cell,
     overscan: OVERSCAN,
     observeElementOffset: (instance, cb) =>
-      observeElementOffset(instance, (offset, isScrolling) =>
-        cb(toVirtualOffset(offset, mapRef.current.realMax, mapRef.current.virtualMax), isScrolling),
-      ),
-    scrollToFn: (offset, options, instance) =>
-      elementScroll(
-        toRealOffset(offset + (options.adjustments ?? 0), mapRef.current.realMax, mapRef.current.virtualMax),
-        { behavior: options.behavior },
-        instance,
-      ),
+      observeElementOffset(instance, (offset, isScrolling) => {
+        const virtual = toVirtualOffset(offset, mapRef.current.realMax, mapRef.current.virtualMax);
+        if (isScrolling) {
+          // プログラムで書いた位置（丸めを許す）なら、利用者のスクロールではない。
+          const program = programLeft.current;
+          programLeft.current = null;
+          detector.move(virtual, viewportRef.current, program === null || Math.abs(offset - program) >= 1);
+        }
+        cb(virtual, isScrolling);
+      }),
+    scrollToFn: (offset, options, instance) => {
+      const left = toRealOffset(
+        offset + (options.adjustments ?? 0),
+        mapRef.current.realMax,
+        mapRef.current.virtualMax,
+      );
+      programLeft.current = left;
+      elementScroll(left, { behavior: options.behavior }, instance);
+    },
   });
 
   // 項目の幅・対応が変わった: 測り直し、今のスクロールの位置を読み直させる。
@@ -103,7 +134,10 @@ export function Filmstrip() {
     // （React が「lifecycle の中の flushSync」と警告するため）。
     let cancelled = false;
     queueMicrotask(() => {
-      if (!cancelled) scrollRef.current?.dispatchEvent(new Event("scroll"));
+      const el = scrollRef.current;
+      if (cancelled || !el) return;
+      programLeft.current = el.scrollLeft;
+      el.dispatchEvent(new Event("scroll"));
     });
     return () => {
       cancelled = true;
@@ -116,7 +150,10 @@ export function Filmstrip() {
     if (!el || currentIndex === null || viewport <= 0) return;
     const offset = toVirtualOffset(el.scrollLeft, realMax, virtualMax);
     const target = keepVisibleOffset({ index: currentIndex, cell, offset, viewport, count });
-    if (target !== null) el.scrollLeft = toRealOffset(target, realMax, virtualMax);
+    if (target === null) return;
+    const left = toRealOffset(target, realMax, virtualMax);
+    programLeft.current = left;
+    el.scrollLeft = left;
   }, [currentIndex, cell, viewport, count, realMax, virtualMax]);
 
   const selected = useMemo(() => new Set(ids), [ids]);
@@ -136,23 +173,36 @@ export function Filmstrip() {
 
   const virtualOffset = virtualizer.scrollOffset ?? 0;
   const realOffset = toRealOffset(virtualOffset, realMax, virtualMax);
+  const visible = virtualizer.getVirtualItems();
+
+  // 描いている範囲（位置）を検索結果のキャッシュに知らせる。
+  const viewStart = visible.length > 0 ? visible[0].index : 0;
+  const viewEnd = visible.length > 0 ? visible[visible.length - 1].index + 1 : 0;
+  useLayoutEffect(() => {
+    searchCache.setView("filmstrip", viewStart, viewEnd);
+  }, [viewStart, viewEnd]);
+  useEffect(() => () => searchCache.clearView("filmstrip"), []);
 
   return (
     <div className="filmstrip">
       <div ref={scrollRef} className="filmstrip-scroll" onWheel={onWheel}>
         <div className="filmstrip-content" style={{ width: realTotal }}>
-          {virtualizer.getVirtualItems().map((vi) => (
-            <FilmstripCell
-              key={vi.key}
-              index={vi.index}
-              left={realOffset + (vi.start - virtualOffset)}
-              size={cell}
-              currentId={current}
-              currentIndex={currentIndex}
-              selected={selected}
-              thumbRevs={thumbRevs}
-            />
-          ))}
+          {visible.map((vi) => {
+            const item = filmstripItem(vi.index, fast);
+            return (
+              <FilmstripCell
+                key={vi.key}
+                index={vi.index}
+                item={item}
+                rev={item ? thumbRevs.of(item) : null}
+                paused={fast}
+                left={realOffset + (vi.start - virtualOffset)}
+                size={cell}
+                current={item ? item.variant_id === current : currentIndex === vi.index}
+                selected={!!item && selected.has(item.variant_id)}
+              />
+            );
+          })}
         </div>
       </div>
       {count === 0 && <div className="filmstrip-empty">表示する写真・動画がありません</div>}
@@ -160,31 +210,49 @@ export function Filmstrip() {
   );
 }
 
-function FilmstripCell(props: {
+/**
+ * 位置 `index` の項目（表示用）。速いスクロールの間（`fast`）は読み込み済みのものだけを返し、ページを
+ * 要求しない（決定事項ログ No.66）。
+ */
+export function filmstripItem(index: number, fast: boolean): VariantSummary | undefined {
+  return fast ? searchCache.peek(index) : searchCache.get(index);
+}
+
+/** 項目（その項目の値だけを受け取る。サムネイルの rev などが変わった項目だけを描き直す）。 */
+export const FilmstripCell = memo(function FilmstripCell(props: {
   index: number;
+  /** 項目（読み込み中・速いスクロールの間に読み込んでいなければ undefined）。 */
+  item: VariantSummary | undefined;
+  rev: string | null;
+  /** 速いスクロールの間（サムネイルを新しく要求しない）。 */
+  paused: boolean;
   left: number;
   size: number;
-  currentId: number | null;
-  currentIndex: number | null;
-  selected: Set<number>;
-  thumbRevs: Record<number, string>;
+  current: boolean;
+  selected: boolean;
 }) {
-  const v: VariantSummary | undefined = searchCache.get(props.index);
+  const v = props.item;
   const [failed, setFailed] = useState<string | null>(null);
-  const isCurrent = v
-    ? v.variant_id === props.currentId
-    : props.currentIndex !== null && props.currentIndex === props.index;
-  const isSelected = !!v && props.selected.has(v.variant_id);
-  const rev = v ? (props.thumbRevs[v.variant_id] ?? v.thumb_rev) : null;
-  // rev がなければサムネイルはまだない（要求しない。できたら thumbnail_updated で rev が来る）。
-  const url = v && rev ? thumbUrl(v.variant_id, rev) : null;
+  // rev がなければサムネイルはまだない（要求しない。できたら thumbnail_updated で rev が来る）。速いスクロールの
+  // 間は新しく要求せず、この写真に出していたものだけを出し続ける（項目は位置で作るので、写真を確かめる）。
+  const shown = useRef<{ id: VariantId; url: string | null } | null>(null);
+  if (v && !props.paused) {
+    shown.current = { id: v.variant_id, url: props.rev ? thumbUrl(v.variant_id, props.rev) : null };
+  }
+  const url = v && shown.current?.id === v.variant_id ? shown.current.url : null;
 
   const onClick = (e: MouseEvent) => {
     // 修飾キー付きのクリックで表示中の写真を移さない（現像の画面が開き直し、同期のコピー元が入れ替わるため）。
-    void actions.selectIndex(props.index, { extend: e.shiftKey, toggle: e.ctrlKey || e.metaKey, keepCurrent: true });
+    // 出していた写真を渡す（新しい世代のページが届くまでは古い世代の項目を出すので、選ぶときに確かめる）。
+    void actions.selectIndex(props.index, {
+      extend: e.shiftKey,
+      toggle: e.ctrlKey || e.metaKey,
+      keepCurrent: true,
+      expect: e.shiftKey ? undefined : v?.variant_id,
+    });
   };
 
-  const cls = ["filmstrip-cell", isCurrent ? "current" : "", isSelected ? "selected" : ""].join(" ");
+  const cls = ["filmstrip-cell", props.current ? "current" : "", props.selected ? "selected" : ""].join(" ");
   return (
     <div
       className={cls}
@@ -221,4 +289,4 @@ function FilmstripCell(props: {
       </div>
     </div>
   );
-}
+});

@@ -89,7 +89,8 @@ export function LibraryLeftPanel() {
     };
   }, [foldersVersion, reload]);
 
-  // カタログの件数（取り込み・削除の後はすぐに、仮想コピーの追加などの後は落ち着いてから読み直す）。
+  // カタログの件数（取り込み・削除の後はすぐに、仮想コピーの追加などの後は落ち着いてから読み直す。取り込み中は
+  // state/app.ts が合図（foldersVersion）を IMPORT_REFRESH_MS に 1 回にまとめる）。
   const statsFolders = useRef<number | null>(null);
   useEffect(() => {
     const immediate = statsFolders.current !== foldersVersion;

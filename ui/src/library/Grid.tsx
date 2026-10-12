@@ -3,8 +3,11 @@
 // - 検索結果（searchCache の件数。id はコアのメモリにある）を行ごとに仮想スクロールする。描く行の範囲は
 //   @tanstack/react-virtual が求める。50 万件で内容の高さがブラウザの要素の高さの上限を超える場合の
 //   スクロールの位置の対応は ScrollMapper が行う（gridMath.ts の冒頭）。
-// - 速いスクロール（スクロールバーのつまみのドラッグなど）の間は、検索結果のページとサムネイルを要求せず、
-//   止まってから見えている範囲だけを要求する（gridMath の isFastScroll）。
+// - 速いスクロール（スクロールバーのつまみのドラッグなど）の間は、検索結果のページとサムネイルを要求せず
+//   （読み込み済みの項目と、出しているサムネイルはそのまま出す）、遅くなるか止まってから見えている範囲だけを
+//   要求する（scrollMapper.ts の FastScrollDetector）。
+// - 描いている範囲を検索結果のキャッシュに知らせる（searchCache.setView。読み直し・捨てるページの判断に
+//   使う）。サムネイルの新しい rev は、描いているセルの分だけ引く（thumbRevs）。
 // - キー（グリッドのモードで、ダイアログが開いていないとき）: ←→ で前後、↑↓ で列の数だけ、Shift で範囲を
 //   広げる（アンカーから 10,000 件まで。gridMath の MAX_RANGE）、Home・End、PageUp・PageDown、Enter で
 //   ルーペ。評価・フラグなどのキーは App.tsx が持つ。
@@ -20,7 +23,7 @@ import { FlagMark, LabelDot, Stars } from "../components/Marks";
 import { formatCaptureTime } from "../format";
 import { useHotkeys } from "../keyboard";
 import { actions, appStore, type Selection, useApp } from "../state/app";
-import { searchCache, useSearchVersion } from "../state/search";
+import { searchCache, thumbRevs, useSearchVersion } from "../state/search";
 import { activeConditionCount, clearConditions } from "./filterLogic";
 import {
   anchoredOffset,
@@ -77,7 +80,8 @@ export function Grid() {
   const searched = useApp((s) => s.search !== null);
   const generation = useApp((s) => s.search?.generation ?? null);
   const selection = useApp((s) => s.selection);
-  const thumbRevs = useApp((s) => s.thumbRevs);
+  // サムネイルの新しい rev が届いたら描き直す（rev は描いているセルの分だけ引く）。
+  useApp((s) => s.thumbRevsVersion);
   const dialogOpen = useApp((s) => s.dialog !== null);
   const filter = useApp((s) => s.filter);
   const sort = useApp((s) => s.sort);
@@ -276,23 +280,27 @@ export function Grid() {
   );
 
   // --- マウス ---
-  const indexOf = (e: MouseEvent) => {
+  const cellOf = (e: MouseEvent) => {
     const el = (e.target as HTMLElement).closest<HTMLElement>("[data-index]");
-    return el ? Number(el.dataset.index) : null;
+    if (!el) return null;
+    // セルに出していた写真（新しい世代のページが届くまでは古い世代の項目を出すので、選ぶときに確かめる）。
+    const id = el.dataset.id;
+    return { index: Number(el.dataset.index), expect: id === undefined ? undefined : Number(id) };
   };
   const onClick = (e: MouseEvent) => {
-    const i = indexOf(e);
-    if (i === null) return;
+    const c = cellOf(e);
+    if (c === null) return;
+    const i = c.index;
     const toggle = !e.shiftKey && (e.metaKey || e.ctrlKey);
     clicked.current = { index: i, toggle, at: performance.now() };
     if (e.shiftKey) void actions.selectIndex(clampRange(i), { extend: true });
-    else if (toggle) void actions.selectIndex(i, { toggle: true });
-    else void actions.selectIndex(i);
+    else if (toggle) void actions.selectIndex(i, { toggle: true, expect: c.expect });
+    else void actions.selectIndex(i, { expect: c.expect });
   };
   const onDoubleClick = (e: MouseEvent) => {
-    const i = indexOf(e);
-    if (i === null || e.shiftKey || e.metaKey || e.ctrlKey) return;
-    void actions.selectIndex(i).then(() => actions.setMode("loupe"));
+    const c = cellOf(e);
+    if (c === null || e.shiftKey || e.metaKey || e.ctrlKey) return;
+    void actions.selectIndex(c.index, { expect: c.expect }).then(() => actions.setMode("loupe"));
   };
 
   const changeCellSize = (v: number) => {
@@ -306,6 +314,14 @@ export function Grid() {
   const shift = mapper.shift();
   renderShift.current = shift;
   const wide = layout.cellWidth >= WIDE_CELL;
+
+  // 描いている範囲（位置）を検索結果のキャッシュに知らせる。
+  const viewStart = items.length > 0 ? items[0].index * layout.cols : 0;
+  const viewEnd = items.length > 0 ? Math.min(count, (items[items.length - 1].index + 1) * layout.cols) : 0;
+  useLayoutEffect(() => {
+    searchCache.setView("grid", viewStart, viewEnd);
+  }, [viewStart, viewEnd]);
+  useEffect(() => () => searchCache.clearView("grid"), []);
 
   return (
     <div className="lib-grid">
@@ -323,13 +339,15 @@ export function Grid() {
               const end = Math.min(count, first + layout.cols);
               const cells = [];
               for (let i = first; i < end; i++) {
-                const item = fast ? undefined : searchCache.get(i);
+                // 速い間は読み込み済みの項目だけを出す（ページを要求しない）。
+                const item = fast ? searchCache.peek(i) : searchCache.get(i);
                 cells.push(
                   <GridCell
                     key={item ? item.variant_id : `i${i}`}
                     index={i}
                     item={item}
-                    rev={item ? (thumbRevs[item.variant_id] ?? item.thumb_rev) : null}
+                    rev={item ? thumbRevs.of(item) : null}
+                    paused={fast}
                     selected={item ? selected.has(item.variant_id) : false}
                     current={item ? item.variant_id === selection.current : i === selection.currentIndex}
                     width={layout.cellWidth}
@@ -381,9 +399,14 @@ export function Grid() {
 
 interface CellProps {
   index: number;
-  /** 項目（読み込み中・速いスクロールの間は undefined）。 */
+  /**
+   * 項目（読み込み中・速いスクロールの間に読み込んでいなければ undefined。新しい世代のページが届くまでは
+   * 古い世代の項目）。
+   */
   item: VariantSummary | undefined;
   rev: string | null;
+  /** 速いスクロールの間（サムネイルを新しく要求しない）。 */
+  paused: boolean;
   selected: boolean;
   current: boolean;
   width: number;
@@ -400,11 +423,12 @@ const GridCell = memo(function GridCell(p: CellProps) {
     <div
       className={cls}
       data-index={p.index}
+      data-id={item?.variant_id}
       style={{ width: p.width, height: p.height }}
       title={item ? cellTitle(item) : undefined}
     >
       <div className="lib-cell-thumb" style={{ height: thumbHeight }}>
-        {item && <Thumb item={item} rev={p.rev} />}
+        {item && <Thumb item={item} rev={p.rev} paused={p.paused} />}
         {item && <Badges item={item} wide={p.wide} />}
       </div>
       <div className="lib-cell-foot" style={{ height: CELL_FOOTER }}>
@@ -430,10 +454,15 @@ function cellTitle(item: VariantSummary): string {
   return lines.join("\n");
 }
 
-/** サムネイル（rev がない・読めないときは、ファイル名と種類の印）。 */
-function Thumb({ item, rev }: { item: VariantSummary; rev: string | null }) {
+/**
+ * サムネイル（rev がない・読めないときは、ファイル名と種類の印）。速いスクロールの間（`paused`）は新しく
+ * 要求せず、既に出しているものだけを出し続ける（セルは写真ごとに作るので、出していたのはこの写真のもの）。
+ */
+function Thumb({ item, rev, paused }: { item: VariantSummary; rev: string | null; paused: boolean }) {
   const [failed, setFailed] = useState<string | null>(null);
-  const src = rev ? thumbUrl(item.variant_id, rev) : null;
+  const shown = useRef<string | null>(null);
+  if (!paused) shown.current = rev ? thumbUrl(item.variant_id, rev) : null;
+  const src = shown.current;
   if (!src || failed === src) {
     return (
       <div className="lib-cell-placeholder">

@@ -256,7 +256,10 @@ function TextSearch({ value }: { value: string | null }) {
 // カメラ・レンズ
 // ---------------------------------------------------------------------------
 
-/** 絞り込みの候補（取り込み・削除の後はすぐに、評価などの変更の後は落ち着いてから読み直す）。 */
+/**
+ * 絞り込みの候補（取り込み・削除の後はすぐに、評価などの変更の後は落ち着いてから読み直す。取り込み中は
+ * state/app.ts が合図（foldersVersion）を IMPORT_REFRESH_MS に 1 回にまとめる）。
+ */
 function useFacets(): { facets: Facets; failed: boolean } {
   const foldersVersion = useApp((s) => s.foldersVersion);
   const detailsVersion = useApp((s) => s.detailsVersion);
