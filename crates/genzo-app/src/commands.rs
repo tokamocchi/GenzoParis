@@ -6,6 +6,9 @@
 //!
 //! コアの関数はブロックしうるので、すべて `spawn_blocking` で呼ぶ（UI のスレッドを止めない。
 //! 決定事項ログ No.36）。失敗は genzo-api の `ErrorInfo`（JSON）で返す。
+//!
+//! Tauri の状態（`State`）を使わない処理の本体（[`execute_command`]・[`develop_frame_bytes`]・
+//! [`region_frame_bytes`]）は別の関数にして、結合テスト（`tests/app`）から [`AppState`] で直接呼ぶ。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -158,6 +161,22 @@ pub async fn close_catalog(state: Shared<'_>, discard_unsaved: bool) -> Result<(
     })
 }
 
+/// コアのコマンド（genzo-api の `Command` の JSON）を、開いているカタログのコアで実行する
+/// （[`core_execute`] の本体）。
+pub fn execute_command(
+    state: &AppState,
+    command: serde_json::Value,
+) -> Result<Response, ErrorInfo> {
+    let command: Command = serde_json::from_value(command).map_err(|e| {
+        error(
+            ErrorKind::InvalidInput,
+            format!("コマンドを解釈できません: {e}"),
+            None,
+        )
+    })?;
+    state.core()?.execute(command).map_err(|e| e.info())
+}
+
 /// コアのコマンドを実行する（genzo-api の `Command` の JSON）。
 #[tauri::command]
 pub async fn core_execute(
@@ -165,61 +184,55 @@ pub async fn core_execute(
     command: serde_json::Value,
 ) -> Result<Response, ErrorInfo> {
     let state = Arc::clone(&state);
-    blocking(move || {
-        let command: Command = serde_json::from_value(command).map_err(|e| {
-            error(
-                ErrorKind::InvalidInput,
-                format!("コマンドを解釈できません: {e}"),
-                None,
-            )
-        })?;
-        state.core()?.execute(command).map_err(|e| e.info())
-    })
-    .await
+    blocking(move || execute_command(&state, command)).await
+}
+
+/// 現像中の写真の最新のプレビューを [`frames`] の形のバイト列にする（[`develop_frame`] の本体。まだ
+/// なければ空）。
+pub fn develop_frame_bytes(state: &AppState) -> Result<Vec<u8>, ErrorInfo> {
+    let core = state.core()?;
+    match core.develop_frame() {
+        Some(f) => frames::encode(&f.info, f.info.width, f.info.height, &f.display_rgb8)
+            .ok_or_else(|| {
+                error(
+                    ErrorKind::Internal,
+                    "プレビューの画素の長さが合いません",
+                    None,
+                )
+            }),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// 表示範囲の描画の最新の結果を [`frames`] の形のバイト列にする（[`region_frame`] の本体。まだなければ
+/// 空）。
+pub fn region_frame_bytes(state: &AppState) -> Result<Vec<u8>, ErrorInfo> {
+    let core = state.core()?;
+    match core.region_frame() {
+        Some(f) => frames::encode(&f.info, f.info.width, f.info.height, &f.display_rgb8)
+            .ok_or_else(|| {
+                error(
+                    ErrorKind::Internal,
+                    "表示範囲の画素の長さが合いません",
+                    None,
+                )
+            }),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// 現像中の写真の最新のプレビュー（[`frames`] の形のバイト列。まだなければ空）。
 #[tauri::command]
 pub async fn develop_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, ErrorInfo> {
     let state = Arc::clone(&state);
-    blocking(move || {
-        let core = state.core()?;
-        let bytes = match core.develop_frame() {
-            Some(f) => frames::encode(&f.info, f.info.width, f.info.height, &f.display_rgb8)
-                .ok_or_else(|| {
-                    error(
-                        ErrorKind::Internal,
-                        "プレビューの画素の長さが合いません",
-                        None,
-                    )
-                })?,
-            None => Vec::new(),
-        };
-        Ok(tauri::ipc::Response::new(bytes))
-    })
-    .await
+    blocking(move || develop_frame_bytes(&state).map(tauri::ipc::Response::new)).await
 }
 
 /// 表示範囲の描画の最新の結果（[`frames`] の形のバイト列。まだなければ空）。
 #[tauri::command]
 pub async fn region_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, ErrorInfo> {
     let state = Arc::clone(&state);
-    blocking(move || {
-        let core = state.core()?;
-        let bytes = match core.region_frame() {
-            Some(f) => frames::encode(&f.info, f.info.width, f.info.height, &f.display_rgb8)
-                .ok_or_else(|| {
-                    error(
-                        ErrorKind::Internal,
-                        "表示範囲の画素の長さが合いません",
-                        None,
-                    )
-                })?,
-            None => Vec::new(),
-        };
-        Ok(tauri::ipc::Response::new(bytes))
-    })
-    .await
+    blocking(move || region_frame_bytes(&state).map(tauri::ipc::Response::new)).await
 }
 
 /// 画面の色空間（canvas が Display P3 を使えるか）。

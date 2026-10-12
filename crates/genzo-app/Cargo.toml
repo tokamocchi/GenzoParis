@@ -26,6 +26,15 @@ name = "genzo-paris"
 path = "src/main.rs"
 test = false
 
+# アプリの結合テスト（本物のコアとワーカーで AppState を動かす）。テストの実行ファイル自身を隠しサブコマンド
+# （`__worker`）でワーカーとして起動するため、libtest の main を使わずに自分の main で振り分ける。テスト用の
+# 実行ファイル（[[bin]]）を足さないのは、Tauri の CLI が [[bin]] と src/bin/ をすべて配布物に入れるため
+# （tests/app/main.rs の doc）。
+[[test]]
+name = "app"
+path = "tests/app/main.rs"
+harness = false
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
@@ -53,6 +62,11 @@ chrono.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 image.workspace = true
+# 結合テスト（tests/app）の実行ファイル自身をワーカーとして動かす（genzo_worker::run_worker）。genzo-api が
+# 既に依存しているもので、新しい crate は増えない。
+genzo-worker.workspace = true
+# 結合テストで、現像設定の保存だけを失敗させる（genzo_catalog::testing。終了のときに保存できない場合の確認）。
+genzo-catalog = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

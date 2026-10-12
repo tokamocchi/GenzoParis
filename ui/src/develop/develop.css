@@ -1,0 +1,400 @@
+/* 現像の画面（中央のプレビュー・右のパネル・左の履歴）。
+ * 画像のまわりは色みのない灰色だけにする（base.css の変数）。色は状態の表示（クリッピングの印など）に限る。 */
+
+/* ---------------------------------------------------------------- 中央 */
+
+.dv-root {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-0);
+}
+
+.dv-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-0);
+  touch-action: none;
+}
+.dv-stage.can-zoom {
+  cursor: zoom-in;
+}
+.dv-stage.zoomed {
+  cursor: grab;
+}
+.dv-stage.panning {
+  cursor: grabbing;
+}
+.dv-stage.tool-wb {
+  cursor: crosshair;
+}
+
+.dv-layer {
+  position: absolute;
+  display: block;
+}
+.dv-image {
+  /* 縮小は滑らかに（等倍以上は画素の境界をそのまま見せたいが、等倍表示は 1:1 で描くので縮小だけ）。 */
+  image-rendering: auto;
+}
+.dv-clip {
+  pointer-events: none;
+}
+
+.dv-busy {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  padding: 6px;
+  border-radius: var(--radius);
+  background: rgba(20, 20, 20, 0.7);
+  pointer-events: none;
+}
+
+.dv-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  background: rgba(20, 20, 20, 0.8);
+  border: 1px solid var(--line-strong);
+  color: var(--fg-1);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.dv-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line-strong);
+  border-left: 4px solid var(--danger);
+  white-space: pre-wrap;
+}
+
+/* 切り抜きの枠 */
+.dv-crop {
+  overflow: visible;
+}
+.dv-crop-shade {
+  fill: rgba(0, 0, 0, 0.62);
+  pointer-events: none;
+}
+.dv-crop-image {
+  fill: none;
+  stroke: var(--fg-2);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  pointer-events: none;
+}
+.dv-crop-thirds line {
+  stroke: rgba(232, 232, 232, 0.45);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.dv-crop-frame {
+  fill: none;
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+.dv-crop-move {
+  fill: transparent;
+  cursor: move;
+}
+.dv-crop-knob {
+  fill: var(--fg-0);
+  stroke: var(--bg-0);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.dv-crop-grip {
+  fill: transparent;
+}
+.grip-nw,
+.grip-se {
+  cursor: nwse-resize;
+}
+.grip-ne,
+.grip-sw {
+  cursor: nesw-resize;
+}
+.grip-n,
+.grip-s {
+  cursor: ns-resize;
+}
+.grip-e,
+.grip-w {
+  cursor: ew-resize;
+}
+
+/* ---------------------------------------------------------------- 右のパネル */
+
+.dp {
+  padding-bottom: 16px;
+}
+.dp .slider {
+  grid-template-columns: 1fr 78px;
+}
+.dp .slider-value {
+  width: 78px;
+}
+.dp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.dp-row > select {
+  flex: 1;
+  min-width: 0;
+}
+.dp-row .grow {
+  flex: 1;
+}
+.dp-label {
+  color: var(--fg-1);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.dp-note {
+  font-size: 12px;
+  color: var(--fg-2);
+  margin: 2px 0 8px;
+}
+.dp-sub {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.dp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.dp-empty {
+  padding: 24px 12px;
+  color: var(--fg-2);
+  text-align: center;
+}
+.dp-warn {
+  margin: 0 0 6px;
+  padding-left: 16px;
+  color: var(--warn);
+  font-size: 12px;
+}
+.dp-info {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  font-size: 12px;
+}
+.dp-info > dt {
+  color: var(--fg-2);
+}
+.dp-info > dd {
+  margin: 0;
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
+/* ヒストグラム */
+.dp-histo {
+  position: relative;
+}
+.dp-histo canvas {
+  display: block;
+  width: 100%;
+  height: 110px;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.dp-clip-mark {
+  position: absolute;
+  top: 4px;
+  width: 0;
+  height: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-bottom: 10px solid var(--bg-4);
+}
+.dp-clip-mark.low {
+  left: 6px;
+}
+.dp-clip-mark.high {
+  right: 6px;
+}
+.dp-clip-mark.low.on {
+  border-bottom-color: #4a7fff;
+}
+.dp-clip-mark.high.on {
+  border-bottom-color: #ff4a4a;
+}
+.dp-clip-mark.active {
+  outline: 1px solid var(--fg-1);
+  outline-offset: 2px;
+}
+.dp-histo-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fg-2);
+}
+
+/* トーンカーブ */
+.dp-tabs {
+  display: flex;
+  gap: 2px;
+  margin: 8px 0 6px;
+  background: var(--bg-2);
+  border-radius: var(--radius);
+  padding: 2px;
+}
+.dp-tabs button {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 2px 0;
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--fg-1);
+  font-size: 12px;
+}
+.dp-tabs button.on {
+  background: var(--bg-4);
+  color: var(--fg-0);
+}
+.dp-curve {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  touch-action: none;
+  cursor: crosshair;
+}
+.dp-curve:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: 1px;
+}
+.dp-curve.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.dp-curve .grid {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.dp-curve .diag {
+  stroke: var(--bg-4);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+.dp-curve .histo {
+  fill: rgba(184, 184, 184, 0.12);
+}
+.dp-curve .total {
+  fill: none;
+  stroke: var(--fg-3);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+.dp-curve .line {
+  fill: none;
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.dp-curve .line.red {
+  stroke: #e06060;
+}
+.dp-curve .line.green {
+  stroke: #60c070;
+}
+.dp-curve .line.blue {
+  stroke: #6090e0;
+}
+.dp-curve .pt {
+  fill: var(--bg-0);
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.dp-curve .pt.sel {
+  fill: var(--fg-0);
+}
+
+/* ---------------------------------------------------------------- 左のパネル */
+
+.dl-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.dl-buttons .wide {
+  grid-column: 1 / span 2;
+}
+.dl-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.dl-history li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.dl-history li:hover {
+  background: var(--bg-3);
+}
+.dl-history li.current {
+  background: var(--bg-4);
+  color: var(--fg-0);
+  font-weight: 600;
+}
+.dl-history li.undone {
+  color: var(--fg-3);
+}
+.dl-history .time {
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.dl-history li.undone .time {
+  color: var(--fg-3);
+}

@@ -1603,6 +1603,7 @@ dependencies = [
  "genzo-catalog",
  "genzo-color",
  "genzo-model",
+ "genzo-worker",
  "image",
  "parking_lot",
  "serde",

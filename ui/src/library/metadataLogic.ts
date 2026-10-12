@@ -2,6 +2,7 @@
 
 import type {
   CaptureTime,
+  FileInfo,
   FileRole,
   FileStatus,
   GpsCoord,
@@ -68,7 +69,7 @@ export function captureNote(c: CaptureTime | null | undefined): string | null {
   const notes: string[] = [];
   switch (c.tz_source) {
     case "utc_only":
-      notes.push("UTC だけが記録されています");
+      notes.push(`UTC だけが記録されているため、既定のタイムゾーン（${c.tz_assumed ?? "要確認"}）で表示`);
       break;
     case "user_default":
       notes.push(`タイムゾーンは既定の値（${c.tz_assumed ?? "要確認"}）で推定`);
@@ -118,11 +119,23 @@ export function formatIso(iso: number | null | undefined): string {
   return iso ? `ISO ${iso.toLocaleString("ja-JP")}` : "—";
 }
 
-/** 複数の値が同じならその値、違えば "mixed"、空なら null。 */
-export function commonValue<T>(values: T[]): T | "mixed" | null {
-  if (values.length === 0) return null;
-  const first = values[0];
-  return values.every((v) => Object.is(v, first)) ? first : "mixed";
+/** 主のファイル（なければ先頭。ファイルがなければ null）。 */
+export function primaryFile(files: FileInfo[]): FileInfo | null {
+  return files.find((f) => f.role === "primary") ?? files[0] ?? null;
+}
+
+/** ファイルの状態の説明（missing・error は理由を添える）。 */
+export function fileStatusText(f: Pick<FileInfo, "status" | "status_reason">): string {
+  const label = fileStatusLabel(f.status);
+  return f.status !== "ok" && f.status_reason ? `${label}（${f.status_reason}）` : label;
+}
+
+/** 動画の行を出すか（どれか 1 つでも値があれば）。 */
+export function hasVideoInfo(v: VideoMetadata | null | undefined): v is VideoMetadata {
+  if (!v) return false;
+  return [v.duration_s, v.fps, v.codec, v.bit_depth, v.color_transfer, v.color_primaries, v.width, v.height].some(
+    (x) => x !== null && x !== undefined,
+  );
 }
 
 /** 仮想コピーの表示名（名前がなければ「仮想コピー」）。マスターなら null。 */

@@ -6,7 +6,18 @@
 //   正）の現地の日付とみなす（CLI の `--from`・`--to` の日付と同じ。genzo-cli の args.rs の `DateArg`）。
 //   開始日はその日の 0 時、終了日は翌日の 0 時（含まない）を UTC にする（終了日の終わりまでを含める）。
 
-import type { ColorLabel, Facets, FacetValue, Flag, Rating, SearchFilter, SortKey } from "../api/types";
+import type {
+  AssetKind,
+  ColorLabel,
+  Facets,
+  FacetValue,
+  Flag,
+  Rating,
+  SearchFilter,
+  SearchSort,
+  SortDirection,
+  SortKey,
+} from "../api/types";
 
 // ---------------------------------------------------------------------------
 // 有効な条件の数・解除
@@ -143,6 +154,27 @@ export function facetOptions(values: FacetValue[], selected: string[] | null | u
   return out;
 }
 
+/** 1 つだけ選ぶ欄で、複数を選んだ条件（画面の外で作ったもの）を表す値。 */
+export const MULTIPLE = "\u0000multiple";
+
+/** 条件 → 1 つだけ選ぶ欄の値（条件なしは ""。複数なら MULTIPLE）。 */
+export function singleChoice(values: string[] | null | undefined): string {
+  if (!values || values.length === 0) return "";
+  return values.length === 1 ? values[0] : MULTIPLE;
+}
+
+/** 1 つだけ選ぶ欄の値 → 条件（"" は条件なし）。 */
+export function choiceToList(value: string): string[] | null {
+  return value === "" || value === MULTIPLE ? null : [value];
+}
+
+/** 種類の選択肢。 */
+export const KIND_OPTIONS: { value: AssetKind | ""; label: string }[] = [
+  { value: "", label: "種類: すべて" },
+  { value: "photo", label: "写真" },
+  { value: "video", label: "動画" },
+];
+
 // ---------------------------------------------------------------------------
 // 撮影日の範囲
 // ---------------------------------------------------------------------------
@@ -175,15 +207,28 @@ function rfc3339(ms: number): string {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+/** UTC の境界として送れる年の範囲（カタログの撮影日時は 0〜9999 年。genzo-model の capture_time.rs）。 */
+const UTC_YEAR_MIN = 0;
+const UTC_YEAR_MAX = 9999;
+
 /**
  * 現地の日付（"YYYY-MM-DD"）→ UTC の境界（RFC 3339）。`upper` なら翌日の 0 時（含まない上限）。
- * `offsetMinutes` は UTC より東が正（+09:00 なら 540）。空・不正な日付なら null。
+ * `offsetMinutes` は UTC より東が正（+09:00 なら 540）。空・不正な日付・UTC で 0〜9999 年の外になる
+ * 日付なら null。
  */
 export function localDateToUtc(date: string, offsetMinutes: number, upper: boolean): string | null {
   const p = parseDate(date);
   if (!p) return null;
   const local = utcMidnight(p[0], p[1], p[2]) + (upper ? DAY_MS : 0);
-  return rfc3339(local - offsetMinutes * 60_000);
+  const ms = local - offsetMinutes * 60_000;
+  const y = new Date(ms).getUTCFullYear();
+  if (y < UTC_YEAR_MIN || y > UTC_YEAR_MAX) return null;
+  return rfc3339(ms);
+}
+
+/** 開始日が終了日より後か（どちらかが空なら false）。"YYYY-MM-DD" は文字列の順が日付の順。 */
+export function isDateRangeReversed(from: string, to: string): boolean {
+  return from !== "" && to !== "" && from > to;
 }
 
 /**
@@ -219,3 +264,13 @@ export const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "rating", label: "評価" },
   { value: "import_order", label: "取り込み順" },
 ];
+
+/** 並べ替えの向きの表示（撮影日時のないものは、どちらの向きでも最後。genzo-catalog の search.rs）。 */
+export function sortDirectionLabel(direction: SortDirection): string {
+  return direction === "ascending" ? "昇順" : "降順";
+}
+
+/** 並べ替えの向きを逆にする。 */
+export function flipDirection(sort: SearchSort): SearchSort {
+  return { ...sort, direction: sort.direction === "ascending" ? "descending" : "ascending" };
+}

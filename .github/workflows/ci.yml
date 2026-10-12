@@ -1,7 +1,13 @@
 # GenzoParis の CI（個人開発のため最小限）。
 #
 # - lint: フォーマットの確認と、依存クレートのライセンス・脆弱性・重複・取得元の確認（cargo-deny。設定は deny.toml）
-# - test: Windows と macOS（Apple Silicon）で、clippy（警告をエラーとして扱う）とテスト
+# - ui: 画面（ui/）の型の検査・テスト・ビルドと、配布のスクリプト（scripts/）のテスト（Linux。Node だけを使う）
+# - test: Windows と macOS（Apple Silicon）で、clippy（警告をエラーとして扱う）とテスト。デスクトップアプリ
+#   （genzo-app。Tauri 2）も含む。genzo-app は既定の機能フラグでは画面のビルド結果（ui/dist）を埋め込まず、
+#   tauri.conf.json の devUrl を使うので、画面をビルドしなくてもビルドできる（tauri-codegen の context.rs）。
+#
+# Linux では Rust の genzo-app をビルドしない（GTK・WebKitGTK の開発用のパッケージが要るため。lint は cargo fmt と
+# cargo-deny だけで、コンパイルしない）。配布物（インストーラー）は release.yml で作る。
 #
 # 対応する要件: docs/02 の MAINT-04（静的な検査）・MAINT-06（両 OS での CI）・SEC-04（依存ライブラリの管理）、
 # docs/05 の 3 章 M0 タスク 5・6。
@@ -40,6 +46,31 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses advisories bans sources
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v5
+      # setup-node は checkout@v5 と同じく Node 24 で動く版の系列（v5）。
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: 依存を入れる
+        run: npm ci
+      - name: 型の検査
+        run: npm run typecheck
+      - name: テスト
+        run: npm test
+      - name: ビルド
+        run: npm run build
+      - name: 配布のスクリプトのテスト
+        working-directory: .
+        run: node --test "scripts/**/*.test.mjs"
 
   test:
     strategy:

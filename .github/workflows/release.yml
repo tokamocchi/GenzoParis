@@ -1,0 +1,136 @@
+# GenzoParis の配布物（インストーラー）を作る（SYS-08。手順と注意は docs/packaging.md）。
+#
+# - 起動: 手動（workflow_dispatch）と、v で始まるタグ（v0.1.0 など）の push
+# - Windows（windows-latest）: NSIS のインストーラー（ユーザーごとのインストール。tauri.conf.json）
+# - macOS（macos-latest。Apple Silicon）: .dmg（と、.app を tar.gz にしたもの）
+# - 署名・公証はしない（社内の数名への配布。macOS はアドホック署名だけ。tauri.bundle.conf.json）
+# - 成果物は Actions の artifact に置く（GitHub の Releases には出さない。誰に・どこで配るかは人の判断）
+#
+# 手順（OS ごと）: 画面のビルド → LibRaw を入れる → ワーカーのビルドと LibRaw の収集（scripts/prepare-worker.mjs）
+# → tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json（scripts/build-app.mjs）
+# → artifact に置く → 確認（ワーカーが同梱の LibRaw で起動できるか）。
+#
+# **未確認**: このワークフローは GitHub Actions でまだ実行していない（2026-10-12 に作成。Linux の .deb で同じ
+# スクリプトが通ることだけ確かめた）。Windows の vcpkg の LibRaw、macOS の dylib の書き換え・署名・.dmg の作成、
+# NSIS の無人インストール（/S）は、最初の実行で確かめる。
+
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+# 同じ ref の配布物の作成は、新しいものが始まっても取り消さない（途中の成果物を捨てないため）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: nsis
+            artifact: genzoparis-windows-x64
+          # macos-latest は Apple Silicon（arm64）のランナー。Intel の Mac 向けは作らない（要るかは人の判断）。
+          - os: macos-latest
+            bundles: app,dmg
+            artifact: genzoparis-macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      # Rust の版は rust-toolchain.toml（1.97.0）が決める。
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # setup-node は ci.yml と同じ版の系列（v5）。
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: 画面の依存を入れる
+        working-directory: ui
+        run: npm ci
+      # 型の検査を含む（npm run build）。tauri build も beforeBuildCommand で同じビルドをもう一度行うが、
+      # 時間のかかる Rust のビルドの前に画面の誤りで止めるため、先に実行する。
+      - name: 画面のビルド
+        working-directory: ui
+        run: npm run build
+
+      # vcpkg はランナーに入っている（VCPKG_INSTALLATION_ROOT）。libraw の port は、スレッドセーフな版を
+      # lib/raw_r.lib・bin/raw_r.dll に置く（scripts/lib/bundle.mjs）。依存（jasper・lcms・zlib・libjpeg-turbo）も
+      # ソースからビルドするため時間がかかる（バイナリのキャッシュは未設定）。
+      - name: LibRaw を入れる（Windows。vcpkg）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libraw:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install が失敗した" }
+          Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib\*.lib", "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin\*.dll"
+      # pkg-config は genzo-raw の build.rs が LibRaw を探すために使う（ci.yml と同じ）。
+      - name: LibRaw を入れる（macOS。Homebrew）
+        if: runner.os == 'macOS'
+        run: |
+          brew install libraw
+          command -v pkg-config >/dev/null || brew install pkgconf
+          pkg-config --modversion libraw_r
+
+      # LIBRAW_INCLUDE_DIR などがなければ、VCPKG_INSTALLATION_ROOT の installed/x64-windows を使う（Windows）。
+      - name: ワーカーのビルドと LibRaw の収集
+        run: node scripts/prepare-worker.mjs
+      # cargo には --locked を付ける（Cargo.lock を変えずにビルドする。scripts/build-app.mjs）。
+      - name: インストーラーを作る
+        run: node scripts/build-app.mjs --skip-worker --bundles ${{ matrix.bundles }}
+
+      # upload-artifact はファイルの実行の権限を保たないため、.app はそのまま置かずに tar.gz にする。
+      - name: .app をまとめる（macOS）
+        if: runner.os == 'macOS'
+        run: tar -czf target/release/bundle/GenzoParis.app.tar.gz -C target/release/bundle/macos GenzoParis.app
+      # upload-artifact は Node 24 で動く最初の版の系列（v6）を使う（v5 は Node 20）。
+      - name: 成果物を置く
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/GenzoParis.app.tar.gz
+            crates/genzo-app/binaries/bundled-libs.txt
+          if-no-files-found: error
+          # 仮置き: 30 日（配布が済んだら消えてよい）。
+          retention-days: 30
+
+      # 確認: 配布物の中のワーカーが、同梱の LibRaw で起動できるか（DLL・dylib が見つからなければ起動しない）。
+      # ランナーには vcpkg・Homebrew の LibRaw もあるため、macOS では読み込んだ場所も確かめる。
+      - name: 確認（Windows。無人インストールしてワーカーを起動する）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
+          $dir = Join-Path $env:LOCALAPPDATA 'GenzoParis'
+          Get-ChildItem $dir
+          & (Join-Path $dir 'genzo-worker.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw "genzo-worker.exe が起動しない（終了コード $LASTEXITCODE）" }
+      - name: 確認（macOS。署名とワーカーの起動）
+        if: runner.os == 'macOS'
+        run: |
+          app=target/release/bundle/macos/GenzoParis.app
+          ls -la "$app/Contents/MacOS" "$app/Contents/Frameworks"
+          otool -L "$app/Contents/MacOS/genzo-worker"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/genzo-worker" --version 2>&1 | tee worker-libs.log
+          grep -q "Contents/MacOS/../Frameworks/libraw" worker-libs.log || grep -q "Contents/Frameworks/libraw" worker-libs.log
+          if grep -q "/opt/homebrew" worker-libs.log; then echo "Homebrew の dylib を読み込んでいる"; exit 1; fi

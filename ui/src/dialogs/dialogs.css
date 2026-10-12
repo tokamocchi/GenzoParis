@@ -1,0 +1,437 @@
+/* ダイアログ・起動の画面・ジョブの表示のスタイル。
+ * 色みのない灰色（base.css の変数）だけを使い、色は状態の表示（警告・危険・強調）に限る。 */
+
+/* ---------------------------------------------------------------- 共通 */
+
+.dlg-section {
+  margin: 10px 0 14px;
+}
+.dlg-section > h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.dlg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dlg-row.end {
+  justify-content: flex-end;
+}
+.dlg-grow {
+  flex: 1;
+  min-width: 0;
+}
+.dlg-path {
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.dlg-path.box {
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  min-height: 26px;
+}
+.dlg-path.empty {
+  color: var(--fg-3);
+  font-family: var(--font);
+}
+.dlg-note,
+.dlg-warn,
+.dlg-error {
+  border: 1px solid var(--line-strong);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  padding: 6px 10px;
+  margin: 8px 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.dlg-note {
+  border-left-color: var(--fg-2);
+  color: var(--fg-1);
+}
+.dlg-warn {
+  border-left-color: var(--warn);
+}
+.dlg-error {
+  border-left-color: var(--danger);
+}
+.dlg-error .hint,
+.dlg-warn .hint {
+  margin-top: 2px;
+}
+.dlg-field-error {
+  color: var(--danger);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.dlg-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dlg-option {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 2px 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.dlg-option:hover {
+  background: var(--bg-2);
+}
+.dlg-option.on {
+  border-color: var(--fg-2);
+  background: var(--bg-2);
+}
+.dlg-option.danger.on {
+  border-color: var(--danger);
+}
+.dlg-option > input {
+  margin: 2px 0 0;
+  grid-row: 1 / span 2;
+}
+.dlg-option .title {
+  font-weight: 600;
+}
+.dlg-option .desc {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.dlg-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 4px 0;
+  cursor: pointer;
+}
+.dlg-check > input {
+  margin-top: 3px;
+}
+.dlg-check .desc {
+  display: block;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.dlg-inline-num {
+  width: 90px;
+}
+.dlg-list {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+  max-height: 220px;
+  overflow: auto;
+  margin: 6px 0;
+}
+.dlg-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.dlg-list-item:last-child {
+  border-bottom: none;
+}
+.dlg-list-item.selectable {
+  cursor: pointer;
+}
+.dlg-list-item.selectable:hover {
+  background: var(--bg-2);
+}
+.dlg-list-item.selected {
+  background: var(--bg-4);
+}
+.dlg-list-more {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.dlg-kv {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 3px 10px;
+  font-size: 12px;
+}
+.dlg-kv > dt {
+  color: var(--fg-2);
+}
+.dlg-kv > dd {
+  margin: 0;
+  min-width: 0;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.dlg-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--line);
+  margin: 0 -16px 10px;
+  padding: 0 16px;
+}
+.dlg-tabs button {
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--fg-2);
+}
+.dlg-tabs button:hover {
+  color: var(--fg-0);
+}
+.dlg-tabs button.on {
+  color: var(--fg-0);
+  border-bottom-color: var(--fg-1);
+}
+.dlg-confirm {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  padding: 8px 10px;
+  margin: 8px 0;
+}
+.dlg-confirm p {
+  margin: 0 0 6px;
+}
+.dlg-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.dlg-busy .spinner,
+.jobs-button .spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
+}
+/* base.css の .btn:hover が危険の色を消すので、ダイアログ・起動の画面の中では保つ。 */
+.dialog .btn.danger:hover:not(:disabled),
+.startup-card .btn.danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--danger);
+}
+
+/* ---------------------------------------------------------------- ショートカットの一覧 */
+
+.shortcut-groups {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 24px;
+}
+.shortcut-group h3 {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.shortcut-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.shortcut-keys {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.shortcut-keys kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0 4px;
+  color: var(--fg-0);
+}
+
+/* ---------------------------------------------------------------- 起動の画面（カタログの選択・開けないとき） */
+
+.startup-screen {
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  background: var(--bg-0);
+}
+.startup-card {
+  width: min(640px, 100%);
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 20px 24px;
+}
+.startup-card h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 700;
+}
+.startup-card h2 {
+  margin: 18px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.startup-card p {
+  margin: 4px 0;
+}
+.startup-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.startup-action {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+.startup-action .desc {
+  grid-column: 1;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.startup-action > .btn {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+.recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.recent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  cursor: pointer;
+}
+.recent-item:hover:not(:disabled) {
+  background: var(--bg-2);
+  border-color: var(--line);
+}
+.recent-item:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.recent-item .name {
+  font-weight: 600;
+}
+.recent-item .path {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-2);
+  word-break: break-all;
+}
+
+/* ---------------------------------------------------------------- ジョブの表示（上の帯） */
+
+.jobs-indicator {
+  position: relative;
+}
+.jobs-button {
+  max-width: 260px;
+}
+.jobs-button .text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.jobs-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 360px;
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  z-index: 90;
+  padding: 6px 0;
+}
+.jobs-item {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.jobs-item:last-child {
+  border-bottom: none;
+}
+.jobs-item .head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.jobs-item .label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jobs-item .state {
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.jobs-item .state.failed {
+  color: var(--danger);
+}
+.jobs-item .message {
+  font-size: 12px;
+  color: var(--fg-2);
+  margin-top: 2px;
+  white-space: pre-wrap;
+}
+
+/* ---------------------------------------------------------------- ドラッグ＆ドロップ */
+
+.drop-overlay {
+  position: fixed;
+  inset: 8px;
+  border: 2px dashed var(--fg-1);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 150;
+  pointer-events: none;
+  font-size: 16px;
+  color: var(--fg-0);
+}

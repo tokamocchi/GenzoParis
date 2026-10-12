@@ -10,6 +10,21 @@
 //! - 閉じるときに保存待ちの現像設定を保存できなかった場合（ディスクの空き容量の不足など）は、閉じずに
 //!   エラーを返す（[`CloseError::SaveFailed`]）。画面は「再試行」と「保存せずに閉じる」を選ばせる
 //!   （genzo-api の `Core::close` の doc。決定事項ログ No.61 の閉じ方）。
+//! - 開く・閉じる・復元は 1 つずつ行う（`lifecycle` のロック）。閉じている途中に届いた要求は、閉じ始めた
+//!   時点でカタログが開いていない扱いになり、[`ErrorKind::Closed`] を返す。
+//! - パスは絶対パスにしてから扱う（相対パスは今のフォルダから）。開いているカタログと同じファイルかは、
+//!   書き方（`..`・シンボリックリンク・Windows の大文字と小文字）によらずに比べる（[`same_file`]）。
+//!
+//! # イベント
+//!
+//! コアのイベントは、カタログごとのスレッドで送り先（[`EventSink`]）に送る。
+//!
+//! - 起動時の警告（前回の異常終了など）は [`CatalogStatus::warnings`] で返し、イベントとしては送らない
+//!   （コアは購読したときに起動時の警告を先に送るが、画面が両方を受けて 2 回知らせないよう、その分は
+//!   送らない）。
+//! - カタログを閉じたら、そのカタログのイベントはそれ以上送らない（送り先が遅く、イベントが溜まって
+//!   いても）。次に開いたカタログの画面に、前のカタログの検索結果の世代・ジョブ・サムネイルの更新が届かない
+//!   ようにするため。閉じる処理は、送っている途中の 1 件を送り終えるのを待つ。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -65,6 +80,8 @@ pub struct Session {
     pub data_dir: PathBuf,
     /// 見つけた ffmpeg・ffprobe。
     pub tools: ExternalTools,
+    /// イベントを送るスレッド（閉じたら止める）。
+    events: Forwarder,
 }
 
 /// 開いたカタログの情報（画面に返す）。
@@ -76,7 +93,7 @@ pub struct CatalogStatus {
     pub data_dir: PathBuf,
     /// 起動時の確認の結果。
     pub startup: StartupReport,
-    /// 起動時の警告（前回の異常終了など）。
+    /// 起動時の警告（前回の異常終了など）。イベント（`core-event`）としては送らない（モジュールの doc）。
     pub warnings: Vec<Event>,
     /// 件数とスキーマの版。
     pub stats: CatalogStats,
@@ -246,12 +263,16 @@ impl AppState {
             .ok_or_else(no_catalog)
     }
 
-    /// 画面の色空間を設定する（開いているカタログにもすぐ反映する）。
+    /// 画面の色空間を設定する（開いているカタログにもすぐ反映する。開いていなければ `None` で、次に開いた
+    /// カタログに使う）。
     pub fn set_display_target(
         &self,
         target: DisplayTarget,
     ) -> Result<Option<DisplayInfo>, ErrorInfo> {
-        *self.display.lock() = target;
+        // 開いているカタログに反映し終えるまでロックを持つ（カタログを開く処理も、色空間を指定してから
+        // セッションを公開するまで同じロックを持つので、同時に呼ばれても、どちらかの順に必ずそろう）。
+        let mut display = self.display.lock();
+        *display = target;
         match self.session() {
             Some(s) => Ok(Some(
                 s.core
@@ -298,14 +319,28 @@ impl AppState {
 
     fn open_locked(&self, path: &Path, create: bool) -> Result<CatalogStatus, ErrorInfo> {
         let path = absolute(path)?;
-        let state = catalog_file::inspect(&path).map_err(|e| {
-            error(
-                ErrorKind::FileAccess,
-                format!("{} を確かめられません: {e}", path.display()),
-                Some("ファイルの場所・ドライブの接続・権限を確かめてください"),
-            )
-        })?;
-        match state {
+        // 同じカタログが開いていれば、そのまま返す（書き方が違っても。閉じると、取り込みなどのジョブを
+        // 取り消してしまう）。
+        if let Some(s) = self.session()
+            && same_file(&s.catalog_path, &path)
+        {
+            return self.describe(&s);
+        }
+        match inspect(&path)? {
+            CatalogFileState::NotCatalog if catalog_file::has_catalog_data(&path) => {
+                // 隣のデータのフォルダに GenzoParis のデータがある: 先頭が壊れたカタログとみなす（作り直さず、
+                // バックアップからの復元を案内する）。
+                return Err(error(
+                    ErrorKind::CatalogCorrupt,
+                    format!(
+                        "カタログ {} を読めません（ファイルが壊れている可能性があります）",
+                        path.display()
+                    ),
+                    Some(
+                        "バックアップから復元してください（壊れたファイルは消さずに、別の名前で残します）",
+                    ),
+                ));
+            }
             CatalogFileState::NotCatalog => {
                 return Err(error(
                     ErrorKind::InvalidInput,
@@ -333,12 +368,6 @@ impl AppState {
             }
             CatalogFileState::Catalog => {}
         }
-        // 同じカタログが開いていれば、そのまま返す。
-        if let Some(s) = self.session()
-            && s.catalog_path == path
-        {
-            return self.describe(&s);
-        }
         self.close_locked(false).map_err(|e| e.info())?;
 
         let settings = self.settings();
@@ -352,21 +381,24 @@ impl AppState {
         config.backup_on_close = settings.backup_on_close;
         config.worker_env = tools.worker_env();
         let core = Arc::new(Core::open(config).map_err(api)?);
-        let target = *self.display.lock();
-        if let Err(e) = target
+        // 色空間を指定してからセッションを公開するまで、色空間のロックを持つ（set_display_target の doc）。
+        let display = self.display.lock();
+        if let Err(e) = display
             .icc()
             .and_then(|icc| core.set_display_profile(Some(&icc)).map_err(api))
         {
             tracing::warn!(?e, "画面の色空間を設定できないので sRGB とみなす");
         }
-        spawn_forwarder(&core, Arc::clone(&self.events));
+        let events = spawn_forwarder(&core, Arc::clone(&self.events));
         let session = Arc::new(Session {
             core,
             catalog_path: path.clone(),
             data_dir,
             tools,
+            events,
         });
         *self.session.write() = Some(Arc::clone(&session));
+        drop(display);
         if let Err(e) = self.update_settings(|s| s.remember_catalog(&path)) {
             tracing::warn!(?e, "最近開いたカタログを記録できない");
         }
@@ -384,11 +416,15 @@ impl AppState {
             return Ok(());
         };
         match session.core.close() {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                session.events.stop();
+                Ok(())
+            }
             Err(e) if !session.core.is_closed() => {
                 if discard_unsaved {
                     // 最後にもう一度だけ保存を試し、できなければ捨てて閉じる（drop。genzo-api の doc）。
                     // ほかのスレッドが一時的にコアを持っていても、最後の参照が外れた時点で閉じる。
+                    session.events.stop();
                     drop(session);
                     Ok(())
                 } else {
@@ -396,7 +432,10 @@ impl AppState {
                     Err(CloseError::SaveFailed(e.info()))
                 }
             }
-            Err(e) => Err(CloseError::ClosedWithError(e.info())),
+            Err(e) => {
+                session.events.stop();
+                Err(CloseError::ClosedWithError(e.info()))
+            }
         }
     }
 
@@ -405,11 +444,13 @@ impl AppState {
     pub fn list_backups(&self, catalog_path: &Path) -> Result<Vec<BackupEntry>, ErrorInfo> {
         let catalog_path = absolute(catalog_path)?;
         if let Some(s) = self.session()
-            && s.catalog_path == catalog_path
+            && same_file(&s.catalog_path, &catalog_path)
         {
             return s.core.list_backups().map_err(api);
         }
-        let dir = catalog_file::data_dir_for(&catalog_path).join("backups");
+        // コアと同じ置き場（データのフォルダの backups。CoreConfig::backup_dir）。
+        let dir =
+            CoreConfig::new(&catalog_path, catalog_file::data_dir_for(&catalog_path)).backup_dir();
         // カタログを読めれば、そのカタログの印のものだけ。読めなければ、同じファイル名のものすべて。
         let owned = genzo_catalog::Catalog::open_read_only(&catalog_path)
             .and_then(|c| c.backup_owner())
@@ -434,11 +475,16 @@ impl AppState {
         Ok(list.into_iter().map(BackupEntry::from).collect())
     }
 
-    /// バックアップから復元する: 開いていれば閉じ、バックアップを検証してカタログの隣に復元し、今の
-    /// カタログを退避してから差し替え、開き直す（DATA-04。退避したファイルは消さない）。
+    /// バックアップから復元する: バックアップを検証してカタログの隣の別のファイルに復元し、カタログが
+    /// 開いていれば閉じ、今のカタログを退避してから差し替え、開き直す（DATA-04。退避したファイルは消さない）。
+    ///
+    /// 差し替えるのは、GenzoParis のカタログ、ないファイル、先頭が壊れたカタログ（隣のデータのフォルダに
+    /// GenzoParis のデータがある。[`catalog_file::has_catalog_data`]）だけ。バックアップが使えなければ、
+    /// 開いているカタログは閉じない。
     pub fn restore(&self, catalog_path: &Path, backup: &Path) -> Result<RestoreOutcome, ErrorInfo> {
         let _guard = self.lifecycle.lock();
         let catalog_path = absolute(catalog_path)?;
+        let backup = absolute(backup)?;
         if !backup.is_file() {
             return Err(error(
                 ErrorKind::NotFound,
@@ -446,8 +492,8 @@ impl AppState {
                 None,
             ));
         }
-        if catalog_file::inspect(&catalog_path).map_err(|e| internal(e.to_string()))?
-            == CatalogFileState::NotCatalog
+        if inspect(&catalog_path)? == CatalogFileState::NotCatalog
+            && !catalog_file::has_catalog_data(&catalog_path)
         {
             return Err(error(
                 ErrorKind::InvalidInput,
@@ -458,13 +504,9 @@ impl AppState {
                 None,
             ));
         }
-        if self
-            .session()
-            .is_some_and(|s| s.catalog_path == catalog_path)
-        {
-            self.close_locked(false).map_err(|e| e.info())?;
-        }
-        let plan = genzo_api::prepare_restore(backup, &catalog_path).map_err(|e| {
+        // 先にバックアップを検証して復元しておく（カタログの隣の別のファイル。今のカタログは変えないので、
+        // 開いたままでよい）。使えないバックアップなら、開いているカタログを閉じずに返す。
+        let plan = genzo_api::prepare_restore(&backup, &catalog_path).map_err(|e| {
             let mut info = e.info();
             if matches!(info.kind, ErrorKind::CatalogCorrupt) {
                 info.hint = Some(
@@ -474,6 +516,18 @@ impl AppState {
             }
             info
         })?;
+        if self
+            .session()
+            .is_some_and(|s| same_file(&s.catalog_path, &catalog_path))
+            && let Err(e) = self.close_locked(false)
+        {
+            // 閉じられない（保存待ちの現像設定を保存できない）: 差し替えずに、復元したファイルを片付ける
+            // （バックアップから作った写しなので、消しても失うものはない）。
+            if let Err(re) = std::fs::remove_file(&plan.restored_path) {
+                tracing::warn!(error = %re, path = %plan.restored_path.display(), "復元したファイルを片付けられない");
+            }
+            return Err(e.info());
+        }
         let displaced = genzo_api::apply_restore(&plan).map_err(|e| {
             let mut info = e.info();
             info.hint = Some(format!(
@@ -487,11 +541,34 @@ impl AppState {
             Err(e) => (None, Some(e)),
         };
         Ok(RestoreOutcome {
-            backup: backup.to_path_buf(),
+            backup,
             displaced,
             status,
             open_error,
         })
+    }
+}
+
+/// カタログのファイルの状態を確かめる（読めなければ file_access のエラー）。
+fn inspect(path: &Path) -> Result<CatalogFileState, ErrorInfo> {
+    catalog_file::inspect(path).map_err(|e| {
+        error(
+            ErrorKind::FileAccess,
+            format!("{} を確かめられません: {e}", path.display()),
+            Some("ファイルの場所・ドライブの接続・権限を確かめてください"),
+        )
+    })
+}
+
+/// 同じファイルか。書き方が同じか、どちらもあって、リンクと `..` を解決したパスが同じなら同じ
+/// （Windows では大文字と小文字の違いも解決する）。
+fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -506,17 +583,41 @@ fn absolute(path: &Path) -> Result<PathBuf, ErrorInfo> {
     })
 }
 
-/// コアのイベントを送り先に転送するスレッド（コアが閉じてチャネルが切れたら終わる）。
-fn spawn_forwarder(core: &Core, sink: EventSink) {
+/// コアのイベントを送り先に転送するスレッドの止め方（モジュールの doc の「イベント」）。
+struct Forwarder {
+    /// 送ってよいか。スレッドは、このロックを持ったまま確かめてから送る（止めた後に送らないため）。
+    active: Arc<Mutex<bool>>,
+}
+
+impl Forwarder {
+    /// 止める: 送っている途中のイベントがあれば送り終えるのを待ち、その後は送らない（スレッドは次の
+    /// イベントを受けたとき、またはチャネルが切れたときに終わる）。
+    fn stop(&self) {
+        *self.active.lock() = false;
+    }
+}
+
+/// コアのイベントを送り先に転送するスレッドを作る（止めるか、コアが閉じてチャネルが切れたら終わる）。
+fn spawn_forwarder(core: &Core, sink: EventSink) -> Forwarder {
+    // 起動時の警告は CatalogStatus::warnings で返すので、購読したときに先に届く分（同じもの）は送らない。
+    // 起動時の警告はコアを開く処理の中でだけ記録されるので、数はここで決まる。
+    let replayed = core.startup_warnings().len();
     let rx = core.subscribe();
+    let active = Arc::new(Mutex::new(true));
+    let flag = Arc::clone(&active);
     let spawned = std::thread::Builder::new()
         .name("genzo-events".to_owned())
         .spawn(move || {
-            while let Ok(event) = rx.recv() {
+            for event in rx.iter().skip(replayed) {
+                let active = flag.lock();
+                if !*active {
+                    break;
+                }
                 sink(&event);
             }
         });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "イベントを転送するスレッドを作れない");
     }
+    Forwarder { active }
 }

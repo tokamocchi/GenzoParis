@@ -11,7 +11,10 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "app:dev": "node ../scripts/tauri.mjs dev",
+    "app:worker": "node ../scripts/prepare-worker.mjs",
+    "app:build": "node ../scripts/build-app.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "3.14.13",
