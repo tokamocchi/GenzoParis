@@ -28,17 +28,23 @@ export function chooseLibrawLibName(fileNames) {
 /**
  * ワーカーの読み込む DLL をたどり、同梱する DLL を決める（Windows）。
  *
- * LibRaw のフォルダ（`findDll` が探す場所）にある DLL だけを同梱し、その DLL の依存もたどる。Visual C++ の
- * ランタイムと OS の DLL は同梱しない（docs/packaging.md）。
+ * - LibRaw のフォルダ（`findDll` が探す場所）にある DLL を同梱し、その DLL の依存もたどる。
+ * - Visual C++ のランタイムの DLL（`vcruntime140.dll`・`msvcp140.dll` など）は、Visual Studio の再頒布用のフォルダ
+ *   （`findVcRuntimeDll` が探す場所）から同梱し、その依存もたどる（ワーカーと同じフォルダに置く「アプリと一緒に置く」
+ *   配置。管理者の権限が要らない。決定事項ログ No.65・73、docs/packaging.md）。見つからないものは
+ *   `vcRuntimeMissing` に入れる（呼び出し側でエラーにする）。
+ * - OS の DLL（UCRT の `api-ms-win-crt-*`・`ucrtbase.dll` を含む。Windows 10 以降は OS の一部）は同梱しない。
  *
  * @param {{ imports: string[], delayImports: string[] }} root ワーカーの読み込む DLL
  * @param {{
  *   findDll: (name: string) => string | null,
+ *   findVcRuntimeDll?: (name: string) => string | null,
  *   readImports: (file: string) => { imports: string[], delayImports: string[] },
  * }} io ファイルを探す・読む処理（テストでは差し替える）
  * @returns {{
  *   bundled: Array<{ name: string, source: string }>,
- *   vcRuntime: string[],
+ *   vcRuntime: Array<{ name: string, source: string }>,
+ *   vcRuntimeMissing: string[],
  *   system: string[],
  *   notFound: string[],
  * }} `notFound` は、LibRaw のフォルダになく、OS の DLL の一覧にもない DLL（OS の DLL でなければ同梱が要る）
@@ -46,16 +52,25 @@ export function chooseLibrawLibName(fileNames) {
 export function planWindowsDlls(root, io) {
   const bundled = new Map();
   const vcRuntime = new Map();
+  const vcRuntimeMissing = new Map();
   const system = new Map();
   const notFound = new Map();
   const queue = [root];
+  const seen = (key) =>
+    bundled.has(key) || vcRuntime.has(key) || vcRuntimeMissing.has(key) || system.has(key) || notFound.has(key);
   while (queue.length > 0) {
     const current = queue.shift();
     for (const name of [...current.imports, ...current.delayImports]) {
       const key = dllKey(name);
-      if (bundled.has(key) || vcRuntime.has(key) || system.has(key) || notFound.has(key)) continue;
+      if (seen(key)) continue;
       if (isVcRuntimeDll(name)) {
-        vcRuntime.set(key, name);
+        const source = io.findVcRuntimeDll?.(name) ?? null;
+        if (source === null) {
+          vcRuntimeMissing.set(key, name);
+          continue;
+        }
+        vcRuntime.set(key, { name, source });
+        queue.push(io.readImports(source));
         continue;
       }
       if (isWindowsSystemDll(name)) {
@@ -74,9 +89,59 @@ export function planWindowsDlls(root, io) {
   return {
     bundled: [...bundled.values()],
     vcRuntime: [...vcRuntime.values()],
+    vcRuntimeMissing: [...vcRuntimeMissing.values()],
     system: [...system.values()],
     notFound: [...notFound.values()],
   };
+}
+
+/**
+ * Visual Studio の再頒布用のフォルダ（`VC\Redist\MSVC\<版>\<アーキテクチャ>`）のアーキテクチャの名前。
+ *
+ * @param {string} triple Rust の target triple
+ * @returns {string | null}
+ */
+export function vcRedistArch(triple) {
+  const arch = triple.split("-")[0];
+  if (arch === "x86_64") return "x64";
+  if (arch === "aarch64") return "arm64";
+  if (/^i[3-6]86$/.test(arch)) return "x86";
+  return null;
+}
+
+/**
+ * 再頒布用のフォルダの版（`VC\Redist\MSVC` の下のフォルダ名）を選ぶ。Visual Studio が既定として書く
+ * `VC\Auxiliary\Build\Microsoft.VCRedistVersion.default.txt` の版があればそれを、なければ数字の版の最大を使う。
+ *
+ * @param {string | null} defaultVersionText `Microsoft.VCRedistVersion.default.txt` の中身（なければ null）
+ * @param {string[]} dirNames `VC\Redist\MSVC` の下のフォルダ名
+ * @returns {string | null}
+ */
+export function pickVcRedistVersion(defaultVersionText, dirNames) {
+  const preferred = defaultVersionText?.trim();
+  if (preferred && dirNames.includes(preferred)) return preferred;
+  const versions = dirNames.filter((n) => /^\d+(\.\d+)*$/.test(n));
+  if (versions.length === 0) return null;
+  const cmp = (a, b) => {
+    const x = a.split(".").map(Number);
+    const y = b.split(".").map(Number);
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+      const d = (x[i] ?? 0) - (y[i] ?? 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  };
+  return versions.sort(cmp).at(-1) ?? null;
+}
+
+/**
+ * 再頒布用のフォルダ（アーキテクチャの下）の中で、ランタイムの DLL を探すフォルダか（`Microsoft.VC143.CRT`・
+ * `Microsoft.VC143.OpenMP` など）。デバッグ版（再頒布できない）は除く。
+ *
+ * @param {string} name
+ */
+export function isVcRedistFolder(name) {
+  return /^Microsoft\.VC\d+\./i.test(name) && !/debug/i.test(name);
 }
 
 /**

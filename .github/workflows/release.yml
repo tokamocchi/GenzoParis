@@ -10,6 +10,8 @@
 # 手順（OS ごと）: 公開の範囲の確認 →（タグのときは版の確認）→ 画面のビルド → LibRaw を入れる → ワーカーのビルドと LibRaw の収集
 # （scripts/prepare-worker.mjs）→ tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json
 # （scripts/build-app.mjs）→ 確認（ワーカーが同梱の LibRaw で起動できるか）→ artifact に置く。
+# Windows は、ワーカーと LibRaw の DLL が使う Visual C++ のランタイムの DLL も同梱する（ランナーの Visual Studio の
+# 再頒布用のフォルダから。決定事項ログ No.73）。
 # 確認に通らなかった配布物は、配る用の artifact には置かない（調べるために「-unverified」の名前で置く）。
 #
 # **未確認**: このワークフローは GitHub Actions でまだ実行していない（2026-10-12 に作成。Linux の .deb で同じ
@@ -164,6 +166,17 @@ jobs:
           # インストール先（ユーザーごとのインストールの既定。実機で未確認）。
           $dir = Join-Path $env:LOCALAPPDATA 'GenzoParis'
           Get-ChildItem $dir
+          # 同梱の一覧（scripts/prepare-worker.mjs が作る bundled-libs.txt）の DLL が、すべてインストール先にあるか。
+          # Visual C++ のランタイムはランナーの OS のフォルダにもあるので、起動の確認だけでは同梱の漏れを見逃す。
+          $listed = Get-Content crates/genzo-app/binaries/bundled-libs.txt |
+            Where-Object { $_ -notmatch '^#' -and $_.Trim() -ne '' } |
+            ForEach-Object { ($_ -split "`t")[0] } |
+            Where-Object { $_ -like '*.dll' }
+          if (-not ($listed | Where-Object { $_ -match '^vcruntime\d+\.dll$' })) { throw "同梱の一覧に Visual C++ のランタイムがない" }
+          foreach ($name in $listed) {
+            if (-not (Test-Path (Join-Path $dir $name))) { throw "同梱したはずの $name がインストール先にない" }
+          }
+          Write-Output "インストール先にある同梱の DLL: $($listed -join ', ')"
           # DLL をインストール先と OS のフォルダからだけ探すよう、PATH を OS のフォルダだけにして起動する
           # （ランナーの PATH に LibRaw などの DLL があると、同梱の漏れを見逃すため）。
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"

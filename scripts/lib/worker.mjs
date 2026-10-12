@@ -9,7 +9,8 @@
 // 3. LibRaw の共有ライブラリとその依存を crates/genzo-app/binaries/libs に集め、Tauri に渡す追加の設定
 //    crates/genzo-app/binaries/tauri.libs.conf.json を作る。
 //    - Windows: ワーカーの読み込む DLL を PE のヘッダからたどり、LibRaw のフォルダ（vcpkg なら
-//      installed/<triplet>/bin）にある DLL を集める。インストール先のフォルダ（ワーカーと同じ場所）に置く。
+//      installed/<triplet>/bin）にある DLL と、Visual C++ のランタイムの DLL（Visual Studio の再頒布用のフォルダ。
+//      下の「Visual C++ のランタイム」）を集める。インストール先のフォルダ（ワーカーと同じ場所）に置く。
 //    - macOS: `otool -l` で依存をたどり、Homebrew の dylib を集める。install_name_tool で参照を
 //      `@executable_path/../Frameworks/...`（ワーカー）・`@loader_path/...`（dylib どうし）に書き換え、
 //      codesign で署名し直す（アドホック。書き換えると署名が壊れ、Apple Silicon では動かなくなるため）。
@@ -27,6 +28,14 @@
 //   LIBRAW_LIB_DIR で探す。
 // - macOS・Linux: pkg-config（Homebrew の libraw、apt の libraw-dev）。
 //
+// Visual C++ のランタイム（Windows。決定事項ログ No.73）: ワーカーと LibRaw の DLL が読み込むランタイムの DLL
+// （vcruntime140.dll・msvcp140.dll など）を、次の順に探したフォルダから同梱する（見つからなければエラー）。
+// 1. 環境変数 GENZO_VC_REDIST_DIR（DLL のあるフォルダ。path.delimiter で区切って複数）
+// 2. 環境変数 VCToolsRedistDir（Visual Studio の開発者のコマンドプロンプトが設定する。…\VC\Redist\MSVC\<版>\）
+// 3. vswhere で見つけた Visual Studio（Build Tools を含む）の VC\Redist\MSVC\<版>
+// 2・3 では、<アーキテクチャ>（x64 など）の下の Microsoft.VC*.CRT・Microsoft.VC*.OpenMP などを探す（デバッグ版は除く）。
+// 本体（genzo-paris）は Tauri がランタイムを静的にリンクするので、ランタイムを読み込まない。
+//
 // macOS の最小の版: Homebrew の dylib は、ビルドした Mac（GitHub Actions ならランナー）の macOS の版向けの
 // bottle なので、tauri.conf.json の minimumSystemVersion（12.0）より新しい macOS 向けになりうる。そのままでは、
 // 古い macOS でアプリは起動するのにワーカーが起動せず RAW を開けない。配る相手の macOS の版は人の判断なので、
@@ -40,7 +49,15 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { LIBS_DIR, chooseLibrawLibName, libsTauriConfig, planWindowsDlls } from "./bundle.mjs";
+import {
+  LIBS_DIR,
+  chooseLibrawLibName,
+  isVcRedistFolder,
+  libsTauriConfig,
+  pickVcRedistVersion,
+  planWindowsDlls,
+  vcRedistArch,
+} from "./bundle.mjs";
 import {
   checkMacosMinimum,
   installNameToolArgs,
@@ -112,7 +129,9 @@ export function prepareWorker() {
   /** @type {string | undefined} .app の最小の版を上げるとき、その版 */
   let raisedMinimum;
   if (os === "windows") {
-    bundled = collectWindowsDlls(sidecar, dllDirs, libsDir);
+    const r = collectWindowsDlls(sidecar, dllDirs, findVcRedistDirs(env, triple), libsDir);
+    bundled = r.bundled;
+    notes.push(...r.notes);
   } else if (os === "macos") {
     const r = collectMacosDylibs(built, sidecar, libsDir);
     bundled = r.bundled;
@@ -165,19 +184,96 @@ function setupWindowsLibraw(env) {
     : [path.join(env.LIBRAW_LIB_DIR, "..", "bin"), env.LIBRAW_LIB_DIR];
 }
 
-/** Windows: ワーカーの読み込む DLL をたどり、LibRaw のフォルダにあるものを集める。 */
-function collectWindowsDlls(worker, dllDirs, libsDir) {
+/**
+ * Windows: Visual C++ のランタイムの DLL を探すフォルダ（上の「Visual C++ のランタイム」の順）。
+ *
+ * @returns {string[]}
+ */
+export function findVcRedistDirs(env, triple) {
+  if (env.GENZO_VC_REDIST_DIR) {
+    return env.GENZO_VC_REDIST_DIR.split(path.delimiter).filter((d) => d !== "");
+  }
+  const arch = vcRedistArch(triple);
+  if (!arch) throw new Error(`Visual C++ のランタイムのアーキテクチャが分からない: ${triple}`);
+  const archDirs = (versionDir) => {
+    const dir = path.join(versionDir, arch);
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && isVcRedistFolder(e.name))
+      .map((e) => path.join(dir, e.name));
+  };
+  if (env.VCToolsRedistDir) {
+    const dirs = archDirs(env.VCToolsRedistDir);
+    if (dirs.length > 0) return dirs;
+  }
+  const vswhere = path.join(
+    env["ProgramFiles(x86)"] || "C:\\Program Files (x86)",
+    "Microsoft Visual Studio",
+    "Installer",
+    "vswhere.exe",
+  );
+  if (!fs.existsSync(vswhere)) {
+    throw new Error(
+      `vswhere が見つからない（${vswhere}）。Visual Studio（Build Tools）を入れるか、環境変数 GENZO_VC_REDIST_DIR に` +
+        "Visual C++ のランタイムの DLL のあるフォルダを指定する（docs/packaging.md）",
+    );
+  }
+  const installs = capture(vswhere, [
+    "-latest",
+    "-products",
+    "*",
+    "-requires",
+    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+    "-property",
+    "installationPath",
+  ])
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  for (const install of installs) {
+    const redistRoot = path.join(install, "VC", "Redist", "MSVC");
+    if (!fs.existsSync(redistRoot)) continue;
+    const defaultFile = path.join(install, "VC", "Auxiliary", "Build", "Microsoft.VCRedistVersion.default.txt");
+    const version = pickVcRedistVersion(
+      fs.existsSync(defaultFile) ? fs.readFileSync(defaultFile, "utf8") : null,
+      fs.readdirSync(redistRoot),
+    );
+    if (!version) continue;
+    const dirs = archDirs(path.join(redistRoot, version));
+    if (dirs.length > 0) return dirs;
+  }
+  throw new Error(
+    `Visual C++ のランタイムの再頒布用のフォルダが見つからない（${arch}。vswhere: ${installs.join(", ") || "なし"}）。` +
+      "環境変数 GENZO_VC_REDIST_DIR で指定できる（docs/packaging.md）",
+  );
+}
+
+/** フォルダの中の DLL の索引（小文字の名前 → パス。先に渡したフォルダを優先する）。 */
+function indexDlls(dirs) {
   const index = new Map();
-  for (const dir of dllDirs) {
+  for (const dir of dirs) {
     if (!fs.existsSync(dir)) continue;
     for (const f of fs.readdirSync(dir)) {
       const key = f.toLowerCase();
       if (key.endsWith(".dll") && !index.has(key)) index.set(key, path.join(dir, f));
     }
   }
+  return index;
+}
+
+/**
+ * Windows: ワーカーの読み込む DLL をたどり、LibRaw のフォルダにあるものと、Visual C++ のランタイムを集める。
+ *
+ * @returns {{ bundled: Array<{ name: string, source: string }>, notes: string[] }}
+ */
+function collectWindowsDlls(worker, dllDirs, vcRedistDirs, libsDir) {
+  const index = indexDlls(dllDirs);
+  const vcIndex = indexDlls(vcRedistDirs);
   const readImports = (file) => readPeImports(new Uint8Array(fs.readFileSync(file)));
   const plan = planWindowsDlls(readImports(worker), {
     findDll: (name) => index.get(name.toLowerCase()) ?? null,
+    findVcRuntimeDll: (name) => vcIndex.get(name.toLowerCase()) ?? null,
     readImports,
   });
   if (!plan.bundled.some((b) => /raw/i.test(b.name))) {
@@ -186,22 +282,30 @@ function collectWindowsDlls(worker, dllDirs, libsDir) {
         `見つからなかった DLL: ${plan.notFound.join(", ") || "なし"}）`,
     );
   }
-  for (const b of plan.bundled) {
+  if (plan.vcRuntimeMissing.length > 0) {
+    throw new Error(
+      `Visual C++ のランタイムの DLL が再頒布用のフォルダにない: ${plan.vcRuntimeMissing.join(", ")}` +
+        `（探した場所: ${vcRedistDirs.join(", ")}）`,
+    );
+  }
+  const all = [...plan.bundled, ...plan.vcRuntime];
+  for (const b of all) {
     fs.copyFileSync(b.source, path.join(libsDir, b.name));
     console.log(`同梱: ${b.name} ← ${b.source}`);
-  }
-  if (plan.vcRuntime.length > 0) {
-    console.log(
-      `注意: Visual C++ のランタイム（${plan.vcRuntime.join(", ")}）は同梱しない。利用者の PC に` +
-        "「Microsoft Visual C++ 再頒布可能パッケージ（x64）」が要る（docs/packaging.md）",
-    );
   }
   if (plan.notFound.length > 0) {
     console.warn(
       `警告: 次の DLL は LibRaw のフォルダになく、OS の DLL の一覧にもない。OS の DLL でなければ同梱が要る: ${plan.notFound.join(", ")}`,
     );
   }
-  return plan.bundled;
+  const notes =
+    plan.vcRuntime.length > 0
+      ? [
+          `# Visual C++ のランタイム（アプリと一緒に置く配置。Windows Update では更新されない。決定事項ログ No.73）: ` +
+            `${plan.vcRuntime.map((v) => v.name).join(", ")}（${vcRedistDirs.join(", ")}）`,
+        ]
+      : [];
+  return { bundled: all, notes };
 }
 
 /**

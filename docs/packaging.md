@@ -4,7 +4,7 @@ GenzoParis を社内の数名に配るための、配布物の作り方・入れ
 
 - 作成: AI（2026-10-12）。**この Linux の開発環境で確かめたのは、同じスクリプトで Linux の .deb を作り、本体とワーカーが入ることまで** です（6 章）。Windows・macOS の配布物は、実機でも GitHub Actions でもまだ作っていません（7 章の「未確認の事項」）。
 - 関係する決定: [決定事項ログ](decision_log.md) の No.32（ワーカーを別の実行ファイルにし、本体を LibRaw に依存させない）・No.62（FFmpeg を同梱しない）・No.63（既定のカタログの場所）。
-- **法的な事項（LibRaw の LGPL の扱い、依存ライブラリ・Visual C++ のランタイムの再頒布、FFmpeg）は、人・専門家の確認待ちです**（8 章）。確認が済むまでは、社外に配らないでください。
+- **法的な事項**: LibRaw の LGPL の扱いと依存ライブラリのライセンスは、利用者が確認済みと回答しました（2026-10-12。implementation_status の判断の表 No.61・62）。**Visual C++ のランタイムの再頒布の条件（同梱するようにした。2.2）と FFmpeg は、人・専門家の確認待ちです**（8 章）。
 - 署名・公証はしません（社内の数名への配布のため）。署名が必要かどうかは人が判断します（[01 の SYS-08](01_feature_inventory.md)）。
 
 ## 1. 配布物の構成
@@ -13,7 +13,7 @@ GenzoParis を社内の数名に配るための、配布物の作り方・入れ
 
 | OS | 形式 | 入る場所と中身 |
 |---|---|---|
-| Windows（x64） | NSIS のインストーラー（`GenzoParis_<版>_x64-setup.exe`）。ユーザーごとのインストールで、管理者の権限は要らない（`tauri.conf.json` の `installMode: currentUser`） | `%LOCALAPPDATA%\GenzoParis\` に、本体 `genzo-paris.exe`・ワーカー `genzo-worker.exe`・LibRaw の DLL（vcpkg なら `raw_r.dll`）とその依存の DLL・`uninstall.exe` |
+| Windows（x64） | NSIS のインストーラー（`GenzoParis_<版>_x64-setup.exe`）。ユーザーごとのインストールで、管理者の権限は要らない（`tauri.conf.json` の `installMode: currentUser`） | `%LOCALAPPDATA%\GenzoParis\` に、本体 `genzo-paris.exe`・ワーカー `genzo-worker.exe`・LibRaw の DLL（vcpkg なら `raw_r.dll`）とその依存の DLL・Visual C++ のランタイムの DLL（`VCRUNTIME140.dll`・`MSVCP140.dll` など。2.2）・`uninstall.exe` |
 | macOS（Apple Silicon） | `.dmg`（`GenzoParis_<版>_aarch64.dmg`）。中の `GenzoParis.app` を「アプリケーション」へ入れる | `GenzoParis.app/Contents/MacOS/` に本体 `genzo-paris` とワーカー `genzo-worker`、`Contents/Frameworks/` に LibRaw の dylib（`libraw_r.*.dylib`）とその依存（libomp・little-cms2・jpeg-turbo など） |
 | Linux（確認用） | `.deb`（`GenzoParis_<版>_amd64.deb`） | `/usr/bin/genzo-paris`・`/usr/bin/genzo-worker`。LibRaw は同梱しない（OS のパッケージを使う。配布の対象ではない） |
 
@@ -85,10 +85,13 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
 
 5. 成果物: `target\release\bundle\nsis\GenzoParis_0.1.0_x64-setup.exe`。同梱した DLL は `crates\genzo-app\binaries\bundled-libs.txt` で確かめられます。
 
-スクリプトは、ワーカー（`genzo-worker.exe`）の PE のヘッダから読み込む DLL をたどり、LibRaw のフォルダ（vcpkg の `bin`）にある DLL だけを集めます（`scripts/lib/pe.mjs`。dumpbin は使わない）。OS の DLL と Visual C++ のランタイムは集めず、一覧に表示します。
+スクリプトは、ワーカー（`genzo-worker.exe`）の PE のヘッダから読み込む DLL をたどり、LibRaw のフォルダ（vcpkg の `bin`）にある DLL と、Visual C++ のランタイムの DLL を集めます（`scripts/lib/pe.mjs`・`scripts/lib/bundle.mjs`。dumpbin は使わない）。OS の DLL（UCRT の `api-ms-win-crt-*`・`ucrtbase.dll` を含む。Windows 10 以降は OS の一部）は集めません。
 
-**Visual C++ のランタイム**: 本体 `genzo-paris.exe` は、Visual C++ のランタイムを静的にリンクします（Tauri の CLI が `tauri build` のときに環境変数 `STATIC_VCRUNTIME` を設定し、tauri-build がリンクの設定を変える。@tauri-apps/cli の CHANGELOG と tauri-build 2.6.3 の `static_vcruntime.rs`）。一方、ワーカーと vcpkg の LibRaw の DLL は、ランタイムの DLL（`VCRUNTIME140.dll`・`MSVCP140.dll` など）を使います。**利用者の PC に「Microsoft Visual C++ 再頒布可能パッケージ（x64）」が入っていないと、ワーカーが起動せず RAW を開けません**（多くの PC には他のアプリと一緒に入っていますが、入っているかは PC によります）。対応は人が決めてください（8 章）:
-(a) 利用者に再頒布可能パッケージを入れてもらう（今の方式）、(b) ランタイムの DLL をインストール先に一緒に置く、(c) インストーラーのフック（`bundle.windows.nsis.installerHooks`）で再頒布可能パッケージを入れる（Tauri の資料に例がある）。
+**Visual C++ のランタイム**: 本体 `genzo-paris.exe` は、Visual C++ のランタイムを静的にリンクします（Tauri の CLI が `tauri build` のときに環境変数 `STATIC_VCRUNTIME` を設定し、tauri-build がリンクの設定を変える。@tauri-apps/cli の CHANGELOG と tauri-build 2.6.3 の `static_vcruntime.rs`）。一方、ワーカーと vcpkg の LibRaw の DLL は、ランタイムの DLL（`VCRUNTIME140.dll`・`MSVCP140.dll` など）を使います。**これらの DLL は、インストール先（ワーカーと同じフォルダ）に一緒に置きます**（アプリと一緒に置く配置。決定事項ログ No.73。2026-10-12 に利用者の指示で、利用者に再頒布可能パッケージを入れてもらう方式から変更）。Windows は実行ファイルと同じフォルダの DLL を先に探すので、再頒布可能パッケージが入っていない PC でもワーカーが起動します。
+
+- DLL は、ビルドした PC（GitHub Actions ならランナー）の Visual Studio（Build Tools を含む）の再頒布用のフォルダ（`VC\Redist\MSVC\<版>\x64\Microsoft.VC*.CRT` など）から集めます。探す順は、環境変数 `GENZO_VC_REDIST_DIR`（DLL のあるフォルダ）→ `VCToolsRedistDir` → vswhere で見つけた Visual Studio です。見つからなければ止まります（`scripts/lib/worker.mjs`）。デバッグ版は使いません。
+- **アプリと一緒に置いた DLL は、Windows Update では更新されません。** ランタイムにセキュリティの修正が出たときは、新しい Visual Studio でビルドし直したインストーラーを配ってください（再頒布可能パッケージが PC に入っていても、ワーカーは同じフォルダの DLL を使います）。
+- 再頒布の条件: Visual Studio のライセンスで再頒布できるファイル（Visual Studio の `REDIST.TXT` の一覧）に当たります。**最終の判断は人が行ってください**（8 章）。
 
 ### 2.3 macOS
 
@@ -215,7 +218,7 @@ FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくて�
 | 1 | release.yml を GitHub Actions で一度も実行していない | 手動で実行し、両 OS の成果物と最後の確認の手順が通るかを見る |
 | 2 | Windows: vcpkg の libraw の `.lib`・DLL の名前（`raw_r`）と、スレッドセーフな版であること（vcpkg の port のファイルで確認しただけ） | 2.2 の手順で作り、`bundled-libs.txt` と ARW の展開を確かめる |
 | 3 | Windows: 集めた DLL だけで、別の PC（vcpkg のない PC）でワーカーが起動するか | 別の PC に入れて ARW を開く。release.yml の確認は vcpkg のあるランナーで、DLL は PATH にないが、OS の DLL の一覧の漏れは見つけられない |
-| 4 | Windows: Visual C++ のランタイムがない PC での動き（2.2） | ランタイムのない PC か、新しく入れた Windows で確かめる |
+| 4 | Windows: Visual C++ のランタイムがない PC での動き（2.2。ランタイムの DLL を同梱するようにした。決定事項ログ No.73） | 再頒布可能パッケージを入れていない PC か、新しく入れた Windows で、RAW を開けるか確かめる |
 | 5 | Windows: NSIS のインストーラーの `/S`（無人インストール）、インストール先、アンインストーラーの「アプリのデータを削除する」の動き | 実機で確かめる |
 | 6 | Windows: SmartScreen・スマート アプリ コントロールでの動き（3.1） | 実機で確かめる |
 | 7 | macOS: `otool -l` の出力の読み取り、dylib の書き換え・署名（スクリプトは出力の例でテストしただけ） | 2.3 の手順で作り、`otool -L` と `DYLD_PRINT_LIBRARIES=1 …/genzo-worker --version` で、`.app` の中の dylib を読むことを確かめる |
@@ -234,7 +237,7 @@ FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくて�
 
 1. **LibRaw の同梱と LGPL-2.1**（決定 No.32、台帳の 3.1 節）: 配布物に LibRaw の共有ライブラリを入れるときに、LGPL の条件を満たす方法（ライセンスの文書を同梱するか、対応するソースの提供の方法、利用者がライブラリを差し替えられること）。今の配布物には **ライセンスの文書を入れていません**。macOS では、`.app` の中の dylib を差し替えると署名が壊れるため、差し替えた人がアドホック署名し直す必要がある点も含めて確認してください。
 2. **LibRaw の依存ライブラリのライセンス**: Windows（vcpkg）は jasper・lcms・zlib・libjpeg-turbo、macOS（Homebrew）は libomp・little-cms2・jpeg-turbo（実際に同梱したものは `bundled-libs.txt`）。それぞれのライセンスと、表記の要否を確認し、台帳に追加してください。
-3. **Visual C++ のランタイムの扱い**（2.2）: 利用者に入れてもらうか、DLL を同梱するか（同梱する場合は Microsoft の再頒布の条件の確認）。
+3. **Visual C++ のランタイムの扱い**（2.2）: DLL をインストール先に同梱する（決定事項ログ No.73。利用者の指示、2026-10-12）。Microsoft の再頒布の条件（`REDIST.TXT`）の確認と、Windows Update で更新されないことの扱い（ビルドし直して配る）は人が判断する。
 4. **FFmpeg**（決定 No.62、台帳の 3.4 節）: 各自が入れる FFmpeg のビルドの構成と、H.264 / H.265 の特許の扱い。
 5. **macOS の最小の版**（2.3）: 配る相手の Mac の macOS の版を確かめ、`.app` の最小の版を上げる（`GENZO_ALLOW_NEWER_MINOS=1`）か、LibRaw とその依存を古い版向けにビルドするかを決める。
 6. **署名・公証の要否**（SYS-08）: 社内の数名への配布なら不要としていますが、配る範囲が広がる場合や、会社の規則で署名が求められる場合は、Windows のコード署名の証明書（有償の場合あり）と、Apple Developer Program（有償）が要ります。費用・手続きは確認していません。

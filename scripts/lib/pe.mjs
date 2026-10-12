@@ -162,8 +162,8 @@ export function dllKey(name) {
 }
 
 /**
- * Visual C++ のランタイムの DLL か（アプリと一緒に置くか、利用者が再頒布可能パッケージを入れるかは
- * 人の判断。docs/packaging.md）。
+ * Visual C++ のランタイムの DLL か（Visual Studio の再頒布用のフォルダから、アプリと一緒に置く。
+ * scripts/lib/bundle.mjs の planWindowsDlls、決定事項ログ No.73）。
  */
 export function isVcRuntimeDll(name) {
   return /^(msvcp\d+(_\d+|_atomic_wait|_codecvt_ids)?|vcruntime\d+(_\d+)?|concrt\d+|vccorlib\d+|vcomp\d+)\.dll$/i.test(
