@@ -523,13 +523,19 @@ fn schedule_regenerate_with(inner: &Arc<Inner>, variant_id: VariantId, priority:
         tracing::warn!(error = %e, "作り直し待ちの印を付けられない");
     }
     let weak = Arc::downgrade(inner);
-    let _ =
+    let mut jobs = inner.regen_jobs.lock();
+    // 終わったものを除く（予約中・実行中のものだけを残す）。
+    jobs.retain(|_, h| !h.is_finished());
+    let handle =
         inner
             .background
             .submit_latest(format!("regenerate-{variant_id}"), priority, move |ctx| {
                 let Some(inner) = weak.upgrade() else {
                     return Ok(());
                 };
+                if let Some(hook) = &inner.on_regenerate_start {
+                    hook(variant_id);
+                }
                 if let Err(e) = regenerate_one(&inner, variant_id, ctx.token())
                     && !e.is_cancelled()
                 {
@@ -542,6 +548,21 @@ fn schedule_regenerate_with(inner: &Arc<Inner>, variant_id: VariantId, priority:
                 }
                 Ok(())
             });
+    jobs.insert(variant_id, handle);
+}
+
+/// `variant_id` の L0 / L1 の作り直しが、予約中か実行中か。予約中なら優先度を `priority` まで上げる
+/// （下げはしない）。
+fn regenerate_in_flight(inner: &Inner, variant_id: VariantId, priority: Priority) -> bool {
+    let jobs = inner.regen_jobs.lock();
+    let Some(handle) = jobs.get(&variant_id).filter(|h| !h.is_finished()) else {
+        return false;
+    };
+    if handle.priority() > priority {
+        // 実行中・直前に終わったものは変えられない（false）が、どちらでも作り直しは進んでいる。
+        let _ = handle.set_priority(priority);
+    }
+    true
 }
 
 /// 起動時に、前回作り直せなかった（作り直し待ちの印が残っている）variant の L0 / L1 を作り直すジョブを
@@ -632,12 +653,15 @@ impl Core {
     ///
     /// 取り込みの後に L0 / L1 を作り直さない既定（[`crate::CoreConfig::render_previews_after_import`]。
     /// implementation_status の No.24 の (b)）で、ルーペなど表示に要るときに作るための入口。同じ variant の
-    /// 予約が続いても、作る処理は最新の 1 件にまとめる。
+    /// 作り直しが予約中・実行中なら、置き換えずに（予約中なら優先度を P1 に上げて）待つ（表示のたびの
+    /// 要求で、実行中の作り直しを取り消して作り直し続けないため）。
     pub fn request_preview(&self, variant_id: VariantId) -> Result<Option<PathBuf>, ApiError> {
         if let Some(path) = self.preview_path(variant_id)? {
             return Ok(Some(path));
         }
-        schedule_regenerate_with(&self.inner, variant_id, Priority::P1);
+        if !regenerate_in_flight(&self.inner, variant_id, Priority::P1) {
+            schedule_regenerate_with(&self.inner, variant_id, Priority::P1);
+        }
         Ok(None)
     }
 

@@ -715,6 +715,7 @@ export type Command =
   | { type: "close_develop" }
   | { type: "undo"; variant_id: VariantId }
   | { type: "redo"; variant_id: VariantId }
+  | { type: "go_to_history"; variant_id: VariantId; entry_id: HistoryEntryId }
   | { type: "history"; variant_id: VariantId }
   | { type: "copy_settings"; variant_id: VariantId }
   | {

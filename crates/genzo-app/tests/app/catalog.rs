@@ -459,11 +459,15 @@ pub fn failed_save_keeps_the_catalog_open_until_retry_or_discard() {
     let path2 = env2.catalog("捨てる.db");
     let (state, id) = open_with_failing_saves(&env2, &path2);
     assert!(state.close_catalog(false).unwrap_err().still_open());
+    // ほかのスレッド（genzo:// の処理など）がコアを持っていても、ここで閉じる（参照が外れるのを待たない）。
+    let held = state.core().unwrap();
     state.close_catalog(true).unwrap();
+    assert!(held.is_closed(), "ほかの参照が残っていても閉じた");
     assert!(state.session().is_none());
     assert_kind(state.core(), ErrorKind::Closed);
     genzo_catalog::testing::allow_develop_writes(&path2).unwrap();
     let reopened = state.open_catalog(&path2, false).unwrap();
+    drop(held);
     assert_eq!(
         reopened.startup.previous_shutdown,
         PreviousShutdown::Unclean,

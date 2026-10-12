@@ -25,6 +25,7 @@ import type {
   Flag,
   FolderInfo,
   FrameInfo,
+  HistoryEntryId,
   HistoryItem,
   IndexOf,
   JobInfo,
@@ -136,6 +137,9 @@ export const undo = async (variant_id: VariantId) =>
   (await execute({ type: "undo", variant_id }, "settings_or_none")).settings;
 export const redo = async (variant_id: VariantId) =>
   (await execute({ type: "redo", variant_id }, "settings_or_none")).settings;
+/** 履歴の項目の位置へ 1 回で移る（その項目がない・すでにその位置なら null）。 */
+export const goToHistory = async (variant_id: VariantId, entry_id: HistoryEntryId) =>
+  (await execute({ type: "go_to_history", variant_id, entry_id }, "settings_or_none")).settings;
 export const history = async (variant_id: VariantId): Promise<HistoryItem[]> =>
   (await execute({ type: "history", variant_id }, "history")).entries;
 export const copySettings = async (variant_id: VariantId): Promise<DevelopSettings> =>

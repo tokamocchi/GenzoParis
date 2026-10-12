@@ -3,10 +3,9 @@
 //
 // - 履歴はコアの history（古い順）を新しい順に出し、今の位置（is_current）を強調する。developStore の
 //   historyVersion（ドラッグの終了・Undo / Redo・保存のイベントで増える）で読み直す。
-// - 項目をクリックすると、その位置まで Undo / Redo を繰り返して戻る。保存待ちの変更があると Undo の前に
-//   保存されて履歴が 1 件増えるので、先に保存してから履歴を読み直して回数を決める（送信の列の中で行う）。
-//   コアは 1 回ごとに保存して変更を知らせるので、移っている間は履歴を読み直さず、終わってから 1 回だけ読む
-//   （1 回で移るコマンド go_to_history の公開はコアに依頼中）。
+// - 項目をクリックすると、コアの go_to_history でその位置へ 1 回で移る（送信の列の中で行う）。保存待ちの
+//   変更があれば、コアが先に保存する（そのときに消えた項目へは移らない）。移っている間は履歴を読み直さず、
+//   終わってから 1 回だけ読む。
 
 import { useEffect, useRef, useState } from "react";
 
@@ -17,7 +16,7 @@ import { actions, appStore, useApp } from "../state/app";
 import { developStore, enqueue, redo, undo, useDevelop } from "../state/develop";
 import { shallowEqual } from "../state/store";
 import { Section } from "../components/Section";
-import { historyAvailability, historyRows, historySteps, redoAvailable } from "./historyMath";
+import { historyAvailability, historyRows, redoAvailable } from "./historyMath";
 import "./develop.css";
 
 /** 履歴を読み直すまでの待ち（ミリ秒。仮置き）。続けて届く変更の知らせ（Undo / Redo のたびの保存など）をまとめる。 */
@@ -26,28 +25,20 @@ const HISTORY_RELOAD_DELAY_MS = 80;
 /** 履歴の位置へ移っている途中か（その間は履歴を読み直さない）。 */
 let historyMoving = false;
 
-/** 履歴の項目の位置まで戻る（進む）。 */
+/** 履歴の項目の位置へ移る。 */
 function goToHistory(variantId: VariantId, target: HistoryEntryId): Promise<void> {
   return enqueue(async () => {
     if (developStore.get().variantId !== variantId) return;
     let settings: DevelopSettings | null = null;
     historyMoving = true;
     try {
-      // 保存待ちの変更を先に保存する（Undo の前の保存で履歴が増え、回数がずれないように）。
-      await core.flushDevelop();
-      const entries = await core.history(variantId);
-      const steps = historySteps(entries, target);
-      if (steps === null || steps === 0) return;
-      for (let i = 0; i < Math.abs(steps); i++) {
-        const s = steps < 0 ? await core.undo(variantId) : await core.redo(variantId);
-        if (!s) break;
-        settings = s;
-      }
+      settings = await core.goToHistory(variantId, target);
+      if (!settings) actions.notify("info", "その履歴の項目はなくなりました（保存待ちの変更を保存したため）");
     } catch (e) {
       actions.reportError(e, "履歴の位置に戻せません");
     } finally {
       historyMoving = false;
-      // 途中で失敗しても、動いたところまでの状態を画面に反映する（履歴もここで 1 回だけ読み直す）。
+      // 失敗しても、今の状態を画面に反映する（履歴もここで 1 回だけ読み直す）。
       try {
         const state = await core.developState();
         developStore.set((cur) => {

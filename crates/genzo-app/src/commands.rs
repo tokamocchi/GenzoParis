@@ -395,7 +395,13 @@ pub async fn quit_app(
     state: Shared<'_>,
     discard_unsaved: bool,
 ) -> Result<(), CloseFailure> {
-    close_catalog(state, discard_unsaved).await?;
+    match close_catalog(state, discard_unsaved).await {
+        Ok(()) => {}
+        // 開いたまま（保存できなかった）なら終わらない（画面が再試行か破棄かを選ばせる）。
+        Err(f) if f.still_open => return Err(f),
+        // 閉じた後の段階のエラー（ワーカーの終了など）は、記録して終わる（lib.rs の終了の要求と同じ）。
+        Err(f) => tracing::warn!(error = ?f.error, "カタログを閉じる処理でエラー"),
+    }
     crate::QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
     app.exit(0);
     Ok(())

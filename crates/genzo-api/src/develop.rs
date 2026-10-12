@@ -32,7 +32,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use genzo_jobs::{JobOptions, Priority, SupersedePolicy};
-use genzo_model::{CropRect, DevelopSettings, Phase, RenderQuality, VariantId};
+use genzo_model::{CropRect, DevelopSettings, HistoryEntryId, Phase, RenderQuality, VariantId};
 use genzo_pipeline::finish::output::{Dither, quantize_u8};
 use genzo_pipeline::{PhotoSource, PreviewRequest, SourceImage};
 use genzo_worker::Lane;
@@ -1136,10 +1136,38 @@ impl Core {
         self.step_history(variant_id, true)
     }
 
+    /// 履歴の項目 `entry` の位置へ 1 回で移る（DEV-27。履歴のパネルで項目を選んだとき）。保存待ちの変更が
+    /// あれば、先に保存してから移る（保存で、今の位置より後の項目は消える）。移った後の設定を返し、その項目が
+    /// ない（保存で消えた・別の variant の項目）・すでにその位置にいるときは `None`（何も変えない）。
+    ///
+    /// Undo / Redo を繰り返すのと同じ結果になるが、保存・変更の知らせ・描き直しは 1 回だけ。
+    pub fn go_to_history(
+        &self,
+        variant_id: VariantId,
+        entry: HistoryEntryId,
+    ) -> Result<Option<DevelopSettings>, ApiError> {
+        self.move_history(variant_id, HistoryMove::To(entry))
+    }
+
     fn step_history(
         &self,
         variant_id: VariantId,
         forward: bool,
+    ) -> Result<Option<DevelopSettings>, ApiError> {
+        self.move_history(
+            variant_id,
+            if forward {
+                HistoryMove::Redo
+            } else {
+                HistoryMove::Undo
+            },
+        )
+    }
+
+    fn move_history(
+        &self,
+        variant_id: VariantId,
+        to: HistoryMove,
     ) -> Result<Option<DevelopSettings>, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
@@ -1155,10 +1183,16 @@ impl Core {
             let _write = inner.develop.save.lock();
             let result = inner.with_catalog_api(|c| {
                 reject_videos(c, &[variant_id])?;
-                Ok(if forward {
-                    c.redo_develop(variant_id)?
-                } else {
-                    c.undo_develop(variant_id)?
+                Ok(match to {
+                    HistoryMove::Undo => c.undo_develop(variant_id)?,
+                    HistoryMove::Redo => c.redo_develop(variant_id)?,
+                    HistoryMove::To(entry) => {
+                        let history = c.history(variant_id)?;
+                        match history.iter().find(|h| h.id == entry) {
+                            Some(h) if !h.is_current => Some(c.go_to_history(variant_id, entry)?),
+                            _ => None,
+                        }
+                    }
                 })
             })?;
             if result.is_some() {
@@ -1427,6 +1461,14 @@ impl Core {
             .with_rotation(f64::from(g.angle_deg))?;
         Ok(genzo_pipeline::finish::constrain_crop(&frames, &g.crop))
     }
+}
+
+/// 履歴の移動のしかた（[`Core::undo`]・[`Core::redo`]・[`Core::go_to_history`]）。
+#[derive(Debug, Clone, Copy)]
+enum HistoryMove {
+    Undo,
+    Redo,
+    To(HistoryEntryId),
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { DevelopSettings, HistogramData, HistoryItem } from "../api/types";
-import { historyAvailability, historyRows, historySteps, redoAvailable } from "./historyMath";
+import { historyAvailability, historyRows, redoAvailable } from "./historyMath";
 import { activatesOnEnter } from "./keyTargets";
 import { clipIndicators, clippingOverlay, histogramHeights, histogramScale } from "./pixels";
 import {
@@ -119,13 +119,6 @@ describe("履歴の移動", () => {
     is_current: current,
   });
   const entries = [item(1), item(2), item(3, true), item(4), item(5)];
-  it("前の項目は Undo の回数（負）、後の項目は Redo の回数（正）", () => {
-    expect(historySteps(entries, 1)).toBe(-2);
-    expect(historySteps(entries, 3)).toBe(0);
-    expect(historySteps(entries, 5)).toBe(2);
-    expect(historySteps(entries, 99)).toBeNull();
-    expect(historySteps([item(1), item(2)], 1)).toBeNull();
-  });
   it("今の位置の前後に項目があれば Undo / Redo できる", () => {
     expect(historyAvailability(entries)).toEqual({ canUndo: true, canRedo: true });
     expect(historyAvailability([item(1, true)])).toEqual({ canUndo: false, canRedo: false });

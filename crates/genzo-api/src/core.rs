@@ -39,6 +39,7 @@
 //! ロックだけで、スケジューラは持っている間に API 側のロックを取らない（取り消しの通知などはロックの外で
 //! 行う）。ほかの処理がこのロックを持ったまま取るロックはない。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,7 +47,8 @@ use std::thread::JoinHandle;
 
 use chrono::{FixedOffset, Utc};
 use genzo_catalog::{Catalog, OpenOptions, PreviewCache, ThumbStore};
-use genzo_jobs::{MemoryBudget, Scheduler};
+use genzo_jobs::{JobHandle, MemoryBudget, Scheduler};
+use genzo_model::VariantId;
 use genzo_pipeline::{Engine, EngineConfig};
 use genzo_worker::{PoolConfig, WorkerConfig, WorkerPool};
 use parking_lot::Mutex;
@@ -93,6 +95,10 @@ pub struct CoreHooks {
     /// よらずに確かめられる。
     #[doc(hidden)]
     pub on_develop_save: Option<Arc<dyn Fn(DevelopSaveStage) + Send + Sync>>,
+    /// テスト専用: L0 / L1 の作り直し（1 枚ずつのバックグラウンドの処理）が始まった直後に、スケジューラの
+    /// スレッドで呼ぶ（値は variant）。
+    #[doc(hidden)]
+    pub on_regenerate_start: Option<Arc<dyn Fn(genzo_model::VariantId) + Send + Sync>>,
 }
 
 /// 現像設定の保存（現像のロックを外して書く保存）の途中の段階（テスト専用のフック
@@ -139,6 +145,7 @@ impl Default for CoreHooks {
             on_settings_update: None,
             on_region_request: None,
             on_develop_save: None,
+            on_regenerate_start: None,
         }
     }
 }
@@ -175,12 +182,17 @@ pub(crate) struct Inner {
     pub on_region_request: Option<Arc<dyn Fn(RegionRequestStage) + Send + Sync>>,
     /// [`CoreHooks::on_develop_save`]。
     pub on_develop_save: Option<Arc<dyn Fn(DevelopSaveStage) + Send + Sync>>,
+    /// [`CoreHooks::on_regenerate_start`]。
+    pub on_regenerate_start: Option<Arc<dyn Fn(VariantId) + Send + Sync>>,
     pub settings: Mutex<CoreSettings>,
     /// 設定の更新（[`Core::update_settings`]）を 1 つずつにするロック（保存・メモリ上の設定への反映・
     /// キャッシュの上限への反映を、別々のロックで行うので、更新全体を守る。ロックの順序の節）。
     pub settings_update: Mutex<()>,
     /// 最後に投入した撮影日時の推定し直しのジョブ（続けて設定を変えたときに、前のジョブを取り消す）。
     pub reresolve_job: Mutex<Option<u64>>,
+    /// variant ごとの、最後に予約した L0 / L1 の作り直し（`previews` の `schedule_regenerate_with`）。
+    /// 表示のための要求（[`Core::request_preview`]）が続いても、予約済み・実行中のものを置き換えない。
+    pub regen_jobs: Mutex<HashMap<VariantId, JobHandle<()>>>,
     /// キャッシュの世代（カタログの `cache_generation`。キャッシュキーの材料。復元の後に変わる）。
     pub cache_generation: String,
     /// ワーカーの RAW デコーダの識別子（起動時に確かめる。L0 / L1 のキャッシュキーの材料。`deps` の doc）。
@@ -433,9 +445,11 @@ impl Core {
             on_settings_update: hooks.on_settings_update,
             on_region_request: hooks.on_region_request,
             on_develop_save: hooks.on_develop_save,
+            on_regenerate_start: hooks.on_regenerate_start,
             settings: Mutex::new(settings),
             settings_update: Mutex::new(()),
             reresolve_job: Mutex::new(None),
+            regen_jobs: Mutex::new(HashMap::new()),
             cache_generation,
             raw_decoder,
             startup: StartupReport {
@@ -473,7 +487,7 @@ impl Core {
         match crate::develop::spawn_saver(&inner) {
             Ok(saver) => *inner.saver.lock() = Some(saver),
             Err(e) => {
-                let _ = close_inner(&inner, true);
+                let _ = close_inner(&inner, CloseMode::LastChance);
                 return Err(e);
             }
         }
@@ -481,7 +495,7 @@ impl Core {
         match crate::search::spawn_refresher(&inner) {
             Ok(h) => *inner.search_refresher.lock() = Some(h),
             Err(e) => {
-                let _ = close_inner(&inner, true);
+                let _ = close_inner(&inner, CloseMode::LastChance);
                 return Err(e);
             }
         }
@@ -506,7 +520,18 @@ impl Core {
     /// 利用者に知らせ、再試行か破棄かを選ばせること。保存の後の段階（ワーカーの終了・カタログを閉じるなど）
     /// のエラーは、閉じた後（`is_closed` が `true`）に返り、閉じ直しはできない。
     pub fn close(&self) -> Result<(), ApiError> {
-        close_inner(&self.inner, false)
+        close_inner(&self.inner, CloseMode::Normal)
+    }
+
+    /// 保存待ちの現像設定を保存できなくても閉じる（[`Core::close`] が保存できずに失敗した後、利用者が
+    /// 「保存せずに閉じる」を選んだとき）。最後にもう一度だけ保存を試し、できなければ保存待ちの設定を捨てて、
+    /// カタログに「正常に終了した」印を付けずに閉じる（drop と同じ。次に開いたとき、前回の異常終了として
+    /// 警告する）。ほかのスレッドがコアを持っていても、この呼び出しの中で閉じる。
+    ///
+    /// 戻ったときは常に閉じている（[`Core::is_closed`] が `true`）。エラーは、保存の後の段階（ワーカーの
+    /// 終了・カタログを閉じるなど）で起きたものだけ（捨てると決めた設定の保存の失敗は返さない。ログには残す）。
+    pub fn close_discarding(&self) -> Result<(), ApiError> {
+        close_inner(&self.inner, CloseMode::Discard)
     }
 
     /// 終了しているか。[`Core::close`] が、保存待ちの現像設定の保存を終えて終了の処理に入った後（その後の段階で
@@ -563,18 +588,31 @@ impl Drop for Core {
     fn drop(&mut self) {
         // 閉じ直せない最後の機会（保存できなくても、閉じるしかない）。
         if !self.inner.closed.load(Ordering::Acquire)
-            && let Err(e) = close_inner(&self.inner, true)
+            && let Err(e) = close_inner(&self.inner, CloseMode::LastChance)
         {
             tracing::warn!(error = %e, "コアを閉じるときにエラーが起きました");
         }
     }
 }
 
-/// 終了の処理（[`Core::close`]・drop）。`last_chance` は、保存待ちの現像設定を保存できなかったときに、
-/// 閉じるのをやめて、もう一度閉じられるようにせず、未保存の設定を捨てて閉じるか（drop など、閉じ直せない
-/// とき。[`Core::close`] の doc）。
-fn close_inner(inner: &Arc<Inner>, last_chance: bool) -> Result<(), ApiError> {
+/// 終了の処理のしかた（[`close_inner`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseMode {
+    /// [`Core::close`]: 保存待ちの現像設定を保存できなければ、何も閉じずにエラーを返す。
+    Normal,
+    /// drop: 閉じ直せない最後の機会。保存できなければ、未保存の設定を捨てて閉じ、保存のエラーも返す。
+    LastChance,
+    /// [`Core::close_discarding`]: 利用者が破棄を選んだ。保存できなければ捨てて閉じ、保存のエラーは返さない。
+    Discard,
+}
+
+/// 終了の処理（[`Core::close`]・[`Core::close_discarding`]・drop）。`mode` が [`CloseMode::Normal`] 以外
+/// なら、保存待ちの現像設定を保存できなかったときに、閉じるのをやめて、もう一度閉じられるようにせず、
+/// 未保存の設定を捨てて閉じる（[`Core::close`] の doc）。
+fn close_inner(inner: &Arc<Inner>, mode: CloseMode) -> Result<(), ApiError> {
     use crate::develop::ShutdownOutcome;
+
+    let last_chance = mode != CloseMode::Normal;
 
     let mut first_err: Option<ApiError> = None;
     // 保存待ちの現像設定を保存できなかったか（できなければ、正常に終了した印を付けない）。
@@ -591,7 +629,9 @@ fn close_inner(inner: &Arc<Inner>, last_chance: bool) -> Result<(), ApiError> {
         ShutdownOutcome::Abandoned(e) => {
             tracing::warn!(error = %e, "保存待ちの現像設定を保存できないまま閉じる");
             unsaved = true;
-            first_err = Some(e);
+            if mode != CloseMode::Discard {
+                first_err = Some(e);
+            }
         }
     }
     let mut keep = |r: Result<(), ApiError>| {

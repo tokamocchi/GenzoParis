@@ -1,20 +1,6 @@
 // 履歴の移動の計算（DEV-27。DOM を使わない純粋な計算）。
 
-import type { HistoryEntryId, HistoryItem } from "../api/types";
-
-/**
- * 今の位置（is_current）から `target` の項目まで動く回数（負は Undo の回数、正は Redo の回数、0 は
- * 動かない）。今の位置か `target` が見つからなければ null。
- *
- * `entries` はコアの history の応答（古い順）。Undo / Redo は 1 回で隣の項目へ動く（genzo-catalog の
- * step_history）。
- */
-export function historySteps(entries: readonly HistoryItem[], target: HistoryEntryId): number | null {
-  const cur = entries.findIndex((e) => e.is_current);
-  const to = entries.findIndex((e) => e.id === target);
-  if (cur < 0 || to < 0) return null;
-  return to - cur;
-}
+import type { HistoryItem } from "../api/types";
 
 /** 表示用に新しい順に並べ、今の位置より後（やり直せる項目）に印を付ける。 */
 export function historyRows(

@@ -13,7 +13,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use genzo_model::{ColorLabel, CropRect, DevelopSettings, ExportSettings, Flag, Rating, VariantId};
+use genzo_model::{
+    ColorLabel, CropRect, DevelopSettings, ExportSettings, Flag, HistoryEntryId, Rating, VariantId,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::core::Core;
@@ -197,6 +199,13 @@ pub enum Command {
     Redo {
         /// variant。
         variant_id: VariantId,
+    },
+    /// 履歴の項目の位置へ 1 回で移る（[`crate::Core::go_to_history`]）。→ [`Response::SettingsOrNone`]
+    GoToHistory {
+        /// variant。
+        variant_id: VariantId,
+        /// 移る先の履歴の項目（[`HistoryItem::id`]）。
+        entry_id: HistoryEntryId,
     },
     /// 履歴。→ [`Response::History`]
     History {
@@ -536,6 +545,12 @@ impl Core {
             },
             C::Redo { variant_id } => R::SettingsOrNone {
                 settings: self.redo(variant_id)?.map(Box::new),
+            },
+            C::GoToHistory {
+                variant_id,
+                entry_id,
+            } => R::SettingsOrNone {
+                settings: self.go_to_history(variant_id, entry_id)?.map(Box::new),
             },
             C::History { variant_id } => R::History {
                 entries: self.history(variant_id)?,

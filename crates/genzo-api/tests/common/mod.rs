@@ -310,6 +310,12 @@ pub fn make_video(path: &Path, creation_time: &str) -> bool {
 
 /// LibRaw が有効なら、合成 DNG（埋め込みの JPEG のプレビュー付き）を書く。書かなければ `false`。
 pub fn make_dng(path: &Path, datetime_exif: &str) -> bool {
+    make_dng_with(path, datetime_exif, true)
+}
+
+/// [`make_dng`] と同じだが、埋め込みのプレビューを付けるかを選べる（付けなければ、埋め込みのサムネイルの
+/// ない RAW になる）。
+pub fn make_dng_with(path: &Path, datetime_exif: &str, with_preview: bool) -> bool {
     if !genzo_raw::LIBRAW_ENABLED {
         eprintln!("LibRaw が無効な build のため、DNG の部分を飛ばす");
         return false;
@@ -346,7 +352,7 @@ pub fn make_dng(path: &Path, datetime_exif: &str) -> bool {
     )
     .unwrap();
     let options = genzo_raw::dng::DngOptions {
-        preview: Some(genzo_raw::dng::DngPreview::Jpeg {
+        preview: with_preview.then_some(genzo_raw::dng::DngPreview::Jpeg {
             width: w,
             height: h,
             data: jpeg,

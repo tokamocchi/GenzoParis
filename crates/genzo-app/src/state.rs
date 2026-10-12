@@ -441,11 +441,15 @@ impl AppState {
             }
             Err(e) if !session.core.is_closed() => {
                 if discard_unsaved {
-                    // 最後にもう一度だけ保存を試し、できなければ捨てて閉じる（drop。genzo-api の doc）。
-                    // ほかのスレッドが一時的にコアを持っていても、最後の参照が外れた時点で閉じる。
+                    // 最後にもう一度だけ保存を試し、できなければ捨てて閉じる（genzo-api の
+                    // `close_discarding`）。ほかのスレッドが一時的にコアを持っていても、ここで閉じる
+                    // （ロックファイルの解放・正常な終了の印などを、終了の前に終える）。
+                    let result = session.core.close_discarding();
                     session.events.stop();
-                    drop(session);
-                    Ok(())
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(e) => Err(CloseError::ClosedWithError(e.info())),
+                    }
                 } else {
                     *self.session.write() = Some(session);
                     Err(CloseError::SaveFailed(e.info()))
