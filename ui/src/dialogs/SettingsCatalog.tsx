@@ -1,17 +1,18 @@
 // 設定の「カタログ」（SYS-05）: カタログに保存する設定（キャッシュの場所と上限・既定の書き出しの色空間・
 // 既定のタイムゾーン）、カタログの情報、カタログの切り替え、キャッシュの整理。
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
 import type { CatalogStats, CoreSettings, ErrorInfo, OutputColorSpace } from "../api/types";
 import { actions, useApp } from "../state/app";
-import { setCoreSettings, switchCatalog } from "./catalogActions";
-import { type CatalogPick, pickExistingCatalog, pickNewCatalog } from "./catalogPick";
+import { setCoreSettings, switchCatalog, waitJobUntilClosed } from "./catalogActions";
+import { type CatalogPick, pickExistingCatalog } from "./catalogPick";
 import { describeGarbage, formatCount, parentDir } from "./dialogFormat";
 import { COLOR_SPACE_OPTIONS } from "./exportLogic";
 import { chooseFolder } from "./native";
+import { useNewCatalogPicker } from "./NewCatalogPicker";
 import { Busy, ErrorBox, PathBox } from "./parts";
 import {
   type CatalogSettingsForm,
@@ -26,7 +27,9 @@ async function collectGarbage(): Promise<void> {
   try {
     const jobId = await core.collectCacheGarbage();
     actions.trackJob(jobId, "collect_garbage");
-    const info = await actions.waitJob(jobId);
+    const info = await waitJobUntilClosed(jobId);
+    // 終わる前にカタログを閉じた（取り消したことは閉じる処理が知らせる）。
+    if (info === "closed") return;
     const r = info.result;
     if (r && r.type === "collect_garbage") actions.notify("success", describeGarbage(r));
     else if (info.state === "cancelled") actions.notify("info", "キャッシュの整理を取り消しました");
@@ -46,7 +49,37 @@ export function SettingsCatalog() {
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [switchError, setSwitchError] = useState<string | null>(null);
+  /** カタログの切り替え中（今のカタログを閉じている。保存待ちの保存・終了時のバックアップを含む）。 */
+  const [switching, setSwitching] = useState(false);
   const [gcRunning, setGcRunning] = useState(false);
+  const mounted = useRef(true);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+    },
+    [],
+  );
+
+  const handlePick = async (pick: CatalogPick) => {
+    if (pick.kind === "cancel" || pick.kind === "no_save_dialog") return;
+    if (pick.kind === "error") {
+      setSwitchError(pick.message);
+      return;
+    }
+    setSwitchError(null);
+    setSwitching(true);
+    try {
+      await switchCatalog(pick.path, pick.create);
+    } finally {
+      // 閉じられたら、このダイアログは閉じている。
+      if (mounted.current) setSwitching(false);
+    }
+  };
+  const newPicker = useNewCatalogPicker(
+    catalog ? parentDir(catalog.catalog_path) : null,
+    handlePick,
+    switching,
+  );
 
   // 開いた時点の値は古いことがあるので、コアから読み直す。
   useEffect(() => {
@@ -128,16 +161,6 @@ export function SettingsCatalog() {
     setGcRunning(true);
     await collectGarbage();
     setGcRunning(false);
-  };
-
-  const handlePick = async (pick: CatalogPick) => {
-    if (pick.kind === "cancel" || pick.kind === "no_save_dialog") return;
-    if (pick.kind === "error") {
-      setSwitchError(pick.message);
-      return;
-    }
-    setSwitchError(null);
-    await switchCatalog(pick.path, pick.create);
   };
 
   const dir = parentDir(catalog.catalog_path);
@@ -285,13 +308,17 @@ export function SettingsCatalog() {
           今のカタログを閉じてから開きます（保存待ちの現像設定は保存します）。
         </p>
         <div className="dlg-row">
-          <button className="btn" onClick={() => void pickExistingCatalog(dir).then(handlePick)}>
+          <button className="btn" onClick={() => void pickExistingCatalog(dir).then(handlePick)} disabled={switching}>
             別のカタログを開く…
           </button>
-          <button className="btn" onClick={() => void pickNewCatalog(dir).then(handlePick)}>
+          <button className="btn" onClick={newPicker.start} disabled={switching}>
             新しいカタログを作る…
           </button>
+          {switching && (
+            <Busy>今のカタログを閉じています…（保存待ちの現像設定の保存・終了時のバックアップを含みます）</Busy>
+          )}
         </div>
+        {newPicker.form}
         {switchError && <div className="dlg-error">{switchError}</div>}
       </div>
     </div>

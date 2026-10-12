@@ -15,7 +15,7 @@
 //!   重ならないように）。閉じている途中に届いた要求は、閉じ始めた時点でカタログが開いていない扱いになり、
 //!   [`ErrorKind::Closed`] を返す。
 //! - 別のカタログを開く・復元するときに、前のカタログを閉じる処理が「閉じた後の段階のエラー」を返したら、
-//!   記録して続ける（[`continue_after_close`]）。開いたまま（保存できない）なら続けない。
+//!   記録して続ける（`continue_after_close`）。開いたまま（保存できない）なら続けない。
 //! - パスは絶対パスにしてから扱う（相対パスは今のフォルダから）。開いているカタログと同じファイルかは、
 //!   書き方（`..`・シンボリックリンク・Windows の大文字と小文字）によらずに比べる（[`same_file`]）。
 //!
@@ -505,6 +505,13 @@ impl AppState {
     /// 差し替えるのは、GenzoParis のカタログ、ないファイル、先頭が壊れたカタログ（隣のデータのフォルダに
     /// GenzoParis のデータがある。[`catalog_file::has_catalog_data`]）だけ。バックアップが使えなければ、
     /// 開いているカタログは閉じない。
+    ///
+    /// - 開いているカタログを閉じられない（保存待ちの現像設定を保存できない）、または別のアプリ（アプリ・
+    ///   CLI）がカタログを開いている（conflict）ときは、復元した写し（`*-restored-*.db`）を片付けて、何も
+    ///   変えずにエラーを返す（写しはバックアップから作り直せる。残すと、やり直すたびに写しが増える）。
+    /// - 閉じる処理が閉じた後の段階でエラーを返したときは、カタログは閉じているので、記録して差し替える
+    ///   （`continue_after_close`）。
+    /// - 差し替えの途中の失敗（名前の変更など）では、写しを残し、その場所を案内に書く。
     pub fn restore(&self, catalog_path: &Path, backup: &Path) -> Result<RestoreOutcome, ErrorInfo> {
         let _guard = self.lifecycle.lock();
         let catalog_path = absolute(catalog_path)?;
@@ -610,7 +617,7 @@ fn remove_restored_copy(path: &Path) {
 }
 
 /// カタログのファイルを判定する（[`catalog_file::assess`]。読めなければ file_access のエラー）。
-pub fn assess(path: &Path) -> Result<Assessment, ErrorInfo> {
+fn assess(path: &Path) -> Result<Assessment, ErrorInfo> {
     catalog_file::assess(path).map_err(|e| {
         error(
             ErrorKind::FileAccess,
@@ -687,7 +694,8 @@ mod tests {
     use super::*;
 
     /// 別のカタログを開く・復元する前に閉じた結果: 開いたまま（保存できない）なら止め、閉じた後の段階の
-    /// エラーなら続ける（結合テストの backup.rs でも、ワーカーを終わらせて起こした場合を確かめる）。
+    /// エラーなら続ける（結合テストの catalog.rs・backup.rs でも、ワーカーを終わらせて起こした場合を
+    /// 確かめる）。
     #[test]
     fn only_a_catalog_left_open_stops_the_next_step() {
         assert!(continue_after_close(Ok(()), "テスト").is_ok());

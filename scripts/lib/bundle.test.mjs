@@ -63,6 +63,11 @@ test("同梱するライブラリの Tauri の設定", () => {
   assert.deepEqual(libsTauriConfig("macos", ["libraw_r.24.dylib", "libomp.dylib"]), {
     bundle: { macOS: { frameworks: ["binaries/libs/libomp.dylib", "binaries/libs/libraw_r.24.dylib"] } },
   });
+  // .app の最小の版を上げるとき（scripts/lib/worker.mjs）。
+  assert.deepEqual(libsTauriConfig("macos", ["libraw_r.24.dylib"], { minimumSystemVersion: "15.0" }), {
+    bundle: { macOS: { frameworks: ["binaries/libs/libraw_r.24.dylib"], minimumSystemVersion: "15.0" } },
+  });
+  assert.deepEqual(libsTauriConfig("macos", [], {}), {});
   assert.deepEqual(libsTauriConfig("linux", ["x.so"]), {});
   assert.deepEqual(libsTauriConfig("windows", []), {});
 });

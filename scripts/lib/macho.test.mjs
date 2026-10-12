@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import {
   candidatePaths,
+  checkMacosMinimum,
   compareMacosVersions,
   installNameToolArgs,
   parseOtoolLoadCommands,
@@ -220,4 +221,48 @@ test("macOS の版を比べる", () => {
   assert.ok(compareMacosVersions("11.0", "12.0") < 0);
   assert.equal(compareMacosVersions("12", "12.0"), 0);
   assert.ok(compareMacosVersions("12.0.1", "12.0") > 0);
+});
+
+test("同梱するものの最小の版が .app の最小の版より新しければ、既定ではエラー", () => {
+  const items = [
+    { name: "genzo-worker", minos: "11.0" },
+    { name: "libraw_r.24.dylib", minos: "15.0" },
+    { name: "libomp.dylib", minos: "14.0" },
+    { name: "libjpeg.8.dylib", minos: null },
+  ];
+  const denied = checkMacosMinimum(items, "12.0", false);
+  assert.equal(denied.newest, "15.0");
+  assert.deepEqual(denied.newer, [
+    { name: "libraw_r.24.dylib", minos: "15.0" },
+    { name: "libomp.dylib", minos: "14.0" },
+  ]);
+  assert.deepEqual(denied.unknown, ["libjpeg.8.dylib"]);
+  assert.match(denied.error ?? "", /GENZO_ALLOW_NEWER_MINOS=1/);
+  assert.match(denied.error ?? "", /libraw_r\.24\.dylib（minos 15\.0）/);
+  assert.equal(denied.minimumSystemVersion, "12.0");
+
+  // 明示的に許すときは通し、.app の最小の版を minos の最大に上げる。
+  const allowed = checkMacosMinimum(items, "12.0", true);
+  assert.equal(allowed.error, null);
+  assert.equal(allowed.minimumSystemVersion, "15.0");
+});
+
+test("同梱するものがすべて .app の最小の版以下なら、そのまま通す", () => {
+  const r = checkMacosMinimum(
+    [
+      { name: "genzo-worker", minos: "11.0" },
+      { name: "libraw_r.24.dylib", minos: "12.0" },
+    ],
+    "12.0",
+    false,
+  );
+  assert.equal(r.error, null);
+  assert.equal(r.newest, "12.0");
+  assert.deepEqual(r.newer, []);
+  assert.equal(r.minimumSystemVersion, "12.0");
+  // minos がどれも読み取れなくても止めない（警告だけ。scripts/lib/worker.mjs）。
+  const unknown = checkMacosMinimum([{ name: "x.dylib", minos: null }], "12.0", false);
+  assert.equal(unknown.error, null);
+  assert.equal(unknown.newest, null);
+  assert.deepEqual(unknown.unknown, ["x.dylib"]);
 });
