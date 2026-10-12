@@ -108,16 +108,22 @@ export function cancelWbTool(): void {
   if (viewStore.get().tool === "wb") viewStore.set({ tool: "none" });
 }
 
-/** 出力の画像（切り抜いた後）の点（各軸 0〜1）を中立にする WB にする。 */
+/**
+ * 表示中のプレビューの点（各軸 0〜1）を中立にする WB にする。
+ *
+ * クリックした時点で表示しているプレビューが切り抜く前の全体（uncropped）かをコアに伝える（コアは、その表示の
+ * 画像に対する割合として点を解釈する。表示を切り替えた直後でも取り違えない）。
+ */
 export async function pickWhiteBalance(x: number, y: number): Promise<void> {
   const d = developStore.get();
   const id = d.variantId;
+  const uncropped = d.frame?.header.uncropped ?? false;
   viewStore.set({ tool: "none" });
   if (id === null || !d.state) return;
   // 送信待ちの設定の後に求める（今の設定での色で中立にする）。
   await enqueue(async () => {
     try {
-      const wb = await core.whiteBalanceAt(id, clamp01(x), clamp01(y));
+      const wb = await core.whiteBalanceAt(id, clamp01(x), clamp01(y), uncropped);
       const cur = developStore.get();
       if (cur.variantId !== id || !cur.settings) return;
       applySettings({ ...cur.settings, white_balance: customWb(wb.temperature_k, wb.tint) }, false);

@@ -542,7 +542,7 @@ export interface FrameInfo {
   warnings: string[];
   /**
    * 切り抜く前の全体（G）を描いたものか（切り抜きの編集中。`set_develop_view` の `uncropped`）。
-   * 古いコアでは無い（false とみなす）。
+   * 回転で画像の外になった四隅は黒（0）で塗られ、ヒストグラムには数えない。古いコアでは無い（false とみなす）。
    */
   uncropped?: boolean;
   /**
@@ -724,7 +724,7 @@ export type Command =
       groups: SettingGroups;
     }
   | { type: "create_virtual_copy"; variant_id: VariantId; name: string | null }
-  | { type: "white_balance_at"; variant_id: VariantId; x: number; y: number }
+  | { type: "white_balance_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
   | { type: "set_develop_view"; uncropped: boolean }
   | {
       type: "constrain_crop";

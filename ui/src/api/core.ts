@@ -147,9 +147,17 @@ export const pasteSettings = async (
 ) => (await execute({ type: "paste_settings", settings, targets, groups }, "updated")).count;
 export const createVirtualCopy = async (variant_id: VariantId, name: string | null = null) =>
   (await execute({ type: "create_virtual_copy", variant_id, name }, "variant_created")).variant_id;
-/** 出力の画像（切り抜いた後）の x・y（0〜1）の点を中立にする WB（適用はしない。DEV-03 のスポイト）。 */
-export const whiteBalanceAt = async (variant_id: VariantId, x: number, y: number) => {
-  const r = await execute({ type: "white_balance_at", variant_id, x, y }, "white_balance");
+/**
+ * 表示中のプレビューの x・y（0〜1）の点を中立にする WB（適用はしない。DEV-03 のスポイト）。
+ *
+ * `uncropped` には、クリックした画像の FrameInfo.uncropped を渡す（切り抜く前の全体の表示なら、その全体に
+ * 対する割合として解釈する。回転で画像の外になった四隅を指すと invalid_input）。
+ */
+export const whiteBalanceAt = async (variant_id: VariantId, x: number, y: number, uncropped?: boolean) => {
+  const r = await execute(
+    { type: "white_balance_at", variant_id, x, y, ...(uncropped === undefined ? {} : { uncropped }) },
+    "white_balance",
+  );
   return { temperature_k: r.temperature_k, tint: r.tint };
 };
 /** 切り抜きの編集中の表示（`uncropped` なら切り抜く前の全体を描く）。 */
