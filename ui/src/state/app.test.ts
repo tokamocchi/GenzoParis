@@ -756,3 +756,14 @@ describe("ジョブの結果の問い合わせとカタログの切り替え（P
     expect(appStore.get().jobs[1]?.state).toBe("running");
   });
 });
+
+describe("カラーラベルを続けて押す（PR #2 の Codex の指摘）", () => {
+  it("読み直しの前に同じキーをもう一度押すと、書いた値で判定して外す", async () => {
+    await loadResults();
+    appStore.set({ mode: "loupe", autoAdvance: false });
+    await show(3);
+    mock.delay = (call) => ((call.args?.command as { type: string } | undefined)?.type === "set_color_label" ? 20 : 0);
+    await Promise.all([actions.toggleColorLabel("red"), actions.toggleColorLabel("red")]);
+    expect(labels[3]).toBeNull();
+  });
+});

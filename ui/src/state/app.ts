@@ -738,14 +738,25 @@ export function nextColorLabel(
  * `ids` の今のカラーラベル（読み込み済みの検索結果から。読み込んでいないものは undefined）。読み込み済みの
  * 項目を 1 回だけ順に見る（写真ごとに探すと、選択の数 × 読み込み済みの件数になる）。
  */
+/**
+ * この画面で最後に書いたカラーラベル（写真ごと）。検索結果の読み直しは少し後なので、続けて同じキーを押したとき、
+ * 読み込み済みの古い値ではなく、書いた値で外すか付けるかを決める。カタログの開閉で空にする（ラベルを変えるのは
+ * この画面の操作だけ）。
+ */
+const writtenColorLabels = new Map<VariantId, ColorLabel | null>();
+
 function loadedColorLabels(ids: readonly VariantId[]): (ColorLabel | null | undefined)[] {
-  const wanted = new Set(ids);
+  const wanted = new Set(ids.filter((id) => !writtenColorLabels.has(id)));
   const found = new Map<VariantId, ColorLabel | null>();
+  for (const id of ids) {
+    if (writtenColorLabels.has(id)) found.set(id, writtenColorLabels.get(id) ?? null);
+  }
   if (wanted.size > 0) {
+    let left = wanted.size;
     for (const v of searchCache.loaded()) {
       if (wanted.has(v.variant_id) && !found.has(v.variant_id)) {
         found.set(v.variant_id, v.color_label);
-        if (found.size === wanted.size) break;
+        if (--left === 0) break;
       }
     }
   }
@@ -757,6 +768,7 @@ async function applyColorLabel(ids: VariantId[], label: ColorLabel | null): Prom
   if (ids.length === 0) return;
   try {
     await core.setColorLabel(ids, label);
+    for (const id of ids) writtenColorLabels.set(id, label);
     await afterMark();
   } catch (e) {
     reportError(e, "カラーラベルを変えられません");
@@ -928,6 +940,7 @@ async function catalogOpened(status: CatalogStatus): Promise<void> {
     clipboard: null,
   });
   modeSeq++;
+  writtenColorLabels.clear();
   appStore.set((s) => ({ foldersVersion: s.foldersVersion + 1 }));
   for (const w of status.warnings) handleEvent(w);
   await runSearch();
@@ -957,6 +970,7 @@ function catalogClosed(): void {
     jobs: {},
   });
   modeSeq++;
+  writtenColorLabels.clear();
   for (const [id, waiters] of [...jobWaiters]) {
     jobWaiters.delete(id);
     const job = jobs[id];

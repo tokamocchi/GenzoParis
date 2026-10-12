@@ -420,23 +420,23 @@ function CaptionEditor(props: { id: VariantId; caption: string | null; disabled:
   const commit = (): Promise<void> => {
     if (dirty.current) {
       dirty.current = false;
-      const { id, draft: text, caption } = latest.current;
+      const { id, draft: text } = latest.current;
       const value = text.trim() === "" ? null : text;
-      if (value !== (caption ?? null)) {
-        chain.current = chain.current.then(async () => {
-          setSaving(true);
-          try {
-            await core.setCaption([id], value);
-            failure.current = null;
-          } catch (e) {
-            dirty.current = true;
-            failure.current = e;
-            actions.reportError(e, "キャプションを保存できません");
-          } finally {
-            setSaving(false);
-          }
-        });
-      }
+      // 編集したら、表示している保存済みの値と同じでも保存する（その前の保存が列の途中なら、表示している値は
+      // 古いので、比べて省くと、先の保存の値が残ってしまう）。
+      chain.current = chain.current.then(async () => {
+        setSaving(true);
+        try {
+          await core.setCaption([id], value);
+          failure.current = null;
+        } catch (e) {
+          dirty.current = true;
+          failure.current = e;
+          actions.reportError(e, "キャプションを保存できません");
+        } finally {
+          setSaving(false);
+        }
+      });
     }
     return chain.current;
   };
