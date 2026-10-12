@@ -9,6 +9,7 @@ import { toApiError } from "../api/errors";
 import type { CoreSettings, ErrorInfo, JobInfo } from "../api/types";
 import { actions, appStore } from "../state/app";
 import { closeDevelopSession } from "../state/develop";
+import { flushPendingWrites } from "../state/flush";
 import { isCloseSaveFailure, retryShouldCreate } from "./catalogLogic";
 import { baseName } from "./dialogFormat";
 import { clearResults } from "./resultLog";
@@ -106,8 +107,13 @@ export async function retryOpenCatalog(path: string): Promise<boolean> {
   return openCatalogAt(path, create);
 }
 
-/** 現像の送信待ちの値を送り、現像の写真を閉じる（カタログを閉じる・復元する前。保存待ちはコアが保存する）。 */
+/**
+ * 画面の送信待ちの変更を送り切る（カタログを閉じる・切り替える・復元する・終了する前。保存待ちはコアが保存する）:
+ * 編集中のキャプションなど登録された書き込み（state/flush.ts）を済ませ、現像の送信待ちの値を送り、現像の写真を
+ * 閉じる。
+ */
 async function settleDevelop(): Promise<void> {
+  await flushPendingWrites();
   if (appStore.get().mode !== "grid") actions.setMode("grid");
   await closeDevelopSession();
 }

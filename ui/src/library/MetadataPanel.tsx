@@ -19,6 +19,7 @@ import { Section } from "../components/Section";
 import { COLOR_LABEL_NAMES, formatAperture, formatBytes, formatCaptureTime, formatFocal, formatShutter } from "../format";
 import { comboLabel } from "../keyboard";
 import { actions, useApp } from "../state/app";
+import { registerFlush } from "../state/flush";
 import "./library.css";
 import {
   captureNote,
@@ -405,33 +406,48 @@ function CaptionEditor(props: { id: VariantId; caption: string | null; disabled:
   const composing = useRef(false);
   const latest = useRef({ id: props.id, draft, caption: props.caption });
   latest.current = { id: props.id, draft, caption: props.caption };
+  /** 保存の列（保存が重なっても、後に保存した値が最後に書かれるように順に送る）。 */
+  const chain = useRef<Promise<void>>(Promise.resolve());
 
   // 保存した値（読み直した詳細）が届いたら、編集していなければ合わせる。
   useEffect(() => {
     if (!dirty.current) setDraft(props.caption ?? "");
   }, [props.caption]);
 
-  const commit = async () => {
-    if (!dirty.current) return;
-    dirty.current = false;
-    const { id, draft: text, caption } = latest.current;
-    const value = text.trim() === "" ? null : text;
-    if (value === (caption ?? null)) return;
-    setSaving(true);
-    try {
-      await core.setCaption([id], value);
-    } catch (e) {
-      dirty.current = true;
-      actions.reportError(e, "キャプションを保存できません");
-    } finally {
-      setSaving(false);
+  /** 編集中の内容を保存の列に入れる（戻り値は、それまでの保存がすべて済んだら解決する）。 */
+  const commit = (): Promise<void> => {
+    if (dirty.current) {
+      dirty.current = false;
+      const { id, draft: text, caption } = latest.current;
+      const value = text.trim() === "" ? null : text;
+      if (value !== (caption ?? null)) {
+        chain.current = chain.current.then(async () => {
+          setSaving(true);
+          try {
+            await core.setCaption([id], value);
+          } catch (e) {
+            dirty.current = true;
+            actions.reportError(e, "キャプションを保存できません");
+          } finally {
+            setSaving(false);
+          }
+        });
+      }
     }
+    return chain.current;
   };
 
-  // 別の写真に移ったとき（この欄が消えるとき）も、編集中の内容を保存する。
+  // 別の写真に移ったとき（この欄が消えるとき）も、編集中の内容を保存する。カタログを閉じる・終了する前にも
+  // 保存を待つ（欄にフォーカスがあるまま ⌘Q などで終了すると、フォーカスが外れず保存されないため）。
   const commitRef = useRef(commit);
   commitRef.current = commit;
-  useEffect(() => () => void commitRef.current(), []);
+  useEffect(() => {
+    const unregister = registerFlush(() => commitRef.current());
+    return () => {
+      unregister();
+      void commitRef.current();
+    };
+  }, []);
 
   return (
     <>

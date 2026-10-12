@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { installBridge } from "../api/bridge";
 import { MockBridge } from "../api/mock";
 import type { DevelopSettings, DevelopState } from "../api/types";
+import * as core from "../api/core";
 import { applySettings, openDevelopFor } from "../state/develop";
+import { registerFlush } from "../state/flush";
 import { quitOnRequest } from "./catalogActions";
 
 function settings(exposure: number): DevelopSettings {
@@ -64,6 +66,25 @@ describe("終了の要求", () => {
       .filter((x) => x !== null);
     // 0.1 は終了の要求の前に送り始めている。0.2（送信待ち）は終了の前に送る。
     expect(seq).toEqual(["set:0.1", "ack:7", "set:0.2", "quit:false"]);
+  });
+
+  it("編集中のキャプションなど、登録された書き込みを済ませてから終了する", async () => {
+    mock.responses.set("core_execute", () => ({ type: "updated", count: 1 }));
+    mock.delay = (c) => ((c.args?.command as { type: string } | undefined)?.type === "set_caption" ? 20 : 0);
+    const unregister = registerFlush(async () => {
+      await core.setCaption([5], "夕焼け");
+    });
+    try {
+      await quitOnRequest(9);
+    } finally {
+      unregister();
+    }
+    const seq = mock.calls
+      .map((c) =>
+        c.command === "core_execute" ? (c.args?.command as { type: string }).type : c.command,
+      )
+      .filter((x) => x === "set_caption" || x === "quit_app");
+    expect(seq).toEqual(["set_caption", "quit_app"]);
   });
 
   it("処理の途中に来た 2 つめの要求には答えるだけで、終了を 2 回は始めない", async () => {
