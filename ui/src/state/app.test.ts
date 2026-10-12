@@ -658,3 +658,30 @@ describe("表示の切り替え（PR #2 の Codex の指摘）", () => {
     expect(appStore.get().selection.current).toBe(idAt(0));
   });
 });
+
+describe("選ぶ操作の競合（PR #2 の Codex の指摘）", () => {
+  it("前の選ぶ操作のページの読み込みが遅れて届いても、後の選択を上書きしない", async () => {
+    const big = 1000;
+    overrides.range = (c) => {
+      const start = c.start as number;
+      const items: VariantSummary[] = [];
+      for (let i = start; i < Math.min(big, start + (c.len as number)); i++) {
+        items.push({ variant_id: idAt(i), kind: "photo", file_name: `${i}.ARW`, color_label: null } as VariantSummary);
+      }
+      return { type: "range", generation: c.generation, start, items };
+    };
+    searchCache.reset(1, big);
+    appStore.set({ search: { generation: 1, count: big } });
+    // 位置 500 のページ（400〜599）の読み込みだけを遅くする。
+    mock.delay = (call) => {
+      const cmd = call.args?.command as { type: string; start?: number } | undefined;
+      return cmd?.type === "range" && cmd.start === 400 ? 40 : 0;
+    };
+    const first = actions.selectIndex(500);
+    const second = actions.selectIndex(10);
+    const [a, b] = await Promise.all([first, second]);
+    expect(b).toBe(true);
+    expect(a).toBe(false);
+    expect(appStore.get().selection.current).toBe(idAt(10));
+  });
+});

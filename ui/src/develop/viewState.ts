@@ -196,7 +196,7 @@ async function restoreCroppedView(): Promise<void> {
 export async function commitCrop(): Promise<void> {
   const draft = viewStore.get().crop;
   if (!draft) return;
-  ++cropSeq;
+  const seq = ++cropSeq;
   viewStore.set({ tool: "none", crop: null });
   const d = developStore.get();
   if (d.variantId === draft.variantId && d.settings && d.state) {
@@ -216,7 +216,10 @@ export async function commitCrop(): Promise<void> {
       if (changed) applySettings({ ...latest.settings, geometry: { ...g, crop, aspect: draft.aspect } }, false);
     }
   }
-  await restoreCroppedView();
+  // 切り抜いた表示に戻すのは、確定した写真のままで、その間に新しい編集を始めていないときだけ（表示の切り替え
+  // （set_develop_view）は今の写真に効くので、別の写真に移って編集を始めていると、その表示を戻してしまう）。
+  // 別の写真に移っていれば、その写真は切り抜いた表示で開いている。
+  if (seq === cropSeq && developStore.get().variantId === draft.variantId) await restoreCroppedView();
 }
 
 /** 切り抜きの編集を取り消す（Esc。枠は保存しない）。 */

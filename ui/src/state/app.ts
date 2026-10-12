@@ -465,7 +465,18 @@ async function locate(id: VariantId, hint: number | null): Promise<number | null
  * クリック）。`extend` なら表示中の写真からその写真までの範囲を足し、そうでなければその写真を足す・外す
  * （表示中の写真は外さない。外すと、表示中の写真が選択に入っていない状態になる）。
  */
-async function changeSelectionKeepingCurrent(index: number, item: VariantSummary, extend: boolean): Promise<boolean> {
+/**
+ * 選ぶ操作（selectIndex・selectAll・selectNone）の通し番号。ページの読み込みを待つ間に新しい選ぶ操作が
+ * あれば、古い操作の結果で選択を上書きしない（素早く送ったときに前の写真に戻らないように）。
+ */
+let selectSeq = 0;
+
+async function changeSelectionKeepingCurrent(
+  index: number,
+  item: VariantSummary,
+  extend: boolean,
+  seq: number,
+): Promise<boolean> {
   const id = item.variant_id;
   const sel = appStore.get().selection;
   if (!extend && id === sel.current) return false;
@@ -482,6 +493,7 @@ async function changeSelectionKeepingCurrent(index: number, item: VariantSummary
       addedItems = await rangeItems(start, target);
     }
   }
+  if (seq !== selectSeq) return false;
   rememberSelected(addedItems);
   const added = addedItems.map((v) => v.variant_id);
   appStore.set((s) => {
@@ -519,19 +531,22 @@ async function selectIndex(
   opts: { extend?: boolean; toggle?: boolean; keepCurrent?: boolean; expect?: VariantId } = {},
 ): Promise<boolean> {
   if (index < 0 || index >= searchCache.count) return false;
+  const seq = ++selectSeq;
+  const superseded = () => seq !== selectSeq;
   let item = await searchCache.fetch(index);
+  if (superseded()) return false;
   if (opts.expect !== undefined && item?.variant_id !== opts.expect) {
     const at = await locate(opts.expect, null);
-    if (at === null) return false;
+    if (at === null || superseded()) return false;
     index = at;
     item = await searchCache.fetch(index);
-    if (item?.variant_id !== opts.expect) return false;
+    if (item?.variant_id !== opts.expect || superseded()) return false;
   }
   if (!item) return false;
   const id = item.variant_id;
   const sel = appStore.get().selection;
   if (opts.keepCurrent && sel.current !== null && (opts.extend || opts.toggle)) {
-    return changeSelectionKeepingCurrent(index, item, !!opts.extend);
+    return changeSelectionKeepingCurrent(index, item, !!opts.extend, seq);
   }
   if (opts.extend && sel.anchorIndex !== null) {
     // 範囲の起点は、起点の写真の今の世代の位置（結果から外れていれば、操作の対象の写真だけ）。
@@ -546,6 +561,7 @@ async function selectIndex(
     const from = anchor ?? index;
     // 範囲の項目を集める（大きすぎる範囲は、操作の対象（index）の側から 10,000 件まで。対象は必ず含める）。
     const items = await rangeItems(from, index);
+    if (superseded()) return false;
     rememberSelected(items);
     appStore.set({
       selection: {
@@ -1110,18 +1126,22 @@ export const actions = {
   /** 選択中の写真の概要（選んだときの項目。順は決まっていない）。 */
   selectedSummaries: (): Iterable<SelectedSummary> => selectedSummaries.values(),
   async selectAll() {
+    const seq = ++selectSeq;
     const n = Math.min(searchCache.count, 10_000);
     // 今の世代の項目だけを使う（キャッシュのページの数には上限があるので、読んだ値をそのまま使う）。
     const items = await searchCache.items(0, n);
+    if (seq !== selectSeq) return;
     rememberSelected(items);
     const ids = items.map((v) => v.variant_id);
     appStore.set((s) => ({ selection: { ...s.selection, ids } }));
     if (searchCache.count > n) notify("info", `先頭の ${n.toLocaleString()} 件を選びました`);
   },
-  selectNone: () =>
+  selectNone: () => {
+    selectSeq++;
     appStore.set((s) => ({
       selection: { ...s.selection, ids: s.selection.current !== null ? [s.selection.current] : [] },
-    })),
+    }));
+  },
   targets,
   pasteTargets,
   // 選別（LIB-04・05）
