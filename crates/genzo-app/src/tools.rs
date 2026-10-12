@@ -4,10 +4,14 @@
 //! 利用者が入れた ffmpeg・ffprobe を、次の順に探す。見つけたものはワーカーに環境変数
 //! `GENZO_FFMPEG`・`GENZO_FFPROBE` で渡す（genzo-media の `video`）。
 //!
-//! 1. 設定で指定したフォルダ（[`crate::settings::AppSettings::ffmpeg_dir`]）
-//! 2. 環境変数 `PATH`
+//! 1. 設定で指定したフォルダ（[`crate::settings::AppSettings::ffmpeg_dir`]）。指定したときは**ここだけ**を
+//!    探す（なければ見つからないとして画面に出す。指定したつもりのないものを使わないため）
+//! 2. 環境変数 `PATH`（絶対パスの項目だけ。`.` などの相対パスは、今のフォルダによって変わるので使わない）
 //! 3. OS ごとの既定の場所（macOS の Finder から起動したアプリには、ターミナルの `PATH`
-//!    （Homebrew の `/opt/homebrew/bin` など）が渡らないため）
+//!    （Homebrew の `/opt/homebrew/bin` など）が渡らないため）。Windows は、本人のフォルダ（winget の
+//!    リンク）と、管理者しか書けない `Program Files` だけにする。`C:\ffmpeg\bin` のような、ほかの利用者も
+//!    作れる・書ける場所は探さない（ほかの利用者が置いた実行ファイルを、この利用者の権限で動かさないため。
+//!    CWE-427）
 //!
 //! 見つからなければ動画の登録はできるが、サムネイルとメタデータ（長さ・fps など）が取れない。画面で
 //! 案内する。
@@ -64,7 +68,6 @@ fn platform_dirs() -> Vec<PathBuf> {
         if let Some(pf) = std::env::var_os("ProgramFiles") {
             dirs.push(Path::new(&pf).join("ffmpeg").join("bin"));
         }
-        dirs.push(PathBuf::from(r"C:\ffmpeg\bin"));
     } else {
         for d in ["/usr/bin", "/usr/local/bin"] {
             dirs.push(PathBuf::from(d));
@@ -76,12 +79,17 @@ fn platform_dirs() -> Vec<PathBuf> {
 /// `stem`（ffmpeg / ffprobe）を探す。
 fn find_in(stem: &str, configured: Option<&Path>, path_var: Option<OsString>) -> Option<PathBuf> {
     let name = exe_name(stem);
-    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = configured {
-        candidates.push(dir.join(&name));
+        let c = dir.join(&name);
+        return c.is_file().then_some(c);
     }
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(p) = path_var {
-        candidates.extend(std::env::split_paths(&p).map(|d| d.join(&name)));
+        candidates.extend(
+            std::env::split_paths(&p)
+                .filter(|d| d.is_absolute())
+                .map(|d| d.join(&name)),
+        );
     }
     candidates.extend(platform_dirs().into_iter().map(|d| d.join(&name)));
     candidates.into_iter().find(|c| c.is_file())
@@ -115,6 +123,27 @@ mod tests {
             find_in("ffprobe", None, Some(path_var)),
             Some(b.path().join(exe_name("ffprobe")))
         );
+    }
+
+    /// 設定でフォルダを指定したら、そこになくても PATH・既定の場所へ進まない。PATH の相対パスは使わない。
+    #[test]
+    fn configured_dir_is_the_only_place_and_relative_path_entries_are_ignored() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(b.path().join(exe_name("ffprobe")), b"").unwrap();
+        let path_var = std::env::join_paths([b.path()]).unwrap();
+        assert_eq!(
+            find_in("ffprobe", Some(a.path()), Some(path_var)),
+            None,
+            "指定したフォルダにないのに、PATH のものを使った"
+        );
+        // 相対パスの項目（今のフォルダからの相対）は候補にしない。テストの今のフォルダ（crate のフォルダ）に
+        // ある Cargo.toml を、PATH の `.` から探しても見つけない（Windows では実行ファイルの拡張子が付くので、
+        // 名前が合わずに見つからない）。
+        assert!(Path::new("Cargo.toml").is_file());
+        let dot = std::env::join_paths([Path::new(".")]).unwrap();
+        assert_eq!(find_in("Cargo.toml", None, Some(dot)), None);
+        assert!(platform_dirs().iter().all(|d| d.is_absolute()));
     }
 
     #[test]

@@ -119,13 +119,15 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 
 ### 2.5 GitHub Actions（`.github/workflows/release.yml`）
 
-手動（Actions の画面の「Run workflow」）か、`v` で始まるタグ（`v0.1.0` など）の push で、Windows（windows-latest）と macOS（macos-latest。Apple Silicon）の配布物を作ります。手順は 2.2・2.3 と同じで、LibRaw は vcpkg（ランナーにある `VCPKG_INSTALLATION_ROOT`）と Homebrew で入れます。
+手動（Actions の画面の「Run workflow」）だけで、Windows（windows-latest）と macOS（macos-latest。Apple Silicon）の配布物を作ります（タグの push では動きません。2026-10-12 の独立レビューの指摘で変更）。手順は 2.2・2.3 と同じで、LibRaw は vcpkg（ランナーにある `VCPKG_INSTALLATION_ROOT`）と Homebrew で入れます。
 
-- タグで起動したときは、最初にタグの版（`v0.1.0` なら 0.1.0）と、`tauri.conf.json` の `version`・Cargo の版（genzo-app・genzo-worker）が同じかを確かめ、違えば止めます（配布物のファイル名・中の版は `tauri.conf.json` の版になるため。版を直してからタグを付け直す）。
-- macOS では、同梱する dylib が `.app` の最小の版より新しい macOS 向けだと止まります（2.3）。配る相手の Mac がすべてその版以降なら、手動の実行で「allow_newer_macos_libs」に印を付けて実行します（タグの push では印なしと同じ）。このとき、artifact の名前に `-macos<版>-or-later` が付き、ジョブの summary に各ファイルの `minos` が出ます。
+- **公開の範囲の確認**: リポジトリが公開（public）のときは、Actions の artifact を GitHub にログインした誰でも取得できます（2026-10-12 時点で、このリポジトリは公開）。そのため、入力の「allow_public_artifacts」に印を付けないと、最初の段階で何も作らずに止まります。印を付けるのは、配布の責任者が、配布物を誰でも取得できる状態にしてよいこと（LibRaw の LGPL などの条件・署名のない配布物を社外に出してよいか。8 章）を確かめた後だけにしてください。配る相手だけに渡したい場合は、非公開のリポジトリで実行するか、手元で作って（2.2・2.3）社内の共有の場所に置いてください。非公開のリポジトリでは、この確認は行いません。
+- 実行の画面で「Use workflow from」に `v` で始まるタグ（`v0.1.0` など）を選んだときは、最初にタグの版（`v0.1.0` なら 0.1.0）と、`tauri.conf.json` の `version`・Cargo の版（genzo-app・genzo-worker）が同じかを確かめ、違えば止めます（配布物のファイル名・中の版は `tauri.conf.json` の版になるため。版を直してからタグを付け直す）。
+- macOS では、同梱する dylib が `.app` の最小の版より新しい macOS 向けだと止まります（2.3）。配る相手の Mac がすべてその版以降なら、実行の画面で「allow_newer_macos_libs」に印を付けて実行します。このとき、artifact の名前に `-macos<版>-or-later` が付き、ジョブの summary に各ファイルの `minos` が出ます。
 - 配布物を作った後、artifact に置く **前に**、配布物の中のワーカーが同梱の LibRaw で起動できるかを確かめます。
   - Windows: インストーラーを `/S` で無人インストールし、`PATH` を OS のフォルダだけにして `genzo-worker.exe --version` を実行する（終了コードと「genzo-worker <版>」の出力）。
   - macOS: `codesign --verify`、Info.plist の最小の版、`hdiutil verify`（.dmg）を見た後、`DYLD_PRINT_LIBRARIES=1` でワーカーを起動し、終了コード・「genzo-worker <版>」の出力・dyld のエラー（`Library not loaded`）がないこと・`Contents/Frameworks` のすべての dylib を `.app` の中から読み込んだこと・Homebrew の場所から読み込んでいないことを確かめる。
+- 外部のアクション（actions/checkout など）は、コミットの SHA で固定しています（ci.yml も同じ。タグの付け替えで、配布物を作る処理が変わらないように）。SHA は 2026-10-12 に `git ls-remote` で、その時点の各タグ（コメントに書いた版）が指すコミットを調べたものです。更新するときは、新しい版のタグが指す SHA を同じ方法で調べ、差分を確かめてから書き換えてください。
 - 成果物は Actions の artifact（`genzoparis-windows-x64`・`genzoparis-macos-arm64`。30 日で消える。仮置き）に置きます。GitHub の Releases には出しません。**artifact は、リポジトリを読める人なら誰でも取得できます。リポジトリの公開の範囲を確かめてから実行してください。**
 - 途中で失敗したときは、調べるために `<名前>-unverified` の artifact（7 日で消える。仮置き）に、できたところまでの配布物と確認の記録を置きます。**`-unverified` の配布物は配らないでください。**
 - **一度も実行していません**（7 章）。最初の実行の結果を見て、ワークフローとこの資料を直してください。
@@ -167,11 +169,11 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 
 ## 4. FFmpeg の入れ方（動画のサムネイル・メタデータ）
 
-FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくても登録できますが、サムネイルとメタデータ（長さ・fps など）が取れません。アプリは ffmpeg・ffprobe を「設定で指定したフォルダ → `PATH` → OS ごとの既定の場所」の順に探します（`crates/genzo-app/src/tools.rs`）。入れた後はアプリを起動し直してください。設定の画面の「一般」で、ffmpeg・ffprobe の横に「見つかりました」と出れば使えます。
+FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくても登録できますが、サムネイルとメタデータ（長さ・fps など）が取れません。アプリは ffmpeg・ffprobe を、設定でフォルダを指定していればそのフォルダだけで、指定していなければ「`PATH`（絶対パスの項目だけ） → OS ごとの既定の場所」の順に探します（`crates/genzo-app/src/tools.rs`）。入れた後はアプリを起動し直してください。設定の画面の「一般」で、ffmpeg・ffprobe の横に「見つかりました」と出れば使えます。
 
 | OS | 入れ方 | アプリが探す既定の場所 |
 |---|---|---|
-| Windows | `winget install --id Gyan.FFmpeg -e`（パッケージの名前は `winget search ffmpeg` で確かめる。要確認） | `%LOCALAPPDATA%\Microsoft\WinGet\Links`（winget がリンクを置く場所）・`%ProgramFiles%\ffmpeg\bin`・`C:\ffmpeg\bin` |
+| Windows | `winget install --id Gyan.FFmpeg -e`（パッケージの名前は `winget search ffmpeg` で確かめる。要確認） | `%LOCALAPPDATA%\Microsoft\WinGet\Links`（winget がリンクを置く場所）・`%ProgramFiles%\ffmpeg\bin`（`C:\ffmpeg\bin` のような、ほかの利用者も書ける場所は探さない。そこに置いた場合は、設定でフォルダを指定する） |
 | macOS | `brew install ffmpeg` | `/opt/homebrew/bin`（Apple Silicon の Homebrew）・`/usr/local/bin`・`/opt/local/bin`（Finder から起動したアプリには端末の `PATH` が渡らないため） |
 
 ほかの場所に入れた場合は、設定の画面で ffmpeg のあるフォルダを指定してください。

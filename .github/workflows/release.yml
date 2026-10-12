@@ -1,12 +1,13 @@
 # GenzoParis の配布物（インストーラー）を作る（SYS-08。手順と注意は docs/packaging.md）。
 #
-# - 起動: 手動（workflow_dispatch）と、v で始まるタグ（v0.1.0 など）の push
+# - 起動: 手動（workflow_dispatch）だけ。タグ（v0.1.0 など）を選んで実行すると版を確かめる。タグの push では
+#   動かさない（成果物の置き場の公開の範囲を、実行する人がその都度確かめるため。下の「公開の範囲の確認」）
 # - Windows（windows-latest）: NSIS のインストーラー（ユーザーごとのインストール。tauri.conf.json）
 # - macOS（macos-latest。Apple Silicon）: .dmg（と、.app を tar.gz にしたもの）
 # - 署名・公証はしない（社内の数名への配布。macOS はアドホック署名だけ。tauri.bundle.conf.json）
 # - 成果物は Actions の artifact に置く（GitHub の Releases には出さない。誰に・どこで配るかは人の判断）
 #
-# 手順（OS ごと）: （タグのときは版の確認）→ 画面のビルド → LibRaw を入れる → ワーカーのビルドと LibRaw の収集
+# 手順（OS ごと）: 公開の範囲の確認 →（タグのときは版の確認）→ 画面のビルド → LibRaw を入れる → ワーカーのビルドと LibRaw の収集
 # （scripts/prepare-worker.mjs）→ tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json
 # （scripts/build-app.mjs）→ 確認（ワーカーが同梱の LibRaw で起動できるか）→ artifact に置く。
 # 確認に通らなかった配布物は、配る用の artifact には置かない（調べるために「-unverified」の名前で置く）。
@@ -23,14 +24,18 @@ on:
       # macOS: Homebrew の dylib は、ランナーの macOS の版向けの bottle なので、tauri.conf.json の
       # minimumSystemVersion（12.0）より新しい macOS 向けになりうる。その場合、既定ではエラーにする（配る相手の
       # macOS の版は人の判断。docs/packaging.md の 2.3）。印を付けると通し、.app の最小の版を同梱したものに合わせて
-      # 上げる（artifact の名前に「-macos<版>-or-later」が付く）。タグの push では常に印なし。
+      # 上げる（artifact の名前に「-macos<版>-or-later」が付く）。
       allow_newer_macos_libs:
         description: "macOS: 同梱する dylib に合わせて、.app の最小の macOS の版を上げてよい（配る相手の Mac がすべてその版以降のときだけ）"
         type: boolean
         default: false
-  push:
-    tags:
-      - "v*"
+      # 公開（public）のリポジトリでは、Actions の artifact は GitHub にログインした誰でも取得できる。配布物を
+      # 社外に出してよいか（LibRaw の LGPL などの条件、署名のない配布物）の確認が済んでいなければ、実行しない。
+      # 印がないと、公開のリポジトリでは最初の段階で止める（非公開のリポジトリでは見ない）。
+      allow_public_artifacts:
+        description: "公開のリポジトリで実行する: 配布物（artifact）を GitHub にログインした誰でも取得できる状態にしてよいことを、配布の責任者が確認した"
+        type: boolean
+        default: false
 
 # 同じ ref の配布物の作成は、新しいものが始まっても取り消さない（途中の成果物を捨てないため）。
 concurrency:
@@ -59,18 +64,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      # 公開のリポジトリでは、artifact を誰でも取得できる（上の allow_public_artifacts）。印がなければ、何も
+      # 作らずに止める（docs/packaging.md の 2.5）。
+      - name: 公開の範囲の確認
+        if: github.event.repository.private == false && !inputs.allow_public_artifacts
+        shell: bash
+        run: |
+          echo "::error::このリポジトリは公開（public）です。作った配布物（artifact）は GitHub にログインした誰でも取得できます。配布の責任者が公開の範囲を確認してから、allow_public_artifacts に印を付けて実行してください（docs/packaging.md の 2.5）。"
+          exit 1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       # Rust の版は rust-toolchain.toml（1.97.0）が決める。
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable（2026-10-12 のブランチの先頭）
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # setup-node は ci.yml と同じ版の系列（v5）。
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      # タグ（v0.2.0 など）で起動したときは、タグの版と配布物の版（tauri.conf.json の version。ファイル名・
+      # タグ（v0.2.0 など）を選んで実行したときは、タグの版と配布物の版（tauri.conf.json の version。ファイル名・
       # Info.plist・インストーラーの版になる）と Cargo の版（本体・ワーカーの版）が同じかを確かめる
       # （違う版の名前の配布物を作らないため）。
       - name: タグと版を比べる
@@ -225,7 +238,7 @@ jobs:
       # upload-artifact は Node 24 で動く最初の版の系列（v6）を使う（v5 は Node 20）。
       # macOS で .app の最小の版を上げたとき（allow_newer_macos_libs）は、名前に「-macos<版>-or-later」を付ける。
       - name: 成果物を置く
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ matrix.artifact }}${{ steps.worker.outputs.macos_min_raised == '1' && format('-macos{0}-or-later', steps.worker.outputs.macos_min_version) || '' }}
           path: |
@@ -239,7 +252,7 @@ jobs:
       # 途中で失敗したときは、調べるために「-unverified」の名前で置く（配らない。仮置き: 7 日で消える）。
       - name: 成果物を置く（失敗したとき。調べる用）
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ matrix.artifact }}-unverified
           path: |

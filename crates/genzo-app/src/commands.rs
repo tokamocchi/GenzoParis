@@ -10,7 +10,7 @@
 //! Tauri の状態（`State`）を使わない処理の本体（[`execute_command`]・[`develop_frame_bytes`]・
 //! [`region_frame_bytes`]）は別の関数にして、結合テスト（`tests/app`）から [`AppState`] で直接呼ぶ。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use genzo_api::{
@@ -365,7 +365,21 @@ pub async fn reveal_variant_file(
     .await
 }
 
+/// OS の既定のアプリで開いてよいファイルか（取り込む対象の拡張子の写真・動画だけ）。
+///
+/// カタログに記録されたパスは、ほかの人から受け取ったカタログでは任意の値になりうる。OS の既定の動作は、
+/// 実行ファイル（`.exe`・`.scr`・`.bat`・`.lnk`・`.app` など）を開かずに実行するので、取り込む対象の
+/// 拡張子でなければ開かない。
+fn openable_media(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(genzo_api::media_kind)
+        .is_some()
+        && !path.is_dir()
+}
+
 /// 元ファイルを OS の既定のアプリで開く（動画の再生など。VID-04 は v1 のため OS のアプリを使う）。
+/// 取り込む対象の拡張子の写真・動画だけを開く（[`openable_media`]）。
 #[tauri::command]
 pub async fn open_variant_file(
     app: AppHandle,
@@ -375,6 +389,16 @@ pub async fn open_variant_file(
     let state = Arc::clone(&state);
     blocking(move || {
         let path = primary_path(&state, variant_id)?;
+        if !openable_media(&path) {
+            return Err(error(
+                ErrorKind::InvalidInput,
+                format!(
+                    "{} は写真・動画の拡張子ではないため、開きません",
+                    path.display()
+                ),
+                None,
+            ));
+        }
         app.opener()
             .open_path(path.to_string_lossy(), None::<&str>)
             .map_err(|e| {
@@ -410,6 +434,28 @@ pub async fn quit_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_media_files_are_opened_with_the_default_app() {
+        assert!(openable_media(Path::new("/p/IMG_0001.ARW")));
+        assert!(openable_media(Path::new("/p/動画 01.MP4")));
+        for bad in [
+            "/p/IMG_0001.scr",
+            "/p/x.exe",
+            "/p/x.bat",
+            "/p/x.lnk",
+            "/p/x.url",
+            "/p/x.app",
+            "/p/x",
+        ] {
+            assert!(!openable_media(Path::new(bad)), "{bad}");
+        }
+        // 拡張子が写真でもフォルダなら開かない（macOS の .app のようなバンドルを含む）。
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("偽物.jpg");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(!openable_media(&dir));
+    }
 
     #[test]
     fn path_kinds_tell_folders_from_files() {
