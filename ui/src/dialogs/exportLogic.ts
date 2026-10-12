@@ -6,13 +6,13 @@
 
 import type {
   ConflictPolicy,
-  ExportItem,
+  ErrorInfo,
   ExportReport,
   ExportSettings,
   JobInfo,
   OutputColorSpace,
 } from "../api/types";
-import { type Notice, formatCount, groupReasons } from "./dialogFormat";
+import { type Notice, formatCount, groupErrors, groupReasons } from "./dialogFormat";
 
 /** JPEG の品質の範囲（genzo-model の ExportSettings::validate）。 */
 export const JPEG_QUALITY_MIN = 1;
@@ -179,23 +179,20 @@ export function restoreExportForm(saved: unknown, coreDefault: OutputColorSpace)
 // 結果のまとめ
 // ---------------------------------------------------------------------------
 
-/** 1 件の飛ばし・失敗の理由（原本の保護は分かりやすい文にする）。 */
-function itemReason(item: ExportItem): { failed: boolean; reason: string } | null {
-  const o = item.outcome;
-  if (o.status === "skipped") return { failed: false, reason: o.reason };
-  if (o.status === "failed") {
-    if (o.error.kind === "protected_destination") {
-      return {
-        failed: true,
-        reason: "原本と同じ場所・同じ名前になるため書き出しませんでした（原本は変更していません）",
-      };
-    }
-    return { failed: true, reason: o.error.message };
-  }
-  return null;
+/** 原本の保護（protected_destination）の分かりやすい文と案内。 */
+const PROTECTED_MESSAGE = "原本と同じ場所・同じ名前になるため書き出しませんでした（原本は変更していません）";
+const PROTECTED_HINT = "書き出し先のフォルダか、同じ名前があるときの扱い（連番）を変えてください";
+
+/** 失敗のエラーを表示用にする（原本の保護は分かりやすい文にする）。 */
+function displayError(e: ErrorInfo): ErrorInfo {
+  if (e.kind !== "protected_destination") return e;
+  return { ...e, message: PROTECTED_MESSAGE, hint: PROTECTED_HINT };
 }
 
-/** 書き出しの結果の説明。 */
+/**
+ * 書き出しの結果の説明。失敗はエラーの種類ごと（件数・例の文・案内）、飛ばした理由と警告は文ごとにまとめる
+ * （失敗の文にはファイルのパスが入るため。dialogFormat.ts の groupErrors）。
+ */
 export function describeExportReport(r: ExportReport): Notice {
   const parts = [`${formatCount(r.written)} 枚を書き出しました`];
   if (r.skipped > 0) parts.push(`${formatCount(r.skipped)} 枚は飛ばしました`);
@@ -203,23 +200,17 @@ export function describeExportReport(r: ExportReport): Notice {
   const head = r.cancelled ? "書き出しを取り消しました" : "書き出し";
   const message = `${head}: ${parts.join("、")}`;
 
-  const failedReasons: string[] = [];
+  const failures: ErrorInfo[] = [];
   const skippedReasons: string[] = [];
-  let protectedHit = false;
   const warnings: string[] = [];
   for (const item of r.items) {
-    const x = itemReason(item);
-    if (x) {
-      (x.failed ? failedReasons : skippedReasons).push(x.reason);
-      if (item.outcome.status === "failed" && item.outcome.error.kind === "protected_destination") protectedHit = true;
-    }
-    if (item.outcome.status === "written") warnings.push(...item.outcome.warnings);
+    const o = item.outcome;
+    if (o.status === "failed") failures.push(displayError(o.error));
+    else if (o.status === "skipped") skippedReasons.push(o.reason);
+    else warnings.push(...o.warnings);
   }
   const lines: string[] = [];
-  if (failedReasons.length > 0) {
-    lines.push("失敗:", ...groupReasons(failedReasons, "枚"));
-    if (protectedHit) lines.push("（書き出し先のフォルダか、同じ名前があるときの扱い（連番）を変えてください）");
-  }
+  if (failures.length > 0) lines.push("失敗:", ...groupErrors(failures, "枚"));
   if (skippedReasons.length > 0) lines.push("飛ばした理由:", ...groupReasons(skippedReasons, "枚"));
   if (warnings.length > 0) lines.push("警告:", ...groupReasons(warnings, "件", 3));
   lines.push(`書き出し先: ${r.dest_dir}`);

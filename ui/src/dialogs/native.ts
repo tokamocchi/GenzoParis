@@ -3,7 +3,7 @@
 //
 // Tauri の外（ブラウザでの確認）では、選択は window.prompt でパスを入力させ、ドラッグ＆ドロップは受け取らない。
 // 保存のダイアログ（save）は、アプリの権限（crates/genzo-app/capabilities/default.json）に dialog:allow-save が
-// 要る。
+// 要る。ないときは権限のエラーになるので、新しいカタログの場所はフォルダと名前で選ばせる（catalogPick.ts）。
 
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";

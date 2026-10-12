@@ -50,25 +50,55 @@ export function anySelected(sel: PasteSelection): boolean {
   return PASTE_GROUP_ITEMS.some(({ key }) => sel[key]);
 }
 
-/** 読み込み済みの検索結果から種類を調べる件数の上限（仮置き: 1,000 件。多いと探すのに時間がかかる）。 */
-export const KIND_LOOKUP_LIMIT = 1000;
+/** 貼り付け先・コピー元を調べるのに使う、読み込み済みの項目の一部。 */
+export type LoadedItem = Pick<VariantSummary, "variant_id" | "kind" | "file_name">;
+
+/**
+ * 読み込み済みの項目を 1 回だけ順に見て、`ids` の項目を集める（全部見つかったら途中でやめる）。
+ *
+ * 項目ごとに検索結果のキャッシュ全体を探す（searchCache.getLoadedById）と、対象の数 × 読み込み済みの件数に
+ * なり、大きなカタログを大きくスクロールした後では画面が止まる。1 回の走査なら、読み込み済みの件数 ＋
+ * 対象の数で済む。
+ */
+export function collectLoaded(
+  ids: ReadonlySet<VariantId>,
+  loaded: Iterable<LoadedItem>,
+): Map<VariantId, LoadedItem> {
+  const found = new Map<VariantId, LoadedItem>();
+  if (ids.size === 0) return found;
+  for (const item of loaded) {
+    if (ids.has(item.variant_id) && !found.has(item.variant_id)) {
+      found.set(item.variant_id, item);
+      if (found.size === ids.size) break;
+    }
+  }
+  return found;
+}
 
 /**
  * 貼り付け先を整える: コピー元の写真と、読み込み済みの検索結果で動画と分かったものを除く（動画には現像設定を
- * 保存しない。コアは動画が含まれていると何も保存せずにエラーにする）。
+ * 保存しない。コアは動画が含まれていると何も保存せずにエラーにする）。コピー元の概要（読み込み済みなら）も
+ * 返す。
  *
- * `lookup` は読み込み済みの項目を id で探す関数（searchCache.getLoadedById）。件数が多いときは探さない
- * （動画が含まれていれば、コアのエラーで知らせる）。
+ * `loaded` は読み込み済みの項目（loadedItems.ts の loadedSummaries）。読み込んでいない項目の種類は分からない
+ * ので除かない（動画が含まれていれば、コアのエラーで知らせる）。
  */
 export function preparePasteTargets(
   targets: readonly VariantId[],
   from: VariantId | null,
-  lookup: (id: VariantId) => Pick<VariantSummary, "kind"> | undefined,
-): { ids: VariantId[]; skippedSource: boolean; skippedVideos: number } {
+  loaded: Iterable<LoadedItem>,
+): { ids: VariantId[]; skippedSource: boolean; skippedVideos: number; source: LoadedItem | undefined } {
   const unique = [...new Set(targets)];
   const withoutSource = from === null ? unique : unique.filter((id) => id !== from);
   const skippedSource = withoutSource.length !== unique.length;
-  if (withoutSource.length > KIND_LOOKUP_LIMIT) return { ids: withoutSource, skippedSource, skippedVideos: 0 };
-  const ids = withoutSource.filter((id) => lookup(id)?.kind !== "video");
-  return { ids, skippedSource, skippedVideos: withoutSource.length - ids.length };
+  const wanted = new Set(withoutSource);
+  if (from !== null) wanted.add(from);
+  const found = collectLoaded(wanted, loaded);
+  const ids = withoutSource.filter((id) => found.get(id)?.kind !== "video");
+  return {
+    ids,
+    skippedSource,
+    skippedVideos: withoutSource.length - ids.length,
+    source: from === null ? undefined : found.get(from),
+  };
 }

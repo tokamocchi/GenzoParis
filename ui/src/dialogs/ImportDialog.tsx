@@ -5,8 +5,9 @@ import { useEffect, useState } from "react";
 import { Dialog } from "../components/Dialog";
 import { actions, useApp } from "../state/app";
 import { onImportFolders, takeImportFolders } from "./importDrop";
-import { videoToolsWarning } from "./importLogic";
+import { likelyFileNames, videoToolsWarning } from "./importLogic";
 import { chooseFolder } from "./native";
+import { baseName } from "./dialogFormat";
 import { PathBox } from "./parts";
 import { loadStored, saveStored } from "./storage";
 
@@ -49,6 +50,8 @@ export function ImportDialog() {
   };
 
   const toolsWarning = videoToolsWarning(tools);
+  // ドロップしたものがフォルダかは確かめられない（拡張子で推定している）ので、ファイルらしい名前に注意を出す。
+  const suspicious = likelyFileNames(folders);
 
   return (
     <Dialog
@@ -76,7 +79,16 @@ export function ImportDialog() {
               <div className="dlg-list">
                 {folders.map((f) => (
                   <div key={f} className="dlg-list-item">
-                    <PathBox path={f} />
+                    <div className="dlg-grow">
+                      <PathBox path={f} />
+                    </div>
+                    <button
+                      className="btn small ghost"
+                      onClick={() => setFolders((list) => list.filter((x) => x !== f))}
+                      title="このフォルダを取り込みから除く"
+                    >
+                      除く
+                    </button>
                   </div>
                 ))}
               </div>
@@ -87,6 +99,14 @@ export function ImportDialog() {
           </button>
         </div>
       </div>
+      {suspicious.length > 0 && (
+        <div className="dlg-warn">
+          次のものはフォルダではない（ファイルの）可能性があります: {suspicious.map(baseName).join("、")}
+          <div className="hint">
+            取り込みはフォルダ単位です。ファイルなら取り込みは「フォルダではありません」で失敗するので、一覧から除くか、「参照…」でフォルダを選び直してください。
+          </div>
+        </div>
+      )}
       <label className="dlg-check">
         <input type="checkbox" checked={recursive} onChange={(e) => setRecursive(e.target.checked)} />
         <span>

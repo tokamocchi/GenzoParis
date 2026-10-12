@@ -44,7 +44,7 @@ macOS の `hardenedRuntime: false` は、Hardened Runtime のライブラリの�
 | `scripts/build-app.mjs` | 上の処理の後、`tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json <引数> -- --locked` を実行する。`--skip-worker` でワーカーのビルドを省く | `npm run app:build -- --bundles nsis` など |
 | `scripts/tauri.mjs` | Tauri の CLI を、この構成で起動する（下の説明） | `npm run app:dev`（`tauri dev`） |
 
-スクリプトは Node（22）だけで動き、新しい npm の依存はありません。テストは `node --test "scripts/**/*.test.mjs"`（CI の ui のジョブでも実行）。
+スクリプトは Node（22）だけで動き、新しい npm の依存はありません。上の 3 つは入口だけで、処理の本体は `scripts/lib/`（`worker.mjs`・`build.mjs`・`tauri-cli.mjs` など）にあります（入口は「直接実行されたか」を判定せずに必ず処理を実行する。判定はシンボリックリンクを含むパスで起動したときに成り立たず、何もせずに成功で終わってしまうため）。テストは `node --test "scripts/**/*.test.mjs"`（CI の ui のジョブでも実行）。
 
 **Tauri の CLI の起動のしかた**: Tauri の CLI（`ui/` の devDependencies の `@tauri-apps/cli` 2.11.5）は、`tauri.conf.json` を「今のフォルダとその下」から探します。この構成では `tauri.conf.json` が `ui/` の外（`crates/genzo-app/`）にあるため、`ui/` で `npx tauri build` を実行しても見つかりません（`npx tauri info` の「App」の欄が空になることで確認）。`scripts/tauri.mjs` は、環境変数 `TAURI_APP_PATH`（Tauri のアプリのフォルダが画面のフォルダの下にない構成のためのもの。@tauri-apps/cli の CHANGELOG）に `crates/genzo-app` を入れ、今のフォルダを `ui/` にして CLI を起動します（`beforeBuildCommand` の `npm run build` は `ui/` で実行される）。手で起動する場合は次のとおりです（先に `npm run app:worker` でワーカーと `binaries/tauri.libs.conf.json` を作っておく。`npm run tauri -- …` は `TAURI_APP_PATH` がないと設定を見つけられません）。
 
@@ -104,7 +104,12 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
 
 スクリプトは、`otool -l` でワーカーの依存をたどって Homebrew の dylib を `binaries/libs/` に写し、参照を書き換え（ワーカーは `@executable_path/../Frameworks/<名前>`、dylib どうしは `@loader_path/<名前>`、dylib の識別名は `@rpath/<名前>`）、`codesign --force --sign -` で署名し直します（書き換えると署名が壊れ、Apple Silicon では署名の壊れた実行ファイルは起動しないため）。書き換えた後に Homebrew の場所への参照が残っていればエラーにします。書き換えの余白のため、ワーカーはリンカーの `-headerpad_max_install_names` 付きでビルドします。Tauri は `.app` に入れた後、`signingIdentity: "-"` で中身を内側から順にアドホック署名し直します。
 
-**動く macOS の版の注意**: Homebrew の dylib は、ビルドした macOS（GitHub Actions なら macos-latest のランナーの版）向けにできています。`tauri.conf.json` の `minimumSystemVersion` は 12.0 ですが、dylib の最小の版（`otool -l` の `LC_BUILD_VERSION` の `minos`）がそれより新しいと、古い macOS ではワーカーが起動せず RAW を開けません。スクリプトはこの場合に警告を出します。対応は人が決めてください: 配る相手の macOS の版に合わせて `minimumSystemVersion` を上げる、または LibRaw とその依存を `MACOSX_DEPLOYMENT_TARGET=12.0` でソースからビルドする（スクリプトは未対応）。
+**動く macOS の版の注意**: Homebrew の dylib は、ビルドした Mac の macOS の版向けの bottle です（Homebrew は macOS の版ごとに bottle を分けて配っていて、`brew install` はその Mac の版向けのものを入れる。GitHub Actions なら macos-latest のランナーの macOS の版向け）。`tauri.conf.json` の `minimumSystemVersion` は 12.0 ですが、dylib の最小の版（`otool -l` の `LC_BUILD_VERSION` の `minos`）がそれより新しいと、古い macOS ではアプリは起動するのにワーカーが起動せず、RAW を開けません。
+
+- スクリプトは、この場合 **既定ではエラーにして止めます**（どの dylib が何の版向けかを表示する）。
+- 配る相手の Mac がすべてその版以降なら、環境変数 `GENZO_ALLOW_NEWER_MINOS=1` を付けて実行すると通ります。このとき、`.app` の最小の版（Info.plist の `LSMinimumSystemVersion`）を、同梱するものの `minos` の最大に上げます（`binaries/tauri.libs.conf.json` に書く。`tauri.conf.json` は変えない）。それより古い Mac では、OS が「この版の macOS では使えない」と知らせて起動しません。
+- どちらの場合も、`.app` の最小の版と同梱したものの `minos` の最大を `binaries/bundled-libs.txt` の先頭に書きます。
+- 配る相手に古い macOS の人がいる場合は、LibRaw とその依存を `MACOSX_DEPLOYMENT_TARGET=12.0` でソースからビルドしたものが要ります（スクリプトは未対応。手順は未整備）。どうするかは人が決めてください（8 章）。
 
 Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。作る場合は Intel の Mac か、x86_64 の Homebrew の LibRaw が要る）。
 
@@ -116,13 +121,18 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 
 手動（Actions の画面の「Run workflow」）か、`v` で始まるタグ（`v0.1.0` など）の push で、Windows（windows-latest）と macOS（macos-latest。Apple Silicon）の配布物を作ります。手順は 2.2・2.3 と同じで、LibRaw は vcpkg（ランナーにある `VCPKG_INSTALLATION_ROOT`）と Homebrew で入れます。
 
+- タグで起動したときは、最初にタグの版（`v0.1.0` なら 0.1.0）と、`tauri.conf.json` の `version`・Cargo の版（genzo-app・genzo-worker）が同じかを確かめ、違えば止めます（配布物のファイル名・中の版は `tauri.conf.json` の版になるため。版を直してからタグを付け直す）。
+- macOS では、同梱する dylib が `.app` の最小の版より新しい macOS 向けだと止まります（2.3）。配る相手の Mac がすべてその版以降なら、手動の実行で「allow_newer_macos_libs」に印を付けて実行します（タグの push では印なしと同じ）。このとき、artifact の名前に `-macos<版>-or-later` が付き、ジョブの summary に各ファイルの `minos` が出ます。
+- 配布物を作った後、artifact に置く **前に**、配布物の中のワーカーが同梱の LibRaw で起動できるかを確かめます。
+  - Windows: インストーラーを `/S` で無人インストールし、`PATH` を OS のフォルダだけにして `genzo-worker.exe --version` を実行する（終了コードと「genzo-worker <版>」の出力）。
+  - macOS: `codesign --verify`、Info.plist の最小の版、`hdiutil verify`（.dmg）を見た後、`DYLD_PRINT_LIBRARIES=1` でワーカーを起動し、終了コード・「genzo-worker <版>」の出力・dyld のエラー（`Library not loaded`）がないこと・`Contents/Frameworks` のすべての dylib を `.app` の中から読み込んだこと・Homebrew の場所から読み込んでいないことを確かめる。
 - 成果物は Actions の artifact（`genzoparis-windows-x64`・`genzoparis-macos-arm64`。30 日で消える。仮置き）に置きます。GitHub の Releases には出しません。**artifact は、リポジトリを読める人なら誰でも取得できます。リポジトリの公開の範囲を確かめてから実行してください。**
-- 最後に、配布物の中のワーカーが同梱の LibRaw で起動できるかを確かめます（Windows はインストーラーを `/S` で無人インストールして `genzo-worker.exe --version`、macOS は `DYLD_PRINT_LIBRARIES` で `.app` の中の dylib を読み込んだことを確認）。
+- 途中で失敗したときは、調べるために `<名前>-unverified` の artifact（7 日で消える。仮置き）に、できたところまでの配布物と確認の記録を置きます。**`-unverified` の配布物は配らないでください。**
 - **一度も実行していません**（7 章）。最初の実行の結果を見て、ワークフローとこの資料を直してください。
 
 ### 2.6 配る前の確認
 
-1. 入れて起動し、ARW を 1 枚取り込んでサムネイルと現像の画面が出ることを確かめる（[M5 の受け入れの手順](m5_acceptance.md) の 0 章）。設定の画面のカタログの欄で、「RAW のデコーダ」が「なし」でないこと（LibRaw の識別子が出る）、「ワーカーのエラー」が出ていないことも確かめる（ワーカーや LibRaw のライブラリが見つからない場合は、ここに出る。画面は作成中のため要確認）。
+1. 入れて起動し、ARW を 1 枚取り込んでサムネイルと現像の画面が出ることを確かめる（[M5 の受け入れの手順](m5_acceptance.md) の 0 章）。設定の画面の「カタログ」で、「RAW のデコーダ」が「なし（RAW を開けません）」でないこと（LibRaw の識別子が出る）、「ワーカーのエラー」が出ていないことも確かめる（ワーカーや LibRaw のライブラリが見つからない場合は、ここに出る。`ui/src/dialogs/SettingsCatalog.tsx` の表示。実機で未確認）。
 2. 配布物の SHA-256 を記録し、配る相手に伝える（受け取った人が、改ざんされていないかを確かめられるように）:
    - Windows（PowerShell）: `Get-FileHash .\GenzoParis_0.1.0_x64-setup.exe -Algorithm SHA256`
    - macOS: `shasum -a 256 GenzoParis_0.1.0_aarch64.dmg`
@@ -157,7 +167,7 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 
 ## 4. FFmpeg の入れ方（動画のサムネイル・メタデータ）
 
-FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくても登録できますが、サムネイルとメタデータ（長さ・fps など）が取れません。アプリは ffmpeg・ffprobe を「設定で指定したフォルダ → `PATH` → OS ごとの既定の場所」の順に探します（`crates/genzo-app/src/tools.rs`）。入れた後はアプリを起動し直してください。設定の画面の「一般」で「見つかった」と出れば使えます。
+FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくても登録できますが、サムネイルとメタデータ（長さ・fps など）が取れません。アプリは ffmpeg・ffprobe を「設定で指定したフォルダ → `PATH` → OS ごとの既定の場所」の順に探します（`crates/genzo-app/src/tools.rs`）。入れた後はアプリを起動し直してください。設定の画面の「一般」で、ffmpeg・ffprobe の横に「見つかりました」と出れば使えます。
 
 | OS | 入れ方 | アプリが探す既定の場所 |
 |---|---|---|
@@ -206,8 +216,9 @@ FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくて�
 | 5 | Windows: NSIS のインストーラーの `/S`（無人インストール）、インストール先、アンインストーラーの「アプリのデータを削除する」の動き | 実機で確かめる |
 | 6 | Windows: SmartScreen・スマート アプリ コントロールでの動き（3.1） | 実機で確かめる |
 | 7 | macOS: `otool -l` の出力の読み取り、dylib の書き換え・署名（スクリプトは出力の例でテストしただけ） | 2.3 の手順で作り、`otool -L` と `DYLD_PRINT_LIBRARIES=1 …/genzo-worker --version` で、`.app` の中の dylib を読むことを確かめる |
+| 7a | macOS: release.yml の確認が前提とする `DYLD_PRINT_LIBRARIES` の出力の形（`dyld[<pid>]: <UUID> <パス>`）と、`@executable_path/../Frameworks` を展開したパスの形（`MacOS/../Frameworks` のままか）。形が違うと、正しい配布物でも確認で止まる（壊れた配布物を通すことはない） | release.yml を実行し、確認のステップの記録（`target/verify-logs/`）を見る |
 | 8 | macOS: Tauri のアドホック署名と `hardenedRuntime: false` で、`codesign --verify --deep --strict` が通るか、Gatekeeper の手順（3.2）のとおりに開けるか | 実機で確かめる |
-| 9 | macOS: Homebrew の dylib の最小の版（2.3）と、配る相手の macOS の版 | `otool -l` の `minos` を見る |
+| 9 | macOS: Homebrew の dylib の実際の最小の版（2.3。macos-latest のランナーの版向けなら 12.0 より新しく、既定では止まる見込み）と、配る相手の macOS の版。`GENZO_ALLOW_NEWER_MINOS=1` で Info.plist の最小の版が上がること | release.yml を実行し、ジョブの summary と `bundled-libs.txt` の先頭の行を見る |
 | 10 | macOS: GitHub Actions のランナーでの .dmg の作成（Finder の操作を使う） | release.yml を実行する |
 | 11 | Tauri の出力のファイル名（`GenzoParis_<版>_x64-setup.exe`・`_aarch64.dmg`） | 実機・Actions で作る |
 | 12 | 画面（WebView）のデータの場所（5 章の表） | 実機で確かめる |
@@ -222,5 +233,6 @@ FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくて�
 2. **LibRaw の依存ライブラリのライセンス**: Windows（vcpkg）は jasper・lcms・zlib・libjpeg-turbo、macOS（Homebrew）は libomp・little-cms2・jpeg-turbo（実際に同梱したものは `bundled-libs.txt`）。それぞれのライセンスと、表記の要否を確認し、台帳に追加してください。
 3. **Visual C++ のランタイムの扱い**（2.2）: 利用者に入れてもらうか、DLL を同梱するか（同梱する場合は Microsoft の再頒布の条件の確認）。
 4. **FFmpeg**（決定 No.62、台帳の 3.4 節）: 各自が入れる FFmpeg のビルドの構成と、H.264 / H.265 の特許の扱い。
-5. **署名・公証の要否**（SYS-08）: 社内の数名への配布なら不要としていますが、配る範囲が広がる場合や、会社の規則で署名が求められる場合は、Windows のコード署名の証明書（有償の場合あり）と、Apple Developer Program（有償）が要ります。費用・手続きは確認していません。
-6. **成果物を置く場所の公開の範囲**（2.5・2.6）: GitHub Actions の artifact、社内の共有フォルダなどを、配る相手だけが見られるか。
+5. **macOS の最小の版**（2.3）: 配る相手の Mac の macOS の版を確かめ、`.app` の最小の版を上げる（`GENZO_ALLOW_NEWER_MINOS=1`）か、LibRaw とその依存を古い版向けにビルドするかを決める。
+6. **署名・公証の要否**（SYS-08）: 社内の数名への配布なら不要としていますが、配る範囲が広がる場合や、会社の規則で署名が求められる場合は、Windows のコード署名の証明書（有償の場合あり）と、Apple Developer Program（有償）が要ります。費用・手続きは確認していません。
+7. **成果物を置く場所の公開の範囲**（2.5・2.6）: GitHub Actions の artifact、社内の共有フォルダなどを、配る相手だけが見られるか。

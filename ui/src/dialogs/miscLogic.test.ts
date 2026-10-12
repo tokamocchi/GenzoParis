@@ -4,12 +4,22 @@ import { describe, expect, it } from "vitest";
 
 import { normalizeCombo } from "../keyboard";
 import type { ErrorInfo } from "../api/types";
-import { catalogErrorGuide, decideCatalogPath, restoreDisplacedName } from "./catalogLogic";
-import { splitDroppedPaths, videoToolsWarning } from "./importLogic";
+import {
+  catalogErrorGuide,
+  decideCatalogPath,
+  isCloseSaveFailure,
+  isDialogPermissionError,
+  newCatalogFileName,
+  restoreDisplacedName,
+  restoreTargetNote,
+  retryShouldCreate,
+} from "./catalogLogic";
+import { likelyFileNames, splitDroppedPaths, videoToolsWarning } from "./importLogic";
 import {
   DEFAULT_PASTE_SELECTION,
-  KIND_LOOKUP_LIMIT,
+  type LoadedItem,
   anySelected,
+  collectLoaded,
   preparePasteTargets,
   restorePasteSelection,
   toSettingGroups,
@@ -32,6 +42,16 @@ describe("取り込み", () => {
       folders: ["/p/2024.05.01", "C:\\photos\\DCIM", "/p/Trip.Paris"],
       files: ["/p/a.ARW", "/p/b.mov", "/p/catalog.db"],
     });
+    // よくあるほかの形式のファイルも、ファイルとみなす。
+    expect(
+      splitDroppedPaths(["/p/a.gif", "/p/clip.MTS", "/p/a.webp", "/p/a.psd", "/p/a.mkv", "/p/a.HIF", "/p/a.docx"]).files,
+    ).toHaveLength(7);
+  });
+
+  it("フォルダではない可能性がある名前（数字だけの拡張子は除く）", () => {
+    expect(
+      likelyFileNames(["/p/2024.05.01", "/p/DCIM", "C:\\x\\clip.xyz", "/p/Trip.Paris", "/p/a.b-c", "/p/.hidden"]),
+    ).toEqual(["C:\\x\\clip.xyz", "/p/Trip.Paris"]);
   });
 
   it("ffmpeg・ffprobe がないときの注意", () => {
@@ -75,18 +95,44 @@ describe("一括適用", () => {
     expect(anySelected(DEFAULT_PASTE_SELECTION)).toBe(true);
   });
 
-  it("コピー元と動画を除く", () => {
-    const kinds: Record<number, "photo" | "video"> = { 1: "photo", 2: "video", 3: "photo" };
-    const lookup = (id: number) => (kinds[id] ? { kind: kinds[id] } : undefined);
-    expect(preparePasteTargets([1, 2, 3, 4, 3], 1, lookup)).toEqual({
+  it("コピー元と動画を除く（読み込み済みの項目から）", () => {
+    const loaded: LoadedItem[] = [
+      { variant_id: 1, kind: "photo", file_name: "a.ARW" },
+      { variant_id: 2, kind: "video", file_name: "b.mov" },
+      { variant_id: 3, kind: "photo", file_name: "c.ARW" },
+    ];
+    expect(preparePasteTargets([1, 2, 3, 4, 3], 1, loaded)).toEqual({
       ids: [3, 4],
       skippedSource: true,
       skippedVideos: 1,
+      source: loaded[0],
     });
-    expect(preparePasteTargets([3], null, lookup)).toEqual({ ids: [3], skippedSource: false, skippedVideos: 0 });
-    // 多いときは種類を探さない。
-    const many = Array.from({ length: KIND_LOOKUP_LIMIT + 1 }, (_, i) => i + 10);
-    expect(preparePasteTargets(many, null, () => ({ kind: "video" })).ids.length).toBe(KIND_LOOKUP_LIMIT + 1);
+    expect(preparePasteTargets([3], null, loaded)).toEqual({
+      ids: [3],
+      skippedSource: false,
+      skippedVideos: 0,
+      source: undefined,
+    });
+    // 読み込んでいない項目の種類は分からないので除かない。
+    expect(preparePasteTargets([7, 8], 9, []).ids).toEqual([7, 8]);
+  });
+
+  it("読み込み済みの項目は 1 回だけ見る（全部見つかったらやめる）", () => {
+    let visited = 0;
+    function* items(): Generator<LoadedItem> {
+      for (let i = 0; i < 500_000; i++) {
+        visited++;
+        yield { variant_id: i, kind: i % 2 === 0 ? "photo" : "video", file_name: `${i}.ARW` };
+      }
+    }
+    const targets = Array.from({ length: 1000 }, (_, i) => i + 100);
+    const r = preparePasteTargets(targets, 50, items());
+    expect(r.ids).toHaveLength(500);
+    expect(r.skippedVideos).toBe(500);
+    expect(r.source?.file_name).toBe("50.ARW");
+    // 最後の対象（1099）を見つけたところでやめる。
+    expect(visited).toBe(1100);
+    expect(collectLoaded(new Set(), items()).size).toBe(0);
   });
 });
 
@@ -103,6 +149,58 @@ describe("カタログの選択", () => {
   it("復元で退避する名前の形", () => {
     expect(restoreDisplacedName("/p/GenzoParis/catalog.db")).toBe("catalog-before-restore-（日時）.db");
     expect(restoreDisplacedName("C:\\x\\main")).toBe("main-before-restore-（日時）.db");
+  });
+
+  it("保存のダイアログの権限のエラー（開発版・配布版の文）", () => {
+    expect(
+      isDialogPermissionError(
+        "dialog.save not allowed. Permissions associated with this command: dialog:allow-save, dialog:default",
+      ),
+    ).toBe(true);
+    expect(isDialogPermissionError("Command plugin:dialog|save not allowed by ACL")).toBe(true);
+    expect(isDialogPermissionError(new Error("Command plugin:dialog|save not allowed by ACL"))).toBe(true);
+    expect(isDialogPermissionError({ kind: "internal", message: "dialog.save not allowed." })).toBe(true);
+    expect(isDialogPermissionError("ファイルにアクセスできません")).toBe(false);
+    expect(isDialogPermissionError(null)).toBe(false);
+  });
+
+  it("新しいカタログの名前", () => {
+    expect(newCatalogFileName(" 旅行 ")).toEqual({ name: "旅行.db" });
+    expect(newCatalogFileName("main.DB")).toEqual({ name: "main.DB" });
+    expect(newCatalogFileName("2024.05")).toEqual({ name: "2024.05.db" });
+    for (const bad of ["", "  ", "a/b", "a\\b", "a:b", "a*b", 'a"b', "a<b", "a|b", "a?", ".", "..", "a.", ".db", ".x", "con", "COM1.db", "lpt9"]) {
+      expect("error" in newCatalogFileName(bad), bad).toBe(true);
+    }
+  });
+
+  it("再試行で作るか（作るつもりだったときだけ、まだなければ作る）", () => {
+    expect(retryShouldCreate(true, "missing")).toBe(true);
+    expect(retryShouldCreate(true, null)).toBe(true);
+    expect(retryShouldCreate(true, "catalog")).toBe(false);
+    expect(retryShouldCreate(true, "not_catalog")).toBe(false);
+    expect(retryShouldCreate(false, "missing")).toBe(false);
+    expect(retryShouldCreate(false, null)).toBe(false);
+  });
+
+  it("復元の確認: 今のカタログの扱い", () => {
+    expect(restoreTargetNote("/p/catalog.db", "catalog", "/p")).toBe(
+      "今のカタログは「catalog-before-restore-（日時）.db」の名前で同じフォルダ（/p）に残します（削除しません）。",
+    );
+    expect(restoreTargetNote("/p/catalog.db", null, "/p")).toContain("の名前で同じフォルダ");
+    const missing = restoreTargetNote("/p/catalog.db", "missing", "/p");
+    expect(missing).toContain("退避するものはありません");
+    expect(missing).not.toContain("今のカタログは");
+  });
+
+  it("復元の前に閉じられなかったエラー（アプリの案内の文で見分ける）", () => {
+    expect(
+      isCloseSaveFailure({
+        ...err("storage"),
+        hint: "空き容量・カタログのフォルダの権限を確かめて再試行するか、保存していない現像設定を捨てて閉じてください",
+      }),
+    ).toBe(true);
+    expect(isCloseSaveFailure({ ...err("catalog_corrupt"), hint: "別のバックアップを選んでください" })).toBe(false);
+    expect(isCloseSaveFailure(err("storage"))).toBe(false);
   });
 
   it("理由ごとの案内", () => {

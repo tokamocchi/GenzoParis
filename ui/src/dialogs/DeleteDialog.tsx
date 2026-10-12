@@ -20,6 +20,7 @@ import {
 } from "./deleteLogic";
 import { formatCount } from "./dialogFormat";
 import { Busy, ErrorBox } from "./parts";
+import { notifyResult } from "./resultLog";
 
 function PlanList(props: { lines: string[]; rest: number }) {
   if (props.lines.length === 0) return null;
@@ -80,8 +81,8 @@ export function DeleteDialog(props: { deleteKind: DeleteKind; variantIds: Varian
     try {
       const report = await core.executeDelete(shown.plan_id);
       actions.closeDialog();
-      const n = describeDeleteReport(kind, report);
-      actions.notify(n.level, n.message, n.detail);
+      // 詳細の全体は、上の帯の「結果」で後から見直せる。
+      notifyResult(describeDeleteReport(kind, report));
       await actions.runSearch();
     } catch (e) {
       const err = toApiError(e).info;

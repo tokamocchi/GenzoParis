@@ -11,8 +11,8 @@ import type { ErrorInfo, VariantId } from "../api/types";
 import { Dialog } from "../components/Dialog";
 import { actions, useApp } from "../state/app";
 import { developStore, enqueue, reloadState } from "../state/develop";
-import { searchCache } from "../state/search";
 import { formatCount } from "./dialogFormat";
+import { loadedSummaries } from "./loadedItems";
 import {
   PASTE_GROUP_ITEMS,
   type PasteSelection,
@@ -32,11 +32,12 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
 
+  // 読み込み済みの検索結果を 1 回だけ見て、動画とコピー元を調べる（開いたときの内容で決める）。
   const prepared = useMemo(
-    () => preparePasteTargets(props.targets, clipboard?.from ?? null, (id) => searchCache.getLoadedById(id)),
+    () => preparePasteTargets(props.targets, clipboard?.from ?? null, loadedSummaries()),
     [props.targets, clipboard],
   );
-  const source = clipboard ? searchCache.getLoadedById(clipboard.from) : undefined;
+  const source = prepared.source;
   const sourceName = clipboard ? (source?.file_name ?? `ID ${clipboard.from}`) : null;
   // 動画には現像設定がない（コピーしても既定の設定になる）ので、貼り付けない。
   const sourceIsVideo = source?.kind === "video";

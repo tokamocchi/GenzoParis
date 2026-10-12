@@ -1,7 +1,8 @@
 // 書き出しのダイアログ（EXP-01・EXP-04）: 形式・色空間・大きさ・GPS の削除・同じ名前の扱い・書き出し先。
 //
 // 開始したら閉じて、進捗は上の帯のジョブの表示に出す。終わったら結果（書いた・飛ばした・失敗の数と理由）を
-// 通知する。前回の設定と書き出し先は、ブラウザに保存して次に使う。
+// 通知する（詳細の全体は、上の帯の「結果」で後から見直せる）。前回の設定と書き出し先は、ブラウザに保存して
+// 次に使う。
 
 import { useMemo, useState } from "react";
 
@@ -10,6 +11,7 @@ import { toApiError } from "../api/errors";
 import type { ErrorInfo, OutputColorSpace, VariantId } from "../api/types";
 import { Dialog } from "../components/Dialog";
 import { actions, useApp } from "../state/app";
+import { waitJobUntilClosed } from "./catalogActions";
 import { formatCount } from "./dialogFormat";
 import {
   COLOR_SPACE_OPTIONS,
@@ -29,6 +31,7 @@ import {
 } from "./exportLogic";
 import { chooseFolder } from "./native";
 import { ErrorBox, PathBox } from "./parts";
+import { notifyResult } from "./resultLog";
 import { loadStored, saveStored } from "./storage";
 
 const STORE_KEY = "export.last";
@@ -36,9 +39,11 @@ const STORE_KEY = "export.last";
 /** 書き出しの終わりを待って、結果を知らせる。 */
 async function followExport(jobId: number): Promise<void> {
   try {
-    const info = await actions.waitJob(jobId);
+    const info = await waitJobUntilClosed(jobId);
+    // 終わる前にカタログを閉じた（取り消したことは閉じる処理が知らせる）。
+    if (info === "closed") return;
     const notice = describeExportJob(info);
-    if (notice) actions.notify(notice.level, notice.message, notice.detail);
+    if (notice) notifyResult(notice);
   } catch (e) {
     actions.reportError(e, "書き出しの結果を受け取れません");
   }

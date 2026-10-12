@@ -3,8 +3,8 @@
 // 削除は 3 つの別々の操作（genzo-api の delete.rs）。どれも計画（影響の一覧）を見せてから実行し、計画の後に
 // カタログが変わっていれば、コアは実行せずに PlanOutdated（kind は conflict）を返す。
 
-import type { DeleteKind, DeletePlan, DeleteReport, ErrorInfo } from "../api/types";
-import { type Notice, baseName, formatCount, groupReasons } from "./dialogFormat";
+import type { DeleteKind, DeletePlan, DeleteReport, ErrorInfo, FileIssue } from "../api/types";
+import { type Notice, baseName, formatCount } from "./dialogFormat";
 
 export interface DeleteKindOption {
   kind: DeleteKind;
@@ -19,14 +19,14 @@ export const DELETE_KIND_OPTIONS: DeleteKindOption[] = [
     kind: "remove_from_catalog",
     label: "カタログから除去",
     description:
-      "カタログの登録だけを消します。元のファイルは残ります。仮想コピー・現像設定・履歴も消えます（同じフォルダを取り込み直すと、現像していない状態で登録し直します）。",
+      "カタログの登録だけを消します。元のファイルは残ります。カタログにだけある情報（評価・フラグ・カラーラベル・キャプション・キーワードの付与・現像設定・履歴・仮想コピー）も消えます。同じフォルダを取り込み直すと、これらのない状態で登録し直します。",
     danger: false,
   },
   {
     kind: "trash",
     label: "ゴミ箱に移す",
     description:
-      "元のファイルを OS のゴミ箱へ移し、カタログからも除去します。ゴミ箱から元に戻せます。ゴミ箱のないドライブ（ネットワークの共有フォルダなど）では移さずに失敗にします（直接は削除しません）。",
+      "元のファイルを OS のゴミ箱へ移し、カタログからも除去します（カタログにだけある評価・現像設定なども消えます）。ファイルはゴミ箱から元に戻せます。ゴミ箱を使えないと分かった場合は、移さずに失敗にします。OS によっては（Windows）、ゴミ箱の大きさを超えるファイルなどで「完全に削除しますか」と確かめることがあります。そのときは「いいえ」を選んでください（「はい」を選ぶと、ゴミ箱を通さずに削除されることがあります）。",
     danger: true,
   },
   {
@@ -52,6 +52,13 @@ export interface DeletePlanSummary {
   files: number;
   /** 場所の分からないファイル（ボリュームが接続されていない）。 */
   filesWithoutPath: number;
+  /**
+   * 場所の分からないファイルを含む写真・動画（asset）。ゴミ箱へ移すときは、移さずに失敗にしてカタログに
+   * 残す（genzo-api の delete.rs の trash_asset）。
+   */
+  assetsWithoutPath: number;
+  /** ゴミ箱へ移す予定のファイル（場所の分からないファイルを含む写真のファイルを除く）。 */
+  trashableFiles: number;
   /** 選んだもの以外も対象になったか（同じ写真のマスター・仮想コピー）。 */
   includesUnselected: boolean;
 }
@@ -59,6 +66,7 @@ export interface DeletePlanSummary {
 export function summarizeDeletePlan(plan: DeletePlan, selectedIds: readonly number[]): DeletePlanSummary {
   const selected = new Set(selectedIds);
   const masters = plan.variants.filter((v) => v.is_master).length;
+  const unknownAssets = new Set(plan.files.filter((f) => f.path === null).map((f) => f.asset_id));
   return {
     variants: plan.variants.length,
     masters,
@@ -66,6 +74,8 @@ export function summarizeDeletePlan(plan: DeletePlan, selectedIds: readonly numb
     assets: plan.assets.length,
     files: plan.files.length,
     filesWithoutPath: plan.files.filter((f) => f.path === null).length,
+    assetsWithoutPath: unknownAssets.size,
+    trashableFiles: plan.files.filter((f) => !unknownAssets.has(f.asset_id)).length,
     includesUnselected: plan.variants.some((v) => !selected.has(v.variant_id)),
   };
 }
@@ -80,10 +90,15 @@ export function describeDeletePlan(kind: DeleteKind, s: DeletePlanSummary): stri
       lines.push(`${formatCount(s.assets)} 枚の写真・動画をカタログから除去します${variantsNote}。`);
       lines.push(`元のファイル ${formatCount(s.files)} 個は残ります。`);
       break;
-    case "trash":
-      lines.push(`${formatCount(s.files)} 個のファイルを OS のゴミ箱へ移します。`);
-      lines.push(`${formatCount(s.assets)} 枚の写真・動画をカタログから除去します${variantsNote}。`);
+    case "trash": {
+      lines.push(`${formatCount(s.trashableFiles)} 個のファイルを OS のゴミ箱へ移します。`);
+      const removable = s.assets - s.assetsWithoutPath;
+      lines.push(
+        `${formatCount(removable)} 枚の写真・動画をカタログから除去します${s.assetsWithoutPath === 0 ? variantsNote : ""}。`,
+      );
+      lines.push("移す前にファイルを確かめ、元の場所が見えない（ドライブが外れているなど）写真は、移さずにカタログに残します。");
       break;
+    }
     case "virtual_copies":
       lines.push(`${formatCount(s.variants)} 件の仮想コピーを削除します。元のファイルは変わりません。`);
       break;
@@ -91,9 +106,11 @@ export function describeDeletePlan(kind: DeleteKind, s: DeletePlanSummary): stri
   if (s.includesUnselected && kind !== "virtual_copies") {
     lines.push("選んだ写真と同じ元ファイルのマスター・仮想コピーも、まとめて対象になります。");
   }
-  if (s.filesWithoutPath > 0 && kind === "trash") {
+  if (s.assetsWithoutPath > 0 && kind === "trash") {
     lines.push(
-      `${formatCount(s.filesWithoutPath)} 個のファイルは場所が分かりません（ドライブが接続されていない可能性があります）。`,
+      `${formatCount(s.assetsWithoutPath)} 枚は、場所の分からないファイル（${formatCount(
+        s.filesWithoutPath,
+      )} 個。ドライブが接続されていない可能性があります）を含むため、ゴミ箱へは移せず、失敗としてカタログに残します。`,
     );
   }
   return lines;
@@ -127,6 +144,44 @@ export function isOutdatedPlanError(e: ErrorInfo): boolean {
   return e.kind === "not_found" && e.message.includes("削除の計画");
 }
 
+/**
+ * 失敗の理由の文から、そのファイルのパスを除く（コアの文は「ゴミ箱へ移動できません（<パス>）: <理由>」の
+ * ように、パスを括弧に入れる。genzo-api の error.rs）。パスが空なら空の括弧を除く。
+ */
+export function stripPathFromReason(reason: string, path: string): string {
+  let r = reason;
+  if (path) r = r.split(path).join("");
+  return r
+    .replace(/（\s*）|\(\s*\)/g, "")
+    .replace(/\s+:/g, ":")
+    .trim();
+}
+
+/**
+ * 失敗したファイルを、パスを除いた理由ごとにまとめた行（多い順。`limit` 種類まで）。例のファイル名を
+ * 3 つまで添える（同じ原因の失敗が、パスの違いで別の理由として数えられないようにする）。
+ */
+export function groupFileIssues(issues: readonly FileIssue[], unit: string, limit = 5): string[] {
+  const groups = new Map<string, string[]>();
+  for (const f of issues) {
+    const reason = stripPathFromReason(f.reason, f.path) || "理由は不明";
+    const list = groups.get(reason) ?? [];
+    list.push(f.path);
+    groups.set(reason, list);
+  }
+  const sorted = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+  const lines: string[] = [];
+  for (const [reason, paths] of sorted.slice(0, limit)) {
+    const names = paths.filter(Boolean).slice(0, 3).map(baseName);
+    const more = paths.length - names.length;
+    const example =
+      names.length > 0 ? `: ${names.join("、")}${more > 0 ? ` ほか ${formatCount(more)} ${unit}` : ""}` : "";
+    lines.push(`・${reason}（${formatCount(paths.length)} ${unit}）${example}`);
+  }
+  if (sorted.length > limit) lines.push(`・ほか ${formatCount(sorted.length - limit)} 種類の理由`);
+  return lines;
+}
+
 /** 実行の結果の説明。 */
 export function describeDeleteReport(kind: DeleteKind, r: DeleteReport): Notice {
   const lines: string[] = [];
@@ -154,11 +209,8 @@ export function describeDeleteReport(kind: DeleteKind, r: DeleteReport): Notice 
   if (r.failed.length > 0) {
     lines.push(
       `${formatCount(r.failed.length)} 枚はゴミ箱へ移せなかったため、カタログに残しています:`,
-      ...groupReasons(
-        r.failed.map((f) => f.reason),
-        "枚",
-        3,
-      ),
+      ...groupFileIssues(r.failed, "枚", 3),
+      "ドライブの接続・権限を確かめてから、もう一度削除してください。",
     );
   }
   let level: Notice["level"] = "success";

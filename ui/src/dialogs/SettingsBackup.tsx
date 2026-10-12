@@ -6,6 +6,7 @@ import * as core from "../api/core";
 import { toApiError } from "../api/errors";
 import type { ErrorInfo } from "../api/types";
 import { actions, useApp } from "../state/app";
+import { waitJobUntilClosed } from "./catalogActions";
 import { describeIntegrity, formatLocalDateTime } from "./dialogFormat";
 import { Busy, ErrorBox } from "./parts";
 import { RestorePanel } from "./RestorePanel";
@@ -42,7 +43,9 @@ export function SettingsBackup() {
     try {
       const jobId = await core.checkIntegrity();
       actions.trackJob(jobId, "integrity_check");
-      const info = await actions.waitJob(jobId);
+      const info = await waitJobUntilClosed(jobId);
+      // 終わる前にカタログを閉じた（取り消したことは閉じる処理が知らせる）。
+      if (info === "closed") return;
       const r = info.result;
       if (r && r.type === "integrity_check") {
         const d = describeIntegrity(r);
