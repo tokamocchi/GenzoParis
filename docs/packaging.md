@@ -107,7 +107,7 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
 **動く macOS の版の注意**: Homebrew の dylib は、ビルドした Mac の macOS の版向けの bottle です（Homebrew は macOS の版ごとに bottle を分けて配っていて、`brew install` はその Mac の版向けのものを入れる。GitHub Actions なら macos-latest のランナーの macOS の版向け）。`tauri.conf.json` の `minimumSystemVersion` は 12.0 ですが、dylib の最小の版（`otool -l` の `LC_BUILD_VERSION` の `minos`）がそれより新しいと、古い macOS ではアプリは起動するのにワーカーが起動せず、RAW を開けません。
 
 - スクリプトは、この場合 **既定ではエラーにして止めます**（どの dylib が何の版向けかを表示する）。
-- 配る相手の Mac がすべてその版以降なら、環境変数 `GENZO_ALLOW_NEWER_MINOS=1` を付けて実行すると通ります。このとき、`.app` の最小の版（Info.plist の `LSMinimumSystemVersion`）を、同梱するものの `minos` の最大に上げます（`binaries/tauri.libs.conf.json` に書く。`tauri.conf.json` は変えない）。それより古い Mac では、OS が「この版の macOS では使えない」と知らせて起動しません。
+- 配る相手の Mac がすべてその版以降なら、環境変数 `GENZO_ALLOW_NEWER_MINOS=1` を付けて実行すると通ります。このとき、`.app` の最小の版（Info.plist の `LSMinimumSystemVersion`）を、同梱するものの `minos` の最大に上げます（`binaries/tauri.libs.conf.json` に書く。`tauri.conf.json` は変えない。Tauri はこの版を Info.plist と、本体のビルドの `MACOSX_DEPLOYMENT_TARGET` に使う。@tauri-apps/cli 2.11.5 の `config.schema.json` の説明）。それより古い Mac では、アプリが起動せず、OS がその旨を知らせます（文言は要確認）。
 - どちらの場合も、`.app` の最小の版と同梱したものの `minos` の最大を `binaries/bundled-libs.txt` の先頭に書きます。
 - 配る相手に古い macOS の人がいる場合は、LibRaw とその依存を `MACOSX_DEPLOYMENT_TARGET=12.0` でソースからビルドしたものが要ります（スクリプトは未対応。手順は未整備）。どうするかは人が決めてください（8 章）。
 
@@ -204,6 +204,7 @@ FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくて�
 4. `bundle.resources` の対応表（Windows で DLL を置くのと同じ書き方。`"binaries/libs/<名前>": "<名前>"`）に試しのファイルを足して作り直し、.deb の resource のフォルダの直下（`usr/lib/GenzoParis/<名前>`）に入ることを確かめた（パスは `crates/genzo-app` から解決される）。確かめた後、試しのファイルを除いて作り直した。
 5. `--config` は複数指定でき、順にマージされること、`--` の後の引数（`--locked -v`）が cargo に渡ることを確かめた（`-v` の出力が出た）。
 6. `.deb` の依存（`Depends`）は `libwebkit2gtk-4.1-0, libgtk-3-0` だけで、LibRaw は入っていない（2.4 のとおり）。
+7. スクリプトを入口と `scripts/lib/` に分けた後（1.3）、`ui/` で `npm run app:build -- --bundles deb` を差し替えなし（`beforeBuildCommand` の `npm run build` で型の検査を含む）で実行し直し、通ることを確かめた（2 分 3 秒。本体は増分のビルド）。`dpkg -c` で本体とワーカーが入り、取り出したワーカーの `--version` が終了コード 0 で、`binaries` の中のファイルと `cmp` で一致した。シンボリックリンクを含むパスで `scripts/tauri.mjs` を起動しても処理が実行されることも確かめた（`scripts/entry.test.mjs`）。
 
 ## 7. 未確認の事項
 
