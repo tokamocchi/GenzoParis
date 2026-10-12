@@ -33,7 +33,7 @@ export function TopBar() {
         </button>
       </nav>
       <span className="spacer" />
-      <label className="btn ghost small" title="評価・フラグを付けたら次の写真へ進む">
+      <label className="btn ghost small" title="評価・フラグ・カラーラベルを付けたら次の写真へ進む">
         <input type="checkbox" checked={autoAdvance} onChange={(e) => actions.setAutoAdvance(e.target.checked)} />
         自動で次へ
       </label>

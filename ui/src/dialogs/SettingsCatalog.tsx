@@ -134,7 +134,7 @@ export function SettingsCatalog() {
       setForm(catalogSettingsForm(saved));
       setCoreSettings(saved);
       const notes: string[] = [];
-      if (r.update.preview_cache_dir !== undefined) notes.push("キャッシュの場所は、次にカタログを開いたときから使います（今のキャッシュは移しません）。");
+      if (r.update.preview_cache_dir !== undefined) notes.push("キャッシュの場所は、アプリを再起動して、このカタログを開いたときから使います（今のキャッシュは移しません）。");
       if (r.update.default_utc_offset_minutes !== undefined) {
         notes.push("既定のタイムゾーンで推定していた撮影日時を、バックグラウンドで推定し直します。");
       }
@@ -179,7 +179,7 @@ export function SettingsCatalog() {
           </div>
         </div>
         <p className="hint" style={{ marginLeft: 148 }}>
-          次にカタログを開いたときから使います（今のキャッシュは移しません）。
+          アプリを再起動して、このカタログを開いたときから使います（今のキャッシュは移しません）。
         </p>
         <div className="field">
           <label htmlFor="cache-gb">上限</label>
