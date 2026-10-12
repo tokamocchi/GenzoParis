@@ -98,9 +98,9 @@ export function retryShouldCreate(wantedCreate: boolean, state: CatalogFileState
  */
 export function restoreTargetNote(catalogPath: string, state: CatalogFileState | null, folder: string): string {
   if (state === "missing") {
-    return "カタログのファイルが見つからないので、退避するものはありません（同じ場所に、復元したカタログを置きます。付随するファイル（-wal など）が残っていれば、それだけを「" +
-      restoreDisplacedName(catalogPath) +
-      "」の名前に付けて残します）。";
+    return `カタログのファイルが見つからないので、退避するものはありません（同じ場所に、復元したカタログを置きます。付随するファイル（-wal など）が残っていれば、「${restoreDisplacedName(
+      catalogPath,
+    )}-wal」のような名前で残します）。`;
   }
   return `今のカタログは「${restoreDisplacedName(catalogPath)}」の名前で同じフォルダ（${folder}）に残します（削除しません）。`;
 }
