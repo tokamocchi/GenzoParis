@@ -87,18 +87,25 @@ export function planWindowsDlls(root, io) {
  * - macOS: `bundle.macOS.frameworks` に dylib のパスを並べ、.app の Contents/Frameworks に置く。
  * - それ以外（Linux）: 同梱しない（確認用。OS のパッケージの LibRaw を使う）。
  *
+ * macOS で `minimumSystemVersion` を渡したときは、.app の最小の版（Info.plist の LSMinimumSystemVersion）も
+ * 上書きする（同梱する dylib の minos に合わせて上げるとき。scripts/lib/worker.mjs）。
+ *
  * @param {"windows" | "macos" | "linux" | "other"} os
  * @param {string[]} fileNames 同梱するファイルの名前（LIBS_DIR の中）
+ * @param {{ minimumSystemVersion?: string }} [options]
  */
-export function libsTauriConfig(os, fileNames) {
+export function libsTauriConfig(os, fileNames, options = {}) {
   const sorted = [...fileNames].sort();
   if (os === "windows") {
     if (sorted.length === 0) return {};
     return { bundle: { resources: Object.fromEntries(sorted.map((n) => [`${LIBS_DIR}/${n}`, n])) } };
   }
   if (os === "macos") {
-    if (sorted.length === 0) return {};
-    return { bundle: { macOS: { frameworks: sorted.map((n) => `${LIBS_DIR}/${n}`) } } };
+    /** @type {{ frameworks?: string[], minimumSystemVersion?: string }} */
+    const macOS = {};
+    if (sorted.length > 0) macOS.frameworks = sorted.map((n) => `${LIBS_DIR}/${n}`);
+    if (options.minimumSystemVersion) macOS.minimumSystemVersion = options.minimumSystemVersion;
+    return Object.keys(macOS).length === 0 ? {} : { bundle: { macOS } };
   }
   return {};
 }

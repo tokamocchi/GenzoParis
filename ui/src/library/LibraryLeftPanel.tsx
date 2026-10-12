@@ -4,7 +4,8 @@
 //   ボリュームごとの根から並べる（folderTree.ts）。
 // - フォルダを選ぶと、そのフォルダで絞り込む（actions.setFilter の folder_id・include_subfolders）。
 //   ほかの絞り込みの条件はそのまま残す。
-// - 行の開閉と「サブフォルダを含める」は、ブラウザに保存する（prefs.ts）。
+// - 行の開閉と「サブフォルダを含める」は、ブラウザに保存する（prefs.ts）。行の開閉はフォルダの ID に
+//   結びつくので、カタログごとに分ける。
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
@@ -14,7 +15,7 @@ import { Section } from "../components/Section";
 import { actions, useApp } from "../state/app";
 import { ancestorKeys, buildFolderTree, type FolderNode, visibleFolderRows } from "./folderTree";
 import "./library.css";
-import { loadBoolean, loadJson, save } from "./prefs";
+import { catalogKey, loadBoolean, loadJson, save } from "./prefs";
 
 /** 評価などの変更（detailsVersion）の後に、カタログの件数を読み直すまでの時間（ms。仮置き）。 */
 const STATS_DELAY_MS = 1000;
@@ -28,6 +29,11 @@ function isOpenMap(v: unknown): v is OpenMap {
     !Array.isArray(v) &&
     Object.values(v as Record<string, unknown>).every((x) => typeof x === "boolean")
   );
+}
+
+/** 保存した行の開閉（鍵がない（カタログを開いていない）・読めないときは空）。 */
+function loadOpen(key: string | null): OpenMap {
+  return key ? loadJson(key, {}, isOpenMap) : {};
 }
 
 /** 行の開閉（保存した値がなければ、ボリュームの根の行だけを開く）。 */
@@ -48,13 +54,22 @@ export function LibraryLeftPanel() {
   const includeSubfolders = useApp((s) => s.filter.include_subfolders ?? false);
   const foldersVersion = useApp((s) => s.foldersVersion);
   const detailsVersion = useApp((s) => s.detailsVersion);
+  const catalogPath = useApp((s) => s.catalog?.catalog_path ?? null);
+  const openKey = catalogKey("folderOpen", catalogPath);
 
   const [folders, setFolders] = useState<FolderInfo[] | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [stats, setStats] = useState<CatalogStats | null>(null);
   const [subPref, setSubPref] = useState(() => loadBoolean("includeSubfolders", true));
-  const [open, setOpen] = useState<OpenMap>(() => loadJson("folderOpen", {}, isOpenMap));
+  const [openState, setOpenState] = useState(() => ({ key: openKey, open: loadOpen(openKey) }));
+  if (openState.key !== openKey) {
+    // カタログが変わった: そのカタログの開閉を読み直し、前のカタログのフォルダを出さない（描画中に直す）。
+    setOpenState({ key: openKey, open: loadOpen(openKey) });
+    setFolders(null);
+    setStats(null);
+  }
+  const open = openState.open;
 
   // フォルダの一覧（古い応答は捨てる）。
   useEffect(() => {
@@ -106,24 +121,24 @@ export function LibraryLeftPanel() {
     if (folderId === null) return;
     const keys = ancestorKeys(tree, folderId);
     if (!keys) return;
-    setOpen((prev) => {
+    setOpenState((prev) => {
       const parents = keys.slice(0, -1);
-      if (parents.every((k, depth) => isOpenIn(prev, k, depth))) return prev;
-      const next = { ...prev };
+      if (parents.every((k, depth) => isOpenIn(prev.open, k, depth))) return prev;
+      const next = { ...prev.open };
       for (const k of parents) next[String(k)] = true;
-      return next;
+      return { key: prev.key, open: next };
     });
   }, [folderId, tree]);
 
   const toggle = (key: FolderId, depth: number) => {
-    const next = { ...open, [String(key)]: !isOpenIn(open, key, depth) };
-    setOpen(next);
+    const next: OpenMap = { ...open, [String(key)]: !isOpenIn(open, key, depth) };
     // 一覧にないフォルダ（削除したもの）の記録は捨てる。
     if (folders) {
       const known = collectKeys(tree, new Set());
       for (const k of Object.keys(next)) if (!known.has(k)) delete next[k];
     }
-    save("folderOpen", next);
+    setOpenState({ key: openKey, open: next });
+    if (openKey) save(openKey, next);
   };
 
   const selectFolder = (id: FolderId) => actions.setFilter({ folder_id: id, include_subfolders: subPref });
@@ -153,7 +168,9 @@ export function LibraryLeftPanel() {
           title="フォルダで絞り込まない（ほかの条件は残す）"
         >
           <span>すべての写真</span>
-          <span className="count">{stats ? `${stats.variants.toLocaleString("ja-JP")} 件` : "—"}</span>
+          <span className="count" title="カタログの写真と動画の数（仮想コピーを含む）">
+            {stats ? `${stats.variants.toLocaleString("ja-JP")} 件` : "—"}
+          </span>
         </div>
       </Section>
 

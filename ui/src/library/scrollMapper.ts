@@ -91,8 +91,12 @@ export class ScrollMapper {
 
   private release: (() => void) | null = null;
 
-  /** 内容の位置（仮想）へ動かす（物理の位置を書き、知らせる）。 */
-  scrollTo(virtual: number): void {
+  /**
+   * 内容の位置（仮想）へ動かす（物理の位置を書き、知らせる）。`source` が "program"（既定。キーボードの
+   * 移動・操作の対象を見せるときなど）なら、速いスクロールとはみなさない（PageDown を押し続けている間も
+   * サムネイルを出す）。利用者のスクロール（ホイール）は "user"。
+   */
+  scrollTo(virtual: number, source: "program" | "user" = "program"): void {
     this.virtual = clampVirtual(virtual, this.layout, this.viewHeight);
     const el = this.el;
     if (el) {
@@ -102,7 +106,7 @@ export class ScrollMapper {
         el.scrollTop = phys;
       }
     }
-    this.emit();
+    this.emit(source === "user");
   }
 
   /** 配置・表示の高さが変わった後に、物理の位置を仮想の位置に合わせ直す（知らせる）。 */
@@ -118,23 +122,25 @@ export class ScrollMapper {
       this.virtual = clampVirtual(toVirtual(phys, this.layout, this.viewHeight), this.layout, this.viewHeight);
     }
     this.written = null;
-    this.emit();
+    this.emit(true);
   }
 
   private handleWheel(e: WheelEvent): void {
     // Ctrl ＋ホイールは拡大縮小（ブラウザ）。横のスクロールは扱わない。
     if (!isScaled(this.layout) || e.ctrlKey || e.deltaY === 0) return;
     e.preventDefault();
-    this.scrollTo(this.virtual + wheelPixels(e.deltaY, e.deltaMode, this.viewHeight));
+    this.scrollTo(this.virtual + wheelPixels(e.deltaY, e.deltaMode, this.viewHeight), "user");
   }
 
-  private emit(): void {
+  /** 位置を知らせる。`user` は利用者のスクロール（スクロールのイベント・ホイール）か。 */
+  private emit(user: boolean): void {
     const t = this.now();
     const distance = Math.abs(this.virtual - this.last.virtual);
     const elapsed = t - this.last.time;
     this.last = { time: t, virtual: this.virtual };
-    // 続けてスクロールしている間だけ速さを見る（止まった後の 1 回の移動（Home・End など）は速いとみなさない）。
-    if (elapsed < SCROLL_IDLE_MS && isFastScroll(distance, elapsed, this.viewHeight)) this.setFast(true);
+    // 利用者が続けてスクロールしている間だけ速さを見る（止まった後の 1 回の移動と、キーボードの移動など
+    // プログラムからの移動は速いとみなさない）。
+    if (user && elapsed < SCROLL_IDLE_MS && isFastScroll(distance, elapsed, this.viewHeight)) this.setFast(true);
     this.onMove?.();
     this.listener?.(this.virtual, true);
     if (this.idleTimer !== null) clearTimeout(this.idleTimer);

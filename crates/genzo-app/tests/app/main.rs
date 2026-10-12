@@ -33,6 +33,7 @@ mod runner;
 mod support;
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// テストの一覧（名前と関数）。
@@ -70,8 +71,16 @@ const TESTS: &[(&str, fn())] = &[
         catalog::failed_save_keeps_the_catalog_open_until_retry_or_discard,
     ),
     (
+        "catalog::errors_after_the_catalog_closed_do_not_stop_opening_another",
+        catalog::errors_after_the_catalog_closed_do_not_stop_opening_another,
+    ),
+    (
         "library::import_thumbnails_and_previews_over_the_uri_scheme",
         library::import_thumbnails_and_previews_over_the_uri_scheme,
+    ),
+    (
+        "library::previews_are_not_cached_long_when_settings_go_back",
+        library::previews_are_not_cached_long_when_settings_go_back,
     ),
     (
         "develop::develop_and_region_frames_match_their_headers",
@@ -88,6 +97,18 @@ const TESTS: &[(&str, fn())] = &[
     (
         "backup::restore_refuses_files_that_are_not_catalogs",
         backup::restore_refuses_files_that_are_not_catalogs,
+    ),
+    (
+        "backup::restore_waits_for_another_app_to_close_the_catalog",
+        backup::restore_waits_for_another_app_to_close_the_catalog,
+    ),
+    (
+        "backup::requests_during_a_restore_wait_or_get_closed_errors",
+        backup::requests_during_a_restore_wait_or_get_closed_errors,
+    ),
+    (
+        "backup::restore_goes_on_when_closing_fails_after_the_catalog_closed",
+        backup::restore_goes_on_when_closing_fails_after_the_catalog_closed,
     ),
     (
         "events::core_events_reach_the_sink",
@@ -111,6 +132,17 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|a| a.as_os_str() == genzo_worker::WORKER_SUBCOMMAND)
     {
+        let mut it = args.into_iter();
+        let prefix: Vec<OsString> = it.next().into_iter().collect();
+        return genzo_worker::run_worker(prefix, it.collect());
+    }
+    // 合図で終わるワーカー（support::ExitSwitch。閉じる処理の途中のエラーを起こすテスト用）。
+    if let Some(marker) = args
+        .first()
+        .and_then(|a| a.to_str())
+        .and_then(|a| a.strip_prefix(support::EXITING_WORKER_PREFIX))
+    {
+        support::exit_when_signalled(PathBuf::from(marker));
         let mut it = args.into_iter();
         let prefix: Vec<OsString> = it.next().into_iter().collect();
         return genzo_worker::run_worker(prefix, it.collect());

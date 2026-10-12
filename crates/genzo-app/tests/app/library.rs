@@ -1,10 +1,11 @@
 //! (b) 取り込み → 検索 → `genzo://` のサムネイル・標準プレビュー（名前に空白と日本語を含む写真）。
 
-use genzo_api::{CatalogChange, Event, JobKind, JobState, Response};
+use genzo_api::{CatalogChange, DevelopSettings, Event, JobKind, JobState, Response, VariantId};
 use genzo_app::protocol::{self, Reply};
+use genzo_app::state::AppState;
 use serde_json::json;
 
-use crate::support::{Env, all_items, by_name, import, ok, write_image};
+use crate::support::{Env, Recorder, all_items, by_name, import, ok, write_image};
 
 /// JPEG を読んで寸法を返す。
 fn jpeg_size(r: &Reply) -> (u32, u32) {
@@ -19,7 +20,8 @@ const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
 /// 取り込み（ImportFolder → WaitJob）の後、検索した写真のサムネイルが `genzo://thumb` で 200 の JPEG。
 /// 標準プレビューは、まだなければ 404 で作る処理を予約し、ThumbnailUpdated のイベントの後に 200。
-/// `rev` が今の内容のものなら長くキャッシュさせ、古い `rev` では長くキャッシュさせない。
+/// サムネイルは `rev` が今の内容のものなら長くキャッシュさせ、古い `rev` では長くキャッシュさせない。
+/// 標準プレビューは `rev` によらず長くキャッシュさせない（[`previews_are_not_cached_long_when_settings_go_back`]）。
 pub fn import_thumbnails_and_previews_over_the_uri_scheme() {
     let env = Env::new();
     let state = env.state();
@@ -134,7 +136,11 @@ pub fn import_thumbnails_and_previews_over_the_uri_scheme() {
     };
     assert_ne!(new_rev, old_rev, "L0 も現像結果に置き換わる");
     let r = protocol::reply(&state, &uri, Some(&new_rev));
-    assert_eq!((r.status, r.cache_control), (200, IMMUTABLE));
+    assert_eq!(
+        (r.status, r.cache_control),
+        (200, "no-cache"),
+        "標準プレビューは今の rev でも長くキャッシュさせない"
+    );
     assert_eq!(
         jpeg_size(&r),
         (96, 64),
@@ -151,5 +157,121 @@ pub fn import_thumbnails_and_previews_over_the_uri_scheme() {
     assert_eq!(jpeg_size(&r), (96, 64));
     let r = protocol::reply(&state, &format!("/thumb/{}", id.get()), Some(&old_rev));
     assert_eq!((r.status, r.cache_control), (200, "no-cache"));
+    state.close_catalog(false).unwrap();
+}
+
+/// 現像設定を保存して、L0・L1 を作り直すのを待つ。作り直した L0 の rev を返す。
+fn save_and_wait(
+    state: &AppState,
+    events: &Recorder,
+    id: VariantId,
+    settings: &DevelopSettings,
+) -> String {
+    let mark = events.mark();
+    ok(
+        state,
+        json!({"type": "set_settings", "settings": settings, "dragging": false}),
+    );
+    match events.wait_for(
+        mark,
+        "L0・L1 の作り直し",
+        |e| matches!(e, Event::ThumbnailUpdated { variant_id, .. } if *variant_id == id),
+    ) {
+        Event::ThumbnailUpdated { rev, .. } => rev,
+        _ => unreachable!(),
+    }
+}
+
+/// 標準プレビュー（L1）は、URI の `rev`（L0 のもの）によらず長くキャッシュさせない。
+///
+/// 現像設定を A → B → A と戻すと、A の L1 はキャッシュ（LRU）に残っていてすぐ返るが、L0 は作り直しの
+/// ジョブが保存するまで B のまま。この間に `rev` = B の URI へ A の L1 を長くキャッシュさせると、後で設定を
+/// B にしたとき、ルーペ（L1 の URI の `rev` は L0 のもの）が A の画像を表示し続ける。作り直しが速く終われば
+/// この間に要求できないこともあるが、どの応答も長くキャッシュさせないことを確かめる。
+pub fn previews_are_not_cached_long_when_settings_go_back() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("戻す 設定");
+    // 作り直しに少し時間がかかるよう、ほかのテストより大きくする（食い違いの間に要求できるように。仮置き:
+    // 600×400。この環境（Linux・debug ビルド）では、続けて 3 回とも間に要求できた）。
+    write_image(&photos.join("大きな 写真.jpg"), (600, 400), 7);
+    state.open_catalog(&env.catalog("戻す.db"), true).unwrap();
+    import(&state, &photos);
+    let id = all_items(&state)[0].variant_id;
+    let uri = format!("/preview/{}", id.get());
+    let core = state.core().unwrap();
+    let mut a = match ok(&state, json!({"type": "open_develop", "variant_id": id})) {
+        Response::Develop(d) => d.settings,
+        other => panic!("{other:?}"),
+    };
+    a.exposure_ev = 0.5;
+    let mut b = a.clone();
+    b.exposure_ev = -1.5;
+
+    // (rev, 応答) の記録。
+    let mut replies: Vec<(String, Reply)> = Vec::new();
+    let rev_a = save_and_wait(&state, &env.events, id, &a);
+    let body_a = protocol::reply(&state, &uri, Some(&rev_a));
+    assert_eq!(body_a.status, 200, "作り直しで L1 も作る");
+    replies.push((rev_a.clone(), body_a.clone()));
+    let rev_b = save_and_wait(&state, &env.events, id, &b);
+    assert_ne!(rev_a, rev_b);
+    let body_b = protocol::reply(&state, &uri, Some(&rev_b));
+    assert_eq!(body_b.status, 200);
+    assert_ne!(body_a.body, body_b.body, "露光量の違う L1");
+    replies.push((rev_b.clone(), body_b.clone()));
+
+    // A に戻す: 保存した直後（L0 を作り直す前）に、rev = B の URI で要求する。
+    let mark = env.events.mark();
+    ok(
+        &state,
+        json!({"type": "set_settings", "settings": &a, "dragging": false}),
+    );
+    env.events.wait_for(mark, "現像設定の保存", |e| {
+        matches!(
+            e,
+            Event::CatalogChanged {
+                change: CatalogChange::Develop,
+                ..
+            }
+        )
+    });
+    let r = protocol::reply(&state, &uri, Some(&rev_b));
+    let l0_rev = core.thumbnail(id).unwrap().map(|t| t.rev);
+    assert_eq!(r.status, 200, "A の L1 はキャッシュに残っている");
+    assert_eq!(r.body, body_a.body, "今の設定（A）の L1 を返す");
+    let mismatch = l0_rev.as_deref() == Some(rev_b.as_str());
+    println!(
+        "    L0 がまだ B のまま（rev = B の URI に A の L1 を返す間）に要求できたか: {mismatch}"
+    );
+    if mismatch {
+        assert_ne!(
+            r.cache_control, IMMUTABLE,
+            "rev = B の URI に A の L1 を長くキャッシュさせない"
+        );
+    }
+    replies.push((rev_b.clone(), r));
+    // A の作り直しが終わると、L0 の rev も A に戻る（同じ設定なので同じキー）。
+    env.events.wait_for(
+        mark,
+        "A の L0 の作り直し",
+        |e| matches!(e, Event::ThumbnailUpdated { variant_id, rev } if *variant_id == id && *rev == rev_a),
+    );
+    let r = protocol::reply(&state, &uri, Some(&rev_a));
+    assert_eq!(r.body, body_a.body);
+    replies.push((rev_a.clone(), r));
+
+    for (rev, r) in &replies {
+        assert_eq!(
+            (r.status, r.cache_control),
+            (200, "no-cache"),
+            "rev {rev}: 標準プレビューは長くキャッシュさせない"
+        );
+    }
+    // サムネイルは、今の rev なら長くキャッシュさせる（L0 と rev は同時に読む）。
+    let r = protocol::reply(&state, &format!("/thumb/{}", id.get()), Some(&rev_a));
+    assert_eq!((r.status, r.cache_control), (200, IMMUTABLE));
+    drop(core);
+    ok(&state, json!({"type": "close_develop"}));
     state.close_catalog(false).unwrap();
 }

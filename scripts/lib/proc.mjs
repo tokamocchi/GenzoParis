@@ -52,3 +52,21 @@ export function capture(cmd, args, options = {}) {
 function quoteForLog(s) {
   return /[\s"']/.test(s) ? JSON.stringify(s) : s;
 }
+
+/**
+ * スクリプトの入口（scripts/*.mjs）で処理を実行する。失敗したらエラーを表示し、終了コード 1 で終わる。
+ *
+ * 入口のファイルは「直接実行されたか」を判定せずに必ずこれを呼ぶ（判定は、シンボリックリンクを含むパスで
+ * 起動したときなどに成り立たず、何もせずに成功で終わってしまうため）。ほかのスクリプトから使う処理は
+ * scripts/lib/ に置く。
+ *
+ * @param {() => void} main
+ */
+export function runMain(main) {
+  try {
+    main();
+  } catch (e) {
+    console.error(`エラー: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
+  }
+}

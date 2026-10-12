@@ -40,7 +40,7 @@ macOS の `hardenedRuntime: false` は、Hardened Runtime のライブラリの�
 
 | スクリプト | 内容 | ui/ からの起動 |
 |---|---|---|
-| `scripts/prepare-worker.mjs` | ワーカーを LibRaw ありで release ビルドし（`cargo build --release --locked -p genzo-worker --features libraw`）、`crates/genzo-app/binaries/genzo-worker-<target triple>` に置く。LibRaw のライブラリを `binaries/libs/` に集め、`binaries/tauri.libs.conf.json` と同梱の一覧 `binaries/bundled-libs.txt` を作る | `npm run app:worker` |
+| `scripts/prepare-worker.mjs` | ワーカーを LibRaw ありで release ビルドし（`cargo build --release --locked -p genzo-worker --features libraw`。macOS は同じ内容を `cargo rustc` で実行し、リンカーの引数を足す。2.3）、`crates/genzo-app/binaries/genzo-worker-<target triple>` に置く。LibRaw のライブラリを `binaries/libs/` に集め、`binaries/tauri.libs.conf.json` と同梱の一覧 `binaries/bundled-libs.txt` を作る | `npm run app:worker` |
 | `scripts/build-app.mjs` | 上の処理の後、`tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json <引数> -- --locked` を実行する。`--skip-worker` でワーカーのビルドを省く | `npm run app:build -- --bundles nsis` など |
 | `scripts/tauri.mjs` | Tauri の CLI を、この構成で起動する（下の説明） | `npm run app:dev`（`tauri dev`） |
 
@@ -186,9 +186,14 @@ FFmpeg は同梱しません（決定 No.62）。動画は FFmpeg がなくて�
 
 ## 6. この環境（Linux）での確認の結果
 
-2026-10-12、Ubuntu 24.04 のコンテナで、LibRaw（apt の libraw-dev 0.21.2）を入れて確かめました。
+2026-10-12、Ubuntu 24.04 のコンテナ（4 コア）で、LibRaw（apt の libraw-dev。`pkg-config --modversion libraw_r` は 0.21.2）を入れて確かめました。
 
-- 結果はこの節の末尾に記録します（実行のログから写す）。
+1. `ui/` で `npm run app:build -- --bundles deb` を実行した（このときは、並行して作業中の画面のコードに型の誤りがあったため、`--config '{"build":{"beforeBuildCommand":"npx vite build"}}'` を足して型の検査を省いた。配布物の中身には関係しない）。ワーカーのビルド（ビルド済みで 0.25 秒）→ Tauri のビルド（本体の release ビルドを含めて 13 分 28 秒）で、`target/release/bundle/deb/GenzoParis_0.1.0_amd64.deb` ができた。
+2. `dpkg -c` で、`usr/bin/genzo-paris`（本体）と `usr/bin/genzo-worker`（ワーカー）が入っていることを確かめた。ワーカーは `crates/genzo-app/binaries/genzo-worker-x86_64-unknown-linux-gnu` と同じファイル（`cmp` で一致）。
+3. `dpkg -x` で取り出し、`ldd` で、ワーカーは `libraw_r.so.23` に依存し、本体は LibRaw に依存しないことを確かめた（決定 No.32）。取り出したワーカーの `--version` は「genzo-worker 0.1.0」を出して終了コード 0。
+4. `bundle.resources` の対応表（Windows で DLL を置くのと同じ書き方。`"binaries/libs/<名前>": "<名前>"`）に試しのファイルを足して作り直し、.deb の resource のフォルダの直下（`usr/lib/GenzoParis/<名前>`）に入ることを確かめた（パスは `crates/genzo-app` から解決される）。確かめた後、試しのファイルを除いて作り直した。
+5. `--config` は複数指定でき、順にマージされること、`--` の後の引数（`--locked -v`）が cargo に渡ることを確かめた（`-v` の出力が出た）。
+6. `.deb` の依存（`Depends`）は `libwebkit2gtk-4.1-0, libgtk-3-0` だけで、LibRaw は入っていない（2.4 のとおり）。
 
 ## 7. 未確認の事項
 

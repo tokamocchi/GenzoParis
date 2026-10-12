@@ -5,6 +5,7 @@ import {
   captureNote,
   dirName,
   extensionMark,
+  fileCheckNotice,
   fileStatusText,
   fileStatusTitle,
   formatDimensions,
@@ -151,5 +152,52 @@ describe("ファイル", () => {
     expect(virtualCopyLabel({ is_master: true, variant_name: null })).toBeNull();
     expect(virtualCopyLabel({ is_master: false, variant_name: null })).toBe("仮想コピー");
     expect(virtualCopyLabel({ is_master: false, variant_name: "白黒" })).toBe("仮想コピー: 白黒");
+  });
+});
+
+describe("元ファイルを確かめ直した結果の知らせ", () => {
+  const ok = { status: "ok" as const, status_reason: null };
+
+  it("すべて確かめられて状態が ok なら成功", () => {
+    expect(fileCheckNotice({ checked: 2, ok: 2, missing: [] }, ok)).toEqual({
+      level: "success",
+      message: "元ファイルを確かめました",
+    });
+  });
+
+  it("見つからないファイルがあれば、その場所を知らせる", () => {
+    const n = fileCheckNotice(
+      {
+        checked: 2,
+        ok: 0,
+        missing: [
+          { path: "/a/IMG_0001.ARW", reason: "ファイルが見つかりません" },
+          { path: "/a/IMG_0001.JPG", reason: "ファイルが見つかりません" },
+        ],
+      },
+      { status: "missing", status_reason: "ファイルが見つかりません" },
+    );
+    expect(n.level).toBe("warning");
+    expect(n.message).toBe("元ファイルが見つかりません");
+    expect(n.detail).toBe("/a/IMG_0001.ARW\nほか 1 件");
+  });
+
+  it("場所が分からない（ドライブが接続されていない）ファイルは、確かめられなかったと知らせる", () => {
+    // check_files は path が None のファイルを checked にだけ数える。
+    const n = fileCheckNotice({ checked: 1, ok: 0, missing: [] }, { status: "missing", status_reason: null });
+    expect(n.level).toBe("warning");
+    expect(n.message).toBe("元ファイルを確かめられませんでした");
+  });
+
+  it("読めない（権限がないなど）ファイルは ok に数えられても、状態が残っていれば成功にしない", () => {
+    const missing = fileCheckNotice({ checked: 1, ok: 1, missing: [] }, { status: "missing", status_reason: "x" });
+    expect(missing.level).toBe("warning");
+    expect(missing.message).toBe("元ファイルを確かめられませんでした");
+    const error = fileCheckNotice({ checked: 1, ok: 1, missing: [] }, { status: "error", status_reason: "壊れている" });
+    expect(error).toEqual({ level: "warning", message: "元ファイルを読めません", detail: "壊れている" });
+  });
+
+  it("後の状態を読めなくても、結果だけで判断する", () => {
+    expect(fileCheckNotice({ checked: 1, ok: 1, missing: [] }, null).level).toBe("success");
   });
 });

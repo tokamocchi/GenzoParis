@@ -1,15 +1,20 @@
 //! (d) バックアップと復元: BackupNow → 閉じる → カタログのファイルを壊す → 開けない（catalog_corrupt）→
-//! バックアップの一覧（ファイル名で探す）→ 復元して開き直す・退避したファイルが残る。
+//! バックアップの一覧（ファイル名で探す）→ 復元して開き直す・退避したファイルが残る。復元の最中のほかの
+//! 要求・別のアプリが開いているカタログの復元・閉じる処理の途中のエラー。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use genzo_api::{BackupEntry, CatalogStats, ErrorKind, Response};
 use genzo_app::catalog_file::{self, CatalogFileState};
-use genzo_app::state::AppState;
+use genzo_app::protocol;
+use genzo_app::state::{AppState, DisplayTarget};
 use serde_json::json;
 
-use crate::support::{Env, all_items, assert_kind, import, ok, write_image};
+use crate::support::{Env, ExitSwitch, all_items, assert_kind, exec, import, ok, write_image};
 
 fn backup_now(state: &AppState) -> BackupEntry {
     match ok(state, json!({"type": "backup_now"})) {
@@ -31,6 +36,18 @@ fn displaced_main(displaced: &[PathBuf]) -> &Path {
         .iter()
         .find(|p| p.extension().is_some_and(|e| e == "db"))
         .unwrap_or_else(|| panic!("退避したカタログがない: {displaced:?}"))
+}
+
+/// カタログのフォルダに、復元の途中のファイル（`*-restored-*.db`）が残っていないこと。
+fn assert_no_restored_copy(path: &Path) {
+    let names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.contains("-restored-")),
+        "復元の途中のファイルを残さない: {names:?}"
+    );
 }
 
 /// 写真 2 枚を取り込んでバックアップを作り、さらに 1 枚取り込んだカタログ。
@@ -83,6 +100,30 @@ pub fn corrupt_catalog_is_restored_from_a_backup() {
         "壊れたファイルを変えない"
     );
     assert!(state.session().is_none());
+
+    // 画面の事前の確認（inspect_catalog_path）も、開く処理と同じくカタログとして返す（画面は開こうとして、
+    // catalog_corrupt で復元を案内する。「カタログではありません」で断ると、復元の案内に届かない）。
+    // ファイルの先頭だけの判定はカタログではないとする。
+    assert_eq!(
+        catalog_file::inspect(&path).unwrap(),
+        CatalogFileState::NotCatalog
+    );
+    assert_eq!(
+        state.inspect_catalog(&path).unwrap(),
+        CatalogFileState::Catalog
+    );
+    // データのフォルダのない、カタログでないファイルは、カタログではない（開く処理も invalid_input）。
+    let memo = env.root().join("メモ.db");
+    std::fs::write(&memo, &bytes).unwrap();
+    assert_eq!(
+        state.inspect_catalog(&memo).unwrap(),
+        CatalogFileState::NotCatalog
+    );
+    assert_kind(state.open_catalog(&memo, false), ErrorKind::InvalidInput);
+    assert_eq!(
+        state.inspect_catalog(&env.root().join("ない.db")).unwrap(),
+        CatalogFileState::Missing
+    );
 
     // バックアップの一覧（カタログを読めないので、ファイル名で探す。新しい順）。
     let list = state.list_backups(&path).unwrap();
@@ -174,14 +215,158 @@ pub fn restore_refuses_files_that_are_not_catalogs() {
         "選んだバックアップが使えなければ、開いているカタログを閉じない"
     );
     assert_eq!(stats(&state).assets, 3, "カタログは変えない");
-    let names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(
-        !names.iter().any(|n| n.contains("restored")),
-        "復元の途中のファイルを残さない: {names:?}"
-    );
+    assert_no_restored_copy(&path);
     drop(core);
+    state.close_catalog(false).unwrap();
+}
+
+/// 別のアプリ（別の AppState。CLI も同じロック）が開いているカタログは差し替えない（conflict）。カタログは
+/// 変えず、復元した写しも残さない（やり直すたびに写しが増えないように）。別のアプリが閉じれば復元できる。
+pub fn restore_waits_for_another_app_to_close_the_catalog() {
+    let env = Env::new();
+    let other = env.state();
+    let path = env.catalog("別の アプリ.db");
+    let backup = catalog_with_backup(&env, &other, &path);
+    let state = env.state_with(env.root().join("config-b"), env.events.sink());
+
+    for _ in 0..2 {
+        let e = assert_kind(state.restore(&path, &backup.path), ErrorKind::Conflict);
+        assert!(
+            e.hint
+                .as_deref()
+                .is_some_and(|h| h.contains("終了してから") && h.contains("変更していません")),
+            "{e:?}"
+        );
+        assert_no_restored_copy(&path);
+    }
+    assert!(state.session().is_none());
+    assert_eq!(
+        stats(&other).assets,
+        3,
+        "開いている側のカタログは変わらない"
+    );
+
+    other.close_catalog(false).unwrap();
+    let outcome = state.restore(&path, &backup.path).unwrap();
+    assert!(outcome.open_error.is_none(), "{:?}", outcome.open_error);
+    assert_eq!(outcome.status.unwrap().stats.assets, 2);
+    assert_no_restored_copy(&path);
+    // 開いた側（state）が持っているので、もう一方は開けない。
+    assert_kind(other.open_catalog(&path, false), ErrorKind::Conflict);
+    state.close_catalog(false).unwrap();
+}
+
+/// 復元の最中に届いた要求: コマンド・`genzo://`・画面の色空間の指定・状態の取得は、成功するか「閉じている」
+/// （URI スキームは 503）だけ。開く・バックアップの一覧・事前の確認は、復元が終わるまで待って成功する。
+/// 終わった後は、復元したカタログが開いていて、画面の色空間の指定も効く。
+pub fn requests_during_a_restore_wait_or_get_closed_errors() {
+    let env = Env::new();
+    let state = env.state();
+    let path = env.catalog("復元 中.db");
+    let backup = catalog_with_backup(&env, &state, &path);
+    let ids: Vec<i64> = all_items(&state)
+        .iter()
+        .map(|s| s.variant_id.get())
+        .collect();
+
+    let stop = AtomicBool::new(false);
+    let (statuses, kinds, waited) = std::thread::scope(|s| {
+        let thumbs = s.spawn(|| {
+            let mut statuses = HashSet::new();
+            while !stop.load(Ordering::SeqCst) {
+                for id in &ids {
+                    statuses.insert(protocol::reply(&state, &format!("/thumb/{id}"), None).status);
+                }
+            }
+            statuses
+        });
+        let requests = s.spawn(|| {
+            let mut kinds = HashSet::new();
+            let mut p3 = false;
+            while !stop.load(Ordering::SeqCst) {
+                let mut errors = vec![
+                    exec(&state, json!({"type": "catalog_stats"})).err(),
+                    exec(&state, json!({"type": "search"})).err(),
+                    state.status().err(),
+                ];
+                p3 = !p3;
+                let target = if p3 {
+                    DisplayTarget::DisplayP3
+                } else {
+                    DisplayTarget::Srgb
+                };
+                errors.push(state.set_display_target(target).err());
+                kinds.extend(errors.into_iter().flatten().map(|e| e.kind));
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            kinds
+        });
+        // 開く・一覧・事前の確認は、復元と同じロックで待つ（どれも成功する）。
+        let waiting = s.spawn(|| {
+            std::thread::sleep(Duration::from_millis(20));
+            let opened = state.open_catalog(&path, false).map(|s| s.catalog_path);
+            let listed = state.list_backups(&path);
+            let inspected = state.inspect_catalog(&path);
+            (opened, listed, inspected)
+        });
+        std::thread::sleep(Duration::from_millis(10));
+        let outcome = state.restore(&path, &backup.path).unwrap();
+        assert!(outcome.open_error.is_none(), "{:?}", outcome.open_error);
+        assert_eq!(outcome.status.unwrap().stats.assets, 2);
+        std::thread::sleep(Duration::from_millis(50));
+        stop.store(true, Ordering::SeqCst);
+        (
+            thumbs.join().unwrap(),
+            requests.join().unwrap(),
+            waiting.join().unwrap(),
+        )
+    });
+    assert!(statuses.contains(&200), "{statuses:?}");
+    // 3 枚目は復元したカタログにない（404）。
+    assert!(
+        statuses.iter().all(|s| matches!(s, 200 | 404 | 503)),
+        "復元の最中のサムネイルは 503: {statuses:?}"
+    );
+    assert!(
+        kinds.iter().all(|k| *k == ErrorKind::Closed),
+        "閉じている以外の失敗: {kinds:?}"
+    );
+    let (opened, listed, inspected) = waited;
+    assert_eq!(opened.unwrap(), path);
+    assert!(
+        listed.unwrap().iter().any(|b| b.path == backup.path),
+        "復元に使ったバックアップは残る"
+    );
+    assert_eq!(inspected.unwrap(), CatalogFileState::Catalog);
+    assert_eq!(stats(&state).assets, 2, "復元したカタログが開いている");
+    assert_no_restored_copy(&path);
+    let info = state
+        .set_display_target(DisplayTarget::DisplayP3)
+        .unwrap()
+        .expect("開いている");
+    assert_eq!(state.status().unwrap().unwrap().display, info);
+    state.close_catalog(false).unwrap();
+}
+
+/// 開いているカタログを復元するとき、閉じる処理が「閉じた後の段階のエラー」（ここではワーカーがいなくなって
+/// いて、終了を頼めない）を返しても、カタログはもう閉じているので、差し替えて開き直す（止めると、閉じたまま
+/// 何もしないで返す）。
+pub fn restore_goes_on_when_closing_fails_after_the_catalog_closed() {
+    let env = Env::new();
+    let switch = ExitSwitch::new(&env.root().join("合図"));
+    let state = env.state_with_worker(env.config_dir(), env.events.sink(), switch.launch());
+    let path = env.catalog("閉じる エラー.db");
+    let backup = catalog_with_backup(&env, &state, &path);
+    let before = state.core().unwrap();
+    switch.exit_all();
+
+    let outcome = state.restore(&path, &backup.path).unwrap();
+    assert!(before.is_closed(), "前のコアは閉じた");
+    assert!(outcome.open_error.is_none(), "{:?}", outcome.open_error);
+    assert_eq!(outcome.status.unwrap().stats.assets, 2);
+    assert!(!outcome.displaced.is_empty());
+    assert_eq!(all_items(&state).len(), 2);
+    assert_no_restored_copy(&path);
+    drop(before);
     state.close_catalog(false).unwrap();
 }

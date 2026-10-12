@@ -5,12 +5,17 @@
 //! | `genzo://localhost/thumb/{variant_id}?rev={rev}` / `http://genzo.localhost/thumb/...` | サムネイル（L0。長辺 320） |
 //! | `genzo://localhost/preview/{variant_id}?rev={rev}` / `http://genzo.localhost/preview/...` | 標準プレビュー（L1）。なければ作る処理を予約して 404 を返す（作ったら `thumbnail_updated` のイベント） |
 //!
-//! - `rev`（L0 のキャッシュキーのハッシュ）が今の内容のものなら、その URI の内容は変わらないので、ブラウザに
-//!   長くキャッシュさせる（`immutable`）。現像設定を変えると `rev` が変わり、新しい URI になる。
-//! - `rev` が今の内容のものでなければ（検索結果の `thumb_rev` が古いうちに要求したなど）、今の内容を返すが、
+//! - サムネイル: `rev`（L0 のキャッシュキーのハッシュ）が今の内容のものなら、その URI の内容は変わらないので、
+//!   ブラウザに長くキャッシュさせる（`immutable`）。現像設定を変えると `rev` が変わり、新しい URI になる。
+//!   `rev` が今の内容のものでなければ（検索結果の `thumb_rev` が古いうちに要求したなど）、今の内容を返すが、
 //!   長くはキャッシュさせない（`no-cache`）。古い `rev` の URI に新しい内容をキャッシュさせると、設定を元に
-//!   戻して `rev` が戻ったときに、ブラウザが違う内容を表示し続けるため。標準プレビュー（L1）は L0 と同時に
-//!   作り直すので、L0 の `rev` と比べる。
+//!   戻して `rev` が戻ったときに、ブラウザが違う内容を表示し続けるため。
+//! - 標準プレビュー: 常に `no-cache`（長くキャッシュさせない）。URI の `rev` は L0 のものだが、返す L1 は
+//!   「今の現像設定」のキーでキャッシュから引くので、L0 の `rev` と L1 の内容が食い違う間がある。設定を
+//!   A → B → A と戻すと、A の L1 はキャッシュ（LRU）に残っていてすぐ返る一方、L0 は作り直しのジョブが保存する
+//!   まで B のまま。この間に `rev` = B の URI へ A の L1 を長くキャッシュさせると、後で設定を B にしたときに、
+//!   ブラウザが A の画像を表示し続ける。L1 のキーを URI に入れて比べるには、コア API に L1 のキー（または今の
+//!   設定から求めた L0 のキー）を返す口が要る（genzo-api。今はない）。
 //! - カタログが開いていない・閉じている途中なら 503、ないものは 404、URI の形が違えば 400。
 //! - JPEG は Display P3 の ICC を埋め込んである（genzo-api の `previews`）。モニターへの変換は WebView が
 //!   行う。
@@ -108,7 +113,7 @@ pub fn query_rev(query: Option<&str>) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
-/// 要求に応える。`rev` は URI の `rev`（なければ `None`）。
+/// 要求に応える。`rev` は URI の `rev`（なければ `None`。サムネイルだけが使う）。
 pub fn reply(state: &AppState, path: &str, rev: Option<&str>) -> Reply {
     let Some(route) = parse(path) else {
         return Reply::empty(400);
@@ -130,17 +135,8 @@ pub fn reply(state: &AppState, path: &str, rev: Option<&str>) -> Reply {
         },
         Route::Preview(id) => match core.request_preview(id) {
             Ok(Some(path)) => match std::fs::read(&path) {
-                Ok(bytes) => {
-                    // 読み終えてから、今の L0 の rev と比べる（読む前に作り直されていれば、L0 の rev も
-                    // 変わっているので、長くキャッシュさせない）。
-                    let immutable = rev.is_some_and(|r| {
-                        core.thumbnail(id)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|t| t.rev == r)
-                    });
-                    Reply::jpeg(bytes, immutable)
-                }
+                // L0 の rev と L1 の内容は食い違いうるので、rev によらず長くキャッシュさせない（モジュールの doc）。
+                Ok(bytes) => Reply::jpeg(bytes, false),
                 // キャッシュの回収で消えた直後など。作り直しを予約して 404 にする。
                 Err(_) => {
                     let _ = core.request_preview(id);

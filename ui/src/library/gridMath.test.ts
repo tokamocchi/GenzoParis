@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   anchoredOffset,
   CELL_FOOTER,
+  clampRangeTarget,
   clampVirtual,
   firstVisibleIndex,
   GRID_GAP,
@@ -10,6 +11,8 @@ import {
   isFastScroll,
   isFullyVisible,
   isScaled,
+  MAX_CELL_WIDTH,
+  MAX_RANGE,
   MAX_SCROLL_PX,
   navigate,
   pageRows,
@@ -32,8 +35,21 @@ describe("配置", () => {
     expect(l.contentHeight).toBe(GRID_GAP + 3 * l.rowHeight);
     expect(l.scrollHeight).toBe(l.contentHeight);
     expect(isScaled(l)).toBe(false);
-    // セルの全体の幅が表示の幅に収まる。
+    // セルの全体の幅が表示の幅に収まる。余り（900 - (6 + 5 × 178) = 4）は左右に分ける。
     expect(l.cols * (l.cellWidth + GRID_GAP) + GRID_GAP).toBeLessThanOrEqual(900);
+    expect(l.insetLeft).toBe(GRID_GAP + 2);
+  });
+
+  it("幅に合わせて広げても、セルの幅はサムネイルの長辺（320）までにし、余りを左右に分ける", () => {
+    // 幅 645・目安 320: 列は 1。広げると floor(639 / 1) - 6 = 633 になるが、320 に抑える。
+    const l = gridLayout(645, 10, 320);
+    expect(l.cols).toBe(1);
+    expect(l.cellWidth).toBe(MAX_CELL_WIDTH);
+    // 余り 645 - (6 + 326) = 313 の半分（156）を左に足す。
+    expect(l.insetLeft).toBe(GRID_GAP + 156);
+    expect(l.insetLeft + l.cols * (l.cellWidth + GRID_GAP)).toBeLessThanOrEqual(645);
+    // 目安が小さければ、上限までは広げる（幅 300・目安 96: 列は 2、セルの幅は floor(294 / 2) - 6 = 141）。
+    expect(gridLayout(300, 10, 96).cellWidth).toBe(141);
   });
 
   it("狭くても 1 列、件数が 0 なら行も 0", () => {
@@ -45,10 +61,10 @@ describe("配置", () => {
 
   it("50 万件ではスクロールの領域の高さを上限までに抑える", () => {
     const l = gridLayout(900, 500_000, 320);
-    // 列 2・行の高さ 469: 25 万行 × 469 + 6 = 1 億 1,725 万 6 px。
+    // 列 2・セルの幅 320（上限）・行の高さ 320 + 22 + 6 = 348: 25 万行 × 348 + 6 = 8,700 万 6 px。
     expect(l.cols).toBe(2);
-    expect(l.rowHeight).toBe(469);
-    expect(l.contentHeight).toBe(117_250_006);
+    expect(l.rowHeight).toBe(348);
+    expect(l.contentHeight).toBe(87_000_006);
     expect(l.scrollHeight).toBe(MAX_SCROLL_PX);
     expect(isScaled(l)).toBe(true);
   });
@@ -114,14 +130,14 @@ describe("見えるようにする位置", () => {
 
   it("配置が変わっても、目印のセルを表示の中の同じあたりに置く", () => {
     const small = gridLayout(900, 1000, 160); // 5 列・行の高さ 200
-    const large = gridLayout(900, 1000, 320); // 2 列・行の高さ 469
+    const large = gridLayout(900, 1000, 320); // 2 列・行の高さ 348・セルの高さ 342
     // セル 50（行 10。上端 2006）が表示の上から 106 の位置にある。
     const v = 1900;
     const next = anchoredOffset(small, large, v, 600, 50);
-    // 大きいセルでは行 25（上端 6 + 25 × 469 = 11731）。セルの高さ 463 が収まる範囲で、上から 106 に置く。
-    expect(next).toBe(11731 - 106);
+    // 大きいセルでは行 25（上端 6 + 25 × 348 = 8706）。セルの高さ 342 が収まる範囲で、上から 106 に置く。
+    expect(next).toBe(8706 - 106);
     // 表示に収まらない位置にあったときは、セルの全体（下の余白 6 まで）が見えるようにずらす。
-    expect(anchoredOffset(small, large, 2006 - 500, 600, 50)).toBe(11731 - (600 - 463 - 6));
+    expect(anchoredOffset(small, large, 2006 - 500, 600, 50)).toBe(8706 - (600 - 342 - 6));
   });
 });
 
@@ -154,6 +170,19 @@ describe("キーボードの移動", () => {
     expect(navigate("End", null, 20, 5, 2)).toBe(19);
     expect(navigate("ArrowRight", 99, 20, 5, 2)).toBe(0);
     expect(navigate("ArrowRight", null, 0, 5, 2)).toBeNull();
+  });
+
+  it("Shift で広げる範囲は、アンカーから 10,000 件までに収める", () => {
+    expect(MAX_RANGE).toBe(10_000);
+    // 下へ: アンカー 0 から End（499,999）は 9,999 まで（0〜9,999 の 10,000 件）。
+    expect(clampRangeTarget(0, 499_999)).toBe(9_999);
+    expect(clampRangeTarget(0, 9_999)).toBe(9_999);
+    // 上へ: アンカー 20,000 から Home（0）は 10,001 まで（10,001〜20,000 の 10,000 件）。
+    expect(clampRangeTarget(20_000, 0)).toBe(10_001);
+    expect(clampRangeTarget(20_000, 15_000)).toBe(15_000);
+    // アンカーがなければそのまま。
+    expect(clampRangeTarget(null, 499_999)).toBe(499_999);
+    expect(clampRangeTarget(5, 5)).toBe(5);
   });
 
   it("1 画面の行の数は 1 以上", () => {

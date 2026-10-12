@@ -101,11 +101,53 @@ pub fn inspect(path: &Path) -> std::io::Result<CatalogFileState> {
     }
 }
 
+/// 開く・差し替える前の判定（[`inspect`] に、先頭が壊れたカタログの見分けを加えたもの）。
+///
+/// アプリのカタログを開く処理・復元・画面の事前の確認（`inspect_catalog_path`）は、すべてこれで判定する
+/// （判定が食い違うと、画面が事前の確認で断ってしまい、開く処理の復元の案内に届かないため）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Assessment {
+    /// ない（新しく作れる）。
+    Missing,
+    /// GenzoParis のカタログ。
+    Catalog,
+    /// 先頭が壊れたカタログ: [`inspect`] はカタログでないとするが、隣のデータのフォルダに GenzoParis の
+    /// データがある（[`has_catalog_data`]）。開くと catalog_corrupt で、バックアップからの復元を案内する。
+    Damaged,
+    /// カタログではないファイル、またはフォルダ（開かない・上書きしない・差し替えない）。
+    NotCatalog,
+}
+
+impl Assessment {
+    /// 画面に返す状態（`inspect_catalog_path`）。先頭が壊れたカタログは [`CatalogFileState::Catalog`] に
+    /// する: 画面はカタログとして開こうとし、開く処理が catalog_corrupt を返して、復元を案内する
+    /// （[`CatalogFileState::NotCatalog`] にすると、画面が「カタログではありません」で断り、復元の案内に
+    /// 届かない）。
+    pub fn file_state(self) -> CatalogFileState {
+        match self {
+            Self::Missing => CatalogFileState::Missing,
+            Self::Catalog | Self::Damaged => CatalogFileState::Catalog,
+            Self::NotCatalog => CatalogFileState::NotCatalog,
+        }
+    }
+}
+
+/// パスを判定する（[`Assessment`]。読めなければエラー）。
+pub fn assess(path: &Path) -> std::io::Result<Assessment> {
+    Ok(match inspect(path)? {
+        CatalogFileState::Missing => Assessment::Missing,
+        CatalogFileState::Catalog => Assessment::Catalog,
+        CatalogFileState::NotCatalog if has_catalog_data(path) => Assessment::Damaged,
+        CatalogFileState::NotCatalog => Assessment::NotCatalog,
+    })
+}
+
 /// カタログの隣のデータのフォルダ（[`data_dir_for`]）に、GenzoParis のデータ（サムネイルの DB、または
 /// このカタログの名前のバックアップ）があるか。
 ///
 /// カタログの先頭が壊れて [`inspect`] が [`CatalogFileState::NotCatalog`] を返したときに、壊れたカタログ
-/// （バックアップから復元を案内する）か、カタログでないファイル（開かない・変えない）かを見分けるのに使う。
+/// （バックアップから復元を案内する）か、カタログでないファイル（開かない・変えない）かを見分けるのに使う
+/// （[`assess`]）。
 pub fn has_catalog_data(catalog: &Path) -> bool {
     if !catalog.is_file() {
         return false;
@@ -198,6 +240,38 @@ mod tests {
         assert!(has_catalog_data(&other), "サムネイルの DB");
         assert!(!has_catalog_data(d.path()), "フォルダはカタログではない");
         assert!(!has_catalog_data(&d.path().join("none.db")), "ないファイル");
+    }
+
+    /// 判定（assess）と、画面に返す状態（file_state）。先頭が壊れたカタログは、画面にはカタログとして返す。
+    #[test]
+    fn assessment_tells_damaged_catalogs_from_other_files() {
+        let d = tempfile::tempdir().unwrap();
+        let none = d.path().join("none.db");
+        assert_eq!(assess(&none).unwrap(), Assessment::Missing);
+        let memo = d.path().join("メモ.db");
+        std::fs::write(&memo, b"not a catalog").unwrap();
+        assert_eq!(assess(&memo).unwrap(), Assessment::NotCatalog);
+        assert_eq!(assess(d.path()).unwrap(), Assessment::NotCatalog);
+        let broken = d.path().join("壊れた.db");
+        std::fs::write(&broken, b"GARBAGE").unwrap();
+        std::fs::create_dir_all(data_dir_for(&broken)).unwrap();
+        std::fs::write(data_dir_for(&broken).join("thumbs.db"), b"").unwrap();
+        assert_eq!(assess(&broken).unwrap(), Assessment::Damaged);
+        let cat = d.path().join("cat.db");
+        drop(genzo_catalog::Catalog::open(&cat).unwrap());
+        assert_eq!(assess(&cat).unwrap(), Assessment::Catalog);
+
+        assert_eq!(Assessment::Missing.file_state(), CatalogFileState::Missing);
+        assert_eq!(Assessment::Catalog.file_state(), CatalogFileState::Catalog);
+        assert_eq!(
+            Assessment::Damaged.file_state(),
+            CatalogFileState::Catalog,
+            "画面は開こうとして、catalog_corrupt で復元を案内する"
+        );
+        assert_eq!(
+            Assessment::NotCatalog.file_state(),
+            CatalogFileState::NotCatalog
+        );
     }
 
     #[test]

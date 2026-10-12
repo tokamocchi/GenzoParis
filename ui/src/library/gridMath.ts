@@ -1,9 +1,13 @@
 // グリッドの配置・スクロールの位置の対応・キーボードの移動先の計算（LIB-01。DOM を使わない純粋な計算）。
 //
 // - 行の高さは一定（セルは正方形のサムネイルの枠＋下の帯）。列の数は幅に合わせ、セルを幅いっぱいに広げる。
+//   ただし、セルの幅はサムネイル（L0）の長辺（320 px）までにする（DPR 1 でサムネイルを拡大して粗く見せない。
+//   余った幅は左右に分ける）。DPR 2 などの高い画素密度では、セルの幅が 160 px を超えると L0 を拡大して
+//   表示する（L0 の大きさの限界。標準プレビュー（L1。長辺 2560）は、なければ作る処理を予約するため、
+//   グリッドの全部のセルには使わない）。
 // - 50 万件のカタログでは、内容の高さがブラウザの要素の高さの上限（Chromium・WebKit の LayoutUnit で
-//   約 3,355 万 px）を超えうる（例: 幅 900 px・セルの大きさ 320 なら列が 2・行の高さが 469 px で、
-//   25 万行 × 469 px = 1 億 1,725 万 px）。そこで、スクロールの
+//   約 3,355 万 px）を超えうる（例: 幅 900 px・セルの大きさ 320 なら列が 2・行の高さが 348 px で、
+//   25 万行 × 348 px = 8,700 万 px）。そこで、スクロールの
 //   領域の高さを MAX_SCROLL_PX までに抑え、スクロールの位置（物理）と内容の位置（仮想）を比例させて
 //   対応させる。上限に収まるときは物理と仮想は同じ（ふつうのスクロール）。
 // - 描く行の範囲は @tanstack/react-virtual が内容の位置（仮想）から求める。react-virtual はスクロールの位置を
@@ -25,6 +29,12 @@ export const MAX_SCROLL_PX = 8_000_000;
 /** セルの大きさ（サムネイルの枠の幅の目安。px）の範囲と既定値（仮置き。サムネイルは長辺 320）。 */
 export const CELL_SIZE = { min: 96, max: 320, default: 160, step: 8 } as const;
 
+/**
+ * 幅に合わせて広げるときの、セルの幅の上限（px）。サムネイル（L0）の長辺（genzo-media の cache.rs の
+ * `CacheSpec::L0_THUMBNAIL`）と同じ。
+ */
+export const MAX_CELL_WIDTH = 320;
+
 export interface GridLayout {
   /** 列の数（1 以上）。 */
   cols: number;
@@ -32,6 +42,8 @@ export interface GridLayout {
   rows: number;
   /** セルの幅（px）。 */
   cellWidth: number;
+  /** 行の左端から先頭のセルまでの余白（px。セルの幅を抑えて余った幅の半分を足す）。 */
+  insetLeft: number;
   /** セルの高さ（px。サムネイルの枠＋下の帯）。 */
   cellHeight: number;
   /** 行の間隔（セルの高さ＋余白。px）。 */
@@ -47,7 +59,9 @@ export function gridLayout(width: number, count: number, targetSize: number): Gr
   const w = Math.max(0, Math.floor(width));
   const size = Math.max(1, targetSize);
   const cols = Math.max(1, Math.floor((w - GRID_GAP) / (size + GRID_GAP)));
-  const cellWidth = Math.max(16, Math.floor((w - GRID_GAP) / cols) - GRID_GAP);
+  const cellWidth = Math.max(16, Math.min(MAX_CELL_WIDTH, Math.floor((w - GRID_GAP) / cols) - GRID_GAP));
+  const used = GRID_GAP + cols * (cellWidth + GRID_GAP);
+  const insetLeft = GRID_GAP + Math.max(0, Math.floor((w - used) / 2));
   const cellHeight = cellWidth + CELL_FOOTER;
   const rowHeight = cellHeight + GRID_GAP;
   const rows = count > 0 ? Math.ceil(count / cols) : 0;
@@ -56,6 +70,7 @@ export function gridLayout(width: number, count: number, targetSize: number): Gr
     cols,
     rows,
     cellWidth,
+    insetLeft,
     cellHeight,
     rowHeight,
     contentHeight,
@@ -181,6 +196,21 @@ export function wheelPixels(deltaY: number, deltaMode: number, viewHeight: numbe
 export function isFastScroll(distance: number, elapsedMs: number, viewHeight: number): boolean {
   if (viewHeight <= 0 || distance <= 0) return false;
   return distance * 80 > viewHeight * Math.max(1, elapsedMs);
+}
+
+/**
+ * Shift で広げる範囲の件数の上限（state/app.ts の selectIndex が範囲の id を集める上限と同じ 10,000 件）。
+ */
+export const MAX_RANGE = 10_000;
+
+/**
+ * Shift で範囲を広げるときの移り先を、アンカーから `max` 件の範囲に収める（範囲の端（操作の対象）が、
+ * 選んだ id の中に入るように）。アンカーがなければそのまま。
+ */
+export function clampRangeTarget(anchor: number | null, target: number, max: number = MAX_RANGE): number {
+  if (anchor === null || max < 1) return target;
+  if (target > anchor) return Math.min(target, anchor + max - 1);
+  return Math.max(target, anchor - max + 1);
 }
 
 /** 1 画面に収まる行の数（PageUp・PageDown の移動量。1 以上）。 */

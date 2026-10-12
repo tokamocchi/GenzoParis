@@ -6,16 +6,19 @@
 // - 見つからない（not_found）: ドライブの接続を確かめて再試行するか、別のカタログを選ぶ。バックアップからの
 //   復元もできる。
 // どの場合も「再試行」「別のカタログを開く」「新しいカタログを作る」「最初の画面に戻る」を出す。
+// 「再試行」は、作るつもりで失敗した（フォルダを作れないなど）ときは、作る（catalogActions.ts の
+// retryOpenCatalog）。
 
 import { useCallback, useState } from "react";
 
 import * as app from "../api/app";
-import { actions, useApp } from "../state/app";
-import { clearCatalogError } from "./catalogActions";
+import { useApp } from "../state/app";
+import { clearCatalogError, openCatalogAt, retryOpenCatalog } from "./catalogActions";
 import { catalogErrorGuide } from "./catalogLogic";
-import { type CatalogPick, pickExistingCatalog, pickNewCatalog } from "./catalogPick";
+import { type CatalogPick, pickExistingCatalog } from "./catalogPick";
 import { parentDir } from "./dialogFormat";
 import "./dialogs.css";
+import { useNewCatalogPicker } from "./NewCatalogPicker";
 import { Busy, ErrorBox, PathBox } from "./parts";
 import { RestorePanel } from "./RestorePanel";
 
@@ -27,28 +30,31 @@ export function CatalogErrorScreen() {
   const [showRestore, setShowRestore] = useState(false);
   const path = catalogError?.path ?? "";
   const load = useCallback(() => app.listCatalogBackups(path), [path]);
-
-  if (!catalogError) return null;
-  const { error } = catalogError;
-  const guide = catalogErrorGuide(error);
   const dir = parentDir(path);
 
-  const open = async (p: string, create: boolean) => {
+  /** 開く（`create` が "retry" なら、前回と同じ開き方で再試行する）。 */
+  const open = async (p: string, create: boolean | "retry") => {
     setBusy(true);
     setPickError(null);
     // 失敗したら catalogError が新しい理由に変わる。
-    await actions.openCatalog(p, create);
+    if (create === "retry") await retryOpenCatalog(p);
+    else await openCatalogAt(p, create);
     setBusy(false);
   };
 
   const handlePick = async (pick: CatalogPick) => {
-    if (pick.kind === "cancel") return;
+    if (pick.kind === "cancel" || pick.kind === "no_save_dialog") return;
     if (pick.kind === "error") {
       setPickError(pick.message);
       return;
     }
     await open(pick.path, pick.create);
   };
+  const newPicker = useNewCatalogPicker(dir, handlePick, busy);
+
+  if (!catalogError) return null;
+  const { error } = catalogError;
+  const guide = catalogErrorGuide(error);
 
   return (
     <div className="startup-screen">
@@ -62,19 +68,20 @@ export function CatalogErrorScreen() {
         {error.kind === "incompatible_version" && version && <p className="hint">このアプリの版: {version}</p>}
 
         <div className="dlg-row" style={{ marginTop: 12 }}>
-          <button className="btn primary" disabled={busy} onClick={() => void open(path, false)}>
+          <button className="btn primary" disabled={busy} onClick={() => void open(path, "retry")}>
             再試行
           </button>
           <button className="btn" disabled={busy} onClick={() => void pickExistingCatalog(dir).then(handlePick)}>
             別のカタログを開く…
           </button>
-          <button className="btn" disabled={busy} onClick={() => void pickNewCatalog(dir).then(handlePick)}>
+          <button className="btn" disabled={busy} onClick={newPicker.start}>
             新しいカタログを作る…
           </button>
           <button className="btn ghost" disabled={busy} onClick={clearCatalogError}>
             最初の画面に戻る
           </button>
         </div>
+        {newPicker.form}
         {busy && (
           <p>
             <Busy>開いています…</Busy>
@@ -87,6 +94,7 @@ export function CatalogErrorScreen() {
             <h2>バックアップから復元</h2>
             {guide.restore === "open" || showRestore ? (
               <RestorePanel
+                key={path}
                 catalogPath={path}
                 load={load}
                 intro="このカタログのバックアップ（データのフォルダの backups にあるもの）です。"

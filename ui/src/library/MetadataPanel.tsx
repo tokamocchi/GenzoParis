@@ -1,7 +1,8 @@
 // メタデータのパネル（LIB-14・VID-03）と、評価・フラグ・カラーラベル・キャプションの操作（LIB-04）。
 //
 // - 操作の対象（selection.current）の詳細を core.variantDetails で読む（対象・detailsVersion が変わったら
-//   読み直す。古い応答は捨てる）。
+//   読み直す。古い応答は捨てる）。新しい詳細が届くまでは前の詳細を薄く出し、1 枚用の評価などの操作は
+//   止める（前の写真の値で、新しい対象を変えないように）。
 // - 評価・フラグ・ラベルは actions.setRating などで付ける（グリッドでは選択中のすべて、ルーペでは表示中の
 //   1 枚。actions.targets）。グリッドで複数を選んでいるときは「N 件を選択」と、まとめて付ける操作を出す。
 // - キャプションは操作の対象の 1 枚に付ける。フォーカスを外したとき・Ctrl / ⌘ ＋ Enter で保存する
@@ -23,6 +24,7 @@ import {
   captureNote,
   dirName,
   fileRoleLabel,
+  fileCheckNotice,
   fileStatusText,
   fileStatusTitle,
   formatDimensions,
@@ -58,7 +60,7 @@ export function MetadataPanel() {
   const selectedCount = useApp((s) => s.selection.ids.length);
   const detailsVersion = useApp((s) => s.detailsVersion);
   const [reload, setReload] = useState(0);
-  const { details, error } = useDetails(current, detailsVersion, reload);
+  const { details, error, notFound } = useDetails(current, detailsVersion, reload);
   const multi = mode === "grid" && selectedCount > 1;
 
   if (current === null && !multi) {
@@ -81,7 +83,12 @@ export function MetadataPanel() {
           </button>
         </div>
       )}
-      {current !== null && !details && !error && (
+      {current !== null && !details && notFound && (
+        <div className="lib-meta-head">
+          <p className="hint">この写真はカタログにありません（削除された可能性があります）。</p>
+        </div>
+      )}
+      {current !== null && !details && !error && !notFound && (
         <div className="lib-meta-head">
           <div className="spinner" />
         </div>
@@ -93,49 +100,66 @@ export function MetadataPanel() {
   );
 }
 
+interface DetailsState {
+  /** 読んだ対象（error・notFound は、この対象のときだけ出す）。 */
+  id: VariantId | null;
+  details: VariantDetails | null;
+  error: string | null;
+  /** カタログにない（not_found。削除された写真など）。 */
+  notFound: boolean;
+}
+
 /** 操作の対象の詳細（対象が変わっても、新しい詳細が届くまでは前のものを薄く出す）。 */
 function useDetails(id: VariantId | null, version: number, reload: number) {
-  const [state, setState] = useState<{ details: VariantDetails | null; error: string | null }>({
-    details: null,
-    error: null,
-  });
+  const [state, setState] = useState<DetailsState>({ id: null, details: null, error: null, notFound: false });
   const seq = useRef(0);
   useEffect(() => {
     const my = ++seq.current;
     if (id === null) {
-      setState({ details: null, error: null });
+      setState({ id: null, details: null, error: null, notFound: false });
       return;
     }
     const t = setTimeout(() => {
       core
         .variantDetails(id)
         .then((details) => {
-          if (seq.current === my) setState({ details, error: null });
+          if (seq.current === my) setState({ id, details, error: null, notFound: false });
         })
         .catch((e: unknown) => {
           if (seq.current !== my) return;
           const err = toApiError(e);
           if (err.kind === "cancelled" || err.kind === "stale") return;
-          // 消えた写真（not_found）は何も出さない。
-          setState({ details: null, error: err.kind === "not_found" ? null : err.info.message });
+          const notFound = err.kind === "not_found";
+          setState({ id, details: null, error: notFound ? null : err.info.message, notFound });
         });
     }, DETAILS_DELAY_MS);
     return () => clearTimeout(t);
   }, [id, version, reload]);
-  return state;
+  // 別の対象の読み込みの失敗は出さない（新しい対象を読み込み中として扱う）。
+  const mine = state.id === id;
+  return {
+    details: state.details,
+    error: mine ? state.error : null,
+    notFound: mine && state.notFound,
+  };
 }
 
 // ---------------------------------------------------------------------------
 // 選別の操作
 // ---------------------------------------------------------------------------
 
-function MarkControls(props: { summary: VariantSummary | null }) {
+/**
+ * 評価・フラグ・ラベルの操作（`summary` が null なら値を出さない（まとめて付けるとき））。`disabled` の間は
+ * 操作できない（新しい対象の詳細が届くまでの間。前の写真の値で、新しい対象を変えないように）。
+ */
+function MarkControls(props: { summary: VariantSummary | null; disabled?: boolean }) {
   const s = props.summary;
+  const disabled = props.disabled ?? false;
   return (
     <>
       <div className="lib-mark-row">
         <span className="label">評価</span>
-        <Stars rating={s?.rating ?? 0} onSet={(r) => void actions.setRating(r)} />
+        <Stars rating={s?.rating ?? 0} onSet={disabled ? undefined : (r) => void actions.setRating(r)} />
         {!s && (
           <button type="button" className="btn small" onClick={() => void actions.setRating(0)} title="評価を外す（0）">
             評価なし
@@ -150,6 +174,7 @@ function MarkControls(props: { summary: VariantSummary | null }) {
             type="button"
             className={`btn small${s?.flag === f.flag ? " active" : ""}`}
             aria-pressed={s ? s.flag === f.flag : undefined}
+            disabled={disabled}
             title={`${f.label}（${comboLabel(f.key)}）`}
             onClick={() => void actions.setFlag(f.flag)}
           >
@@ -172,6 +197,7 @@ function MarkControls(props: { summary: VariantSummary | null }) {
                 aria-pressed={s ? on : undefined}
                 aria-label={name}
                 title={b.key ? `${name}（${comboLabel(b.key)}）` : name}
+                disabled={disabled}
                 onClick={() => void actions.setColorLabel(b.label)}
               >
                 {b.label ? <LabelDot label={b.label} /> : "なし"}
@@ -221,7 +247,7 @@ function Details(props: { details: VariantDetails; stale: boolean; multi: boolea
             {primary?.status_reason ? `（${primary.status_reason}）` : ""}
           </div>
         )}
-        {!multi && <MarkControls summary={s} />}
+        {!multi && <MarkControls summary={s} disabled={stale} />}
       </div>
 
       <Section id="lib.meta.info" title="情報">
@@ -331,8 +357,10 @@ function FileActions({ summary: s, onReload }: { summary: VariantSummary; onRelo
     setChecking(true);
     try {
       const r = await core.checkFiles([s.variant_id]);
-      if (r.missing.length > 0) actions.notify("warning", "元ファイルが見つかりません", r.missing[0].reason);
-      else actions.notify("success", "元ファイルを確かめました");
+      // 確かめ直した後の状態（場所が分からない・読めないファイルは、前の状態のまま残る）。
+      const after = await core.variantDetails(s.variant_id).catch(() => null);
+      const notice = fileCheckNotice(r, after ? primaryFile(after.files) : null);
+      actions.notify(notice.level, notice.message, notice.detail);
     } catch (e) {
       actions.reportError(e, "元ファイルを確かめられません");
     } finally {

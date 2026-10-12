@@ -1,7 +1,8 @@
 // カタログの選択の画面（カタログを開いていないとき。初回の起動など）。決定事項ログ No.63。
 //
 // - 既定の場所（ピクチャの GenzoParis/catalog.db）に作って開く（あれば開く）。
-// - 別の場所に作る（保存のダイアログ。カタログでないファイルは上書きしない）。
+// - 別の場所に作る（保存のダイアログ。使えなければフォルダと名前で選ぶ。カタログでないファイルは上書き
+//   しない）。
 // - 既存のカタログを開く。最近開いたカタログを開く。
 //
 // 開けなければ、カタログを開けないときの画面（CatalogErrorScreen）になる。
@@ -11,9 +12,11 @@ import { useEffect, useState } from "react";
 import * as app from "../api/app";
 import type { CatalogFileState } from "../api/types";
 import { actions, appStore, useApp } from "../state/app";
-import { type CatalogPick, pickExistingCatalog, pickNewCatalog } from "./catalogPick";
+import { openCatalogAt } from "./catalogActions";
+import { type CatalogPick, pickExistingCatalog } from "./catalogPick";
 import { baseName, parentDir } from "./dialogFormat";
 import "./dialogs.css";
+import { useNewCatalogPicker } from "./NewCatalogPicker";
 import { Busy } from "./parts";
 
 export function WelcomeScreen() {
@@ -54,12 +57,12 @@ export function WelcomeScreen() {
     setBusy(path);
     setError(null);
     // 失敗したら appStore.catalogError が入り、開けないときの画面に変わる。
-    await actions.openCatalog(path, create);
+    await openCatalogAt(path, create);
     setBusy(null);
   };
 
   const handlePick = async (pick: CatalogPick) => {
-    if (pick.kind === "cancel") return;
+    if (pick.kind === "cancel" || pick.kind === "no_save_dialog") return;
     if (pick.kind === "error") {
       setError(pick.message);
       return;
@@ -69,6 +72,7 @@ export function WelcomeScreen() {
 
   const defaultState = defaultPath ? states[defaultPath] : undefined;
   const startDir = defaultPath ? parentDir(defaultPath) : null;
+  const newPicker = useNewCatalogPicker(startDir, handlePick, busy !== null);
 
   return (
     <div className="startup-screen">
@@ -105,10 +109,11 @@ export function WelcomeScreen() {
           <div className="startup-action">
             <strong>別の場所に新しいカタログを作る</strong>
             <span className="desc">外付けのドライブなど、好きな場所に作れます</span>
-            <button className="btn" disabled={busy !== null} onClick={() => void pickNewCatalog(startDir).then(handlePick)}>
+            <button className="btn" disabled={busy !== null} onClick={newPicker.start}>
               場所を選ぶ…
             </button>
           </div>
+          {newPicker.form}
           <div className="startup-action">
             <strong>既存のカタログを開く</strong>
             <span className="desc">前に作ったカタログ（.db）を選びます（コマンドラインの genzo で作ったものも開けます）</span>

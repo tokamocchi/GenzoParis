@@ -1,8 +1,28 @@
 // ライブラリの画面の表示の好み（セルの大きさ・サブフォルダを含めるか・フォルダの開閉）をブラウザに保存する。
 //
-// 保存できない（容量・プライベートモードなど）ときも、その場では動くようにする（例外を外に出さない）。
+// - 保存できない（容量・プライベートモードなど）ときも、その場では動くようにする（例外を外に出さない）。
+// - カタログの中の ID（フォルダの ID など）に結びつく値は、カタログごとに分ける（catalogKey）。ID は
+//   カタログのデータベースの行の ID なので、別のカタログでは別のものを指す。
 
 const PREFIX = "genzo.library.";
+
+/** 文字列の 32 bit の FNV-1a ハッシュ（16 進 8 桁。UTF-16 の単位で計算する）。 */
+export function hashString(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * カタログごとに分ける値の鍵（"folderOpen" → "folderOpen.<カタログのパスのハッシュ>"）。カタログを
+ * 開いていなければ null（保存しない）。
+ */
+export function catalogKey(base: string, catalogPath: string | null | undefined): string | null {
+  return catalogPath ? `${base}.${hashString(catalogPath)}` : null;
+}
 
 export function loadNumber(key: string, fallback: number, min: number, max: number): number {
   try {

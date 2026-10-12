@@ -5,7 +5,9 @@ import { regionFor } from "../state/region";
 import {
   MAX_FILMSTRIP_SCROLL_PX,
   MAX_REGION_PIXELS,
+  L1_SETTLE_MS,
   RecentMap,
+  accumulateWheel,
   clampCenter,
   expandRegion,
   fitRect,
@@ -13,6 +15,7 @@ import {
   formatFps,
   formatResolution,
   keepVisibleOffset,
+  l1RequestDelay,
   limitRegion,
   normalizedPoint,
   normalizedToOutput,
@@ -21,6 +24,7 @@ import {
   pannedCenter,
   prefetchIndices,
   regionCovers,
+  regionUsable,
   sameRect,
   snapToDevicePixels,
   toRealOffset,
@@ -223,6 +227,34 @@ describe("limitRegion・regionCovers", () => {
   });
 });
 
+describe("regionUsable（描いてある範囲をそのまま使えるか）", () => {
+  const have = {
+    x: 100,
+    y: 100,
+    region_width: 1000,
+    region_height: 800,
+    full_width: 7008,
+    full_height: 4672,
+    generation: 5,
+  };
+  const need = { x: 200, y: 150, width: 800, height: 600 };
+  it("同じ大きさ・範囲を含む・世代が古くなければ使う", () => {
+    expect(regionUsable(have, need, 7008, 4672, 5)).toBe(true);
+    // 世代が分からなければ、世代では判断しない。
+    expect(regionUsable(have, need, 7008, 4672, null)).toBe(true);
+    // 描いた後に知った世代が古い（描いた方が新しい）なら使う。
+    expect(regionUsable(have, need, 7008, 4672, 4)).toBe(true);
+  });
+  it("現像設定が外から変わった（世代が新しい）なら描き直す", () => {
+    expect(regionUsable(have, need, 7008, 4672, 6)).toBe(false);
+  });
+  it("範囲を含まない・出力の大きさが違う・まだ描いていないなら描き直す", () => {
+    expect(regionUsable(have, { ...need, x: 50 }, 7008, 4672, 5)).toBe(false);
+    expect(regionUsable(have, need, 6000, 4000, 5)).toBe(false);
+    expect(regionUsable(null, need, 7008, 4672, 5)).toBe(false);
+  });
+});
+
 describe("outputSizeFromFrame", () => {
   const base = { variant_id: 1, generation: 1, width: 1600, height: 1067 } as FrameInfo;
   it("出力の大きさがあれば使う", () => {
@@ -251,6 +283,19 @@ describe("prefetchIndices（先読みする位置）", () => {
   });
   it("数を変えられる", () => {
     expect(prefetchIndices(5, 100, 1, 3, 0)).toEqual([6, 7, 8]);
+  });
+});
+
+describe("l1RequestDelay（写真送りの途中は L1 の要求を待つ）", () => {
+  it("前の写真から間がなければ待つ", () => {
+    expect(l1RequestDelay(33)).toBe(L1_SETTLE_MS);
+    expect(l1RequestDelay(0, 150)).toBe(150);
+    expect(l1RequestDelay(149, 150)).toBe(150);
+  });
+  it("間があれば（1 枚ずつ送っている・最初の写真）すぐ要求する", () => {
+    expect(l1RequestDelay(150, 150)).toBe(0);
+    expect(l1RequestDelay(2000)).toBe(0);
+    expect(l1RequestDelay(Number.POSITIVE_INFINITY)).toBe(0);
   });
 });
 
@@ -328,6 +373,38 @@ describe("スクロールの位置の対応（50 万件）", () => {
     expect(toVirtualOffset(-5, 100, 1000)).toBe(0);
     expect(toRealOffset(5000, 100, 1000)).toBe(100);
     expect(toRealOffset(10, 0, 0)).toBe(0);
+  });
+});
+
+describe("accumulateWheel（ホイールの端数の持ち越し）", () => {
+  it("1 px 未満の量でも、貯まれば動く", () => {
+    // 50 万件（比 約 0.19）で deltaY = 2 を 20 回: 2 × 0.1882 × 20 ≈ 7.5 px。
+    let rest = 0;
+    let moved = 0;
+    for (let i = 0; i < 20; i++) {
+      const r = accumulateWheel(rest, 2 * 0.1882);
+      rest = r.rest;
+      moved += r.step;
+    }
+    expect(moved).toBe(7);
+    expect(rest).toBeCloseTo(0.528, 6);
+  });
+  it("切り捨てで量が減らない（100 × 0.1882 を 5 回で 94 px）", () => {
+    let rest = 0;
+    let moved = 0;
+    for (let i = 0; i < 5; i++) {
+      const r = accumulateWheel(rest, 100 * 0.1882);
+      rest = r.rest;
+      moved += r.step;
+    }
+    expect(moved).toBe(94);
+  });
+  it("負の向きも同じ。向きが変わったら端数を捨てる", () => {
+    expect(accumulateWheel(0, -0.6)).toEqual({ step: 0, rest: -0.6 });
+    const r = accumulateWheel(-0.6, -0.6);
+    expect(r.step).toBe(-1);
+    expect(r.rest).toBeCloseTo(-0.2, 9);
+    expect(accumulateWheel(-0.6, 0.5)).toEqual({ step: 0, rest: 0.5 });
   });
 });
 

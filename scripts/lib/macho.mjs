@@ -254,3 +254,53 @@ export function compareMacosVersions(a, b) {
   }
   return 0;
 }
+
+/**
+ * 同梱する Mach-O（ワーカーと dylib）の最小の版（minos）を、.app の最小の版（tauri.conf.json の
+ * bundle.macOS.minimumSystemVersion）と比べる。
+ *
+ * Homebrew の dylib は、ビルドした Mac の macOS の版向けの bottle なので、minos が .app の最小の版より
+ * 新しくなりうる。その場合、古い macOS ではアプリは起動するのにワーカーが起動せず、RAW を開けない。
+ * 配る相手の macOS の版は人の判断なので、既定ではエラーにする。明示的に許すとき（allowNewer）は通し、
+ * .app の最小の版を同梱したものの minos の最大に上げる（古い macOS では、起動できないことを OS が知らせる）。
+ *
+ * @param {Array<{ name: string, minos: string | null }>} items 同梱するもの（minos が読み取れなければ null）
+ * @param {string} minimum .app の最小の版（tauri.conf.json）
+ * @param {boolean} allowNewer 新しいものがあっても通すか
+ * @returns {{
+ *   items: Array<{ name: string, minos: string | null }>,
+ *   newest: string | null,
+ *   newer: Array<{ name: string, minos: string }>,
+ *   unknown: string[],
+ *   error: string | null,
+ *   minimumSystemVersion: string,
+ * }} `newest` は minos の最大（読み取れないものを除く）、`newer` は minimum より新しいもの、`unknown` は
+ *   minos が読み取れなかったものの名前、`minimumSystemVersion` は .app に書く最小の版
+ */
+export function checkMacosMinimum(items, minimum, allowNewer) {
+  let newest = null;
+  for (const { minos } of items) {
+    if (minos && (newest === null || compareMacosVersions(minos, newest) > 0)) newest = minos;
+  }
+  const newer = items
+    .filter((i) => i.minos && compareMacosVersions(i.minos, minimum) > 0)
+    .map((i) => ({ name: i.name, minos: /** @type {string} */ (i.minos) }));
+  const unknown = items.filter((i) => !i.minos).map((i) => i.name);
+  const base = { items, newest, newer, unknown };
+  if (newer.length === 0 || newest === null) {
+    return { ...base, error: null, minimumSystemVersion: minimum };
+  }
+  if (!allowNewer) {
+    return {
+      ...base,
+      error:
+        `同梱するものが、.app の最小の版（tauri.conf.json の minimumSystemVersion: ${minimum}）より新しい macOS 向け` +
+        `にビルドされている: ${newer.map((n) => `${n.name}（minos ${n.minos}）`).join(", ")}。このままでは macOS ` +
+        `${newest} より古い Mac で RAW を開けない。配る相手の Mac がすべて macOS ${newest} 以降なら、環境変数 ` +
+        "GENZO_ALLOW_NEWER_MINOS=1 を付けて実行する（.app の最小の版を上げる）。そうでなければ、LibRaw と依存を" +
+        ` MACOSX_DEPLOYMENT_TARGET=${minimum} でビルドしたものを使う（手順は未整備。docs/packaging.md の 2.3）`,
+      minimumSystemVersion: minimum,
+    };
+  }
+  return { ...base, error: null, minimumSystemVersion: newest };
+}

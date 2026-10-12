@@ -6,8 +6,10 @@
 //   UTC の境界にする（開始日はその日の 0 時を含む、終了日は翌日の 0 時を含まない。filterLogic.ts の冒頭）。
 // - カメラ・レンズ・動画のコーデックの候補は core.facets()。カタログが変わったら読み直す。読めなければ
 //   候補なしで動く（コーデックの欄は候補があるときだけ出す）。
+// - 長辺の画素数・動画の長さ・フレームレートの範囲（VID-03）は「詳しい条件」の中に置く（入力は全角の数字も
+//   読む。フォーカスを外したとき・Enter・入力から 600 ms 後に反映する）。
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import * as core from "../api/core";
 import type { AssetKind, Facets, FacetValue, SearchFilter, SearchSort, SortKey } from "../api/types";
@@ -24,13 +26,19 @@ import {
   flagOption,
   flagsFor,
   flipDirection,
+  formatRangeValue,
   formatUtcOffset,
   isDateRangeReversed,
+  isNumericRangeReversed,
   KIND_OPTIONS,
   LABEL_CHOICES,
   localDateToUtc,
   MULTIPLE,
   normalizeText,
+  NUMERIC_RANGES,
+  type NumericRange,
+  numericRangeCount,
+  parseRangeInput,
   RATING_OPTIONS,
   ratingOption,
   ratingPatch,
@@ -46,6 +54,8 @@ import "./library.css";
 const TEXT_DELAY_MS = 300;
 /** 日付の入力から検索までの時間（ms。年の数字を打っている途中で検索しないように。仮置き）。 */
 const DATE_DELAY_MS = 600;
+/** 数値（長辺の画素数・動画の長さ・fps）の入力から検索までの時間（ms。仮置き）。 */
+const NUMBER_DELAY_MS = 600;
 /** 評価などの変更（detailsVersion）の後に、カメラ・レンズの候補を読み直すまでの時間（ms。仮置き）。 */
 const FACETS_DELAY_MS = 1000;
 
@@ -154,6 +164,8 @@ export function FilterBar() {
           onChange={(v) => actions.setFilter({ codecs: v })}
         />
       )}
+
+      <MoreConditions filter={filter} />
 
       <DateRange filter={filter} offset={offset} />
 
@@ -311,6 +323,184 @@ function FacetSelect(props: {
         </option>
       ))}
     </select>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 詳しい条件（長辺の画素数・動画の長さ・フレームレート。VID-03）
+// ---------------------------------------------------------------------------
+
+function MoreConditions({ filter }: { filter: SearchFilter }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  const panelId = useId();
+  const count = numericRangeCount(filter);
+
+  // 外を押したら閉じる。
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [open]);
+
+  return (
+    <span
+      className="lib-filter-more"
+      ref={ref}
+      onKeyDown={(e) => {
+        // Escape は閉じるだけにする（ルーペから戻るなどの全体のキーに渡さない）。
+        if (e.key === "Escape" && open) {
+          e.stopPropagation();
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        className={`btn small${count > 0 ? " active" : ""}`}
+        aria-expanded={open}
+        aria-controls={panelId}
+        title="長辺の画素数・動画の長さ・フレームレートで絞り込む"
+        onClick={() => setOpen((o) => !o)}
+      >
+        詳しい条件{count > 0 ? `（${count}）` : ""} ▾
+      </button>
+      {open && (
+        <div id={panelId} className="lib-filter-pop" role="group" aria-label="詳しい条件">
+          {NUMERIC_RANGES.map((r) => (
+            <NumericRangeRow key={r.id} range={r} filter={filter} />
+          ))}
+          <p className="hint">
+            下限・上限ともその値を含みます。動画の長さ・フレームレートを指定すると、写真と、その値の分からない動画は
+            除きます。長辺の画素数は写真にも動画にも効きます。
+          </p>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function NumericRangeRow({ range, filter }: { range: NumericRange; filter: SearchFilter }) {
+  const reversed = isNumericRangeReversed(filter, range);
+  // 確定の時点の条件と比べる（入力の遅延の間に条件が変わっていてもよいように）。
+  const commit = (key: NumericRange["min"] | NumericRange["max"], v: number | null) => {
+    if (v !== (appStore.get().filter[key] ?? null)) actions.setFilter({ [key]: v });
+  };
+  return (
+    <div
+      className={`lib-filter-range${reversed ? " reversed" : ""}`}
+      title={reversed ? "下限が上限より大きいため、該当する写真はありません" : undefined}
+    >
+      <span className="label">{range.label}</span>
+      <NumberInput
+        value={filter[range.min] ?? null}
+        range={range}
+        label={`${range.label}の下限（${range.unit}）`}
+        placeholder="下限"
+        onCommit={(v) => commit(range.min, v)}
+      />
+      <span className="label">〜</span>
+      <NumberInput
+        value={filter[range.max] ?? null}
+        range={range}
+        label={`${range.label}の上限（${range.unit}）`}
+        placeholder="上限"
+        onCommit={(v) => commit(range.max, v)}
+      />
+      <span className="label">{range.unit}</span>
+    </div>
+  );
+}
+
+/**
+ * 数値の入力欄（全角の数字も読む。IME の変換中は反映しない）。読めない値では条件を変えず、欄に印を付ける。
+ * 欄が消えるとき（「詳しい条件」を閉じたとき）も、編集中の値を反映する。
+ */
+function NumberInput(props: {
+  value: number | null;
+  range: NumericRange;
+  label: string;
+  placeholder: string;
+  onCommit: (v: number | null) => void;
+}) {
+  const { integer, limit } = props.range;
+  const [text, setText] = useState(() => formatRangeValue(props.value));
+  const [invalid, setInvalid] = useState(false);
+  const dirty = useRef(false);
+  const composing = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latest = useRef({ text, onCommit: props.onCommit });
+  latest.current = { text, onCommit: props.onCommit };
+
+  // 外から変わったとき（条件の解除など）は、編集していなければ合わせる。
+  useEffect(() => {
+    if (dirty.current) return;
+    setText(formatRangeValue(props.value));
+    setInvalid(false);
+  }, [props.value]);
+
+  const cancel = () => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
+  };
+  /** 入力を反映する（`unmounting` のときは表示を変えない）。 */
+  const flush = (unmounting = false) => {
+    cancel();
+    if (!dirty.current) return;
+    dirty.current = false;
+    const p = parseRangeInput(latest.current.text, integer, limit);
+    if (!p.ok) {
+      if (!unmounting) setInvalid(true);
+      return;
+    }
+    latest.current.onCommit(p.value);
+    if (!unmounting) {
+      setInvalid(false);
+      // 表示を整える（"３８４０" → "3840"）。
+      setText(formatRangeValue(p.value));
+    }
+  };
+  const flushRef = useRef(flush);
+  flushRef.current = flush;
+  useEffect(() => () => flushRef.current(true), []);
+
+  return (
+    <input
+      type="text"
+      inputMode={integer ? "numeric" : "decimal"}
+      className={`lib-filter-number${invalid ? " invalid" : ""}`}
+      value={text}
+      placeholder={props.placeholder}
+      aria-label={props.label}
+      aria-invalid={invalid || undefined}
+      title={invalid ? (integer ? "0 以上の整数を入力してください" : "0 以上の数を入力してください") : props.label}
+      onChange={(e) => {
+        dirty.current = true;
+        setText(e.target.value);
+        cancel();
+        if (!composing.current && !(e.nativeEvent as InputEvent).isComposing) {
+          timer.current = setTimeout(() => flushRef.current(), NUMBER_DELAY_MS);
+        }
+      }}
+      onCompositionStart={() => {
+        composing.current = true;
+        cancel();
+      }}
+      onCompositionEnd={() => {
+        composing.current = false;
+        cancel();
+        timer.current = setTimeout(() => flushRef.current(), NUMBER_DELAY_MS);
+      }}
+      onBlur={() => flush()}
+      onKeyDown={(e) => {
+        // IME の変換を確定する Enter では反映しない。
+        if (composing.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
+        if (e.key === "Enter") flush();
+      }}
+    />
   );
 }
 

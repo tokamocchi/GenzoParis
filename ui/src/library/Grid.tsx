@@ -6,7 +6,8 @@
 // - 速いスクロール（スクロールバーのつまみのドラッグなど）の間は、検索結果のページとサムネイルを要求せず、
 //   止まってから見えている範囲だけを要求する（gridMath の isFastScroll）。
 // - キー（グリッドのモードで、ダイアログが開いていないとき）: ←→ で前後、↑↓ で列の数だけ、Shift で範囲を
-//   広げる、Home・End、PageUp・PageDown、Enter でルーペ。評価・フラグなどのキーは App.tsx が持つ。
+//   広げる（アンカーから 10,000 件まで。gridMath の MAX_RANGE）、Home・End、PageUp・PageDown、Enter で
+//   ルーペ。評価・フラグなどのキーは App.tsx が持つ。
 // - selection.current が変わったら、そのセルが見えるようにスクロールする。グリッドを開き直したときは
 //   真ん中に置く。絞り込み・並べ替えを変えたら先頭に戻し、操作の対象が残っていればそこを見せる。
 
@@ -25,11 +26,13 @@ import {
   anchoredOffset,
   CELL_FOOTER,
   CELL_SIZE,
+  clampRangeTarget,
   firstVisibleIndex,
   GRID_GAP,
   type GridLayout,
   gridLayout,
   isFullyVisible,
+  MAX_RANGE,
   type NavKey,
   navigate,
   pageRows,
@@ -45,6 +48,19 @@ const WIDE_CELL = 140;
 
 /** クリックの後、選択の変化でスクロールしない時間（ms。選択は検索結果の読み込みを待つので少し長め。仮置き）。 */
 const CLICK_REVEAL_MS = 2000;
+
+/** スライダーで値を変えるキー（スライダーにフォーカスがあるときは、グリッドの移動に使わない）。 */
+const SLIDER_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
+
+/**
+ * Shift で広げる範囲の移り先を、アンカーから上限の件数までに収める（範囲の端（操作の対象）が選択に
+ * 入るように。state/app.ts の selectIndex は範囲の id を 10,000 件までしか集めない）。収めたら知らせる。
+ */
+function clampRange(target: number): number {
+  const next = clampRangeTarget(appStore.get().selection.anchorIndex, target);
+  if (next !== target) actions.notify("info", `範囲の選択は ${MAX_RANGE.toLocaleString("ja-JP")} 件までです`);
+  return next;
+}
 
 /** グリッドを閉じたときの位置（内容の位置。操作の対象がないときに戻す）。 */
 let savedVirtual = 0;
@@ -223,8 +239,9 @@ export function Grid() {
   const navTarget = useRef<number | null>(null);
   const go = (key: NavKey, extend: boolean) => {
     const from = navTarget.current ?? appStore.get().selection.currentIndex;
-    const next = navigate(key, from, searchCache.count, layout.cols, pageRows(layout, size.height));
-    if (next === null) return;
+    let next = navigate(key, from, searchCache.count, layout.cols, pageRows(layout, size.height));
+    if (next !== null && extend) next = clampRange(next);
+    if (next === null || next === from) return;
     navTarget.current = next;
     reveal(next, false);
     void actions.selectIndex(next, extend ? { extend: true } : {}).finally(() => {
@@ -268,7 +285,7 @@ export function Grid() {
     if (i === null) return;
     const toggle = !e.shiftKey && (e.metaKey || e.ctrlKey);
     clicked.current = { index: i, toggle, at: performance.now() };
-    if (e.shiftKey) void actions.selectIndex(i, { extend: true });
+    if (e.shiftKey) void actions.selectIndex(clampRange(i), { extend: true });
     else if (toggle) void actions.selectIndex(i, { toggle: true });
     else void actions.selectIndex(i);
   };
@@ -325,7 +342,7 @@ export function Grid() {
                 <div
                   key={row.key}
                   className="lib-grid-row"
-                  style={{ top: row.start + shift, height: layout.cellHeight, gap: GRID_GAP, paddingLeft: GRID_GAP }}
+                  style={{ top: row.start + shift, height: layout.cellHeight, gap: GRID_GAP, paddingLeft: layout.insetLeft }}
                 >
                   {cells}
                 </div>
@@ -346,6 +363,10 @@ export function Grid() {
           step={CELL_SIZE.step}
           value={cellSize}
           onChange={(e) => changeCellSize(Number(e.target.value))}
+          // 矢印・Home・End などはスライダーの値を変える（window のグリッドのキーまで届かないようにする）。
+          onKeyDown={(e) => {
+            if (SLIDER_KEYS.has(e.key)) e.stopPropagation();
+          }}
           onDoubleClick={() => changeCellSize(CELL_SIZE.default)}
           title="ダブルクリックで既定の大きさに戻す"
         />
@@ -440,7 +461,7 @@ function Badges({ item, wide }: { item: VariantSummary; wide: boolean }) {
       )}
       {vc && (
         <span className="lib-badge" title={vc}>
-          {wide ? "仮想コピー" : "VC"}
+          {wide ? "仮想コピー" : "仮想"}
         </span>
       )}
       <span className="spacer" />

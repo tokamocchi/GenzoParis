@@ -2,6 +2,7 @@
 
 import type {
   CaptureTime,
+  FileCheckReport,
   FileInfo,
   FileRole,
   FileStatus,
@@ -142,4 +143,51 @@ export function hasVideoInfo(v: VideoMetadata | null | undefined): v is VideoMet
 export function virtualCopyLabel(s: Pick<VariantSummary, "is_master" | "variant_name">): string | null {
   if (s.is_master) return null;
   return s.variant_name ? `仮想コピー: ${s.variant_name}` : "仮想コピー";
+}
+
+/** 元ファイルを確かめ直した結果の知らせ。 */
+export interface FileCheckNotice {
+  level: "success" | "warning";
+  message: string;
+  detail?: string;
+}
+
+/**
+ * 元ファイルを確かめ直した結果（core.checkFiles）と、その後の主のファイルの状態から、知らせる内容を決める。
+ *
+ * genzo-api の library.rs の `check_files` では、場所が分からない（ボリュームが接続されていない）ファイルは
+ * `checked` に数えるが `ok` にも `missing` にも入れない。読めない（権限がないなど）ファイルは `ok` に数え、
+ * 状態は前のまま残す。そのため `ok` だけでは確かめられたと言えず、その後の状態も見る。
+ * `after` は確かめ直した後の主のファイルの状態（読めなければ null）。
+ */
+export function fileCheckNotice(
+  r: Pick<FileCheckReport, "checked" | "ok" | "missing">,
+  after: Pick<FileInfo, "status" | "status_reason"> | null,
+): FileCheckNotice {
+  if (r.missing.length > 0) {
+    const more = r.missing.length > 1 ? `ほか ${(r.missing.length - 1).toLocaleString("ja-JP")} 件` : null;
+    return {
+      level: "warning",
+      message: "元ファイルが見つかりません",
+      detail: [r.missing[0].path, more].filter(Boolean).join("\n"),
+    };
+  }
+  if (r.ok < r.checked) {
+    return {
+      level: "warning",
+      message: "元ファイルを確かめられませんでした",
+      detail: "場所が分からないファイルがあります（ドライブが接続されていない可能性があります）",
+    };
+  }
+  if (after && after.status === "missing") {
+    return {
+      level: "warning",
+      message: "元ファイルを確かめられませんでした",
+      detail: "ファイルを読めないため、状態を確かめられません（読む権限がないなどの可能性があります）",
+    };
+  }
+  if (after && after.status === "error") {
+    return { level: "warning", message: "元ファイルを読めません", detail: after.status_reason ?? undefined };
+  }
+  return { level: "success", message: "元ファイルを確かめました" };
 }

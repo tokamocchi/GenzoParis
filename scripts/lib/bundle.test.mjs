@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { splitBuildArgs } from "../build-app.mjs";
+import { splitBuildArgs } from "./build.mjs";
 import { chooseLibrawLibName, libsTauriConfig, planWindowsDlls } from "./bundle.mjs";
 import { parseHostTriple, sidecarFileName, targetOs } from "./target.mjs";
 

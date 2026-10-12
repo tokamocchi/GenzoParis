@@ -10,8 +10,12 @@
 //! - 閉じるときに保存待ちの現像設定を保存できなかった場合（ディスクの空き容量の不足など）は、閉じずに
 //!   エラーを返す（[`CloseError::SaveFailed`]）。画面は「再試行」と「保存せずに閉じる」を選ばせる
 //!   （genzo-api の `Core::close` の doc。決定事項ログ No.61 の閉じ方）。
-//! - 開く・閉じる・復元は 1 つずつ行う（`lifecycle` のロック）。閉じている途中に届いた要求は、閉じ始めた
-//!   時点でカタログが開いていない扱いになり、[`ErrorKind::Closed`] を返す。
+//! - 開く・閉じる・復元は 1 つずつ行う（`lifecycle` のロック）。開いていないカタログのファイルを調べる処理
+//!   （[`AppState::inspect_catalog`]・[`AppState::list_backups`]）も同じロックを持つ（復元の差し替えと
+//!   重ならないように）。閉じている途中に届いた要求は、閉じ始めた時点でカタログが開いていない扱いになり、
+//!   [`ErrorKind::Closed`] を返す。
+//! - 別のカタログを開く・復元するときに、前のカタログを閉じる処理が「閉じた後の段階のエラー」を返したら、
+//!   記録して続ける（[`continue_after_close`]）。開いたまま（保存できない）なら続けない。
 //! - パスは絶対パスにしてから扱う（相対パスは今のフォルダから）。開いているカタログと同じファイルかは、
 //!   書き方（`..`・シンボリックリンク・Windows の大文字と小文字）によらずに比べる（[`same_file`]）。
 //!
@@ -37,7 +41,7 @@ use genzo_color::icc::{IccProfile, StandardProfile};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
-use crate::catalog_file::{self, CatalogFileState};
+use crate::catalog_file::{self, Assessment};
 use crate::settings::{self, AppSettings};
 use crate::tools::{self, ExternalTools};
 
@@ -311,6 +315,19 @@ impl AppState {
         })
     }
 
+    /// パスがカタログか（画面の開く・作る前の確認。`inspect_catalog_path`）。開く処理・復元と同じ判定
+    /// （[`catalog_file::assess`]）で、先頭が壊れたカタログもカタログとして返す（[`Assessment::file_state`]）。
+    /// 相対パスは今のフォルダから（開く処理と同じ）。
+    pub fn inspect_catalog(
+        &self,
+        path: &Path,
+    ) -> Result<catalog_file::CatalogFileState, ErrorInfo> {
+        // 開いていないカタログを SQLite で開いて調べることがあるので、復元の差し替えと重ならないようにする
+        // （list_backups の doc）。
+        let _guard = self.lifecycle.lock();
+        Ok(assess(&absolute(path)?)?.file_state())
+    }
+
     /// カタログを開く。`create` なら、なければ作る（あれば、GenzoParis のカタログならそのまま開く）。
     pub fn open_catalog(&self, path: &Path, create: bool) -> Result<CatalogStatus, ErrorInfo> {
         let _guard = self.lifecycle.lock();
@@ -326,8 +343,8 @@ impl AppState {
         {
             return self.describe(&s);
         }
-        match inspect(&path)? {
-            CatalogFileState::NotCatalog if catalog_file::has_catalog_data(&path) => {
+        match assess(&path)? {
+            Assessment::Damaged => {
                 // 隣のデータのフォルダに GenzoParis のデータがある: 先頭が壊れたカタログとみなす（作り直さず、
                 // バックアップからの復元を案内する）。
                 return Err(error(
@@ -341,21 +358,21 @@ impl AppState {
                     ),
                 ));
             }
-            CatalogFileState::NotCatalog => {
+            Assessment::NotCatalog => {
                 return Err(error(
                     ErrorKind::InvalidInput,
                     format!("{} は GenzoParis のカタログではありません", path.display()),
                     Some("カタログ（.db）のファイルを選ぶか、新しいカタログを作ってください"),
                 ));
             }
-            CatalogFileState::Missing if !create => {
+            Assessment::Missing if !create => {
                 return Err(error(
                     ErrorKind::NotFound,
                     format!("カタログ {} が見つかりません", path.display()),
                     Some("ドライブの接続を確かめるか、別のカタログを開いてください"),
                 ));
             }
-            CatalogFileState::Missing => {
+            Assessment::Missing => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| {
                         error(
@@ -366,9 +383,11 @@ impl AppState {
                     })?;
                 }
             }
-            CatalogFileState::Catalog => {}
+            Assessment::Catalog => {}
         }
-        self.close_locked(false).map_err(|e| e.info())?;
+        // 前のカタログを閉じる（開いたままなら開かない。閉じた後の段階のエラーは記録して続ける）。
+        continue_after_close(self.close_locked(false), "別のカタログを開く")
+            .map_err(|e| e.info())?;
 
         let settings = self.settings();
         let tools = tools::locate(settings.ffmpeg_dir.as_deref());
@@ -441,7 +460,12 @@ impl AppState {
 
     /// カタログのバックアップの一覧（新しい順）。開いているカタログならコアから、開いていない（壊れて
     /// 開けない）カタログなら、データのフォルダの `backups` から探す。
+    ///
+    /// 開く・閉じる・復元と同じロック（`lifecycle`）を持つ: 開いていないカタログは SQLite で読み取り専用に
+    /// 開いて調べるので、復元の差し替え（ファイルの名前の変更）と重ならないようにする（Windows では、開いて
+    /// いるファイルの名前を変えられず、復元が失敗するため。この環境（Linux）では確かめていない。要確認）。
     pub fn list_backups(&self, catalog_path: &Path) -> Result<Vec<BackupEntry>, ErrorInfo> {
+        let _guard = self.lifecycle.lock();
         let catalog_path = absolute(catalog_path)?;
         if let Some(s) = self.session()
             && same_file(&s.catalog_path, &catalog_path)
@@ -492,9 +516,7 @@ impl AppState {
                 None,
             ));
         }
-        if inspect(&catalog_path)? == CatalogFileState::NotCatalog
-            && !catalog_file::has_catalog_data(&catalog_path)
-        {
+        if assess(&catalog_path)? == Assessment::NotCatalog {
             return Err(error(
                 ErrorKind::InvalidInput,
                 format!(
@@ -519,21 +541,31 @@ impl AppState {
         if self
             .session()
             .is_some_and(|s| same_file(&s.catalog_path, &catalog_path))
-            && let Err(e) = self.close_locked(false)
+            && let Err(e) = continue_after_close(self.close_locked(false), "復元")
         {
-            // 閉じられない（保存待ちの現像設定を保存できない）: 差し替えずに、復元したファイルを片付ける
-            // （バックアップから作った写しなので、消しても失うものはない）。
-            if let Err(re) = std::fs::remove_file(&plan.restored_path) {
-                tracing::warn!(error = %re, path = %plan.restored_path.display(), "復元したファイルを片付けられない");
-            }
+            // 閉じられない（保存待ちの現像設定を保存できず、開いたまま）: 差し替えずに、復元したファイルを
+            // 片付ける（バックアップから作った写しなので、消しても失うものはない）。
+            remove_restored_copy(&plan.restored_path);
             return Err(e.info());
         }
         let displaced = genzo_api::apply_restore(&plan).map_err(|e| {
             let mut info = e.info();
-            info.hint = Some(format!(
-                "復元したファイル {} は残っています。カタログを開いている GenzoParis（アプリ・CLI）を終了してから、やり直してください",
-                plan.restored_path.display()
-            ));
+            if info.kind == ErrorKind::Conflict {
+                // 別のアプリ（アプリ・CLI）がカタログを開いている: apply_restore はロックを取れずに、何も
+                // 変えずに戻る。復元した写しは片付ける（残すと、やり直すたびに写しが増える。バックアップから
+                // 作り直せるので、消しても失うものはない）。
+                remove_restored_copy(&plan.restored_path);
+                info.hint = Some(
+                    "カタログを開いている GenzoParis（アプリ・CLI）を終了してから、やり直してください（カタログは変更していません）"
+                        .to_owned(),
+                );
+            } else {
+                // 名前の変更の途中の失敗など: 復元した写しは、手で差し替えられるように残す。
+                info.hint = Some(format!(
+                    "復元したファイル {} は残っています。カタログのフォルダの権限を確かめ、カタログを開いている GenzoParis（アプリ・CLI）を終了してから、やり直してください",
+                    plan.restored_path.display()
+                ));
+            }
             info
         })?;
         let (status, open_error) = match self.open_locked(&catalog_path, false) {
@@ -549,9 +581,37 @@ impl AppState {
     }
 }
 
-/// カタログのファイルの状態を確かめる（読めなければ file_access のエラー）。
-fn inspect(path: &Path) -> Result<CatalogFileState, ErrorInfo> {
-    catalog_file::inspect(path).map_err(|e| {
+/// 前のカタログを閉じた結果から、続けて（別のカタログを開く・差し替える）よいかを決める。
+///
+/// - 開いたまま（[`CloseError::SaveFailed`]。保存待ちの現像設定を保存できない）なら続けない（そのエラーを
+///   返す。画面は再試行か、捨てて閉じるかを選ばせる）。
+/// - 閉じた後の段階のエラー（[`CloseError::ClosedWithError`]。ワーカーの終了・サムネイルの DB・カタログを
+///   閉じる処理など）は、記録して続ける。セッションはもう外れ、コアは閉じてロックも外れている
+///   （genzo-api の `Core::close` の doc。閉じ直しはできない）ので、止めると、閉じたまま何もせずに返すことに
+///   なる。
+fn continue_after_close(r: Result<(), CloseError>, what: &str) -> Result<(), CloseError> {
+    match r {
+        Err(CloseError::ClosedWithError(e)) => {
+            tracing::warn!(
+                error = ?e,
+                "{what}: 前のカタログを閉じる処理の途中でエラーがあったが、閉じたので続ける"
+            );
+            Ok(())
+        }
+        r => r,
+    }
+}
+
+/// 復元した写し（`*-restored-*.db`）を片付ける（失敗は記録だけ）。
+fn remove_restored_copy(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        tracing::warn!(error = %e, path = %path.display(), "復元したファイルを片付けられない");
+    }
+}
+
+/// カタログのファイルを判定する（[`catalog_file::assess`]。読めなければ file_access のエラー）。
+pub fn assess(path: &Path) -> Result<Assessment, ErrorInfo> {
+    catalog_file::assess(path).map_err(|e| {
         error(
             ErrorKind::FileAccess,
             format!("{} を確かめられません: {e}", path.display()),
@@ -620,4 +680,24 @@ fn spawn_forwarder(core: &Core, sink: EventSink) -> Forwarder {
         tracing::error!(error = %e, "イベントを転送するスレッドを作れない");
     }
     Forwarder { active }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 別のカタログを開く・復元する前に閉じた結果: 開いたまま（保存できない）なら止め、閉じた後の段階の
+    /// エラーなら続ける（結合テストの backup.rs でも、ワーカーを終わらせて起こした場合を確かめる）。
+    #[test]
+    fn only_a_catalog_left_open_stops_the_next_step() {
+        assert!(continue_after_close(Ok(()), "テスト").is_ok());
+        let info = error(ErrorKind::Storage, "保存できない", None);
+        let stopped = continue_after_close(Err(CloseError::SaveFailed(info.clone())), "テスト");
+        assert!(matches!(stopped, Err(CloseError::SaveFailed(ref e)) if *e == info));
+        let worker = error(ErrorKind::Internal, "ワーカーを終了できない", None);
+        assert!(
+            continue_after_close(Err(CloseError::ClosedWithError(worker)), "テスト").is_ok(),
+            "閉じた後のエラーでは止めない"
+        );
+    }
 }

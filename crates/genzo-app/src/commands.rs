@@ -101,19 +101,15 @@ pub async fn app_status(app: AppHandle, state: Shared<'_>) -> Result<AppStatus, 
     .await
 }
 
-/// パスがカタログか（開く・作る前の確認）。
+/// パスがカタログか（開く・作る前の確認。[`AppState::inspect_catalog`]。先頭が壊れたカタログも、開く処理と
+/// 同じくカタログとして返し、開く処理の catalog_corrupt で復元を案内する）。
 #[tauri::command]
-pub async fn inspect_catalog_path(path: PathBuf) -> Result<CatalogFileState, ErrorInfo> {
-    blocking(move || {
-        catalog_file::inspect(&path).map_err(|e| {
-            error(
-                ErrorKind::FileAccess,
-                format!("{} を確かめられません: {e}", path.display()),
-                None,
-            )
-        })
-    })
-    .await
+pub async fn inspect_catalog_path(
+    state: Shared<'_>,
+    path: PathBuf,
+) -> Result<CatalogFileState, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || state.inspect_catalog(&path)).await
 }
 
 /// カタログを開く（`create` なら、なければ作る）。

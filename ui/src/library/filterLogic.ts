@@ -176,6 +176,93 @@ export const KIND_OPTIONS: { value: AssetKind | ""; label: string }[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// 長辺の画素数・動画の長さ・フレームレートの範囲（VID-03）
+// ---------------------------------------------------------------------------
+//
+// genzo-catalog の search.rs: 下限・上限とも「この値を含む」。長辺の画素数（幅と高さの大きいほう）は写真にも
+// 動画にも効く。動画の長さ・fps（とコーデック）を指定すると、写真と、その値の分からない動画は除く。
+// genzo-api の SearchFilter では、長辺の画素数は u32、長さ（秒）・fps は f64。
+
+/** 数値の範囲の条件。 */
+export interface NumericRange {
+  id: "long_edge" | "duration" | "fps";
+  label: string;
+  unit: string;
+  min: "long_edge_min" | "duration_min_s" | "fps_min";
+  max: "long_edge_max" | "duration_max_s" | "fps_max";
+  /** 整数だけか（長辺の画素数は u32）。 */
+  integer: boolean;
+  /** 入力できる上限（長辺の画素数は u32 の上限。長さ・fps は有限の数ならよい）。 */
+  limit: number;
+}
+
+/** u32 の上限（genzo-api の SearchFilter の long_edge_min・long_edge_max の型）。 */
+const U32_MAX = 4_294_967_295;
+
+export const NUMERIC_RANGES: NumericRange[] = [
+  {
+    id: "long_edge",
+    label: "長辺の画素数",
+    unit: "px",
+    min: "long_edge_min",
+    max: "long_edge_max",
+    integer: true,
+    limit: U32_MAX,
+  },
+  {
+    id: "duration",
+    label: "動画の長さ",
+    unit: "秒",
+    min: "duration_min_s",
+    max: "duration_max_s",
+    integer: false,
+    limit: Number.MAX_VALUE,
+  },
+  {
+    id: "fps",
+    label: "フレームレート",
+    unit: "fps",
+    min: "fps_min",
+    max: "fps_max",
+    integer: false,
+    limit: Number.MAX_VALUE,
+  },
+];
+
+export type ParsedNumber = { ok: true; value: number | null } | { ok: false };
+
+/**
+ * 数値の入力欄の文字列 → 値（空は条件なし（null））。全角の数字（IME の入力）も読み、桁区切りの「,」と
+ * 空白は無視する。負の数・整数の欄の小数・上限を超える値・読めない文字列は `ok: false`。
+ */
+export function parseRangeInput(text: string, integer: boolean, limit: number): ParsedNumber {
+  const t = text.normalize("NFKC").replace(/[,\s]/g, "");
+  if (t === "") return { ok: true, value: null };
+  const pattern = integer ? /^\d+$/ : /^(\d+\.?\d*|\.\d+)$/;
+  if (!pattern.test(t)) return { ok: false };
+  const n = Number(t);
+  if (!Number.isFinite(n) || n < 0 || n > limit) return { ok: false };
+  return { ok: true, value: n };
+}
+
+/** 条件の値 → 入力欄の文字列（条件なしは ""）。 */
+export function formatRangeValue(v: number | null | undefined): string {
+  return v === null || v === undefined || !Number.isFinite(v) ? "" : String(v);
+}
+
+/** 下限が上限より大きいか（どちらかがなければ false）。 */
+export function isNumericRangeReversed(f: SearchFilter, r: NumericRange): boolean {
+  const lo = f[r.min];
+  const hi = f[r.max];
+  return typeof lo === "number" && typeof hi === "number" && lo > hi;
+}
+
+/** 数値の範囲の条件のうち、指定しているものの数（下限・上限をまとめて 1 つ）。 */
+export function numericRangeCount(f: SearchFilter): number {
+  return NUMERIC_RANGES.filter((r) => isSet(f[r.min]) || isSet(f[r.max])).length;
+}
+
+// ---------------------------------------------------------------------------
 // 撮影日の範囲
 // ---------------------------------------------------------------------------
 

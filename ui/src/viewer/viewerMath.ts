@@ -41,6 +41,18 @@ export const PREFETCH_BEHIND = 1;
 export const PREFETCH_KEEP = 6;
 
 /**
+ * 写真送りの途中とみなす間隔（ミリ秒。仮置き）。前の写真からこれより短い間で移ったら、L1 の要求と先読みを
+ * この時間だけ待つ（←→ を押し続けている間に、通り過ぎる写真ごとに L1 を作る処理を予約しない）。
+ */
+export const L1_SETTLE_MS = 150;
+
+/**
+ * L1 の作成待ちのまま、作ってあるかを 1 回だけ確かめるまでの時間（ミリ秒。仮置き。知らせの取りこぼしへの
+ * 備え。確かめるのは作る処理を予約しない preview_path）。
+ */
+export const L1_CHECK_MS = 5000;
+
+/**
  * 等倍表示の準備で、現像のプレビュー（出力の大きさが入っている）が届くのを待つ時間（ミリ秒。仮置き）。
  * 過ぎたら render_develop で描いて求める。
  */
@@ -178,6 +190,34 @@ export function sameRect(a: Rect, b: Rect): boolean {
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 }
 
+/**
+ * 描いてある範囲（`have`。genzo-api の RegionInfo）を、そのまま使えるか。出力の大きさが同じで、要る範囲
+ * `need` を含み、描いた現像設定の世代が `generation`（分かっている最新の世代。分からなければ null）より
+ * 古くないこと。現像設定が外から変わった（設定の貼り付け・Undo など）ら描き直す。
+ */
+export function regionUsable(
+  have:
+    | {
+        x: number;
+        y: number;
+        region_width: number;
+        region_height: number;
+        full_width: number;
+        full_height: number;
+        generation: number;
+      }
+    | null
+    | undefined,
+  need: Rect,
+  fullW: number,
+  fullH: number,
+  generation: number | null,
+): boolean {
+  if (!have || have.full_width !== fullW || have.full_height !== fullH) return false;
+  if (generation !== null && have.generation < generation) return false;
+  return regionCovers({ x: have.x, y: have.y, width: have.region_width, height: have.region_height }, need);
+}
+
 /** 描いてある範囲 `have` が、要る範囲 `need` を含むか（含めば描き直さない）。 */
 export function regionCovers(have: Rect, need: Rect): boolean {
   return (
@@ -226,6 +266,14 @@ export function prefetchIndices(
   return out;
 }
 
+/**
+ * L1 の要求（と先読み）を待つ時間（ミリ秒）。前の写真から `sincePrevious` ミリ秒で移った。写真送りの途中
+ * （`settleMs` より短い）なら `settleMs`、そうでなければ 0（すぐ要求する。PERF-04）。
+ */
+export function l1RequestDelay(sincePrevious: number, settleMs = L1_SETTLE_MS): number {
+  return sincePrevious < settleMs ? settleMs : 0;
+}
+
 /** 読み直しのための印を URI に付ける（0 なら付けない。先読みした URI と同じにするため）。 */
 export function withRetryParam(url: string, retry: number): string {
   if (retry <= 0) return url;
@@ -271,6 +319,10 @@ export class RecentMap<K, V> {
     this.map.delete(key);
   }
 
+  clear(): void {
+    this.map.clear();
+  }
+
   keys(): K[] {
     return [...this.map.keys()];
   }
@@ -305,6 +357,19 @@ export function keepVisibleOffset(opts: {
   const total = count * cell;
   const target = start + cell / 2 - viewport / 2;
   return clamp(target, 0, Math.max(0, total - viewport));
+}
+
+/**
+ * ホイールの量（物理の px。小数）を、端数を持ち越して整数にする。WebKit のスクロールの位置は整数なので、
+ * スクロールの領域を抑えている（50 万件）ときに 1 回の量が 1 px 未満になると、足しても切り捨てで消える。
+ * 戻り値の `step` を scrollLeft に足し、`rest` を次の回に渡す。向きが変わったら、前の向きの端数は捨てる。
+ */
+export function accumulateWheel(rest: number, delta: number): { step: number; rest: number } {
+  const carried = rest * delta < 0 ? 0 : rest;
+  const total = carried + delta;
+  // -0 は 0 にする。
+  const step = Math.trunc(total) || 0;
+  return { step, rest: total - step };
 }
 
 /** スクロールの位置（物理）→ 内容の位置（仮想）。上限に収まるとき（realMax == virtualMax）は同じ値。 */

@@ -8,11 +8,16 @@ import {
   flagOption,
   flagsFor,
   flipDirection,
+  formatRangeValue,
   formatUtcOffset,
   isDateRangeReversed,
+  isNumericRangeReversed,
   localDateToUtc,
   MULTIPLE,
   normalizeText,
+  NUMERIC_RANGES,
+  numericRangeCount,
+  parseRangeInput,
   ratingOption,
   ratingPatch,
   singleChoice,
@@ -143,5 +148,59 @@ describe("並べ替え", () => {
   it("向きを逆にする", () => {
     expect(flipDirection({ key: "rating", direction: "ascending" })).toEqual({ key: "rating", direction: "descending" });
     expect(flipDirection({ key: "rating", direction: "descending" })).toEqual({ key: "rating", direction: "ascending" });
+  });
+});
+
+describe("長辺の画素数・動画の長さ・フレームレート（VID-03）", () => {
+  const [longEdge, duration, fps] = NUMERIC_RANGES;
+
+  it("条件の名前は SearchFilter の欄と対応する", () => {
+    expect(NUMERIC_RANGES.map((r) => [r.min, r.max])).toEqual([
+      ["long_edge_min", "long_edge_max"],
+      ["duration_min_s", "duration_max_s"],
+      ["fps_min", "fps_max"],
+    ]);
+    expect(longEdge.integer).toBe(true);
+    expect(duration.integer).toBe(false);
+  });
+
+  it("入力を数にする（全角の数字・桁区切りも読む。空は条件なし）", () => {
+    expect(parseRangeInput("", true, longEdge.limit)).toEqual({ ok: true, value: null });
+    expect(parseRangeInput("  ", true, longEdge.limit)).toEqual({ ok: true, value: null });
+    expect(parseRangeInput("3840", true, longEdge.limit)).toEqual({ ok: true, value: 3840 });
+    expect(parseRangeInput("３,８４０", true, longEdge.limit)).toEqual({ ok: true, value: 3840 });
+    expect(parseRangeInput("29.97", false, fps.limit)).toEqual({ ok: true, value: 29.97 });
+    expect(parseRangeInput("２９．９７", false, fps.limit)).toEqual({ ok: true, value: 29.97 });
+    expect(parseRangeInput(".5", false, duration.limit)).toEqual({ ok: true, value: 0.5 });
+    expect(parseRangeInput("10.", false, duration.limit)).toEqual({ ok: true, value: 10 });
+  });
+
+  it("負の数・整数の欄の小数・u32 を超える値・読めない文字列は受け付けない", () => {
+    expect(parseRangeInput("-1", false, duration.limit).ok).toBe(false);
+    expect(parseRangeInput("12.5", true, longEdge.limit).ok).toBe(false);
+    expect(parseRangeInput("4294967295", true, longEdge.limit)).toEqual({ ok: true, value: 4_294_967_295 });
+    expect(parseRangeInput("4294967296", true, longEdge.limit).ok).toBe(false);
+    expect(parseRangeInput("1e3", false, duration.limit).ok).toBe(false);
+    expect(parseRangeInput("abc", false, duration.limit).ok).toBe(false);
+    expect(parseRangeInput("1.2.3", false, duration.limit).ok).toBe(false);
+  });
+
+  it("値を入力欄の文字列に戻す", () => {
+    expect(formatRangeValue(null)).toBe("");
+    expect(formatRangeValue(undefined)).toBe("");
+    expect(formatRangeValue(3840)).toBe("3840");
+    expect(formatRangeValue(29.97)).toBe("29.97");
+  });
+
+  it("下限が上限より大きいかと、指定している条件の数", () => {
+    expect(isNumericRangeReversed({ fps_min: 60, fps_max: 30 }, fps)).toBe(true);
+    expect(isNumericRangeReversed({ fps_min: 30, fps_max: 30 }, fps)).toBe(false);
+    expect(isNumericRangeReversed({ fps_min: 60 }, fps)).toBe(false);
+    expect(numericRangeCount({})).toBe(0);
+    expect(numericRangeCount({ long_edge_min: 3840, duration_max_s: 10, duration_min_s: 1 })).toBe(2);
+    // 有効な条件の数（全体）にも 1 つずつ数え、解除で消える。
+    const f = { long_edge_min: 3840, duration_max_s: 10, fps_min: 50 };
+    expect(activeConditionCount(f)).toBe(3);
+    expect(clearConditions(f)).toEqual({});
   });
 });

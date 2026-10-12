@@ -131,7 +131,7 @@ export function SettingsCatalog() {
   };
 
   const handlePick = async (pick: CatalogPick) => {
-    if (pick.kind === "cancel") return;
+    if (pick.kind === "cancel" || pick.kind === "no_save_dialog") return;
     if (pick.kind === "error") {
       setSwitchError(pick.message);
       return;

@@ -72,6 +72,11 @@ export function RestorePanel(props: {
         r.displaced.length > 0 ? `以前のカタログは次の名前で残しています:\n${r.displaced.join("\n")}` : undefined;
       if (r.opened) actions.notify("success", `バックアップ（${when}）から復元しました`, detail);
       else actions.notify("warning", `バックアップ（${when}）から復元しましたが、開けませんでした`, detail);
+      // 開けなかったときは、この画面（カタログを開けないときの画面）が新しい理由で残るので、操作できるように戻す。
+      if (mounted.current) {
+        setRestoring(false);
+        setConfirming(false);
+      }
       return;
     }
     if (mounted.current) {

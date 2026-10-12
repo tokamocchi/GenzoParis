@@ -24,6 +24,82 @@ pub fn worker() -> WorkerLaunch {
     }
 }
 
+/// 合図で終わるワーカーの隠しサブコマンドの接頭辞（後ろに合図のファイルのパスを付ける。main.rs）。
+pub const EXITING_WORKER_PREFIX: &str = "__worker_exit_when=";
+
+/// 合図で終わるワーカー（[`ExitSwitch`]）の中で: 生きている印のファイルを作り、合図のファイルができたら、
+/// 印を消してすぐに終わる（応答を返さずに。ワーカーの異常終了と同じ）。
+pub fn exit_when_signalled(marker: PathBuf) {
+    let alive = ExitSwitch::alive_path(&marker, std::process::id());
+    if std::fs::write(&alive, b"").is_err() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("test-exit-switch".to_owned())
+        .spawn(move || {
+            loop {
+                if marker.exists() {
+                    let _ = std::fs::remove_file(&alive);
+                    std::process::exit(3);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+}
+
+/// ワーカーのプロセスを合図で終わらせる仕掛け（閉じる処理の「閉じた後の段階のエラー」を起こすため。
+/// コアは、終了の処理でワーカーに終了を頼み、ワーカーがもういなければエラーにする）。
+pub struct ExitSwitch {
+    marker: PathBuf,
+}
+
+impl ExitSwitch {
+    /// `dir` に合図のファイルを置く仕掛け。
+    pub fn new(dir: &Path) -> Self {
+        std::fs::create_dir_all(dir).unwrap();
+        Self {
+            marker: dir.join("exit-now"),
+        }
+    }
+
+    fn alive_path(marker: &Path, pid: u32) -> PathBuf {
+        let mut s = marker.as_os_str().to_owned();
+        s.push(format!(".alive-{pid}"));
+        PathBuf::from(s)
+    }
+
+    /// 生きているワーカーの数（印のファイルの数）。
+    pub fn alive(&self) -> usize {
+        let prefix = format!(
+            "{}.alive-",
+            self.marker.file_name().unwrap().to_string_lossy()
+        );
+        std::fs::read_dir(self.marker.parent().unwrap())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .is_ok_and(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            })
+            .count()
+    }
+
+    /// このワーカーの起動方法（テストの実行ファイル自身を、合図のファイルのパス付きの隠しサブコマンドで起動する）。
+    pub fn launch(&self) -> WorkerLaunch {
+        WorkerLaunch::SelfSubcommand {
+            executable: Some(std::env::current_exe().expect("テストの実行ファイルのパス")),
+            subcommand: format!("{EXITING_WORKER_PREFIX}{}", self.marker.display()),
+        }
+    }
+
+    /// 今動いているワーカーをすべて終わらせ、終わるのを待つ。合図は外すので、後から起動するワーカーは動く。
+    pub fn exit_all(&self) {
+        assert!(self.alive() > 0, "ワーカーが動いていない");
+        std::fs::write(&self.marker, b"").unwrap();
+        wait_until("ワーカーが終わる", || self.alive() == 0);
+        std::fs::remove_file(&self.marker).unwrap();
+    }
+}
+
 /// EventSink で受けたイベントの記録。
 #[derive(Default)]
 pub struct Recorder {
@@ -112,7 +188,17 @@ impl Env {
 
     /// 設定のフォルダとイベントの送り先を指定した AppState（GPU は使わない）。
     pub fn state_with(&self, config_dir: PathBuf, sink: EventSink) -> AppState {
-        let state = AppState::new(config_dir, sink).with_worker(worker());
+        self.state_with_worker(config_dir, sink, worker())
+    }
+
+    /// ワーカーの起動方法も指定した AppState（GPU は使わない）。
+    pub fn state_with_worker(
+        &self,
+        config_dir: PathBuf,
+        sink: EventSink,
+        launch: WorkerLaunch,
+    ) -> AppState {
+        let state = AppState::new(config_dir, sink).with_worker(launch);
         state
             .update_settings(|s| s.gpu = GpuMode::Off)
             .expect("設定を保存できる");

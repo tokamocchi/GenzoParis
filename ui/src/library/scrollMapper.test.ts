@@ -115,6 +115,46 @@ describe("ScrollMapper", () => {
     expect(fast).toEqual([true, false]);
   });
 
+  it("縮めているときのホイールも、続けて速く動いたら速いスクロールとする", () => {
+    const { m, el } = mapper(500_000, 320);
+    const fast: boolean[] = [];
+    m.onFastChange = (f) => fast.push(f);
+    clock = 1000;
+    el.fire("wheel", { deltaY: 100, deltaMode: 0, ctrlKey: false, preventDefault: () => {} });
+    clock += 16;
+    // 16 ms で 1 ページ分（表示の高さ 800）を超えて動く。
+    el.fire("wheel", { deltaY: 1, deltaMode: 2, ctrlKey: false, preventDefault: () => {} });
+    expect(fast).toEqual([true]);
+  });
+
+  it("プログラムからの移動（キーボードの移動など）は、スクロールの直後でも速いとみなさない", () => {
+    const { m, el } = mapper(500_000, 160);
+    const fast: boolean[] = [];
+    m.onFastChange = (f) => fast.push(f);
+    clock = 1000;
+    // ホイールで 100 px 動かした 50 ms 後に、末尾へ（End）。
+    el.userScroll(100);
+    clock += 50;
+    m.scrollTo(1e12);
+    expect(fast).toEqual([]);
+    // 書いた位置のスクロールのイベントでも、速いとみなさない。
+    clock += 5;
+    el.fire("scroll");
+    expect(fast).toEqual([]);
+    // PageDown の押し続け（33 ms ごとに 681 px）でも、速いとみなさない。
+    m.scrollTo(0);
+    for (let i = 1; i <= 10; i++) {
+      clock += 33;
+      m.scrollTo(i * 681);
+      el.fire("scroll");
+    }
+    expect(fast).toEqual([]);
+    // その後の利用者のスクロールは、プログラムで動かした位置から測る。
+    clock += 16;
+    el.userScroll(el.scrollTop + 2000);
+    expect(fast).toEqual([true]);
+  });
+
   it("範囲の外へは動かさず、解除した後はイベントを受けない", () => {
     const { m, el, calls, release } = mapper(10, 160);
     m.scrollTo(1e9);

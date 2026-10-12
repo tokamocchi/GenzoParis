@@ -12,7 +12,7 @@ use genzo_app::catalog_file::{self, CatalogFileState};
 use genzo_app::{commands, protocol, settings};
 use serde_json::json;
 
-use crate::support::{Env, all_items, assert_kind, exec, import, ok, write_image};
+use crate::support::{Env, ExitSwitch, all_items, assert_kind, exec, import, ok, write_image};
 
 /// (a) ないカタログを作る・データのフォルダができる・同じパスでもう一度開くと同じものを返す・カタログで
 /// ないファイルは invalid_input・ないパスで create = false は not_found・settings.json に last_catalog が
@@ -474,5 +474,52 @@ pub fn failed_save_keeps_the_catalog_open_until_retry_or_discard() {
         0.0,
         "保存しなかった設定は捨てた"
     );
+    state.close_catalog(false).unwrap();
+}
+
+/// 閉じる処理が「閉じた後の段階のエラー」（ここではワーカーがいなくなっていて、終了を頼めない）を返したら、
+/// カタログは閉じている（still_open ではない。ロックも外れていて、開き直せる）。別のカタログを開くときに
+/// 前のカタログがこのエラーで閉じても、新しいカタログを開く（止めると、閉じたまま何も開かずに返す）。
+pub fn errors_after_the_catalog_closed_do_not_stop_opening_another() {
+    let env = Env::new();
+    let switch = ExitSwitch::new(&env.root().join("合図"));
+    let state = env.state_with_worker(env.config_dir(), env.events.sink(), switch.launch());
+    let photos = env.photos("閉じる エラー");
+    write_image(&photos.join("一 枚.jpg"), (64, 48), 6);
+    let first = env.catalog("一つ目.db");
+    let second = env.catalog("二つ目.db");
+
+    // 閉じるだけ: エラーを返すが、閉じている。
+    state.open_catalog(&first, true).unwrap();
+    import(&state, &photos);
+    let core = state.core().unwrap();
+    switch.exit_all();
+    let e = state
+        .close_catalog(false)
+        .expect_err("ワーカーに終了を頼めないのに、エラーにならない");
+    assert!(!e.still_open(), "{e:?}");
+    assert!(core.is_closed());
+    assert!(state.session().is_none());
+    assert_kind(state.core(), ErrorKind::Closed);
+    drop(core);
+
+    // 別のカタログを開く: 前のカタログが同じエラーで閉じても、新しいカタログを開く。
+    state.open_catalog(&first, false).unwrap();
+    import(&state, &photos);
+    let core = state.core().unwrap();
+    switch.exit_all();
+    let status = state.open_catalog(&second, true).unwrap();
+    assert_eq!(status.catalog_path, second);
+    assert!(core.is_closed(), "前のカタログは閉じた");
+    assert!(!Arc::ptr_eq(&state.core().unwrap(), &core));
+    assert_eq!(
+        state.settings().last_catalog.as_deref(),
+        Some(second.as_path())
+    );
+    drop(core);
+    state.close_catalog(false).unwrap();
+    // 前のカタログのロックは外れている。
+    state.open_catalog(&first, false).unwrap();
+    assert_eq!(all_items(&state).len(), 1);
     state.close_catalog(false).unwrap();
 }

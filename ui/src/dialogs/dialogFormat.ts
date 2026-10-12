@@ -1,6 +1,6 @@
 // ダイアログ・起動の画面・ジョブの表示で使う書式（日時・パス・ジョブの進捗。DOM を使わない純粋な計算）。
 
-import type { IntegrityReport, JobKind, JobResult, JobState } from "../api/types";
+import type { ErrorInfo, ErrorKind, IntegrityReport, JobKind, JobResult, JobState } from "../api/types";
 
 /** 件数の表示（3 桁区切り）。 */
 export function formatCount(n: number): string {
@@ -37,6 +37,18 @@ export function parentDir(path: string): string | null {
   // "C:\a.db" のフォルダは "C:\"。
   if (i === 2 && /^[A-Za-z]:/.test(path)) return path.slice(0, 3);
   return path.slice(0, i);
+}
+
+/**
+ * フォルダとファイルの名前をつなぐ。区切りはフォルダの書き方に合わせる（"\" だけを使うパス（Windows）なら
+ * "\"、それ以外は "/"）。フォルダが区切りで終わっていれば、そのままつなぐ。
+ */
+export function joinPath(dir: string, name: string): string {
+  const d = dir.trim();
+  if (d === "") return name;
+  if (d.endsWith("/") || d.endsWith("\\")) return `${d}${name}`;
+  const sep = d.includes("\\") && !d.includes("/") ? "\\" : "/";
+  return `${d}${sep}${name}`;
 }
 
 /**
@@ -114,8 +126,70 @@ export interface Notice {
   detail?: string;
 }
 
+/** エラーの種類の名前（失敗の理由を種類ごとにまとめるときの見出し。genzo-api の ErrorKind）。 */
+export const ERROR_KIND_LABEL: Record<ErrorKind, string> = {
+  invalid_input: "値が正しくない",
+  not_found: "見つからない",
+  stale: "情報が古い",
+  cancelled: "取り消した",
+  file_access: "ファイルにアクセスできない",
+  unsupported_file: "対応していないファイル",
+  corrupt_file: "ファイルが壊れている",
+  protected_destination: "原本と同じ場所・同じ名前",
+  conflict: "ほかの操作・ファイルとの競合",
+  trash_unavailable: "ゴミ箱を使えない",
+  storage: "空き容量・書き込みの問題",
+  catalog_corrupt: "カタログの問題",
+  incompatible_version: "版が合わない",
+  worker: "画像の処理（ワーカー）のエラー",
+  gpu: "GPU のエラー",
+  closed: "カタログが閉じている",
+  internal: "内部のエラー",
+};
+
 /**
- * 理由ごとの件数の行（多い順。`limit` 種類まで、残りは「ほか N 種類」）。
+ * 失敗をエラーの種類（ErrorInfo.kind）ごとにまとめた行（多い順。`limit` 種類まで、残りは「ほか N 種類」）。
+ *
+ * コアの説明の文にはファイルのパスが入るので、文ごとにまとめると、同じ原因（ドライブが外れたなど）の失敗が
+ * 1 件ずつ別の理由になる。種類ごとに件数・例の文（`examples` 個まで。違う文だけ）・案内（最初に見つかった
+ * hint）を出す。
+ */
+export function groupErrors(errors: readonly ErrorInfo[], unit: string, limit = 5, examples = 2): string[] {
+  const groups = new Map<ErrorKind, { count: number; examples: string[]; hint: string | null }>();
+  for (const e of errors) {
+    const g = groups.get(e.kind) ?? { count: 0, examples: [], hint: null };
+    g.count++;
+    if (g.examples.length < examples && !g.examples.includes(e.message)) g.examples.push(e.message);
+    if (!g.hint && e.hint) g.hint = e.hint;
+    groups.set(e.kind, g);
+  }
+  const sorted = [...groups.entries()].sort((a, b) => b[1].count - a[1].count);
+  const lines: string[] = [];
+  for (const [kind, g] of sorted.slice(0, limit)) {
+    lines.push(`・${ERROR_KIND_LABEL[kind] ?? kind}（${formatCount(g.count)} ${unit}）`);
+    for (const ex of g.examples) lines.push(`　例: ${ex}`);
+    if (g.hint) lines.push(`　→ ${g.hint}`);
+  }
+  if (sorted.length > limit) lines.push(`・ほか ${formatCount(sorted.length - limit)} 種類の理由`);
+  return lines;
+}
+
+/** 通知に出す詳細の行の上限（仮置き: 8 行。全体は上の帯の「結果」で見られる）。 */
+export const TOAST_DETAIL_LINES = 8;
+
+/**
+ * 通知に出す詳細を短くする（`maxLines` 行まで。切ったら、続きの見方を書き足す）。
+ */
+export function shortenDetail(detail: string | undefined, maxLines = TOAST_DETAIL_LINES): string | undefined {
+  if (detail === undefined) return undefined;
+  const lines = detail.split("\n");
+  if (lines.length <= maxLines) return detail;
+  return [...lines.slice(0, maxLines), "…（続きは上の帯の「結果」で見られます）"].join("\n");
+}
+
+/**
+ * 理由ごとの件数の行（多い順。`limit` 種類まで、残りは「ほか N 種類」）。決まった文の理由（書き出しを
+ * 飛ばした理由など）に使う。パスの入る文は groupErrors で種類ごとにまとめる。
  */
 export function groupReasons(reasons: string[], unit: string, limit = 5): string[] {
   const counts = new Map<string, number>();

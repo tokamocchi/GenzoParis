@@ -261,6 +261,9 @@
   width: 10px;
   height: 10px;
 }
+.lib-label-btn:disabled {
+  cursor: default;
+}
 .lib-label-btn.on {
   border-color: var(--fg-0);
   box-shadow: inset 0 0 0 1px var(--fg-0);
@@ -281,6 +284,52 @@
 }
 .lib-filterbar .spacer {
   flex: 1;
+}
+/* 詳しい条件（長辺の画素数・動画の長さ・フレームレート） */
+.lib-filter-more {
+  position: relative;
+  display: inline-flex;
+}
+.lib-filter-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: max-content;
+  max-width: min(420px, 90vw);
+  padding: 8px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+.lib-filter-pop .hint {
+  margin: 2px 0 0;
+  font-size: 11px;
+  white-space: normal;
+}
+.lib-filter-range {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.lib-filter-range > .label:first-child {
+  width: 96px;
+  color: var(--fg-1);
+}
+.lib-filter-range .label {
+  color: var(--fg-2);
+}
+.lib-filterbar input.lib-filter-number {
+  width: 84px;
+  text-align: right;
+}
+.lib-filterbar input.lib-filter-number.invalid,
+.lib-filter-range.reversed input.lib-filter-number {
+  border-color: var(--warn);
 }
 
 /* ------------------------------------------------------------------ 左のパネル（フォルダ） */

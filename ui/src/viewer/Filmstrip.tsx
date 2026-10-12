@@ -7,6 +7,9 @@
 //   （react-virtual の observeElementOffset・scrollToFn の間に入る。上限に収まるときは同じ値）。
 // - 表示中の写真（selection.current）を枠で強調し、見える位置に保つ（端に寄ったら中央に置く）。
 // - クリックで選ぶ（Shift で範囲、Ctrl / ⌘ で追加・解除）。縦のホイールで横に送る。
+// - 横のスクロールバーは常に場所を取る（viewer.css の overflow-x: scroll）。項目の大きさを内側の高さから
+//   決めるので、スクロールバーが出入りすると大きさが変わり、内容の幅が変わって、またスクロールバーが
+//   出入りする、を繰り返すため。
 
 import { elementScroll, observeElementOffset, useVirtualizer } from "@tanstack/react-virtual";
 import { type MouseEvent, type WheelEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -17,11 +20,20 @@ import { FlagMark, LabelDot } from "../components/Marks";
 import { formatCaptureTime } from "../format";
 import { actions, useApp } from "../state/app";
 import { searchCache, useSearchVersion } from "../state/search";
-import { MAX_FILMSTRIP_SCROLL_PX, keepVisibleOffset, toRealOffset, toVirtualOffset } from "./viewerMath";
+import {
+  MAX_FILMSTRIP_SCROLL_PX,
+  accumulateWheel,
+  keepVisibleOffset,
+  toRealOffset,
+  toVirtualOffset,
+} from "./viewerMath";
 import "./viewer.css";
 
-/** 1 項目の幅の既定値（px。高さを測るまでの仮置き。--filmstrip-h の 96 px からスクロールバーを除いた目安）。 */
-const DEFAULT_CELL = 84;
+/**
+ * 1 項目の幅の既定値（px。高さを測るまでの仮置き。--filmstrip-h の 96 px から、上の枠線 1 px と
+ * base.css のスクロールバーの 10 px を除いた値）。
+ */
+const DEFAULT_CELL = 85;
 
 /** 1 項目の幅の下限（px。仮置き）。 */
 const MIN_CELL = 40;
@@ -41,7 +53,8 @@ export function Filmstrip() {
   const [size, setSize] = useState({ cell: DEFAULT_CELL, viewport: 0 });
   const { cell, viewport } = size;
 
-  // 項目は正方形（高さはスクロールバーを除いた内側の高さ）。
+  // 項目は正方形（高さはスクロールバーを除いた内側の高さ。スクロールバーは常に場所を取るので、件数で
+  // 変わらない）。
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -84,7 +97,15 @@ export function Filmstrip() {
   // 項目の幅・対応が変わった: 測り直し、今のスクロールの位置を読み直させる。
   useEffect(() => {
     virtualizer.measure();
-    scrollRef.current?.dispatchEvent(new Event("scroll"));
+    // react-virtual はスクロールの知らせで flushSync するので、effect の中ではなく、終わった後に送る
+    // （React が「lifecycle の中の flushSync」と警告するため）。
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) scrollRef.current?.dispatchEvent(new Event("scroll"));
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [virtualizer, cell, realMax, virtualMax]);
 
   // 表示中の写真を見える位置に保つ。
@@ -98,13 +119,17 @@ export function Filmstrip() {
 
   const selected = useMemo(() => new Set(ids), [ids]);
 
-  // 縦のホイールで横に送る（内容の位置で 1 対 1 に動くよう、物理の量に直す）。
+  // 縦のホイールで横に送る（内容の位置で 1 対 1 に動くよう、物理の量に直す）。スクロールの領域を抑えている
+  // ときは 1 回の量が 1 px 未満になりうるので、端数を持ち越す（WebKit のスクロールの位置は整数）。
+  const wheelRest = useRef(0);
   const onWheel = (e: WheelEvent<HTMLDivElement>) => {
     const el = scrollRef.current;
     if (!el || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
     const unit = e.deltaMode === 1 ? cell : e.deltaMode === 2 ? viewport : 1;
     const ratio = virtualMax > 0 ? realMax / virtualMax : 1;
-    el.scrollLeft += e.deltaY * unit * ratio;
+    const { step, rest } = accumulateWheel(wheelRest.current, e.deltaY * unit * ratio);
+    wheelRest.current = rest;
+    if (step !== 0) el.scrollLeft += step;
   };
 
   const virtualOffset = virtualizer.scrollOffset ?? 0;

@@ -5,9 +5,15 @@
 // - 標準プレビュー（L1。長辺 2560）を画面に合わせて中央に出す。L1 が読めるまでは、サムネイル（L0）を同じ
 //   大きさで出す（PERF-05: 先に埋め込み JPEG、後で現像結果）。
 // - L1 がまだない（404）ときは、genzo:// の処理がコアに作る処理を予約する（genzo-app の protocol.rs）。
-//   作り終えた知らせ（thumbnail_updated）で rev が変われば URI が変わって読み直す。rev が同じまま（L1 だけが
-//   キャッシュの回収で消えていた）のときは、URI に印（retry）を付けて読み直す。
-// - 前後の写真の L1 を先に読んでおく（PERF-04。prefetch.ts）。
+//   要求し直すたびにコアの作り直しが最初からになるので、404 になった写真は作成待ちとして覚え（l1Status.ts）、
+//   作り終えた知らせ（thumbnail_updated）が届くまで要求しない。rev が変われば URI が変わって読み直す。
+//   rev が同じまま（L1 だけがキャッシュの回収で消えていた）のときは、URI に印（retry）を付けて読み直す。
+//   知らせを取りこぼした場合に備え、作成待ちのまま L1_CHECK_MS たったら、作る処理を予約しない preview_path で
+//   1 回だけ確かめる。
+// - 写真送りの途中（前の写真から L1_SETTLE_MS 未満で移った）は、L1 の要求と先読みを L1_SETTLE_MS 待つ
+//   （通り過ぎる写真ごとに作る処理を予約しない）。
+// - 前後の写真の L1 を先に読んでおく（PERF-04。prefetch.ts）。表示中の写真の L1 が読めた（または作成待ちに
+//   なった）後で読む（表示中の写真の作る処理を先に予約する）。
 // - 等倍表示（Z・クリックした点を中心に）: 現像のセッション（state/develop.ts。現像の画面と同じ）で写真を
 //   開き、出力の画像のフル解像度の大きさを求めてから（outputSize.ts）、見えている範囲だけをコアに描かせて
 //   canvas に出す（state/region.ts）。画像の 1 画素を画面の 1 物理画素にする（canvas の CSS の大きさは
@@ -35,13 +41,15 @@ import { FlagMark, LabelDot, Stars } from "../components/Marks";
 import { formatCaptureTime, formatDuration } from "../format";
 import { isTyping, useHotkeys } from "../keyboard";
 import { actions, appStore, useApp } from "../state/app";
+import { useDevelop } from "../state/develop";
 import { cancelRegionRender, regionFor, renderRegion } from "../state/region";
 import { searchCache, useSearchVersion } from "../state/search";
 import { useCoreEvent, useViewRect } from "./hooks";
 import { resolveOutputSize } from "./outputSize";
-import { prefetchImage } from "./prefetch";
+import { l1Status, prefetchL1, prefetchState } from "./prefetch";
 import {
   DRAG_THRESHOLD_PX,
+  L1_CHECK_MS,
   MAX_REGION_PIXELS,
   PAN_SETTLE_MS,
   type Rect,
@@ -51,12 +59,13 @@ import {
   formatCodec,
   formatFps,
   formatResolution,
+  l1RequestDelay,
   limitRegion,
   normalizedPoint,
   orientedSize,
   pannedCenter,
   prefetchIndices,
-  regionCovers,
+  regionUsable,
   sameRect,
   snapToDevicePixels,
   withRetryParam,
@@ -95,6 +104,21 @@ function saveShowInfo(v: boolean): void {
 // ルーペ
 // ---------------------------------------------------------------------------
 
+/** 表示する写真が変わったこと（写真送り）。 */
+interface Navigation {
+  /** 通し番号（表示する写真が変わるたびに増える）。 */
+  seq: number;
+  /** 変わった時刻（performance.now()）。 */
+  at: number;
+  /** L1 の要求と先読みを待つ時間（ミリ秒。写真送りの途中なら L1_SETTLE_MS。l1RequestDelay）。 */
+  delay: number;
+}
+
+/** 待つ時間の残り（ミリ秒）。 */
+function remainingDelay(nav: Navigation): number {
+  return Math.max(0, nav.at + nav.delay - performance.now());
+}
+
 export function Loupe() {
   const current = useApp((s) => s.selection.current);
   const currentIndex = useApp((s) => s.selection.currentIndex);
@@ -104,6 +128,27 @@ export function Loupe() {
   const revOverride = useApp((s) => (current !== null ? s.thumbRevs[current] : undefined));
   useSearchVersion();
   const [showInfo, setShowInfo] = useState(loadShowInfo);
+
+  // 写真送りの間隔（表示する写真が変わったときだけ、描画の中で更新する。StrictMode の 2 回目の描画では
+  // 同じ写真なので変わらない）。
+  const navRef = useRef<Navigation & { id: VariantId | null }>({
+    id: null,
+    seq: 0,
+    at: Number.NEGATIVE_INFINITY,
+    delay: 0,
+  });
+  if (navRef.current.id !== current) {
+    const now = performance.now();
+    navRef.current = {
+      id: current,
+      seq: navRef.current.seq + 1,
+      at: now,
+      delay: l1RequestDelay(now - navRef.current.at),
+    };
+  }
+  const nav = navRef.current;
+  /** 表示中の写真の L1 が読めた（または作成待ちになった）写真送りの通し番号。先読みはその後で始める。 */
+  const [settledSeq, setSettledSeq] = useState(0);
 
   const listed = findSummary(current, currentIndex);
   // 動画の情報（VID-03）と、検索結果のキャッシュにない写真の概要のために、詳細を読む。
@@ -119,7 +164,8 @@ export function Loupe() {
     },
     hotkeysEnabled,
   );
-  usePrefetchNeighbors(currentIndex);
+  // 動画には L1 がないので、待たずに先読みする。概要が分からない間は先読みしない。
+  usePrefetchNeighbors(currentIndex, nav, summary?.kind === "video" || settledSeq === nav.seq);
 
   if (current === null) {
     return (
@@ -143,7 +189,14 @@ export function Loupe() {
       {summary.kind === "video" ? (
         <VideoView key={current} summary={summary} details={details} thumbRev={thumbRev} />
       ) : (
-        <PhotoView key={current} summary={summary} thumbRev={thumbRev} hotkeysEnabled={hotkeysEnabled} />
+        <PhotoView
+          key={current}
+          summary={summary}
+          thumbRev={thumbRev}
+          hotkeysEnabled={hotkeysEnabled}
+          nav={nav}
+          onL1Settled={setSettledSeq}
+        />
       )}
       {showInfo && <InfoOverlay summary={summary} index={currentIndex} count={count} />}
       <FileNotice summary={summary} />
@@ -186,34 +239,48 @@ function useVariantDetails(id: VariantId | null, version: number, enabled: boole
   return loaded && loaded.summary.variant_id === id ? loaded : null;
 }
 
-/** 前後の写真の L1 を先読みする（PERF-04）。進む向きを覚えて、その向きを多めに読む。 */
-function usePrefetchNeighbors(currentIndex: number | null): void {
+/**
+ * 前後の写真の L1 を先読みする（PERF-04）。進む向きを覚えて、その向きを多めに読む。`ready`（表示中の写真の
+ * L1 が読めた・作成待ちになった）になってから、写真送りの待ち（nav.delay）の残りを待って読む。
+ */
+function usePrefetchNeighbors(currentIndex: number | null, nav: Navigation, ready: boolean): void {
   const version = useSearchVersion();
   const prev = useRef<number | null>(null);
   const direction = useRef<1 | -1>(1);
-  /** 先読みの対象（id → URI）。作り終えた知らせで読み直す。 */
-  const targets = useRef(new Map<VariantId, string>());
+  /** 先読みの対象（id）。作り終えた知らせで読み直す。 */
+  const targets = useRef(new Set<VariantId>());
   useEffect(() => {
     if (currentIndex === null) return;
     if (prev.current !== null && prev.current !== currentIndex) direction.current = currentIndex > prev.current ? 1 : -1;
     prev.current = currentIndex;
-    const revs = appStore.get().thumbRevs;
-    const next = new Map<VariantId, string>();
-    for (const i of prefetchIndices(currentIndex, searchCache.count, direction.current)) {
-      const v = searchCache.get(i);
-      // 動画には L1 がない（作る処理を予約しない）。
-      if (!v || v.kind !== "photo") continue;
-      const url = previewUrl(v.variant_id, revs[v.variant_id] ?? v.thumb_rev);
-      next.set(v.variant_id, url);
-      prefetchImage(url);
+  }, [currentIndex]);
+  useEffect(() => {
+    targets.current = new Set();
+    if (currentIndex === null || !ready) return;
+    const run = () => {
+      const revs = appStore.get().thumbRevs;
+      for (const i of prefetchIndices(currentIndex, searchCache.count, direction.current)) {
+        const v = searchCache.get(i);
+        // 動画には L1 がない（作る処理を予約しない）。
+        if (!v || v.kind !== "photo") continue;
+        const rev = revs[v.variant_id] ?? v.thumb_rev;
+        targets.current.add(v.variant_id);
+        prefetchL1(v.variant_id, rev, previewUrl(v.variant_id, rev));
+      }
+    };
+    const wait = remainingDelay(nav);
+    if (wait <= 0) {
+      run();
+      return;
     }
-    targets.current = next;
-  }, [currentIndex, version]);
+    const timer = setTimeout(run, wait);
+    return () => clearTimeout(timer);
+    // nav は写真送りの通し番号で比べる。
+  }, [currentIndex, version, ready, nav.seq]);
   useCoreEvent((e) => {
+    // 作成待ちの印は prefetch.ts が先に消している。
     if (e.type !== "thumbnail_updated" || !targets.current.has(e.variant_id)) return;
-    const url = previewUrl(e.variant_id, e.rev);
-    targets.current.set(e.variant_id, url);
-    prefetchImage(url);
+    prefetchL1(e.variant_id, e.rev, previewUrl(e.variant_id, e.rev));
   });
 }
 
@@ -282,10 +349,18 @@ type Zoom =
   /** 等倍。cx・cy は表示の中心（出力の画素。表示の大きさに合わせた制限の前の値）。 */
   | { kind: "zoomed"; fullW: number; fullH: number; cx: number; cy: number };
 
-function PhotoView(props: { summary: VariantSummary; thumbRev: string | null; hotkeysEnabled: boolean }) {
-  const { summary, thumbRev } = props;
+function PhotoView(props: {
+  summary: VariantSummary;
+  thumbRev: string | null;
+  hotkeysEnabled: boolean;
+  nav: Navigation;
+  /** L1 が読めた・作成待ちになった（先読みを始めてよい）。写真送りの通し番号を渡す。 */
+  onL1Settled: (seq: number) => void;
+}) {
+  const { summary, thumbRev, nav } = props;
   const id = summary.variant_id;
   const fileOk = summary.file_status === "ok";
+  const missing = summary.file_status === "missing";
   const viewRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const view = useViewRect(viewRef);
@@ -308,29 +383,85 @@ function PhotoView(props: { summary: VariantSummary; thumbRev: string | null; ho
       return n >= MAX_L1_RETRY ? r : { rev: revRef.current, n: n + 1 };
     });
   const l0 = useImageSlot(thumbRev ? thumbUrl(id, thumbRev) : null);
-  const l1 = useImageSlot(withRetryParam(previewUrl(id, thumbRev), retryCount));
+  const l1Url = withRetryParam(previewUrl(id, thumbRev), retryCount);
+  // 作成待ち（404 になった。作り終えた知らせを待つ）・作れなかった間は要求しない（l1Status.ts）。
+  const l1State = l1Status.state(id, thumbRev, Date.now());
+  // 写真送りの途中は少し待ってから要求する。先読み中なら、その結果を待つ（同じ URI を重ねて要求しない）。
+  const [l1Go, setL1Go] = useState(() => {
+    const p = prefetchState(l1Url);
+    return p ? p.ready : nav.delay <= 0;
+  });
+  useEffect(() => {
+    if (l1Go) return;
+    let cancelled = false;
+    const p = prefetchState(l1Url);
+    if (p) {
+      void p.done.then(() => {
+        if (!cancelled) setL1Go(true);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    const timer = setTimeout(() => setL1Go(true), remainingDelay(nav));
+    return () => clearTimeout(timer);
+    // 写真ごとに作り直す部品なので、待つのは最初の 1 回だけ。
+  }, [l1Go]);
+  const l1 = useImageSlot(l1Go && l1State === "none" ? l1Url : null);
+  // 要求を始めたときの通し番号（404 と作り終えた知らせの順序の入れ替わりを見分ける。l1Status.ts）。
+  const l1Request = useRef<{ url: string | null; rev: string | null; stamp: number }>({
+    url: null,
+    rev: null,
+    stamp: 0,
+  });
+  if (l1Request.current.url !== l1.url) {
+    l1Request.current = { url: l1.url, rev: thumbRev, stamp: l1Status.stamp() };
+  }
   const l1ReadyRef = useRef(false);
   l1ReadyRef.current = l1.ready;
   const [previewFailed, setPreviewFailed] = useState(false);
+  const l1Failed = previewFailed || l1State === "failed";
 
-  // L1 が読めない: もう作ってあれば（知らせを取りこぼした）すぐ読み直す。なければ作る処理が予約される。
-  const onL1Error = () => {
-    if (!fileOk) return;
-    core
-      .requestPreview(id)
-      .then((path) => {
-        if (path && mounted.current) bumpRetry();
-      })
-      .catch(() => undefined);
+  // L1 が読めない: 作成待ちにする（作る処理は genzo:// の処理が予約した。作り終えた知らせを待つ）。要求の
+  // 後に作り終えていれば、すぐ読み直す。もう使っていない URI の失敗は使わない（要求を始めた時点が分からない）。
+  const onL1Error = (url: string) => {
+    const r = l1Request.current;
+    if (r.url !== url || !mounted.current) return;
+    if (!l1Status.markMissing(id, r.rev, r.stamp, Date.now())) bumpRetry();
   };
   useCoreEvent((e) => {
     if (e.type === "thumbnail_updated" && e.variant_id === id) {
-      // rev が変われば URI が変わって読み直す。同じ rev なら印を付けて読み直す。
+      // rev が変われば URI が変わって読み直す。同じ rev なら印を付けて読み直す（作成待ちの印は prefetch.ts が
+      // 先に消している）。
       if (!l1ReadyRef.current && e.rev === revRef.current) bumpRetry();
     } else if (e.type === "warning" && e.code === "preview_failed" && e.variant_id === id) {
       setPreviewFailed(true);
     }
   });
+
+  // 作成待ちのまま L1_CHECK_MS たった: 知らせを取りこぼしていないか、作る処理を予約しない preview_path で
+  // 1 回だけ確かめる（request_preview は、なければ作り直しを予約し直すので使わない）。
+  useEffect(() => {
+    if (l1State !== "waiting" || !fileOk) return;
+    const timer = setTimeout(() => {
+      core
+        .execute({ type: "preview_path", variant_id: id }, "path")
+        .then((r) => {
+          if (!r.path || !mounted.current) return;
+          l1Status.clear(id);
+          bumpRetry();
+        })
+        .catch(() => undefined);
+    }, L1_CHECK_MS);
+    return () => clearTimeout(timer);
+  }, [l1State, fileOk, id]);
+
+  // 表示中の写真の L1 が決まった（読めた・作成待ち・作れなかった）: 前後の先読みを始めてよい。
+  const l1Settled = l1.ready || l1.failed || l1State !== "none";
+  const { onL1Settled } = props;
+  useEffect(() => {
+    if (l1Settled) onL1Settled(nav.seq);
+  }, [l1Settled, onL1Settled, nav.seq]);
 
   const shown = l1.shown ?? l0.shown;
   const natural = shown
@@ -350,8 +481,11 @@ function PhotoView(props: { summary: VariantSummary; thumbRev: string | null; ho
   const firstRegion = useRef(true);
   /** 表示範囲の描画を要求したことがあるか（取り消しを送るかどうか）。 */
   const usedRegion = useRef(false);
-  /** 最後に要求した範囲（届いた結果が今の表示を含まなければ要求し直すが、同じ範囲を繰り返さない）。 */
-  const lastRequest = useRef<Rect | null>(null);
+  /**
+   * 最後に要求した範囲と現像設定の世代（届いた結果が今の表示を含まなければ要求し直すが、同じ範囲・同じ世代を
+   * 繰り返さない）。
+   */
+  const lastRequest = useRef<{ rect: Rect; generation: number | null } | null>(null);
 
   useEffect(() => {
     if (!message) return;
@@ -361,7 +495,9 @@ function PhotoView(props: { summary: VariantSummary; thumbRev: string | null; ho
 
   const startZoom = (u: number, v: number) => {
     if (!fileOk) {
-      setMessage("元ファイルを読めないため、等倍表示にできません");
+      setMessage(
+        missing ? "元ファイルが見つからないため、等倍表示にできません" : "元ファイルを読めないため、等倍表示にできません",
+      );
       return;
     }
     const my = ++zoomSeq.current;
@@ -437,6 +573,15 @@ function PhotoView(props: { summary: VariantSummary; thumbRev: string | null; ho
     props.hotkeysEnabled,
   );
 
+  // 開いている写真の現像設定の、分かっている最新の世代（設定の貼り付け・Undo などで外から変わったら、
+  // 描いてある範囲を描き直す）。コアの状態（reloadState などで更新）と現像のプレビューの大きい方。
+  const devGeneration = useDevelop((s) => {
+    if (s.variantId !== id) return null;
+    const a = s.state && s.state.variant_id === id ? s.state.generation : null;
+    const b = s.frame && s.frame.header.variant_id === id ? s.frame.header.generation : null;
+    return a === null ? b : b === null ? a : Math.max(a, b);
+  });
+
   const zoomed = zoom.kind === "zoomed" ? zoom : null;
   const center = zoomed
     ? {
@@ -459,21 +604,14 @@ function PhotoView(props: { summary: VariantSummary; thumbRev: string | null; ho
       devicePixelRatio: view.dpr,
     });
     const need = limitRegion(expandRegion(visible, 1, zoomed.fullW, zoomed.fullH), MAX_REGION_PIXELS);
-    const have = region?.header;
-    if (
-      have &&
-      have.full_width === zoomed.fullW &&
-      have.full_height === zoomed.fullH &&
-      regionCovers({ x: have.x, y: have.y, width: have.region_width, height: have.region_height }, need)
-    ) {
-      return;
-    }
-    // 同じ範囲を要求済み（描いている途中・描けた結果が届いた後）なら、もう一度は要求しない。
-    if (lastRequest.current && sameRect(lastRequest.current, need)) return;
+    if (regionUsable(region?.header, need, zoomed.fullW, zoomed.fullH, devGeneration)) return;
+    // 同じ範囲・同じ世代を要求済み（描いている途中・描けた結果が届いた後）なら、もう一度は要求しない。
+    const last = lastRequest.current;
+    if (last && sameRect(last.rect, need) && last.generation === devGeneration) return;
     const timer = setTimeout(
       () => {
         firstRegion.current = false;
-        lastRequest.current = need;
+        lastRequest.current = { rect: need, generation: devGeneration };
         const my = ++regionSeq.current;
         setBusy(true);
         renderRegion({ variant_id: id, space: "output", ...need, scale: 1 })
@@ -501,7 +639,20 @@ function PhotoView(props: { summary: VariantSummary; thumbRev: string | null; ho
     );
     return () => clearTimeout(timer);
     // center は zoom と view から求めた値なので、x・y の数で比べる（描画ごとに作り直すオブジェクトにしない）。
-  }, [id, zoomed?.fullW, zoomed?.fullH, center?.x, center?.y, dragging, regionFailed, view.width, view.height, view.dpr, region]);
+  }, [
+    id,
+    zoomed?.fullW,
+    zoomed?.fullH,
+    center?.x,
+    center?.y,
+    dragging,
+    regionFailed,
+    view.width,
+    view.height,
+    view.dpr,
+    region,
+    devGeneration,
+  ]);
 
   // 描いた範囲を canvas に出す（位置・大きさは描画の中で決まる。同じフレームで描く）。
   useLayoutEffect(() => {
@@ -583,14 +734,16 @@ function PhotoView(props: { summary: VariantSummary; thumbRev: string | null; ho
   const rh = region && region.header.variant_id === id ? region.header : null;
   const background = l1.shown?.url ?? l0.shown?.url ?? null;
 
+  // L1 を今は出せない（読めなかった・作成待ち・作れなかった）。
+  const l1Gone = l1.failed || l1State !== "none";
   let status: string | null = null;
   if (zoom.kind === "preparing") status = "等倍表示を準備しています…";
   else if (zoomed && busy) status = rh ? "描き直しています…" : "等倍で描いています…";
-  else if (zoom.kind === "fit" && !l1.shown && l1.failed && fileOk && !previewFailed) {
+  else if (zoom.kind === "fit" && !l1.shown && l1Gone && fileOk && !l1Failed) {
     status = "標準プレビューを作っています…";
   }
   const nothing = !l0.shown && !l1.shown;
-  const noImage = nothing && (l0.url === null || l0.failed) && l1.failed;
+  const noImage = nothing && (l0.url === null || l0.failed) && l1Gone;
 
   const viewClass = [
     "loupe-view",
@@ -653,7 +806,11 @@ function PhotoView(props: { summary: VariantSummary; thumbRev: string | null; ho
         {noImage && (
           <div className="loupe-center-note">
             <p>プレビューがありません</p>
-            {!fileOk && <p className="hint">元ファイルが見つからないため、作れません</p>}
+            {!fileOk && (
+              <p className="hint">
+                {missing ? "元ファイルが見つからないため、作れません" : "元ファイルを読めないため、作れません"}
+              </p>
+            )}
           </div>
         )}
       </div>
