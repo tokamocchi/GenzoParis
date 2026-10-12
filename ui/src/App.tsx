@@ -11,7 +11,6 @@
 import { useEffect, useState } from "react";
 
 import * as appApi from "./api/app";
-import * as core from "./api/core";
 import { onCloseFailed, startCoreEvents } from "./api/events";
 import { displayTarget } from "./api/frames";
 import { StatusBar } from "./components/StatusBar";
@@ -29,7 +28,6 @@ import { Grid } from "./library/Grid";
 import { LibraryLeftPanel } from "./library/LibraryLeftPanel";
 import { MetadataPanel } from "./library/MetadataPanel";
 import { actions, appStore, useApp } from "./state/app";
-import { searchCache } from "./state/search";
 import { developStore, installDevelopEvents, redo, undo } from "./state/develop";
 import { Filmstrip } from "./viewer/Filmstrip";
 import { Loupe } from "./viewer/Loupe";
@@ -108,21 +106,10 @@ function useGlobalHotkeys(enabled: boolean) {
       "mod+shift+c": async () => {
         const id = appStore.get().selection.current;
         if (id === null) return;
-        // 動画には現像設定がない（既定の設定を写すと、貼り付け先を既定に戻してしまう）。
-        const item = searchCache.getLoadedById(id);
-        if (item?.kind === "video") {
-          actions.notify("info", "動画の設定はコピーできません");
-          return;
-        }
-        try {
-          // 現像中の写真なら、画面の最新の値（送信前を含む）をコピーする。
-          const d = developStore.get();
-          const settings = d.variantId === id && d.settings ? d.settings : await core.copySettings(id);
-          actions.setClipboard({ settings, from: id });
-          actions.notify("info", "現像設定をコピーしました");
-        } catch (e) {
-          actions.reportError(e, "現像設定をコピーできません");
-        }
+        // 現像中の写真なら、画面の最新の値（送信前を含む）をコピーする。動画は写さない（種類は、検索結果の
+        // ページが捨てられていても確かめる。state/app.ts の copySettingsOf）。
+        const d = developStore.get();
+        await actions.copySettingsOf(id, d.variantId === id ? d.settings : null);
       },
       // 貼り付けは、ルーペ・現像でもフィルムストリップで選んだ写真を含める（state/app.ts の pasteTargets）。
       "mod+shift+v": () => {

@@ -14,6 +14,7 @@ import { developStore, enqueue, reloadState } from "../state/develop";
 import { formatCount } from "./dialogFormat";
 import { loadedSummaries } from "./loadedItems";
 import {
+  type LoadedItem,
   PASTE_GROUP_ITEMS,
   type PasteSelection,
   anySelected,
@@ -26,15 +27,22 @@ import { loadStored, saveStored } from "./storage";
 
 const STORE_KEY = "paste.groups";
 
+/** 種類・名前の分かる写真（選んだ写真の概要、読み込み済みの検索結果の順）。 */
+function* knownSummaries(): Generator<LoadedItem> {
+  yield* actions.selectedSummaries();
+  yield* loadedSummaries();
+}
+
 export function PasteSettingsDialog(props: { targets: VariantId[] }) {
   const clipboard = useApp((s) => s.clipboard);
   const [sel, setSel] = useState<PasteSelection>(() => restorePasteSelection(loadStored(STORE_KEY)));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
 
-  // 読み込み済みの検索結果を 1 回だけ見て、動画とコピー元を調べる（開いたときの内容で決める）。
+  // 選んだ写真の概要（選んだときの項目）と読み込み済みの検索結果を 1 回だけ見て、動画とコピー元を調べる（開いた
+  // ときの内容で決める）。検索結果のページは上限で捨てるので、選んだ写真の種類は選んだときの項目で確かめる。
   const prepared = useMemo(
-    () => preparePasteTargets(props.targets, clipboard?.from ?? null, loadedSummaries()),
+    () => preparePasteTargets(props.targets, clipboard?.from ?? null, knownSummaries()),
     [props.targets, clipboard],
   );
   const source = prepared.source;

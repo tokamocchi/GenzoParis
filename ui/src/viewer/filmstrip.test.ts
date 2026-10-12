@@ -9,7 +9,7 @@ import { installBridge } from "../api/bridge";
 import { MockBridge } from "../api/mock";
 import type { VariantSummary } from "../api/types";
 import { searchCache } from "../state/search";
-import { FilmstripCell, filmstripItem } from "./Filmstrip";
+import { FilmstripCell, filmstripClickOptions, filmstripItem } from "./Filmstrip";
 
 const summary = (i: number): VariantSummary =>
   ({
@@ -74,5 +74,20 @@ describe("フィルムストリップの項目（performance-5）", () => {
     const shown = renderToString(createElement(FilmstripCell, { ...props, paused: false }));
     expect(shown).toContain("<img");
     expect(shown).toContain("r2");
+  });
+});
+
+describe("項目のクリック（M1）", () => {
+  it("Shift + クリックでも、出していた写真を確かめて選ぶ（表示中の写真は移さない）", () => {
+    expect(filmstripClickOptions({ shiftKey: true, ctrlKey: false, metaKey: false }, 110)).toEqual({
+      extend: true,
+      toggle: false,
+      keepCurrent: true,
+      expect: 110,
+    });
+    expect(filmstripClickOptions({ shiftKey: false, ctrlKey: false, metaKey: true }, 110)).toMatchObject({
+      toggle: true,
+      expect: 110,
+    });
   });
 });

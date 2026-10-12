@@ -96,6 +96,8 @@ class ControlledBridge implements Bridge {
   revs = new Map<number, string>();
   /** この世代より古い要求は stale にする（コアが次の世代に進んだ）。 */
   coreGeneration = 0;
+  /** 世代・位置の写真の id（既定は世代ごとに別の id）。 */
+  idOf: (generation: number, index: number) => number = (g, i) => summary(g, i).variant_id;
 
   invoke<T>(_command: string, args?: Record<string, unknown>): Promise<T> {
     const c = args?.command as { type: string; generation: number; start: number; len: number };
@@ -126,7 +128,10 @@ class ControlledBridge implements Bridge {
       const count = this.counts.get(p.generation) ?? 0;
       const items: VariantSummary[] = [];
       for (let i = p.start; i < Math.min(count, p.start + PAGE_SIZE); i++) {
-        items.push(summary(p.generation, i, this.revs.get(p.generation) ?? "r0"));
+        items.push({
+          ...summary(p.generation, i, this.revs.get(p.generation) ?? "r0"),
+          variant_id: this.idOf(p.generation, i),
+        });
       }
       p.resolve({ type: "range", generation: p.generation, start: p.start, items });
     }
@@ -346,6 +351,57 @@ describe("新しい世代のときの表示（performance-4）", () => {
 
   it("ページの上限は、範囲の選択・全選択の上限（1 万件）と表示中の範囲の近くを持てる数", () => {
     expect(MAX_PAGES).toBeGreaterThanOrEqual(10_000 / PAGE_SIZE + 2 * NEAR_PAGES + 1);
+  });
+});
+
+describe("古い世代と新しい世代のページが並ぶとき（M2）", () => {
+  let b: ControlledBridge;
+  beforeEach(() => {
+    b = new ControlledBridge();
+    controlled = b;
+    installBridge(b);
+  });
+
+  it("同じ写真を 2 つのセルに出さない（古い世代の側は、今の世代のページにある写真を出さない）", async () => {
+    // 世代 2 では先頭に 1 枚増え、位置が 1 つずつずれる。
+    b.idOf = (g, i) => (g === 1 ? 1_000 + i : i === 0 ? 999 : 1_000 + i - 1);
+    b.counts.set(1, 2_000);
+    b.counts.set(2, 2_001);
+    searchCache.reset(1, 2_000);
+    // 7 列の行（位置 1196〜1202）がページ 5（〜1199）とページ 6（1200〜）にまたがる。
+    searchCache.setView("grid", 1_190, 1_210);
+    searchCache.get(1_196);
+    searchCache.get(1_200);
+    await drain(b);
+    searchCache.reset(2, 2_001);
+    for (let i = 1_196; i <= 1_202; i++) searchCache.get(i);
+    expect(b.starts().sort((x, y) => x - y)).toEqual([1_000, 1_200]);
+    // 新しい世代のページ 6 だけが先に届いた。
+    b.pending.sort((x, y) => y.start - x.start);
+    b.respond(1);
+    await flush();
+    const row: (number | undefined)[] = [];
+    for (let i = 1_196; i <= 1_202; i++) row.push(searchCache.get(i)?.variant_id);
+    const shown = row.filter((v) => v !== undefined);
+    expect(new Set(shown).size).toBe(shown.length);
+    // 古い世代の 1196〜1198 はそのまま出し（ちらつかせない）、今の世代のページにある 2199 は新しい位置にだけ出す。
+    expect(row).toEqual([2_196, 2_197, 2_198, undefined, 2_199, 2_200, 2_201]);
+    await drain(b);
+    for (let i = 1_196; i <= 1_202; i++) expect(searchCache.get(i)?.variant_id).toBe(1_000 + i - 1);
+  });
+
+  it("表示用に残す古い世代は直前の 1 つだけ（2 つ前の世代のページは捨てる）", async () => {
+    b.counts.set(1, 1_000);
+    b.counts.set(2, 1_000);
+    b.counts.set(3, 1_000);
+    searchCache.reset(1, 1_000);
+    searchCache.setView("grid", 0, 100);
+    searchCache.get(0);
+    await drain(b);
+    // 世代 2 のページが届く前に、世代 3 になった。
+    searchCache.reset(2, 1_000);
+    searchCache.reset(3, 1_000);
+    expect(searchCache.peek(0)).toBeUndefined();
   });
 });
 

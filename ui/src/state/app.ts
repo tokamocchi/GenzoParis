@@ -8,6 +8,7 @@ import { describeError, isStale, toApiError } from "../api/errors";
 import { onCoreEvent } from "../api/events";
 import type {
   AppStatus,
+  AssetKind,
   CatalogStatus,
   CloseFailure,
   ColorLabel,
@@ -24,6 +25,7 @@ import type {
   SearchFilter,
   SearchSort,
   VariantId,
+  VariantSummary,
 } from "../api/types";
 import { type CatalogChangeSet, searchCache, thumbRevs } from "./search";
 import { createStore, useStore } from "./store";
@@ -66,8 +68,10 @@ export interface Selection {
   current: VariantId | null;
   /** current の検索結果の中の位置（不明なら null）。 */
   currentIndex: number | null;
-  /** Shift で範囲を選ぶときの起点。 */
+  /** Shift で範囲を選ぶときの起点（位置。世代が変わると古くなりうるので、anchorId で確かめる）。 */
   anchorIndex: number | null;
+  /** Shift で範囲を選ぶときの起点の写真（選ぶときに、今の世代の位置を求め直す）。 */
+  anchorId: VariantId | null;
 }
 
 export interface AppState {
@@ -140,7 +144,7 @@ export const appStore = createStore<AppState>({
   sort: DEFAULT_SORT,
   search: null,
   searching: false,
-  selection: { ids: [], current: null, currentIndex: null, anchorIndex: null },
+  selection: { ids: [], current: null, currentIndex: null, anchorIndex: null, anchorId: null },
   autoAdvance: typeof localStorage === "undefined" ? false : loadAutoAdvance(),
   dialog: null,
   toasts: [],
@@ -396,6 +400,9 @@ async function relocateSelection(): Promise<void> {
   try {
     const r = await core.indexOf(sel.current);
     if (r.generation !== searchCache.generation) return;
+    // 問い合わせている間に選び直されていたら、その選択のままにする（前の写真の位置を、別の写真の位置として
+    // 書かない。外れたときの選び直し・選択の解除もしない）。
+    if (appStore.get().selection.current !== sel.current) return;
     if (r.index === null) {
       // 絞り込みで外れた。ルーペ・現像では近い位置の写真に移る。
       const fallback =
@@ -407,23 +414,50 @@ async function relocateSelection(): Promise<void> {
         }));
       return;
     }
-    appStore.set((s) => ({ selection: { ...s.selection, currentIndex: r.index } }));
+    const index = r.index;
+    appStore.set((s) =>
+      s.selection.current !== sel.current
+        ? {}
+        : {
+            selection: {
+              ...s.selection,
+              currentIndex: index,
+              // 範囲の起点が表示中の写真なら、その位置も合わせる。
+              anchorIndex: s.selection.anchorId === sel.current ? index : s.selection.anchorIndex,
+            },
+          },
+    );
   } catch (e) {
     if (!isStale(e)) reportError(e);
   }
 }
 
 /**
- * `from` から `to` までの範囲の id を集める（大きすぎる範囲は `to` の側から 10,000 件まで。`to` は必ず
+ * `from` から `to` までの範囲の項目を集める（大きすぎる範囲は `to` の側から 10,000 件まで。`to` は必ず
  * 含める）。
  */
-async function rangeIds(from: number, to: number): Promise<VariantId[]> {
+async function rangeItems(from: number, to: number): Promise<VariantSummary[]> {
   const [a, end] =
     from <= to
       ? [Math.max(from, to - (MAX_RANGE_SELECTION - 1)), to]
       : [to, Math.min(from, to + (MAX_RANGE_SELECTION - 1))];
   // 今の世代の項目だけを使う（キャッシュのページの数には上限があるので、読んだ値をそのまま使う）。
-  return (await searchCache.items(a, end + 1)).map((v) => v.variant_id);
+  return searchCache.items(a, end + 1);
+}
+
+/**
+ * 写真 `id` の今の世代の位置（`hint` の位置にその写真があればそこ。なければ index_of で求める）。検索結果に
+ * ない・求められなければ null。コアが、待たせている新しい世代（取り込み中の間引き）に進んでいれば、その世代に
+ * してから使う。
+ */
+async function locate(id: VariantId, hint: number | null): Promise<number | null> {
+  if (hint !== null && hint >= 0 && hint < searchCache.count && (await searchCache.fetch(hint))?.variant_id === id) {
+    return hint;
+  }
+  const r = await core.indexOf(id).catch(() => null);
+  if (!r) return null;
+  if (r.generation !== searchCache.generation && pendingSearch?.generation === r.generation) searchThrottle.fire();
+  return r.generation === searchCache.generation ? r.index : null;
 }
 
 /**
@@ -431,11 +465,25 @@ async function rangeIds(from: number, to: number): Promise<VariantId[]> {
  * クリック）。`extend` なら表示中の写真からその写真までの範囲を足し、そうでなければその写真を足す・外す
  * （表示中の写真は外さない。外すと、表示中の写真が選択に入っていない状態になる）。
  */
-async function changeSelectionKeepingCurrent(index: number, id: VariantId, extend: boolean): Promise<void> {
+async function changeSelectionKeepingCurrent(index: number, item: VariantSummary, extend: boolean): Promise<boolean> {
+  const id = item.variant_id;
   const sel = appStore.get().selection;
-  if (!extend && id === sel.current) return;
-  // 表示中の写真の位置が分からなければ、範囲ではなくその写真だけを足す。
-  const added = extend && sel.currentIndex !== null ? await rangeIds(sel.currentIndex, index) : [id];
+  if (!extend && id === sel.current) return false;
+  let addedItems = [item];
+  if (extend && sel.current !== null) {
+    // 範囲の起点（表示中の写真）は、今の世代の位置で求める（currentIndex は世代が変わった直後は古い）。
+    // 分からなければ（結果から外れた）、範囲ではなくその写真だけを足す。
+    const generation = searchCache.generation;
+    const start = await locate(sel.current, sel.currentIndex);
+    if (start !== null) {
+      // 起点を求める間に世代が変わったら、クリックした写真の位置も求め直す。
+      const target = searchCache.generation === generation ? index : await locate(id, index);
+      if (target === null) return false;
+      addedItems = await rangeItems(start, target);
+    }
+  }
+  rememberSelected(addedItems);
+  const added = addedItems.map((v) => v.variant_id);
   appStore.set((s) => {
     const cur = s.selection;
     // 表示中の写真は、常に選択に含める。
@@ -447,6 +495,7 @@ async function changeSelectionKeepingCurrent(index: number, id: VariantId, exten
     const has = new Set(base);
     return { selection: { ...cur, ids: [...base, ...added.filter((x) => !has.has(x))] } };
   });
+  return true;
 }
 
 /**
@@ -458,46 +507,137 @@ async function changeSelectionKeepingCurrent(index: number, id: VariantId, exten
  * コピー元が最後にクリックした写真に入れ替わって、現像していた写真を上書きしてしまうため。修飾キーなしの
  * クリックは、どちらでもその写真を表示し、選択をその 1 枚にする。
  *
- * `expect` はクリックしたセルに出していた写真（グリッド・フィルムストリップ）。セルは新しい世代のページが
- * 届くまで古い世代の項目を出すので、今の世代のその位置が別の写真なら、その写真の位置を求め直して選ぶ
- * （見つからなければ選ばない）。
+ * `expect` はクリックしたセルに出していた写真（グリッド・フィルムストリップ。Shift + クリックを含む）。セルは
+ * 新しい世代のページが届くまで古い世代の項目を出すので、今の世代のその位置が別の写真なら、その写真の位置を
+ * 求め直して選ぶ（見つからなければ選ばない）。範囲の起点も、起点の写真（anchorId・表示中の写真）の今の世代の
+ * 位置で求める。
+ *
+ * 戻り値は選んだ（選択を変えた）か。選べなかったとき（写真が見つからない・読めない）は false。
  */
 async function selectIndex(
   index: number,
   opts: { extend?: boolean; toggle?: boolean; keepCurrent?: boolean; expect?: VariantId } = {},
-): Promise<void> {
-  if (index < 0 || index >= searchCache.count) return;
+): Promise<boolean> {
+  if (index < 0 || index >= searchCache.count) return false;
   let item = await searchCache.fetch(index);
   if (opts.expect !== undefined && item?.variant_id !== opts.expect) {
-    const r = await core.indexOf(opts.expect).catch(() => null);
-    if (!r || r.index === null || r.generation !== searchCache.generation) return;
-    index = r.index;
+    const at = await locate(opts.expect, null);
+    if (at === null) return false;
+    index = at;
     item = await searchCache.fetch(index);
-    if (item?.variant_id !== opts.expect) return;
+    if (item?.variant_id !== opts.expect) return false;
   }
-  if (!item) return;
+  if (!item) return false;
   const id = item.variant_id;
   const sel = appStore.get().selection;
   if (opts.keepCurrent && sel.current !== null && (opts.extend || opts.toggle)) {
-    await changeSelectionKeepingCurrent(index, id, !!opts.extend);
-    return;
+    return changeSelectionKeepingCurrent(index, item, !!opts.extend);
   }
   if (opts.extend && sel.anchorIndex !== null) {
-    // 範囲の id を集める（大きすぎる範囲は、操作の対象（index）の側から 10,000 件まで。対象は必ず含める）。
-    const ids = await rangeIds(sel.anchorIndex, index);
-    appStore.set({ selection: { ids, current: id, currentIndex: index, anchorIndex: sel.anchorIndex } });
-    return;
+    // 範囲の起点は、起点の写真の今の世代の位置（結果から外れていれば、操作の対象の写真だけ）。
+    const generation = searchCache.generation;
+    const anchor = sel.anchorId !== null ? await locate(sel.anchorId, sel.anchorIndex) : sel.anchorIndex;
+    if (searchCache.generation !== generation) {
+      // 起点を求める間に世代が変わった: 操作の対象の位置も求め直す。
+      const at = await locate(id, index);
+      if (at === null) return false;
+      index = at;
+    }
+    const from = anchor ?? index;
+    // 範囲の項目を集める（大きすぎる範囲は、操作の対象（index）の側から 10,000 件まで。対象は必ず含める）。
+    const items = await rangeItems(from, index);
+    rememberSelected(items);
+    appStore.set({
+      selection: {
+        ids: items.map((v) => v.variant_id),
+        current: id,
+        currentIndex: index,
+        anchorIndex: from,
+        anchorId: anchor === null ? id : sel.anchorId,
+      },
+    });
+    return true;
   }
+  rememberSelected([item]);
   if (opts.toggle) {
     const has = sel.ids.includes(id);
     const ids = has ? sel.ids.filter((x) => x !== id) : [...sel.ids, id];
     appStore.set({
-      selection: { ids, current: has ? (ids[ids.length - 1] ?? null) : id, currentIndex: has ? null : index, anchorIndex: index },
+      selection: {
+        ids,
+        current: has ? (ids[ids.length - 1] ?? null) : id,
+        currentIndex: has ? null : index,
+        anchorIndex: index,
+        anchorId: id,
+      },
     });
     if (has) await relocateSelection();
-    return;
+    return true;
   }
-  appStore.set({ selection: { ids: [id], current: id, currentIndex: index, anchorIndex: index } });
+  appStore.set({ selection: { ids: [id], current: id, currentIndex: index, anchorIndex: index, anchorId: id } });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// 選択中の写真の概要
+// ---------------------------------------------------------------------------
+
+/** 選択中の写真の概要のうち、覚えておくもの。 */
+export type SelectedSummary = Pick<VariantSummary, "variant_id" | "kind" | "file_name">;
+
+/**
+ * 選択中の写真（選択の集合と表示中の写真）の概要（選んだときの項目から）。検索結果のキャッシュのページは上限で
+ * 捨てるので、選んだ写真の種類（動画か）をページとは別に覚えておく（現像設定のコピー・貼り付けで、動画に
+ * 既定の設定を写さないため）。選択から外れたものは、選択が変わったときに捨てる。
+ */
+const selectedSummaries = new Map<VariantId, SelectedSummary>();
+
+function rememberSelected(items: Iterable<VariantSummary>): void {
+  for (const v of items) {
+    selectedSummaries.set(v.variant_id, { variant_id: v.variant_id, kind: v.kind, file_name: v.file_name });
+  }
+}
+
+let lastSelection = appStore.get().selection;
+appStore.subscribe(() => {
+  const sel = appStore.get().selection;
+  if (sel === lastSelection) return;
+  lastSelection = sel;
+  if (selectedSummaries.size === 0) return;
+  const keep = new Set(sel.ids);
+  if (sel.current !== null) keep.add(sel.current);
+  for (const id of [...selectedSummaries.keys()]) if (!keep.has(id)) selectedSummaries.delete(id);
+});
+
+/**
+ * 写真の種類（読み込み済みの検索結果・選んだときの項目から。どちらにもなければコアに問い合わせる）。読めなければ
+ * 例外（呼び出し元が知らせる）。
+ */
+async function kindOf(id: VariantId): Promise<AssetKind> {
+  const known = searchCache.getLoadedById(id)?.kind ?? selectedSummaries.get(id)?.kind;
+  if (known) return known;
+  return (await core.variantDetails(id)).summary.kind;
+}
+
+/**
+ * 写真の現像設定をコピーする（Ctrl / ⌘ + Shift + C。DEV-30）。動画には現像設定がない（コアは既定の設定を返し、
+ * 貼り付けると貼り付け先を既定に戻してしまう）ので、種類を確かめてからコピーする。`latest` は現像中の写真なら
+ * 画面の最新の値（送信前を含む）。コピーしたら true。
+ */
+async function copySettingsOf(id: VariantId, latest: DevelopSettings | null): Promise<boolean> {
+  try {
+    if ((await kindOf(id)) === "video") {
+      notify("info", "動画の設定はコピーできません");
+      return false;
+    }
+    const settings = latest ?? (await core.copySettings(id));
+    appStore.set({ clipboard: { settings, from: id } });
+    notify("info", "現像設定をコピーしました");
+    return true;
+  } catch (e) {
+    reportError(e, "現像設定をコピーできません");
+    return false;
+  }
 }
 
 /** 前後の写真へ（`delta` は -1 / +1 など）。 */
@@ -729,7 +869,7 @@ async function catalogOpened(status: CatalogStatus): Promise<void> {
     catalogError: null,
     catalogOpening: null,
     search: null,
-    selection: { ids: [], current: null, currentIndex: null, anchorIndex: null },
+    selection: { ids: [], current: null, currentIndex: null, anchorIndex: null, anchorId: null },
     filter: {},
     sort: DEFAULT_SORT,
     mode: "grid",
@@ -758,7 +898,7 @@ function catalogClosed(): void {
     catalogOpening: null,
     search: null,
     searching: false,
-    selection: { ids: [], current: null, currentIndex: null, anchorIndex: null },
+    selection: { ids: [], current: null, currentIndex: null, anchorIndex: null, anchorId: null },
     mode: "grid",
     dialog: null,
     clipboard: null,
@@ -934,10 +1074,21 @@ export const actions = {
   // 選択
   selectIndex,
   moveSelection,
+  /** 位置の写真を選んでルーペで開く（グリッドのダブルクリック）。選べなかったら開かない（戻り値は開いたか）。 */
+  async openInLoupe(index: number, expect?: VariantId): Promise<boolean> {
+    const ok = await selectIndex(index, { expect });
+    if (ok) appStore.set({ mode: "loupe" });
+    return ok;
+  },
+  kindOf,
+  /** 選択中の写真の概要（選んだときの項目。順は決まっていない）。 */
+  selectedSummaries: (): Iterable<SelectedSummary> => selectedSummaries.values(),
   async selectAll() {
     const n = Math.min(searchCache.count, 10_000);
     // 今の世代の項目だけを使う（キャッシュのページの数には上限があるので、読んだ値をそのまま使う）。
-    const ids = (await searchCache.items(0, n)).map((v) => v.variant_id);
+    const items = await searchCache.items(0, n);
+    rememberSelected(items);
+    const ids = items.map((v) => v.variant_id);
     appStore.set((s) => ({ selection: { ...s.selection, ids } }));
     if (searchCache.count > n) notify("info", `先頭の ${n.toLocaleString()} 件を選びました`);
   },
@@ -984,4 +1135,5 @@ export const actions = {
   importFolder,
   importFolders,
   setClipboard: (clipboard: AppState["clipboard"]) => appStore.set({ clipboard }),
+  copySettingsOf,
 };

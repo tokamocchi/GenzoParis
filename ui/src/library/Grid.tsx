@@ -17,7 +17,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { memo, type MouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import type { SearchFilter, VariantSummary } from "../api/types";
+import type { SearchFilter, VariantId, VariantSummary } from "../api/types";
 import { thumbUrl } from "../api/uri";
 import { FlagMark, LabelDot, Stars } from "../components/Marks";
 import { formatCaptureTime } from "../format";
@@ -63,6 +63,26 @@ function clampRange(target: number): number {
   const next = clampRangeTarget(appStore.get().selection.anchorIndex, target);
   if (next !== target) actions.notify("info", `範囲の選択は ${MAX_RANGE.toLocaleString("ja-JP")} 件までです`);
   return next;
+}
+
+/**
+ * セルのクリックで選ぶ位置と選び方: 修飾キーなしは選び直し、Ctrl / ⌘ は追加・解除、Shift は範囲（移り先は
+ * アンカーから上限の件数まで。`clamp`）。どれも、セルに出していた写真 `expect` を確かめて選ぶ（新しい世代の
+ * ページが届くまでは古い世代の項目を出すので、今の世代のその位置は別の写真でありうる）。範囲の上限で移り先を
+ * 変えたときは、その位置の写真を選ぶ（クリックした写真ではない）。
+ */
+export function cellClickSelection(
+  index: number,
+  expect: VariantId | undefined,
+  mods: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean },
+  clamp: (target: number) => number,
+): { index: number; opts: { extend?: boolean; toggle?: boolean; expect?: VariantId } } {
+  if (mods.shiftKey) {
+    const target = clamp(index);
+    return { index: target, opts: { extend: true, expect: target === index ? expect : undefined } };
+  }
+  if (mods.metaKey || mods.ctrlKey) return { index, opts: { toggle: true, expect } };
+  return { index, opts: { expect } };
 }
 
 /** グリッドを閉じたときの位置（内容の位置。操作の対象がないときに戻す）。 */
@@ -290,17 +310,16 @@ export function Grid() {
   const onClick = (e: MouseEvent) => {
     const c = cellOf(e);
     if (c === null) return;
-    const i = c.index;
     const toggle = !e.shiftKey && (e.metaKey || e.ctrlKey);
-    clicked.current = { index: i, toggle, at: performance.now() };
-    if (e.shiftKey) void actions.selectIndex(clampRange(i), { extend: true });
-    else if (toggle) void actions.selectIndex(i, { toggle: true, expect: c.expect });
-    else void actions.selectIndex(i, { expect: c.expect });
+    clicked.current = { index: c.index, toggle, at: performance.now() };
+    const { index, opts } = cellClickSelection(c.index, c.expect, e, clampRange);
+    void actions.selectIndex(index, opts);
   };
   const onDoubleClick = (e: MouseEvent) => {
     const c = cellOf(e);
     if (c === null || e.shiftKey || e.metaKey || e.ctrlKey) return;
-    void actions.selectIndex(c.index, { expect: c.expect }).then(() => actions.setMode("loupe"));
+    // 選べなかったら（出していた写真が結果から外れたなど）、前の写真でルーペを開かない。
+    void actions.openInLoupe(c.index, c.expect);
   };
 
   const changeCellSize = (v: number) => {
@@ -341,6 +360,10 @@ export function Grid() {
               for (let i = first; i < end; i++) {
                 // 速い間は読み込み済みの項目だけを出す（ページを要求しない）。
                 const item = fast ? searchCache.peek(i) : searchCache.get(i);
+                // key は写真（同じ写真が同じ位置に残れば、世代が変わってもセルと <img> を作り直さない）。
+                // 古い世代の項目は、今の世代のページに入っている写真を出さない（search.ts の shown）ので、
+                // 古い世代と新しい世代のページが同じ行に並んでも、同じ写真が 2 つのセルに出て key が重なる
+                // ことはない。
                 cells.push(
                   <GridCell
                     key={item ? item.variant_id : `i${i}`}

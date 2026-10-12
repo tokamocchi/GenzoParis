@@ -218,6 +218,18 @@ export function filmstripItem(index: number, fast: boolean): VariantSummary | un
   return fast ? searchCache.peek(index) : searchCache.get(index);
 }
 
+/**
+ * 項目のクリックで選ぶ選び方（修飾キー付きでは表示中の写真を移さない。現像の画面が開き直し、同期のコピー元が
+ * 入れ替わるため）。出していた写真 `id` を渡す（Shift + クリックを含む。新しい世代のページが届くまでは古い世代の
+ * 項目を出すので、選ぶときに今の世代の位置を確かめる）。
+ */
+export function filmstripClickOptions(
+  mods: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean },
+  id: VariantId | undefined,
+): { extend: boolean; toggle: boolean; keepCurrent: true; expect: VariantId | undefined } {
+  return { extend: mods.shiftKey, toggle: mods.ctrlKey || mods.metaKey, keepCurrent: true, expect: id };
+}
+
 /** 項目（その項目の値だけを受け取る。サムネイルの rev などが変わった項目だけを描き直す）。 */
 export const FilmstripCell = memo(function FilmstripCell(props: {
   index: number;
@@ -242,14 +254,7 @@ export const FilmstripCell = memo(function FilmstripCell(props: {
   const url = v && shown.current?.id === v.variant_id ? shown.current.url : null;
 
   const onClick = (e: MouseEvent) => {
-    // 修飾キー付きのクリックで表示中の写真を移さない（現像の画面が開き直し、同期のコピー元が入れ替わるため）。
-    // 出していた写真を渡す（新しい世代のページが届くまでは古い世代の項目を出すので、選ぶときに確かめる）。
-    void actions.selectIndex(props.index, {
-      extend: e.shiftKey,
-      toggle: e.ctrlKey || e.metaKey,
-      keepCurrent: true,
-      expect: e.shiftKey ? undefined : v?.variant_id,
-    });
+    void actions.selectIndex(props.index, filmstripClickOptions(e, v?.variant_id));
   };
 
   const cls = ["filmstrip-cell", props.current ? "current" : "", props.selected ? "selected" : ""].join(" ");

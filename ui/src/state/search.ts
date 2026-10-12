@@ -10,6 +10,9 @@
 //   ページが届くまで表示用に残す（読み込み中の表示に戻してちらつかせない）。ほかのページは捨てる。古い世代の
 //   項目は表示（get・peek）だけに使い、選択・操作に使うもの（fetch・items・loaded・findLoaded・
 //   getLoadedById）は今の世代の項目だけを返す（同じ位置でも別の写真でありうるため）。
+//   表示用に残す古い世代は直前の 1 つだけにし、今の世代のページに入っている写真は古い世代の側では出さない
+//   （古い世代と新しい世代のページが並ぶと、ずれた位置に同じ写真が 2 回出るため。出さない間は読み込み中の
+//   セルになる）。
 // - 同じ世代の読み直し（invalidate。評価などの変更の後）は、変わった variant を含むページと表示中の範囲の
 //   ページだけを読み直す（届くまでは古い値を出す）。影響が広い変更（all）では表示中の範囲のページだけを
 //   読み直し、ほかは捨てる（次に見たときに読む）。
@@ -219,6 +222,8 @@ class SearchCache {
 
   private token: object = {};
   private pages = new Map<number, Entry>();
+  /** 今の世代のページにある写真（id → ページ）。 */
+  private currentIds = new Map<VariantId, number>();
   /** 今の世代の要求（ページで引く。送る前・送った後）。 */
   private jobs = new Map<number, Job>();
   /** 送る前の要求。 */
@@ -295,14 +300,19 @@ class SearchCache {
    * 項目は表示だけに使う）。ほかのページと、送る前の要求は捨てる。どこも表示していなければ、すべて捨てる。
    */
   reset(generation: number, count: number): void {
+    const previous = this.token;
     this.generation = generation;
     this.count = count;
     this.token = {};
+    this.currentIds.clear();
     const waiting = this.queue;
     this.queue = [];
     this.jobs.clear();
-    for (const [page] of [...this.pages]) {
-      if (page * PAGE_SIZE >= count || this.inView(page, NEAR_PAGES) !== true) this.pages.delete(page);
+    for (const [page, e] of [...this.pages]) {
+      // 表示用に残すのは直前の世代のページだけ（それより古い世代のページと写真が重なって出ないように）。
+      if (e.token !== previous || page * PAGE_SIZE >= count || this.inView(page, NEAR_PAGES) !== true) {
+        this.pages.delete(page);
+      }
     }
     // 待っている処理（items）は、世代が変わったことを見て読み直す。
     for (const job of waiting) job.resolve(null);
@@ -322,7 +332,7 @@ class SearchCache {
       if (e.token !== this.token || e.sent > change.since) continue;
       const action = this.afterChange(page, e.items, change);
       if (action === "drop") {
-        this.pages.delete(page);
+        this.deletePage(page);
         dropped = true;
       } else if (action === "reload") {
         void this.request(page, false);
@@ -362,9 +372,7 @@ class SearchCache {
     const page = Math.floor(index / PAGE_SIZE);
     const e = this.pages.get(page);
     if (!e || e.token !== this.token) void this.request(page, false);
-    if (!e) return undefined;
-    e.used = ++this.clock;
-    return e.items[index - page * PAGE_SIZE];
+    return e ? this.shown(e, index - page * PAGE_SIZE) : undefined;
   }
 
   /** 位置 `index` の項目（表示用）を、読み込みを起こさずに返す（読み込み済みでなければ undefined）。 */
@@ -372,9 +380,18 @@ class SearchCache {
     if (index < 0 || index >= this.count) return undefined;
     const page = Math.floor(index / PAGE_SIZE);
     const e = this.pages.get(page);
-    if (!e) return undefined;
+    return e ? this.shown(e, index - page * PAGE_SIZE) : undefined;
+  }
+
+  /**
+   * ページの `offset` 番目の項目（表示用）。古い世代の項目は、その写真が今の世代のページに入っていれば出さない
+   * （新しい世代のページと並ぶと、ずれた位置に同じ写真が 2 回出て、セルの key も重なるため）。
+   */
+  private shown(e: Entry, offset: number): VariantSummary | undefined {
     e.used = ++this.clock;
-    return e.items[index - page * PAGE_SIZE];
+    const v = e.items[offset];
+    if (v && e.token !== this.token && this.currentIds.has(v.variant_id)) return undefined;
+    return v;
   }
 
   // --- 選択・操作に使う（今の世代の項目だけ） ---
@@ -433,22 +450,35 @@ class SearchCache {
 
   /** 今の世代の読み込み済みの項目から id を探す（なければ -1）。 */
   findLoaded(id: VariantId): number {
-    for (const [page, e] of this.pages) {
-      if (e.token !== this.token) continue;
-      const i = e.items.findIndex((v) => v.variant_id === id);
-      if (i >= 0) return page * PAGE_SIZE + i;
-    }
-    return -1;
+    const page = this.currentIds.get(id);
+    const e = page === undefined ? undefined : this.pages.get(page);
+    if (page === undefined || !e) return -1;
+    const i = e.items.findIndex((v) => v.variant_id === id);
+    return i >= 0 ? page * PAGE_SIZE + i : -1;
   }
 
   /** 今の世代の読み込み済みの項目（id から）。 */
   getLoadedById(id: VariantId): VariantSummary | undefined {
-    for (const e of this.pages.values()) {
-      if (e.token !== this.token) continue;
-      const v = e.items.find((x) => x.variant_id === id);
-      if (v) return v;
-    }
-    return undefined;
+    const i = this.findLoaded(id);
+    return i >= 0 ? this.pages.get(Math.floor(i / PAGE_SIZE))?.items[i % PAGE_SIZE] : undefined;
+  }
+
+  // --- ページ ---
+
+  /** ページを入れる（今の世代の写真の索引も合わせる）。 */
+  private setPage(page: number, entry: Entry): void {
+    this.deletePage(page);
+    this.pages.set(page, entry);
+    if (entry.token === this.token) for (const v of entry.items) this.currentIds.set(v.variant_id, page);
+  }
+
+  /** ページを捨てる（今の世代の写真の索引も合わせる）。 */
+  private deletePage(page: number): void {
+    const e = this.pages.get(page);
+    if (!e) return;
+    this.pages.delete(page);
+    if (e.token !== this.token) return;
+    for (const v of e.items) if (this.currentIds.get(v.variant_id) === page) this.currentIds.delete(v.variant_id);
   }
 
   // --- 要求 ---
@@ -544,8 +574,8 @@ class SearchCache {
       this.thumbRevs.settle(items, job.thumbMark);
       // 送った後に変更があった: 値は使い（持っていたものより新しい）、変更の後の扱いに従う。
       const action = job.change ? this.afterChange(job.page, items, job.change) : "keep";
-      if (action === "drop") this.pages.delete(job.page);
-      else this.pages.set(job.page, { token: job.token, items, used: ++this.clock, sent: job.sent });
+      if (action === "drop") this.deletePage(job.page);
+      else this.setPage(job.page, { token: job.token, items, used: ++this.clock, sent: job.sent });
       if (action === "reload") void this.request(job.page, false);
       this.evict();
       this.changed();
@@ -566,7 +596,7 @@ class SearchCache {
       .sort(([, a], [, b]) => Number(a.token === this.token) - Number(b.token === this.token) || a.used - b.used);
     for (const [page] of candidates) {
       if (this.pages.size <= MAX_PAGES) break;
-      this.pages.delete(page);
+      this.deletePage(page);
     }
   }
 
