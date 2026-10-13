@@ -123,8 +123,8 @@ impl StageRegistry {
 
     /// 組み込みのステージをすべて登録した表（処理の順）。
     ///
-    /// - センサーのステージ（2・3・5（3 方式）・8）。6・7（v1）は ID だけ予約
-    ///   （[`crate::finish::reserved`]）。
+    /// - センサーのステージ（2・3・4（ハイライト復元）・5（3 方式）・6（ノイズ軽減）・7（レンズ補正）・8）。
+    ///   4・6・7 は v1 の機能で、処理バージョン 2 だけで適用する（ID は [`crate::finish::reserved`]）。
     /// - 仕上げのステージ 9〜16（[`crate::finish::scene_stages`]。12・14 は v1 の予約で、常に飛ばす）。
     /// - 出力: 17a 画面（[`DisplayStage::default`]。モニターのプロファイルがない場合の sRGB の変換で、
     ///   一致テスト用）、17b 書き出し（sRGB・Display P3・Adobe RGB）とキャッシュ（Display P3）。
@@ -235,18 +235,21 @@ mod tests {
         let r = StageRegistry::builtin();
         let ids = r.ids();
         assert_eq!(
-            ids[..6],
+            ids[..9],
             [
                 NormalizeStage::ID,
                 WhiteBalanceStage::ID,
+                crate::sensor::HighlightRecoveryStage::ID,
                 DemosaicMethod::Rcd.stage_id(),
                 DemosaicMethod::Bilinear.stage_id(),
                 DemosaicMethod::Half2x2.stage_id(),
+                crate::sensor::NoiseReductionStage::ID,
+                crate::sensor::LensCorrectionStage::ID,
                 ColorMatrixStage::ID,
             ]
         );
         assert_eq!(
-            ids[6..],
+            ids[9..],
             [
                 "finish.geometry",
                 "finish.exposure",
@@ -268,7 +271,7 @@ mod tests {
         assert!(r.stages().all(|s| s.phase() == genzo_model::Phase::C));
         assert!(r.find("finish.tone").is_some());
         let numbers: Vec<u8> = r.sensor_stages().map(|s| s.stage_number()).collect();
-        assert_eq!(numbers, [2, 3, 5, 5, 5, 8]);
+        assert_eq!(numbers, [2, 3, 4, 5, 5, 5, 6, 7, 8]);
         assert!(r.find_sensor("sensor.demosaic.rcd").is_some());
         assert!(r.find("sensor.demosaic.rcd").is_none());
         assert!(format!("{r:?}").contains("sensor.normalize"));

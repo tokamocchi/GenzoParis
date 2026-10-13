@@ -39,6 +39,31 @@ pub(crate) fn sanitize_metadata(m: &mut PhotoMetadata) {
     }
 }
 
+/// ワーカーが返した説明の文（埋め込みのレンズ補正の情報が使えなかった理由など）の文字数の上限。
+///
+/// **仮置き**: 300 文字（理由の文は 100 文字前後）。
+pub const MAX_WORKER_NOTE_CHARS: usize = 300;
+
+/// ワーカーが返した説明の文を、画面・CLI に出せる形にする（制御文字は空白にし、前後の空白を除き、
+/// [`MAX_WORKER_NOTE_CHARS`] 文字で切る（切ったら「…」を付ける）。空なら `None`）。乗っ取られたワーカーが
+/// 長い文・端末の制御文字を送っても、そのまま出さないため。
+pub(crate) fn sanitize_note(note: Option<String>) -> Option<String> {
+    let note = note?;
+    let cleaned: String = note
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut out: String = trimmed.chars().take(MAX_WORKER_NOTE_CHARS).collect();
+    if trimmed.chars().count() > MAX_WORKER_NOTE_CHARS {
+        out.push('…');
+    }
+    Some(out)
+}
+
 /// 寸法を確かめて画素数を返す。
 fn checked_pixels(width: u32, height: u32, max: u64) -> Result<u64, BufferError> {
     if width == 0 || height == 0 {
@@ -107,6 +132,8 @@ pub(crate) fn raw_image(
         as_shot_wb: info.as_shot_wb,
         cam_xyz: info.cam_xyz,
         metadata,
+        // 埋め込みのレンズ補正の情報（節点の数・係数の範囲は validate で確かめる）。
+        lens_correction: info.lens_correction,
     };
     image
         .validate()
@@ -286,7 +313,23 @@ mod tests {
             metadata: PhotoMetadata::default(),
             decoder_id: Some("test".into()),
             cam_xyz_source: None,
+            lens_correction: None,
+            lens_correction_note: None,
         }
+    }
+
+    #[test]
+    fn worker_notes_are_trimmed_and_cleaned() {
+        assert_eq!(sanitize_note(None), None);
+        assert_eq!(sanitize_note(Some(" \n ".into())), None);
+        assert_eq!(
+            sanitize_note(Some("係数が\u{1b}[31m不正\n".into())).as_deref(),
+            Some("係数が [31m不正")
+        );
+        let long = "あ".repeat(MAX_WORKER_NOTE_CHARS + 10);
+        let got = sanitize_note(Some(long)).unwrap();
+        assert_eq!(got.chars().count(), MAX_WORKER_NOTE_CHARS + 1);
+        assert!(got.ends_with('…'));
     }
 
     fn u16_bytes(values: &[u16]) -> Vec<u8> {
@@ -302,6 +345,34 @@ mod tests {
         let img = raw_image(&p, raw_info(6, 4)).unwrap();
         assert_eq!(img.data, values);
         assert_eq!(img.cfa, CfaPattern::RGGB);
+    }
+
+    /// 埋め込みのレンズ補正の情報（DEV-14）は受け渡し、不正な値（乗っ取られたワーカーの送った値など）は
+    /// 使わない。
+    #[test]
+    fn raw_carries_and_checks_the_lens_correction() {
+        use genzo_raw::{LensCorrectionData, SonyLensCorrection};
+        let f = Fixture::new();
+        let buf = f.buffer(PayloadKind::CfaU16, 6, 4, &u16_bytes(&[600; 24]));
+        let p = buf.open_payload(PayloadKind::CfaU16, false).unwrap();
+        let lens = LensCorrectionData::SonyArw(SonyLensCorrection {
+            distortion: vec![-3; 16],
+            ..Default::default()
+        });
+        let mut ok = raw_info(6, 4);
+        ok.lens_correction = Some(lens.clone());
+        assert_eq!(raw_image(&p, ok).unwrap().lens_correction, Some(lens));
+        let mut bad = raw_info(6, 4);
+        bad.lens_correction = Some(LensCorrectionData::SonyArw(SonyLensCorrection {
+            vignetting: vec![0; 200],
+            ..Default::default()
+        }));
+        assert!(matches!(raw_image(&p, bad), Err(BufferError::Invalid(_))));
+        // JSON にない（古いワーカー）なら None。
+        let mut json = serde_json::to_value(raw_info(6, 4)).unwrap();
+        json.as_object_mut().unwrap().remove("lens_correction");
+        let info: RawFrameInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.lens_correction, None);
     }
 
     #[test]

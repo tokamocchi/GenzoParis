@@ -159,7 +159,9 @@ impl Stage for DisplayStage {
     }
     fn params(&self, _: &DevelopSettings, ctx: &StageContext<'_>) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(Some(StageParams::new(self.transform()?))),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                Ok(Some(StageParams::new(self.transform()?)))
+            }
         }
     }
     fn input_roi(&self, output_roi: Roi, _: &StageParams, _: &StageContext<'_>) -> Roi {
@@ -174,7 +176,9 @@ impl Stage for DisplayStage {
     ) -> Result<()> {
         let t = params.expect::<Arc<DisplayTransform>>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 => map_pixels(input, output, |_, _, c| t.apply(c)),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                map_pixels(input, output, |_, _, c| t.apply(c))
+            }
         }
     }
 }
@@ -307,7 +311,9 @@ impl Stage for ExportStage {
     }
     fn params(&self, _: &DevelopSettings, ctx: &StageContext<'_>) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(Some(StageParams::new(ExportTransform::new(self.space())))),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                Ok(Some(StageParams::new(ExportTransform::new(self.space()))))
+            }
         }
     }
     fn input_roi(&self, output_roi: Roi, _: &StageParams, _: &StageContext<'_>) -> Roi {
@@ -322,7 +328,9 @@ impl Stage for ExportStage {
     ) -> Result<()> {
         let t = *params.expect::<ExportTransform>(self.id())?;
         match ctx.process_version {
-            ProcessVersion::V1 => map_pixels(input, output, |_, _, c| t.apply(c)),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                map_pixels(input, output, |_, _, c| t.apply(c))
+            }
         }
     }
 }

@@ -922,7 +922,11 @@ mod tests {
         assert_eq!(meta.image.sha256, sha256_hex(&encode_float_image(&img)));
         let json = fs::read_to_string(s.meta_path("sample")).unwrap();
         assert!(json.contains("\"metric\": \"diff_8bit\""), "{json}");
-        assert!(json.contains("\"process_version\": 1"), "{json}");
+        let pv = format!(
+            "\"process_version\": {}",
+            genzo_model::CURRENT_PROCESS_VERSION
+        );
+        assert!(json.contains(&pv), "{json}");
         match s.check(&spec(), &img).unwrap() {
             GoldenOutcome::Passed(r) => assert!(r.passed()),
             other => panic!("{other:?}"),
@@ -1073,6 +1077,8 @@ mod tests {
         let s = store(&e, GoldenMode::Update);
         s.check(&spec(), &img).unwrap();
         let s = s.with_mode(GoldenMode::Compare);
+        // 記録した版（今の版）と違う処理バージョン。
+        let other_version = genzo_model::CURRENT_PROCESS_VERSION + 1;
         let cases: Vec<(GoldenSpec, &str)> = vec![
             (
                 spec().with_input(InputRef::from_bytes("other", b"x")),
@@ -1082,7 +1088,10 @@ mod tests {
                 spec().with_develop_settings(&genzo_model::DevelopSettings::default()),
                 "develop",
             ),
-            (spec().with_process_version(2), "process_version"),
+            (
+                spec().with_process_version(other_version),
+                "process_version",
+            ),
             (
                 {
                     let mut x = spec();
@@ -1099,7 +1108,7 @@ mod tests {
             }
         }
         // 作り直すと合格する。
-        let changed = spec().with_process_version(2);
+        let changed = spec().with_process_version(other_version);
         s.clone()
             .with_mode(GoldenMode::Update)
             .check(&changed, &img)

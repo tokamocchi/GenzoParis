@@ -495,6 +495,9 @@ pub struct RawFrame {
     pub decoder_id: Option<String>,
     /// `image.cam_xyz` の出どころ（render_deps の記録用。分からなければ `None`）。
     pub cam_xyz_source: Option<genzo_raw::CamXyzSource>,
+    /// 埋め込みのレンズ補正の情報が読めない・不正だったときの理由（DEV-14。そのときは
+    /// `image.lens_correction` は `None`。長さと制御文字は整えてある）。読めた・なかった場合は `None`。
+    pub lens_correction_note: Option<String>,
 }
 
 /// [`WorkerClient::decode_image`] の結果（リニア BT.2020。04 の 2.6 節の B2）。
@@ -1393,6 +1396,7 @@ impl WorkerClient {
     ) -> Result<RawFrame, WorkerClientError> {
         let decoder_id = info.decoder_id.clone();
         let cam_xyz_source = info.cam_xyz_source;
+        let lens_correction_note = validate::sanitize_note(info.lens_correction_note.clone());
         let image = buffer
             .open_payload(PayloadKind::CfaU16, self.config.verify_checksum)
             .and_then(|p| validate::raw_image(&p, info));
@@ -1401,6 +1405,7 @@ impl WorkerClient {
                 image,
                 decoder_id,
                 cam_xyz_source,
+                lens_correction_note,
             }),
             Err(e) => self.invalid_buffer(e),
         }

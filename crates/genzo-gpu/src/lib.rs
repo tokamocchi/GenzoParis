@@ -19,9 +19,10 @@
 //! | [`error`] | [`GpuError`] | 6.3 節 |
 //!
 //! WGSL は `src/shaders/` にある（`common.wgsl`・`pixel_io.wgsl`・`color_lib.wgsl` が共通の部分、
-//! `finish.wgsl`（ステージ 10・11・13・15・16）・`output.wgsl`（17a・17b）・`geometry.wgsl`（9）・
-//! `histogram.wgsl`（17c）・`quantize.wgsl`（17b の量子化）・`sensor.wgsl`（2・3・5 の簡易処理）・
-//! `resample.wgsl`（8 と縮小））。
+//! `finish.wgsl`（ステージ 10・11・13・15・16）・`output.wgsl`（17a・17b）・`geometry.wgsl`（9 と、
+//! 同じバイキュービックを使う 7 のレンズ補正。処理バージョン 2）・
+//! `histogram.wgsl`（17c）・`quantize.wgsl`（17b の量子化）・`sensor.wgsl`（2・3・4（ハイライト復元。処理バージョン 2）・
+//! 5 の簡易処理）・`denoise.wgsl`（6 のノイズ軽減。処理バージョン 2）・`resample.wgsl`（8 と縮小））。
 //!
 //! # 依存の向き（04 の 1.4 節の図との違い）
 //!
@@ -99,7 +100,8 @@
 //! # 未実装（v1・PoC で決めること）
 //!
 //! - RCD（最終品質のデモザイク）・双線形の GPU 版（CPU 版で処理する）。等倍・書き出しのセンサー処理
-//!   （ステージ 2〜8）は CPU 版。
+//!   （ステージ 2〜8。4 のハイライト復元・6 のノイズ軽減・7 のレンズ補正を含む）は CPU 版。GPU 版のステージ 4・6・7 は
+//!   簡易処理の A1（[`GpuRenderer::render_a1_draft`]）と一致テストで使う。
 //! - 段階 B（ガイドの計算）の GPU 版（CPU 版で計算し、ステージ 11 が GPU で参照する）。
 //! - ルーペの範囲（`render_region`）の GPU 版。
 //! - 複数のステージを 1 つのカーネルにまとめる最適化（PoC-3 の計測の後）。

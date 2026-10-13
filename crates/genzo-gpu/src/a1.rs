@@ -1,8 +1,9 @@
 //! 段階 A1 の簡易処理（Draft）の GPU 版（docs/04_architecture.md の 2.2 節「WB を変更したとき」:
 //! ドラッグ中は 2 × 2 の画素をまとめる簡易処理で計算し、長辺 2560px に縮小する。PERF-01b）。
 //!
-//! ステージ 2（正規化）→ 3（WB・飽和の切りそろえ）→ 5（2 × 2 の簡易処理）→ 8（色変換）→ 面積平均の
-//! 縮小（横・縦）を GPU で実行する。式と範囲のたどり方は genzo-pipeline の
+//! ステージ 2（正規化）→ 3（WB・飽和の切りそろえ）→〔4（ハイライト復元。処理バージョン 2 で復元するとき）〕→ 5（2 × 2 の
+//! 簡易処理）→〔6（ノイズ軽減。処理バージョン 2 で量が 0 でないとき）〕→〔7（レンズ補正。処理バージョン 2 で補正があるとき）〕
+//! → 8（色変換）→ 面積平均の縮小（横・縦）を GPU で実行する。式と範囲のたどり方は genzo-pipeline の
 //! `SensorPlan::render_preview` と同じ:
 //!
 //! - プレビューの出力の行の帯（[`A1_BAND_ROWS`] 行）ごとに、縮小に必要な半分の格子の行
@@ -13,12 +14,16 @@
 //! - RAW は GPU に 1 回だけ転送して保持する（同じ `Arc<RawImage>` の間。WB のドラッグの 1 コマごとに
 //!   転送しない）。
 //!
-//! 最終品質（RCD）の GPU 版は未実装（CPU 版で処理する）。
+//! 最終品質（RCD）の GPU 版は未実装（CPU 版で処理する。ステージ 4・6 を含む最終品質の A1 は CPU 版）。
 
 use std::sync::{Arc, PoisonError};
 
 use genzo_model::{DevelopSettings, RenderQuality};
 use genzo_pipeline::resample::AreaWeights;
+use genzo_pipeline::sensor::{
+    HighlightRecoveryStage, LensCorrectionStage, NoiseReductionStage, NormalizeStage,
+    WhiteBalanceStage,
+};
 use genzo_pipeline::{
     A1Image, ColorContract, DemosaicMethod, InputKind, RgbImage, Roi, SensorOptions, SensorPlan,
     preview_size,
@@ -28,7 +33,8 @@ use genzo_raw::RawImage;
 use crate::error::{GpuError, Result};
 use crate::kernels::{Batch, Dispatch, Kernel, Params, read_count};
 use crate::renderer::{
-    GpuRenderer, cfa_table, check_raw, pack_raw, record_normalize, record_white_balance,
+    GpuRenderer, cfa_table, check_raw, pack_raw, record_highlight, record_noise_reduction,
+    record_normalize, record_white_balance,
 };
 
 /// 1 回に投入するプレビューの出力の行数（GPU のメモリと投入の回数の釣り合い）。**仮置き**: α7 IV で
@@ -121,9 +127,19 @@ impl GpuRenderer {
             };
             let roi = Roi::new(0, iy0 as i32, gw, iy1 - iy0);
             let rois = plan.stage_rois(roi)?;
+            // ステージの出力の範囲（stage_rois の並びは plan.stages() と同じ。4・6・7 はあるときだけ）。
+            let ids: Vec<&'static str> = plan.stages().iter().map(|st| st.id()).collect();
+            let out_of = |id: &str| -> Result<Roi> {
+                ids.iter()
+                    .position(|x| *x == id)
+                    .map(|k| rois[k + 1])
+                    .ok_or_else(|| GpuError::Internal(format!("ステージ {id} が計画にない")))
+            };
             let mut batch = Batch::with_stats(&self.gpu, &self.kernels, stats.clone())?;
-            // ステージ 2: RAW → CFA（rois[1]。ステージ 3 の入力の範囲）。
-            let cfa_roi = rois[1];
+            // 投入が終わるまで持つ途中のバッファ。
+            let mut keep: Vec<wgpu::Buffer> = Vec::new();
+            // ステージ 2: RAW → CFA（ステージ 3 の入力の範囲）。
+            let cfa_roi = out_of(NormalizeStage::ID)?;
             let n_cfa = cfa_roi.pixel_count() * 4;
             let values = self.gpu.create_storage("genzo-gpu.cfa（CFA）", n_cfa)?;
             let flags = self
@@ -132,41 +148,118 @@ impl GpuRenderer {
             record_normalize(
                 &mut batch, &plan, raw.cfa, raw, &words, &values, &flags, cfa_roi,
             )?;
-            // ステージ 3: CFA → CFA（rois[2]）。
-            let wb_roi = rois[2];
+            // ステージ 3: CFA → CFA。ハイライトを復元するときは飽和の印も写す（ステージ 4 が使う）。
+            let wb_roi = out_of(WhiteBalanceStage::ID)?;
             let wb = self
                 .gpu
                 .create_storage("genzo-gpu.cfa（CFA）", wb_roi.pixel_count() * 4)?;
             let table = cfa_table(raw.cfa, Roi::new(0, 0, 1, 1));
+            let wb_flags = match plan.highlight() {
+                Some(_) => Some(
+                    self.gpu
+                        .create_storage("genzo-gpu.cfa_flags（CFA）", wb_roi.pixel_count() * 4)?,
+                ),
+                None => None,
+            };
             record_white_balance(
-                &mut batch, &plan, table, cfa_roi, &values, &flags, &wb, None, wb_roi,
+                &mut batch,
+                &plan,
+                table,
+                cfa_roi,
+                &values,
+                &flags,
+                &wb,
+                wb_flags.as_ref(),
+                wb_roi,
             )?;
-            // ステージ 5: 2 × 2（rois[3]）。
-            let half_roi = rois[3];
+            // ステージ 4: ハイライト復元（あるときだけ）。
+            let (cfa_buf, cfa_out_roi) = match &wb_flags {
+                Some(wf) => {
+                    let hr_roi = out_of(HighlightRecoveryStage::ID)?;
+                    let hr = self
+                        .gpu
+                        .create_storage("genzo-gpu.cfa（CFA）", hr_roi.pixel_count() * 4)?;
+                    let hr_flags = self
+                        .gpu
+                        .create_storage("genzo-gpu.cfa_flags（CFA）", hr_roi.pixel_count() * 4)?;
+                    record_highlight(
+                        &mut batch, &plan, table, wb_roi, &wb, wf, &hr, &hr_flags, hr_roi,
+                    )?;
+                    keep.push(hr_flags);
+                    (hr, hr_roi)
+                }
+                None => (wb.clone(), wb_roi),
+            };
+            // ステージ 5: 2 × 2。
+            let half_roi = out_of(DemosaicMethod::Half2x2.stage_id())?;
             let half = self
                 .gpu
                 .create_storage("genzo-gpu.half（画像）", half_roi.pixel_count() * 12)?;
-            let mut p = Params::new(Kernel::Half2x2, wb_roi, half_roi);
+            let mut p = Params::new(Kernel::Half2x2, cfa_out_roi, half_roi);
             p.u32s("CFA", &table);
             batch.dispatch(Dispatch {
                 kernel: Kernel::Half2x2,
                 params: p.finish()?,
-                src: &wb,
+                src: &cfa_buf,
                 dst: &half,
                 aux: None,
                 aux_out: None,
                 threads: (half_roi.width, half_roi.height),
             })?;
-            // ステージ 8: 色変換（rois[4] = roi）。
+            // ステージ 6: ノイズ軽減（あるときだけ）。
+            let (rgb_src, rgb_roi) = match plan.noise() {
+                Some(noise) => {
+                    let nr_roi = out_of(NoiseReductionStage::ID)?;
+                    let out = record_noise_reduction(
+                        &mut batch, noise, &half, half_roi, nr_roi, &mut keep,
+                    )?;
+                    (out, nr_roi)
+                }
+                None => (half.clone(), half_roi),
+            };
+            // ステージ 7: レンズ補正（あるときだけ）。
+            let lens_out = match plan.lens() {
+                Some(lens) => {
+                    let lens_roi = out_of(LensCorrectionStage::ID)?;
+                    let buf = self
+                        .gpu
+                        .create_storage("genzo-gpu.lens（画像）", lens_roi.pixel_count() * 12)?;
+                    let (params, aux) = crate::stages::prepare_lens(
+                        lens,
+                        DemosaicMethod::Half2x2.sensor_pixels_per_output(),
+                        (gw, gh),
+                        rgb_roi,
+                        lens_roi,
+                    )?;
+                    let aux = self.gpu.create_storage_init("genzo-gpu.aux", &aux)?;
+                    batch.dispatch(Dispatch {
+                        kernel: Kernel::LensCorrection,
+                        params,
+                        src: &rgb_src,
+                        dst: &buf,
+                        aux: Some(&aux),
+                        aux_out: None,
+                        threads: (lens_roi.width, lens_roi.height),
+                    })?;
+                    keep.push(aux);
+                    Some((buf, lens_roi))
+                }
+                None => None,
+            };
+            let (cm_src, cm_roi) = match &lens_out {
+                Some((buf, r)) => (buf, *r),
+                None => (&rgb_src, rgb_roi),
+            };
+            // ステージ 8: 色変換（最後の範囲 = roi）。
             let rgb = self
                 .gpu
                 .create_storage("genzo-gpu.a1_band（画像）", roi.pixel_count() * 12)?;
-            let mut p = Params::new(Kernel::ColorMatrix, half_roi, roi);
+            let mut p = Params::new(Kernel::ColorMatrix, cm_roi, roi);
             p.mat("MAT", plan.camera_to_working().rows());
             batch.dispatch(Dispatch {
                 kernel: Kernel::ColorMatrix,
                 params: p.finish()?,
-                src: &half,
+                src: cm_src,
                 dst: &rgb,
                 aux: None,
                 aux_out: None,
@@ -226,6 +319,7 @@ impl GpuRenderer {
             }
             // 帯ごとに完了を待つ（GPU のメモリを帯 1 つ分に抑えるため）。
             batch.submit_only()?;
+            drop(keep);
             y = y1;
         }
         let replaced = read_count(&self.gpu, &stats)?;
@@ -246,6 +340,7 @@ impl GpuRenderer {
             warnings: plan.warnings().to_vec(),
             non_finite_replaced: replaced,
             input_kind: InputKind::SceneReferred,
+            lens_geometry: plan.lens_geometry(),
         })
     }
 

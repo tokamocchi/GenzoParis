@@ -1,23 +1,24 @@
-//! v1 で実装するステージの予約（docs/04_architecture.md の 2.1 節のステージ 6・7・12・14、
-//! 4: ハイライト復元は 1 段目の仮の処理）。
+//! v1 のステージの ID と予約（docs/04_architecture.md の 2.1 節のステージ 4・6・7・12・14）。4・6・7 と歪曲補正は
+//! 処理バージョン 2 で実装した（下の表）。12・14・マスクはまだ予約。
 //!
-//! | ステージ | ID | 段階 | 現像設定の項目 | 処理バージョン v1 での扱い |
-//! |---|---|---|---|---|
-//! | 6. ノイズ軽減 | [`NOISE_REDUCTION_ID`] | A1 | `detail.noise_reduction` | 適用しない |
-//! | 7. レンズ補正（周辺減光・倍率色収差） | [`LENS_CORRECTION_ID`] | A1 | `lens.profile_enabled`・`lens.vignetting_scale`・`lens.remove_chromatic_aberration` | 適用しない |
-//! | 9. の歪曲補正 | （ステージ 9 の一部） | C（B にも影響） | `lens.profile_enabled`・`lens.distortion_scale` | 適用しない |
-//! | 12. テクスチャ・明瞭度・かすみの除去 | [`TextureStage::ID`] | C | （設定の項目がまだない） | 何もしない |
-//! | 14. シャープ | [`SharpenStage::ID`] | C | `detail.sharpening` | 適用しない |
-//! | ローカル補正（マスク） | — | C | `masks` | 適用しない |
+//! | ステージ | ID | 段階 | 現像設定の項目 | 処理バージョン 1 | 処理バージョン 2 |
+//! |---|---|---|---|---|---|
+//! | 4. ハイライト復元 | [`HIGHLIGHT_RECOVERY_ID`] | A1 | `highlight_recovery` | 適用しない（ステージ 3 の飽和の切りそろえ） | 適用する（復元する方式のとき。`crate::sensor::highlight`） |
+//! | 6. ノイズ軽減 | [`NOISE_REDUCTION_ID`] | A1 | `detail.noise_reduction` | 適用しない | 適用する（`crate::sensor::denoise`） |
+//! | 7. レンズ補正（周辺減光・倍率色収差） | [`LENS_CORRECTION_ID`] | A1 | `lens.profile_enabled`・`lens.vignetting_scale`・`lens.remove_chromatic_aberration`・手動の周辺減光・色収差 | 適用しない | 適用する（[`crate::lens`]・`crate::sensor::LensCorrectionStage`） |
+//! | 9. の歪曲補正 | （ステージ 9 の一部） | C（B にも影響） | `lens.profile_enabled`・`lens.distortion_scale`・`lens.distortion` | 適用しない | 適用する（[`crate::lens::RadialDistortion`]） |
+//! | 12. テクスチャ・明瞭度・かすみの除去 | [`TextureStage::ID`] | C | （設定の項目がまだない） | 何もしない | 何もしない（予約） |
+//! | 14. シャープ | [`SharpenStage::ID`] | C | `detail.sharpening` | 適用しない | 適用しない（予約） |
+//! | ローカル補正（マスク） | — | C | `masks` | 適用しない | 適用しない（予約） |
 //!
-//! **決めごと**: 処理バージョン v1 は、これらの設定に値があっても **無視して** 処理を続ける
-//! （ステージの `params` は常に `None`）。エラーにしないのは、センサー処理（1 段目）が
+//! **決めごと**: 処理バージョン 1 は、これらの設定に値があっても **無視して** 処理を続ける
+//! （ステージの `params` は常に `None`。処理バージョン 2 でも、12・14・マスクは同じ）。エラーにしないのは、センサー処理（1 段目）が
 //! ノイズ軽減・レンズ補正を同じように無視しているのと合わせ、写真を開けなくしないため。値が
 //! 入っていることは [`unimplemented_settings`] で調べられるので、エンジン・UI は警告を出せる。
 //! これらを実装するときは、既存の写真の結果を変えないよう **処理バージョンを上げる**（2.5 節）。
 //!
-//! 6・7 はセンサーのステージ（入出力が CFA・カメラ RGB）なので、ここでは ID だけを予約する
-//! （[`crate::sensor`] に実装する）。12・14 は [`Stage`] として登録表に載せ、並び順と ID を固定する。
+//! 4・6・7 はセンサーのステージ（入出力が CFA・カメラ RGB）なので、ここでは ID だけを置く
+//! （実装は [`crate::sensor`]・[`crate::lens`]）。12・14 は [`Stage`] として登録表に載せ、並び順と ID を固定する。
 
 use std::fmt;
 
@@ -30,20 +31,27 @@ use crate::image::{ImageTile, Roi};
 use crate::stage::{Stage, StageContext, StageParams};
 use crate::version::ProcessVersion;
 
-/// ステージ 6（ノイズ軽減。v1）の予約の ID。
+/// ステージ 4（ハイライト復元。v1。処理バージョン 2 で適用する）の ID。
+pub const HIGHLIGHT_RECOVERY_ID: &str = "sensor.highlight_recovery";
+/// ステージ 6（ノイズ軽減。v1。処理バージョン 2 で適用する）の ID。
 pub const NOISE_REDUCTION_ID: &str = "sensor.noise_reduction";
-/// ステージ 7（レンズ補正の周辺減光・倍率色収差。v1）の予約の ID。
+/// ステージ 7（レンズ補正の周辺減光・倍率色収差。v1。処理バージョン 2 で適用する）の ID。
 pub const LENS_CORRECTION_ID: &str = "sensor.lens_correction";
 
-/// 処理バージョン v1 では適用しない（値があっても無視する）現像設定の項目。
+/// 設定の処理バージョンでは適用しない（値があっても無視する）現像設定の項目（ハイライト復元・ノイズ軽減・
+/// レンズ補正は処理バージョン 1 だけ、シャープ・マスクはどの版でも）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnimplementedSetting {
+    /// ハイライト復元（ステージ 4）。
+    HighlightRecovery,
     /// ノイズ軽減（ステージ 6）。
     NoiseReduction,
     /// レンズのプロファイルによる補正（ステージ 7 の周辺減光・ステージ 9 の歪曲補正）。
     LensProfile,
     /// 倍率色収差の除去（ステージ 7）。
     ChromaticAberration,
+    /// レンズ補正の手動の補正（歪曲・周辺減光・色収差。ステージ 7・9）。
+    LensManual,
     /// シャープ（ステージ 14）。
     Sharpening,
     /// ローカル補正（マスク）。
@@ -54,8 +62,9 @@ impl UnimplementedSetting {
     /// 関係するステージの ID。
     pub const fn stage_id(self) -> &'static str {
         match self {
+            Self::HighlightRecovery => HIGHLIGHT_RECOVERY_ID,
             Self::NoiseReduction => NOISE_REDUCTION_ID,
-            Self::LensProfile | Self::ChromaticAberration => LENS_CORRECTION_ID,
+            Self::LensProfile | Self::ChromaticAberration | Self::LensManual => LENS_CORRECTION_ID,
             Self::Sharpening => SharpenStage::ID,
             Self::Masks => "finish.masks",
         }
@@ -65,30 +74,49 @@ impl UnimplementedSetting {
 impl fmt::Display for UnimplementedSetting {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::NoiseReduction => "ノイズ軽減はこの処理バージョンでは適用されません",
-            Self::LensProfile => {
-                "レンズのプロファイルによる補正はこの処理バージョンでは適用されません"
+            Self::HighlightRecovery => {
+                "ハイライト復元はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
             }
-            Self::ChromaticAberration => "倍率色収差の除去はこの処理バージョンでは適用されません",
+            Self::NoiseReduction => {
+                "ノイズ軽減はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
+            Self::LensProfile => {
+                "レンズのプロファイルによる補正はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
+            Self::ChromaticAberration => {
+                "倍率色収差の除去はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
+            Self::LensManual => {
+                "レンズ補正の手動の補正はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
             Self::Sharpening => "シャープはこの処理バージョンでは適用されません",
             Self::Masks => "ローカル補正（マスク）はこの処理バージョンでは適用されません",
         })
     }
 }
 
-/// 値が入っているが、処理バージョン v1 では適用しない項目の一覧（丸めた設定で判定する）。
+/// 値が入っているが、設定の処理バージョンでは適用しない項目の一覧（丸めた設定で判定する。モジュールの
+/// doc の表。未知の処理バージョンは丸めた版で判定する）。
 pub fn unimplemented_settings(settings: &DevelopSettings) -> Vec<UnimplementedSetting> {
     let s = settings.normalized();
+    let version = ProcessVersion::from_u32(s.process_version).unwrap_or(ProcessVersion::CURRENT);
     let mut out = Vec::new();
-    let nr = s.detail.noise_reduction;
-    if nr.luminance != 0.0 || nr.color != 0.0 {
-        out.push(UnimplementedSetting::NoiseReduction);
-    }
-    if s.lens.profile_enabled {
-        out.push(UnimplementedSetting::LensProfile);
-    }
-    if s.lens.remove_chromatic_aberration {
-        out.push(UnimplementedSetting::ChromaticAberration);
+    if !version.has_v1_features() {
+        if !s.highlight_recovery.is_disabled() {
+            out.push(UnimplementedSetting::HighlightRecovery);
+        }
+        if !s.detail.noise_reduction.is_disabled() {
+            out.push(UnimplementedSetting::NoiseReduction);
+        }
+        if s.lens.profile_enabled {
+            out.push(UnimplementedSetting::LensProfile);
+        }
+        if s.lens.remove_chromatic_aberration {
+            out.push(UnimplementedSetting::ChromaticAberration);
+        }
+        if s.lens.has_manual() {
+            out.push(UnimplementedSetting::LensManual);
+        }
     }
     if s.detail.sharpening.amount != 0.0 {
         out.push(UnimplementedSetting::Sharpening);
@@ -130,7 +158,7 @@ impl Stage for TextureStage {
     }
     fn params(&self, _: &DevelopSettings, ctx: &StageContext<'_>) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(None),
+            ProcessVersion::V1 | ProcessVersion::V2 => Ok(None),
         }
     }
     fn input_roi(&self, output_roi: Roi, _: &StageParams, _: &StageContext<'_>) -> Roi {
@@ -173,7 +201,7 @@ impl Stage for SharpenStage {
     }
     fn params(&self, _: &DevelopSettings, ctx: &StageContext<'_>) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(None),
+            ProcessVersion::V1 | ProcessVersion::V2 => Ok(None),
         }
     }
     fn input_roi(&self, output_roi: Roi, _: &StageParams, _: &StageContext<'_>) -> Roi {
@@ -203,7 +231,10 @@ mod tests {
 
     #[test]
     fn values_in_v1_items_are_reported() {
-        let mut s = DevelopSettings::default();
+        let mut s = DevelopSettings {
+            process_version: 1,
+            ..Default::default()
+        };
         s.detail.noise_reduction.color = 20.0;
         s.detail.sharpening.amount = 40.0;
         s.lens.profile_enabled = true;
@@ -221,20 +252,47 @@ mod tests {
                 ..Default::default()
             },
         });
+        s.lens.vignetting_amount = 20.0;
+        s.highlight_recovery.method = genzo_model::HighlightMethod::Reconstruct;
         let u = unimplemented_settings(&s);
         assert_eq!(
             u,
             [
+                UnimplementedSetting::HighlightRecovery,
                 UnimplementedSetting::NoiseReduction,
                 UnimplementedSetting::LensProfile,
                 UnimplementedSetting::ChromaticAberration,
+                UnimplementedSetting::LensManual,
                 UnimplementedSetting::Sharpening,
                 UnimplementedSetting::Masks,
             ]
         );
-        assert_eq!(u[0].stage_id(), NOISE_REDUCTION_ID);
-        assert_eq!(u[3].stage_id(), SharpenStage::ID);
-        assert!(u[0].to_string().contains("ノイズ軽減"));
+        assert_eq!(u[0].stage_id(), HIGHLIGHT_RECOVERY_ID);
+        assert_eq!(u[1].stage_id(), NOISE_REDUCTION_ID);
+        assert_eq!(u[4].stage_id(), LENS_CORRECTION_ID);
+        assert_eq!(u[5].stage_id(), SharpenStage::ID);
+        assert!(u[0].to_string().contains("ハイライト復元"));
+        assert!(u[1].to_string().contains("ノイズ軽減"));
+        assert!(u[1].to_string().contains("処理バージョンを更新"));
+        assert!(u[4].to_string().contains("処理バージョンを更新"));
+        // 処理バージョン 2 ではハイライト復元・ノイズ軽減・レンズ補正を適用する（ほかの項目はまだ予約のまま）。
+        s.process_version = 2;
+        assert_eq!(
+            unimplemented_settings(&s),
+            [
+                UnimplementedSetting::Sharpening,
+                UnimplementedSetting::Masks
+            ]
+        );
+        // 版 1 でも、復元しない設定（量 0）・量 0 のノイズ軽減は知らせない。
+        let mut quiet = DevelopSettings {
+            process_version: 1,
+            ..Default::default()
+        };
+        quiet.highlight_recovery.method = genzo_model::HighlightMethod::Neutral;
+        quiet.highlight_recovery.amount = 0.0;
+        quiet.detail.noise_reduction.luminance_detail = 0.0;
+        assert!(unimplemented_settings(&quiet).is_empty());
     }
 
     #[test]

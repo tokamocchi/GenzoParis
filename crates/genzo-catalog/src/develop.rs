@@ -392,24 +392,47 @@ impl Catalog {
         items: &[(VariantId, DevelopSettings)],
         label: &str,
     ) -> Result<Vec<HistoryEntryId>> {
+        let items: Vec<(VariantId, &DevelopSettings, &str)> =
+            items.iter().map(|(v, s)| (*v, s, label)).collect();
+        self.save_develop_items(&items)
+    }
+
+    /// [`Catalog::save_develop_batch`] と同じ（1 つのトランザクション・重複は最後のもの・1 件でも失敗したら
+    /// すべて取り消す）で、履歴の名前を variant ごとに指定する（DEV-30 の貼り付けで、処理バージョンも
+    /// 更新した写真だけ名前を変える）。結果は `items` と同じ順。
+    pub fn save_develop_labeled(
+        &mut self,
+        items: &[(VariantId, DevelopSettings, String)],
+    ) -> Result<Vec<HistoryEntryId>> {
+        let items: Vec<(VariantId, &DevelopSettings, &str)> = items
+            .iter()
+            .map(|(v, s, label)| (*v, s, label.as_str()))
+            .collect();
+        self.save_develop_items(&items)
+    }
+
+    fn save_develop_items(
+        &mut self,
+        items: &[(VariantId, &DevelopSettings, &str)],
+    ) -> Result<Vec<HistoryEntryId>> {
         let mut last = std::collections::HashMap::new();
-        for (i, (v, _)) in items.iter().enumerate() {
+        for (i, (v, _, _)) in items.iter().enumerate() {
             last.insert(*v, i);
         }
         let encoded = items
             .iter()
-            .map(|(_, s)| encode(s))
+            .map(|(_, s, _)| encode(s))
             .collect::<Result<Vec<_>>>()?;
         let now = now_utc_string();
         let tx = self.conn.transaction()?;
         let mut saved = std::collections::HashMap::new();
-        for (i, (v, _)) in items.iter().enumerate() {
+        for (i, (v, _, label)) in items.iter().enumerate() {
             if last[v] == i {
                 saved.insert(*v, save_develop_tx(&tx, *v, &encoded[i], label, &now)?);
             }
         }
         tx.commit()?;
-        Ok(items.iter().map(|(v, _)| saved[v]).collect())
+        Ok(items.iter().map(|(v, _, _)| saved[v]).collect())
     }
 
     /// 1 つ前の履歴に戻す（Undo）。戻せない場合は `None`。

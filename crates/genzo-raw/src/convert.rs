@@ -736,6 +736,7 @@ pub(crate) fn build_decoded(
         as_shot_wb,
         cam_xyz,
         metadata,
+        lens_correction: None,
     };
     image.validate()?;
     let dng_color_matrices = c
@@ -784,6 +785,7 @@ pub(crate) fn build_decoded(
         input_size: range.input_size,
         data_range_checked: decoder.data_range_checked,
         saturation_level,
+        lens_correction_note: None,
     };
     Ok(DecodedRaw { image, details })
 }

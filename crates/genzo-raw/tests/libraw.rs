@@ -78,6 +78,7 @@ fn sample(cfa: CfaPattern, width: u32, height: u32, seed: u32) -> RawImage {
         as_shot_wb: [2.25, 1.0, 1.625, 1.0],
         cam_xyz: Some(CAM_XYZ),
         metadata,
+        lens_correction: None,
     }
 }
 
@@ -1171,4 +1172,57 @@ fn saturation_level_is_set_from_levels() {
     assert_eq!(d.image.saturation_level, expected);
     assert_eq!(d.details.saturation_level, expected);
     assert!(expected < img.white_level && expected > 516.0);
+}
+
+/// 埋め込みのレンズ補正の情報（DEV-14）: LibRaw の展開の後に、同じ入力の TIFF の構造から読んで
+/// `RawImage::lens_correction` に入れる（ファイルとメモリ上のデータの両方）。
+#[test]
+fn embedded_lens_correction_is_attached_after_decoding() {
+    use genzo_raw::{
+        DngLensCorrection, DngVignetteRadial, DngWarpPlane, DngWarpRectilinear, LensCorrectionData,
+        SonyLensCorrection,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let img = sample(CfaPattern::RGGB, 64, 48, 7);
+    let dng_lens = LensCorrectionData::DngOpcode(DngLensCorrection {
+        warp: Some(DngWarpRectilinear {
+            planes: vec![DngWarpPlane {
+                kr: [1.0, -0.03, 0.002, 0.0],
+                kt: [0.0, 0.0],
+            }],
+            center: [0.5, 0.5],
+        }),
+        vignette: Some(DngVignetteRadial {
+            k: [0.4, 0.0, 0.0, 0.0, 0.0],
+            center: [0.5, 0.5],
+        }),
+    });
+    let sony_lens = LensCorrectionData::SonyArw(SonyLensCorrection {
+        distortion: vec![-10; 16],
+        vignetting: vec![200; 16],
+        ca_red: vec![5; 16],
+        ca_blue: vec![-5; 16],
+    });
+    for (name, lens) in [("dng.dng", dng_lens), ("sony.dng", sony_lens)] {
+        let opts = DngOptions {
+            lens_correction: Some(lens.clone()),
+            ..Default::default()
+        };
+        let path = write(dir.path(), name, &img, &opts);
+        let d = decode_file_with_details(&path).unwrap();
+        assert_eq!(d.image.lens_correction.as_ref(), Some(&lens));
+        assert_eq!(d.details.lens_correction_note, None);
+        // 画素は補正の情報があっても変わらない（LibRaw は opcode を適用しない）。
+        assert_eq!(d.image.data, img.data);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            decode_bytes(&bytes).unwrap().image.lens_correction,
+            Some(lens)
+        );
+    }
+    // 情報のない DNG は None。
+    let path = write(dir.path(), "plain.dng", &img, &DngOptions::default());
+    let d = decode_file_with_details(&path).unwrap();
+    assert_eq!(d.image.lens_correction, None);
+    assert_eq!(d.details.lens_correction_note, None);
 }

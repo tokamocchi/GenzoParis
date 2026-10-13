@@ -60,6 +60,10 @@ pub mod ranges {
     pub const ANGLE_DEG: ValueRange = ValueRange::new(-45.0, 45.0);
     /// レンズ補正の適用量（%。100 でプロファイルどおり）。
     pub const LENS_SCALE: ValueRange = ValueRange::new(0.0, 200.0);
+    /// レンズ補正の手動のスライダー（歪曲・周辺減光の量・色収差。-100〜+100）。
+    pub const LENS_MANUAL: ValueRange = ValueRange::new(-100.0, 100.0);
+    /// 手動の周辺減光の中点（0〜100）。
+    pub const LENS_MIDPOINT: ValueRange = ValueRange::new(0.0, 100.0);
     /// シャープの適用量。
     pub const SHARPEN_AMOUNT: ValueRange = ValueRange::new(0.0, 150.0);
     /// シャープの半径。
@@ -376,11 +380,15 @@ pub struct Geometry {
     pub aspect: Option<AspectRatio>,
 }
 
-/// レンズ補正（DEV-14。v1）。既定は無効。
+/// レンズ補正（DEV-14。v1。処理バージョン 2 から適用する）。既定は無効。
 ///
-/// 補正のデータは [`RenderDeps::lens_profile`] で参照する。
-/// 周辺減光と倍率色収差はステージ 7（段階 A1）、歪曲補正はステージ 9（ジオメトリ。段階 C で、
-/// ガイドの段階 B にも影響する）で適用する（04 の 2.1 節・2.7 節）。
+/// - **プロファイルによる補正**: RAW に埋め込まれた補正の情報（Sony の ARW のタグ・DNG の opcode。
+///   genzo-raw の `lens`）を使う。どの情報を使ったかは [`RenderDeps::lens_profile`] に記録する。
+///   lensfun などの外部のデータは使わない（利用者の決定）。
+/// - **手動の補正**: 補正の情報がない写真（と、プロファイルの補正に重ねる微調整）のためのスライダー。
+///
+/// 周辺減光と倍率色収差はステージ 7（段階 A1。カメラ RGB）、歪曲補正はステージ 9（ジオメトリ。段階 C で、
+/// ガイドの段階 B にも影響する）で適用する（04 の 2.1 節・2.7 節）。式は genzo-pipeline の `lens`。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LensCorrection {
@@ -390,14 +398,35 @@ pub struct LensCorrection {
     pub distortion_scale: f32,
     /// 周辺減光補正の適用量（%。0〜200、100 でプロファイルどおり）。
     pub vignetting_scale: f32,
-    /// 倍率色収差を除去する。
+    /// 倍率色収差を除去する（プロファイルの色収差の情報を使う）。
     pub remove_chromatic_aberration: bool,
+    /// 手動の歪曲補正（-100〜+100）。正で樽型の歪曲（線が外へふくらむ）を、負で糸巻き型の歪曲を補正する。
+    pub distortion: f32,
+    /// 手動の周辺減光の補正量（-100〜+100）。正で四隅を明るくし、負で暗くする。
+    pub vignetting_amount: f32,
+    /// 手動の周辺減光の中点（0〜100。既定 50）。小さいほど中心に近い位置から補正する。
+    pub vignetting_midpoint: f32,
+    /// 手動の倍率色収差の補正の赤 / シアン（-100〜+100）。正で赤のチャンネルの像を大きくする。
+    pub ca_red_cyan: f32,
+    /// 手動の倍率色収差の補正の青 / 黄（-100〜+100）。正で青のチャンネルの像を大きくする。
+    pub ca_blue_yellow: f32,
 }
 
 impl LensCorrection {
-    /// 補正を何もしない設定か。
+    /// 手動の周辺減光の中点の既定値。
+    pub const DEFAULT_VIGNETTING_MIDPOINT: f32 = 50.0;
+
+    /// 補正を何もしない設定か（結果が補正なしと同じかどうかは、写真の補正の情報にもよる）。
     pub fn is_disabled(&self) -> bool {
-        !self.profile_enabled && !self.remove_chromatic_aberration
+        !self.profile_enabled && !self.remove_chromatic_aberration && !self.has_manual()
+    }
+
+    /// 手動の補正のどれかが 0 でないか（中点は量が 0 なら効かないので見ない）。
+    pub fn has_manual(&self) -> bool {
+        self.distortion != 0.0
+            || self.vignetting_amount != 0.0
+            || self.ca_red_cyan != 0.0
+            || self.ca_blue_yellow != 0.0
     }
 }
 
@@ -408,6 +437,11 @@ impl Default for LensCorrection {
             distortion_scale: 100.0,
             vignetting_scale: 100.0,
             remove_chromatic_aberration: false,
+            distortion: 0.0,
+            vignetting_amount: 0.0,
+            vignetting_midpoint: Self::DEFAULT_VIGNETTING_MIDPOINT,
+            ca_red_cyan: 0.0,
+            ca_blue_yellow: 0.0,
         }
     }
 }
@@ -437,14 +471,102 @@ impl Default for Sharpening {
     }
 }
 
-/// ノイズ軽減（DEV-13。v1。04 の 2.1 節のステージ 6）。既定は 0（何もしない）。
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+/// ハイライト復元の方式（DEV-06。v1。04 の 2.1 節のステージ 4。処理バージョン 2 から適用する）。
+///
+/// JSON では `"clip"`・`"neutral"`・`"reconstruct"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HighlightMethod {
+    /// 白で切りそろえる（復元しない）。飽和した画素の近傍を、すべてのチャンネルが飽和する値で切りそろえる
+    /// （処理バージョン 1 と同じ。genzo-pipeline の `sensor::wb` の飽和の切りそろえ）。
+    #[default]
+    Clip,
+    /// 明るさだけを復元する（無彩色）。飽和したチャンネルを、飽和していないチャンネルの値と飽和の値の大きい方に
+    /// する（色は推定しない）。
+    Neutral,
+    /// 色を保って復元する。飽和したチャンネルを、近傍の飽和していない画素の色の比から再構成する。
+    Reconstruct,
+}
+
+impl HighlightMethod {
+    /// すべての方式。
+    pub const ALL: [HighlightMethod; 3] = [
+        HighlightMethod::Clip,
+        HighlightMethod::Neutral,
+        HighlightMethod::Reconstruct,
+    ];
+}
+
+/// ハイライト復元（DEV-06。v1。04 の 2.1 節のステージ 4。処理バージョン 2 から適用する）。
+///
+/// 既定は「白で切りそろえる」（復元しない。処理バージョン 1 と同じ結果。決定事項ログ No.126）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HighlightRecovery {
+    /// 方式。
+    pub method: HighlightMethod,
+    /// 量（0〜100。既定 100）。0 で切りそろえ（[`HighlightMethod::Clip`]）と同じ結果、100 で方式どおりに
+    /// 復元する。[`HighlightMethod::Clip`] では使わない。
+    pub amount: f32,
+}
+
+impl HighlightRecovery {
+    /// 量の既定値。
+    pub const DEFAULT_AMOUNT: f32 = 100.0;
+
+    /// 復元しない（切りそろえと同じ結果になる）設定か。
+    pub fn is_disabled(&self) -> bool {
+        self.method == HighlightMethod::Clip || self.amount == 0.0
+    }
+}
+
+impl Default for HighlightRecovery {
+    fn default() -> Self {
+        Self {
+            method: HighlightMethod::Clip,
+            amount: Self::DEFAULT_AMOUNT,
+        }
+    }
+}
+
+/// ノイズ軽減（DEV-13。v1。04 の 2.1 節のステージ 6。処理バージョン 2 から適用する）。既定は量が 0（何もしない）。
+///
+/// 「ディテール」「コントラスト」は量が 0 なら効かない。式は genzo-pipeline の `sensor::denoise`。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NoiseReduction {
     /// 輝度ノイズの軽減（0〜100）。
     pub luminance: f32,
+    /// 輝度ノイズの軽減のディテール（0〜100。既定 50）。大きいほど細かい模様を残す（細かい段の軽減を弱める）。
+    pub luminance_detail: f32,
+    /// 輝度ノイズの軽減のコントラスト（0〜100。既定 0）。大きいほど大きな模様の明暗を残す（粗い段の軽減を弱める）。
+    pub luminance_contrast: f32,
     /// 色ノイズの軽減（0〜100）。
     pub color: f32,
+    /// 色ノイズの軽減のディテール（0〜100。既定 50）。大きいほど細かい色の境界を残す（細かい段の軽減を弱める）。
+    pub color_detail: f32,
+}
+
+impl NoiseReduction {
+    /// ディテールの既定値（輝度・色）。
+    pub const DEFAULT_DETAIL: f32 = 50.0;
+
+    /// 量がどちらも 0（何もしない）か。
+    pub fn is_disabled(&self) -> bool {
+        self.luminance == 0.0 && self.color == 0.0
+    }
+}
+
+impl Default for NoiseReduction {
+    fn default() -> Self {
+        Self {
+            luminance: 0.0,
+            luminance_detail: Self::DEFAULT_DETAIL,
+            luminance_contrast: 0.0,
+            color: 0.0,
+            color_detail: Self::DEFAULT_DETAIL,
+        }
+    }
 }
 
 /// ディテール（シャープ・ノイズ軽減。v1）。
@@ -462,9 +584,7 @@ pub struct DetailParams {
 impl DetailParams {
     /// 何もしない設定か。
     pub fn is_neutral(&self) -> bool {
-        self.sharpening.amount == 0.0
-            && self.noise_reduction.luminance == 0.0
-            && self.noise_reduction.color == 0.0
+        self.sharpening.amount == 0.0 && self.noise_reduction.is_disabled()
     }
 }
 
@@ -583,7 +703,8 @@ impl DataRef {
 pub struct RenderDeps {
     /// カメラ行列・プロファイル。RAW 以外の入力では空のままでよい。
     pub camera_profile: DataRef,
-    /// レンズ補正のデータ。
+    /// レンズ補正のデータ（埋め込みの補正の情報。ID は出どころと機種・レンズ、SHA-256 は情報の内容。
+    /// genzo-api の `deps`）。補正の情報のない写真・RAW 以外は `None`。
     pub lens_profile: Option<DataRef>,
     /// RAW デコーダとその設定（例: `"libraw-0.21.2"`）。
     pub raw_decoder: String,

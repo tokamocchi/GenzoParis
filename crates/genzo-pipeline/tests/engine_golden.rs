@@ -9,6 +9,11 @@
 //!   量子化の前の f32）。
 //! - 許容差: IQ-07a（8bit 換算で ±1）。Windows / macOS の数学ライブラリの差（`exp2`・`log2`・`powf`・
 //!   `sin`・`cos` の最下位のビット）はこれより十分小さい。
+//! - 処理バージョン: 基準画像は **処理バージョン 1** の結果（既存の写真の結果を変えない。IQ-08）。設定は
+//!   版 1 を明示する（2026-10-13 に処理バージョン 2 を作ったとき、新しい写真の既定が 2 になったため。
+//!   基準画像の画素は変えず、記録した設定の JSON（スキーマの版 2）だけを作り直した）。版 2 でも、v1 の機能の
+//!   項目が既定値ならビット単位で同じ結果になることを `process_version_2_matches_1_without_v1_features` で
+//!   確かめる。
 //! - 基準の作り直し: `GENZO_UPDATE_GOLDEN=1 cargo test -p genzo-pipeline --test engine_golden`
 //!   （CI では作り直さない。genzo-testkit の golden の doc）。作り直したら git の差分を確認してから
 //!   コミットする。
@@ -27,8 +32,25 @@ const WIDTH: u32 = 192;
 /// 合成の RAW の大きさ。
 const HEIGHT: u32 = 128;
 
-/// 代表的な現像設定（名前、説明、設定）。
+/// 代表的な現像設定（名前、説明、設定）。処理バージョンは 1（モジュールの doc）。
 fn variants() -> Vec<(&'static str, &'static str, DevelopSettings)> {
+    variants_v2()
+        .into_iter()
+        .map(|(n, d, s)| {
+            (
+                n,
+                d,
+                DevelopSettings {
+                    process_version: 1,
+                    ..s
+                },
+            )
+        })
+        .collect()
+}
+
+/// 代表的な現像設定（新しい写真の既定の処理バージョン 2）。
+fn variants_v2() -> Vec<(&'static str, &'static str, DevelopSettings)> {
     let mut out = vec![("engine_default", "既定の設定", DevelopSettings::default())];
     out.push((
         "engine_exposure_plus1",
@@ -132,4 +154,33 @@ fn export_results_match_the_golden_images() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// 処理バージョン 2 でも、v1 の機能の項目（レンズ補正など）が既定値なら、版 1 とビット単位で同じ結果になる
+/// （新しい写真の既定を 2 にした根拠。決定事項ログ No.120）。
+#[test]
+fn process_version_2_matches_1_without_v1_features() {
+    let source = raw_source(raw_from(&busy_scene(WIDTH, HEIGHT)));
+    let e = engine(96, 64);
+    let srgb = OutputTarget::Export(OutputColorSpace::Srgb);
+    for ((name, _, v1), (_, _, v2)) in variants().into_iter().zip(variants_v2()) {
+        assert_eq!(v1.process_version, 1);
+        assert_eq!(v2.process_version, 2);
+        let a = e
+            .render_full_resolution(&source, &v1, Some(&srgb), &NeverCancel)
+            .unwrap();
+        let b = e
+            .render_full_resolution(&source, &v2, Some(&srgb), &NeverCancel)
+            .unwrap();
+        assert_bitwise_eq(&a.b3.image, &b.b3.image, name);
+        assert_bitwise_eq(&a.output.unwrap().image, &b.output.unwrap().image, name);
+        // プレビュー（A1 → ガイド → 段階 C）も同じ。
+        let pa = e
+            .render_preview(&source, &v1, genzo_model::RenderQuality::Final, 96)
+            .unwrap();
+        let pb = e
+            .render_preview(&source, &v2, genzo_model::RenderQuality::Final, 96)
+            .unwrap();
+        assert_bitwise_eq(&pa.b3.image, &pb.b3.image, name);
+    }
 }

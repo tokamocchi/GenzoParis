@@ -46,6 +46,11 @@ export function formatKelvin(v: number): string {
   return `${Math.round(v)} K`;
 }
 
+/** 割合（"120%"。レンズ補正のプロファイルの適用量）。 */
+export function formatPercent(v: number): string {
+  return `${Math.round(v)}%`;
+}
+
 /** 角度（"+1.25°"）。 */
 export function formatAngle(v: number): string {
   return `${formatSigned(v, 2)}°`;

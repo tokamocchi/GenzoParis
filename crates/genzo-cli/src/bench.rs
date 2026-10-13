@@ -56,7 +56,7 @@ use genzo_testkit::{EnvironmentInfo, InputRef};
 use serde_json::json;
 
 use crate::Status;
-use crate::args::{BenchArgs, BenchTarget, GlobalArgs};
+use crate::args::{BenchArgs, BenchTarget, GlobalArgs, SensorArgs};
 use crate::error::{CliError, CliResult};
 use crate::output::{Output, json_value};
 use crate::standalone::{
@@ -287,6 +287,17 @@ struct Ctx {
     /// RAW か（RAW 以外は簡易処理がなく、WB のドラッグも最終品質で描く）。
     is_raw: bool,
     gpu: Option<GpuRenderer>,
+    /// 計測の設定に当てるハイライト復元・ノイズ軽減（DEV-06・DEV-13。指定がなければ何もしない）。
+    sensor: SensorArgs,
+}
+
+impl Ctx {
+    /// 計測で使う現像設定（[`bench_settings`] に、ハイライト復元・ノイズ軽減の指定を当てたもの）。
+    fn settings(&self) -> DevelopSettings {
+        let mut s = bench_settings();
+        self.sensor.apply(&mut s);
+        s
+    }
 }
 
 /// プレビューを 1 回描く（GPU があれば GPU 版。結果は読み出さず、ヒストグラムだけ求める）。
@@ -354,7 +365,7 @@ fn bench_preview(ctx: &Ctx, source: &PhotoSource) -> CliResult<Vec<BenchResult>>
     let preview_bench = |name: &str| base(name, true, ctx).note("preview", preview_note.clone());
 
     // (1) 露光量のドラッグ（段階 C）。最初に 1 回描いて A1・ガイドをキャッシュに入れる。
-    let mut s = bench_settings();
+    let mut s = ctx.settings();
     render_preview(&engine, gpu, source, &s, RenderQuality::Final)?;
     let mut ev = 0.0f32;
     let r = preview_bench("cli_preview_stage_c")
@@ -371,7 +382,7 @@ fn bench_preview(ctx: &Ctx, source: &PhotoSource) -> CliResult<Vec<BenchResult>>
     results.push(r);
 
     // (1) WB のドラッグ（簡易処理）。
-    let mut s = bench_settings();
+    let mut s = ctx.settings();
     let mut k = WB_SWEEP.0;
     let r = preview_bench("cli_preview_wb_drag_draft")
         .target(WB_DRAG_TARGET)
@@ -386,7 +397,7 @@ fn bench_preview(ctx: &Ctx, source: &PhotoSource) -> CliResult<Vec<BenchResult>>
     results.push(r);
 
     // (2) WB を離した後の最終品質（コールド: 毎回キャッシュを捨てる / ウォーム: WB を変えながら）。
-    let mut s = bench_settings();
+    let mut s = ctx.settings();
     let r = preview_bench("cli_preview_wb_release_final")
         .target(WB_RELEASE_TARGET)
         .develop_settings(&s)
@@ -398,7 +409,7 @@ fn bench_preview(ctx: &Ctx, source: &PhotoSource) -> CliResult<Vec<BenchResult>>
             );
         })?;
     results.push(r);
-    let mut s = bench_settings();
+    let mut s = ctx.settings();
     let r = preview_bench("cli_preview_wb_release_final")
         .target(WB_RELEASE_TARGET)
         .develop_settings(&s)
@@ -483,7 +494,7 @@ fn source_metadata(source: &PhotoSource) -> genzo_model::PhotoMetadata {
 fn bench_export(ctx: &Ctx, input: &BenchInput, worker: &mut Worker) -> CliResult<Vec<BenchResult>> {
     let engine = Engine::new(EngineConfig::default())?;
     let gpu = ctx.gpu.as_ref();
-    let settings = bench_settings();
+    let settings = ctx.settings();
     let export = ExportSettings {
         on_conflict: ConflictPolicy::Overwrite,
         ..ExportSettings::default()
@@ -575,6 +586,7 @@ pub fn run(g: &GlobalArgs, out: Output, a: BenchArgs) -> CliResult<Status> {
         size,
         is_raw: matches!(source.image, SourceImage::Raw(_)),
         gpu,
+        sensor: a.sensor.clone(),
     };
     out.progress(format!(
         "計測しています（{}、{} × {}、{}）…",

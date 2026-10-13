@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 
 pub use params::{
     AspectRatio, ColorParams, CropRect, CurvePoint, DataRef, DetailParams, Geometry,
-    LensCorrection, LocalAdjustment, LocalDelta, MAX_ASPECT_TERM, MAX_CURVE_POINTS, MAX_MASKS,
-    MIN_CROP_SIZE, MaskShape, NoiseReduction, ParametricCurve, RenderDeps, Sharpening, ToneCurve,
-    ToneParams, ValueRange, WbPreset, WhiteBalance, ranges,
+    HighlightMethod, HighlightRecovery, LensCorrection, LocalAdjustment, LocalDelta,
+    MAX_ASPECT_TERM, MAX_CURVE_POINTS, MAX_MASKS, MIN_CROP_SIZE, MaskShape, NoiseReduction,
+    ParametricCurve, RenderDeps, Sharpening, ToneCurve, ToneParams, ValueRange, WbPreset,
+    WhiteBalance, ranges,
 };
 pub use validate::{FieldIssue, IssueKind, ValidationError};
 
@@ -38,6 +39,8 @@ pub struct DevelopSettings {
     pub process_version: u32,
     /// ホワイトバランス（DEV-03）。
     pub white_balance: WhiteBalance,
+    /// ハイライト復元（DEV-06。v1。既定は復元しない（白で切りそろえる））。
+    pub highlight_recovery: HighlightRecovery,
     /// 露光量（EV。-5〜+5。DEV-04）。
     pub exposure_ev: f32,
     /// コントラスト（-100〜+100。DEV-04）。
@@ -67,6 +70,7 @@ impl Default for DevelopSettings {
             schema_version: CURRENT_SCHEMA_VERSION,
             process_version: CURRENT_PROCESS_VERSION,
             white_balance: WhiteBalance::default(),
+            highlight_recovery: HighlightRecovery::default(),
             exposure_ev: 0.0,
             contrast: 0.0,
             tone: ToneParams::default(),
@@ -170,6 +174,7 @@ impl DevelopSettings {
     pub fn is_neutral(&self) -> bool {
         let s = self.normalized();
         s.white_balance == WhiteBalance::AsShot
+            && s.highlight_recovery.is_disabled()
             && s.exposure_ev == 0.0
             && s.contrast == 0.0
             && s.tone == ToneParams::default()
@@ -224,7 +229,7 @@ mod tests {
     #[test]
     fn missing_fields_take_defaults() {
         let s = DevelopSettings::from_json(
-            r#"{"schema_version": 1, "process_version": 1, "exposure_ev": 1.5, "tone": {"shadows": 20}}"#,
+            r#"{"schema_version": 2, "process_version": 1, "exposure_ev": 1.5, "tone": {"shadows": 20}}"#,
         )
         .unwrap();
         assert_eq!(s.exposure_ev, 1.5);
@@ -237,16 +242,163 @@ mod tests {
 
     #[test]
     fn missing_process_version_uses_the_schema_default_not_current() {
+        // v1 のスキーマの JSON は処理バージョン 1（MVP の写真の結果を変えない。IQ-08）。
         let s = DevelopSettings::from_json(r#"{"schema_version": 1}"#).unwrap();
         assert_eq!(s.process_version, 1);
+        assert_eq!(
+            s,
+            DevelopSettings {
+                process_version: 1,
+                ..Default::default()
+            }
+        );
+        let s = DevelopSettings::from_json(r#"{"schema_version": 2}"#).unwrap();
+        assert_eq!(s.process_version, 2);
         assert_eq!(s, DevelopSettings::default());
     }
 
     #[test]
     fn unknown_fields_are_ignored() {
         let s =
-            DevelopSettings::from_json(r#"{"schema_version": 1, "future_option": true}"#).unwrap();
+            DevelopSettings::from_json(r#"{"schema_version": 2, "future_option": true}"#).unwrap();
         assert_eq!(s, DevelopSettings::default());
+    }
+
+    #[test]
+    fn current_versions() {
+        // 新しく現像する写真は処理バージョン 2（v1 の機能のステージ。決定事項ログ No.120）。
+        let s = DevelopSettings::default();
+        assert_eq!(s.schema_version, 2);
+        assert_eq!(s.process_version, 2);
+        // 版 1 の設定も読める（既存の写真）。
+        let v1 =
+            DevelopSettings::from_json(r#"{"schema_version": 2, "process_version": 1}"#).unwrap();
+        assert_eq!(v1.process_version, 1);
+        v1.validate().unwrap();
+    }
+
+    #[test]
+    fn manual_lens_corrections_are_not_neutral() {
+        assert!(DevelopSettings::default().lens.is_disabled());
+        for f in [
+            |l: &mut LensCorrection| l.distortion = 10.0,
+            |l: &mut LensCorrection| l.vignetting_amount = -5.0,
+            |l: &mut LensCorrection| l.ca_red_cyan = 1.0,
+            |l: &mut LensCorrection| l.ca_blue_yellow = -1.0,
+            |l: &mut LensCorrection| l.profile_enabled = true,
+            |l: &mut LensCorrection| l.remove_chromatic_aberration = true,
+        ] {
+            let mut s = DevelopSettings::default();
+            f(&mut s.lens);
+            assert!(!s.is_neutral(), "{:?}", s.lens);
+        }
+        // 中点だけを変えても（量が 0 なので）補正はない。
+        let mut s = DevelopSettings::default();
+        s.lens.vignetting_midpoint = 10.0;
+        assert!(s.lens.is_disabled() && s.is_neutral());
+    }
+
+    #[test]
+    fn lens_values_are_validated_and_normalized() {
+        let mut s = DevelopSettings::default();
+        s.lens.distortion = 150.0;
+        s.lens.vignetting_midpoint = f32::NAN;
+        s.lens.ca_blue_yellow = -101.0;
+        let err = s.validate().unwrap_err();
+        assert!(err.has_field("lens.distortion"));
+        assert!(err.has_field("lens.vignetting_midpoint"));
+        assert!(err.has_field("lens.ca_blue_yellow"));
+        let n = s.normalized();
+        assert_eq!(n.lens.distortion, 100.0);
+        assert_eq!(n.lens.vignetting_midpoint, 50.0);
+        assert_eq!(n.lens.ca_blue_yellow, -100.0);
+        n.validate().unwrap();
+    }
+
+    #[test]
+    fn highlight_recovery_and_noise_reduction_defaults_and_json() {
+        // 既定は復元しない・ノイズ軽減の量 0（処理バージョン 1 と同じ結果。決定事項ログ No.126・127）。
+        let s = DevelopSettings::default();
+        assert_eq!(s.highlight_recovery.method, HighlightMethod::Clip);
+        assert_eq!(s.highlight_recovery.amount, 100.0);
+        assert!(s.highlight_recovery.is_disabled());
+        let nr = s.detail.noise_reduction;
+        assert_eq!(
+            (nr.luminance, nr.luminance_detail, nr.luminance_contrast),
+            (0.0, 50.0, 0.0)
+        );
+        assert_eq!((nr.color, nr.color_detail), (0.0, 50.0));
+        assert!(nr.is_disabled());
+        // JSON の形。
+        let hr = HighlightRecovery {
+            method: HighlightMethod::Reconstruct,
+            amount: 80.0,
+        };
+        assert_eq!(
+            serde_json::to_string(&hr).unwrap(),
+            r#"{"method":"reconstruct","amount":80.0}"#
+        );
+        // 項目のない JSON（レンズ補正のパッケージまでのスキーマの版 2）は既定値で補う。
+        let s = DevelopSettings::from_json(
+            r#"{"schema_version": 2, "detail": {"noise_reduction": {"luminance": 30}}, "highlight_recovery": {"method": "neutral"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.detail.noise_reduction.luminance, 30.0);
+        assert_eq!(s.detail.noise_reduction.luminance_detail, 50.0);
+        assert_eq!(s.detail.noise_reduction.color_detail, 50.0);
+        assert_eq!(s.highlight_recovery.method, HighlightMethod::Neutral);
+        assert_eq!(s.highlight_recovery.amount, 100.0);
+        assert!(!s.is_neutral());
+        // 量が 0 なら復元しない（切りそろえと同じ）。
+        let z = DevelopSettings {
+            highlight_recovery: HighlightRecovery {
+                method: HighlightMethod::Reconstruct,
+                amount: 0.0,
+            },
+            ..Default::default()
+        };
+        assert!(z.highlight_recovery.is_disabled() && z.is_neutral());
+        // ノイズ軽減のディテール・コントラストだけを変えても（量が 0 なので）何もしない。
+        let mut d = DevelopSettings::default();
+        d.detail.noise_reduction.luminance_detail = 10.0;
+        d.detail.noise_reduction.luminance_contrast = 80.0;
+        d.detail.noise_reduction.color_detail = 90.0;
+        assert!(d.is_neutral());
+    }
+
+    #[test]
+    fn highlight_and_noise_values_are_validated_and_normalized() {
+        let mut s = DevelopSettings::default();
+        s.highlight_recovery.amount = 150.0;
+        s.detail.noise_reduction.luminance_detail = f32::NAN;
+        s.detail.noise_reduction.luminance_contrast = -1.0;
+        s.detail.noise_reduction.color_detail = 101.0;
+        let err = s.validate().unwrap_err();
+        for f in [
+            "highlight_recovery.amount",
+            "detail.noise_reduction.luminance_detail",
+            "detail.noise_reduction.luminance_contrast",
+            "detail.noise_reduction.color_detail",
+        ] {
+            assert!(err.has_field(f), "{f}: {err}");
+        }
+        let n = s.normalized();
+        assert_eq!(n.highlight_recovery.amount, 100.0);
+        assert_eq!(n.detail.noise_reduction.luminance_detail, 50.0);
+        assert_eq!(n.detail.noise_reduction.luminance_contrast, 0.0);
+        assert_eq!(n.detail.noise_reduction.color_detail, 100.0);
+        n.validate().unwrap();
+        // 量の NaN は既定値（100）に丸める。
+        let mut h = DevelopSettings::default();
+        h.highlight_recovery.amount = f32::NAN;
+        assert_eq!(h.normalized().highlight_recovery.amount, 100.0);
+        // 未知の方式は JSON の読み込みでエラー。
+        assert!(matches!(
+            DevelopSettings::from_json(
+                r#"{"schema_version": 2, "highlight_recovery": {"method": "magic"}}"#
+            ),
+            Err(DevelopError::Json(_))
+        ));
     }
 
     #[test]
@@ -256,15 +408,15 @@ mod tests {
             Err(DevelopError::MissingSchemaVersion)
         ));
         assert!(matches!(
-            DevelopSettings::from_json(r#"{"schema_version": 2}"#),
+            DevelopSettings::from_json(r#"{"schema_version": 3}"#),
             Err(DevelopError::FutureSchemaVersion {
-                found: 2,
-                supported: 1
+                found: 3,
+                supported: 2
             })
         ));
         assert!(matches!(
-            DevelopSettings::from_json(r#"{"schema_version": 1, "process_version": 2}"#),
-            Err(DevelopError::UnsupportedProcessVersion { found: 2, .. })
+            DevelopSettings::from_json(r#"{"schema_version": 2, "process_version": 3}"#),
+            Err(DevelopError::UnsupportedProcessVersion { found: 3, .. })
         ));
         assert!(matches!(
             DevelopSettings::from_json(r#"{"schema_version": 1, "process_version": 0}"#),
@@ -301,7 +453,7 @@ mod tests {
 
     #[test]
     fn from_json_does_not_reject_out_of_range_values() {
-        let s = DevelopSettings::from_json(r#"{"schema_version": 1, "exposure_ev": 9.0}"#).unwrap();
+        let s = DevelopSettings::from_json(r#"{"schema_version": 2, "exposure_ev": 9.0}"#).unwrap();
         assert!(s.validate().is_err());
         assert_eq!(s.normalized().exposure_ev, 5.0);
     }
@@ -387,7 +539,8 @@ mod proptests {
             tint in any_f32(),
             luma in any_points(),
             red in any_points(),
-            pv in 0u32..4,
+            pv in 0u32..5,
+            extra in prop::array::uniform6(any_f32()),
         ) -> DevelopSettings {
             let mut s = DevelopSettings {
                 process_version: pv,
@@ -402,6 +555,14 @@ mod proptests {
             s.geometry.crop = CropRect { left: crop[0], top: crop[1], right: crop[2], bottom: crop[3] };
             s.tone_curve.luma = luma;
             s.tone_curve.red = red;
+            s.highlight_recovery = HighlightRecovery { method: HighlightMethod::Reconstruct, amount: extra[5] };
+            s.detail.noise_reduction = NoiseReduction {
+                luminance: extra[0],
+                luminance_detail: extra[1],
+                luminance_contrast: extra[2],
+                color: extra[3],
+                color_detail: extra[4],
+            };
             s
         }
     }

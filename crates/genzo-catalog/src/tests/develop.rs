@@ -375,6 +375,46 @@ fn batch_save_stores_different_settings_atomically() {
     assert!(f.cat.save_develop_batch(&[], "空").unwrap().is_empty());
 }
 
+/// 履歴の名前を variant ごとに指定する一括の保存（DEV-30 の貼り付けで、処理バージョンも更新した写真）。
+#[test]
+fn labeled_batch_save_records_each_label_atomically() {
+    let mut f = Fixture::new();
+    let a = f.photo("A.ARW", 1, None).master_variant_id;
+    let b = f.photo("B.ARW", 2, None).master_variant_id;
+    let entries = f
+        .cat
+        .save_develop_labeled(&[
+            (a, exposure(0.5), "設定の貼り付け".to_owned()),
+            (
+                b,
+                exposure(-0.5),
+                "設定の貼り付け・処理バージョンを 2 に更新".to_owned(),
+            ),
+        ])
+        .unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(f.cat.develop_settings(b).unwrap(), exposure(-0.5));
+    assert_eq!(
+        labels(&f.cat, a),
+        vec![HISTORY_LABEL_IMPORT, "設定の貼り付け"]
+    );
+    assert_eq!(
+        labels(&f.cat, b),
+        vec![
+            HISTORY_LABEL_IMPORT,
+            "設定の貼り付け・処理バージョンを 2 に更新"
+        ]
+    );
+    // 1 件でも失敗したら、すべて取り消す。
+    let bad = [
+        (a, exposure(1.5), "x".to_owned()),
+        (VariantId::new(9999), exposure(1.0), "y".to_owned()),
+    ];
+    assert!(f.cat.save_develop_labeled(&bad).is_err());
+    assert_eq!(f.cat.develop_settings(a).unwrap(), exposure(0.5));
+    assert_eq!(f.cat.history(a).unwrap().len(), 2);
+}
+
 #[test]
 fn virtual_copies_are_deleted_atomically() {
     let mut f = Fixture::new();

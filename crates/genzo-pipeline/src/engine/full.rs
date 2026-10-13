@@ -665,7 +665,7 @@ impl Engine {
                     None,
                     frames,
                     SensorGrid::full_resolution(&frames),
-                    Vec::new(),
+                    crate::sensor::working_sensor_warnings(settings)?,
                 )
             }
         })

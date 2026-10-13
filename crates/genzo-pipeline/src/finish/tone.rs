@@ -161,7 +161,7 @@ impl Stage for ToneStage {
         ctx: &StageContext<'_>,
     ) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => {}
+            ProcessVersion::V1 | ProcessVersion::V2 => {}
         }
         let s = settings.normalized();
         let t = s.tone;
@@ -196,7 +196,7 @@ impl Stage for ToneStage {
     ) -> Result<()> {
         let p = *params.expect::<ToneStageParams>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 => {}
+            ProcessVersion::V1 | ProcessVersion::V2 => {}
         }
         let guide = &checked_guide(ctx, Self::ID)?.image;
         map_pixels(input, output, |x, y, c| {

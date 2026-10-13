@@ -1,20 +1,30 @@
-// 現像のパネル（右。DEV-03〜05・07・08・15・26）。
+// 現像のパネル（右。DEV-03〜08・13〜15・26）。
 //
-// - ヒストグラム・基本補正（WB・露光量・コントラスト・ハイライト / シャドウ・白 / 黒・自然な彩度・彩度）・
-//   トーンカーブ（パラメトリックとポイント）・切り抜きと角度・すべてリセット・警告と元の画像の情報。
+// - ヒストグラム・基本補正（WB・露光量・コントラスト・ハイライト / シャドウ・白 / 黒・ハイライト復元（処理バージョン 2
+//   から。RAW だけ）・自然な彩度・彩度）・トーンカーブ（パラメトリックとポイント）・ディテール（ノイズ軽減の輝度・
+//   カラー。処理バージョン 2 から。RAW だけ）・切り抜きと角度・レンズ補正（プロファイル・色収差の除去・手動の
+//   歪曲 / 周辺減光 / 色収差。処理バージョン 2 から）・すべてリセット・警告と元の画像の情報（処理バージョンの
+//   更新）。
 // - 値は developStore.settings（送信前を含む最新の値）から読み、変更は applySettings で送る（ドラッグ中は
 //   dragging: true、離したら endDrag。state/develop.ts の送信の列）。
 // - 写真を開いている間・開けなかったときは、操作を無効にする。
 
 import { useState } from "react";
 
-import type { CurvePoint, DevelopSettings, WbPreset } from "../api/types";
+import type {
+  CurvePoint,
+  DevelopSettings,
+  HighlightMethod,
+  LensCorrection,
+  NoiseReduction,
+  WbPreset,
+} from "../api/types";
 import { RANGES, WB_PRESETS } from "../api/types";
 import { Section } from "../components/Section";
 import { Slider } from "../components/Slider";
 import { comboLabel } from "../keyboard";
 import { useApp } from "../state/app";
-import { applySettings, developStore, endDrag, useDevelop } from "../state/develop";
+import { applySettings, developStore, endDrag, upgradeProcessVersion, useDevelop } from "../state/develop";
 import { ASPECT_CHOICES, aspectKey } from "./cropMath";
 import { CURVE_CHANNELS, type CurveChannel, withChannel } from "./curveMath";
 import { Histogram } from "./Histogram";
@@ -23,13 +33,31 @@ import {
   formatAngle,
   formatEv,
   formatKelvin,
+  formatPercent,
   formatSigned,
   parseNumber,
   positionToTemperature,
   sameShown,
   temperatureToPosition,
 } from "./scales";
-import { type WbMode, customWb, defaultGeometry, effectiveWb, resetAll, wbFromMode, wbMode } from "./settingsLogic";
+import {
+  type WbMode,
+  canUpgradeProcess,
+  customWb,
+  defaultGeometry,
+  defaultLens,
+  defaultNoiseReduction,
+  effectiveWb,
+  fullHighlightRecovery,
+  fullLens,
+  fullNoiseReduction,
+  lensControls,
+  lensInfoNote,
+  resetAll,
+  sensorControls,
+  wbFromMode,
+  wbMode,
+} from "./settingsLogic";
 import { ToneCurveEditor } from "./ToneCurveEditor";
 import {
   cancelCrop,
@@ -48,10 +76,10 @@ import "./develop.css";
 const PLACEHOLDER: DevelopSettings = resetAll({
   schema_version: 0,
   process_version: 0,
-  lens: { profile_enabled: false, distortion_scale: 100, vignetting_scale: 100, remove_chromatic_aberration: false },
+  lens: defaultLens(),
   detail: {
     sharpening: { amount: 0, radius: 1, detail: 0, masking: 0 },
-    noise_reduction: { luminance: 0, color: 0 },
+    noise_reduction: defaultNoiseReduction(),
   },
   masks: [],
   render_deps: { camera_profile: { id: "", sha256: "" }, lens_profile: null, raw_decoder: "" },
@@ -290,8 +318,225 @@ function BasicSection(props: { settings: DevelopSettings; disabled: boolean }) {
         onCommit={endDrag}
       />
       <SliderRows defs={TONE_SLIDERS} settings={settings} disabled={disabled} />
+      <HighlightRecoveryRows settings={settings} disabled={disabled} />
       <div className="dp-sub">色</div>
       <SliderRows defs={COLOR_SLIDERS} settings={settings} disabled={disabled} />
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ハイライト復元（DEV-06）・ノイズ軽減（DEV-13）。処理バージョン 2 から。RAW だけ。
+// ---------------------------------------------------------------------------
+
+const HIGHLIGHT_METHODS: { value: HighlightMethod; label: string; title: string }[] = [
+  { value: "clip", label: "白で切りそろえる", title: "白飛びしたところを白にそろえます（復元しない。これまでと同じ）" },
+  {
+    value: "neutral",
+    label: "明るさだけ復元",
+    title: "白飛びしたチャンネルの明るさを、ほかのチャンネルから復元します（色は付けない）",
+  },
+  {
+    value: "reconstruct",
+    label: "色を保って復元",
+    title: "白飛びしたチャンネルを、近くの白飛びしていない部分の色の比から復元します",
+  },
+];
+
+/** 処理バージョンが古いときの知らせと、更新のボタン（ハイライト復元・ディテールのパネル）。 */
+function UpgradeNote(props: { what: string; processVersion: number }) {
+  const latest = useDevelop((s) => s.state?.latest_process_version);
+  return (
+    <div className="dp-note">
+      {`この写真の処理バージョン（${props.processVersion}）では、${props.what}は使われません。`}
+      {"処理バージョンを更新すると使えます（使わなければ見え方は変わりません。履歴から取り消せます）。"}
+      {canUpgradeProcess(props.processVersion, latest) && (
+        <div className="dp-row">
+          <button className="btn small" onClick={() => void upgradeProcessVersion()}>
+            処理バージョンを {latest} に更新
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HighlightRecoveryRows(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const source = useDevelop((s) => s.state?.source ?? null);
+  const c = sensorControls(settings, source, disabled);
+  const hr = fullHighlightRecovery(settings.highlight_recovery);
+  const pct = (v: number) => `${Math.round(v)}`;
+  return (
+    <>
+      <div className="dp-sub">ハイライト復元</div>
+      {c.needsUpgrade && !disabled && (
+        <UpgradeNote what="ハイライト復元" processVersion={settings.process_version} />
+      )}
+      <div className="dp-row">
+        <select
+          value={hr.method}
+          disabled={!c.highlight}
+          aria-label="ハイライト復元の方式"
+          title={HIGHLIGHT_METHODS.find((m) => m.value === hr.method)?.title}
+          onChange={(e) =>
+            update(
+              (s) => ({
+                ...s,
+                highlight_recovery: {
+                  ...fullHighlightRecovery(s.highlight_recovery),
+                  method: e.target.value as HighlightMethod,
+                },
+              }),
+              false,
+            )
+          }
+        >
+          {HIGHLIGHT_METHODS.map((m) => (
+            <option key={m.value} value={m.value} title={m.title}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <Slider
+        label="量"
+        value={hr.amount}
+        min={RANGES.amount.min}
+        max={RANGES.amount.max}
+        step={1}
+        defaultValue={100}
+        format={pct}
+        parse={parseNumber}
+        disabled={!c.highlightAmount}
+        onChange={(v, dragging) =>
+          update((s) => {
+            const cur = fullHighlightRecovery(s.highlight_recovery);
+            if (sameShown(pct, v, cur.amount)) return null;
+            return { ...s, highlight_recovery: { ...cur, amount: Math.round(v) } };
+          }, dragging)
+        }
+        onCommit={endDrag}
+        title="復元の強さ（0 で白で切りそろえたのと同じ、100 で方式どおりに復元）"
+      />
+      {c.notRaw && !c.needsUpgrade && (
+        <div className="dp-note">RAW 以外の写真では、ハイライト復元は使われません。</div>
+      )}
+    </>
+  );
+}
+
+interface NoiseSliderDef {
+  key: keyof NoiseReduction;
+  label: string;
+  defaultValue: number;
+  title: string;
+  /** 動かせるか（量が 0 でないときだけ動かせる項目がある）。 */
+  enabled: (c: ReturnType<typeof sensorControls>) => boolean;
+}
+
+const LUMINANCE_SLIDERS: NoiseSliderDef[] = [
+  {
+    key: "luminance",
+    label: "輝度",
+    defaultValue: 0,
+    title: "明るさのざらつき（輝度ノイズ）を減らします",
+    enabled: (c) => c.noise,
+  },
+  {
+    key: "luminance_detail",
+    label: "ディテール",
+    defaultValue: 50,
+    title: "大きいほど細かい模様を残します（細かい段の軽減を弱めます）",
+    enabled: (c) => c.luminanceOptions,
+  },
+  {
+    key: "luminance_contrast",
+    label: "コントラスト",
+    defaultValue: 0,
+    title: "大きいほど大きな模様の明暗を残します（粗い段の軽減を弱めます）",
+    enabled: (c) => c.luminanceOptions,
+  },
+];
+
+const COLOR_NOISE_SLIDERS: NoiseSliderDef[] = [
+  {
+    key: "color",
+    label: "カラー",
+    defaultValue: 0,
+    title: "色のまだら（カラーノイズ）を減らします",
+    enabled: (c) => c.noise,
+  },
+  {
+    key: "color_detail",
+    label: "ディテール",
+    defaultValue: 50,
+    title: "大きいほど細かい色の境界を残します（細かい段の軽減を弱めます）",
+    enabled: (c) => c.colorOptions,
+  },
+];
+
+function NoiseSliders(props: {
+  defs: NoiseSliderDef[];
+  nr: NoiseReduction;
+  controls: ReturnType<typeof sensorControls>;
+}) {
+  const fmt = (v: number) => String(Math.round(v));
+  return (
+    <>
+      {props.defs.map((d) => (
+        <Slider
+          key={d.key}
+          label={d.label}
+          value={props.nr[d.key]}
+          min={RANGES.amount.min}
+          max={RANGES.amount.max}
+          step={1}
+          defaultValue={d.defaultValue}
+          format={fmt}
+          parse={parseNumber}
+          disabled={!d.enabled(props.controls)}
+          onChange={(v, dragging) =>
+            update((s) => {
+              const nr = fullNoiseReduction(s.detail?.noise_reduction);
+              if (sameShown(fmt, v, nr[d.key])) return null;
+              return { ...s, detail: { ...s.detail, noise_reduction: { ...nr, [d.key]: Math.round(v) } } };
+            }, dragging)
+          }
+          onCommit={endDrag}
+          title={d.title}
+        />
+      ))}
+    </>
+  );
+}
+
+function DetailSection(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const source = useDevelop((s) => s.state?.source ?? null);
+  const c = sensorControls(settings, source, disabled);
+  const nr = fullNoiseReduction(settings.detail?.noise_reduction);
+  const changed = JSON.stringify(nr) !== JSON.stringify(defaultNoiseReduction());
+  return (
+    <Section id="develop.detail" title="ディテール" defaultOpen={false}>
+      {c.needsUpgrade && !disabled && <UpgradeNote what="ノイズ軽減" processVersion={settings.process_version} />}
+      <div className="dp-sub">ノイズ軽減</div>
+      <NoiseSliders defs={LUMINANCE_SLIDERS} nr={nr} controls={c} />
+      <NoiseSliders defs={COLOR_NOISE_SLIDERS} nr={nr} controls={c} />
+      {c.notRaw && !c.needsUpgrade && <div className="dp-note">RAW 以外の写真では、ノイズ軽減は使われません。</div>}
+      <div className="dp-row">
+        <span className="grow" />
+        <button
+          className="btn small"
+          disabled={disabled || c.needsUpgrade || !changed}
+          onClick={() =>
+            update((s) => ({ ...s, detail: { ...s.detail, noise_reduction: defaultNoiseReduction() } }), false)
+          }
+          title="ノイズ軽減を元に戻す（軽減しない）"
+        >
+          リセット
+        </button>
+      </div>
     </Section>
   );
 }
@@ -431,6 +676,211 @@ function CropSection(props: { settings: DevelopSettings; disabled: boolean }) {
 }
 
 // ---------------------------------------------------------------------------
+// レンズ補正（DEV-14）
+// ---------------------------------------------------------------------------
+
+interface LensSliderDef {
+  key: keyof LensCorrection;
+  label: string;
+  min: number;
+  max: number;
+  defaultValue: number;
+  format: (v: number) => string;
+  title: string;
+}
+
+const PROFILE_SLIDERS: Record<"distortion_scale" | "vignetting_scale", LensSliderDef> = {
+  distortion_scale: {
+    key: "distortion_scale",
+    label: "歪曲（適用量）",
+    min: RANGES.lensScale.min,
+    max: RANGES.lensScale.max,
+    defaultValue: 100,
+    format: formatPercent,
+    title: "埋め込みの情報による歪曲補正の強さ（100% で情報どおり）",
+  },
+  vignetting_scale: {
+    key: "vignetting_scale",
+    label: "周辺減光（適用量）",
+    min: RANGES.lensScale.min,
+    max: RANGES.lensScale.max,
+    defaultValue: 100,
+    format: formatPercent,
+    title: "埋め込みの情報による周辺減光補正の強さ（100% で情報どおり）",
+  },
+};
+
+const MANUAL_SLIDERS: Record<
+  "distortion" | "vignetting_amount" | "vignetting_midpoint" | "ca_red_cyan" | "ca_blue_yellow",
+  LensSliderDef
+> = {
+  distortion: {
+    key: "distortion",
+    label: "歪曲",
+    min: RANGES.lensManual.min,
+    max: RANGES.lensManual.max,
+    defaultValue: 0,
+    format: signed0,
+    title: "正で樽型の歪曲（線が外へふくらむ）を、負で糸巻き型の歪曲を補正します。画像の欠けないように拡大します",
+  },
+  vignetting_amount: {
+    key: "vignetting_amount",
+    label: "周辺減光",
+    min: RANGES.lensManual.min,
+    max: RANGES.lensManual.max,
+    defaultValue: 0,
+    format: signed0,
+    title: "正で四隅を明るくし、負で暗くします",
+  },
+  vignetting_midpoint: {
+    key: "vignetting_midpoint",
+    label: "中点",
+    min: RANGES.lensMidpoint.min,
+    max: RANGES.lensMidpoint.max,
+    defaultValue: 50,
+    format: (v) => String(Math.round(v)),
+    title: "周辺減光の補正を始める位置（小さいほど中心に近い位置から補正します）",
+  },
+  ca_red_cyan: {
+    key: "ca_red_cyan",
+    label: "赤 / シアン",
+    min: RANGES.lensManual.min,
+    max: RANGES.lensManual.max,
+    defaultValue: 0,
+    format: signed0,
+    title: "倍率色収差の補正: 正で赤の像を大きくします（縁の赤・シアンの色ずれを打ち消す向きに動かします）",
+  },
+  ca_blue_yellow: {
+    key: "ca_blue_yellow",
+    label: "青 / 黄",
+    min: RANGES.lensManual.min,
+    max: RANGES.lensManual.max,
+    defaultValue: 0,
+    format: signed0,
+    title: "倍率色収差の補正: 正で青の像を大きくします（縁の青・黄の色ずれを打ち消す向きに動かします）",
+  },
+};
+
+function LensSlider(props: { def: LensSliderDef; lens: LensCorrection; disabled: boolean }) {
+  const { def } = props;
+  return (
+    <Slider
+      label={def.label}
+      value={props.lens[def.key] as number}
+      min={def.min}
+      max={def.max}
+      step={1}
+      defaultValue={def.defaultValue}
+      format={def.format}
+      parse={parseNumber}
+      disabled={props.disabled}
+      onChange={(v, dragging) =>
+        update((s) => {
+          const lens = fullLens(s.lens);
+          if (sameShown(def.format, v, lens[def.key] as number)) return null;
+          return { ...s, lens: { ...lens, [def.key]: Math.round(v) } };
+        }, dragging)
+      }
+      onCommit={endDrag}
+      title={def.title}
+    />
+  );
+}
+
+function LensCheck(props: {
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  title: string;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <label className={`dp-check${props.disabled ? " disabled" : ""}`} title={props.title}>
+      <input
+        type="checkbox"
+        checked={props.checked}
+        disabled={props.disabled}
+        onChange={(e) => props.onChange(e.target.checked)}
+      />
+      {props.label}
+    </label>
+  );
+}
+
+function setLens(patch: Partial<LensCorrection>): void {
+  update((s) => ({ ...s, lens: { ...fullLens(s.lens), ...patch } }), false);
+}
+
+function LensSection(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const source = useDevelop((s) => s.state?.source ?? null);
+  const latest = useDevelop((s) => s.state?.latest_process_version);
+  const lens = fullLens(settings.lens);
+  const c = lensControls(settings, source, disabled);
+  const isRaw = !!source?.is_raw;
+  const infoNote = lensInfoNote(source);
+  const changed = JSON.stringify(lens) !== JSON.stringify(defaultLens());
+  return (
+    <Section id="develop.lens" title="レンズ補正" defaultOpen={false}>
+      {c.needsUpgrade && !disabled && (
+        <div className="dp-note">
+          {`この写真の処理バージョン（${settings.process_version}）では、レンズ補正は使われません。`}
+          {"処理バージョンを更新すると使えます（レンズ補正を使わなければ見え方は変わりません。履歴から取り消せます）。"}
+          {canUpgradeProcess(settings.process_version, latest) && (
+            <div className="dp-row">
+              <button className="btn small" onClick={() => void upgradeProcessVersion()}>
+                処理バージョンを {latest} に更新
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="dp-sub">プロファイル</div>
+      <LensCheck
+        label="プロファイルによる補正を有効"
+        checked={lens.profile_enabled}
+        disabled={!c.profile}
+        title="RAW に埋め込まれた補正の情報で、歪曲と周辺減光を補正します"
+        onChange={(on) => setLens({ profile_enabled: on })}
+      />
+      <LensCheck
+        label="色収差を除去"
+        checked={lens.remove_chromatic_aberration}
+        disabled={!c.removeCa}
+        title="RAW に埋め込まれた補正の情報で、倍率色収差（縁の色ずれ）を補正します"
+        onChange={(on) => setLens({ remove_chromatic_aberration: on })}
+      />
+      {infoNote !== null && <div className="dp-note">{infoNote}</div>}
+      <LensSlider def={PROFILE_SLIDERS.distortion_scale} lens={lens} disabled={!c.distortionScale} />
+      <LensSlider def={PROFILE_SLIDERS.vignetting_scale} lens={lens} disabled={!c.vignettingScale} />
+      <div className="dp-sub">手動</div>
+      <LensSlider def={MANUAL_SLIDERS.distortion} lens={lens} disabled={!c.manualDistortion} />
+      <LensSlider def={MANUAL_SLIDERS.vignetting_amount} lens={lens} disabled={!c.manualSensor} />
+      <LensSlider def={MANUAL_SLIDERS.vignetting_midpoint} lens={lens} disabled={!c.manualSensor} />
+      <div className="dp-sub">色収差</div>
+      <LensSlider def={MANUAL_SLIDERS.ca_red_cyan} lens={lens} disabled={!c.manualSensor} />
+      <LensSlider def={MANUAL_SLIDERS.ca_blue_yellow} lens={lens} disabled={!c.manualSensor} />
+      {source && !isRaw && !c.needsUpgrade && (
+        <div className="dp-note">
+          RAW 以外の写真では、プロファイルによる補正・周辺減光・色収差の補正は使われません（歪曲の手動の補正は使えます）。
+        </div>
+      )}
+      <div className="dp-row">
+        <span className="grow" />
+        <button
+          className="btn small"
+          disabled={disabled || c.needsUpgrade || !changed}
+          onClick={() => update((s) => ({ ...s, lens: defaultLens() }), false)}
+          title="レンズ補正を元に戻す（補正なし）"
+        >
+          リセット
+        </button>
+      </div>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 情報
 // ---------------------------------------------------------------------------
 
@@ -460,6 +910,8 @@ function InfoSection() {
       : null,
   );
   const assumedSrgb = useDevelop((s) => !!s.frame?.header.display_assumed_srgb);
+  const processVersion = useDevelop((s) => (s.state && s.settings ? s.settings.process_version : null));
+  const latest = useDevelop((s) => s.state?.latest_process_version);
   return (
     <Section id="develop.info" title="情報" defaultOpen={false}>
       {source ? (
@@ -488,6 +940,15 @@ function InfoSection() {
             <>
               <dt>画面の色</dt>
               <dd>sRGB とみなして表示しています</dd>
+            </>
+          )}
+          {processVersion !== null && (
+            <>
+              <dt>処理バージョン</dt>
+              <dd>
+                {processVersion}
+                {canUpgradeProcess(processVersion, latest) ? `（最新は ${latest}）` : ""}
+              </dd>
             </>
           )}
         </dl>
@@ -530,7 +991,9 @@ export function DevelopPanel() {
       )}
       <BasicSection settings={shown} disabled={disabled} />
       <CurveSection settings={shown} disabled={disabled} />
+      <DetailSection settings={shown} disabled={disabled} />
       <CropSection settings={shown} disabled={disabled} />
+      <LensSection settings={shown} disabled={disabled} />
       <div className="dp-actions">
         <button
           className="btn"
@@ -540,7 +1003,7 @@ export function DevelopPanel() {
             if (viewStore.get().crop) void cancelCrop();
             update((s) => resetAll(s), false);
           }}
-          title="切り抜きを含むすべての調整を元に戻す（レンズ補正・ディテール・部分補正は保つ）"
+          title="切り抜き・レンズ補正・ハイライト復元・ノイズ軽減を含むすべての調整を元に戻す（シャープ・部分補正は保つ）"
         >
           すべてリセット
         </button>

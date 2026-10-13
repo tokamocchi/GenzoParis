@@ -282,6 +282,11 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
     case "edit_capture_time":
       openCaptureTimeDialog();
       return;
+    case "upgrade_process": {
+      const targets = actions.targets();
+      if (targets.length > 0) actions.openDialog({ kind: "upgrade_process", targets });
+      return;
+    }
     case "move_to_folder":
       openMoveFiles(null);
       return;

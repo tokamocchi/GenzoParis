@@ -81,6 +81,8 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | SQLite | カタログ DB とサムネイル DB（`genzo-catalog`。04 の 3 章） | 3.53.2（`libsqlite3-sys` 0.38.2 が同梱する amalgamation。`rusqlite` 0.40.2） | crates.io の `libsqlite3-sys`（`sqlite3/` に同梱）。上流は https://sqlite.org/ | パブリックドメイン（`sqlite3.c` のヘッダの「The author disclaims copyright to this source code」で確認）。バインディングの crate は MIT | 静的リンク。`rusqlite` の機能フラグ `bundled` と `backup`。コンパイルの設定は `libsqlite3-sys` の build.rs の既定（3.3 節）。システムの SQLite は使わない | 実行ファイルに含まれる。対応するソースは crates.io の `libsqlite3-sys` 0.38.2 | SQLite 自体は不要とされる（パブリックドメイン）。バインディングの MIT の表記は Rust のクレートとして扱う | AI 記入（2026-10-09）。人の確認待ち |
 | FFmpeg / ffprobe | 動画のメタデータの取得とサムネイルの生成（`genzo-media`）。子プロセスとして実行する（04 の 1.2 節） | 開発環境は 6.1.1。配布する版は未定 | 開発環境は Ubuntu 24.04 の apt（`ffmpeg` 7:6.1.1-3ubuntu5）。配布物での入手方法は未定 | ビルドの構成で LGPL-2.1-or-later・GPL-2.0-or-later・(L)GPL-3.0-or-later のいずれかになり、`--enable-nonfree` のビルドは再配布できないとされる。開発環境の版は `--enable-gpl` のビルド（`ffmpeg -version` の configure の引数と、Ubuntu の copyright ファイルで確認）。上流の LICENSE.md は未確認 | リンクしない（子プロセス）。同梱する場合は configure の引数を記録する | 未定（同梱するか、利用者に入れてもらうか）。同梱する場合は対応するソースとビルドの構成の提供が必要 | 同梱する場合は、ライセンスの全文、ビルドの構成、組み込んだ外部ライブラリの表記（要確認） | AI 記入（2026-10-09）。配布の方針は人の判断待ち |
 | RCD デモザイク | デモザイク（04 の 2.1 節のステージ 5。最終品質。既定のまま。決定事項ログ No.34） | CPU 版は `crates/genzo-pipeline/src/sensor/demosaic/rcd.rs`（2026-10-10。調査の時点の SHA-256 `3fe730d9b5bf8e4a876aae7d7c5bbed0075e3778c5271d1edf0dff7b471313fc`、追加したコミット 527f911）。GPU 版は未実装（書き出しのセンサー処理は CPU 版を使う）。第三者のファイルは取り込んでいない | アルゴリズムの考案者は Luis Sanz Rodríguez。考案者の実装は https://github.com/LuisSR/RCD-Demosaicing （`rcd_demosaicing.c`、Release 2.3）。改変した実装は RawTherapee・darktable・librtprocess にある（3.5 節に URL・コミット）。**`rcd.rs` は、これらの実装（特に 2021 年以降の改変版）と手順・定数・式の書き方・変数名が一致する**（2026-10-10 の AI の調査。3.5 節） | 自前のファイルとして、アプリと同じ GPL-3.0-or-later。比べた実装のファイルの表示は、RawTherapee・darktable・librtprocess が GPL-3.0-or-later、考案者の実装は LICENSE が GPL 第 3 版の全文でソースに表示なし（3.5 節）。由来の扱いと元の著作権表示の書き方は**人・専門家の確認待ち** | 該当なし（自前の Rust のコード） | アプリのソースに含まれる | 考案者の名前は doc コメントに記載済み。RawTherapee・darktable の版を参考にした実装として扱い、元の著作権表示（RawTherapee: Luis Sanz Rodriguez・Ingo Weyrich、darktable: darktable developers）と出典を `rcd.rs` のヘッダに記載した（2026-10-10。3.5 節）。書き方の妥当性は人・専門家の確認待ち | AI 記入（2026-10-10）。出典の調査は済み（2026-10-10）。扱いは人・専門家の確認待ち |
+| darktable のレンズ補正（埋め込みのメタデータの解釈。参考） | Sony の ARW に埋め込まれたレンズ補正の値（0x7032・0x7035・0x7037）の意味と、DNG の opcode（WarpRectilinear・FixVignetteRadial）の形・式の確認（DEV-14。決定事項ログ No.121。04 の 2.1 節のステージ 7・9） | darktable のブランチ master（2026-10-13 に取得。コミットは記録していない）の `src/iop/lens.cc`・`src/common/exif.cc`・`src/common/dng_opcode.c`（SHA-256 は 3.9 節） | https://github.com/darktable-org/darktable | GPL-3.0-or-later（3 つのファイルのヘッダの「either version 3 of the License, or (at your option) any later version」で確認） | 該当なし（第三者のファイルは取り込んでいない。自前の Rust のコード `crates/genzo-raw/src/lens.rs`・`crates/genzo-pipeline/src/lens.rs`） | アプリのソースに含まれる（自前のコード） | 値の解釈（節点の位置・尺度・式）が darktable と同じなので、参考にした実装として、darktable の著作権表示（「Copyright (C) 2019-2026 darktable developers」）と出典・SHA-256 を `crates/genzo-pipeline/src/lens.rs` の doc に記載した（2026-10-13）。書き方の妥当性は人・専門家の確認待ち | AI 記入（2026-10-13）。扱いは人・専門家の確認待ち |
+| ハイライト復元・ノイズ軽減の手法（公開の手法。参考） | ハイライト復元（DEV-06。04 の 2.1 節のステージ 4）とノイズ軽減（DEV-13。ステージ 6）の考え方: 近傍の色の比による再構成（最小二乗の比）、平方根による分散の安定化（Anscombe 変換の近似）、B3 スプラインの à trous ウェーブレットと non-negative garrote による係数の縮小（決定事項ログ No.126・127） | 該当なし（2026-10-13 の自前の実装。`crates/genzo-pipeline/src/sensor/highlight.rs`・`denoise.rs`、GPU 版は `crates/genzo-gpu/src/shaders/sensor.wgsl`・`denoise.wgsl`） | 文献の手法（3.10 節。**この実装では文献・第三者のコードを取得していない。AI の知識**） | 自前のコードとして、アプリと同じ GPL-3.0-or-later。第三者のコード（darktable・RawTherapee など）は参照・取り込みしていない | 該当なし（自前の Rust・WGSL のコード） | アプリのソースに含まれる（自前のコード） | 不要の見込み（コードを写していないため）。手法の出典は 3.10 節に記す | AI 記入（2026-10-13）。出典の書き方は人の確認待ち |
 | ColorChecker Classic の基準値 | PoC-4 の色の評価の基準とテスト（`crates/genzo-testkit/src/colorchecker.rs`。2014 年 11 月以降の版と、より前の版の 24 色 × L\*a\*b\*（D50）） | X-Rite の公表値（CGATS のファイル。2014 年 11 月以降の版の測定日は 2015-04-28）。値は colour-science 0.4.6 のデータから写したもの | X-Rite（現在は Calibrite）の公表資料。2026-10-10 の照合には、GitHub 上の第三者のリポジトリにある CGATS ファイルの写しを使った（3.8 節） | 利用条件は未確認（**要確認**） | 該当なし（テストのデータ） | `genzo-testkit` はテストと計測用の crate。開発用の CLI（`genzo`）は計測の記録のために依存するが、配布するアプリに含めるかは未定（含める場合は利用条件の確認が要る） | 出典（X-Rite）を doc に記載 | AI 記入（2026-10-10）。値は写しと一致、一次資料とは未照合（人の確認待ち） |
 | カメラ行列（α7 IV / α7C） | カメラ RGB から XYZ への変換（04 の 2.5 節の `render_deps`、2.6 節） | 未作成 | 候補は LibRaw の内蔵の表、DNG の ColorMatrix、カラーチャートからの自作（3.6 節） | 要確認（出典ごとに利用条件を確認する） | アプリのデータファイルとして持ち、ID とハッシュで参照する | アプリに同梱する予定 | 出典による（要確認） | 未着手 |
 | Mesa（llvmpipe） | 開発環境（Linux のコンテナ）で wgpu を動かすための、ソフトウェアの Vulkan | 25.2.8（`mesa-vulkan-drivers` 25.2.8-0ubuntu0.24.04.4）。Vulkan のローダーは `libvulkan1` 1.3.275.0 | Ubuntu 24.04 の apt | 主に MIT とされる（未確認。配布しないため優先度は低い） | wgpu が実行時に Vulkan のローダー経由で読み込む。ビルド時のリンクはない | **配布物に含めない** | 不要（配布しない） | 開発環境だけで使う |
@@ -234,11 +236,48 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   6. **利用条件**: 公表値をテストのデータとして使う条件は未確認です。
 - 結果は決定事項ログ No.37 の「再検討の条件」の欄に書いてください。確認の後に `colorchecker.rs` の doc の「照合」の記述を更新します（コードの変更。未対応）。
 
+### 3.9 レンズ補正の埋め込みの情報の解釈（darktable を参考にした）
+
+**実装の状況**（2026-10-13、AI 記入。DEV-14、決定事項ログ No.121〜123）
+- 利用者の決定（DEV-14）: **ARW / DNG に埋め込まれた補正の情報を使い、ない場合は手動のスライダーで補正する。lensfun などの外部のデータは使わない・同梱しない**。アプリは外部のレンズのデータベース・プロファイルを持たず、ダウンロードもしません。
+- 読み取り（`crates/genzo-raw/src/lens.rs`）と補正の計算（`crates/genzo-pipeline/src/lens.rs`、GPU 版は `crates/genzo-gpu/src/shaders/geometry.wgsl`）は自前の Rust・WGSL のコードです。**第三者のファイルは取り込んでいません**（取得したソースはリポジトリの外に置き、リポジトリにはコピーしていない）。
+- Sony の値の意味には公開の仕様がないため、darktable の解釈（`_init_coeffs_md_v2`。新しい現像で使われる版 2）に合わせました: 節点の位置 `(i + 0.5) / (n − 1)`、節点の間の線形補間、歪曲 `1 + t · d · 2^−14`、色収差 `1 + a · 2^−21`、周辺減光 `v' = 2^(0.5 − 2^(t · v · 2^−13 − 1))` で画素を割る（下限 1e-4）。**コードは写していません**が、値の解釈と式が同じなので、参考にした実装として著作権表示と出典を `genzo-pipeline/src/lens.rs` の doc に書きました。
+- DNG の opcode の形（見出し・面の数・係数）は `dng_opcode.c` で確かめました（WarpRectilinear は面ごとに係数 6 個と中心 2 個）。式は darktable の `lens.cc` の DNG の扱いと同じです。ただし darktable は中心を画像の中心、半径の基準を画像の対角線の半分にしていて、GenzoParis は opcode の光学中心と、中心から最も遠い隅までの距離を使います（DNG の仕様の記述による。**仕様書はこの調査では取得していない。AI の知識**）。
+- Sony のタグの場所（RAW の SubIFD。Exiv2 の `Exif.SubImage1.*CorrParams`）は `exif.cc` で確かめました。ExifTool のタグの表は、この調査では取得していません。
+
+**調べたファイル**（2026-10-13、AI の調査。GitHub の公開リポジトリから匿名で取得。**法的な評価（派生物に当たるかなど）はしていません**。記録に使う前に元のページで確かめてください）
+
+| ファイル | 取得元 | 版（取得時点） | ライセンスの表示 | 著作権の表示 | SHA-256 |
+|---|---|---|---|---|---|
+| `src/iop/lens.cc` | https://raw.githubusercontent.com/darktable-org/darktable/master/src/iop/lens.cc | ブランチ master（2026-10-13。コミットは記録していない） | GPL-3.0-or-later | 「Copyright (C) 2019-2026 darktable developers.」 | `5801e7dd1ef957a8fd243badb3fc28b579a919aa9abcb39c42c9dd2444577886` |
+| `src/common/exif.cc` | https://raw.githubusercontent.com/darktable-org/darktable/master/src/common/exif.cc | 同上 | GPL-3.0-or-later | 「Copyright (C) 2009-2026 darktable developers.」 | `c5ecf9fff1234a329fd1e82c9ad6d571ba6e321d922eed01f5a58f6b87c314f5` |
+| `src/common/dng_opcode.c` | https://raw.githubusercontent.com/darktable-org/darktable/master/src/common/dng_opcode.c | 同上 | GPL-3.0-or-later | 「Copyright (C) 2011-2023 darktable developers.」 | `61f775f54e25aa1cba4cae6b3a4252adee86a9591ef4e1c9cbc694346a5b5e39` |
+
+- **人の確認が必要な事項**
+  1. 値の解釈を参考にした（コードは写していない）実装の、著作権表示の書き方と扱い（RCD デモザイクの 3.5 節と同じ論点）。
+  2. 取得したファイルのコミット（記録していない。上の SHA-256 で同じファイルかを確かめられる）。
+  3. Sony の値の意味が実機の ARW で正しいか（人の判断の表 No.131）。DNG の opcode の中心と半径の基準（同 No.132）。
+
+### 3.10 ハイライト復元・ノイズ軽減の手法（公開の手法。第三者のコードは参照していない）
+
+**実装の状況**（2026-10-13、AI 記入。DEV-06・DEV-13、決定事項ログ No.126・127）
+- ハイライト復元（`crates/genzo-pipeline/src/sensor/highlight.rs`、GPU 版は `crates/genzo-gpu/src/shaders/sensor.wgsl` の `highlight_main`）とノイズ軽減（`crates/genzo-pipeline/src/sensor/denoise.rs`、GPU 版は `crates/genzo-gpu/src/shaders/denoise.wgsl`）は自前の Rust・WGSL のコードです。**第三者のファイル・コードは取得も取り込みもしていません**（darktable の「inpaint opposed」「denoise (wavelets)」・RawTherapee の「color propagation」・dcraw の `-H` の各方式は、この実装のために読んでいません。名前と考え方は AI の知識として知っているもの）。
+- 使った考え方（公開の手法。**文献はこの調査では取得していない。出典は AI の知識による**）:
+  - 飽和したチャンネルを、近傍の飽和していない画素の色の比で再構成する（ハイライト復元の一般的な考え方）。比は最小二乗の形（`Σ u·c / Σ u²`）で、明るい参照を重く見る重みと、手がかりの少なさによる明るさだけの復元への移り方は、この実装で決めたもの。
+  - 分散の安定化: 光のショットノイズに対する平方根の変換（F. J. Anscombe, 1948 の変換の近似）。
+  - à trous（穴あき）のウェーブレット変換と B3 スプラインの 5 タップ `[1, 4, 6, 4, 1] / 16`（J.-L. Starck・F. Murtagh らの多重解像度の画像処理の文献で広く使われるもの）。
+  - 係数の縮小の non-negative garrote（L. Breiman, 1995。ウェーブレットの縮小への応用は H.-Y. Gao, 1998）。
+- 段ごとの雑音の大きさの表（`NR_LUMA_LEVEL_NOISE` など）は、合成の雑音をこのアプリの RCD でデモザイクして計測した値（`denoise/tests.rs`）。
+
+- **人の確認が必要な事項**
+  1. 手法の出典の書き方（コードは写していないので著作権表示は要らない見込みだが、論文の参照の要否と書き方）。
+  2. 実写での画質（人の判断の表 No.137・138）。
+
 ## 4. 今後記入する対象
 
 使うことが決まった時点で、2 章の一覧に追加します。
 
-- lensfun（使う場合。ライブラリは LGPL-3.0、データベースは CC BY-SA 3.0 とされる。03 の 2.2 節）
+- lensfun（使う場合。ライブラリは LGPL-3.0、データベースは CC BY-SA 3.0 とされる。03 の 2.2 節）。2026-10-13 の DEV-14 で、利用者の決定により**使わない**ことになった（埋め込みの補正の情報と手動の補正だけ。3.9 節）
 - ICC プロファイル（sRGB・Display P3 などのファイルを同梱する場合）
 - Exiv2（使う場合。GPL-2.0-or-later とされる。03 の 2.1 節）
 - LibRaw が依存するライブラリ（libjpeg、OpenMP のランタイム、lcms2 など）を同梱する場合

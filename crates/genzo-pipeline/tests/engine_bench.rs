@@ -131,3 +131,88 @@ fn bench_a1_and_full_resolution_export_a7iv() {
         .unwrap();
     report(&result);
 }
+
+#[test]
+#[ignore = "計測（手動で --release で実行する）"]
+fn bench_a1_with_highlight_recovery_and_noise_reduction_a7iv() {
+    // ハイライト復元（ステージ 4）・ノイズ軽減（ステージ 6。処理バージョン 2）を有効にした段階 A1（最終品質・簡易処理）と
+    // 書き出し。シーンは busy_scene を 2.5 倍にして、明るい部分を白飛びさせる（白飛びの画素の割合は表示する）。
+    use genzo_model::{HighlightMethod, HighlightRecovery, NoiseReduction};
+    let (w, h) = A7IV;
+    let scene = busy_scene(w, h);
+    let bright = genzo_testkit::image::FloatImage::from_rgb_fn(w, h, |x, y| {
+        let p = scene.pixel(x, y).unwrap();
+        [p[0] * 2.5, p[1] * 2.5, p[2] * 2.5]
+    })
+    .unwrap();
+    let raw = raw_from(&bright);
+    let clipped = raw
+        .data
+        .iter()
+        .filter(|&&v| f32::from(v) >= raw.saturation_level)
+        .count();
+    println!(
+        "白飛びの画素の割合: {:.1} %",
+        100.0 * clipped as f64 / raw.data.len() as f64
+    );
+    let source = raw_source(raw);
+    let e = engine(2560, 1024);
+    let base = DevelopSettings::default();
+    let mut nr = DevelopSettings::default();
+    nr.detail.noise_reduction = NoiseReduction {
+        luminance: 30.0,
+        color: 25.0,
+        ..Default::default()
+    };
+    let mut color_only = DevelopSettings::default();
+    color_only.detail.noise_reduction.color = 25.0;
+    let hr = DevelopSettings {
+        highlight_recovery: HighlightRecovery {
+            method: HighlightMethod::Reconstruct,
+            amount: 100.0,
+        },
+        ..Default::default()
+    };
+    let mut both = nr.clone();
+    both.highlight_recovery = hr.highlight_recovery;
+    for (name, s, quality) in [
+        (
+            "engine_a1_final_v2_default_a7iv",
+            &base,
+            RenderQuality::Final,
+        ),
+        ("engine_a1_final_hr_a7iv", &hr, RenderQuality::Final),
+        (
+            "engine_a1_final_nr_color_a7iv",
+            &color_only,
+            RenderQuality::Final,
+        ),
+        ("engine_a1_final_nr_a7iv", &nr, RenderQuality::Final),
+        ("engine_a1_final_hr_nr_a7iv", &both, RenderQuality::Final),
+        ("engine_a1_draft_hr_nr_a7iv", &both, RenderQuality::Draft),
+    ] {
+        let result = Bench::batch(name)
+            .note("resolution", "7008x4672")
+            .note("backend", "cpu")
+            .develop_settings(s)
+            .run_cold(
+                || e.clear_caches(),
+                || e.a1(&source, s, quality, 2560).unwrap(),
+            )
+            .unwrap();
+        report(&result);
+    }
+    let export = ExportSettings::default();
+    let job = e.full_resolution(&source, &both).unwrap();
+    let result = Bench::batch("engine_export_jpeg8_hr_nr_a7iv")
+        .note("resolution", "7008x4672")
+        .note("backend", "cpu")
+        .note("tile", "1024")
+        .develop_settings(&both)
+        .run_warm(|| {
+            job.export(&export, &ExportOptions::default(), &NeverCancel)
+                .unwrap()
+        })
+        .unwrap();
+    report(&result);
+}

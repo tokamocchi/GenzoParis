@@ -16,12 +16,12 @@
 //! | 段階 | 含める項目 |
 //! |---|---|
 //! | A0 | process_version、RAW デコーダ（`render_deps.raw_decoder`） |
-//! | A1 | process_version、render_deps 全体（カメラプロファイル・レンズデータ・デコーダ）、WB、ノイズ軽減、レンズ補正のうちステージ 7 の項目（`lens.profile_enabled`・`lens.vignetting_scale`・`lens.remove_chromatic_aberration`） |
-//! | B | A1 の項目 ＋ 角度補正（回転）＋ 歪曲補正の適用量（`lens.distortion_scale`） |
+//! | A1 | process_version、render_deps 全体（カメラプロファイル・レンズデータ・デコーダ）、WB、ハイライト復元（ステージ 4）、ノイズ軽減（ステージ 6。ディテール・コントラストを含む）、レンズ補正のうちステージ 7 の項目（`lens.profile_enabled`・`lens.vignetting_scale`・`lens.remove_chromatic_aberration`・手動の周辺減光（`lens.vignetting_amount`・`lens.vignetting_midpoint`）・手動の色収差（`lens.ca_red_cyan`・`lens.ca_blue_yellow`）） |
+//! | B | A1 の項目 ＋ 角度補正（回転）＋ 歪曲補正の適用量（`lens.distortion_scale`）と手動の歪曲（`lens.distortion`） |
 //! | C | すべて（= [`DevelopSettings::develop_hash`]） |
 //!
 //! - 段階 A1 はステージ 2〜8（2.2 節）で、歪曲補正はステージ 9（ジオメトリ）に属する（2.1 節）。
-//!   そのため歪曲補正の適用量は A1 に含めず、B に含める（2.7 節の表の「回転、歪曲補正」）。
+//!   そのため歪曲補正の適用量と手動の歪曲は A1 に含めず、B に含める（2.7 節の表の「回転、歪曲補正」）。
 //!   歪曲補正を有効にするかどうか（`lens.profile_enabled`）は周辺減光と共通なので A1 に含まれ、
 //!   B にも A1 を通じて含まれる。
 //! - 露光量・切り抜き・ハイライトやシャドウなどのスライダーは B に含めない（2.7 節の表）。
@@ -31,7 +31,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::DevelopSettings;
-use super::params::{LensCorrection, NoiseReduction, RenderDeps, WhiteBalance};
+use super::params::{HighlightRecovery, LensCorrection, NoiseReduction, RenderDeps, WhiteBalance};
 use crate::Phase;
 
 /// 部分ハッシュの入力の前に付ける、段階ごとの区別のための文字列。
@@ -66,6 +66,10 @@ struct LensA1Input {
     profile_enabled: bool,
     vignetting_scale: f32,
     remove_chromatic_aberration: bool,
+    vignetting_amount: f32,
+    vignetting_midpoint: f32,
+    ca_red_cyan: f32,
+    ca_blue_yellow: f32,
 }
 
 impl LensA1Input {
@@ -74,6 +78,10 @@ impl LensA1Input {
             profile_enabled: lens.profile_enabled,
             vignetting_scale: lens.vignetting_scale,
             remove_chromatic_aberration: lens.remove_chromatic_aberration,
+            vignetting_amount: lens.vignetting_amount,
+            vignetting_midpoint: lens.vignetting_midpoint,
+            ca_red_cyan: lens.ca_red_cyan,
+            ca_blue_yellow: lens.ca_blue_yellow,
         }
     }
 }
@@ -83,6 +91,7 @@ struct A1Input<'a> {
     process_version: u32,
     render_deps: &'a RenderDeps,
     white_balance: &'a WhiteBalance,
+    highlight_recovery: &'a HighlightRecovery,
     lens: LensA1Input,
     noise_reduction: &'a NoiseReduction,
 }
@@ -93,6 +102,8 @@ struct BInput<'a> {
     angle_deg: f32,
     /// 歪曲補正の適用量（ステージ 9。有効かどうかは `a1.lens.profile_enabled`）。
     distortion_scale: f32,
+    /// 手動の歪曲（ステージ 9）。
+    distortion: f32,
 }
 
 fn a1_input(s: &DevelopSettings) -> A1Input<'_> {
@@ -100,6 +111,7 @@ fn a1_input(s: &DevelopSettings) -> A1Input<'_> {
         process_version: s.process_version,
         render_deps: &s.render_deps,
         white_balance: &s.white_balance,
+        highlight_recovery: &s.highlight_recovery,
         lens: LensA1Input::new(&s.lens),
         noise_reduction: &s.detail.noise_reduction,
     }
@@ -140,6 +152,7 @@ impl DevelopSettings {
                     a1: a1_input(&s),
                     angle_deg: s.geometry.angle_deg,
                     distortion_scale: s.lens.distortion_scale,
+                    distortion: s.lens.distortion,
                 };
                 sha256(&[DOMAIN_B, &to_json_bytes(&input)])
             }
@@ -226,6 +239,31 @@ mod tests {
         let mut b = a.clone();
         b.lens.distortion_scale = 50.0;
         assert_eq!(changed_phases(&a, &b), [Phase::B, Phase::C]);
+        // 手動の歪曲も同じ（DEV-14）。
+        let mut c = a.clone();
+        c.lens.distortion = 30.0;
+        assert_eq!(changed_phases(&a, &c), [Phase::B, Phase::C]);
+    }
+
+    #[test]
+    fn manual_vignetting_and_chromatic_aberration_change_a1() {
+        // 手動の周辺減光・色収差はステージ 7（段階 A1）。
+        let a = base();
+        let mut v = base();
+        v.lens.vignetting_amount = 40.0;
+        assert_eq!(changed_phases(&a, &v), [Phase::A1, Phase::B, Phase::C]);
+        let mut m = base();
+        m.lens.vignetting_midpoint = 20.0;
+        assert_eq!(changed_phases(&a, &m), [Phase::A1, Phase::B, Phase::C]);
+        let mut r = base();
+        r.lens.ca_red_cyan = -10.0;
+        assert_eq!(changed_phases(&a, &r), [Phase::A1, Phase::B, Phase::C]);
+        let mut b = base();
+        b.lens.ca_blue_yellow = 10.0;
+        assert_eq!(changed_phases(&a, &b), [Phase::A1, Phase::B, Phase::C]);
+        let mut lp = base();
+        lp.render_deps.lens_profile = Some(DataRef::new("sony_arw:x", "2".repeat(64)));
+        assert_eq!(changed_phases(&a, &lp), [Phase::A1, Phase::B, Phase::C]);
     }
 
     #[test]
@@ -248,6 +286,20 @@ mod tests {
         let mut nr = base();
         nr.detail.noise_reduction.luminance = 20.0;
         assert_eq!(changed_phases(&a, &nr), [Phase::A1, Phase::B, Phase::C]);
+
+        // ノイズ軽減のディテール・コントラスト（ステージ 6）とハイライト復元（ステージ 4）も段階 A1。
+        let mut nd = base();
+        nd.detail.noise_reduction.color_detail = 20.0;
+        assert_eq!(changed_phases(&a, &nd), [Phase::A1, Phase::B, Phase::C]);
+        let mut nc = base();
+        nc.detail.noise_reduction.luminance_contrast = 20.0;
+        assert_eq!(changed_phases(&a, &nc), [Phase::A1, Phase::B, Phase::C]);
+        let mut hr = base();
+        hr.highlight_recovery.method = crate::develop::params::HighlightMethod::Reconstruct;
+        assert_eq!(changed_phases(&a, &hr), [Phase::A1, Phase::B, Phase::C]);
+        let mut ha = base();
+        ha.highlight_recovery.amount = 50.0;
+        assert_eq!(changed_phases(&a, &ha), [Phase::A1, Phase::B, Phase::C]);
 
         let mut lens = base();
         lens.lens.profile_enabled = true;
@@ -279,11 +331,14 @@ mod tests {
         dec.render_deps.raw_decoder = "libraw-0.22.0".to_owned();
         assert_eq!(changed_phases(&a, &dec), Phase::ALL);
 
-        // process_version は丸めで 1〜現在の値に収まるため、ここでは丸めの前後の
-        // 等価性だけを確認する（値が 2 以上になったら変化のテストを追加する）。
+        // 処理バージョンが違えば、すべての段階が変わる（既定は現在の版 2）。
         let mut pv = base();
-        pv.process_version = 0;
-        assert_eq!(changed_phases(&a, &pv), Vec::<Phase>::new());
+        pv.process_version = 1;
+        assert_eq!(changed_phases(&a, &pv), Phase::ALL);
+        // 丸め（0 → 1）の前後は同じ。
+        let mut zero = base();
+        zero.process_version = 0;
+        assert_eq!(changed_phases(&pv, &zero), Vec::<Phase>::new());
     }
 
     #[test]
@@ -309,6 +364,7 @@ mod tests {
             "\"schema_version\"",
             "\"process_version\"",
             "\"white_balance\"",
+            "\"highlight_recovery\"",
             "\"exposure_ev\"",
             "\"contrast\"",
             "\"tone\"",
@@ -333,16 +389,18 @@ mod tests {
         assert_eq!(
             json,
             concat!(
-                r#"{"schema_version":1,"process_version":1,"white_balance":"as_shot","#,
+                r#"{"schema_version":2,"process_version":2,"white_balance":"as_shot","#,
+                r#""highlight_recovery":{"method":"clip","amount":100.0},"#,
                 r#""exposure_ev":0.0,"contrast":0.0,"#,
                 r#""tone":{"highlights":0.0,"shadows":0.0,"whites":0.0,"blacks":0.0},"#,
                 r#""tone_curve":{"parametric":{"highlights":0.0,"lights":0.0,"darks":0.0,"shadows":0.0},"#,
                 r#""luma":[],"red":[],"green":[],"blue":[]},"#,
                 r#""color":{"saturation":0.0,"vibrance":0.0},"#,
                 r#""geometry":{"crop":{"left":0.0,"top":0.0,"right":1.0,"bottom":1.0},"angle_deg":0.0,"aspect":null},"#,
-                r#""lens":{"profile_enabled":false,"distortion_scale":100.0,"vignetting_scale":100.0,"remove_chromatic_aberration":false},"#,
+                r#""lens":{"profile_enabled":false,"distortion_scale":100.0,"vignetting_scale":100.0,"remove_chromatic_aberration":false,"#,
+                r#""distortion":0.0,"vignetting_amount":0.0,"vignetting_midpoint":50.0,"ca_red_cyan":0.0,"ca_blue_yellow":0.0},"#,
                 r#""detail":{"sharpening":{"amount":0.0,"radius":1.0,"detail":0.0,"masking":0.0},"#,
-                r#""noise_reduction":{"luminance":0.0,"color":0.0}},"#,
+                r#""noise_reduction":{"luminance":0.0,"luminance_detail":50.0,"luminance_contrast":0.0,"color":0.0,"color_detail":50.0}},"#,
                 r#""masks":[],"#,
                 r#""render_deps":{"camera_profile":{"id":"","sha256":""},"lens_profile":null,"raw_decoder":""}}"#
             )

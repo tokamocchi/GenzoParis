@@ -58,6 +58,7 @@ const HISTOGRAM: &str = include_str!("../shaders/histogram.wgsl");
 const QUANTIZE: &str = include_str!("../shaders/quantize.wgsl");
 const SENSOR: &str = include_str!("../shaders/sensor.wgsl");
 const RESAMPLE: &str = include_str!("../shaders/resample.wgsl");
+const DENOISE: &str = include_str!("../shaders/denoise.wgsl");
 
 /// 座標を i32 にするときの切り詰めの範囲（2^30。CPU 版は i64 で 2^40。極端な座標でだけ結果が違う）。
 pub(crate) const COORD_LIMIT: f32 = (1u32 << 30) as f32;
@@ -86,11 +87,12 @@ pub(crate) enum Module {
     Quantize,
     Sensor,
     Resample,
+    Denoise,
 }
 
 impl Module {
     #[cfg(test)]
-    pub(crate) const ALL: [Module; 7] = [
+    pub(crate) const ALL: [Module; 8] = [
         Module::Finish,
         Module::Output,
         Module::Geometry,
@@ -98,6 +100,7 @@ impl Module {
         Module::Quantize,
         Module::Sensor,
         Module::Resample,
+        Module::Denoise,
     ];
 
     fn label(self) -> &'static str {
@@ -109,6 +112,7 @@ impl Module {
             Module::Quantize => "genzo-gpu.quantize",
             Module::Sensor => "genzo-gpu.sensor",
             Module::Resample => "genzo-gpu.resample",
+            Module::Denoise => "genzo-gpu.denoise",
         }
     }
 
@@ -121,6 +125,7 @@ impl Module {
             Module::Quantize => &[COMMON, QUANTIZE],
             Module::Sensor => &[COMMON, SENSOR],
             Module::Resample => &[COMMON, PIXEL_IO, RESAMPLE],
+            Module::Denoise => &[COMMON, PIXEL_IO, DENOISE],
         }
     }
 
@@ -172,6 +177,16 @@ impl Module {
                 ("CROP_Y", 1),
                 ("GRID_W", 1),
                 ("GRID_H", 1),
+                ("WARP", 1),
+                ("PRE", 6),
+                ("POST", 6),
+                ("INV_R2", 1),
+                ("LUT_OFF", 3),
+                ("LUT_LEN", 3),
+                ("LUT_INV", 3),
+                ("CENTER", 2),
+                ("SPG", 1),
+                ("LFLAGS", 1),
             ],
             Module::Histogram => &[("HLUMA", 3)],
             Module::Quantize => &[
@@ -194,8 +209,25 @@ impl Module {
                 ("CLIP_MODE", 1),
                 ("RADIUS", 1),
                 ("FLAGS_OUT", 1),
+                ("HR_MODE", 1),
+                ("HR_AMOUNT", 1),
+                ("HR_INV_W2", 3),
+                ("HR_INV_R1", 1),
+                ("HR_R1", 1),
+                ("HR_RADIUS", 1),
+                ("HR_CONF_W", 1),
             ],
             Module::Resample => &[("MAT", 9), ("TAP_OFF", 1)],
+            Module::Denoise => &[
+                ("HOLE", 1),
+                ("MASK", 1),
+                ("T_LUMA", 1),
+                ("T_CHROMA", 1),
+                ("AUX_X", 1),
+                ("AUX_Y", 1),
+                ("AUX_W", 1),
+                ("EPS", 1),
+            ],
         }
     }
 
@@ -242,18 +274,25 @@ pub(crate) enum Kernel {
     Display,
     Export,
     Geometry,
+    LensCorrection,
     Histogram,
     Quantize,
     Normalize,
     WhiteBalance,
+    HighlightRecovery,
     Half2x2,
+    NrForward,
+    NrSmoothH,
+    NrSmoothV,
+    NrDetail,
+    NrInverse,
     ColorMatrix,
     DownscaleH,
     DownscaleV,
 }
 
 impl Kernel {
-    pub(crate) const ALL: [Kernel; 17] = [
+    pub(crate) const ALL: [Kernel; 24] = [
         Kernel::Exposure,
         Kernel::Contrast,
         Kernel::Tone,
@@ -263,11 +302,18 @@ impl Kernel {
         Kernel::Display,
         Kernel::Export,
         Kernel::Geometry,
+        Kernel::LensCorrection,
         Kernel::Histogram,
         Kernel::Quantize,
         Kernel::Normalize,
         Kernel::WhiteBalance,
+        Kernel::HighlightRecovery,
         Kernel::Half2x2,
+        Kernel::NrForward,
+        Kernel::NrSmoothH,
+        Kernel::NrSmoothV,
+        Kernel::NrDetail,
+        Kernel::NrInverse,
         Kernel::ColorMatrix,
         Kernel::DownscaleH,
         Kernel::DownscaleV,
@@ -282,10 +328,18 @@ impl Kernel {
             | Kernel::SceneToDisplay
             | Kernel::ToneCurve => Module::Finish,
             Kernel::Display | Kernel::Export => Module::Output,
-            Kernel::Geometry => Module::Geometry,
+            Kernel::Geometry | Kernel::LensCorrection => Module::Geometry,
             Kernel::Histogram => Module::Histogram,
             Kernel::Quantize => Module::Quantize,
-            Kernel::Normalize | Kernel::WhiteBalance | Kernel::Half2x2 => Module::Sensor,
+            Kernel::Normalize
+            | Kernel::WhiteBalance
+            | Kernel::HighlightRecovery
+            | Kernel::Half2x2 => Module::Sensor,
+            Kernel::NrForward
+            | Kernel::NrSmoothH
+            | Kernel::NrSmoothV
+            | Kernel::NrDetail
+            | Kernel::NrInverse => Module::Denoise,
             Kernel::ColorMatrix | Kernel::DownscaleH | Kernel::DownscaleV => Module::Resample,
         }
     }
@@ -301,9 +355,16 @@ impl Kernel {
             Kernel::Display => "display_main",
             Kernel::Export => "export_main",
             Kernel::Geometry | Kernel::Histogram | Kernel::Quantize => "main",
+            Kernel::LensCorrection => "lens_main",
             Kernel::Normalize => "normalize_main",
             Kernel::WhiteBalance => "white_balance_main",
+            Kernel::HighlightRecovery => "highlight_main",
             Kernel::Half2x2 => "half_main",
+            Kernel::NrForward => "nr_forward_main",
+            Kernel::NrSmoothH => "nr_smooth_h_main",
+            Kernel::NrSmoothV => "nr_smooth_v_main",
+            Kernel::NrDetail => "nr_detail_main",
+            Kernel::NrInverse => "nr_inverse_main",
             Kernel::ColorMatrix => "color_matrix_main",
             Kernel::DownscaleH => "downscale_h_main",
             Kernel::DownscaleV => "downscale_v_main",
@@ -364,7 +425,14 @@ impl Kernel {
             ],
             Kernel::Display => &["W2D", "D2W", "GC_LUMA", "LUT_N"],
             Kernel::Export => &["MAT", "GC_LUMA", "TRANSFER"],
-            Kernel::Geometry => &["AFF", "CROP_X", "CROP_Y", "GRID_W", "GRID_H"],
+            Kernel::Geometry => &[
+                "AFF", "CROP_X", "CROP_Y", "GRID_W", "GRID_H", "WARP", "PRE", "POST", "INV_R2",
+                "LUT_OFF", "LUT_LEN", "LUT_INV",
+            ],
+            Kernel::LensCorrection => &[
+                "GRID_W", "GRID_H", "INV_R2", "LUT_OFF", "LUT_LEN", "LUT_INV", "CENTER", "SPG",
+                "LFLAGS",
+            ],
             Kernel::Histogram => &["HLUMA"],
             Kernel::Quantize => &[
                 "QBITS",
@@ -383,7 +451,24 @@ impl Kernel {
                 "RADIUS",
                 "FLAGS_OUT",
             ],
+            Kernel::HighlightRecovery => &[
+                "CFA",
+                "CLIP_LEVEL",
+                "CLIP_MODE",
+                "RADIUS",
+                "HR_MODE",
+                "HR_AMOUNT",
+                "HR_INV_W2",
+                "HR_INV_R1",
+                "HR_R1",
+                "HR_RADIUS",
+                "HR_CONF_W",
+            ],
             Kernel::Half2x2 => &["CFA"],
+            Kernel::NrForward => &["EPS"],
+            Kernel::NrSmoothH | Kernel::NrSmoothV => &["HOLE", "MASK"],
+            Kernel::NrDetail => &["T_LUMA", "T_CHROMA", "AUX_X", "AUX_Y", "AUX_W"],
+            Kernel::NrInverse => &["AUX_X", "AUX_Y", "AUX_W", "EPS"],
             Kernel::ColorMatrix => &["MAT"],
             Kernel::DownscaleH | Kernel::DownscaleV => &["TAP_OFF"],
         }
@@ -766,6 +851,11 @@ impl<'g> Batch<'g> {
             recorded: 0,
             counts: false,
         })
+    }
+
+    /// GPU（バッファの確保に使う）。
+    pub(crate) fn gpu(&self) -> &'g GpuContext {
+        self.gpu
     }
 
     /// カーネルを 1 回実行するコマンドを記録する。

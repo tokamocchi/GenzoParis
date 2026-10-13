@@ -553,7 +553,9 @@ pub(crate) fn decode(source: Source<'_>) -> Result<DecodedRaw, RawError> {
         data_error_count: p.error_count(),
         data_range_checked,
     };
-    convert::build_decoded(&sizes, &color, &meta, data, decoder, &range)
+    let mut decoded = convert::build_decoded(&sizes, &color, &meta, data, decoder, &range)?;
+    crate::decode::attach_lens_correction(&mut decoded, source);
+    Ok(decoded)
 }
 
 /// 撮影情報を読む（[`crate::read_metadata`] の実体）。

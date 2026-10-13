@@ -360,6 +360,7 @@ enum Pending {
         path: PathBuf,
         image: RawImage,
         cam_xyz_source: genzo_raw::CamXyzSource,
+        lens_note: Option<String>,
     },
     Image {
         path: PathBuf,
@@ -471,12 +472,13 @@ impl<'a> Worker<'a> {
     }
 
     fn decode_raw(&mut self, path: PathBuf, shm: &ShmRef, pending: Option<Pending>) -> JobResult {
-        let (image, cam_xyz_source) = match pending {
+        let (image, cam_xyz_source, lens_note) = match pending {
             Some(Pending::Raw {
                 path: p,
                 image,
                 cam_xyz_source,
-            }) if p == path => (image, cam_xyz_source),
+                lens_note,
+            }) if p == path => (image, cam_xyz_source, lens_note),
             _ => {
                 check_input(&path)?;
                 let format = detect_photo_format(&path)?;
@@ -486,10 +488,16 @@ impl<'a> Worker<'a> {
                         format!("RAW ではない（{format:?}）"),
                     ));
                 }
-                // 行列の出どころ（render_deps の記録用）も返すため、詳細付きで展開する。
+                // 行列の出どころ（render_deps の記録用）と、埋め込みのレンズ補正の情報が使えなかった理由
+                // （画面に出す）も返すため、詳細付きで展開する。
                 let decoded = genzo_raw::decode_file_with_details(&path).map_err(raw_err)?;
                 let source = decoded.details.cam_xyz_source;
-                (decoded.into_verified_image().map_err(raw_err)?, source)
+                let lens_note = decoded.details.lens_correction_note.clone();
+                (
+                    decoded.into_verified_image().map_err(raw_err)?,
+                    source,
+                    lens_note,
+                )
             }
         };
         let data_len = image.data.len() as u64 * 2;
@@ -498,6 +506,7 @@ impl<'a> Worker<'a> {
                 path,
                 image,
                 cam_xyz_source,
+                lens_note,
             });
             return Err(e);
         }
@@ -533,6 +542,8 @@ impl<'a> Worker<'a> {
             metadata,
             decoder_id: genzo_raw::decoder_id(),
             cam_xyz_source: Some(cam_xyz_source),
+            lens_correction: image.lens_correction,
+            lens_correction_note: lens_note,
         }))
     }
 
@@ -1199,6 +1210,8 @@ fn oversize(mode: OversizeMode, shm: &ShmRef) -> JobResult {
         metadata: PhotoMetadata::default(),
         decoder_id: Some("test-oversize".to_owned()),
         cam_xyz_source: None,
+        lens_correction: None,
+        lens_correction_note: None,
     };
     match mode {
         OversizeMode::TooManyPixels => {

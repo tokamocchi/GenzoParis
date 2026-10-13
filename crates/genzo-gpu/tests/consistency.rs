@@ -563,6 +563,10 @@ fn compare_sensor_stage(
             match (&cpu, &gpu) {
                 (SensorData::Cfa(a), SensorData::Cfa(b)) => {
                     let r = compare(a.data(), b.data(), tol);
+                    eprintln!(
+                        "差 {id}: 最大 {:e}、許容に対する比 {:.4}",
+                        r.max_abs, r.max_ratio
+                    );
                     assert!(r.passed(), "{id} {clip:?}: {r}");
                     assert_eq!(a.saturated(), b.saturated(), "{id}: 飽和の印");
                     assert_eq!(a.pattern(), b.pattern(), "{id}: CFA の並び");
@@ -570,6 +574,10 @@ fn compare_sensor_stage(
                 (SensorData::Rgb(a), SensorData::Rgb(b)) => {
                     assert_eq!(a.contract(), b.contract(), "{id}");
                     let r = compare_pixels(a.image.data(), b.image.data(), tol);
+                    eprintln!(
+                        "差 {id}: 最大 {:e}、許容に対する比 {:.4}",
+                        r.max_abs, r.max_ratio
+                    );
                     assert!(r.passed(), "{id} {clip:?}: {r}");
                 }
                 _ => panic!("{id}: 出力の種類が違う"),
@@ -592,48 +600,154 @@ fn every_registered_sensor_stage_matches_the_cpu_version() {
     // 極端な WB（R の係数が 1 未満。飽和の切りそろえの値が緑の係数で決まる。人の判断 No.19）。
     let mut extreme = DevelopSettings::default();
     custom_wb(&mut extreme, 2000.0, 0.0);
+    // ステージ 7（レンズ補正。処理バージョン 2）は、補正があるときだけ計画に入るので、埋め込みの情報と
+    // 補正の設定を付けて比べる。
+    let lens_id = genzo_pipeline::sensor::LensCorrectionStage::ID;
+    let with_lens = |s: &DevelopSettings| {
+        let mut s = s.clone();
+        s.lens.profile_enabled = true;
+        s.lens.remove_chromatic_aberration = true;
+        s.lens.vignetting_amount = 40.0;
+        s.lens.ca_red_cyan = 70.0;
+        s.lens.ca_blue_yellow = -50.0;
+        s
+    };
+    let lens_data = genzo_raw::LensCorrectionData::SonyArw(genzo_raw::SonyLensCorrection {
+        distortion: Vec::new(),
+        vignetting: (0..16).map(|i| (300 * i) as i16).collect(),
+        ca_red: (0..16).map(|i| (900 * i) as i16).collect(),
+        ca_blue: (0..16).map(|i| (-700 * i) as i16).collect(),
+    });
+    // ステージ 4（ハイライト復元）・6（ノイズ軽減）も、設定が何かをするときだけ計画に入る。方式・量・面の有無を変えて
+    // 比べる（ハイライト復元の量 < 100 % は、切りそろえ（clip の 3 種類）と混ぜる経路）。
+    let hr_id = genzo_pipeline::sensor::HighlightRecoveryStage::ID;
+    let nr_id = genzo_pipeline::sensor::NoiseReductionStage::ID;
+    let variants = |id: &str, s: &DevelopSettings| -> Vec<DevelopSettings> {
+        if id == lens_id {
+            vec![with_lens(s)]
+        } else if id == hr_id {
+            [
+                (genzo_model::HighlightMethod::Reconstruct, 100.0),
+                (genzo_model::HighlightMethod::Reconstruct, 60.0),
+                (genzo_model::HighlightMethod::Neutral, 100.0),
+            ]
+            .into_iter()
+            .map(|(method, amount)| {
+                let mut s = s.clone();
+                s.highlight_recovery = genzo_model::HighlightRecovery { method, amount };
+                s
+            })
+            .collect()
+        } else if id == nr_id {
+            [(40.0, 50.0, 30.0), (70.0, 0.0, 0.0), (0.0, 80.0, 0.0)]
+                .into_iter()
+                .map(|(luminance, color, luminance_contrast)| {
+                    let mut s = s.clone();
+                    s.detail.noise_reduction = genzo_model::NoiseReduction {
+                        luminance,
+                        color,
+                        luminance_contrast,
+                        ..Default::default()
+                    };
+                    s
+                })
+                .collect()
+        } else {
+            vec![s.clone()]
+        }
+    };
     let mut tested = Vec::new();
     for stage in registry.sensor_stages() {
         let has_gpu = stage
             .gpu(g.registry())
-            .is_some_and(|s| s.supports(ProcessVersion::V1));
+            .is_some_and(|s| s.supports(ProcessVersion::V2));
         if !has_gpu {
             continue;
         }
-        for cfa in CfaPattern::ALL {
-            // 飽和の閾値 = 白レベル の RAW と、閾値が白レベルより低い RAW（A-3）。
-            for raw in [
-                raw_from(&scene, cfa, true),
-                raw_with_crop_and_plateau(&scene, cfa),
-            ] {
-                for clip in [
-                    SaturationClip::default(),
-                    SaturationClip::Off,
-                    SaturationClip::Global,
+        let is_lens = stage.id() == lens_id;
+        for (settings, extreme) in variants(stage.id(), &settings)
+            .into_iter()
+            .zip(variants(stage.id(), &extreme))
+        {
+            for cfa in CfaPattern::ALL {
+                // 飽和の閾値 = 白レベル の RAW と、閾値が白レベルより低い RAW（A-3）。
+                for mut raw in [
+                    raw_from(&scene, cfa, true),
+                    raw_with_crop_and_plateau(&scene, cfa),
                 ] {
-                    // 半分の格子の範囲（画像の外にはみ出す範囲と、内側の範囲）。
-                    for roi in [
-                        Roi::new(-3, -2, 20, 15),
-                        Roi::new(5, 4, 16, 12),
-                        Roi::full(33, 25),
-                    ] {
-                        compare_sensor_stage(g, stage.id(), &raw, &settings, clip, roi);
+                    if is_lens {
+                        raw.lens_correction = Some(lens_data.clone());
                     }
-                    compare_sensor_stage(
-                        g,
-                        stage.id(),
-                        &raw,
-                        &extreme,
-                        clip,
-                        Roi::new(-3, -2, 20, 15),
-                    );
+                    for clip in [
+                        SaturationClip::default(),
+                        SaturationClip::Off,
+                        SaturationClip::Global,
+                    ] {
+                        // 半分の格子の範囲（画像の外にはみ出す範囲と、内側の範囲）。
+                        for roi in [
+                            Roi::new(-3, -2, 20, 15),
+                            Roi::new(5, 4, 16, 12),
+                            Roi::full(33, 25),
+                        ] {
+                            compare_sensor_stage(g, stage.id(), &raw, &settings, clip, roi);
+                        }
+                        compare_sensor_stage(
+                            g,
+                            stage.id(),
+                            &raw,
+                            &extreme,
+                            clip,
+                            Roi::new(-3, -2, 20, 15),
+                        );
+                    }
                 }
             }
         }
         tested.push(stage.id());
     }
     eprintln!("比べたセンサーのステージ: {tested:?}");
-    assert_eq!(tested.len(), 4, "{tested:?}");
+    assert_eq!(tested.len(), 7, "{tested:?}");
+    assert!(tested.contains(&lens_id));
+    assert!(tested.contains(&hr_id));
+    assert!(tested.contains(&nr_id));
+}
+
+/// ステージ 9 の歪曲補正（処理バージョン 2。手動の歪曲と回転・切り抜き）の CPU 版と GPU 版の一致。
+#[test]
+fn geometry_with_lens_distortion_matches_the_cpu_version() {
+    let g = gpu_or_skip!();
+    let mut compared = 0;
+    for (amount, deg) in [(60.0f32, 0.0f32), (-80.0, 5.0), (100.0, -12.0)] {
+        let mut settings = settings_for_all_stages();
+        settings.lens.distortion = amount;
+        settings.geometry.angle_deg = deg;
+        with_context(&settings, |ctx, a1_image| {
+            assert!(ctx.frames.distortion.is_some());
+            let registry = StageRegistry::builtin();
+            let stage = registry.find("finish.geometry").unwrap();
+            let params = stage.params(&settings, ctx).unwrap().unwrap();
+            let plan = params
+                .get::<genzo_pipeline::finish::GeometryPlan>()
+                .unwrap();
+            assert!(plan.warp().is_some());
+            let (w, h) = plan.output_size();
+            for out in [Roi::new(2, 3, w - 4, h - 5), Roi::full(w, h)] {
+                let need = stage.input_roi(out, &params, ctx);
+                let input = tile_of(a1_image, need);
+                let (cpu, gpu, n_cpu, n_gpu) = run_both(g, stage, ctx, &settings, &input, out);
+                let report = compare_pixels(
+                    cpu.image.data(),
+                    gpu.image.data(),
+                    stage_tolerance("finish.geometry"),
+                );
+                eprintln!("歪曲 {amount} 回転 {deg}: {report}");
+                assert!(report.passed(), "{amount} {deg}: {report}");
+                assert_eq!(n_cpu, n_gpu);
+                compared += 1;
+            }
+        });
+    }
+    assert_eq!(compared, 3 * 2 * 2);
 }
 
 #[test]

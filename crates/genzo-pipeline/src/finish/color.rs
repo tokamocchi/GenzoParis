@@ -157,7 +157,7 @@ impl Stage for ColorStage {
         ctx: &StageContext<'_>,
     ) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => {
+            ProcessVersion::V1 | ProcessVersion::V2 => {
                 let c = settings.normalized().color;
                 let p = ColorStageParams::from_sliders(c.saturation, c.vibrance);
                 Ok((!p.is_identity()).then(|| StageParams::new(p)))
@@ -176,7 +176,9 @@ impl Stage for ColorStage {
     ) -> Result<()> {
         let p = *params.expect::<ColorStageParams>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 => map_pixels(input, output, |_, _, c| p.apply(c)),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                map_pixels(input, output, |_, _, c| p.apply(c))
+            }
         }
     }
 }

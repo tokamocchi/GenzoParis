@@ -10,9 +10,9 @@ use std::fmt;
 use super::DevelopSettings;
 use super::params::{
     AspectRatio, ColorParams, CropRect, CurvePoint, DataRef, DetailParams, Geometry,
-    LensCorrection, LocalAdjustment, LocalDelta, MAX_ASPECT_TERM, MAX_CURVE_POINTS, MAX_MASKS,
-    MIN_CROP_SIZE, MaskShape, ParametricCurve, RenderDeps, ToneCurve, ToneParams, ValueRange,
-    WhiteBalance, ranges,
+    HighlightRecovery, LensCorrection, LocalAdjustment, LocalDelta, MAX_ASPECT_TERM,
+    MAX_CURVE_POINTS, MAX_MASKS, MIN_CROP_SIZE, MaskShape, NoiseReduction, ParametricCurve,
+    RenderDeps, ToneCurve, ToneParams, ValueRange, WhiteBalance, ranges,
 };
 use crate::{CURRENT_PROCESS_VERSION, CURRENT_SCHEMA_VERSION};
 
@@ -159,6 +159,7 @@ impl DevelopSettings {
             CURRENT_PROCESS_VERSION,
         );
         check_white_balance(&self.white_balance, &mut c);
+        self.highlight_recovery.check(&mut c);
         c.range("exposure_ev", self.exposure_ev, ranges::EXPOSURE_EV);
         c.range("contrast", self.contrast, ranges::SLIDER);
         self.tone.check(&mut c);
@@ -209,6 +210,7 @@ impl DevelopSettings {
         s.schema_version = CURRENT_SCHEMA_VERSION;
         s.process_version = s.process_version.clamp(1, CURRENT_PROCESS_VERSION);
         normalize_white_balance(&mut s.white_balance);
+        s.highlight_recovery.normalize();
         clamp0(&mut s.exposure_ev, ranges::EXPOSURE_EV);
         clamp0(&mut s.contrast, ranges::SLIDER);
         s.tone.normalize();
@@ -460,6 +462,19 @@ impl LensCorrection {
             self.vignetting_scale,
             ranges::LENS_SCALE,
         );
+        for (name, v) in [
+            ("lens.distortion", self.distortion),
+            ("lens.vignetting_amount", self.vignetting_amount),
+            ("lens.ca_red_cyan", self.ca_red_cyan),
+            ("lens.ca_blue_yellow", self.ca_blue_yellow),
+        ] {
+            c.range(name, v, ranges::LENS_MANUAL);
+        }
+        c.range(
+            "lens.vignetting_midpoint",
+            self.vignetting_midpoint,
+            ranges::LENS_MIDPOINT,
+        );
     }
 
     fn normalize(&mut self) {
@@ -468,6 +483,16 @@ impl LensCorrection {
             ranges::LENS_SCALE.clamp_or(self.distortion_scale, d.distortion_scale);
         self.vignetting_scale =
             ranges::LENS_SCALE.clamp_or(self.vignetting_scale, d.vignetting_scale);
+        for v in [
+            &mut self.distortion,
+            &mut self.vignetting_amount,
+            &mut self.ca_red_cyan,
+            &mut self.ca_blue_yellow,
+        ] {
+            *v = ranges::LENS_MANUAL.clamp_or(*v, 0.0);
+        }
+        self.vignetting_midpoint =
+            ranges::LENS_MIDPOINT.clamp_or(self.vignetting_midpoint, d.vignetting_midpoint);
     }
 }
 
@@ -479,16 +504,21 @@ impl DetailParams {
         c.range("detail.sharpening.detail", s.detail, ranges::AMOUNT_0_100);
         c.range("detail.sharpening.masking", s.masking, ranges::AMOUNT_0_100);
         let n = &self.noise_reduction;
-        c.range(
-            "detail.noise_reduction.luminance",
-            n.luminance,
-            ranges::AMOUNT_0_100,
-        );
-        c.range(
-            "detail.noise_reduction.color",
-            n.color,
-            ranges::AMOUNT_0_100,
-        );
+        for (name, v) in [
+            ("detail.noise_reduction.luminance", n.luminance),
+            (
+                "detail.noise_reduction.luminance_detail",
+                n.luminance_detail,
+            ),
+            (
+                "detail.noise_reduction.luminance_contrast",
+                n.luminance_contrast,
+            ),
+            ("detail.noise_reduction.color", n.color),
+            ("detail.noise_reduction.color_detail", n.color_detail),
+        ] {
+            c.range(name, v, ranges::AMOUNT_0_100);
+        }
     }
 
     fn normalize(&mut self) {
@@ -497,9 +527,32 @@ impl DetailParams {
         s.radius = ranges::SHARPEN_RADIUS.clamp_or(s.radius, 1.0);
         clamp0(&mut s.detail, ranges::AMOUNT_0_100);
         clamp0(&mut s.masking, ranges::AMOUNT_0_100);
-        let n = &mut self.noise_reduction;
-        clamp0(&mut n.luminance, ranges::AMOUNT_0_100);
-        clamp0(&mut n.color, ranges::AMOUNT_0_100);
+        self.noise_reduction.normalize();
+    }
+}
+
+impl NoiseReduction {
+    fn normalize(&mut self) {
+        let r = ranges::AMOUNT_0_100;
+        clamp0(&mut self.luminance, r);
+        self.luminance_detail = r.clamp_or(self.luminance_detail, Self::DEFAULT_DETAIL);
+        clamp0(&mut self.luminance_contrast, r);
+        clamp0(&mut self.color, r);
+        self.color_detail = r.clamp_or(self.color_detail, Self::DEFAULT_DETAIL);
+    }
+}
+
+impl HighlightRecovery {
+    fn check(&self, c: &mut Checker) {
+        c.range(
+            "highlight_recovery.amount",
+            self.amount,
+            ranges::AMOUNT_0_100,
+        );
+    }
+
+    fn normalize(&mut self) {
+        self.amount = ranges::AMOUNT_0_100.clamp_or(self.amount, Self::DEFAULT_AMOUNT);
     }
 }
 

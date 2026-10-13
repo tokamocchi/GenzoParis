@@ -4,9 +4,10 @@
 //! |---|---|---|---|
 //! | 2. 正規化 | [`normalize`] | RAW（u16）→ CFA（B0） | `sensor.normalize` |
 //! | 3. ホワイトバランス | [`wb`] | CFA（B0）→ CFA（B1 の値） | `sensor.white_balance` |
-//! | 4. ハイライト復元 | （v1。未実装。仮の処理はステージ 3 の飽和の切りそろえ） | — | — |
+//! | 4. ハイライト復元（処理バージョン 2。復元する設定のときだけ。それ以外はステージ 3 の飽和の切りそろえ） | [`highlight`]・[`HighlightRecoveryStage`] | CFA（B1 の値）→ CFA | `sensor.highlight_recovery` |
 //! | 5. デモザイク | [`demosaic`] | CFA → RGB（B1） | `sensor.demosaic.rcd` など |
-//! | 6. ノイズ軽減・7. レンズ補正 | （v1。未実装） | — | — |
+//! | 6. ノイズ軽減（処理バージョン 2。量が 0 でないときだけ） | [`denoise`]・[`NoiseReductionStage`] | RGB（B1）→ RGB（B1） | `sensor.noise_reduction` |
+//! | 7. レンズ補正（周辺減光・倍率色収差。処理バージョン 2） | [`crate::lens`]・[`LensCorrectionStage`] | RGB（B1）→ RGB（B1） | `sensor.lens_correction` |
 //! | 8. 色変換 | [`color_matrix`] | RGB（B1）→ RGB（B2） | `sensor.color_matrix` |
 //!
 //! # センサーのステージのインターフェース（設計の意図）
@@ -50,6 +51,8 @@
 
 pub mod color_matrix;
 pub mod demosaic;
+pub mod denoise;
+pub mod highlight;
 pub mod normalize;
 pub mod wb;
 
@@ -67,7 +70,9 @@ use crate::border::mirror_cover;
 use crate::contract::ColorContract;
 use crate::coords::{CoordinateFrames, SensorGrid};
 use crate::error::{PipelineError, Result};
+use crate::finish::geometry::sample_bicubic_channel;
 use crate::image::{CfaImage, ImageTile, RgbImage, Roi};
+use crate::lens::{LensStagePlan, ProfileDistortion, requests_sensor_corrections};
 use crate::resample::{
     AreaWeights, downscale_area, downscale_column_row, downscale_row, preview_size,
 };
@@ -75,6 +80,8 @@ use crate::stage::{GpuStage, GpuStageLookup, InputKind, StageContext};
 use crate::version::ProcessVersion;
 
 use self::demosaic::DemosaicMethod;
+use self::denoise::NoisePlan;
+use self::highlight::HighlightPlan;
 use self::normalize::SensorLevels;
 use self::wb::{SaturationClip, WbCoefficients};
 
@@ -88,6 +95,11 @@ pub const FALLBACK_CAM_XYZ: Mat3 = XYZ_TO_BT2020;
 /// 結果には影響しない。
 pub const PREVIEW_BAND_ROWS: u32 = 32;
 
+/// プレビューの帯の入力の行の数を、ステージの余白の合計（出力の格子の行）の何倍以上にするか。ノイズ軽減（ステージ 6）の
+/// 余白（フル解像度で 62 行）は帯の行（α7 IV で 約 88 行）に比べて大きく、帯ごとに余白を計算し直す量が増えるので、
+/// 帯を広げる（[`SensorPlan::preview_band_rows`]。**仮置き**。結果には影響しない）。
+pub const BAND_MARGIN_RATIO: u32 = 6;
+
 /// センサー処理の警告（処理は続けるが、結果が正確でない・設定どおりでないことを示す）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SensorWarning {
@@ -96,6 +108,18 @@ pub enum SensorWarning {
     /// 色温度・tint の設定ではカメラの WB の係数を作れないため、作れる範囲に丸めた（人の判断の表
     /// No.17。[`wb::resolve_white_balance`]）。
     WhiteBalanceClamped(wb::WbClamp),
+    /// プロファイルによるレンズ補正・色収差の除去を求めたが、この写真には埋め込みの補正の情報が
+    /// ない（DEV-14。手動の補正は使える）。
+    LensProfileMissing,
+    /// DNG の WarpRectilinear の接線方向の係数を使わなかった（[`crate::lens`]）。
+    LensTangentialIgnored,
+    /// RAW 以外の写真では、ステージ 7（周辺減光・色収差・プロファイルの補正）を使わない（歪曲の手動の
+    /// 補正は使える）。
+    LensSensorCorrectionsNotApplicable,
+    /// RAW 以外の写真では、ステージ 4（ハイライト復元）を使わない（飽和の情報がない）。
+    HighlightRecoveryNotApplicable,
+    /// RAW 以外の写真では、ステージ 6（ノイズ軽減）を使わない（センサーの段階の処理。人の判断の表 No.139）。
+    NoiseReductionNotApplicable,
 }
 
 impl fmt::Display for SensorWarning {
@@ -115,6 +139,21 @@ impl fmt::Display for SensorWarning {
                     c.used_k,
                     tint(c.used_tint_x10)
                 )
+            }
+            SensorWarning::LensProfileMissing => f.write_str(
+                "この写真には埋め込みのレンズ補正の情報がないため、プロファイルによる補正・色収差の除去は使われません（手動の補正は使えます）",
+            ),
+            SensorWarning::LensTangentialIgnored => f.write_str(
+                "DNG のレンズ補正の情報のうち、接線方向の歪曲の係数は使っていません（半径方向の補正だけを使います）",
+            ),
+            SensorWarning::LensSensorCorrectionsNotApplicable => f.write_str(
+                "RAW 以外の写真では、レンズ補正のうち周辺減光・色収差・プロファイルによる補正は使われません（歪曲の手動の補正は使えます）",
+            ),
+            SensorWarning::HighlightRecoveryNotApplicable => {
+                f.write_str("RAW 以外の写真では、ハイライト復元は使われません")
+            }
+            SensorWarning::NoiseReductionNotApplicable => {
+                f.write_str("RAW 以外の写真では、ノイズ軽減は使われません")
             }
         }
     }
@@ -320,7 +359,7 @@ impl SensorStage for NormalizeStage {
             return Err(mismatch(Self::ID, SensorKind::Raw, &input));
         };
         match ctx.process_version {
-            ProcessVersion::V1 => {
+            ProcessVersion::V1 | ProcessVersion::V2 => {
                 plan.check_raw(raw)?;
                 Ok(SensorData::Cfa(normalize::normalize(
                     raw,
@@ -368,11 +407,114 @@ impl SensorStage for WhiteBalanceStage {
             return Err(mismatch(Self::ID, SensorKind::Cfa, &input));
         };
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(SensorData::Cfa(wb::apply_white_balance(
-                &cfa,
-                &plan.wb,
-                plan.saturation_clip,
-                output_roi,
+            ProcessVersion::V1 | ProcessVersion::V2 => Ok(SensorData::Cfa(
+                wb::apply_white_balance(&cfa, &plan.wb, plan.saturation_clip, output_roi)?,
+            )),
+        }
+    }
+}
+
+/// ステージ 4: ハイライト復元（[`highlight`]。処理バージョン 2 で、復元する設定のときだけ計画に入る）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HighlightRecoveryStage;
+
+impl HighlightRecoveryStage {
+    /// ステージの ID（[`crate::finish::reserved::HIGHLIGHT_RECOVERY_ID`] と同じ）。
+    pub const ID: &'static str = crate::finish::reserved::HIGHLIGHT_RECOVERY_ID;
+}
+
+impl SensorStage for HighlightRecoveryStage {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+    fn stage_number(&self) -> u8 {
+        4
+    }
+    fn input_kind(&self) -> SensorKind {
+        SensorKind::Cfa
+    }
+    fn output_kind(&self) -> SensorKind {
+        SensorKind::Cfa
+    }
+    fn input_roi(&self, output_roi: Roi, plan: &SensorPlan) -> Roi {
+        match &plan.highlight {
+            Some(h) => output_roi.expand(h.margin()),
+            None => output_roi,
+        }
+    }
+    fn run_cpu<'r>(
+        &self,
+        ctx: &StageContext<'_>,
+        plan: &SensorPlan,
+        input: SensorData<'r>,
+        output_roi: Roi,
+    ) -> Result<SensorData<'r>> {
+        let SensorData::Cfa(cfa) = input else {
+            return Err(mismatch(Self::ID, SensorKind::Cfa, &input));
+        };
+        let h = plan
+            .highlight
+            .as_ref()
+            .ok_or(PipelineError::PlanMismatch("ハイライト復元の計画がない"))?;
+        match ctx.process_version {
+            ProcessVersion::V1 => Err(PipelineError::PlanMismatch(
+                "処理バージョン 1 ではハイライト復元を適用しない",
+            )),
+            ProcessVersion::V2 => Ok(SensorData::Cfa(highlight::recover_highlights(
+                &cfa, h, output_roi,
+            )?)),
+        }
+    }
+}
+
+/// ステージ 6: ノイズ軽減（[`denoise`]。処理バージョン 2 で、量が 0 でないときだけ計画に入る）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoiseReductionStage;
+
+impl NoiseReductionStage {
+    /// ステージの ID（[`crate::finish::reserved::NOISE_REDUCTION_ID`] と同じ）。
+    pub const ID: &'static str = crate::finish::reserved::NOISE_REDUCTION_ID;
+}
+
+impl SensorStage for NoiseReductionStage {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+    fn stage_number(&self) -> u8 {
+        6
+    }
+    fn input_kind(&self) -> SensorKind {
+        SensorKind::Rgb
+    }
+    fn output_kind(&self) -> SensorKind {
+        SensorKind::Rgb
+    }
+    fn input_roi(&self, output_roi: Roi, plan: &SensorPlan) -> Roi {
+        match &plan.noise {
+            Some(n) => output_roi.expand(n.margin()),
+            None => output_roi,
+        }
+    }
+    fn run_cpu<'r>(
+        &self,
+        ctx: &StageContext<'_>,
+        plan: &SensorPlan,
+        input: SensorData<'r>,
+        output_roi: Roi,
+    ) -> Result<SensorData<'r>> {
+        let SensorData::Rgb(tile) = input else {
+            return Err(mismatch(Self::ID, SensorKind::Rgb, &input));
+        };
+        let n = plan
+            .noise
+            .as_ref()
+            .ok_or(PipelineError::PlanMismatch("ノイズ軽減の計画がない"))?;
+        match ctx.process_version {
+            ProcessVersion::V1 => Err(PipelineError::PlanMismatch(
+                "処理バージョン 1 ではノイズ軽減を適用しない",
+            )),
+            ProcessVersion::V2 => Ok(SensorData::Rgb(denoise::reduce_noise(
+                &tile, n, output_roi,
             )?)),
         }
     }
@@ -436,7 +578,7 @@ impl SensorStage for DemosaicStage {
             return Err(mismatch(self.id(), SensorKind::Cfa, &input));
         };
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(SensorData::Rgb(demosaic::demosaic(
+            ProcessVersion::V1 | ProcessVersion::V2 => Ok(SensorData::Rgb(demosaic::demosaic(
                 &cfa,
                 self.method,
                 output_roi,
@@ -481,7 +623,7 @@ impl SensorStage for ColorMatrixStage {
             return Err(mismatch(Self::ID, SensorKind::Rgb, &input));
         };
         match ctx.process_version {
-            ProcessVersion::V1 => {
+            ProcessVersion::V1 | ProcessVersion::V2 => {
                 let mut tile = if tile.roi == output_roi {
                     tile
                 } else {
@@ -494,14 +636,154 @@ impl SensorStage for ColorMatrixStage {
     }
 }
 
+/// ステージ 7: レンズ補正の周辺減光・倍率色収差（[`crate::lens`]。処理バージョン 2）。
+///
+/// 入力の格子の画素 (i, j)（中心は格子の連続座標 `(i + 0.5, j + 0.5)`）ごとに、[`LensKernelParams`] の値で
+/// （f32。GPU 版も同じ式）:
+///
+/// ```text
+/// gx = (i + 0.5) − cx、 gy = (j + 0.5) − cy                （格子の画素の単位）
+/// sx = gx · k、 sy = gy · k                                （S の画素。k は格子の 1 画素あたりの S の画素）
+/// u = (sx · sx + sy · sy) · inv_r2
+/// g = 周辺減光の表(u)（なければ 1）
+/// R = 色収差があれば R の像を (cx + mR(u) · gx, cy + mR(u) · gy) でバイキュービック、なければ入力の R
+/// B = 同じく mB(u)。 G = 入力の G
+/// 出力 = (g · R, g · G, g · B)
+/// ```
+///
+/// バイキュービックはステージ 9 と同じ Keys の 3 次畳み込み（[`crate::finish::geometry`]）で、入力の範囲の
+/// 外は格子の鏡映。
+///
+/// [`LensKernelParams`]: crate::lens::LensKernelParams
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LensCorrectionStage;
+
+impl LensCorrectionStage {
+    /// ステージの ID（[`crate::finish::reserved::LENS_CORRECTION_ID`] と同じ）。
+    pub const ID: &'static str = crate::finish::reserved::LENS_CORRECTION_ID;
+}
+
+impl SensorStage for LensCorrectionStage {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+    fn stage_number(&self) -> u8 {
+        7
+    }
+    fn input_kind(&self) -> SensorKind {
+        SensorKind::Rgb
+    }
+    fn output_kind(&self) -> SensorKind {
+        SensorKind::Rgb
+    }
+    fn input_roi(&self, output_roi: Roi, plan: &SensorPlan) -> Roi {
+        match &plan.lens {
+            Some(l) => output_roi.expand(l.margin(plan.demosaic.sensor_pixels_per_output())),
+            None => output_roi,
+        }
+    }
+    fn run_cpu<'r>(
+        &self,
+        ctx: &StageContext<'_>,
+        plan: &SensorPlan,
+        input: SensorData<'r>,
+        output_roi: Roi,
+    ) -> Result<SensorData<'r>> {
+        let SensorData::Rgb(tile) = input else {
+            return Err(mismatch(Self::ID, SensorKind::Rgb, &input));
+        };
+        let lens = plan
+            .lens
+            .as_ref()
+            .ok_or(PipelineError::PlanMismatch("レンズ補正の計画がない"))?;
+        match ctx.process_version {
+            ProcessVersion::V1 => Err(PipelineError::PlanMismatch(
+                "処理バージョン 1 ではレンズ補正を適用しない",
+            )),
+            ProcessVersion::V2 => Ok(SensorData::Rgb(apply_lens_correction(
+                &tile,
+                lens,
+                plan.demosaic.sensor_pixels_per_output(),
+                plan.output_grid(),
+                output_roi,
+            )?)),
+        }
+    }
+}
+
+/// ステージ 7 の CPU 版の本体（[`LensCorrectionStage`] の doc の式）。`grid` は入力の格子の寸法（鏡映に使う）。
+pub fn apply_lens_correction(
+    input: &ImageTile,
+    lens: &LensStagePlan,
+    sensor_per_grid: u32,
+    grid: (u32, u32),
+    output_roi: Roi,
+) -> Result<ImageTile> {
+    let p = lens.kernel_params(sensor_per_grid);
+    let roi = output_roi;
+    let Some((ox, oy)) = roi.offset_in(&input.roi) else {
+        return Err(PipelineError::InvalidRoi {
+            roi,
+            reason: "入力のタイルが出力の範囲を覆っていない",
+        });
+    };
+    let in_w = input.roi.width as usize;
+    let src = input.image.data();
+    let width = roi.width as usize;
+    let mut out = ImageTile::new(roi, input.contract())?;
+    out.image
+        .data_mut()
+        .par_chunks_mut(width.max(1))
+        .enumerate()
+        .for_each(|(j, row)| {
+            let gy = (i64::from(roi.y) + j as i64) as f32 + 0.5 - p.center[1];
+            for (i, px) in row.iter_mut().enumerate() {
+                let gx = (i64::from(roi.x) + i as i64) as f32 + 0.5 - p.center[0];
+                let sx = gx * p.sensor_per_grid;
+                let sy = gy * p.sensor_per_grid;
+                let u = (sx * sx + sy * sy) * p.inv_r2;
+                let c = src[(oy + j) * in_w + ox + i];
+                let (r, b) = match &lens.chromatic_aberration {
+                    Some((mr, mb)) => {
+                        let kr = mr.eval(u);
+                        let kb = mb.eval(u);
+                        (
+                            sample_bicubic_channel(
+                                input,
+                                grid,
+                                p.center[0] + kr * gx,
+                                p.center[1] + kr * gy,
+                                0,
+                            ),
+                            sample_bicubic_channel(
+                                input,
+                                grid,
+                                p.center[0] + kb * gx,
+                                p.center[1] + kb * gy,
+                                2,
+                            ),
+                        )
+                    }
+                    None => (c[0], c[2]),
+                };
+                let g = lens.vignetting.as_ref().map_or(1.0, |v| v.eval(u));
+                *px = [g * r, g * c[1], g * b];
+            }
+        });
+    Ok(out)
+}
+
 /// 組み込みのセンサーのステージ（すべて。登録表用）。
-pub fn builtin_sensor_stages() -> [&'static dyn SensorStage; 6] {
+pub fn builtin_sensor_stages() -> [&'static dyn SensorStage; 9] {
     [
         &NormalizeStage,
         &WhiteBalanceStage,
+        &HighlightRecoveryStage,
         &DemosaicStage::RCD,
         &DemosaicStage::BILINEAR,
         &DemosaicStage::HALF_2X2,
+        &NoiseReductionStage,
+        &LensCorrectionStage,
         &ColorMatrixStage,
     ]
 }
@@ -523,9 +805,13 @@ pub struct SensorPlan {
     levels: SensorLevels,
     wb: WbCoefficients,
     saturation_clip: SaturationClip,
+    highlight: Option<HighlightPlan>,
     demosaic: DemosaicMethod,
+    noise: Option<NoisePlan>,
     cam_xyz: Mat3,
     camera_to_working: Mat3F32,
+    lens: Option<LensStagePlan>,
+    lens_geometry: Option<ProfileDistortion>,
     warnings: Vec<SensorWarning>,
 }
 
@@ -572,6 +858,41 @@ impl SensorPlan {
             process_version,
             options.quality,
         ));
+        // ステージ 4（ハイライト復元）・6（ノイズ軽減）。版 2 から、設定が何かをするときだけ。ハイライトを復元する
+        // ときは、ステージ 3 では切りそろえず、ステージ 4 が切りそろえた値と混ぜる（highlight の doc）。
+        let (highlight, noise) = if process_version.has_v1_features() {
+            (
+                HighlightPlan::new(&settings.highlight_recovery, &wb, options.saturation_clip),
+                NoisePlan::new(&settings.detail.noise_reduction, demosaic),
+            )
+        } else {
+            (None, None)
+        };
+        let saturation_clip = if highlight.is_some() {
+            SaturationClip::Off
+        } else {
+            options.saturation_clip
+        };
+        // ステージ 7（レンズ補正。版 2 から。crate::lens）。
+        let lens_geometry = ProfileDistortion::from_raw(raw);
+        let lens = if process_version.has_v1_features() {
+            LensStagePlan::new(raw, &settings.lens)
+        } else {
+            None
+        };
+        if process_version.has_v1_features() {
+            let l = &settings.lens;
+            let data = raw.lens_correction.as_ref();
+            let missing = (l.profile_enabled && data.is_none_or(|d| d.is_empty()))
+                || (l.remove_chromatic_aberration
+                    && data.is_none_or(|d| !d.has_chromatic_aberration()));
+            if missing {
+                warnings.push(SensorWarning::LensProfileMissing);
+            }
+            if l.profile_enabled && lens_geometry.is_some_and(|g| g.ignores_tangential()) {
+                warnings.push(SensorWarning::LensTangentialIgnored);
+            }
+        }
         Ok(Self {
             process_version,
             quality: options.quality,
@@ -582,12 +903,26 @@ impl SensorPlan {
             orientation: raw.metadata.orientation,
             levels: SensorLevels::from_raw(raw)?,
             wb,
-            saturation_clip: options.saturation_clip,
+            saturation_clip,
+            highlight,
             demosaic,
+            noise,
             cam_xyz,
             camera_to_working,
+            lens,
+            lens_geometry,
             warnings,
         })
+    }
+
+    /// ステージ 7（レンズ補正）の計画（補正がなければ `None`）。
+    pub fn lens(&self) -> Option<&LensStagePlan> {
+        self.lens.as_ref()
+    }
+
+    /// プロファイルの歪曲（[`CoordinateFrames::lens_geometry`]）。
+    pub fn lens_geometry(&self) -> Option<ProfileDistortion> {
+        self.lens_geometry
     }
 
     /// 処理バージョン。
@@ -615,9 +950,20 @@ impl SensorPlan {
         &self.wb
     }
 
-    /// 飽和した画素の切りそろえの方法（ステージ 3）。
+    /// 飽和した画素の切りそろえの方法（ステージ 3 が使うもの。ハイライトを復元するときは
+    /// [`SaturationClip::Off`] で、切りそろえはステージ 4 が [`HighlightPlan::baseline`] で行う）。
     pub fn saturation_clip(&self) -> SaturationClip {
         self.saturation_clip
+    }
+
+    /// ステージ 4（ハイライト復元）の計画（復元しなければ `None`）。
+    pub fn highlight(&self) -> Option<&HighlightPlan> {
+        self.highlight.as_ref()
+    }
+
+    /// ステージ 6（ノイズ軽減）の計画（軽減しなければ `None`）。
+    pub fn noise(&self) -> Option<&NoisePlan> {
+        self.noise.as_ref()
     }
 
     /// デモザイクの方式（ステージ 5）。
@@ -652,6 +998,9 @@ impl SensorPlan {
             orientation: self.orientation,
             // 段階 A1 は回転を知らない（coords の doc）。
             rotation_deg: 0.0,
+            lens_geometry: self.lens_geometry,
+            // 歪曲補正はステージ 9（段階 B・C の文脈で作る）。
+            distortion: None,
         }
     }
 
@@ -677,14 +1026,22 @@ impl SensorPlan {
             .output_grid(self.sensor_width, self.sensor_height)
     }
 
-    /// 実行するステージの並び（2 → 3 → 5 → 8）。
-    pub fn stages(&self) -> [&'static dyn SensorStage; 4] {
-        [
-            &NormalizeStage,
-            &WhiteBalanceStage,
-            DemosaicStage::for_method(self.demosaic),
-            &ColorMatrixStage,
-        ]
+    /// 実行するステージの並び（2 → 3 → 〔4〕→ 5 → 〔6〕→ 〔7〕→ 8。4 はハイライトを復元するとき、6 はノイズを
+    /// 軽減するとき、7 はレンズ補正があるときだけ）。
+    pub fn stages(&self) -> Vec<&'static dyn SensorStage> {
+        let mut v: Vec<&'static dyn SensorStage> = vec![&NormalizeStage, &WhiteBalanceStage];
+        if self.highlight.is_some() {
+            v.push(&HighlightRecoveryStage);
+        }
+        v.push(DemosaicStage::for_method(self.demosaic));
+        if self.noise.is_some() {
+            v.push(&NoiseReductionStage);
+        }
+        if self.lens.is_some() {
+            v.push(&LensCorrectionStage);
+        }
+        v.push(&ColorMatrixStage);
+        v
     }
 
     /// ステージの文脈（出力の格子の解像度の倍率と品質を含む）。
@@ -741,18 +1098,19 @@ impl SensorPlan {
     /// 出力の格子の範囲 `roi`（画像の外にはみ出してよい）を [`render_roi`](Self::render_roi) で作る
     /// ときに、各ステージが **実際に処理する** 範囲（出力側から `input_roi` をたどったもの。2.7 節）。
     ///
-    /// `[0]` がステージ 2 の入力（RAW の上。画像の外の部分は鏡映で作る）、`[1]`〜`[3]` がステージ
-    /// 3・5・8 の入力、`[4]` がステージ 8 の出力。`[4]` は `roi` そのものではなく、`roi` を鏡映で
-    /// 折り返したときに参照する **画像の内側** の範囲（[`mirror_cover`]）で、`roi` のはみ出した部分は
-    /// この結果を鏡映して作る。`roi` が空ならエラー。
-    pub fn stage_rois(&self, roi: Roi) -> Result<[Roi; 5]> {
+    /// `[0]` がステージ 2 の入力（RAW の上。画像の外の部分は鏡映で作る）、`[k]` が [`stages`](Self::stages)
+    /// の `k` 番目のステージの入力（ステージ 3・〔4〕・5・〔6〕・〔7〕・8）、最後がステージ 8 の出力（長さは
+    /// ステージの数 + 1）。最後は `roi` そのものではなく、`roi` を鏡映で折り返したときに参照する
+    /// **画像の内側** の範囲（[`mirror_cover`]）で、`roi` のはみ出した部分はこの結果を鏡映して作る。
+    /// `roi` が空ならエラー。
+    pub fn stage_rois(&self, roi: Roi) -> Result<Vec<Roi>> {
         let (gw, gh) = self.output_grid();
         let inner = mirror_cover(roi, gw, gh).ok_or(PipelineError::InvalidRoi {
             roi,
             reason: "範囲が空、または出力の格子が空",
         })?;
         let stages = self.stages();
-        let mut rois = [inner; 5];
+        let mut rois = vec![inner; stages.len() + 1];
         for k in (0..stages.len()).rev() {
             rois[k] = stages[k].input_roi(rois[k + 1], self);
         }
@@ -788,7 +1146,24 @@ impl SensorPlan {
             warnings: self.warnings.clone(),
             non_finite_replaced: replaced,
             input_kind: InputKind::SceneReferred,
+            lens_geometry: self.lens_geometry,
         })
+    }
+
+    /// 段階 A1 のプレビューで 1 回に処理する出力の行の数（[`PREVIEW_BAND_ROWS`] 以上。帯の入力の行がステージの
+    /// 余白の合計の [`BAND_MARGIN_RATIO`] 倍以上になるように広げる）。`gh` は出力の格子の高さ、`ph` はプレビューの
+    /// 高さ。結果には影響しない（各画素の結果は帯の分け方によらない）。
+    pub fn preview_band_rows(&self, gh: u32, ph: u32) -> u32 {
+        let probe = Roi::new(0, 0, 1, 1);
+        let px = i64::from(self.demosaic.sensor_pixels_per_output());
+        let margin = self
+            .stage_rois(probe)
+            .map(|r| (-i64::from(r[0].y)).max(0) / px)
+            .unwrap_or(0);
+        let want = (margin as f64 * f64::from(BAND_MARGIN_RATIO) * f64::from(ph.max(1))
+            / f64::from(gh.max(1)))
+        .ceil();
+        PREVIEW_BAND_ROWS.max(want.min(f64::from(u32::MAX)) as u32)
     }
 
     /// 帯ごとにステージ 2〜8 を実行して縮小する。
@@ -801,7 +1176,7 @@ impl SensorPlan {
         let wx = AreaWeights::new(gw, pw)?;
         let wy = AreaWeights::new(gh, ph)?;
         let row_len = pw as usize;
-        let band = PREVIEW_BAND_ROWS as usize;
+        let band = self.preview_band_rows(gh, ph) as usize;
         let mut data = vec![[0.0f32; 3]; row_len * ph as usize];
         let counts = data
             .par_chunks_mut(row_len * band)
@@ -861,6 +1236,9 @@ pub struct A1Image {
     pub non_finite_replaced: u64,
     /// 入力の種類（RAW はシーン参照、RAW 以外はディスプレイ参照。ステージ 15 の扱いを決める）。
     pub input_kind: InputKind,
+    /// RAW に埋め込まれたプロファイルの歪曲（[`CoordinateFrames::lens_geometry`]。段階 B・C の歪曲補正に
+    /// 使う。なければ `None`）。
+    pub lens_geometry: Option<ProfileDistortion>,
 }
 
 impl A1Image {
@@ -887,6 +1265,8 @@ impl A1Image {
             orientation: self.orientation,
             // 段階 A1 は回転を知らない（coords の doc）。回転は段階 B・C の文脈で加える。
             rotation_deg: 0.0,
+            lens_geometry: self.lens_geometry,
+            distortion: None,
         }
     }
 
@@ -949,6 +1329,14 @@ impl SourceImage {
         }
     }
 
+    /// RAW に埋め込まれたプロファイルの歪曲（RAW 以外・情報がなければ `None`）。
+    pub fn lens_geometry(&self) -> Option<ProfileDistortion> {
+        match self {
+            SourceImage::Raw(r) => ProfileDistortion::from_raw(r),
+            SourceImage::Working { .. } => None,
+        }
+    }
+
     /// 見える範囲の寸法（既定の切り抜き、なければ S の寸法。向きを反映する前）。
     pub fn visible_size(&self) -> (u32, u32) {
         match self.default_crop() {
@@ -956,6 +1344,37 @@ impl SourceImage {
             None => self.sensor_size(),
         }
     }
+}
+
+/// RAW 以外の写真の警告（版 2 で、ステージ 7 の補正を求めている設定なら
+/// [`SensorWarning::LensSensorCorrectionsNotApplicable`]）。
+pub fn working_lens_warnings(settings: &DevelopSettings) -> Result<Vec<SensorWarning>> {
+    let version = ProcessVersion::from_u32(settings.process_version)?;
+    let s = settings.normalized();
+    Ok(if requests_sensor_corrections(version, &s.lens) {
+        vec![SensorWarning::LensSensorCorrectionsNotApplicable]
+    } else {
+        Vec::new()
+    })
+}
+
+/// RAW 以外の写真の警告（版 2 で、センサーの段階のステージ（4・6・7）を求めている設定なら、使われないことを
+/// 知らせる: [`SensorWarning::HighlightRecoveryNotApplicable`]・[`SensorWarning::NoiseReductionNotApplicable`]・
+/// [`SensorWarning::LensSensorCorrectionsNotApplicable`]）。
+pub fn working_sensor_warnings(settings: &DevelopSettings) -> Result<Vec<SensorWarning>> {
+    let version = ProcessVersion::from_u32(settings.process_version)?;
+    let s = settings.normalized();
+    let mut out = Vec::new();
+    if version.has_v1_features() {
+        if !s.highlight_recovery.is_disabled() {
+            out.push(SensorWarning::HighlightRecoveryNotApplicable);
+        }
+        if !s.detail.noise_reduction.is_disabled() {
+            out.push(SensorWarning::NoiseReductionNotApplicable);
+        }
+    }
+    out.extend(working_lens_warnings(settings)?);
+    Ok(out)
 }
 
 /// 入力から段階 A1 のプレビュー（長辺 `long_edge` px、B2）を作る（2.2 節）。
@@ -1001,9 +1420,10 @@ pub fn render_a1(
                 default_crop: None,
                 orientation: *orientation,
                 quality: RenderQuality::Final,
-                warnings: Vec::new(),
+                warnings: working_sensor_warnings(settings)?,
                 non_finite_replaced: replaced,
                 input_kind: InputKind::DisplayReferred,
+                lens_geometry: None,
             })
         }
     }

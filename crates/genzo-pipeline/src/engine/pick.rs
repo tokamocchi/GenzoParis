@@ -282,6 +282,7 @@ mod tests {
             as_shot_wb: AS_SHOT,
             cam_xyz: Some(CAM_XYZ),
             metadata: Default::default(),
+            lens_correction: None,
         };
         edit(&mut raw);
         PhotoSource::new(

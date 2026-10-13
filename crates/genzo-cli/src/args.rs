@@ -1195,18 +1195,39 @@ pub enum DevelopCommand {
         #[arg(value_parser = parse_variant_id)]
         variant: VariantId,
     },
-    /// 現像設定を変える（JSON。部分的な指定は今の設定にマージする。履歴に 1 件記録する）
+    /// 現像設定を変える（JSON。部分的な指定は今の設定にマージする。レンズ補正・ハイライト復元・ノイズ軽減は
+    /// オプションでも指定できる。履歴に 1 件記録する）
     Set {
         /// variant の ID
         #[arg(value_parser = parse_variant_id)]
         variant: VariantId,
-        /// 設定の JSON のファイル（- で標準入力）。`--json <FILE>` とも書ける（必須。UTF-8、BOM 付きの
-        /// UTF-8、UTF-16 を読める）
+        /// 設定の JSON のファイル（- で標準入力）。`--json <FILE>` とも書ける（レンズ補正・ハイライト復元・ノイズ
+        /// 軽減のオプションだけを指定するときは省ける。UTF-8、BOM 付きの UTF-8、UTF-16 を読める）
         #[arg(long = "settings", value_name = "FILE")]
         settings: Option<String>,
         /// マージせず、指定した JSON（欠けた項目は既定値）で置き換える
         #[arg(long)]
         replace: bool,
+        /// レンズ補正（DEV-14。JSON の後に当てる）
+        #[command(flatten)]
+        lens: LensArgs,
+        /// ハイライト復元・ノイズ軽減（DEV-06・DEV-13。JSON の後に当てる）
+        #[command(flatten)]
+        sensor: SensorArgs,
+    },
+    /// 処理バージョンを最新に更新する（DATA-09。レンズ補正などは処理バージョン 2 から使われる。ほかの設定は
+    /// 変えない。履歴に 1 件記録する。すでに最新の写真・動画は何もしない。複数の ID をまとめて更新できる）
+    Upgrade {
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// 元の画像の情報（RAW か・大きさ・デコーダ・撮影時の WB・埋め込みのレンズ補正の情報）と処理バージョンを
+    /// 表示する（写真を開いて展開する）
+    Source {
+        /// variant の ID（写真。動画は開けない）
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
     },
     /// 現像設定を初期化する（何も調整していない設定。履歴に 1 件記録する）
     Reset {
@@ -1243,6 +1264,10 @@ pub enum DevelopCommand {
         /// 写す項目（カンマ区切り。省略時はすべて）
         #[arg(long, value_enum, value_delimiter = ',')]
         groups: Vec<GroupArg>,
+        /// コピー先の処理バージョンがコピー元より古ければ、コピー元の版に更新する（DATA-09。省略時はコピー先の
+        /// 版のまま。古い版の写真では、レンズ補正・ハイライト復元・ノイズ軽減は使われない）
+        #[arg(long)]
+        upgrade_process_version: bool,
     },
     /// 仮想コピーを作る（LIB-13。元の写真と同じスタックに入る（展開する））
     VirtualCopy {
@@ -1283,6 +1308,179 @@ pub enum DevelopCommand {
     /// 比較表示（LIB-03）の同期ズームと同じ範囲を、2 枚までの写真について同時に描いて PNG に書く（コア API
     /// `render_view_region` を試す。範囲の中心は写真ごとの割合、大きさは出力の画素で、どの写真も同じ）
     Compare(CompareArgs),
+}
+
+/// オン / オフの指定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SwitchArg {
+    /// 有効にする。
+    On,
+    /// 無効にする。
+    Off,
+}
+
+impl SwitchArg {
+    /// 有効か。
+    pub fn is_on(self) -> bool {
+        self == SwitchArg::On
+    }
+}
+
+/// `develop set` のレンズ補正の指定（DEV-14。設定の JSON の `lens` と同じ項目。処理バージョン 2 から使われる）。
+/// 値の範囲は genzo-model の検証で確かめる。
+#[derive(Debug, Clone, Default, Args)]
+pub struct LensArgs {
+    /// プロファイル（RAW に埋め込まれた補正の情報）による補正（歪曲・周辺減光）を有効にする（JSON の
+    /// lens.profile_enabled）
+    #[arg(long, value_enum, value_name = "on|off")]
+    pub lens_profile: Option<SwitchArg>,
+    /// 倍率色収差を除去する（埋め込みの色収差の情報を使う。lens.remove_chromatic_aberration）
+    #[arg(long, value_enum, value_name = "on|off")]
+    pub remove_ca: Option<SwitchArg>,
+    /// プロファイルの歪曲補正の適用量（%。0〜200、100 で情報どおり。lens.distortion_scale）
+    #[arg(long, value_name = "PERCENT")]
+    pub distortion_scale: Option<f32>,
+    /// プロファイルの周辺減光補正の適用量（%。0〜200、100 で情報どおり。lens.vignetting_scale）
+    #[arg(long, value_name = "PERCENT")]
+    pub vignetting_scale: Option<f32>,
+    /// 手動の歪曲補正（-100〜100。正で樽型、負で糸巻き型の歪曲を補正する。lens.distortion）
+    #[arg(long, allow_hyphen_values = true, value_name = "N")]
+    pub distortion: Option<f32>,
+    /// 手動の周辺減光の補正量（-100〜100。正で四隅を明るくする。lens.vignetting_amount）
+    #[arg(long, allow_hyphen_values = true, value_name = "N")]
+    pub vignetting: Option<f32>,
+    /// 手動の周辺減光の中点（0〜100。既定 50。lens.vignetting_midpoint）
+    #[arg(long, value_name = "N")]
+    pub vignetting_midpoint: Option<f32>,
+    /// 手動の倍率色収差の補正の赤 / シアン（-100〜100。lens.ca_red_cyan）
+    #[arg(long, allow_hyphen_values = true, value_name = "N")]
+    pub ca_red_cyan: Option<f32>,
+    /// 手動の倍率色収差の補正の青 / 黄（-100〜100。lens.ca_blue_yellow）
+    #[arg(long, allow_hyphen_values = true, value_name = "N")]
+    pub ca_blue_yellow: Option<f32>,
+}
+
+impl LensArgs {
+    /// どれかを指定したか。
+    pub fn any(&self) -> bool {
+        self.lens_profile.is_some()
+            || self.remove_ca.is_some()
+            || self.distortion_scale.is_some()
+            || self.vignetting_scale.is_some()
+            || self.distortion.is_some()
+            || self.vignetting.is_some()
+            || self.vignetting_midpoint.is_some()
+            || self.ca_red_cyan.is_some()
+            || self.ca_blue_yellow.is_some()
+    }
+
+    /// 指定した項目を `lens` に当てる（指定しなかった項目は今の値のまま）。
+    pub fn apply(&self, lens: &mut genzo_model::LensCorrection) {
+        if let Some(v) = self.lens_profile {
+            lens.profile_enabled = v.is_on();
+        }
+        if let Some(v) = self.remove_ca {
+            lens.remove_chromatic_aberration = v.is_on();
+        }
+        let set = |dst: &mut f32, v: Option<f32>| {
+            if let Some(v) = v {
+                *dst = v;
+            }
+        };
+        set(&mut lens.distortion_scale, self.distortion_scale);
+        set(&mut lens.vignetting_scale, self.vignetting_scale);
+        set(&mut lens.distortion, self.distortion);
+        set(&mut lens.vignetting_amount, self.vignetting);
+        set(&mut lens.vignetting_midpoint, self.vignetting_midpoint);
+        set(&mut lens.ca_red_cyan, self.ca_red_cyan);
+        set(&mut lens.ca_blue_yellow, self.ca_blue_yellow);
+    }
+}
+
+/// ハイライト復元の方式（genzo-model の `HighlightMethod`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HighlightArg {
+    /// 白で切りそろえる（復元しない。処理バージョン 1 と同じ）。
+    Clip,
+    /// 明るさだけを復元する（無彩色）。
+    Neutral,
+    /// 色を保って復元する（近傍の色の比で再構成する）。
+    Reconstruct,
+}
+
+impl HighlightArg {
+    /// genzo-model の値。
+    pub fn method(self) -> genzo_model::HighlightMethod {
+        match self {
+            HighlightArg::Clip => genzo_model::HighlightMethod::Clip,
+            HighlightArg::Neutral => genzo_model::HighlightMethod::Neutral,
+            HighlightArg::Reconstruct => genzo_model::HighlightMethod::Reconstruct,
+        }
+    }
+}
+
+/// `develop set` のハイライト復元（DEV-06）・ノイズ軽減（DEV-13）の指定（設定の JSON の `highlight_recovery`・
+/// `detail.noise_reduction` と同じ項目。処理バージョン 2 から使われる。RAW の写真だけ）。値の範囲は genzo-model の
+/// 検証で確かめる。
+#[derive(Debug, Clone, Default, Args)]
+pub struct SensorArgs {
+    /// ハイライト復元の方式（clip: 白で切りそろえる（既定）・neutral: 明るさだけ・reconstruct: 色を保って復元。
+    /// highlight_recovery.method）
+    #[arg(long, value_enum, value_name = "METHOD")]
+    pub highlight_recovery: Option<HighlightArg>,
+    /// ハイライト復元の量（0〜100。既定 100。highlight_recovery.amount）
+    #[arg(long, value_name = "N")]
+    pub highlight_amount: Option<f32>,
+    /// 輝度ノイズの軽減（0〜100。detail.noise_reduction.luminance）
+    #[arg(long, value_name = "N")]
+    pub nr_luminance: Option<f32>,
+    /// 輝度ノイズの軽減のディテール（0〜100。既定 50。detail.noise_reduction.luminance_detail）
+    #[arg(long, value_name = "N")]
+    pub nr_luminance_detail: Option<f32>,
+    /// 輝度ノイズの軽減のコントラスト（0〜100。既定 0。detail.noise_reduction.luminance_contrast）
+    #[arg(long, value_name = "N")]
+    pub nr_luminance_contrast: Option<f32>,
+    /// カラーノイズの軽減（0〜100。detail.noise_reduction.color）
+    #[arg(long, value_name = "N")]
+    pub nr_color: Option<f32>,
+    /// カラーノイズの軽減のディテール（0〜100。既定 50。detail.noise_reduction.color_detail）
+    #[arg(long, value_name = "N")]
+    pub nr_color_detail: Option<f32>,
+}
+
+impl SensorArgs {
+    /// どれかを指定したか。
+    pub fn any(&self) -> bool {
+        self.highlight_recovery.is_some()
+            || self.highlight_amount.is_some()
+            || self.nr_luminance.is_some()
+            || self.nr_luminance_detail.is_some()
+            || self.nr_luminance_contrast.is_some()
+            || self.nr_color.is_some()
+            || self.nr_color_detail.is_some()
+    }
+
+    /// 指定した項目を `settings` に当てる（指定しなかった項目は今の値のまま）。
+    pub fn apply(&self, settings: &mut genzo_model::DevelopSettings) {
+        if let Some(m) = self.highlight_recovery {
+            settings.highlight_recovery.method = m.method();
+        }
+        let set = |dst: &mut f32, v: Option<f32>| {
+            if let Some(v) = v {
+                *dst = v;
+            }
+        };
+        set(
+            &mut settings.highlight_recovery.amount,
+            self.highlight_amount,
+        );
+        let nr = &mut settings.detail.noise_reduction;
+        set(&mut nr.luminance, self.nr_luminance);
+        set(&mut nr.luminance_detail, self.nr_luminance_detail);
+        set(&mut nr.luminance_contrast, self.nr_luminance_contrast);
+        set(&mut nr.color, self.nr_color);
+        set(&mut nr.color_detail, self.nr_color_detail);
+    }
 }
 
 /// `develop compare` の引数（LIB-03）。
@@ -1481,6 +1679,9 @@ pub struct BenchArgs {
     /// 結果の記録先のフォルダ（省略時は環境変数 GENZO_BENCH_DIR、それもなければ bench-results）
     #[arg(long, value_name = "DIR")]
     pub out: Option<PathBuf>,
+    /// 計測の設定に当てるハイライト復元・ノイズ軽減（DEV-06・DEV-13。`develop set` と同じオプション。処理バージョン 2）
+    #[command(flatten)]
+    pub sensor: SensorArgs,
 }
 
 /// 計測する処理。
@@ -2263,6 +2464,77 @@ mod tests {
     }
 
     #[test]
+    fn develop_set_accepts_lens_options() {
+        let cli = parse(&[
+            "genzo",
+            "develop",
+            "set",
+            "7",
+            "--lens-profile",
+            "on",
+            "--remove-ca",
+            "off",
+            "--distortion",
+            "-20",
+            "--vignetting",
+            "-35.5",
+            "--ca-blue-yellow",
+            "-3",
+            "--distortion-scale",
+            "80",
+            "--json",
+        ])
+        .unwrap();
+        assert!(cli.global.json, "最後の --json は出力の指定");
+        let Command::Develop(DevelopCommand::Set { settings, lens, .. }) = cli.command else {
+            panic!()
+        };
+        assert_eq!(settings, None);
+        assert!(lens.any());
+        assert_eq!(lens.lens_profile, Some(SwitchArg::On));
+        assert_eq!(lens.remove_ca, Some(SwitchArg::Off));
+        let mut l = genzo_model::LensCorrection {
+            remove_chromatic_aberration: true,
+            ca_red_cyan: 9.0,
+            ..Default::default()
+        };
+        lens.apply(&mut l);
+        assert!(l.profile_enabled);
+        assert!(!l.remove_chromatic_aberration);
+        assert_eq!(l.distortion, -20.0);
+        assert_eq!(l.vignetting_amount, -35.5);
+        assert_eq!(l.ca_blue_yellow, -3.0);
+        assert_eq!(l.distortion_scale, 80.0);
+        assert_eq!(l.ca_red_cyan, 9.0, "指定しない項目は今の値のまま");
+        assert_eq!(l.vignetting_midpoint, 50.0);
+        // 何も指定しなければ any() は false（JSON も無ければ実行のときに使い方の誤り）。
+        let cli = parse(&["genzo", "develop", "set", "7"]).unwrap();
+        let Command::Develop(DevelopCommand::Set { lens, .. }) = cli.command else {
+            panic!()
+        };
+        assert!(!lens.any());
+        assert!(parse(&["genzo", "develop", "set", "7", "--lens-profile", "yes"]).is_err());
+        assert!(parse(&["genzo", "develop", "set", "7", "--distortion", "abc"]).is_err());
+        // 処理バージョンの更新・元の画像の情報。
+        let cli = parse(&["genzo", "develop", "upgrade", "7"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop(DevelopCommand::Upgrade { variants }) if variants == [VariantId::new(7)]
+        ));
+        let cli = parse(&["genzo", "develop", "upgrade", "7", "8"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop(DevelopCommand::Upgrade { variants }) if variants.len() == 2
+        ));
+        assert!(parse(&["genzo", "develop", "upgrade"]).is_err());
+        let cli = parse(&["genzo", "develop", "source", "7"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop(DevelopCommand::Source { variant }) if variant == VariantId::new(7)
+        ));
+    }
+
+    #[test]
     fn json_is_detected_for_usage_errors() {
         let args = rewrite_develop_set(os(&["genzo", "rate", "1", "9", "--json"]));
         assert!(json_requested(&args));
@@ -2377,11 +2649,35 @@ mod tests {
             "basic-tone,white-balance",
         ])
         .unwrap();
-        let Command::Develop(DevelopCommand::Copy { to, groups, .. }) = cli.command else {
+        let Command::Develop(DevelopCommand::Copy {
+            to,
+            groups,
+            upgrade_process_version,
+            ..
+        }) = cli.command
+        else {
             panic!()
         };
         assert_eq!(to.len(), 2);
         assert_eq!(groups, vec![GroupArg::BasicTone, GroupArg::WhiteBalance]);
+        assert!(!upgrade_process_version, "既定はコピー先の版のまま");
+        let cli = parse(&[
+            "genzo",
+            "develop",
+            "copy",
+            "1",
+            "--to",
+            "2",
+            "--upgrade-process-version",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop(DevelopCommand::Copy {
+                upgrade_process_version: true,
+                ..
+            })
+        ));
     }
 
     #[test]

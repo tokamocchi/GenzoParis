@@ -9,6 +9,8 @@ use std::str::FromStr;
 use genzo_model::PhotoMetadata;
 use serde::{Deserialize, Serialize};
 
+use crate::lens::LensCorrectionData;
+
 /// 受け取る RAW の画素数の上限（有効画素）。
 ///
 /// 対象機種（α7 IV で約 33M 画素）より十分大きく、壊れたファイルによる巨大な確保を防ぐ値
@@ -118,6 +120,9 @@ pub enum RawError {
     /// CFA の配列が不正。
     #[error("CFA の配列が不正です: {0}")]
     InvalidCfaPattern(String),
+    /// 埋め込みのレンズ補正の情報が不正（[`crate::lens::LensCorrectionData::validate`]）。
+    #[error("埋め込みのレンズ補正の情報が不正です: {0}")]
+    InvalidLensCorrection(String),
     /// 対応していない形式。
     #[error("対応していない RAW です: {0}")]
     Unsupported(String),
@@ -401,6 +406,9 @@ pub struct RawImage {
     pub cam_xyz: Option<[[f32; 3]; 3]>,
     /// 撮影情報。
     pub metadata: PhotoMetadata,
+    /// 埋め込みのレンズ補正の情報（DEV-14。Sony の ARW のタグ・DNG の opcode。[`crate::lens`]）。
+    /// なければ `None`。
+    pub lens_correction: Option<LensCorrectionData>,
 }
 
 impl RawImage {
@@ -429,8 +437,8 @@ impl RawImage {
             .unwrap_or(PixelRect::full(self.width, self.height))
     }
 
-    /// 寸法・長さ・上限・黒レベルと白レベル・飽和の閾値・既定の切り抜き・WB の係数・カメラ行列を
-    /// 検証する。
+    /// 寸法・長さ・上限・黒レベルと白レベル・飽和の閾値・既定の切り抜き・WB の係数・カメラ行列・
+    /// 埋め込みのレンズ補正の情報を検証する。
     ///
     /// ワーカーから受け取ったバッファは、使う前に必ずこれで検証する（04 の 1.2 節）。
     pub fn validate(&self) -> Result<(), RawError> {
@@ -499,6 +507,9 @@ impl RawImage {
         if let Some(m) = &self.cam_xyz {
             validate_matrix(m)?;
         }
+        if let Some(lens) = &self.lens_correction {
+            lens.validate()?;
+        }
         Ok(())
     }
 }
@@ -560,6 +571,7 @@ mod tests {
             as_shot_wb: [2.4, 1.0, 1.6, 1.0],
             cam_xyz: Some([[0.7, -0.2, -0.05], [-0.45, 1.25, 0.2], [-0.07, 0.15, 0.6]]),
             metadata: PhotoMetadata::default(),
+            lens_correction: None,
         }
     }
 

@@ -199,7 +199,7 @@ mod tests {
         k.file_revision = 2;
         variants.push(k);
         let mut k = base;
-        k.process_version = 2;
+        k.process_version = base.process_version + 1;
         variants.push(k);
         let mut k = base;
         k.render_deps_hash[0] ^= 1;

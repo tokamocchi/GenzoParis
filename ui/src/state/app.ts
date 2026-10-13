@@ -51,6 +51,8 @@ export type DialogState =
   | { kind: "export"; variantIds: VariantId[] }
   | { kind: "delete"; deleteKind: DeleteKind; variantIds: VariantId[] }
   | { kind: "paste_settings"; targets: VariantId[] }
+  // 処理バージョンをまとめて最新に更新する（DATA-09。写真の右クリックのメニュー）。
+  | { kind: "upgrade_process"; targets: VariantId[] }
   | { kind: "settings"; tab?: "general" | "view" | "catalog" | "backup" }
   | { kind: "shortcuts" }
   | { kind: "close_failed"; failure: CloseFailure; quitting: boolean }

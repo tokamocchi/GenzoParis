@@ -8,7 +8,7 @@
 //!
 //! | IFD | タグ |
 //! |---|---|
-//! | IFD0（RAW） | NewSubFileType = 0、ImageWidth / ImageLength、BitsPerSample = 16、Compression = 1、PhotometricInterpretation = 32803（CFA）、Make / Model、StripOffsets / RowsPerStrip / StripByteCounts、Orientation、SamplesPerPixel = 1、PlanarConfiguration = 1、Software、SubIFDs（プレビューがあるとき）、CFARepeatPatternDim = 2 × 2、CFAPattern、ExifIFD、GPSInfo、DNGVersion = 1.4.0.0、DNGBackwardVersion = 1.1.0.0、UniqueCameraModel、CFAPlaneColor、CFALayout = 1、BlackLevelRepeatDim = 2 × 2、BlackLevel（4 位置）、WhiteLevel、DefaultCropOrigin / DefaultCropSize（[`RawImage::default_crop`] があるとき。ActiveArea の左上からの位置）、ColorMatrix1（/2）、AsShotNeutral、CalibrationIlluminant1（/2）、ActiveArea（余白があるとき） |
+//! | IFD0（RAW） | （[`DngOptions::lens_correction`]・[`RawImage::lens_correction`] があるとき）OpcodeList3 または Sony の 0x7032・0x7035・0x7037、NewSubFileType = 0、ImageWidth / ImageLength、BitsPerSample = 16、Compression = 1、PhotometricInterpretation = 32803（CFA）、Make / Model、StripOffsets / RowsPerStrip / StripByteCounts、Orientation、SamplesPerPixel = 1、PlanarConfiguration = 1、Software、SubIFDs（プレビューがあるとき）、CFARepeatPatternDim = 2 × 2、CFAPattern、ExifIFD、GPSInfo、DNGVersion = 1.4.0.0、DNGBackwardVersion = 1.1.0.0、UniqueCameraModel、CFAPlaneColor、CFALayout = 1、BlackLevelRepeatDim = 2 × 2、BlackLevel（4 位置）、WhiteLevel、DefaultCropOrigin / DefaultCropSize（[`RawImage::default_crop`] があるとき。ActiveArea の左上からの位置）、ColorMatrix1（/2）、AsShotNeutral、CalibrationIlluminant1（/2）、ActiveArea（余白があるとき） |
 //! | EXIF IFD | ExposureTime、FNumber、ISOSpeedRatings（65535 を超えるときは RecommendedExposureIndex も）、ExifVersion、DateTimeOriginal、OffsetTimeOriginal、FocalLength、SubSecTimeOriginal、LensModel |
 //! | GPS IFD | GPSVersionID、GPSLatitudeRef / GPSLatitude、GPSLongitudeRef / GPSLongitude |
 //! | SubIFD（プレビュー） | NewSubFileType = 1、8bit の RGB（非圧縮）または JPEG（Compression = 7） |
@@ -35,6 +35,7 @@ use std::path::Path;
 
 use genzo_model::{GpsCoord, PhotoMetadata};
 
+use crate::lens::{LensCorrectionData, encode_opcode_list, sony_tag_values};
 use crate::{CfaColor, RawError, RawImage};
 
 /// EXIF の LightSource の D65（CalibrationIlluminant の既定値）。
@@ -60,6 +61,10 @@ pub struct DngOptions {
     /// DefaultCropOrigin / DefaultCropSize に書く値（左, 上, 幅, 高さ。ActiveArea の左上からの
     /// 位置）を、[`RawImage::default_crop`] の代わりに指定する（範囲外の値のテスト用。検証しない）。
     pub default_crop_tag: Option<[u32; 4]>,
+    /// 埋め込みのレンズ補正の情報を書く（`None` なら [`RawImage::lens_correction`]）。DNG の opcode は
+    /// IFD0 の OpcodeList3（0xC74E）、Sony のタグは IFD0 の 0x7032・0x7035・0x7037（SSHORT。
+    /// darktable が DNG に写すときと同じ置き場所）に書く（[`crate::lens`] の読み取りのテスト用）。
+    pub lens_correction: Option<LensCorrectionData>,
 }
 
 impl Default for DngOptions {
@@ -72,6 +77,7 @@ impl Default for DngOptions {
             color_matrix_2: None,
             preview: None,
             default_crop_tag: None,
+            lens_correction: None,
         }
     }
 }
@@ -185,6 +191,7 @@ mod tag {
     pub const CALIBRATION_ILLUMINANT_1: u16 = 50778;
     pub const CALIBRATION_ILLUMINANT_2: u16 = 50779;
     pub const ACTIVE_AREA: u16 = 50829;
+    pub const OPCODE_LIST3: u16 = crate::lens::TAG_OPCODE_LIST3;
 
     pub const GPS_VERSION_ID: u16 = 0;
     pub const GPS_LATITUDE_REF: u16 = 1;
@@ -214,6 +221,7 @@ enum Value {
     /// NUL を含まない ASCII の文字列（書くときに NUL を付ける）。
     Ascii(String),
     Short(Vec<u16>),
+    SShort(Vec<i16>),
     Long(Vec<u32>),
     Rational(Vec<(u32, u32)>),
     SRational(Vec<(i32, i32)>),
@@ -230,6 +238,7 @@ impl Value {
             Value::Long(_) => 4,
             Value::Rational(_) => 5,
             Value::Undefined(_) => 7,
+            Value::SShort(_) => 8,
             Value::SRational(_) => 10,
         }
     }
@@ -240,6 +249,7 @@ impl Value {
             Value::Byte(v) | Value::Undefined(v) => v.len(),
             Value::Ascii(s) => s.len() + 1,
             Value::Short(v) => v.len(),
+            Value::SShort(v) => v.len(),
             Value::Long(v) => v.len(),
             Value::Rational(v) => v.len(),
             Value::SRational(v) => v.len(),
@@ -257,6 +267,7 @@ impl Value {
                 b
             }
             Value::Short(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Value::SShort(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             Value::Long(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             Value::Rational(v) => v
                 .iter()
@@ -708,6 +719,23 @@ pub fn encode(image: &RawImage, options: &DngOptions) -> Result<Vec<u8>, DngErro
         .map(|&c| rational(1.0 / f64::from(c)))
         .collect::<Result<Vec<_>, _>>()?;
     main.set(tag::AS_SHOT_NEUTRAL, Value::Rational(neutral));
+    match options
+        .lens_correction
+        .as_ref()
+        .or(image.lens_correction.as_ref())
+    {
+        Some(LensCorrectionData::DngOpcode(d)) => {
+            main.set(tag::OPCODE_LIST3, Value::Undefined(encode_opcode_list(d)));
+        }
+        Some(LensCorrectionData::SonyArw(s)) => {
+            for (t, values) in sony_tag_values(s) {
+                if let Some(v) = values {
+                    main.set(t, Value::SShort(v));
+                }
+            }
+        }
+        None => {}
+    }
     if !mg.is_zero() {
         // ActiveArea は 上・左・下・右。
         main.set(

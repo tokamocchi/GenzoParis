@@ -1,9 +1,26 @@
-//! `develop` のサブコマンド（DEV-00〜08・DEV-27・DEV-30、LIB-13。04 の 2.5 節）。
+//! `develop` のサブコマンド（DEV-00〜08・DEV-14・DEV-27・DEV-30、LIB-13、DATA-09。04 の 2.5 節）。
 //!
 //! - `get` / `set` / `reset` は写真を開かずに（展開せずに）カタログの設定を読み書きする。保存は
-//!   genzo-api の [`genzo_api::Core::paste_settings_with_label`]（1 つのトランザクションで履歴に 1 件）。
-//!   履歴の名前は `set` では変わった項目（[`genzo_api::describe_change`]。例: 「露光量 +0.50」）、`reset`
-//!   では [`HISTORY_LABEL_RESET`]。
+//!   genzo-api の [`genzo_api::Core::paste_settings_with`]（1 つのトランザクションで履歴に 1 件。処理バージョンは
+//!   作った設定の値をそのまま保存する: [`genzo_api::PasteVersion::Source`]）。履歴の名前は `set` では変わった
+//!   項目（[`genzo_api::describe_change`]。例: 「露光量 +0.50」）、`reset` では [`HISTORY_LABEL_RESET`]。
+//! - `set` の処理バージョンは、JSON に `process_version` を書いたときだけ変わる（DATA-09。`--replace` でも、
+//!   書かなければ今の版のまま: [`merged_settings`]）。
+//! - `set` のレンズ補正（DEV-14）はオプション（`--lens-profile`・`--remove-ca`・`--distortion-scale`・
+//!   `--vignetting-scale`・`--distortion`・`--vignetting`・`--vignetting-midpoint`・`--ca-red-cyan`・
+//!   `--ca-blue-yellow`）でも指定できる（JSON の後に当てる。[`settings_with_options`]）。処理バージョン 1 の
+//!   写真では使われないので警告する（[`lens_ignored`]）。
+//! - `set` のハイライト復元（DEV-06）・ノイズ軽減（DEV-13）もオプション（`--highlight-recovery`・`--highlight-amount`・
+//!   `--nr-luminance`・`--nr-luminance-detail`・`--nr-luminance-contrast`・`--nr-color`・`--nr-color-detail`）で
+//!   指定できる（JSON の後、レンズ補正と同じく当てる）。処理バージョン 1 の写真では使われないので警告する
+//!   （[`sensor_ignored`]）。
+//! - `upgrade` は処理バージョンを最新に更新する（DATA-09。履歴の名前はアプリの更新と同じ
+//!   [`genzo_api::upgrade_process_label`]）。複数の ID をまとめて更新できる（genzo-api の
+//!   [`genzo_api::Core::upgrade_process_versions`]。すでに最新の写真・動画は飛ばす）。`source` は写真を開いて、
+//!   元の画像の情報（埋め込みのレンズ補正の情報の要約を含む。genzo-api の `SourceInfo`）と処理バージョンを
+//!   表示する。
+//! - `copy` はコピー先の処理バージョンを変えない（`--upgrade-process-version` で、コピー元より古い写真を
+//!   コピー元の版に上げる）。古い版のために写した項目の一部が使われない写真があれば警告する。
 //! - `set` の JSON は **部分的な指定を今の設定にマージする**（[`merge_json`]）。オブジェクトは項目ごとに
 //!   再帰的に合わせ、配列と値は置き換える。WB のような「種類を 1 つのキーで表す」値（`{"preset": ...}` と
 //!   `{"custom": {...}}`）は、種類が違えば置き換える。知らない項目（打ち間違い）はエラーにする
@@ -17,21 +34,25 @@
 //! - `compare` は、比較表示（LIB-03）の同期ズームと同じ範囲（中心は写真ごとの割合、大きさは出力の画素で
 //!   共通）を、写真ごとに比較表示の面（genzo-api の `view_output_size`・`render_view_region`。現像の
 //!   セッションは開かない）に同時に描いて、PNG に書く。
-//! - JSON の出力: `get` は設定そのもの（そのまま `set --replace` に渡せる）。`set`・`reset`・`undo`・
-//!   `redo` は `{"variant_id", "changed", "settings"}`（Undo / Redo できなければ `changed: false`、
-//!   `settings: null`。終了コードは 0）。
+//! - JSON の出力: `get` は設定そのもの（そのまま `set --replace` に渡せる）。`set`・`upgrade`（ID が 1 つ）・
+//!   `reset`・`undo`・`redo` は `{"variant_id", "changed", "settings"}`（Undo / Redo できなければ
+//!   `changed: false`、`settings: null`。終了コードは 0）。`upgrade` に ID が複数なら `{"updated"}`（更新した
+//!   数）。`copy` は `{"from", "updated", "upgraded", "needs_upgrade"}`。`source` は `{"variant_id", "source",
+//!   "process_version", "latest_process_version"}`（埋め込みのレンズ補正の情報が壊れていて使えなかった理由は
+//!   `source.lens_correction_note`）。
 
 use std::io::Read;
 
 use genzo_api::{
-    DeleteKind, DevelopSettings, MAX_VIEW_PANES, RegionRequest, RegionSpace, SettingGroups,
-    VariantId, ViewOutputSize,
+    DeleteKind, DevelopSettings, MAX_VIEW_PANES, PasteVersion, RegionRequest, RegionSpace,
+    SettingGroups, VariantId, ViewOutputSize,
 };
 use serde_json::{Value, json};
 
 use crate::Status;
 use crate::args::{
-    BeforeArgs, CompareArgs, DevelopCommand, GlobalArgs, RegionArgs, RegionSpaceArg, setting_groups,
+    BeforeArgs, CompareArgs, DevelopCommand, GlobalArgs, LensArgs, RegionArgs, RegionSpaceArg,
+    SensorArgs, setting_groups,
 };
 use crate::error::{CliError, CliResult};
 use crate::library::{ensure_variants, unique_ids};
@@ -49,23 +70,46 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
             variant,
             settings,
             replace,
+            lens,
+            sensor,
         } => {
-            let Some(source) = settings else {
-                return Err(CliError::Usage(
-                    "現像設定の JSON を --json <FILE>（または --settings <FILE>。- で標準入力）で指定してください"
-                        .to_owned(),
-                ));
+            let patch = match settings {
+                Some(source) => read_json_input(&source)?,
+                None if lens.any() || sensor.any() => json!({}),
+                None => {
+                    return Err(CliError::Usage(
+                        "現像設定の JSON を --json <FILE>（または --settings <FILE>。- で標準入力）か、レンズ補正・\
+                         ハイライト復元・ノイズ軽減のオプション（--lens-profile・--highlight-recovery・\
+                         --nr-luminance など）で指定してください"
+                            .to_owned(),
+                    ));
+                }
             };
-            let patch = read_json_input(&source)?;
-            set(g, out, variant, &patch, replace)
+            set(g, out, variant, &patch, replace, &lens, &sensor)
         }
+        DevelopCommand::Upgrade { variants } => upgrade(g, out, &variants),
+        DevelopCommand::Source { variant } => source(g, out, variant),
         DevelopCommand::Reset { variant } => reset(g, out, variant),
         DevelopCommand::Undo { variant } => step(g, out, variant, false),
         DevelopCommand::Redo { variant } => step(g, out, variant, true),
         DevelopCommand::History { variant } => history(g, out, variant),
-        DevelopCommand::Copy { from, to, groups } => {
-            copy(g, out, from, &to, setting_groups(&groups))
-        }
+        DevelopCommand::Copy {
+            from,
+            to,
+            groups,
+            upgrade_process_version,
+        } => copy(
+            g,
+            out,
+            from,
+            &to,
+            setting_groups(&groups),
+            if upgrade_process_version {
+                PasteVersion::Upgrade
+            } else {
+                PasteVersion::Keep
+            },
+        ),
         DevelopCommand::VirtualCopy { variant, name } => virtual_copy(g, out, variant, name),
         DevelopCommand::DeleteCopy { variant } => {
             crate::library::delete(g, out, DeleteKind::VirtualCopies, &[variant], true)
@@ -196,6 +240,10 @@ pub fn unknown_field(known: &Value, patch: &Value, prefix: &str) -> Option<Strin
 }
 
 /// 今の設定に JSON をマージした設定を作って検証する（`replace` なら既定の設定に合わせる）。
+///
+/// 処理バージョンは、JSON に `process_version` を書いたときだけ変わる（DATA-09: 明示的な更新なしに変えない）。
+/// `replace` の土台も、処理バージョンと外部データ（`render_deps`）は今の値（`reset` と同じ。既定の設定の版は
+/// 最新なので、そのまま使うと版 1 の写真が黙って版 2 になる。検証の指摘）。
 pub fn merged_settings(
     current: &DevelopSettings,
     patch: &Value,
@@ -207,7 +255,11 @@ pub fn merged_settings(
         ));
     }
     let base = if replace {
-        DevelopSettings::default()
+        DevelopSettings {
+            process_version: current.process_version,
+            render_deps: current.render_deps.clone(),
+            ..DevelopSettings::default()
+        }
     } else {
         current.clone()
     };
@@ -259,9 +311,41 @@ fn save(s: &Session, v: VariantId, new: &DevelopSettings, label: Option<&str>) -
     let label = label
         .map(str::to_owned)
         .unwrap_or_else(|| genzo_api::describe_change(&current, new));
+    // 作った設定をそのまま保存する（処理バージョンも。`set` の JSON に書いた版・`upgrade` の版）。
     s.core
-        .paste_settings_with_label(new, &[v], SettingGroups::ALL, &label)?;
+        .paste_settings_with(new, &[v], SettingGroups::ALL, PasteVersion::Source, &label)?;
     Ok(true)
+}
+
+/// JSON をマージした設定に、レンズ補正・ハイライト復元・ノイズ軽減のオプションを当てて検証する。
+pub fn settings_with_options(
+    current: &DevelopSettings,
+    patch: &Value,
+    replace: bool,
+    lens: &LensArgs,
+    sensor: &SensorArgs,
+) -> CliResult<DevelopSettings> {
+    let mut new = merged_settings(current, patch, replace)?;
+    if lens.any() || sensor.any() {
+        lens.apply(&mut new.lens);
+        sensor.apply(&mut new);
+        new.validate().map_err(genzo_model::DevelopError::from)?;
+    }
+    Ok(new)
+}
+
+/// 処理バージョンが古く、ハイライト復元・ノイズ軽減が使われない設定か（DEV-06・DEV-13。処理バージョン 2 から
+/// 使われる）。
+pub fn sensor_ignored(settings: &DevelopSettings) -> bool {
+    settings.process_version < genzo_pipeline::ProcessVersion::V2.get()
+        && (!settings.highlight_recovery.is_disabled()
+            || !settings.detail.noise_reduction.is_disabled())
+}
+
+/// 処理バージョンが古く、レンズ補正が使われない設定か（DEV-14。処理バージョン 2 から使われる）。
+pub fn lens_ignored(settings: &DevelopSettings) -> bool {
+    settings.process_version < genzo_pipeline::ProcessVersion::V2.get()
+        && settings.lens != genzo_model::LensCorrection::default()
 }
 
 fn set(
@@ -270,17 +354,138 @@ fn set(
     v: VariantId,
     patch: &Value,
     replace: bool,
+    lens: &LensArgs,
+    sensor: &SensorArgs,
 ) -> CliResult<Status> {
     let s = Session::open(g, out, &OpenOptions::default())?;
     let current = s.core.develop_settings(v)?;
-    let new = merged_settings(&current, patch, replace)?;
+    let new = settings_with_options(&current, patch, replace, lens, sensor)?;
     let changed = save(&s, v, &new, None)?;
     let saved = s.core.develop_settings(v)?;
     s.close()?;
     if !changed && !out.json {
         out.progress("設定は変わっていません（履歴に記録しませんでした）");
     }
+    if lens_ignored(&saved) && saved.lens != current.lens {
+        out.warn(format!(
+            "この写真の処理バージョン（{}）では、レンズ補正は使われません（genzo develop upgrade {v} で更新できます）",
+            saved.process_version
+        ));
+    }
+    if sensor_ignored(&saved)
+        && (saved.highlight_recovery != current.highlight_recovery
+            || saved.detail.noise_reduction != current.detail.noise_reduction)
+    {
+        out.warn(format!(
+            "この写真の処理バージョン（{}）では、ハイライト復元・ノイズ軽減は使われません（genzo develop upgrade {v} で更新できます）",
+            saved.process_version
+        ));
+    }
     print_settings(out, v, &saved, changed);
+    Ok(Status::Success)
+}
+
+/// 処理バージョンを最新に更新する（DATA-09。履歴の名前はアプリの更新と同じ）。ID が複数ならまとめて
+/// 更新する（genzo-api の [`genzo_api::Core::upgrade_process_versions`]。1 つのトランザクション）。
+fn upgrade(g: &GlobalArgs, out: Output, variants: &[VariantId]) -> CliResult<Status> {
+    let variants = unique_ids(variants);
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    ensure_variants(&s, &variants)?;
+    let latest = genzo_model::CURRENT_PROCESS_VERSION;
+    let n = s.core.upgrade_process_versions(&variants)?;
+    if let [v] = variants[..] {
+        let saved = s.core.develop_settings(v)?;
+        s.close()?;
+        if n == 0 && !out.json {
+            out.progress(format!(
+                "処理バージョンはすでに最新（{}）です（履歴に記録しませんでした）",
+                saved.process_version
+            ));
+        }
+        print_settings(out, v, &saved, n > 0);
+        return Ok(Status::Success);
+    }
+    s.close()?;
+    if out.json {
+        out.print_json(&json!({ "updated": n }));
+    } else {
+        out.line(format!(
+            "{n} 件の処理バージョンを {latest} に更新しました（すでに最新の写真・動画の {} 件はそのまま）",
+            variants.len() - n
+        ));
+    }
+    Ok(Status::Success)
+}
+
+/// 元の画像の情報と処理バージョンを表示する（写真を開いて展開する）。
+fn source(g: &GlobalArgs, out: Output, v: VariantId) -> CliResult<Status> {
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    ensure_variants(&s, &[v])?;
+    let state = s.core.open_develop(v);
+    // 開けたら閉じる（設定は変えていないので保存するものはない）。
+    let closed = if state.is_ok() {
+        s.core.close_develop()
+    } else {
+        Ok(())
+    };
+    s.close()?;
+    let state = state?;
+    closed?;
+    let src = &state.source;
+    if out.json {
+        out.print_json(&json!({
+            "variant_id": v,
+            "source": json_value(src),
+            "process_version": state.settings.process_version,
+            "latest_process_version": state.latest_process_version,
+        }));
+        return Ok(Status::Success);
+    }
+    let mut t = Table::new(["項目", "値"]);
+    t.row(vec![
+        "種類".to_owned(),
+        if src.is_raw { "RAW" } else { "RAW 以外" }.to_owned(),
+    ]);
+    t.row(vec![
+        "元の大きさ".to_owned(),
+        format!("{} × {}（向きを反映する前）", src.width, src.height),
+    ]);
+    t.row(vec![
+        "デコーダ".to_owned(),
+        src.decoder.clone().unwrap_or_else(|| "-".to_owned()),
+    ]);
+    t.row(vec![
+        "撮影時の WB".to_owned(),
+        src.as_shot_white_balance
+            .map(|w| format!("{:.0} K、tint {:+.0}", w.temperature_k, w.tint))
+            .unwrap_or_else(|| "-".to_owned()),
+    ]);
+    t.row(vec![
+        "レンズ補正の情報".to_owned(),
+        match (&src.lens_correction, &src.lens_correction_note) {
+            (Some(l), _) => l.description.clone(),
+            (None, Some(note)) => {
+                format!(
+                    "使えません（埋め込みの情報が壊れています: {note}。手動の補正だけを使えます）"
+                )
+            }
+            (None, None) if src.is_raw => "なし（手動の補正だけを使えます）".to_owned(),
+            (None, None) => "-（RAW 以外。歪曲の手動の補正だけを使えます）".to_owned(),
+        },
+    ]);
+    let pv = state.settings.process_version;
+    t.row(vec![
+        "処理バージョン".to_owned(),
+        if pv < state.latest_process_version {
+            format!(
+                "{pv}（最新は {}。genzo develop upgrade {v} で更新できます）",
+                state.latest_process_version
+            )
+        } else {
+            pv.to_string()
+        },
+    ]);
+    out.table(&t);
     Ok(Status::Success)
 }
 
@@ -355,17 +560,44 @@ fn copy(
     from: VariantId,
     to: &[VariantId],
     groups: SettingGroups,
+    version: PasteVersion,
 ) -> CliResult<Status> {
     let to = unique_ids(to);
     let s = Session::open(g, out, &OpenOptions::default())?;
     ensure_variants(&s, &to)?;
     let source = s.core.develop_settings(from)?;
-    let n = s.core.paste_settings(&source, &to, groups)?;
+    let r = s.core.paste_settings_with(
+        &source,
+        &to,
+        groups,
+        version,
+        genzo_api::HISTORY_LABEL_PASTE,
+    )?;
     s.close()?;
+    if r.needs_upgrade > 0 {
+        out.warn(format!(
+            "{} 件は処理バージョンが古いため、写した項目の一部（レンズ補正・ハイライト復元・ノイズ軽減）は使われません\
+             （--upgrade-process-version を付けてコピーするか、genzo develop upgrade で更新できます）",
+            r.needs_upgrade
+        ));
+    }
     if out.json {
-        out.print_json(&json!({ "from": from, "updated": n }));
+        out.print_json(&json!({
+            "from": from,
+            "updated": r.count,
+            "upgraded": r.upgraded,
+            "needs_upgrade": r.needs_upgrade,
+        }));
+    } else if r.upgraded > 0 {
+        out.line(format!(
+            "variant {from} の設定を {} 件に適用しました（{} 件の処理バージョンを {} に更新）",
+            r.count, r.upgraded, source.process_version
+        ));
     } else {
-        out.line(format!("variant {from} の設定を {n} 件に適用しました"));
+        out.line(format!(
+            "variant {from} の設定を {} 件に適用しました",
+            r.count
+        ));
     }
     Ok(Status::Success)
 }
@@ -713,6 +945,37 @@ mod tests {
         assert_eq!(r.tone.shadows, 40.0);
     }
 
+    /// 処理バージョンは、JSON に書いたときだけ変わる（DATA-09。検証の指摘: `--replace` の土台が既定の設定
+    /// （最新の版）だったため、版 1 の写真が黙って版 2 になっていた）。
+    #[test]
+    fn replace_keeps_the_current_process_version_unless_written() {
+        let mut current = DevelopSettings {
+            process_version: 1,
+            exposure_ev: 0.3,
+            ..Default::default()
+        };
+        current.render_deps.raw_decoder = "libraw-0.21.2".to_owned();
+        for patch in [json!({}), json!({"exposure_ev": 0.5})] {
+            for replace in [false, true] {
+                let s = merged_settings(&current, &patch, replace).unwrap();
+                assert_eq!(s.process_version, 1, "{patch} replace={replace}");
+                assert_eq!(s.render_deps, current.render_deps);
+            }
+        }
+        // オプションだけ（JSON なし）でも同じ。
+        let lens = LensArgs {
+            lens_profile: Some(crate::args::SwitchArg::On),
+            ..LensArgs::default()
+        };
+        let s = settings_with_options(&current, &json!({}), true, &lens, &SensorArgs::default())
+            .unwrap();
+        assert_eq!(s.process_version, 1);
+        assert!(s.lens.profile_enabled);
+        // JSON に書けば、その版にする（明示的な指定）。
+        let s = merged_settings(&current, &json!({"process_version": 2}), true).unwrap();
+        assert_eq!(s.process_version, 2);
+    }
+
     #[test]
     fn enum_values_are_replaced_when_the_kind_changes() {
         let current = DevelopSettings {
@@ -799,6 +1062,88 @@ mod tests {
             decode_text(&[0xFF, 0xFE, 0x00, 0xD8]).is_err(),
             "対のないサロゲート"
         );
+    }
+
+    #[test]
+    fn lens_options_are_applied_after_the_json_and_validated() {
+        let current = DevelopSettings::default();
+        let lens = LensArgs {
+            lens_profile: Some(crate::args::SwitchArg::On),
+            distortion: Some(-20.0),
+            ..Default::default()
+        };
+        let patch = json!({"lens": {"distortion": 10, "ca_red_cyan": 4}, "exposure_ev": 0.5});
+        let s =
+            settings_with_options(&current, &patch, false, &lens, &SensorArgs::default()).unwrap();
+        assert!(s.lens.profile_enabled);
+        assert_eq!(s.lens.distortion, -20.0, "オプションが JSON より後");
+        assert_eq!(s.lens.ca_red_cyan, 4.0);
+        assert_eq!(s.exposure_ev, 0.5);
+        // 範囲の外は検証で拒む。
+        let bad = LensArgs {
+            vignetting_scale: Some(250.0),
+            ..Default::default()
+        };
+        assert!(
+            settings_with_options(&current, &json!({}), false, &bad, &SensorArgs::default())
+                .is_err()
+        );
+        // 処理バージョン 1 では、レンズ補正を設定していれば「使われない」。
+        assert!(!lens_ignored(&s));
+        let v1 = DevelopSettings {
+            process_version: 1,
+            ..s.clone()
+        };
+        assert!(lens_ignored(&v1));
+        assert!(!lens_ignored(&DevelopSettings {
+            process_version: 1,
+            ..DevelopSettings::default()
+        }));
+    }
+
+    #[test]
+    fn sensor_options_are_applied_after_the_json_and_validated() {
+        let current = DevelopSettings::default();
+        let sensor = SensorArgs {
+            highlight_recovery: Some(crate::args::HighlightArg::Reconstruct),
+            highlight_amount: Some(60.0),
+            nr_luminance: Some(30.0),
+            nr_color_detail: Some(80.0),
+            ..Default::default()
+        };
+        let patch = json!({"detail": {"noise_reduction": {"luminance": 10, "color": 25}}});
+        let s =
+            settings_with_options(&current, &patch, false, &LensArgs::default(), &sensor).unwrap();
+        assert_eq!(
+            s.highlight_recovery.method,
+            genzo_model::HighlightMethod::Reconstruct
+        );
+        assert_eq!(s.highlight_recovery.amount, 60.0);
+        assert_eq!(
+            s.detail.noise_reduction.luminance, 30.0,
+            "オプションが JSON より後"
+        );
+        assert_eq!(s.detail.noise_reduction.color, 25.0);
+        assert_eq!(s.detail.noise_reduction.color_detail, 80.0);
+        assert_eq!(s.detail.noise_reduction.luminance_detail, 50.0);
+        // 範囲の外は検証で拒む。
+        let bad = SensorArgs {
+            nr_color: Some(120.0),
+            ..Default::default()
+        };
+        assert!(
+            settings_with_options(&current, &json!({}), false, &LensArgs::default(), &bad).is_err()
+        );
+        // 処理バージョン 1 では使われない。
+        assert!(!sensor_ignored(&s));
+        assert!(sensor_ignored(&DevelopSettings {
+            process_version: 1,
+            ..s.clone()
+        }));
+        assert!(!sensor_ignored(&DevelopSettings {
+            process_version: 1,
+            ..DevelopSettings::default()
+        }));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! | ステージ | モジュール | 型 | ID | 契約（入力 → 出力） | 設計書 |
 //! |---|---|---|---|---|---|
-//! | 9. ジオメトリ（向き・回転・切り抜き） | [`geometry`] | [`GeometryStage`] | `finish.geometry` | B2（S の格子）→ B2（C の格子） | 2.1 節・2.7 節、DEV-15 |
+//! | 9. ジオメトリ（向き・回転・歪曲補正・切り抜き） | [`geometry`] | [`GeometryStage`] | `finish.geometry` | B2（S の格子）→ B2（C の格子） | 2.1 節・2.7 節、DEV-15・DEV-14 |
 //! | 10. 露光量 | [`exposure`] | [`ExposureStage`] | `finish.exposure` | B2 → B2 | DEV-04、IQ-02 |
 //! | 10 の後. コントラスト | [`exposure`] | [`ContrastStage`] | `finish.contrast` | B2 → B2 | DEV-04（仮置き） |
 //! | 11. トーン（ハイライト・シャドウ・白・黒） | [`tone`] | [`ToneStage`] | `finish.tone` | B2 → B2（ガイドを使う） | DEV-05、2.7 節、PoC-5 |
@@ -153,6 +153,9 @@ pub fn scene_stages() -> [&'static dyn Stage; 9] {
 ///
 /// - 処理バージョンは丸める前の値で確かめる（未知の版はエラー）。
 /// - `frames`（S の寸法と向き）に、設定の角度補正（丸めた値）を回転として加える。
+/// - 処理バージョン 2 では、`frames` のプロファイルの歪曲（[`CoordinateFrames::lens_geometry`]）と設定の
+///   レンズ補正（適用量・手動の歪曲）から歪曲補正（[`CoordinateFrames::distortion`]）を作って加える
+///   （[`crate::lens::RadialDistortion::for_settings`]。版 1 では加えない）。
 /// - `grid` はステージ 9 の入力の格子。`resolution_scale` は格子の長辺の倍率
 ///   （[`SensorGrid::resolution_scale`]）。
 /// - ガイドは [`StageContext::with_guide`] で、入力の種類（RAW 以外か）は
@@ -165,12 +168,25 @@ pub fn finish_context<'a>(
 ) -> Result<StageContext<'a>> {
     let version = ProcessVersion::from_u32(settings.process_version)?;
     let s = settings.normalized();
-    let frames = frames.with_rotation(f64::from(s.geometry.angle_deg))?;
+    let frames = stage_c_frames(frames, version, f64::from(s.geometry.angle_deg), &s.lens)?;
     let grid = SensorGrid::new(grid.width, grid.height, grid.extent)?;
     Ok(StageContext::new(version, frames)
         .with_sensor_grid(grid)
         .with_resolution_scale(grid.resolution_scale())
         .with_quality(quality))
+}
+
+/// 段階 B・C の座標系: `frames`（段階 A1 の座標系。回転なし）に回転と歪曲補正を加えたもの
+/// （[`finish_context`] とガイド（[`crate::guide::compute_guide`]）が同じものを作るための共通の関数）。
+pub fn stage_c_frames(
+    frames: CoordinateFrames,
+    version: ProcessVersion,
+    rotation_deg: f64,
+    lens: &genzo_model::LensCorrection,
+) -> Result<CoordinateFrames> {
+    let frames = frames.with_rotation(rotation_deg)?;
+    let distortion = crate::lens::RadialDistortion::for_settings(&frames, version, lens);
+    Ok(frames.with_distortion(distortion))
 }
 
 impl A1Image {

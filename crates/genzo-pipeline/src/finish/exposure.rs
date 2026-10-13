@@ -102,7 +102,7 @@ impl Stage for ExposureStage {
         ctx: &StageContext<'_>,
     ) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => {
+            ProcessVersion::V1 | ProcessVersion::V2 => {
                 let ev = settings.normalized().exposure_ev;
                 Ok((ev != 0.0).then(|| StageParams::new(ExposureParams::new(ev))))
             }
@@ -120,7 +120,7 @@ impl Stage for ExposureStage {
     ) -> Result<()> {
         let p = *params.expect::<ExposureParams>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 => {
+            ProcessVersion::V1 | ProcessVersion::V2 => {
                 let k = p.gain;
                 map_pixels(input, output, |_, _, c| [c[0] * k, c[1] * k, c[2] * k])
             }
@@ -207,7 +207,7 @@ impl Stage for ContrastStage {
         ctx: &StageContext<'_>,
     ) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => {
+            ProcessVersion::V1 | ProcessVersion::V2 => {
                 let p = ContrastParams::from_slider(settings.normalized().contrast);
                 Ok((!p.is_identity()).then(|| StageParams::new(p)))
             }
@@ -225,7 +225,9 @@ impl Stage for ContrastStage {
     ) -> Result<()> {
         let p = *params.expect::<ContrastParams>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 => map_pixels(input, output, |_, _, c| p.apply(c)),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                map_pixels(input, output, |_, _, c| p.apply(c))
+            }
         }
     }
 }

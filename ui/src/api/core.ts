@@ -56,6 +56,8 @@ import type {
   KeywordUsage,
   MetadataSummary,
   NamePreview,
+  PasteReport,
+  PasteVersion,
   RangeResult,
   Rating,
   RegionInfo,
@@ -276,6 +278,9 @@ export const setSettings = async (settings: DevelopSettings, dragging: boolean) 
   (await execute({ type: "set_settings", settings, dragging }, "generation")).generation;
 export const endDrag = async (): Promise<DevelopState> =>
   strip(await execute({ type: "end_drag" }, "develop"));
+/** 現像中の写真の処理バージョンを最新に更新する（DATA-09。履歴に 1 件。すでに最新なら何もしない）。 */
+export const upgradeProcessVersion = async (): Promise<DevelopState> =>
+  strip(await execute({ type: "upgrade_process_version" }, "develop"));
 export const renderDevelop = async (): Promise<FrameInfo> =>
   strip(await execute({ type: "render_develop" }, "frame"));
 export const renderRegion = async (request: RegionRequest): Promise<RegionInfo> =>
@@ -318,11 +323,25 @@ export const history = async (variant_id: VariantId): Promise<HistoryItem[]> =>
   (await execute({ type: "history", variant_id }, "history")).entries;
 export const copySettings = async (variant_id: VariantId): Promise<DevelopSettings> =>
   (await execute({ type: "copy_settings", variant_id }, "settings")).settings;
+/**
+ * 設定を選んだ写真に貼り付ける（DEV-30）。貼り付け先の処理バージョンは変えない（processVersion が "upgrade" なら、
+ * 貼り付け元より古い写真を貼り付け元の版に上げる。DATA-09）。
+ */
 export const pasteSettings = async (
   settings: DevelopSettings,
   targets: VariantId[],
   groups: SettingGroups,
-) => (await execute({ type: "paste_settings", settings, targets, groups }, "updated")).count;
+  processVersion: PasteVersion = "keep",
+): Promise<PasteReport> =>
+  strip(
+    await execute(
+      { type: "paste_settings", settings, targets, groups, process_version: processVersion },
+      "pasted",
+    ),
+  );
+/** 選んだ写真の処理バージョンをまとめて最新に更新する（DATA-09。すでに最新の写真・動画は飛ばす）。更新した数。 */
+export const upgradeProcessVersions = async (variant_ids: VariantId[]) =>
+  (await execute({ type: "upgrade_process_versions", variant_ids }, "updated")).count;
 export const createVirtualCopy = async (variant_id: VariantId, name: string | null = null) =>
   (await execute({ type: "create_virtual_copy", variant_id, name }, "variant_created")).variant_id;
 /**

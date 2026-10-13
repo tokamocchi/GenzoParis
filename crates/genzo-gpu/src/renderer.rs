@@ -26,6 +26,8 @@ use std::sync::{Mutex, PoisonError};
 use genzo_color::{DisplayProfile, DisplayProfileFallbackReason};
 use genzo_pipeline::engine::StageBackend;
 use genzo_pipeline::finish::output::{ClipCounts, Dither, Histogram};
+use genzo_pipeline::sensor::denoise::{NR_EPSILON, NoisePlan};
+use genzo_pipeline::sensor::highlight::{HR_CONFIDENCE_WEIGHT, HR_SEARCH_RADIUS};
 use genzo_pipeline::sensor::wb::SaturationClip;
 use genzo_pipeline::sensor::{SensorData, SensorPlan, SensorStage};
 use genzo_pipeline::{
@@ -715,6 +717,34 @@ impl GpuRenderer {
                 let (out, n) = self.white_balance_on_gpu(plan, &cfa, output_roi)?;
                 Ok((SensorData::Cfa(out), n))
             }
+            (GpuStageKind::HighlightRecovery, SensorData::Cfa(cfa)) => {
+                let (out, n) = self.highlight_on_gpu(plan, &cfa, output_roi)?;
+                Ok((SensorData::Cfa(out), n))
+            }
+            (GpuStageKind::NoiseReduction, SensorData::Rgb(tile)) => {
+                let noise = plan
+                    .noise()
+                    .ok_or(PipelineError::PlanMismatch("ノイズ軽減の計画がない"))?;
+                let src = self.upload(&tile)?;
+                let mut batch = Batch::new(&self.gpu, &self.kernels)?;
+                let mut keep = Vec::new();
+                let out = record_noise_reduction(
+                    &mut batch,
+                    noise,
+                    &src.buffer,
+                    tile.roi,
+                    output_roi,
+                    &mut keep,
+                )?;
+                let n = batch.submit()?;
+                drop(keep);
+                let out = GpuTile {
+                    buffer: out,
+                    roi: output_roi,
+                    contract: tile.contract(),
+                };
+                Ok((SensorData::Rgb(self.download(&out)?), n))
+            }
             (GpuStageKind::Half2x2, SensorData::Cfa(cfa)) => {
                 let src = self.gpu.create_storage_init(
                     "genzo-gpu.cfa（CFA）",
@@ -730,6 +760,33 @@ impl GpuRenderer {
                     src: &src,
                     dst: &out.buffer,
                     aux: None,
+                    aux_out: None,
+                    threads: (output_roi.width, output_roi.height),
+                })?;
+                let n = batch.submit()?;
+                Ok((SensorData::Rgb(self.download(&out)?), n))
+            }
+            (GpuStageKind::LensCorrection, SensorData::Rgb(tile)) => {
+                let lens = plan
+                    .lens()
+                    .ok_or(PipelineError::PlanMismatch("レンズ補正の計画がない"))?;
+                let src = self.upload(&tile)?;
+                let out = self.alloc(output_roi, ColorContract::B1CameraRgb)?;
+                let (params, aux) = crate::stages::prepare_lens(
+                    lens,
+                    plan.demosaic().sensor_pixels_per_output(),
+                    plan.output_grid(),
+                    tile.roi,
+                    output_roi,
+                )?;
+                let aux = self.gpu.create_storage_init("genzo-gpu.aux", &aux)?;
+                let mut batch = Batch::new(&self.gpu, &self.kernels)?;
+                batch.dispatch(Dispatch {
+                    kernel: Kernel::LensCorrection,
+                    params,
+                    src: &src.buffer,
+                    dst: &out.buffer,
+                    aux: Some(&aux),
                     aux_out: None,
                     threads: (output_roi.width, output_roi.height),
                 })?;
@@ -804,6 +861,46 @@ impl GpuRenderer {
             sat.into_iter().map(|s| s != 0).collect(),
         )?;
         Ok((cfa, n))
+    }
+
+    fn highlight_on_gpu(
+        &self,
+        plan: &SensorPlan,
+        cfa: &genzo_pipeline::CfaImage,
+        out_roi: Roi,
+    ) -> Result<(genzo_pipeline::CfaImage, u64)> {
+        let src = self
+            .gpu
+            .create_storage_init("genzo-gpu.cfa（CFA）", bytemuck::cast_slice(cfa.data()))?;
+        let flags_in: Vec<u32> = cfa.saturated().iter().map(|&s| u32::from(s)).collect();
+        let flags = self.gpu.create_storage_init(
+            "genzo-gpu.cfa_flags（CFA）",
+            bytemuck::cast_slice(&flags_in),
+        )?;
+        let out = self
+            .gpu
+            .create_storage("genzo-gpu.cfa（CFA）", out_roi.pixel_count() * 4)?;
+        let flags_out = self
+            .gpu
+            .create_storage("genzo-gpu.cfa_flags（CFA）", out_roi.pixel_count() * 4)?;
+        let mut batch = Batch::new(&self.gpu, &self.kernels)?;
+        record_highlight(
+            &mut batch,
+            plan,
+            cfa_table(cfa.pattern(), cfa.roi()),
+            cfa.roi(),
+            &src,
+            &flags,
+            &out,
+            &flags_out,
+            out_roi,
+        )?;
+        let n = batch.submit()?;
+        let data: Vec<f32> =
+            bytemuck::pod_collect_to_vec(&self.gpu.read_buffer(&out, out_roi.pixel_count() * 4)?);
+        let mut window = cfa.window(out_roi)?;
+        window.data_mut().copy_from_slice(&data);
+        Ok((window, n))
     }
 
     fn white_balance_on_gpu(
@@ -954,6 +1051,167 @@ pub(crate) fn record_white_balance(
     })
 }
 
+/// ステージ 4（ハイライト復元。処理バージョン 2）のディスパッチを記録する（入力は WB を掛けた CFA と飽和の印。
+/// 飽和の印は `flags_out` に写す）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_highlight(
+    batch: &mut Batch<'_>,
+    plan: &SensorPlan,
+    table: [u32; 4],
+    in_roi: Roi,
+    values: &wgpu::Buffer,
+    flags: &wgpu::Buffer,
+    out: &wgpu::Buffer,
+    flags_out: &wgpu::Buffer,
+    out_roi: Roi,
+) -> Result<()> {
+    let h = plan
+        .highlight()
+        .ok_or(PipelineError::PlanMismatch("ハイライト復元の計画がない"))?;
+    let (mode, radius) = match h.baseline {
+        SaturationClip::Off => (0u32, 0u32),
+        SaturationClip::Neighborhood { radius } => (1, radius),
+        SaturationClip::Global => (2, 0),
+    };
+    let radius = i32::try_from(radius).map_err(|_| GpuError::Unsupported {
+        stage: "sensor.highlight_recovery",
+        reason: format!("飽和の切りそろえの半径 {radius} が大きすぎる"),
+    })?;
+    let r1 = HR_SEARCH_RADIUS as f32 + 1.0;
+    let mut p = Params::new(Kernel::HighlightRecovery, in_roi, out_roi);
+    p.u32s("CFA", &table)
+        .f32("CLIP_LEVEL", h.clip_level)
+        .u32("CLIP_MODE", mode)
+        .i32("RADIUS", radius)
+        .u32("HR_MODE", h.mode.code())
+        .f32("HR_AMOUNT", h.amount)
+        .f32s("HR_INV_W2", &h.inv_white_sq)
+        .f32("HR_INV_R1", 1.0 / r1)
+        .f32("HR_R1", r1)
+        .i32("HR_RADIUS", HR_SEARCH_RADIUS as i32)
+        .f32("HR_CONF_W", HR_CONFIDENCE_WEIGHT);
+    batch.dispatch(Dispatch {
+        kernel: Kernel::HighlightRecovery,
+        params: p.finish()?,
+        src: values,
+        dst: out,
+        aux: Some(flags),
+        aux_out: Some(flags_out),
+        threads: (out_roi.width, out_roi.height),
+    })
+}
+
+/// ステージ 6（ノイズ軽減。処理バージョン 2）のディスパッチを記録する。`src` は範囲 `in_roi`（`out_roi` を
+/// [`NoisePlan::margin`] だけ広げた範囲を含む）の RGB（B1）。結果（範囲 `out_roi` の RGB）のバッファを返す。途中の
+/// バッファは `keep` に入れる（投入が終わるまで持つ）。
+pub(crate) fn record_noise_reduction(
+    batch: &mut Batch<'_>,
+    plan: &NoisePlan,
+    src: &wgpu::Buffer,
+    in_roi: Roi,
+    out_roi: Roi,
+    keep: &mut Vec<wgpu::Buffer>,
+) -> Result<wgpu::Buffer> {
+    let gpu = batch.gpu();
+    let r0 = out_roi.expand(plan.margin());
+    if !in_roi.contains_roi(&r0) {
+        return Err(PipelineError::InvalidRoi {
+            roi: in_roi,
+            reason: "ノイズ軽減の入力が必要な範囲（ウェーブレットの余白）を覆っていない",
+        }
+        .into());
+    }
+    let mask = u32::from(plan.luma_active()) | (u32::from(plan.chroma_active()) * 6);
+    let rgb_bytes = |r: Roi| r.pixel_count().max(1) * 12;
+    // 平方根の領域の (Y, D1, D2)。
+    let p0 = gpu.create_storage("genzo-gpu.nr（面）", rgb_bytes(r0))?;
+    let mut p = Params::new(Kernel::NrForward, in_roi, r0);
+    p.f32("EPS", NR_EPSILON);
+    batch.dispatch(Dispatch {
+        kernel: Kernel::NrForward,
+        params: p.finish()?,
+        src,
+        dst: &p0,
+        aux: None,
+        aux_out: None,
+        threads: (r0.width, r0.height),
+    })?;
+    let acc = gpu.create_storage("genzo-gpu.nr（細部の和）", rgb_bytes(out_roi))?;
+    let mut cur = p0;
+    let mut cur_roi = r0;
+    for j in 0..plan.levels {
+        let m = NoisePlan::level_margin(j);
+        let next_roi = cur_roi.shrink(m).ok_or(PipelineError::InvalidRoi {
+            roi: cur_roi,
+            reason: "ノイズ軽減の段の範囲が小さすぎる",
+        })?;
+        let hole = 1i32 << j;
+        // 横方向: cur の行、next の列。
+        let h_roi = Roi::new(next_roi.x, cur_roi.y, next_roi.width, cur_roi.height);
+        let tmp = gpu.create_storage("genzo-gpu.nr（横）", rgb_bytes(h_roi))?;
+        let mut p = Params::new(Kernel::NrSmoothH, cur_roi, h_roi);
+        p.i32("HOLE", hole).u32("MASK", mask);
+        batch.dispatch(Dispatch {
+            kernel: Kernel::NrSmoothH,
+            params: p.finish()?,
+            src: &cur,
+            dst: &tmp,
+            aux: None,
+            aux_out: None,
+            threads: (h_roi.width, h_roi.height),
+        })?;
+        let next = gpu.create_storage("genzo-gpu.nr（面）", rgb_bytes(next_roi))?;
+        let mut p = Params::new(Kernel::NrSmoothV, h_roi, next_roi);
+        p.i32("HOLE", hole).u32("MASK", mask);
+        batch.dispatch(Dispatch {
+            kernel: Kernel::NrSmoothV,
+            params: p.finish()?,
+            src: &tmp,
+            dst: &next,
+            aux: None,
+            aux_out: None,
+            threads: (next_roi.width, next_roi.height),
+        })?;
+        // 細部を縮小して足す（out_roi）。
+        let mut p = Params::new(Kernel::NrDetail, cur_roi, out_roi);
+        p.f32("T_LUMA", plan.luma[j as usize])
+            .f32("T_CHROMA", plan.chroma[j as usize])
+            .i32("AUX_X", next_roi.x)
+            .i32("AUX_Y", next_roi.y)
+            .u32("AUX_W", next_roi.width);
+        batch.dispatch(Dispatch {
+            kernel: Kernel::NrDetail,
+            params: p.finish()?,
+            src: &cur,
+            dst: &acc,
+            aux: Some(&next),
+            aux_out: None,
+            threads: (out_roi.width, out_roi.height),
+        })?;
+        keep.push(tmp);
+        keep.push(std::mem::replace(&mut cur, next));
+        cur_roi = next_roi;
+    }
+    let out = gpu.create_storage("genzo-gpu.nr（画像）", rgb_bytes(out_roi))?;
+    let mut p = Params::new(Kernel::NrInverse, cur_roi, out_roi);
+    p.i32("AUX_X", out_roi.x)
+        .i32("AUX_Y", out_roi.y)
+        .u32("AUX_W", out_roi.width)
+        .f32("EPS", NR_EPSILON);
+    batch.dispatch(Dispatch {
+        kernel: Kernel::NrInverse,
+        params: p.finish()?,
+        src: &cur,
+        dst: &out,
+        aux: Some(&acc),
+        aux_out: None,
+        threads: (out_roi.width, out_roi.height),
+    })?;
+    keep.push(cur);
+    keep.push(acc);
+    Ok(out)
+}
+
 /// 符号化した値（B4a・B4b・B5）か（genzo-pipeline の量子化・ヒストグラムと同じ確認）。
 fn check_encoded(contract: ColorContract) -> Result<()> {
     if contract.is_linear() {
@@ -996,6 +1254,7 @@ mod tests {
             as_shot_wb: [1.0; 4],
             cam_xyz: None,
             metadata: genzo_model::PhotoMetadata::default(),
+            lens_correction: None,
         };
         assert_eq!(pack_raw(&raw), vec![2, 1, 4, 3, 6, 5, 0, 0]);
     }

@@ -214,11 +214,12 @@ impl PhotoSource {
         }
     }
 
-    /// 座標系（S の寸法・既定の切り抜き・向き。回転なし）。
+    /// 座標系（S の寸法・既定の切り抜き・向き・プロファイルの歪曲。回転・歪曲補正なし）。
     pub fn frames(&self) -> Result<CoordinateFrames> {
         let (w, h) = self.image.sensor_size();
-        CoordinateFrames::new(w, h, self.image.orientation())?
-            .with_default_crop(self.image.default_crop())
+        Ok(CoordinateFrames::new(w, h, self.image.orientation())?
+            .with_default_crop(self.image.default_crop())?
+            .with_lens_geometry(self.image.lens_geometry()))
     }
 }
 
@@ -610,6 +611,7 @@ impl Engine {
         long_edge: u32,
     ) -> Result<GuideKey> {
         let spec = GuideSpec::from_settings(settings)?;
+        // ガイドの寸法は G の外接矩形で決まる（歪曲補正の D は O と同じ大きさなので回転だけで決まる）。
         let frames = source.frames()?.with_rotation(spec.rotation_deg)?;
         let size = guide_size(&frames, spec.params.long_edge);
         let cache = CacheKey::for_settings(

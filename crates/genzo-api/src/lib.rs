@@ -43,7 +43,7 @@
 //! |---|---|---|
 //! | [`Core`]（`core`） | 起動（カタログ・前回の終了の確認・ファイル操作の確定・自動バックアップ・キャッシュの持ち主の確認と作り直し）と終了、実行モデル、ロックの順序 | 1.2 節・1.3 節、DATA-03b・04・05・07 |
 //! | `lock` | カタログの排他（1 つのカタログは 1 つのアプリだけが開く。[`ApiError::CatalogInUse`]） | 3 章 |
-//! | `deps` | 現像設定の外部データ（`render_deps`: カメラ行列の出どころとハッシュ・RAW デコーダ）の記録 | 2.5 節、R-08 |
+//! | `deps` | 現像設定の外部データ（`render_deps`: カメラ行列の出どころとハッシュ・RAW デコーダ・埋め込みのレンズ補正の情報の出どころとハッシュ）の記録 | 2.5 節、R-08、DEV-14 |
 //! | [`config`] | [`CoreConfig`]（ワーカーの起動方法 [`WorkerLaunch`]、GPU の使用 [`GpuMode`]）と仮置きの値 | 1.2 節 |
 //! | [`command`] | [`Command`]・[`Response`]・[`Core::execute`] | 1.5 節 |
 //! | [`events`] | [`Event`]（ジョブの進捗・カタログの変更・プレビューの更新・検索結果の世代・警告） | 1.5 節 |
@@ -59,7 +59,7 @@
 //! | `stacks` | スタック（[`Core::create_stack`]・[`Core::set_stacks_collapsed`]・[`Core::auto_stack`]。検索結果のまとめ方は `search`）と仮想コピーの名前・マスターの入れ替え（[`Core::rename_virtual_copy`]・[`Core::set_as_master`]） | LIB-12・13、3.10 節 |
 //! | `previews` | サムネイル（[`Core::thumbnail`]）・L1（[`Core::preview_path`]）と、現像結果からの作り直し | 4 章・4.1 節、PRV-01・02・04 |
 //! | `playback` | 動画の再生（[`Core::video_playback`]・配信するファイル [`Core::video_stream`]）と、WebView で再生できない動画の再生用のファイル（[`Core::create_video_proxy`]。利用者の ffmpeg で H.264 ＋ AAC の MP4 にする。上限容量の LRU のキャッシュ） | VID-04、4.2 節 |
-//! | `develop` | 現像のセッション（[`Core::open_develop`]・[`Core::set_settings`]・Undo / Redo・一括適用・仮想コピー）、WB のスポイト（[`Core::white_balance_at`]）、切り抜きの編集の支え（[`Core::set_develop_view`]・[`Core::constrain_crop`]） | DEV-00〜08・15・26・27・30、6.2 節 |
+//! | `develop` | 現像のセッション（[`Core::open_develop`]・[`Core::set_settings`]・Undo / Redo・一括適用・仮想コピー）、WB のスポイト（[`Core::white_balance_at`]）、切り抜きの編集の支え（[`Core::set_develop_view`]・[`Core::constrain_crop`]）、処理バージョンの更新（[`Core::upgrade_process_version`]・まとめて [`Core::upgrade_process_versions`]。レンズ補正などの v1 の機能は処理バージョン 2 から。貼り付けは版を変えない: [`PasteVersion`]）。埋め込みのレンズ補正の情報の要約は [`SourceInfo::lens_correction`] | DEV-00〜08・14・15・26・27・30、DATA-09、6.2 節 |
 //! | `render` | GPU → CPU の切り替え、画面のプロファイル（[`Core::set_display_profile`]） | 2.4 節・6.3 節、IQ-05 |
 //! | `region` | 表示範囲の描画（[`Core::render_region`]。ルーペの等倍表示・拡大とパン。P0 の最新の 1 件だけ、取り消しあり） | PRV-03・LIB-02、2.7 節・6.1 節 |
 //! | `view` | 比較表示の表示範囲の描画（[`Core::render_view_region`]・[`Core::view_output_size`]。面ごとに任意の写真を描く。展開した入力を上限まで持ち、[`Core::release_view`] で捨てる） | LIB-03、1.5 節・6.1 節 |
@@ -159,7 +159,10 @@ pub use core::{
     RegionRequestStage, SettingsUpdateStage,
 };
 pub use delete::{OsTrash, TrashBackend};
-pub use develop::{HISTORY_LABEL_GENERIC, HISTORY_LABEL_PASTE, describe_change};
+pub use develop::{
+    HISTORY_LABEL_GENERIC, HISTORY_LABEL_PASTE, HISTORY_LABEL_UPGRADE_PROCESS, describe_change,
+    upgrade_process_label,
+};
 pub use error::{ApiError, ErrorInfo, ErrorKind};
 pub use events::{CatalogChange, Event, WarningCode};
 pub use identity::{DUPLICATE_GROUPS_MAX, HASH_FAILURES_KEPT, INTERACTIVE_MAX_WAIT};

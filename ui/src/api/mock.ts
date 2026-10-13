@@ -13,6 +13,8 @@ import type {
   ContentHashStatus,
   CoreSettings,
   CrashReportSummary,
+  DevelopSettings,
+  DevelopState,
   DuplicateGroupList,
   FileMovePlan,
   FileMoveReport,
@@ -28,6 +30,7 @@ import type {
   IptcMetadata,
   KeywordInfo,
   KeywordUsage,
+  LensCorrectionInfo,
   LogFolderInfo,
   LogStatus,
   MetadataSummary,
@@ -35,6 +38,7 @@ import type {
   RegionInfo,
   RegionRequest,
   SmartRule,
+  SourceInfo,
   StackInfo,
   Timeline,
   TimelineGroup,
@@ -212,9 +216,140 @@ export const MOCK_BEFORE_INFO: BeforeInfo = {
   variant_id: 1,
   source: { kind: "initial" },
   label: "読み込み",
-  process_version: 1,
+  process_version: 2,
   generation: 7,
 };
+
+/** 埋め込みのレンズ補正の情報の見本（DEV-14。Sony の ARW）。 */
+export const MOCK_LENS_CORRECTION_INFO: LensCorrectionInfo = {
+  source: "sony_arw",
+  description: "Sony の ARW（歪曲・周辺減光・色収差）",
+  distortion: true,
+  vignetting: true,
+  chromatic_aberration: true,
+};
+
+/** 現像設定の見本（genzo-model の DevelopSettings::default の JSON。スキーマ版 2・処理バージョン 2）。 */
+export function mockDevelopSettings(over: Partial<DevelopSettings> = {}): DevelopSettings {
+  return {
+    schema_version: 2,
+    process_version: 2,
+    white_balance: "as_shot",
+    highlight_recovery: { method: "clip", amount: 100 },
+    exposure_ev: 0,
+    contrast: 0,
+    tone: { highlights: 0, shadows: 0, whites: 0, blacks: 0 },
+    tone_curve: {
+      parametric: { highlights: 0, lights: 0, darks: 0, shadows: 0 },
+      luma: [],
+      red: [],
+      green: [],
+      blue: [],
+    },
+    color: { saturation: 0, vibrance: 0 },
+    geometry: { crop: { left: 0, top: 0, right: 1, bottom: 1 }, angle_deg: 0, aspect: null },
+    lens: {
+      profile_enabled: false,
+      distortion_scale: 100,
+      vignetting_scale: 100,
+      remove_chromatic_aberration: false,
+      distortion: 0,
+      vignetting_amount: 0,
+      vignetting_midpoint: 50,
+      ca_red_cyan: 0,
+      ca_blue_yellow: 0,
+    },
+    detail: {
+      sharpening: { amount: 0, radius: 1, detail: 0, masking: 0 },
+      noise_reduction: { luminance: 0, luminance_detail: 50, luminance_contrast: 0, color: 0, color_detail: 50 },
+    },
+    masks: [],
+    render_deps: { camera_profile: { id: "", sha256: "" }, lens_profile: null, raw_decoder: "" },
+    ...over,
+  };
+}
+
+/**
+ * 設定の貼り付け（paste_settings）・処理バージョンのまとめての更新（upgrade_process_versions）の応答を足す（DEV-30・
+ * DATA-09）。`versions` は写真ごとの処理バージョン（無い写真は 2）。コアと同じく、貼り付けは版を変えず
+ * （process_version が "upgrade" なら貼り付け元の版まで上げる）、版 1 の写真に v1 の機能の項目（レンズ補正の
+ * プロファイル・手動の歪曲・ノイズ軽減の輝度）を写したら needs_upgrade に数える。送ったコマンドは `sent` に残す。
+ */
+export function mockPasteCommands(
+  b: MockBridge,
+  versions: Map<number, number> = new Map(),
+): { sent: Record<string, unknown>[] } {
+  const sent: Record<string, unknown>[] = [];
+  const base = b.responses.get("core_execute");
+  const versionOf = (id: number) => versions.get(id) ?? 2;
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    switch (c.type) {
+      case "paste_settings": {
+        sent.push(c);
+        const settings = c.settings as DevelopSettings;
+        const ids = [...new Set(c.targets as number[])];
+        const usesV1Features =
+          settings.lens.profile_enabled || settings.lens.distortion !== 0 || settings.detail.noise_reduction.luminance !== 0;
+        let upgraded = 0;
+        let needs = 0;
+        for (const id of ids) {
+          const before = versionOf(id);
+          const after = c.process_version === "upgrade" ? Math.max(before, settings.process_version) : before;
+          if (after > before) upgraded++;
+          versions.set(id, after);
+          if (after < 2 && usesV1Features) needs++;
+        }
+        return { type: "pasted", count: ids.length, upgraded, needs_upgrade: needs };
+      }
+      case "upgrade_process_versions": {
+        sent.push(c);
+        let count = 0;
+        for (const id of new Set(c.variant_ids as number[])) {
+          if (versionOf(id) < 2) {
+            versions.set(id, 2);
+            count++;
+          }
+        }
+        return { type: "updated", count };
+      }
+      default:
+        return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
+    }
+  });
+  return { sent };
+}
+
+/** 現像する写真の元の画像の情報の見本（RAW。埋め込みのレンズ補正の情報つき）。 */
+export function mockSourceInfo(over: Partial<SourceInfo> = {}): SourceInfo {
+  return {
+    is_raw: true,
+    width: 6000,
+    height: 4000,
+    decoder: "libraw-0.21.2",
+    as_shot_white_balance: { temperature_k: 5100, tint: 8 },
+    lens_correction: MOCK_LENS_CORRECTION_INFO,
+    lens_correction_note: null,
+    ...over,
+  };
+}
+
+/** 現像の状態の見本（genzo-api の DevelopState）。 */
+export function mockDevelopState(over: Partial<DevelopState> = {}): DevelopState {
+  return {
+    variant_id: 1,
+    settings: mockDevelopSettings(),
+    generation: 1,
+    can_undo: false,
+    can_redo: false,
+    dirty: false,
+    dragging: false,
+    source: mockSourceInfo(),
+    before: null,
+    latest_process_version: 2,
+    ...over,
+  };
+}
 
 /** 画素のバイト列（frames.ts の形）を作る（ヘッダーの JSON と、幅 × 高さの RGBA）。 */
 export function mockFrameBytes(header: Partial<FrameInfo> & { width: number; height: number }): ArrayBuffer {

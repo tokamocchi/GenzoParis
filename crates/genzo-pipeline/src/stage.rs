@@ -392,7 +392,7 @@ pub(crate) mod tests {
             params: &StageParams,
         ) -> Result<()> {
             match ctx.process_version {
-                ProcessVersion::V1 => {}
+                ProcessVersion::V1 | ProcessVersion::V2 => {}
             }
             let k = *params.expect::<f32>(self.id())?;
             let src = input.crop(output.roi)?;

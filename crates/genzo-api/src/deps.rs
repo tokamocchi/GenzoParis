@@ -6,7 +6,9 @@
 //!     ID は `none`、SHA-256 は空。今の行列は、設計（2.5 節）のアプリのデータファイルではなく、LibRaw の
 //!     内蔵の表か DNG の ColorMatrix（implementation_status No.25）。
 //!   - RAW デコーダ（`raw_decoder`）: ワーカーが返す識別子（`libraw-0.21.2` など）。
-//!   - レンズのデータ（`lens_profile`）: まだない（`None`）。
+//!   - レンズのデータ（`lens_profile`。DEV-14）: RAW に埋め込まれたレンズ補正の情報（genzo-raw の `lens`）。
+//!     ID は出どころと機種・レンズ（`sony_arw:SONY ILCE-7M4|FE 24-70mm F2.8 GM II` など）、SHA-256 は情報の
+//!     内容（JSON にしたもの）。情報がなければ `None`。lensfun などの外部のデータは使わない。
 //!
 //!   RAW 以外の入力では空のまま。
 //! - 現像のセッション・書き出し・プレビューの作り直しは、保存された設定の `render_deps` を、実際に使った
@@ -24,7 +26,7 @@
 //!   キーが変わり、古い色のサムネイル・プレビューは使われなくなる。
 
 use genzo_model::{DataRef, DevelopSettings, PhotoMetadata, RenderDeps};
-use genzo_raw::CamXyzSource;
+use genzo_raw::{CamXyzSource, LensCorrectionData};
 use sha2::{Digest, Sha256};
 
 /// 展開した RAW で実際に使う依存（このモジュールの doc）。
@@ -33,6 +35,7 @@ pub(crate) fn actual_render_deps(
     source: Option<CamXyzSource>,
     metadata: &PhotoMetadata,
     decoder_id: Option<&str>,
+    lens: Option<&LensCorrectionData>,
 ) -> RenderDeps {
     let camera = metadata
         .camera_name()
@@ -51,11 +54,26 @@ pub(crate) fn actual_render_deps(
         }
         None => DataRef::new("none", ""),
     };
+    let lens_profile = lens.map(|l| {
+        let name = metadata.lens.as_deref().unwrap_or("unknown");
+        DataRef::new(format!("{}:{camera}|{name}", l.source_id()), lens_sha256(l))
+    });
     RenderDeps {
         camera_profile,
-        lens_profile: None,
+        lens_profile,
         raw_decoder: decoder_id.unwrap_or_default().to_owned(),
     }
+}
+
+/// レンズ補正の情報の SHA-256（JSON にしたもの。小文字の 16 進数 64 文字）。
+fn lens_sha256(l: &LensCorrectionData) -> String {
+    let mut h = Sha256::new();
+    h.update(b"genzo.lens_correction.v1\0");
+    h.update(serde_json::to_vec(l).expect("レンズ補正の情報は JSON にできる"));
+    h.finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
 /// 行列の値の SHA-256（小文字の 16 進数 64 文字）。
@@ -81,12 +99,34 @@ pub(crate) fn with_render_deps(settings: &DevelopSettings, deps: &RenderDeps) ->
 }
 
 /// 保存された依存が、今の依存と違うか（空なら違うとしない。空は「まだ記録していない」）。
+///
+/// レンズのデータは、記録がない（`None`。レンズ補正の前に保存した写真）なら比べない（記録していない
+/// だけで、結果に影響していないため）。
 pub(crate) fn recorded_deps_differ(recorded: &RenderDeps, actual: &RenderDeps) -> bool {
-    *recorded != RenderDeps::default() && recorded != actual
+    if *recorded == RenderDeps::default() {
+        return false;
+    }
+    recorded.camera_profile != actual.camera_profile
+        || recorded.raw_decoder != actual.raw_decoder
+        || (recorded.lens_profile.is_some() && recorded.lens_profile != actual.lens_profile)
 }
 
 /// 保存された依存と今の依存が違うときの警告の文。
 pub(crate) fn deps_changed_message(recorded: &RenderDeps, actual: &RenderDeps) -> String {
+    if recorded.camera_profile == actual.camera_profile
+        && recorded.raw_decoder == actual.raw_decoder
+    {
+        let id = |d: &RenderDeps| {
+            d.lens_profile
+                .as_ref()
+                .map_or_else(|| "なし".to_owned(), |l| l.id.clone())
+        };
+        return format!(
+            "前回保存したときと、埋め込みのレンズ補正の情報が違います（保存: {}、今: {}）。レンズ補正の結果が変わる可能性があります",
+            id(recorded),
+            id(actual)
+        );
+    }
     format!(
         "前回保存したときと、カメラ行列または RAW デコーダが違います（保存: {} / {}、今: {} / {}）。同じ設定でも色が変わる可能性があります",
         recorded.camera_profile.id,
@@ -121,6 +161,7 @@ mod tests {
             Some(CamXyzSource::LibRawTable),
             &meta(),
             Some("libraw-0.21.2"),
+            None,
         );
         assert!(d.camera_profile.id.starts_with("libraw_table:"), "{d:?}");
         assert!(d.camera_profile.id.contains("ILCE-7M4"), "{d:?}");
@@ -137,6 +178,7 @@ mod tests {
             Some(CamXyzSource::LibRawTable),
             &meta(),
             Some("libraw-0.21.2"),
+            None,
         );
         assert_ne!(d.camera_profile.sha256, d2.camera_profile.sha256);
         // DNG の ColorMatrix。
@@ -148,6 +190,7 @@ mod tests {
             }),
             &meta(),
             None,
+            None,
         );
         assert!(
             dng.camera_profile
@@ -156,18 +199,50 @@ mod tests {
         );
         assert_eq!(dng.raw_decoder, "");
         // 行列がない。
-        let none = actual_render_deps(None, Some(CamXyzSource::None), &meta(), Some("x"));
+        let none = actual_render_deps(None, Some(CamXyzSource::None), &meta(), Some("x"), None);
         assert_eq!(none.camera_profile, DataRef::new("none", ""));
     }
 
     #[test]
     fn empty_recorded_deps_are_filled_without_warning() {
-        let actual = actual_render_deps(Some(&M), None, &meta(), Some("libraw-0.21.2"));
+        let actual = actual_render_deps(Some(&M), None, &meta(), Some("libraw-0.21.2"), None);
         assert!(!recorded_deps_differ(&RenderDeps::default(), &actual));
         assert!(!recorded_deps_differ(&actual, &actual));
         let mut old = actual.clone();
         old.raw_decoder = "libraw-0.20.0".into();
         assert!(recorded_deps_differ(&old, &actual));
         assert!(deps_changed_message(&old, &actual).contains("libraw-0.20.0"));
+    }
+
+    #[test]
+    fn lens_data_is_recorded_and_compared_only_when_recorded() {
+        use genzo_raw::SonyLensCorrection;
+        let lens = LensCorrectionData::SonyArw(SonyLensCorrection {
+            distortion: vec![-5; 16],
+            ..Default::default()
+        });
+        let mut m = meta();
+        m.lens = Some("FE 24-70mm F2.8 GM II".into());
+        let with = actual_render_deps(Some(&M), None, &m, Some("libraw-0.21.2"), Some(&lens));
+        let lp = with.lens_profile.clone().unwrap();
+        assert_eq!(lp.id, "sony_arw:SONY ILCE-7M4|FE 24-70mm F2.8 GM II");
+        assert_eq!(lp.sha256.len(), 64);
+        // 設定として正しい（検証を通る）。
+        with_render_deps(&DevelopSettings::default(), &with)
+            .validate()
+            .unwrap();
+        // 記録がない（レンズ補正の前に保存した写真）なら警告しない。
+        let mut old = with.clone();
+        old.lens_profile = None;
+        assert!(!recorded_deps_differ(&old, &with));
+        // 記録した情報と違えば警告する。
+        let other = LensCorrectionData::SonyArw(SonyLensCorrection {
+            distortion: vec![-6; 16],
+            ..Default::default()
+        });
+        let changed = actual_render_deps(Some(&M), None, &m, Some("libraw-0.21.2"), Some(&other));
+        assert_ne!(changed.lens_profile, with.lens_profile);
+        assert!(recorded_deps_differ(&with, &changed));
+        assert!(deps_changed_message(&with, &changed).contains("レンズ補正"));
     }
 }

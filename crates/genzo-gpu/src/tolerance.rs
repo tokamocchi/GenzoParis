@@ -14,6 +14,7 @@
 //!
 //! | ステージ | abs | rel | 差が出る主な理由 |
 //! |---|---|---|---|
+//! | `sensor.lens_correction` | 1e−4 | 1e−4 | ステージ 9 と同じバイキュービック（色収差の R・B）と 1D LUT の利得 |
 //! | `finish.geometry` | 1e−4 | 1e−4 | 座標の積和（融合）・16 個の重み付きの和。座標の 1 ULP の差（座標 100 px で約 8e−6 px、7000 px で約 5e−4 px）が、くっきりした輪郭では値の差になる |
 //! | `finish.exposure` | 0 | 1e−6 | 掛け算だけ（丸めは同じはず） |
 //! | `finish.contrast` | 1e−6 | 2e−5 | `log2`・`exp2` の精度 |
@@ -23,6 +24,8 @@
 //! | `finish.tone_curve` | 1e−5 | 1e−4 | `pow`（IEC 61966-2-1）、LUT の位置の差 |
 //! | `output.display` | 1e−4 | 0 | 符号化（IEC 61966-2-1）の `pow`、色域の圧縮の割り算、3D LUT の位置の差（0〜1 の値） |
 //! | `output.export.*`・`output.cache.*` | 1e−4 | 0 | 同上（0〜1 の値） |
+//! | `sensor.highlight_recovery` | 1e−6 | 1e−5 | 近傍の組の積和（融合）と割り算（2.5 ULP） |
+//! | `sensor.noise_reduction` | 1e−5 | 1e−4 | 平方根（WGSL の `sqrt` の精度）・5 タップの積和を段の数だけ重ねる・縮小の割り算 |
 //! | `sensor.normalize`・`sensor.demosaic.half2x2` | 1e−7 | 1e−6 | 引き算と掛け算だけ |
 //! | `sensor.white_balance` | 1e−7 | 1e−6 | 掛け算だけ |
 //! | `sensor.color_matrix` | 1e−6 | 1e−5 | 行列の積和 |
@@ -67,6 +70,7 @@ pub const FINAL_OUTPUT_MAX_DIFF_8BIT: f64 = 1.0;
 pub fn stage_tolerance(stage_id: &str) -> StageTolerance {
     match stage_id {
         "finish.geometry" => StageTolerance::new(1e-4, 1e-4),
+        "sensor.lens_correction" => StageTolerance::new(1e-4, 1e-4),
         "finish.exposure" => StageTolerance::new(0.0, 1e-6),
         "finish.contrast" => StageTolerance::new(1e-6, 2e-5),
         "finish.tone" => StageTolerance::new(1e-6, 1e-4),
@@ -81,6 +85,8 @@ pub fn stage_tolerance(stage_id: &str) -> StageTolerance {
             StageTolerance::new(1e-7, 1e-6)
         }
         "sensor.color_matrix" => StageTolerance::new(1e-6, 1e-5),
+        "sensor.highlight_recovery" => StageTolerance::new(1e-6, 1e-5),
+        "sensor.noise_reduction" => StageTolerance::new(1e-5, 1e-4),
         _ => DEFAULT_STAGE_TOLERANCE,
     }
 }

@@ -3,6 +3,32 @@
 //
 // 入力のタイルは S の格子（P_IN_*）、出力は C の格子（P_OUT_*）。P_AFF は G の格子の連続座標 →
 // 入力の格子の連続座標のアフィン変換（GeometryPlan::lattice_to_input_f32。行ごとに a, b, t）。
+// P_WARP が 1 なら歪曲補正（処理バージョン 2。GeometryPlan::warp の式）: P_PRE（G の格子 → D から中心を
+// 引いたもの）・P_INV_R2・倍率の 1D LUT（aux の LUT 0）・P_POST（中心からの差 → 入力の格子）。
+//
+// 同じモジュールの lens_main はステージ 7（genzo-pipeline の sensor::LensCorrectionStage。周辺減光の
+// 利得と R・B の倍率色収差。1D LUT は aux の LUT 0〜2、バイキュービックはこのファイルの関数）。
+
+@group(0) @binding(4) var<storage, read> aux: array<f32>;
+
+// 1D LUT k（aux の P_LUT_OFF[k] から P_LUT_LEN[k] 点。定義域の下端は 0。genzo-pipeline の
+// interp::Lut1d::eval と同じ式）。
+fn lut_at(k: u32, x: f32) -> f32 {
+    let off = pu(P_LUT_OFF + k);
+    let len = pu(P_LUT_LEN + k);
+    let last = f32(len - 1u);
+    let t0 = x * pf(P_LUT_INV + k);
+    // NaN は比較が偽になるので 0 にする。
+    var t = 0.0;
+    if (t0 >= 0.0) {
+        t = min(t0, last);
+    }
+    let i = min(u32(t), len - 2u);
+    let f = t - f32(i);
+    let a = aux[off + i];
+    let b = aux[off + i + 1u];
+    return a + (b - a) * f;
+}
 
 // 入力の画素 (x, y)（入力の格子の座標）。タイルにない場合は格子の鏡映で折り返した位置、それもなければ
 // タイルの最も近い画素（genzo-pipeline の geometry::fetch と同じ）。
@@ -51,6 +77,28 @@ fn cubic_base(v: f32) -> CubicBase {
     return CubicBase(i32(clamp(i, -COORD_LIMIT, COORD_LIMIT)), t);
 }
 
+// 1 つのチャンネル ch のバイキュービックの 1 行（geometry::sample_bicubic_channel）。
+fn cubic_row_channel(ix: i32, yy: i32, wx: vec4<f32>, ch: u32) -> f32 {
+    let p0 = geometry_fetch(ix - 1, yy)[ch];
+    let p1 = geometry_fetch(ix, yy)[ch];
+    let p2 = geometry_fetch(ix + 1, yy)[ch];
+    let p3 = geometry_fetch(ix + 2, yy)[ch];
+    return wx.x * p0 + wx.y * p1 + wx.z * p2 + wx.w * p3;
+}
+
+// 入力の格子の連続座標 (x, y) の 1 つのチャンネル ch のバイキュービック。
+fn bicubic_channel(x: f32, y: f32, ch: u32) -> f32 {
+    let bx = cubic_base(x);
+    let by = cubic_base(y);
+    let wx = cubic_weights(bx.t);
+    let wy = cubic_weights(by.t);
+    let r0 = cubic_row_channel(bx.i, by.i - 1, wx, ch);
+    let r1 = cubic_row_channel(bx.i, by.i, wx, ch);
+    let r2 = cubic_row_channel(bx.i, by.i + 1, wx, ch);
+    let r3 = cubic_row_channel(bx.i, by.i + 2, wx, ch);
+    return wy.x * r0 + wy.y * r1 + wy.z * r2 + wy.w * r3;
+}
+
 fn cubic_row(ix: i32, yy: i32, wx: vec4<f32>) -> vec3<f32> {
     let p0 = geometry_fetch(ix - 1, yy);
     let p1 = geometry_fetch(ix, yy);
@@ -72,8 +120,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let g = out_global(gid);
     let xx = f32(pi(P_CROP_X) + g.x) + 0.5;
     let yy = f32(pi(P_CROP_Y) + g.y) + 0.5;
-    let x = pf(P_AFF) * xx + pf(P_AFF + 1u) * yy + pf(P_AFF + 2u);
-    let y = pf(P_AFF + 3u) * xx + pf(P_AFF + 4u) * yy + pf(P_AFF + 5u);
+    var x = 0.0;
+    var y = 0.0;
+    if (pu(P_WARP) != 0u) {
+        // 歪曲補正（GeometryPlan::warp の map_f32 と同じ式）。
+        let dx = pf(P_PRE) * xx + pf(P_PRE + 1u) * yy + pf(P_PRE + 2u);
+        let dy = pf(P_PRE + 3u) * xx + pf(P_PRE + 4u) * yy + pf(P_PRE + 5u);
+        let u = (dx * dx + dy * dy) * pf(P_INV_R2);
+        let k = lut_at(0u, u);
+        let ex = k * dx;
+        let ey = k * dy;
+        x = pf(P_POST) * ex + pf(P_POST + 1u) * ey + pf(P_POST + 2u);
+        y = pf(P_POST + 3u) * ex + pf(P_POST + 4u) * ey + pf(P_POST + 5u);
+    } else {
+        x = pf(P_AFF) * xx + pf(P_AFF + 1u) * yy + pf(P_AFF + 2u);
+        y = pf(P_AFF + 3u) * xx + pf(P_AFF + 4u) * yy + pf(P_AFF + 5u);
+    }
     let bx = cubic_base(x);
     let by = cubic_base(y);
     let wx = cubic_weights(bx.t);
@@ -88,4 +150,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         wy.x * r0.z + wy.y * r1.z + wy.z * r2.z + wy.w * r3.z,
     );
     store_out(gid, sanitize3(c));
+}
+
+// ステージ 7: レンズ補正の周辺減光・倍率色収差（sensor::LensCorrectionStage と apply_lens_correction の式）。
+// P_CENTER は中心（入力の格子の連続座標）、P_SPG は格子の 1 画素あたりの S の画素、P_INV_R2 は 1 / R²。
+// P_LFLAGS の bit 0 が周辺減光（LUT 0）、bit 1 が色収差（LUT 1 = R、LUT 2 = B）。
+@compute @workgroup_size(8, 8)
+fn lens_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (!in_output(gid)) {
+        return;
+    }
+    let g = out_global(gid);
+    let cx = pf(P_CENTER);
+    let cy = pf(P_CENTER + 1u);
+    let gx = f32(g.x) + 0.5 - cx;
+    let gy = f32(g.y) + 0.5 - cy;
+    let sx = gx * pf(P_SPG);
+    let sy = gy * pf(P_SPG);
+    let u = (sx * sx + sy * sy) * pf(P_INV_R2);
+    let c = load_global(g);
+    let flags = pu(P_LFLAGS);
+    var r = c.x;
+    var b = c.z;
+    if ((flags & 2u) != 0u) {
+        let kr = lut_at(1u, u);
+        let kb = lut_at(2u, u);
+        r = bicubic_channel(cx + kr * gx, cy + kr * gy, 0u);
+        b = bicubic_channel(cx + kb * gx, cy + kb * gy, 2u);
+    }
+    var gain = 1.0;
+    if ((flags & 1u) != 0u) {
+        gain = lut_at(0u, u);
+    }
+    store_out(gid, sanitize3(vec3<f32>(gain * r, gain * c.y, gain * b)));
 }

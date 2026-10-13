@@ -9,7 +9,7 @@
 //!
 //! | ID | GPU 版 | カーネル（`shaders/`） |
 //! |---|---|---|
-//! | `finish.geometry` | ステージ 9（バイキュービック） | `geometry.wgsl` |
+//! | `finish.geometry` | ステージ 9（バイキュービック。歪曲補正（処理バージョン 2）を含む） | `geometry.wgsl` |
 //! | `finish.exposure`・`finish.contrast` | ステージ 10 | `finish.wgsl` |
 //! | `finish.tone` | ステージ 11（ガイドの双線形） | `finish.wgsl` |
 //! | `finish.color` | ステージ 13（OKLab） | `finish.wgsl` |
@@ -18,6 +18,9 @@
 //! | `output.display` | ステージ 17a（3D LUT の四面体補間） | `output.wgsl` |
 //! | `output.export.*`・`output.cache.display_p3` | ステージ 17b | `output.wgsl` |
 //! | `sensor.normalize`・`sensor.white_balance`・`sensor.demosaic.half2x2` | ステージ 2・3・5（簡易） | `sensor.wgsl` |
+//! | `sensor.highlight_recovery` | ステージ 4（ハイライト復元。処理バージョン 2） | `sensor.wgsl`（`highlight_main`） |
+//! | `sensor.noise_reduction` | ステージ 6（ノイズ軽減。処理バージョン 2。順・段ごとの横と縦・細部・逆の 5 種類のカーネル） | `denoise.wgsl` |
+//! | `sensor.lens_correction` | ステージ 7（周辺減光・倍率色収差。処理バージョン 2） | `geometry.wgsl`（`lens_main`） |
 //! | `sensor.color_matrix` | ステージ 8 | `resample.wgsl` |
 //!
 //! GPU 版がないステージ（`finish.texture`・`finish.sharpen`（v1 の予約）、`sensor.demosaic.rcd`・
@@ -40,7 +43,10 @@ use genzo_pipeline::finish::{
 };
 use genzo_pipeline::guide::checked_guide;
 use genzo_pipeline::interp::Lut1d;
-use genzo_pipeline::sensor::{ColorMatrixStage, NormalizeStage, WhiteBalanceStage};
+use genzo_pipeline::sensor::{
+    ColorMatrixStage, HighlightRecoveryStage, LensCorrectionStage, NoiseReductionStage,
+    NormalizeStage, WhiteBalanceStage,
+};
 use genzo_pipeline::{
     DemosaicMethod, GpuStage, GpuStageLookup, ProcessVersion, Roi, Stage, StageContext, StageParams,
 };
@@ -73,8 +79,14 @@ pub enum GpuStageKind {
     Normalize,
     /// ステージ 3: ホワイトバランス。
     WhiteBalance,
+    /// ステージ 4: ハイライト復元。
+    HighlightRecovery,
     /// ステージ 5: 2 × 2 の簡易処理。
     Half2x2,
+    /// ステージ 6: ノイズ軽減。
+    NoiseReduction,
+    /// ステージ 7: レンズ補正（周辺減光・倍率色収差）。
+    LensCorrection,
     /// ステージ 8: 色変換。
     ColorMatrix,
 }
@@ -86,7 +98,10 @@ impl GpuStageKind {
             self,
             GpuStageKind::Normalize
                 | GpuStageKind::WhiteBalance
+                | GpuStageKind::HighlightRecovery
                 | GpuStageKind::Half2x2
+                | GpuStageKind::NoiseReduction
+                | GpuStageKind::LensCorrection
                 | GpuStageKind::ColorMatrix
         )
     }
@@ -118,7 +133,7 @@ impl GpuStage for GpuStageEntry {
 
     fn supports(&self, version: ProcessVersion) -> bool {
         match version {
-            ProcessVersion::V1 => true,
+            ProcessVersion::V1 | ProcessVersion::V2 => true,
         }
     }
 
@@ -158,7 +173,10 @@ impl GpuStageRegistry {
         entries.extend([
             GpuStageEntry::new(NormalizeStage::ID, K::Normalize),
             GpuStageEntry::new(WhiteBalanceStage::ID, K::WhiteBalance),
+            GpuStageEntry::new(HighlightRecoveryStage::ID, K::HighlightRecovery),
             GpuStageEntry::new(DemosaicMethod::Half2x2.stage_id(), K::Half2x2),
+            GpuStageEntry::new(NoiseReductionStage::ID, K::NoiseReduction),
+            GpuStageEntry::new(LensCorrectionStage::ID, K::LensCorrection),
             GpuStageEntry::new(ColorMatrixStage::ID, K::ColorMatrix),
         ]);
         Self { entries }
@@ -272,7 +290,7 @@ pub(crate) fn prepare_rgb(
 ) -> Result<Prepared> {
     let id = stage.id();
     match ctx.process_version {
-        ProcessVersion::V1 => {}
+        ProcessVersion::V1 | ProcessVersion::V2 => {}
     }
     let (kernel, p, aux) = match kind {
         GpuStageKind::Geometry => {
@@ -289,7 +307,32 @@ pub(crate) fn prepare_rgb(
             .i32("CROP_Y", crop.y)
             .u32("GRID_W", grid.width)
             .u32("GRID_H", grid.height);
-            (Kernel::Geometry, p, None)
+            // 歪曲補正（処理バージョン 2）: 倍率の表を aux の表 0 に入れる。
+            let aux = match plan.warp() {
+                Some(w) => {
+                    let flat =
+                        |m: [[f32; 3]; 2]| [m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2]];
+                    p.u32("WARP", 1)
+                        .f32s("PRE", &flat(w.pre))
+                        .f32s("POST", &flat(w.post))
+                        .f32("INV_R2", w.inv_r2)
+                        .u32s("LUT_OFF", &[0; 3])
+                        .u32s("LUT_LEN", &[w.lut.values().len() as u32, 2, 2])
+                        .f32s("LUT_INV", &[w.lut.inv_step(), 1.0, 1.0]);
+                    Some(f32_bytes(w.lut.values()))
+                }
+                None => {
+                    p.u32("WARP", 0)
+                        .f32s("PRE", &[0.0; 6])
+                        .f32s("POST", &[0.0; 6])
+                        .f32("INV_R2", 0.0)
+                        .u32s("LUT_OFF", &[0; 3])
+                        .u32s("LUT_LEN", &[2; 3])
+                        .f32s("LUT_INV", &[1.0; 3]);
+                    None
+                }
+            };
+            (Kernel::Geometry, p, aux)
         }
         GpuStageKind::Exposure => {
             let e = params.expect::<ExposureParams>(id)?;
@@ -385,7 +428,10 @@ pub(crate) fn prepare_rgb(
         }
         GpuStageKind::Normalize
         | GpuStageKind::WhiteBalance
+        | GpuStageKind::HighlightRecovery
         | GpuStageKind::Half2x2
+        | GpuStageKind::NoiseReduction
+        | GpuStageKind::LensCorrection
         | GpuStageKind::ColorMatrix => {
             return Err(unsupported(
                 id,
@@ -458,6 +504,50 @@ fn prepare_tone_curve(t: &ToneCurveParams, input: Roi, output: Roi) -> Result<Ke
         .f32("BLACK_LIFT", t.black_lift)
         .f32("RATIO_MIN", t.ratio_min);
     Ok((Kernel::ToneCurve, p, Some(f32_bytes(&values))))
+}
+
+/// ステージ 7（レンズ補正）のパラメータと補助の入力（周辺減光・R・B の表を aux の表 0〜2 につなぐ）。
+/// `sensor_per_grid` は入力の格子の 1 画素あたりの S の画素（1 か 2）。
+pub(crate) fn prepare_lens(
+    lens: &genzo_pipeline::lens::LensStagePlan,
+    sensor_per_grid: u32,
+    grid: (u32, u32),
+    input: Roi,
+    output: Roi,
+) -> Result<(Vec<u32>, Arc<Vec<u8>>)> {
+    let k = lens.kernel_params(sensor_per_grid);
+    let mut values: Vec<f32> = Vec::new();
+    let (mut off, mut len, mut inv) = ([0u32; 3], [2u32; 3], [1f32; 3]);
+    let mut flags = 0u32;
+    let mut put = |slot: usize, lut: &Lut1d, values: &mut Vec<f32>| {
+        off[slot] = values.len() as u32;
+        len[slot] = lut.values().len() as u32;
+        inv[slot] = lut.inv_step();
+        values.extend_from_slice(lut.values());
+    };
+    if let Some(v) = &lens.vignetting {
+        flags |= 1;
+        put(0, v, &mut values);
+    }
+    if let Some((r, b)) = &lens.chromatic_aberration {
+        flags |= 2;
+        put(1, r, &mut values);
+        put(2, b, &mut values);
+    }
+    if values.is_empty() {
+        values.extend_from_slice(&[0.0, 0.0]);
+    }
+    let mut p = Params::new(Kernel::LensCorrection, input, output);
+    p.u32("GRID_W", grid.0)
+        .u32("GRID_H", grid.1)
+        .f32("INV_R2", k.inv_r2)
+        .u32s("LUT_OFF", &off)
+        .u32s("LUT_LEN", &len)
+        .f32s("LUT_INV", &inv)
+        .f32s("CENTER", &k.center)
+        .f32("SPG", k.sensor_per_grid)
+        .u32("LFLAGS", flags);
+    Ok((p.finish()?, f32_bytes(&values)))
 }
 
 #[cfg(test)]

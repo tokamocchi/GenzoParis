@@ -30,10 +30,10 @@ use crate::types::{
     CoreSettings, DeleteKind, DeletePlan, DeleteReport, DevelopState, DisplayInfo,
     DuplicateGroupList, Facets, FileCheckReport, FileIdentity, FolderInfo, FrameInfo, HistoryItem,
     ImportOptions, IndexOf, JobInfo, KeywordHit, KeywordInfo, KeywordUsage, MetadataSummary,
-    NamePreview, PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest, SearchFilter,
-    SearchResult, SearchSort, SettingGroups, SettingsUpdate, ShownVariants, StackInfo,
-    StartupReport, ThumbnailData, Timeline, VariantDetails, VariantKeywords, VideoPlayback,
-    VideoProxyCacheStatus, ViewOutputSize,
+    NamePreview, PasteReport, PasteVersion, PickedWhiteBalance, RangeResult, RegionInfo,
+    RegionRequest, SearchFilter, SearchResult, SearchSort, SettingGroups, SettingsUpdate,
+    ShownVariants, StackInfo, StartupReport, ThumbnailData, Timeline, VariantDetails,
+    VariantKeywords, VideoPlayback, VideoProxyCacheStatus, ViewOutputSize,
 };
 use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, RelinkReport, RelinkRequest, RelocatePlan,
@@ -425,6 +425,15 @@ pub enum Command {
     },
     /// ドラッグを終える（履歴に 1 件記録して保存）。→ [`Response::Develop`]
     EndDrag,
+    /// 現像中の写真の処理バージョンを最新に更新する（DATA-09。履歴に 1 件記録して保存）。
+    /// → [`Response::Develop`]
+    UpgradeProcessVersion,
+    /// 選んだ写真の処理バージョンをまとめて最新に更新する（DATA-09。[`crate::Core::upgrade_process_versions`]。
+    /// すでに最新の写真・動画は飛ばす）。→ [`Response::Updated`]（更新した数）
+    UpgradeProcessVersions {
+        /// 対象。
+        variant_ids: Vec<VariantId>,
+    },
     /// 現在の設定で同期で描く。→ [`Response::Frame`]
     RenderDevelop,
     /// 現像中の写真の表示範囲を描く（ルーペの等倍表示・拡大とパン。P0 の最新の 1 件だけ。
@@ -517,7 +526,7 @@ pub enum Command {
         /// variant。
         variant_id: VariantId,
     },
-    /// 設定を複数の variant に適用する（DEV-30）。→ [`Response::Updated`]
+    /// 設定を複数の variant に適用する（DEV-30。[`crate::Core::paste_settings_with`]）。→ [`Response::Pasted`]
     PasteSettings {
         /// 設定。
         settings: Box<DevelopSettings>,
@@ -526,6 +535,9 @@ pub enum Command {
         /// 写す項目（省略時はすべて）。
         #[serde(default)]
         groups: SettingGroups,
+        /// 貼り付け先の処理バージョンの扱い（省略時は変えない。DATA-09）。
+        #[serde(default)]
+        process_version: PasteVersion,
     },
     /// 仮想コピーを作る。→ [`Response::VariantCreated`]
     CreateVirtualCopy {
@@ -845,6 +857,8 @@ pub enum Response {
         /// 数。
         count: u64,
     },
+    /// 設定の貼り付けの結果（[`Command::PasteSettings`]）。
+    Pasted(PasteReport),
     /// variant の詳細。
     Details(Box<VariantDetails>),
     /// 説明のメタデータのまとめ。
@@ -1288,6 +1302,10 @@ impl Core {
                 generation: self.set_settings(&settings, dragging)?,
             },
             C::EndDrag => R::Develop(Box::new(self.end_drag()?)),
+            C::UpgradeProcessVersion => R::Develop(Box::new(self.upgrade_process_version()?)),
+            C::UpgradeProcessVersions { variant_ids } => R::Updated {
+                count: self.upgrade_process_versions(&variant_ids)? as u64,
+            },
             C::RenderDevelop => R::Frame(Box::new(self.render_develop()?)),
             C::RenderRegion { request } => R::Region(Box::new(self.render_region(&request)?.info)),
             C::CancelRegion => {
@@ -1360,9 +1378,14 @@ impl Core {
                 settings,
                 targets,
                 groups,
-            } => R::Updated {
-                count: self.paste_settings(&settings, &targets, groups)? as u64,
-            },
+                process_version,
+            } => R::Pasted(self.paste_settings_with(
+                &settings,
+                &targets,
+                groups,
+                process_version,
+                crate::develop::HISTORY_LABEL_PASTE,
+            )?),
             C::CreateVirtualCopy { variant_id, name } => R::VariantCreated {
                 variant_id: self.create_virtual_copy(variant_id, name.as_deref())?,
             },
@@ -1618,6 +1641,60 @@ mod tests {
         let c: Command =
             serde_json::from_value(json!({"type": "set_develop_view", "uncropped": true})).unwrap();
         assert_eq!(c, Command::SetDevelopView { uncropped: true });
+        // 処理バージョンの更新（DATA-09）。引数はない。
+        let c: Command =
+            serde_json::from_value(json!({"type": "upgrade_process_version"})).unwrap();
+        assert_eq!(c, Command::UpgradeProcessVersion);
+        // まとめての更新（ライブラリの右クリックのメニュー）。
+        let c: Command = serde_json::from_value(json!({
+            "type": "upgrade_process_versions",
+            "variant_ids": [3, 4]
+        }))
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::UpgradeProcessVersions {
+                variant_ids: vec![VariantId::new(3), VariantId::new(4)],
+            }
+        );
+        // 貼り付け: 処理バージョンの扱いは省略すると変えない（keep）。
+        let c: Command = serde_json::from_value(json!({
+            "type": "paste_settings",
+            "settings": {},
+            "targets": [1],
+        }))
+        .unwrap();
+        let Command::PasteSettings {
+            process_version, ..
+        } = c
+        else {
+            panic!("{c:?}");
+        };
+        assert_eq!(process_version, PasteVersion::Keep);
+        let c: Command = serde_json::from_value(json!({
+            "type": "paste_settings",
+            "settings": {},
+            "targets": [1],
+            "process_version": "upgrade",
+        }))
+        .unwrap();
+        assert!(matches!(
+            c,
+            Command::PasteSettings {
+                process_version: PasteVersion::Upgrade,
+                ..
+            }
+        ));
+        let r = serde_json::to_value(Response::Pasted(PasteReport {
+            count: 3,
+            upgraded: 1,
+            needs_upgrade: 2,
+        }))
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({"type": "pasted", "count": 3, "upgraded": 1, "needs_upgrade": 2})
+        );
         let c: Command = serde_json::from_value(json!({
             "type": "constrain_crop",
             "variant_id": 1,
@@ -1979,6 +2056,10 @@ mod tests {
                 settings: Box::default(),
                 targets: vec![VariantId::new(1)],
                 groups: SettingGroups::default(),
+                process_version: PasteVersion::Upgrade,
+            },
+            Command::UpgradeProcessVersions {
+                variant_ids: vec![VariantId::new(1), VariantId::new(2)],
             },
             Command::Export {
                 variant_ids: vec![VariantId::new(1)],
@@ -2013,6 +2094,7 @@ mod tests {
                 uncropped: Some(false),
             },
             Command::SetDevelopView { uncropped: true },
+            Command::UpgradeProcessVersion,
             Command::ViewOutputSize {
                 pane: 1,
                 variant_id: VariantId::new(4),

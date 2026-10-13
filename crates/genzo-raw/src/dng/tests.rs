@@ -38,6 +38,7 @@ fn sample_image(cfa: CfaPattern) -> RawImage {
             },
             ..Default::default()
         },
+        lens_correction: None,
     }
 }
 

@@ -74,7 +74,7 @@
 //! | `library` | `import`・`search`・`show`・`rate / flag / label / caption / metadata`・`thumbs`・`remove`・`trash` |
 //! | `organize` | `keyword list / add / remove / show / create / rename / move / delete / export`・`collection list / create / add / remove / rename / move / delete / rule`（LIB-09〜11）と、`search --keyword / --collection / --rule` の解釈 |
 //! | `stacks` | `stack create / add / remove / unstack / top / collapse / expand / show / auto`（LIB-12）と `develop rename-copy / make-master`（LIB-13） |
-//! | `develop` | `develop get / set / reset / undo / redo / history / copy / virtual-copy / delete-copy / rename-copy / make-master / region / before / compare` |
+//! | `develop` | `develop get / set / upgrade / source / reset / undo / redo / history / copy / virtual-copy / delete-copy / rename-copy / make-master / region / before / compare`（`set` のレンズ補正のオプション・`upgrade`・`source` は DEV-14・DATA-09） |
 //! | `export` | `export` と書き出しの設定 |
 //! | `standalone` | カタログなしの `render`・`info`（ワーカーを直接使う） |
 //! | `bench` | `bench preview / export`（genzo-testkit の計測と記録） |

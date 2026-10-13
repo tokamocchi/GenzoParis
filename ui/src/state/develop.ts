@@ -296,6 +296,44 @@ export function redo(): Promise<void> {
   });
 }
 
+/**
+ * 現像中の写真の処理バージョンを最新に更新する（DATA-09。レンズ補正などは処理バージョン 2 から）。履歴に
+ * 1 件記録され、Undo で戻せる。送信待ちの設定を先に送ってから実行する。
+ */
+export function upgradeProcessVersion(): Promise<void> {
+  const d = developStore.get();
+  if (!d.state || !d.settings) return Promise.resolve();
+  const variantId = d.state.variant_id;
+  const old = d.settings.process_version;
+  const latest = d.state.latest_process_version;
+  if (latest !== undefined && old < latest) {
+    // 更新を待つ間に変えた値も新しい版で送る（古い版のままの設定を後から送って、更新を戻さないように）。
+    developStore.set({ settings: { ...d.settings, process_version: latest } });
+  }
+  return enqueue(async () => {
+    let state: DevelopState;
+    try {
+      state = await core.upgradeProcessVersion();
+    } catch (e) {
+      // 更新できなければ、画面の版を戻す（コアの設定は古い版のまま）。
+      const s = developStore.get();
+      if (s.settings && s.state?.variant_id === variantId) {
+        developStore.set({ settings: { ...s.settings, process_version: old } });
+      }
+      throw e;
+    }
+    if (state.variant_id !== developStore.get().variantId) return;
+    // 更新の後に利用者が値を変えていたら（送信待ちがある）、画面の値は上書きしない。
+    const busy = pending !== null || tail.length > 0;
+    developStore.set((s) => ({
+      state,
+      settings: busy ? s.settings : state.settings,
+      before: beforeOf(state, s),
+      historyVersion: s.historyVersion + 1,
+    }));
+  });
+}
+
 /** コアの状態を読み直す（一括適用などで、開いている写真の設定が外から変わったとき）。 */
 export function reloadState(): Promise<void> {
   return enqueue(async () => {

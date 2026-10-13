@@ -21,8 +21,22 @@ pub type Migration = fn(Value) -> Result<Value, String>;
 
 /// マイグレーション関数の表。`MIGRATIONS[i]` は schema_version `i + 1` → `i + 2` の変換。
 ///
-/// 現在は v1 だけなので空。
-pub const MIGRATIONS: &[Migration] = &[];
+/// - 1 → 2（[`migrate_v1_to_v2`]）: レンズ補正の手動の項目を加えた（DEV-14）。v1 の機能のパッケージの間
+///   （配布の前）は、後のパッケージが足す項目も版 2 に入れる（決定事項ログ No.120）: ハイライト復元
+///   （`highlight_recovery`。DEV-06）、ノイズ軽減のディテール・コントラスト（`detail.noise_reduction.
+///   luminance_detail`・`luminance_contrast`・`color_detail`。DEV-13）。
+pub const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2];
+
+/// schema_version 1 → 2: レンズ補正の手動の項目（`lens.distortion`・`lens.vignetting_amount`・
+/// `lens.vignetting_midpoint`・`lens.ca_red_cyan`・`lens.ca_blue_yellow`）、ハイライト復元
+/// （`highlight_recovery`）、ノイズ軽減のディテール・コントラスト（`detail.noise_reduction` の
+/// `luminance_detail`・`luminance_contrast`・`color_detail`）を加えた。
+///
+/// 新しい項目は JSON になければ既定値（何もしない値）で補うので、値は書き換えない。`lens` が
+/// オブジェクトでない（型の誤り）ときは、そのまま残して型の読み込みでエラーにする。
+fn migrate_v1_to_v2(value: Value) -> Result<Value, String> {
+    Ok(value)
+}
 
 // 表の長さとスキーマのバージョンが食い違わないことをコンパイル時に確かめる。
 const _: () = assert!(MIGRATIONS.len() as u32 + 1 == CURRENT_SCHEMA_VERSION);
@@ -32,10 +46,12 @@ const _: () = assert!(MIGRATIONS.len() as u32 + 1 == CURRENT_SCHEMA_VERSION);
 /// 欠けている値を「現在の」処理バージョンで補うと、アプリの更新で結果が変わってしまう
 /// （IQ-08・DATA-09）ため、スキーマのバージョンごとに固定の値を使う。
 fn process_version_when_missing(schema_version: u32) -> u32 {
-    // v1 のスキーマは処理バージョン 1 とともに作られた。
-    // スキーマを上げて処理バージョンの既定が変わるときは、ここに分岐を追加する。
+    // v1 のスキーマは処理バージョン 1 とともに、v2 のスキーマは処理バージョン 2 とともに作られた。
     debug_assert!(schema_version >= 1);
-    1
+    match schema_version {
+        1 => 1,
+        _ => 2,
+    }
 }
 
 /// JSON の値を現在のスキーマへ移行する。
@@ -143,6 +159,47 @@ mod tests {
         let v3 = migrate_with(v2, 3, table).unwrap();
         assert_eq!(v3["contrast"], json!(20.0));
         assert_eq!(v3["schema_version"], json!(3));
+    }
+
+    /// 実際の表: v1（MVP）の設定を v2 に移行すると、値はそのままで、処理バージョンも保つ
+    /// （レンズ補正の手動の項目は読み込みで既定値になる）。
+    #[test]
+    fn v1_settings_migrate_to_v2_without_changing_values() {
+        let v1 = json!({
+            "schema_version": 1,
+            "process_version": 1,
+            "exposure_ev": 0.5,
+            "lens": {"profile_enabled": true, "distortion_scale": 80.0}
+        });
+        let v2 = migrate_to_current(v1).unwrap();
+        assert_eq!(v2["schema_version"], json!(2));
+        assert_eq!(v2["process_version"], json!(1));
+        let s: crate::DevelopSettings = serde_json::from_value(v2).unwrap();
+        assert_eq!(s.exposure_ev, 0.5);
+        assert!(s.lens.profile_enabled);
+        assert_eq!(s.lens.distortion_scale, 80.0);
+        assert_eq!(s.lens.distortion, 0.0);
+        assert_eq!(s.lens.vignetting_midpoint, 50.0);
+        // ハイライト復元・ノイズ軽減の新しい項目も既定値（復元しない・ディテール 50）。値は保つ。
+        assert_eq!(s.highlight_recovery, crate::HighlightRecovery::default());
+        assert_eq!(s.detail.noise_reduction.luminance_detail, 50.0);
+        assert_eq!(s.detail.noise_reduction.color_detail, 50.0);
+        let v1 = json!({
+            "schema_version": 1,
+            "process_version": 1,
+            "detail": {"noise_reduction": {"luminance": 20.0, "color": 30.0}}
+        });
+        let s: crate::DevelopSettings =
+            serde_json::from_value(migrate_to_current(v1).unwrap()).unwrap();
+        assert_eq!(s.process_version, 1);
+        assert_eq!(s.detail.noise_reduction.luminance, 20.0);
+        assert_eq!(s.detail.noise_reduction.color, 30.0);
+        assert_eq!(s.detail.noise_reduction.luminance_contrast, 0.0);
+        // process_version のない v1 は 1、v2 は 2 で補う（そのスキーマが作られたときの版。IQ-08）。
+        let v1 = migrate_to_current(json!({"schema_version": 1})).unwrap();
+        assert_eq!(v1["process_version"], json!(1));
+        let v2 = migrate_to_current(json!({"schema_version": 2})).unwrap();
+        assert_eq!(v2["process_version"], json!(2));
     }
 
     #[test]

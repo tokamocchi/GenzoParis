@@ -18,7 +18,12 @@
 //!
 //! # 飽和した画素の扱い（仮の処理。dcraw の `-H 0` に相当する切りそろえ）
 //!
-//! ハイライト復元（ステージ 4）は v1 で実装する。MVP でも、飽和した部分がマゼンタに色かぶりする
+//! ハイライト復元（ステージ 4。DEV-06）は処理バージョン 2 で、設定（genzo-model の `HighlightRecovery`）が
+//! 復元する方式のときだけ使う（[`super::highlight`]）。そのときは **このステージでは切りそろえず**
+//! （[`SaturationClip::Off`]。[`super::SensorPlan`] が決める）、ステージ 4 が下の切りそろえと同じ規則の値と
+//! 復元した値を量で混ぜる。版 1 と、版 2 で復元しない設定（既定）は、これまでどおりこのステージで切りそろえる。
+//!
+//! MVP でも、飽和した部分がマゼンタに色かぶりする
 //! のを避けるため、WB を掛けた後に、**飽和した画素とその近傍の値を「すべてのチャンネルが飽和する
 //! 値」（共通の白 = 係数の最小値 × 1）で切りそろえる**（`v = min(v, 切りそろえの値)`）。
 //!
@@ -38,7 +43,7 @@
 //!   **飽和した画素から半径 [`SATURATION_CLIP_RADIUS`] 画素以内（CFA の画素）だけ** を切りそろえる
 //!   （[`SaturationClip::Neighborhood`]）。dcraw と同じ全体の切りそろえ（[`SaturationClip::Global`]）と、
 //!   切りそろえない設定（[`SaturationClip::Off`]。比較用）も選べる。どれにするかは PoC-3 で実写を
-//!   見て決め、ステージ 4（v1）で置き換える。
+//!   見て決める（ステージ 4 の復元を既定にするかは人の判断の表 No.137）。
 //!
 //! 計算の順序（GPU 版も同じ）: `v = v × 係数[位置]`、近傍に飽和した画素があれば `v = min(v, 共通の白)`。
 
@@ -224,7 +229,7 @@ pub fn resolve_white_balance(
 }
 
 /// 近傍（半径 `r`。チェビシェフ距離）に飽和した画素があるかの表（`w × h`）。
-fn dilate(sat: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
+pub(crate) fn dilate(sat: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
     if r == 0 {
         return sat.to_vec();
     }

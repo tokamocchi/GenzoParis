@@ -34,9 +34,9 @@ pub use catalog::{
 };
 pub use develop::{
     AspectRatio, ColorParams, CropRect, CurvePoint, DataRef, DetailParams, DevelopError,
-    DevelopSettings, FieldIssue, Geometry, IssueKind, LensCorrection, LocalAdjustment, LocalDelta,
-    MaskShape, NoiseReduction, ParametricCurve, RenderDeps, Sharpening, ToneCurve, ToneParams,
-    ValidationError, WbPreset, WhiteBalance,
+    DevelopSettings, FieldIssue, Geometry, HighlightMethod, HighlightRecovery, IssueKind,
+    LensCorrection, LocalAdjustment, LocalDelta, MaskShape, NoiseReduction, ParametricCurve,
+    RenderDeps, Sharpening, ToneCurve, ToneParams, ValidationError, WbPreset, WhiteBalance,
 };
 pub use export::{
     ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize, OutputColorSpace,
@@ -64,10 +64,21 @@ pub use smart::{
 ///
 /// 項目の追加・名前の変更などで JSON の形が変わったときに上げ、
 /// [`develop::migrate`] にマイグレーション関数を追加する。
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+///
+/// - 2（2026-10-13。DEV-14）: レンズ補正の手動の項目（`lens.distortion` など）を加えた。v1 の機能の
+///   パッケージの間（配布の前）は、後のパッケージが足す項目も版 2 に入れる（決定事項ログ No.120）。
+///   同日、ハイライト復元（`highlight_recovery`。DEV-06）とノイズ軽減のディテール・コントラスト（DEV-13）を
+///   加えた（決定事項ログ No.126・127）。
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// 処理アルゴリズムの現在のバージョン（04 の 2.5 節。IQ-08・DATA-09）。
 ///
 /// 同じ設定でも結果が変わるアルゴリズムの変更をしたときに上げる。
 /// 新しく現像する写真にはこの値を使い、既存の写真の値は明示的な更新なしには変えない。
-pub const CURRENT_PROCESS_VERSION: u32 = 1;
+///
+/// - 1: MVP（04 の 2.1 節のステージのうち、v1 の印のないもの）。
+/// - 2（2026-10-13）: v1 の機能のステージ（最初はレンズ補正。DEV-14。同日、ハイライト復元（DEV-06）と
+///   ノイズ軽減（DEV-13）も足した）。v1 の機能のパッケージの間（配布の前）は、後のパッケージも版 2 に足す。
+///   既定の設定（v1 の機能の項目が既定値。ハイライト復元は「白で切りそろえる」、ノイズ軽減は量 0）では版 1 と
+///   同じ結果になるので、新しい写真の既定を 2 にした（決定事項ログ No.120・126）。
+pub const CURRENT_PROCESS_VERSION: u32 = 2;

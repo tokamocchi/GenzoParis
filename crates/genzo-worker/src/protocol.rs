@@ -446,6 +446,15 @@ pub struct RawFrameInfo {
     /// `render_deps.camera_profile` の記録用）。古いワーカーの応答にはない（`None`）。
     #[serde(default)]
     pub cam_xyz_source: Option<genzo_raw::CamXyzSource>,
+    /// 埋め込みのレンズ補正の情報（DEV-14。`genzo_raw::RawImage::lens_correction`）。本体は
+    /// `RawImage::validate` で値を確かめる。古いワーカーの応答・情報のない RAW では `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_correction: Option<genzo_raw::LensCorrectionData>,
+    /// 埋め込みのレンズ補正の情報が読めない・不正だったときの理由（`genzo_raw::RawDetails::lens_correction_note`。
+    /// そのときは `lens_correction` を `None` にして展開は続ける）。本体は画面・CLI に出す（長さと制御文字は
+    /// 本体が整える）。読めた・なかった・古いワーカーの応答では `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_correction_note: Option<String>,
 }
 
 /// [`Job::DecodeImage`] の付随情報（画素は共有メモリ）。
@@ -847,6 +856,8 @@ mod tests {
                 metadata: PhotoMetadata::default(),
                 decoder_id: None,
                 cam_xyz_source: Some(genzo_raw::CamXyzSource::LibRawTable),
+                lens_correction_note: None,
+                lens_correction: None,
             }),
             JobOutput::Image(LinearImageInfo {
                 format: PhotoFormat::Png,

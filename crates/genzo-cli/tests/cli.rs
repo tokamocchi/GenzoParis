@@ -289,6 +289,15 @@ fn make_dng(path: &Path) -> bool {
 
 /// [`make_dng`] に、既定の切り抜き（DefaultCropOrigin / DefaultCropSize。有効画素の座標）を付ける。
 fn make_dng_with_crop(path: &Path, default_crop: Option<genzo_raw::PixelRect>) -> bool {
+    make_dng_with(path, default_crop, None)
+}
+
+/// [`make_dng_with_crop`] に、埋め込みのレンズ補正の情報（DNG の opcode。DEV-14）を付ける。
+fn make_dng_with(
+    path: &Path,
+    default_crop: Option<genzo_raw::PixelRect>,
+    lens: Option<genzo_raw::LensCorrectionData>,
+) -> bool {
     if !genzo_raw::LIBRAW_ENABLED {
         eprintln!("LibRaw が無効な build のため、DNG の部分を飛ばす");
         return false;
@@ -335,6 +344,7 @@ fn make_dng_with_crop(path: &Path, default_crop: Option<genzo_raw::PixelRect>) -
             height: h,
             data: jpeg,
         }),
+        lens_correction: lens,
         ..Default::default()
     };
     genzo_raw::dng::write_file(path, &raw, &options).unwrap();
@@ -968,6 +978,335 @@ fn partial_failures_exit_with_3() {
     // 見つからないファイルは作り直しを飛ばす（失敗ではない）ので 0。
     let r = env.run(&["thumbs", "regenerate", &a.to_string(), "--json"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
+}
+
+/// `develop set` のハイライト復元・ノイズ軽減のオプション（DEV-06・DEV-13）: JSON の後に当て、範囲の外はエラー、
+/// 処理バージョン 1 の写真では「使われない」と知らせる。履歴の名前は変わった項目。
+#[test]
+fn develop_highlight_and_noise_reduction_options() {
+    let env = Env::new();
+    write_plain(&env.photos.join("A.png"), (60, 40));
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.png").to_string();
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--highlight-recovery",
+        "reconstruct",
+        "--highlight-amount",
+        "70",
+        "--nr-luminance",
+        "25",
+        "--nr-luminance-detail",
+        "40",
+        "--nr-luminance-contrast",
+        "10",
+        "--nr-color",
+        "30",
+        "--nr-color-detail",
+        "60",
+    ]);
+    assert_eq!(set["changed"], true);
+    let hr = &set["settings"]["highlight_recovery"];
+    assert_eq!(hr["method"], "reconstruct");
+    assert_eq!(hr["amount"], 70.0);
+    let nr = &set["settings"]["detail"]["noise_reduction"];
+    assert_eq!(nr["luminance"], 25.0);
+    assert_eq!(nr["luminance_detail"], 40.0);
+    assert_eq!(nr["luminance_contrast"], 10.0);
+    assert_eq!(nr["color"], 30.0);
+    assert_eq!(nr["color_detail"], 60.0);
+    let history = env.json(&["develop", "history", &a]);
+    let last = history.as_array().unwrap().last().unwrap()["label"].clone();
+    assert_eq!(
+        last,
+        "ハイライト復元・輝度ノイズの軽減 25・カラーノイズの軽減 30"
+    );
+    // JSON の後にオプションを当てる。
+    let r = env.run_stdin(
+        &[
+            "develop",
+            "set",
+            &a,
+            "--json",
+            "-",
+            "--nr-color",
+            "5",
+            "--json",
+        ],
+        Some(r#"{"detail": {"noise_reduction": {"color": 50, "luminance": 0}}}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["detail"]["noise_reduction"]["color"], 5.0);
+    assert_eq!(got["detail"]["noise_reduction"]["luminance"], 0.0);
+    // 範囲の外・知らない方式はエラー（設定は変わらない）。
+    let r = env.run(&["develop", "set", &a, "--nr-luminance", "101"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--highlight-recovery", "magic"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(
+        env.json(&["develop", "get", &a])["highlight_recovery"]["method"],
+        "reconstruct"
+    );
+    // 処理バージョン 1 の写真では知らせる。
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--nr-luminance", "35"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("ハイライト復元・ノイズ軽減は使われません"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// `develop set` のレンズ補正のオプション・`develop upgrade`（処理バージョンの更新）・`develop source`（元の
+/// 画像の情報と埋め込みのレンズ補正の情報）（DEV-14・DATA-09）。
+#[test]
+fn develop_lens_options_upgrade_and_source() {
+    let env = Env::new();
+    write_plain(&env.photos.join("A.png"), (60, 40));
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.png").to_string();
+    // 新しく取り込んだ写真は最新の処理バージョン。
+    assert_eq!(env.json(&["develop", "get", &a])["process_version"], 2);
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--lens-profile",
+        "on",
+        "--distortion",
+        "-20",
+        "--vignetting-midpoint",
+        "30",
+    ]);
+    assert_eq!(set["changed"], true);
+    let lens = &set["settings"]["lens"];
+    assert_eq!(lens["profile_enabled"], true);
+    assert_eq!(lens["distortion"], -20.0);
+    assert_eq!(lens["vignetting_midpoint"], 30.0);
+    assert_eq!(
+        lens["vignetting_amount"], 0.0,
+        "指定しない項目は今の値のまま"
+    );
+    // JSON とオプションを一緒に使うと、JSON の後にオプションを当てる。
+    let r = env.run_stdin(
+        &[
+            "develop",
+            "set",
+            &a,
+            "--json",
+            "-",
+            "--ca-red-cyan",
+            "15",
+            "--json",
+        ],
+        Some(r#"{"lens": {"ca_red_cyan": 5, "ca_blue_yellow": -5}, "exposure_ev": 0.25}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["lens"]["ca_red_cyan"], 15.0);
+    assert_eq!(got["lens"]["ca_blue_yellow"], -5.0);
+    assert_eq!(got["lens"]["distortion"], -20.0);
+    assert_eq!(got["exposure_ev"], 0.25);
+    // 範囲の外はエラー（設定は変わらない）。値の誤りは使い方の誤り。
+    let r = env.run(&["develop", "set", &a, "--distortion", "150"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--lens-profile", "maybe"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(
+        env.json(&["develop", "get", &a])["lens"]["distortion"],
+        -20.0
+    );
+    // すでに最新なら何もしない。
+    let up = env.json(&["develop", "upgrade", &a]);
+    assert_eq!(up["changed"], false);
+    // 処理バージョン 1 の写真では、レンズ補正を変えると「使われない」と知らせ、upgrade で更新する。
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--vignetting", "30"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("レンズ補正は使われません"),
+        "{}",
+        r.stderr
+    );
+    let up = env.json(&["develop", "upgrade", &a]);
+    assert_eq!(up["changed"], true);
+    assert_eq!(up["settings"]["process_version"], 2);
+    assert_eq!(
+        up["settings"]["lens"]["vignetting_amount"], 30.0,
+        "ほかの設定は変えない"
+    );
+    let history = env.json(&["develop", "history", &a]);
+    let last = history.as_array().unwrap().last().unwrap()["label"].clone();
+    assert_eq!(last, "処理バージョンを 2 に更新");
+    // 元の画像の情報（RAW 以外なので、埋め込みのレンズ補正の情報はない）。
+    let src = env.json(&["develop", "source", &a]);
+    assert_eq!(src["source"]["is_raw"], false);
+    assert_eq!(src["source"]["width"], 60);
+    assert!(src["source"]["lens_correction"].is_null(), "{src}");
+    assert_eq!(src["process_version"], 2);
+    assert_eq!(src["latest_process_version"], 2);
+    let text = env.run(&["develop", "source", &a]);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(text.stdout.contains("レンズ補正の情報"), "{}", text.stdout);
+    assert!(text.stdout.contains("RAW 以外"), "{}", text.stdout);
+
+    // LibRaw が有効な build なら、埋め込みのレンズ補正の情報（DNG の opcode）のある RAW でも確かめる。
+    let lens = genzo_raw::LensCorrectionData::DngOpcode(genzo_raw::DngLensCorrection {
+        warp: None,
+        vignette: Some(genzo_raw::DngVignetteRadial {
+            k: [0.5, 0.0, 0.0, 0.0, 0.0],
+            center: [0.5, 0.5],
+        }),
+    });
+    let raws = env.path("raws");
+    std::fs::create_dir_all(&raws).unwrap();
+    if !make_dng_with(&raws.join("L.dng"), None, Some(lens)) {
+        return;
+    }
+    env.json(&["import", raws.to_str().unwrap()]);
+    let l = id_of(&env.json(&["search"]), "L.dng").to_string();
+    let src = env.json(&["develop", "source", &l]);
+    assert_eq!(src["source"]["is_raw"], true);
+    let info = &src["source"]["lens_correction"];
+    assert_eq!(info["source"], "dng_opcode", "{src}");
+    assert_eq!(info["vignetting"], true);
+    assert_eq!(info["distortion"], false);
+    let set = env.json(&["develop", "set", &l, "--lens-profile", "on"]);
+    assert_eq!(set["settings"]["lens"]["profile_enabled"], true);
+}
+
+/// 処理バージョン 1 と 2 の写真の間の `develop copy`・`develop set --replace`・`develop upgrade` に ID を複数
+/// （DEV-30・DATA-09。検証の指摘）: コピー先の版は変えず（`--upgrade-process-version` のときだけ上げる）、使われない
+/// 項目を警告する。`--replace` も、JSON に書かなければ今の版のまま。
+#[test]
+fn develop_copy_and_upgrade_between_process_versions() {
+    let env = Env::new();
+    // 内容が同じファイルは重複として取り込まないので、別の内容にする。
+    for (i, name) in ["A.jpg", "B.jpg", "C.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (40, 30), i as u8 + 1, None, false);
+    }
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b, c) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+        id_of(&search, "C.jpg").to_string(),
+    );
+    // A・C を版 1 にする（JSON に書いた版は、そのまま保存する）。
+    for v in [&a, &c] {
+        let r = env.run_stdin(
+            &["develop", "set", v, "--json", "-"],
+            Some(r#"{"process_version": 1}"#),
+        );
+        assert_eq!(r.code, 0, "{}", r.stderr);
+    }
+    // JSON で版を上げても、履歴の名前は変わった項目だけ（「処理バージョン」を重ねない）。
+    let r = env.run_stdin(
+        &["develop", "set", &c, "--json", "-"],
+        Some(r#"{"process_version": 2}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let history = env.json(&["develop", "history", &c]);
+    assert_eq!(
+        history.as_array().unwrap().last().unwrap()["label"],
+        "処理バージョン"
+    );
+    let r = env.run_stdin(
+        &["develop", "set", &c, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    // --replace でも、JSON に版を書かなければ版 1 のまま（オプションだけでも）。
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-", "--replace"],
+        Some(r#"{"exposure_ev": 0.5}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(env.json(&["develop", "get", &a])["process_version"], 1);
+    let set = env.json(&["develop", "set", &a, "--vignetting", "10", "--replace"]);
+    assert_eq!(set["settings"]["process_version"], 1);
+    // 版 2 の B の設定（レンズ補正）を、一部の項目だけ版 1 の A へ: 貼り付けられ、A は版 1 のまま。
+    env.json(&["develop", "set", &b, "--distortion", "-20"]);
+    let r = env.run(&[
+        "develop",
+        "copy",
+        &b,
+        "--to",
+        &a,
+        "--groups",
+        "lens,basic-tone",
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let copied: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(copied["updated"], 1);
+    assert_eq!(copied["upgraded"], 0);
+    assert_eq!(copied["needs_upgrade"], 1);
+    assert!(
+        r.stderr.contains("処理バージョンが古いため"),
+        "{}",
+        r.stderr
+    );
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["process_version"], 1);
+    assert_eq!(got["lens"]["distortion"], -20.0);
+    // すべての項目でも、コピー先の版のまま。
+    env.json(&["develop", "copy", &b, "--to", &a]);
+    assert_eq!(env.json(&["develop", "get", &a])["process_version"], 1);
+    // 版 1 の設定を版 2 の写真へ: 版 2 のまま（下げない）。
+    env.json(&[
+        "develop",
+        "copy",
+        &c,
+        "--to",
+        &b,
+        "--upgrade-process-version",
+    ]);
+    assert_eq!(env.json(&["develop", "get", &b])["process_version"], 2);
+    // --upgrade-process-version で、古い写真だけを上げる。
+    let up = env.json(&[
+        "develop",
+        "copy",
+        &b,
+        "--to",
+        &a,
+        "--groups",
+        "lens",
+        "--upgrade-process-version",
+    ]);
+    assert_eq!(up["upgraded"], 1);
+    assert_eq!(up["needs_upgrade"], 0);
+    assert_eq!(env.json(&["develop", "get", &a])["process_version"], 2);
+    let history = env.json(&["develop", "history", &a]);
+    let last = history.as_array().unwrap().last().unwrap()["label"].clone();
+    assert_eq!(last, "設定の貼り付け・処理バージョンを 2 に更新");
+    // develop upgrade に ID を複数: 最新でない写真だけを更新する。
+    let up = env.json(&["develop", "upgrade", &a, &b, &c]);
+    assert_eq!(up, serde_json::json!({"updated": 1}));
+    assert_eq!(env.json(&["develop", "get", &c])["process_version"], 2);
+    let text = env.run(&["develop", "upgrade", &a, &c]);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(
+        text.stdout.contains("0 件の処理バージョンを 2 に更新"),
+        "{}",
+        text.stdout
+    );
 }
 
 /// `develop region`: 表示範囲を描いて PNG に書く（コア API の render_region。No.52）。既にあるファイルには

@@ -6,8 +6,8 @@
 //   付く。削除のダイアログでは、折りたたんだスタックの中に隠れた写真も含めるかを選べる（hiddenStackMembers。
 //   既定は含めない）。
 // - 写真の右クリックのメニュー（photoMenuEntries）は、項目の種類・文言・使えるかだけを決める（実行は
-//   state/stacks.ts）。撮影日時の修正（LIB-16）・フォルダへの移動と名前の変更（FILE-02）・見つからない写真の
-//   再リンク（FILE-04）のダイアログも、このメニューから開ける。
+//   state/stacks.ts）。撮影日時の修正（LIB-16）・処理バージョンの更新（DATA-09）・フォルダへの移動と名前の変更
+//   （FILE-02）・見つからない写真の再リンク（FILE-04）のダイアログも、このメニューから開ける。
 
 import type {
   AutoStackReport,
@@ -128,6 +128,7 @@ export type PhotoMenuAction =
   | "collapse_all"
   | "auto_stack"
   | "edit_capture_time"
+  | "upgrade_process"
   | "move_to_folder"
   | "rename_files"
   | "relink";
@@ -177,6 +178,7 @@ export function photoMenuEntries(
     { action: "auto_stack", label: "撮影時刻でスタック…", enabled: true },
     PHOTO_MENU_SEPARATOR,
     { action: "edit_capture_time", label: "撮影日時を修正…", enabled: any },
+    { action: "upgrade_process", label: "処理バージョンを最新に更新…", enabled: any && !(targets <= 1 && isVideo) },
     PHOTO_MENU_SEPARATOR,
     { action: "move_to_folder", label: "フォルダへ移動…", enabled: any },
     { action: "rename_files", label: "ファイルの名前を変える…", keys: "F2", enabled: any },

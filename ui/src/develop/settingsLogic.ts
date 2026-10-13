@@ -1,10 +1,15 @@
-// 現像設定の組み立て（WB の選択・リセット。DOM を使わない純粋な計算）。
+// 現像設定の組み立て（WB の選択・レンズ補正・ハイライト復元・ノイズ軽減の操作の可否・リセット。DOM を使わない純粋な
+// 計算）。
 
 import {
   type AsShotWhiteBalance,
   type DevelopSettings,
   type Geometry,
+  type HighlightRecovery,
+  type LensCorrection,
+  type NoiseReduction,
   RANGES,
+  type SourceInfo,
   type WbPreset,
   type WhiteBalance,
   WB_PRESETS,
@@ -73,15 +78,177 @@ export function defaultGeometry(): Geometry {
   return { crop: { ...FULL_CROP }, angle_deg: 0, aspect: null };
 }
 
+/** 既定のレンズ補正（補正なし。genzo-model の LensCorrection::default）。 */
+export function defaultLens(): LensCorrection {
+  return {
+    profile_enabled: false,
+    distortion_scale: 100,
+    vignetting_scale: 100,
+    remove_chromatic_aberration: false,
+    distortion: 0,
+    vignetting_amount: 0,
+    vignetting_midpoint: 50,
+    ca_red_cyan: 0,
+    ca_blue_yellow: 0,
+  };
+}
+
+/**
+ * 古いコアや古い設定で項目が欠けていても、レンズ補正のすべての項目をそろえる（欠けた項目は既定値。コアの
+ * serde の既定と同じ）。
+ */
+export function fullLens(lens: Partial<LensCorrection> | null | undefined): LensCorrection {
+  return { ...defaultLens(), ...(lens ?? {}) };
+}
+
+/** レンズ補正を使える最初の処理バージョン（genzo-pipeline の ProcessVersion::V2）。 */
+export const LENS_PROCESS_VERSION = 2;
+
+/** 処理バージョンを更新できるか（コアが最新の版を知らせていて、設定の版がそれより古い）。 */
+export function canUpgradeProcess(processVersion: number, latest: number | undefined): boolean {
+  return latest !== undefined && processVersion < latest;
+}
+
+/** レンズ補正のパネルの各項目を操作できるか（DEV-14）。 */
+export interface LensControls {
+  /** 処理バージョンが古く、レンズ補正を使えない（更新が必要）。 */
+  needsUpgrade: boolean;
+  /** 「プロファイルによる補正を有効」（RAW だけ。補正の情報は RAW に埋め込まれている）。 */
+  profile: boolean;
+  /** 歪曲補正の適用量（プロファイルの歪曲の情報があり、プロファイルの補正が有効）。 */
+  distortionScale: boolean;
+  /** 周辺減光補正の適用量（RAW で、プロファイルの周辺減光の情報があり、プロファイルの補正が有効）。 */
+  vignettingScale: boolean;
+  /** 「色収差を除去」（RAW だけ）。 */
+  removeCa: boolean;
+  /** 手動の歪曲（RAW 以外の写真にも使える）。 */
+  manualDistortion: boolean;
+  /** 手動の周辺減光・色収差（RAW だけ。センサーの色空間で補正する）。 */
+  manualSensor: boolean;
+}
+
+/**
+ * レンズ補正のパネルの各項目を操作できるか。周辺減光と倍率色収差はセンサーの色空間の段階（ステージ 7）で
+ * 補正するので RAW だけ、歪曲は仕上げの座標変換（ステージ 9）なので、どの写真にも使える。`disabled` は
+ * 写真を開いていないなど、パネル全体を使えないとき。
+ */
+export function lensControls(
+  settings: DevelopSettings,
+  source: SourceInfo | null,
+  disabled: boolean,
+): LensControls {
+  const lens = fullLens(settings.lens);
+  const needsUpgrade = settings.process_version < LENS_PROCESS_VERSION;
+  const on = !disabled && !needsUpgrade && source !== null;
+  const raw = !!source?.is_raw;
+  const info = source?.lens_correction ?? null;
+  return {
+    needsUpgrade,
+    profile: on && raw,
+    distortionScale: on && raw && lens.profile_enabled && !!info?.distortion,
+    vignettingScale: on && raw && lens.profile_enabled && !!info?.vignetting,
+    removeCa: on && raw,
+    manualDistortion: on,
+    manualSensor: on && raw,
+  };
+}
+
+/**
+ * レンズ補正のパネルの、埋め込みの補正の情報の説明（RAW だけ。RAW 以外・写真を開いていなければ null）。情報が
+ * 壊れていて使えなかったとき（コアの lens_correction_note）は、もともとない場合と区別して理由を出す。
+ */
+export function lensInfoNote(source: SourceInfo | null): string | null {
+  if (!source?.is_raw) return null;
+  const info = source.lens_correction ?? null;
+  if (info) return `補正の情報: ${info.description}`;
+  const note = source.lens_correction_note ?? null;
+  if (note) return `埋め込みの補正の情報が壊れているため使えません（${note}）。手動で補正できます。`;
+  return "この写真には埋め込みの補正の情報がありません（手動で補正できます）。";
+}
+
+/** 既定のハイライト復元（復元しない。genzo-model の HighlightRecovery::default）。 */
+export function defaultHighlightRecovery(): HighlightRecovery {
+  return { method: "clip", amount: 100 };
+}
+
+/** 古いコアや古い設定で項目が欠けていても、ハイライト復元の項目をそろえる（欠けた項目は既定値）。 */
+export function fullHighlightRecovery(h: Partial<HighlightRecovery> | null | undefined): HighlightRecovery {
+  return { ...defaultHighlightRecovery(), ...(h ?? {}) };
+}
+
+/** 既定のノイズ軽減（量 0・ディテール 50。genzo-model の NoiseReduction::default）。 */
+export function defaultNoiseReduction(): NoiseReduction {
+  return { luminance: 0, luminance_detail: 50, luminance_contrast: 0, color: 0, color_detail: 50 };
+}
+
+/** 古いコアや古い設定で項目が欠けていても、ノイズ軽減の項目をそろえる（欠けた項目は既定値）。 */
+export function fullNoiseReduction(n: Partial<NoiseReduction> | null | undefined): NoiseReduction {
+  return { ...defaultNoiseReduction(), ...(n ?? {}) };
+}
+
+/** ハイライト復元・ノイズ軽減を使える最初の処理バージョン（genzo-pipeline の ProcessVersion::V2）。 */
+export const SENSOR_PROCESS_VERSION = 2;
+
+/** ハイライト復元・ノイズ軽減（DEV-06・DEV-13）の各項目を操作できるか。 */
+export interface SensorControls {
+  /** 処理バージョンが古く、使えない（更新が必要）。 */
+  needsUpgrade: boolean;
+  /** RAW 以外の写真で、使えない（センサーの段階の処理のため）。 */
+  notRaw: boolean;
+  /** ハイライト復元の方式。 */
+  highlight: boolean;
+  /** ハイライト復元の量（復元する方式のとき）。 */
+  highlightAmount: boolean;
+  /** 輝度・カラーノイズの軽減の量。 */
+  noise: boolean;
+  /** 輝度ノイズの軽減のディテール・コントラスト（輝度の量が 0 でないとき）。 */
+  luminanceOptions: boolean;
+  /** カラーノイズの軽減のディテール（カラーの量が 0 でないとき）。 */
+  colorOptions: boolean;
+}
+
+/**
+ * ハイライト復元・ノイズ軽減の各項目を操作できるか。どちらもセンサーの段階（ステージ 4・6）の処理なので RAW だけで、
+ * 処理バージョン 2 から使える。ディテール・コントラストは、それぞれの量が 0 なら効かないので動かせない（Lightroom
+ * Classic と同じ）。`disabled` は写真を開いていないなど、パネル全体を使えないとき。
+ */
+export function sensorControls(
+  settings: DevelopSettings,
+  source: SourceInfo | null,
+  disabled: boolean,
+): SensorControls {
+  const needsUpgrade = settings.process_version < SENSOR_PROCESS_VERSION;
+  const notRaw = source !== null && !source.is_raw;
+  const on = !disabled && !needsUpgrade && source !== null && source.is_raw;
+  const hr = fullHighlightRecovery(settings.highlight_recovery);
+  const nr = fullNoiseReduction(settings.detail?.noise_reduction);
+  return {
+    needsUpgrade,
+    notRaw,
+    highlight: on,
+    highlightAmount: on && hr.method !== "clip",
+    noise: on,
+    luminanceOptions: on && nr.luminance > 0,
+    colorOptions: on && nr.color > 0,
+  };
+}
+
 /**
  * すべてリセット（genzo-model の DevelopSettings::default の値にする）。
  *
  * - schema_version・process_version・render_deps は今の値を保つ（コアが管理する値）。
- * - masks・lens・detail も今の値を保つ（MVP の画面にない項目を、利用者が見えないところで消さない）。
+ * - レンズ補正・ハイライト復元・ノイズ軽減は既定に戻す（画面のパネルで見える項目）。
+ * - masks とシャープ（detail.sharpening）は今の値を保つ（画面にない項目を、利用者が見えないところで消さない）。
  */
 export function resetAll(s: DevelopSettings): DevelopSettings {
   return {
     ...s,
+    lens: defaultLens(),
+    highlight_recovery: defaultHighlightRecovery(),
+    detail: {
+      ...(s.detail ?? { sharpening: { amount: 0, radius: 1, detail: 0, masking: 0 } }),
+      noise_reduction: defaultNoiseReduction(),
+    },
     white_balance: "as_shot",
     exposure_ev: 0,
     contrast: 0,

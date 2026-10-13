@@ -1300,6 +1300,43 @@ pub struct SourceInfo {
     /// 撮影時の係数から求める。求められない・設定できる範囲（2000〜50000 K、tint ±150）の外なら `None`。
     #[serde(default)]
     pub as_shot_white_balance: Option<AsShotWhiteBalance>,
+    /// RAW に埋め込まれたレンズ補正の情報（DEV-14。Sony の ARW のタグ・DNG の opcode）の要約。
+    /// 情報がない・RAW 以外は `None`（手動の補正だけを使える）。
+    #[serde(default)]
+    pub lens_correction: Option<LensCorrectionInfo>,
+    /// 埋め込みのレンズ補正の情報が読めない・不正だったため使わなかった理由（DEV-14。genzo-raw の
+    /// `RawDetails::lens_correction_note`。そのときは `lens_correction` は `None`）。画面は「情報が壊れていたため
+    /// 使えません」と、もともとない場合と区別して出す。読めた・なかった・RAW 以外は `None`。
+    #[serde(default)]
+    pub lens_correction_note: Option<String>,
+}
+
+/// 埋め込みのレンズ補正の情報の要約（[`SourceInfo::lens_correction`]。画面のレンズ補正のパネルの表示用）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LensCorrectionInfo {
+    /// 出どころ（`"sony_arw"`・`"dng_opcode"`）。
+    pub source: String,
+    /// 説明（例: `"Sony の ARW（歪曲・周辺減光・色収差）"`）。
+    pub description: String,
+    /// 歪曲の情報があるか。
+    pub distortion: bool,
+    /// 周辺減光の情報があるか。
+    pub vignetting: bool,
+    /// 倍率色収差の情報があるか。
+    pub chromatic_aberration: bool,
+}
+
+impl LensCorrectionInfo {
+    /// 埋め込みの情報から作る。
+    pub fn of(l: &genzo_raw::LensCorrectionData) -> Self {
+        Self {
+            source: l.source_id().to_owned(),
+            description: l.describe(),
+            distortion: l.has_distortion(),
+            vignetting: l.has_vignetting(),
+            chromatic_aberration: l.has_chromatic_aberration(),
+        }
+    }
 }
 
 /// 撮影時の WB の色温度と tint（[`SourceInfo::as_shot_white_balance`]。`WhiteBalance::Custom` に
@@ -1345,6 +1382,11 @@ pub struct DevelopState {
     /// `None`。写真を開き直すと `None` に戻る）。
     #[serde(default)]
     pub before: Option<BeforeInfo>,
+    /// このアプリの最新の処理バージョン（genzo-model の `CURRENT_PROCESS_VERSION`）。`settings` の
+    /// 処理バージョンがこれより古ければ、画面は「処理バージョンを更新」を出す
+    /// （[`crate::Core::upgrade_process_version`]。DATA-09）。
+    #[serde(default)]
+    pub latest_process_version: u32,
 }
 
 /// ビフォー / アフターの表示（DEV-31）のビフォーの設定の出どころ（[`crate::Core::set_before`]）。
@@ -1627,7 +1669,7 @@ pub struct RegionFrame {
 pub struct SettingGroups {
     /// ホワイトバランス。
     pub white_balance: bool,
-    /// 露光量・コントラスト・ハイライト・シャドウ・白・黒。
+    /// 露光量・コントラスト・ハイライト・シャドウ・白・黒・ハイライト復元（DEV-06）。
     pub basic_tone: bool,
     /// トーンカーブ。
     pub tone_curve: bool,
@@ -1637,7 +1679,7 @@ pub struct SettingGroups {
     pub geometry: bool,
     /// レンズ補正。
     pub lens: bool,
-    /// シャープ・ノイズ軽減。
+    /// シャープ・ノイズ軽減（DEV-13）。
     pub detail: bool,
     /// ローカル補正。
     pub masks: bool,
@@ -1667,11 +1709,16 @@ impl SettingGroups {
         *self == Self::ALL
     }
 
-    /// `target` に `source` の選んだ項目を写したもの。処理バージョンと外部データは `target` のまま
-    /// （すべての項目を写す場合は `source` をそのまま使う）。
+    /// `target` に `source` の選んだ項目を写したもの。**処理バージョンと外部データ（`render_deps`）は、すべての
+    /// 項目を写す場合も `target` のまま**（DATA-09: 処理バージョンは明示的な更新なしに変えない。版を変えるかは
+    /// 貼り付けの側（[`PasteVersion`]）で決める）。
     pub fn merge(&self, source: &DevelopSettings, target: &DevelopSettings) -> DevelopSettings {
         if self.is_all() {
-            return source.clone();
+            return DevelopSettings {
+                process_version: target.process_version,
+                render_deps: target.render_deps.clone(),
+                ..source.clone()
+            };
         }
         let mut out = target.clone();
         if self.white_balance {
@@ -1681,6 +1728,7 @@ impl SettingGroups {
             out.exposure_ev = source.exposure_ev;
             out.contrast = source.contrast;
             out.tone = source.tone;
+            out.highlight_recovery = source.highlight_recovery;
         }
         if self.tone_curve {
             out.tone_curve = source.tone_curve.clone();
@@ -1702,6 +1750,40 @@ impl SettingGroups {
         }
         out
     }
+}
+
+/// 設定の貼り付け（DEV-30）で、貼り付け先の処理バージョンをどうするか（DATA-09。
+/// [`crate::Core::paste_settings_with`]）。
+///
+/// 処理バージョン 1 と 2 は、版 1 からある項目を同じ意味で使う（genzo-pipeline の
+/// `ProcessVersion::shares_settings_with`）ので、版の違う写真の間でも、選んだ項目だけを写せる。版 2 にしかない
+/// 項目（レンズ補正・ハイライト復元・ノイズ軽減）を版 1 の写真に写すと、値は保存するが、処理バージョンを更新
+/// するまで使われない（[`PasteReport::needs_upgrade`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteVersion {
+    /// 貼り付け先の版のまま（既定。新しいアルゴリズムは明示的に更新した写真だけに使う）。
+    #[default]
+    Keep,
+    /// 貼り付け先が貼り付け元より古ければ、貼り付け元の版に更新する（利用者が貼り付けのダイアログ・CLI の
+    /// `develop copy --upgrade-process-version` で選んだとき。明示的な更新）。新しい版の写真を古い版に
+    /// 下げることはない。
+    Upgrade,
+    /// 貼り付け元の版にする（CLI の `develop set`: JSON に書いた版をそのまま保存する。古い版に下げることも
+    /// ある）。
+    Source,
+}
+
+/// 設定の貼り付け（DEV-30）の結果（[`crate::Core::paste_settings_with`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PasteReport {
+    /// 適用した variant の数。
+    pub count: u64,
+    /// 処理バージョンを更新した（上げた）variant の数（[`PasteVersion::Upgrade`]・[`PasteVersion::Source`]）。
+    pub upgraded: u64,
+    /// 貼り付けた後の設定に、その写真の処理バージョンでは使われず、最新の版に更新すると使われる項目の値が
+    /// ある variant の数（版 1 の写真に写したレンズ補正など。画面は処理バージョンの更新を案内する）。
+    pub needs_upgrade: u64,
 }
 
 /// 画面のプロファイルの情報（IQ-05）。
@@ -2640,4 +2722,83 @@ pub struct RelinkReport {
     pub reread: Vec<PathBuf>,
     /// 結び付けられなかったもの。
     pub failed: Vec<FileIssue>,
+}
+
+#[cfg(test)]
+mod setting_groups_tests {
+    use super::*;
+
+    #[test]
+    fn basic_tone_includes_highlight_recovery_and_detail_includes_noise_reduction() {
+        let mut source = DevelopSettings {
+            exposure_ev: 0.5,
+            highlight_recovery: genzo_model::HighlightRecovery {
+                method: genzo_model::HighlightMethod::Reconstruct,
+                amount: 70.0,
+            },
+            ..Default::default()
+        };
+        source.detail.noise_reduction.luminance = 30.0;
+        let target = DevelopSettings::default();
+        // 基本のトーンだけ: ハイライト復元は写り、ノイズ軽減は写らない。
+        let tone_only = SettingGroups {
+            white_balance: false,
+            basic_tone: true,
+            tone_curve: false,
+            color: false,
+            geometry: false,
+            lens: false,
+            detail: false,
+            masks: false,
+        };
+        let out = tone_only.merge(&source, &target);
+        assert_eq!(out.exposure_ev, 0.5);
+        assert_eq!(out.highlight_recovery, source.highlight_recovery);
+        assert_eq!(out.detail, target.detail);
+        // ディテールだけ: ノイズ軽減が写り、ハイライト復元は写らない。
+        let detail_only = SettingGroups {
+            basic_tone: false,
+            detail: true,
+            ..tone_only
+        };
+        let out = detail_only.merge(&source, &target);
+        assert_eq!(out.detail.noise_reduction.luminance, 30.0);
+        assert_eq!(out.highlight_recovery, target.highlight_recovery);
+        assert_eq!(out.exposure_ev, 0.0);
+    }
+
+    /// すべての項目を写しても、一部の項目を写しても、処理バージョンと外部データは貼り付け先のまま（DATA-09。
+    /// 検証の指摘: すべての項目では貼り付け元の版に黙って置き換わっていた）。
+    #[test]
+    fn merge_keeps_the_target_process_version_and_render_deps() {
+        let mut source = DevelopSettings {
+            exposure_ev: 0.7,
+            ..Default::default()
+        };
+        source.lens.profile_enabled = true;
+        source.render_deps.raw_decoder = "libraw-source".to_owned();
+        assert_eq!(source.process_version, 2);
+        let mut target = DevelopSettings {
+            process_version: 1,
+            ..Default::default()
+        };
+        target.render_deps.raw_decoder = "libraw-target".to_owned();
+        for groups in [
+            SettingGroups::ALL,
+            SettingGroups {
+                geometry: false,
+                ..SettingGroups::ALL
+            },
+        ] {
+            let out = groups.merge(&source, &target);
+            assert_eq!(out.process_version, 1, "{groups:?}");
+            assert_eq!(out.render_deps, target.render_deps, "{groups:?}");
+            assert_eq!(out.exposure_ev, 0.7);
+            assert!(out.lens.profile_enabled);
+        }
+        // 逆向き（版 1 の設定を版 2 の写真へ）も、版 2 のまま。
+        let out = SettingGroups::ALL.merge(&target, &source);
+        assert_eq!(out.process_version, 2);
+        assert_eq!(out.exposure_ev, 0.0);
+    }
 }

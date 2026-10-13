@@ -12,8 +12,10 @@
 //!    (a) S の向きのまま、ガイドと同じ密度（S の 1 画素あたりのガイドの画素の数）まで面積平均で
 //!    縮小する（[`crate::resample::AreaWeights`]。リニアの値の平均）。入力より大きくはしない。
 //!    (b) ガイドの画素ごとに、G の座標 → S → (a) の格子の座標をたどり、双線形で引く
-//!    （[`crate::interp::sample_bilinear_gray`]。端の外は鏡映）。回転と向きをここで反映する。
-//!    回転のない場合は (a) の画素の中心をそのまま引くので、補間は恒等になる。
+//!    （[`crate::interp::sample_bilinear_gray`]。端の外は鏡映）。回転・歪曲補正（処理バージョン 2）・向きを
+//!    ここで反映する。回転・歪曲補正のない場合は (a) の画素の中心をそのまま引くので、補間は恒等になる。
+//!    歪曲補正があるときは、G → S を画素ごとに f64 で求める（[`CoordinateFrames::g_to_sensor`]。ガイドは
+//!    CPU 版だけなので、GPU 版と同じ式にする必要はない）。
 //! 4. `log2(max(Y, 2^−16))`（[`crate::sanitize::safe_log2`]）。
 //! 5. エッジを保つぼかし: 自身をガイドにした **ガイデッドフィルタ**（He, Sun, Tang, "Guided Image
 //!    Filtering", ECCV 2010 の式。[`guided_filter`]）。半径は G の長辺に対する割合
@@ -33,7 +35,7 @@
 //! | 保存形式 | `CacheFormat { kind: BGuide, color_space: Log2Luminance, format_version: GUIDE_FORMAT_VERSION }` |
 //!
 //! 露光量・切り抜き・ハイライトやシャドウなどのスライダーは含めない（[`GuideSpec::from_settings`] は
-//! 処理バージョンと角度補正だけを読む）。
+//! 処理バージョンと角度補正とレンズ補正（歪曲補正の項目。ほかの項目は A1 のキーに含まれる）だけを読む）。
 //!
 //! # GPU 版と一致させるための決めごと（2.3 節）
 //!
@@ -89,7 +91,7 @@ impl GuideParams {
     /// 処理バージョンのパラメータ。
     pub const fn for_version(version: ProcessVersion) -> Self {
         match version {
-            ProcessVersion::V1 => Self {
+            ProcessVersion::V1 | ProcessVersion::V2 => Self {
                 long_edge: GUIDE_LONG_EDGE,
                 radius_fraction: GUIDE_RADIUS_FRACTION,
                 epsilon: GUIDE_EPSILON,
@@ -112,6 +114,8 @@ pub struct GuideSpec {
     pub process_version: ProcessVersion,
     /// 角度補正（度）。G を決める。
     pub rotation_deg: f64,
+    /// レンズ補正の設定（丸めた値。歪曲補正（D）で G を決める。処理バージョン 2）。
+    pub lens: genzo_model::LensCorrection,
     /// アルゴリズムのパラメータ。
     pub params: GuideParams,
 }
@@ -129,6 +133,7 @@ impl GuideSpec {
             } else {
                 rotation_deg
             },
+            lens: s.lens,
             params: GuideParams::for_version(process_version),
         })
     }
@@ -156,8 +161,8 @@ pub fn compute_guide(a1: &A1Image, spec: &GuideSpec) -> Result<Guide> {
     compute_guide_from(&a1.image, a1.sensor_grid(), a1.frames(), spec)
 }
 
-/// B2 の画像（S の向き。`grid` は画像が覆う S の範囲）からガイドを作る。`frames` の回転は
-/// 使わず、`spec.rotation_deg` にする。
+/// B2 の画像（S の向き。`grid` は画像が覆う S の範囲）からガイドを作る。`frames` の回転・歪曲補正は
+/// 使わず、`spec` から作る（[`crate::finish::stage_c_frames`]。段階 C の文脈と同じ座標系）。
 pub fn compute_guide_from(
     image: &RgbImage,
     grid: SensorGrid,
@@ -180,9 +185,14 @@ pub fn compute_guide_from(
             grid.height
         )));
     }
-    let frames = frames.with_rotation(spec.rotation_deg)?;
+    let frames = crate::finish::stage_c_frames(
+        frames.with_distortion(None),
+        spec.process_version,
+        spec.rotation_deg,
+        &spec.lens,
+    )?;
     match spec.process_version {
-        ProcessVersion::V1 => {}
+        ProcessVersion::V1 | ProcessVersion::V2 => {}
     }
     let (out_w, out_h) = guide_size(&frames, spec.params.long_edge);
     let (g_w, g_h) = frames.g_size_px();
@@ -217,6 +227,7 @@ pub fn compute_guide_from(
         ],
     ];
     let mut values = vec![0.0f32; out_w as usize * out_h as usize];
+    let warped = frames.distortion.is_some();
     values
         .par_chunks_mut(out_w as usize)
         .enumerate()
@@ -224,8 +235,17 @@ pub fn compute_guide_from(
             let v = q as f32 + 0.5;
             for (p, out) in row.iter_mut().enumerate() {
                 let u = p as f32 + 0.5;
-                let x = a[0][0] * u + a[0][1] * v + a[0][2];
-                let y = a[1][0] * u + a[1][1] * v + a[1][2];
+                let (x, y) = if warped {
+                    // 歪曲補正: G → S を f64 で求める（モジュールの doc の 3b）。
+                    let (gx, gy) = (f64::from(u) * kx, f64::from(v) * ky);
+                    let (xs, ys) = frames.g_to_sensor(gx, gy);
+                    ((xs * sx) as f32, (ys * sy) as f32)
+                } else {
+                    (
+                        a[0][0] * u + a[0][1] * v + a[0][2],
+                        a[1][0] * u + a[1][1] * v + a[1][2],
+                    )
+                };
                 // 4. 対数（下限 2^−16）。
                 *out = safe_log2(sample_bilinear_gray(&small, x, y));
             }
@@ -426,6 +446,7 @@ mod tests {
         GuideSpec {
             process_version: ProcessVersion::V1,
             rotation_deg: deg,
+            lens: genzo_model::LensCorrection::default(),
             params: GuideParams::for_version(ProcessVersion::V1),
         }
     }

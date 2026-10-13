@@ -31,7 +31,7 @@ import {
   KeywordDeleteDialog,
   KeywordDialog,
 } from "./OrganizeDialogs";
-import { PasteSettingsDialog } from "./PasteSettingsDialog";
+import { PasteSettingsDialog, UpgradeProcessDialog } from "./PasteSettingsDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { SmartCollectionDialog } from "./SmartCollectionDialog";
@@ -112,6 +112,9 @@ export function Dialogs() {
       break;
     case "paste_settings":
       body = <PasteSettingsDialog targets={dialog.targets} />;
+      break;
+    case "upgrade_process":
+      body = <UpgradeProcessDialog targets={dialog.targets} />;
       break;
     case "settings":
       body = <SettingsDialog tab={dialog.tab} />;

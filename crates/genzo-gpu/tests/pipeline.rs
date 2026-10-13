@@ -453,6 +453,144 @@ fn export_diff_8bit(a: &ExportPixels, b: &ExportPixels) -> f64 {
     }
 }
 
+/// ハイライト復元・ノイズ軽減（処理バージョン 2）のある RAW: GPU 版の簡易処理の A1（ステージ 4・6 を含む）・
+/// プレビュー・書き出し（センサー処理は CPU 版）が CPU 版と一致する。
+#[test]
+fn highlight_recovery_and_noise_reduction_match_the_cpu_version() {
+    let g = gpu_or_skip!();
+    let raw = raw_from(&camera_scene(150, 104), CfaPattern::GRBG, true);
+    let source = raw_source_with_id(raw, 78);
+    let mut s = rotated_strong();
+    s.highlight_recovery = genzo_model::HighlightRecovery {
+        method: genzo_model::HighlightMethod::Reconstruct,
+        amount: 80.0,
+    };
+    s.detail.noise_reduction = genzo_model::NoiseReduction {
+        luminance: 35.0,
+        color: 45.0,
+        luminance_contrast: 20.0,
+        ..Default::default()
+    };
+    let engine = engine(90, 64);
+    let cpu = engine.a1(&source, &s, RenderQuality::Draft, 64).unwrap();
+    let genzo_pipeline::SourceImage::Raw(r) = &source.image else {
+        unreachable!()
+    };
+    let gpu = g
+        .render_a1_draft(r, &s, &engine.config().sensor, 64)
+        .unwrap();
+    assert_eq!(gpu.frames(), cpu.frames());
+    let d = compare_pixels(cpu.image.data(), gpu.image.data(), A1_TOLERANCE);
+    assert!(d.passed(), "A1: {d}");
+    // 設定を変えると結果も変わる（ステージ 4・6 が効いている）。
+    let plain = g
+        .render_a1_draft(r, &rotated_strong(), &engine.config().sensor, 64)
+        .unwrap();
+    assert_ne!(plain.image.data(), gpu.image.data());
+    for quality in [RenderQuality::Final, RenderQuality::Draft] {
+        compare_preview(
+            g,
+            &engine,
+            &source,
+            &s,
+            quality,
+            90,
+            OutputTarget::Export(OutputColorSpace::Srgb),
+        );
+    }
+    let export = ExportSettings::default();
+    let c = engine
+        .export(
+            &source,
+            &s,
+            &export,
+            &ExportOptions::default(),
+            &NeverCancel,
+        )
+        .unwrap();
+    let e = g
+        .export(
+            &engine,
+            &source,
+            &s,
+            &export,
+            &ExportOptions::default(),
+            &NeverCancel,
+        )
+        .unwrap();
+    let diff = export_diff_8bit(&c.pixels, &e.pixels);
+    assert!(diff <= FINAL_OUTPUT_MAX_DIFF_8BIT, "{diff}");
+}
+
+/// レンズ補正（処理バージョン 2。埋め込みの情報と手動の補正）のある RAW: GPU 版の簡易処理の A1（ステージ 7
+/// を含む）・プレビュー（ステージ 9 の歪曲補正を含む）・書き出しが CPU 版と一致する。
+#[test]
+fn lens_corrections_match_the_cpu_version() {
+    let g = gpu_or_skip!();
+    let mut raw = raw_with_crop_and_plateau(&camera_scene(150, 104), CfaPattern::RGGB);
+    raw.lens_correction = Some(genzo_raw::LensCorrectionData::SonyArw(
+        genzo_raw::SonyLensCorrection {
+            distortion: (0..16).map(|i| (-50 * i) as i16).collect(),
+            vignetting: (0..16).map(|i| (250 * i) as i16).collect(),
+            ca_red: (0..16).map(|i| (600 * i) as i16).collect(),
+            ca_blue: (0..16).map(|i| (-400 * i) as i16).collect(),
+        },
+    ));
+    let source = raw_source_with_id(raw, 77);
+    let mut s = rotated_strong();
+    s.lens.profile_enabled = true;
+    s.lens.remove_chromatic_aberration = true;
+    s.lens.distortion = 25.0;
+    s.lens.vignetting_amount = 30.0;
+    s.lens.ca_red_cyan = 40.0;
+    let engine = engine(90, 64);
+    // 簡易処理の A1（GPU 版のステージ 7）。
+    let cpu = engine.a1(&source, &s, RenderQuality::Draft, 64).unwrap();
+    let genzo_pipeline::SourceImage::Raw(r) = &source.image else {
+        unreachable!()
+    };
+    let gpu = g
+        .render_a1_draft(r, &s, &engine.config().sensor, 64)
+        .unwrap();
+    assert_eq!(gpu.frames(), cpu.frames());
+    assert!(gpu.lens_geometry.is_some());
+    let d = compare_pixels(cpu.image.data(), gpu.image.data(), A1_TOLERANCE);
+    assert!(d.passed(), "A1: {d}");
+    for quality in [RenderQuality::Final, RenderQuality::Draft] {
+        compare_preview(
+            g,
+            &engine,
+            &source,
+            &s,
+            quality,
+            90,
+            OutputTarget::Export(OutputColorSpace::Srgb),
+        );
+    }
+    let export = ExportSettings::default();
+    let c = engine
+        .export(
+            &source,
+            &s,
+            &export,
+            &ExportOptions::default(),
+            &NeverCancel,
+        )
+        .unwrap();
+    let e = g
+        .export(
+            &engine,
+            &source,
+            &s,
+            &export,
+            &ExportOptions::default(),
+            &NeverCancel,
+        )
+        .unwrap();
+    let diff = export_diff_8bit(&c.pixels, &e.pixels);
+    assert!(diff <= FINAL_OUTPUT_MAX_DIFF_8BIT, "{diff}");
+}
+
 #[test]
 fn export_matches_the_cpu_version() {
     let g = gpu_or_skip!();

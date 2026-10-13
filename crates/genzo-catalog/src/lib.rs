@@ -28,7 +28,8 @@
 //! - 説明のメタデータ（LIB-15。タイトル・キャプション・作成者・著作権など）: [`Catalog::asset_metadata`]、
 //!   [`Catalog::set_asset_metadata`]（一括編集）、[`Catalog::metadata_summary`]
 //! - 現像設定・履歴: [`Catalog::save_develop`]、[`Catalog::apply_develop_to_many`]、
-//!   [`Catalog::save_develop_batch`]、[`Catalog::undo_develop`]、[`Catalog::redo_develop`]
+//!   [`Catalog::save_develop_batch`]（履歴の名前を variant ごとに: [`Catalog::save_develop_labeled`]）、
+//!   [`Catalog::undo_develop`]、[`Catalog::redo_develop`]
 //! - 削除・ファイル操作: [`Catalog::remove_assets`]、[`Catalog::delete_virtual_copies`]、
 //!   [`Catalog::trash_plan`]、[`Catalog::plan_trash`]、移動・リネーム（FILE-02）: [`Catalog::plan_file_moves`]、
 //!   [`Catalog::plan_folder_op`]、[`Catalog::complete_file_op_entries`]、[`Catalog::create_folder`]

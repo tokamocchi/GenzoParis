@@ -214,16 +214,56 @@ export interface Geometry {
   aspect: AspectRatio | null;
 }
 
+/** レンズ補正（DEV-14。genzo-model の LensCorrection。処理バージョン 2 から使える）。 */
 export interface LensCorrection {
+  /** プロファイル（RAW に埋め込まれた補正の情報）による補正（歪曲・周辺減光）を有効にする。 */
   profile_enabled: boolean;
+  /** 歪曲補正の適用量（%。0〜200、100 でプロファイルどおり）。 */
   distortion_scale: number;
+  /** 周辺減光補正の適用量（%。0〜200、100 でプロファイルどおり）。 */
   vignetting_scale: number;
+  /** 倍率色収差を除去する（プロファイルの色収差の情報を使う）。 */
   remove_chromatic_aberration: boolean;
+  /** 手動の歪曲補正（-100〜100。正で樽型、負で糸巻き型の歪曲を補正する）。 */
+  distortion: number;
+  /** 手動の周辺減光の補正量（-100〜100。正で四隅を明るくする）。 */
+  vignetting_amount: number;
+  /** 手動の周辺減光の中点（0〜100。既定 50。小さいほど中心に近い位置から補正する）。 */
+  vignetting_midpoint: number;
+  /** 手動の倍率色収差の補正の赤 / シアン（-100〜100）。 */
+  ca_red_cyan: number;
+  /** 手動の倍率色収差の補正の青 / 黄（-100〜100）。 */
+  ca_blue_yellow: number;
+}
+
+/** ノイズ軽減（DEV-13。genzo-model の NoiseReduction。処理バージョン 2 から使える。RAW だけ）。 */
+export interface NoiseReduction {
+  /** 輝度ノイズの軽減（0〜100）。 */
+  luminance: number;
+  /** 輝度ノイズの軽減のディテール（0〜100。既定 50）。 */
+  luminance_detail: number;
+  /** 輝度ノイズの軽減のコントラスト（0〜100。既定 0）。 */
+  luminance_contrast: number;
+  /** カラーノイズの軽減（0〜100）。 */
+  color: number;
+  /** カラーノイズの軽減のディテール（0〜100。既定 50）。 */
+  color_detail: number;
 }
 
 export interface DetailParams {
   sharpening: { amount: number; radius: number; detail: number; masking: number };
-  noise_reduction: { luminance: number; color: number };
+  noise_reduction: NoiseReduction;
+}
+
+/** ハイライト復元の方式（genzo-model の HighlightMethod）。 */
+export type HighlightMethod = "clip" | "neutral" | "reconstruct";
+
+/** ハイライト復元（DEV-06。genzo-model の HighlightRecovery。処理バージョン 2 から使える。RAW だけ）。 */
+export interface HighlightRecovery {
+  /** 方式（clip: 白で切りそろえる（既定）・neutral: 明るさだけ・reconstruct: 色を保って復元）。 */
+  method: HighlightMethod;
+  /** 量（0〜100。既定 100。clip では使わない）。 */
+  amount: number;
 }
 
 export interface RenderDeps {
@@ -236,6 +276,8 @@ export interface DevelopSettings {
   schema_version: number;
   process_version: number;
   white_balance: WhiteBalance;
+  /** ハイライト復元（DEV-06。古いコアの応答では欠けうる）。 */
+  highlight_recovery: HighlightRecovery;
   /** 露光量（EV。-5〜5）。 */
   exposure_ev: number;
   /** コントラスト（-100〜100）。 */
@@ -259,6 +301,12 @@ export const RANGES = {
   temperatureK: { min: 2000, max: 50000 },
   tint: { min: -150, max: 150 },
   angleDeg: { min: -45, max: 45 },
+  /** レンズ補正のプロファイルの適用量（%）。 */
+  lensScale: { min: 0, max: 200 },
+  /** レンズ補正の手動の補正（歪曲・周辺減光の量・色収差）。 */
+  lensManual: { min: -100, max: 100 },
+  /** 手動の周辺減光の中点。 */
+  lensMidpoint: { min: 0, max: 100 },
 } as const;
 
 /** WB のプリセットの色温度と tint（genzo-model の WbPreset::temperature_tint）。 */
@@ -281,6 +329,22 @@ export interface SettingGroups {
   lens: boolean;
   detail: boolean;
   masks: boolean;
+}
+
+/**
+ * 貼り付け先の処理バージョンの扱い（genzo-api の PasteVersion。DATA-09）。keep: 貼り付け先の版のまま（既定）、
+ * upgrade: 貼り付け元より古ければ貼り付け元の版に上げる（利用者が選んだとき）、source: 貼り付け元の版にする。
+ */
+export type PasteVersion = "keep" | "upgrade" | "source";
+
+/** 設定の貼り付けの結果（genzo-api の PasteReport）。 */
+export interface PasteReport {
+  /** 適用した写真の数。 */
+  count: number;
+  /** 処理バージョンを上げた写真の数。 */
+  upgraded: number;
+  /** 処理バージョンが古いため、写した項目の一部（レンズ補正など）が使われない写真の数。 */
+  needs_upgrade: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -841,6 +905,30 @@ export interface SourceInfo {
   height: number;
   decoder: string | null;
   as_shot_white_balance: AsShotWhiteBalance | null;
+  /**
+   * RAW に埋め込まれたレンズ補正の情報（DEV-14。Sony の ARW のタグ・DNG の opcode）の要約。情報がない・
+   * RAW 以外は null（手動の補正だけを使える。古いコアでは無い）。
+   */
+  lens_correction?: LensCorrectionInfo | null;
+  /**
+   * 埋め込みのレンズ補正の情報が読めない・不正だったため使わなかった理由（genzo-api の SourceInfo の
+   * lens_correction_note）。もともと情報がない場合と区別して出す。読めた・なかった・RAW 以外・古いコアでは無い。
+   */
+  lens_correction_note?: string | null;
+}
+
+/** 埋め込みのレンズ補正の情報の要約（genzo-api の LensCorrectionInfo）。 */
+export interface LensCorrectionInfo {
+  /** 出どころ（"sony_arw"・"dng_opcode"）。 */
+  source: string;
+  /** 説明（例: "Sony の ARW（歪曲・周辺減光・色収差）"）。 */
+  description: string;
+  /** 歪曲の情報があるか。 */
+  distortion: boolean;
+  /** 周辺減光の情報があるか。 */
+  vignetting: boolean;
+  /** 倍率色収差の情報があるか。 */
+  chromatic_aberration: boolean;
 }
 
 export interface DevelopState {
@@ -854,6 +942,11 @@ export interface DevelopState {
   source: SourceInfo;
   /** ビフォー / アフターの表示のビフォー（DEV-31。設定していなければ null。古いコアでは無い）。 */
   before?: BeforeInfo | null;
+  /**
+   * このアプリの最新の処理バージョン（DATA-09）。設定の process_version がこれより古ければ「処理バージョンを
+   * 更新」を出す（upgrade_process_version）。古いコアでは無い。
+   */
+  latest_process_version?: number;
 }
 
 /** ビフォーの設定の出どころ（DEV-31。genzo-api の BeforeSource）。切り抜き・角度は常にアフターと同じ。 */
@@ -1272,6 +1365,8 @@ export type Command =
   | { type: "develop_state" }
   | { type: "set_settings"; settings: DevelopSettings; dragging: boolean }
   | { type: "end_drag" }
+  | { type: "upgrade_process_version" }
+  | { type: "upgrade_process_versions"; variant_ids: VariantId[] }
   | { type: "render_develop" }
   | { type: "render_region"; request: RegionRequest }
   | { type: "cancel_region" }
@@ -1295,6 +1390,7 @@ export type Command =
       settings: DevelopSettings;
       targets: VariantId[];
       groups: SettingGroups;
+      process_version?: PasteVersion;
     }
   | { type: "create_virtual_copy"; variant_id: VariantId; name: string | null }
   | { type: "white_balance_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
@@ -1360,6 +1456,7 @@ export type Response =
   | ({ type: "index_of" } & IndexOf)
   | ({ type: "shown_variants" } & ShownVariants)
   | { type: "updated"; count: number }
+  | ({ type: "pasted" } & PasteReport)
   | ({ type: "details" } & VariantDetails)
   | ({ type: "metadata" } & MetadataSummary)
   | { type: "folders"; folders: FolderInfo[] }

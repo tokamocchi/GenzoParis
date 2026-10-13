@@ -19,7 +19,10 @@
         "detail": {
           "noise_reduction": {
             "color": 0.0,
-            "luminance": 0.0
+            "color_detail": 50.0,
+            "luminance": 0.0,
+            "luminance_contrast": 0.0,
+            "luminance_detail": 50.0
           },
           "sharpening": {
             "amount": 0.0,
@@ -39,10 +42,19 @@
             "top": 0.0
           }
         },
+        "highlight_recovery": {
+          "amount": 100.0,
+          "method": "clip"
+        },
         "lens": {
+          "ca_blue_yellow": 0.0,
+          "ca_red_cyan": 0.0,
+          "distortion": 0.0,
           "distortion_scale": 100.0,
           "profile_enabled": false,
           "remove_chromatic_aberration": false,
+          "vignetting_amount": 0.0,
+          "vignetting_midpoint": 50.0,
           "vignetting_scale": 100.0
         },
         "masks": [],
@@ -55,7 +67,7 @@
           "lens_profile": null,
           "raw_decoder": ""
         },
-        "schema_version": 1,
+        "schema_version": 2,
         "tone": {
           "blacks": 0.0,
           "highlights": 0.0,
@@ -106,7 +118,7 @@
         },
         "white_balance": "as_shot"
       },
-      "develop_hash": "9243648281193c33204661575ec4635234305e3c4ce9fc9bcb14ee1a8d9a76aa",
+      "develop_hash": "e90f93ae009dc0c85a2c6eae15f182780c8e843346b13abd843d6fb61ab40db7",
       "process_version": 1
     },
     "process_version": 1,

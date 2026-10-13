@@ -222,6 +222,7 @@ pub(crate) fn load_source(
             frame.cam_xyz_source,
             &frame.image.metadata,
             frame.decoder_id.as_deref(),
+            frame.image.lens_correction.as_ref(),
         );
         // 寸法は見える範囲（RAW の既定の切り抜き。利用者の切り抜きの割合の基準。genzo-pipeline の
         // coords の「既定の切り抜き」）。
@@ -232,6 +233,12 @@ pub(crate) fn load_source(
             height: visible.height,
             decoder: frame.decoder_id.clone(),
             as_shot_white_balance: as_shot_white_balance(&frame.image),
+            lens_correction: frame
+                .image
+                .lens_correction
+                .as_ref()
+                .map(crate::types::LensCorrectionInfo::of),
+            lens_correction_note: frame.lens_correction_note.clone(),
         };
         let metadata = frame.image.metadata.clone();
         LoadedSource {
@@ -261,6 +268,8 @@ pub(crate) fn load_source(
                 height: h,
                 decoder: None,
                 as_shot_white_balance: None,
+                lens_correction: None,
+                lens_correction_note: None,
             },
             file,
             render_deps: genzo_model::RenderDeps::default(),
@@ -695,6 +704,7 @@ mod tests {
                 [-0.0715, 0.1505, 0.6066],
             ]),
             metadata: Default::default(),
+            lens_correction: None,
         };
         let t = as_shot_white_balance(&image).expect("範囲内");
         let cam = genzo_color::Mat3::from_rows(image.cam_xyz.unwrap().map(|r| r.map(f64::from)));

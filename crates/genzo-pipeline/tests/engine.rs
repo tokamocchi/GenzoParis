@@ -1265,8 +1265,10 @@ fn stage_backends_fall_back_to_cpu() {
 
     let source = raw_source(raw_from(&busy_scene(64, 48)));
     let e = engine(32, 32);
+    // 偽の GPU 版は処理バージョン 1 だけに対応する（版 2 では CPU 版。下で確かめる）。
     let s = DevelopSettings {
         exposure_ev: 0.5,
+        process_version: 1,
         ..Default::default()
     };
     let job = e.full_resolution(&source, &s).unwrap();
@@ -1283,6 +1285,17 @@ fn stage_backends_fall_back_to_cpu() {
         };
         assert_eq!(b, expect, "{id}");
     }
+    // 対応していない処理バージョン（版 2）では CPU 版。
+    let v2 = DevelopSettings {
+        process_version: 2,
+        ..s
+    };
+    let job = e.full_resolution(&source, &v2).unwrap();
+    assert!(
+        job.stage_backends(&Lookup(FakeExposureGpu))
+            .iter()
+            .all(|(_, b)| *b == StageBackend::Cpu)
+    );
 }
 
 #[test]
