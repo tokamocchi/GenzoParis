@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use genzo_model::{
     CollectionId, CollectionKind, ColorLabel, CropRect, DevelopSettings, ExportSettings, Flag,
-    HistoryEntryId, KeywordId, MetadataField, Rating, SmartRule, StackId, VariantId,
+    FolderId, HistoryEntryId, KeywordId, MetadataField, Rating, SmartRule, StackId, VariantId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,14 +24,19 @@ use crate::core::Core;
 use crate::error::ApiError;
 use crate::maintenance::RestorePlan;
 use crate::types::{
-    AutoStackReport, BackupEntry, BeforeInfo, BeforeSource, Capabilities, CatalogSchema,
-    CatalogStats, CollectionInfo, ContentHashStatus, CopySettings, CoreSettings, DeleteKind,
-    DeletePlan, DeleteReport, DevelopState, DisplayInfo, DuplicateGroupList, Facets,
-    FileCheckReport, FileIdentity, FolderInfo, FrameInfo, HistoryItem, ImportOptions, IndexOf,
-    JobInfo, KeywordHit, KeywordInfo, KeywordUsage, MetadataSummary, NamePreview,
-    PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest, SearchFilter, SearchResult,
-    SearchSort, SettingGroups, SettingsUpdate, ShownVariants, StackInfo, StartupReport,
-    ThumbnailData, VariantDetails, VariantKeywords,
+    AutoStackReport, BackupEntry, BeforeInfo, BeforeSource, Capabilities, CaptureDevice,
+    CaptureDeviceKey, CaptureTarget, CaptureTimeEdit, CaptureTimeEditInfo, CaptureTimePlan,
+    CaptureTimeUndo, CatalogSchema, CatalogStats, CollectionInfo, ContentHashStatus, CopySettings,
+    CoreSettings, DeleteKind, DeletePlan, DeleteReport, DevelopState, DisplayInfo,
+    DuplicateGroupList, Facets, FileCheckReport, FileIdentity, FolderInfo, FrameInfo, HistoryItem,
+    ImportOptions, IndexOf, JobInfo, KeywordHit, KeywordInfo, KeywordUsage, MetadataSummary,
+    NamePreview, PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest, SearchFilter,
+    SearchResult, SearchSort, SettingGroups, SettingsUpdate, ShownVariants, StackInfo,
+    StartupReport, ThumbnailData, Timeline, VariantDetails, VariantKeywords,
+};
+use crate::types::{
+    FileMovePlan, FileMoveReport, FileRenamePlan, RelinkReport, RelinkRequest, RelocatePlan,
+    RenameSpec, VolumeInfo,
 };
 
 /// コマンド（UI → コア）。
@@ -624,6 +629,146 @@ pub enum Command {
         /// コピーの設定（コピー先のフォルダは使わない）。
         copy: CopySettings,
     },
+
+    // --- 撮影日時の一括修正（LIB-16）・タイムライン（ORG-01） ---
+    /// 機材の一覧（[`crate::Core::capture_devices`]）。→ [`Response::CaptureDevices`]
+    CaptureDevices,
+    /// 写真の機材（[`crate::Core::capture_device_of`]）。→ [`Response::CaptureDevice`]
+    CaptureDeviceOf {
+        /// 写真。
+        variant_id: VariantId,
+    },
+    /// 撮影日時の修正の見込み（何も変えない。[`crate::Core::plan_capture_time_edit`]）。
+    /// → [`Response::CaptureTimePlan`]
+    PlanCaptureTimeEdit {
+        /// 対象。
+        target: CaptureTarget,
+        /// 修正。
+        edit: CaptureTimeEdit,
+    },
+    /// 撮影日時を修正する（[`crate::Core::edit_capture_times`]）。→ [`Response::CaptureTimePlan`]
+    EditCaptureTimes {
+        /// 対象。
+        target: CaptureTarget,
+        /// 修正。
+        edit: CaptureTimeEdit,
+    },
+    /// 撮影日時の修正の履歴。→ [`Response::CaptureTimeEdits`]
+    CaptureTimeEdits,
+    /// 最後の撮影日時の修正を取り消す。→ [`Response::CaptureTimeUndone`]
+    UndoCaptureTimeEdit,
+    /// 表示中の検索結果のタイムライン（[`crate::Core::timeline`]）。→ [`Response::Timeline`]
+    Timeline {
+        /// 世代。
+        generation: u64,
+        /// イベントの区切りの間隔（秒。0 ならイベントで分けない）。
+        #[serde(default)]
+        gap_seconds: u32,
+    },
+
+    // --- ボリューム・ファイル操作・見つからない写真（FILE-02〜FILE-04） ---
+    /// ボリュームの一覧（`refresh` なら、つながりを確かめ直す。[`crate::Core::refresh_volumes`]）。
+    /// → [`Response::Volumes`]
+    Volumes {
+        /// つながりを確かめ直すか。
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// 写真の移動の予定（[`crate::Core::plan_move_files`]）。→ [`Response::MovePlan`]
+    PlanMoveFiles {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+        /// 移動先のフォルダ。
+        dest_folder: FolderId,
+    },
+    /// 写真を移動する（ジョブ。[`crate::Core::move_files`]）。→ [`Response::JobStarted`]
+    MoveFiles {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+        /// 移動先のフォルダ。
+        dest_folder: FolderId,
+    },
+    /// 写真の名前の変更の予定（[`crate::Core::plan_rename_files`]）。→ [`Response::RenamePlan`]
+    PlanRenameFiles {
+        /// 写真（テンプレートの連番はこの順）。
+        variant_ids: Vec<VariantId>,
+        /// 名前の付け方。
+        spec: RenameSpec,
+    },
+    /// 写真の名前を変える（[`crate::Core::rename_files`]）。→ [`Response::FilesMoved`]
+    RenameFiles {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+        /// 名前の付け方。
+        spec: RenameSpec,
+    },
+    /// フォルダを作る（[`crate::Core::create_folder`]）。→ [`Response::Folder`]
+    CreateFolder {
+        /// 親のフォルダ。
+        parent_id: FolderId,
+        /// 名前。
+        name: String,
+    },
+    /// フォルダの名前を変える（[`crate::Core::rename_folder`]）。→ [`Response::Folder`]
+    RenameFolder {
+        /// フォルダ。
+        folder_id: FolderId,
+        /// 新しい名前。
+        name: String,
+    },
+    /// フォルダを別のフォルダの中へ移す（[`crate::Core::move_folder`]）。→ [`Response::Folder`]
+    MoveFolder {
+        /// フォルダ。
+        folder_id: FolderId,
+        /// 移動先の親のフォルダ。
+        parent_id: FolderId,
+    },
+    /// 写真が登録されていないフォルダ（と配下）をカタログから除く（[`crate::Core::remove_folder`]。ディスクには
+    /// 触れない）。→ [`Response::Updated`]（除いたフォルダの数）
+    RemoveFolder {
+        /// フォルダ。
+        folder_id: FolderId,
+    },
+    /// 見つからない写真を確かめる（ジョブ。[`crate::Core::check_missing`]）。→ [`Response::JobStarted`]
+    CheckMissing {
+        /// フォルダ（配下を含む。`None` ならすべて）。
+        #[serde(default)]
+        folder_id: Option<FolderId>,
+    },
+    /// 再リンクの候補を探す（ジョブ。[`crate::Core::find_relink_candidates`]）。→ [`Response::JobStarted`]
+    FindRelinkCandidates {
+        /// 写真（`None` ならすべての見つからないファイル）。
+        #[serde(default)]
+        variant_ids: Option<Vec<VariantId>>,
+        /// 探すフォルダ。
+        search_dir: PathBuf,
+        /// 配下のフォルダも探すか。
+        #[serde(default = "default_true")]
+        recursive: bool,
+    },
+    /// 見つからないファイルを結び付け直す（[`crate::Core::relink_files`]）。→ [`Response::Relinked`]
+    RelinkFiles {
+        /// 結び付けるもの。
+        links: Vec<RelinkRequest>,
+    },
+    /// フォルダの場所の指定し直しの予定（[`crate::Core::plan_relocate_folder`]）。→ [`Response::RelocatePlan`]
+    PlanRelocateFolder {
+        /// フォルダ。
+        folder_id: FolderId,
+        /// 新しい場所。
+        path: PathBuf,
+    },
+    /// フォルダの場所を指定し直す（[`crate::Core::relocate_folder`]）。→ [`Response::RelocatePlan`]
+    RelocateFolder {
+        /// フォルダ。
+        folder_id: FolderId,
+        /// 新しい場所。
+        path: PathBuf,
+    },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// [`Command::DuplicateGroups`] の上限の既定値。
@@ -824,6 +969,44 @@ pub enum Response {
     FileIdentity(FileIdentity),
     /// コピー先の名前の例。
     NamePreview(NamePreview),
+    /// 機材の一覧（LIB-16）。
+    CaptureDevices {
+        /// 機材。
+        devices: Vec<CaptureDevice>,
+    },
+    /// 写真の機材。
+    CaptureDevice(CaptureDeviceKey),
+    /// 撮影日時の修正の見込み・結果。
+    CaptureTimePlan(CaptureTimePlan),
+    /// 撮影日時の修正の履歴（新しい順）。
+    CaptureTimeEdits {
+        /// 履歴。
+        edits: Vec<CaptureTimeEditInfo>,
+    },
+    /// 撮影日時の修正を取り消した（履歴がなければ `null`）。
+    CaptureTimeUndone {
+        /// 取り消したもの。
+        undone: Option<CaptureTimeUndo>,
+    },
+    /// タイムライン（ORG-01）。
+    Timeline(Timeline),
+    /// ボリュームの一覧（FILE-03）。
+    Volumes {
+        /// ボリューム。
+        volumes: Vec<VolumeInfo>,
+    },
+    /// 写真の移動の予定（FILE-02）。
+    MovePlan(FileMovePlan),
+    /// 写真の名前の変更の予定（FILE-02）。
+    RenamePlan(FileRenamePlan),
+    /// 写真の名前の変更の結果。
+    FilesMoved(FileMoveReport),
+    /// フォルダ（作った・名前を変えた・移したもの）。
+    Folder(FolderInfo),
+    /// 再リンクの結果（FILE-04）。
+    Relinked(RelinkReport),
+    /// フォルダの場所の指定し直しの予定・結果（FILE-04）。
+    RelocatePlan(RelocatePlan),
 }
 
 fn ms(v: u64) -> Duration {
@@ -1177,6 +1360,77 @@ impl Core {
             C::DuplicateGroups { limit } => R::DuplicateGroups(self.duplicate_groups(limit)?),
             C::IdentifyFile { path } => R::FileIdentity(self.identify_file(&path)?),
             C::ImportNamePreview { copy } => R::NamePreview(self.import_name_preview(&copy)),
+            C::CaptureDevices => R::CaptureDevices {
+                devices: self.capture_devices()?,
+            },
+            C::CaptureDeviceOf { variant_id } => {
+                R::CaptureDevice(self.capture_device_of(variant_id)?)
+            }
+            C::PlanCaptureTimeEdit { target, edit } => {
+                R::CaptureTimePlan(self.plan_capture_time_edit(&target, &edit)?)
+            }
+            C::EditCaptureTimes { target, edit } => {
+                R::CaptureTimePlan(self.edit_capture_times(&target, &edit)?)
+            }
+            C::CaptureTimeEdits => R::CaptureTimeEdits {
+                edits: self.capture_time_edits()?,
+            },
+            C::UndoCaptureTimeEdit => R::CaptureTimeUndone {
+                undone: self.undo_capture_time_edit()?,
+            },
+            C::Timeline {
+                generation,
+                gap_seconds,
+            } => R::Timeline(self.timeline(generation, gap_seconds)?),
+            C::Volumes { refresh } => R::Volumes {
+                volumes: if refresh {
+                    self.refresh_volumes()?
+                } else {
+                    self.volumes()?
+                },
+            },
+            C::PlanMoveFiles {
+                variant_ids,
+                dest_folder,
+            } => R::MovePlan(self.plan_move_files(&variant_ids, dest_folder)?),
+            C::MoveFiles {
+                variant_ids,
+                dest_folder,
+            } => R::JobStarted {
+                job_id: self.move_files(&variant_ids, dest_folder)?,
+            },
+            C::PlanRenameFiles { variant_ids, spec } => {
+                R::RenamePlan(self.plan_rename_files(&variant_ids, &spec)?)
+            }
+            C::RenameFiles { variant_ids, spec } => {
+                R::FilesMoved(self.rename_files(&variant_ids, &spec)?)
+            }
+            C::CreateFolder { parent_id, name } => R::Folder(self.create_folder(parent_id, &name)?),
+            C::RenameFolder { folder_id, name } => R::Folder(self.rename_folder(folder_id, &name)?),
+            C::MoveFolder {
+                folder_id,
+                parent_id,
+            } => R::Folder(self.move_folder(folder_id, parent_id)?),
+            C::RemoveFolder { folder_id } => R::Updated {
+                count: self.remove_folder(folder_id)?,
+            },
+            C::CheckMissing { folder_id } => R::JobStarted {
+                job_id: self.check_missing(folder_id)?,
+            },
+            C::FindRelinkCandidates {
+                variant_ids,
+                search_dir,
+                recursive,
+            } => R::JobStarted {
+                job_id: self.find_relink_candidates(variant_ids, &search_dir, recursive)?,
+            },
+            C::RelinkFiles { links } => R::Relinked(self.relink_files(&links)?),
+            C::PlanRelocateFolder { folder_id, path } => {
+                R::RelocatePlan(self.plan_relocate_folder(folder_id, &path)?)
+            }
+            C::RelocateFolder { folder_id, path } => {
+                R::RelocatePlan(self.relocate_folder(folder_id, &path)?)
+            }
         })
     }
 
@@ -1439,6 +1693,73 @@ mod tests {
         assert_eq!(back.hidden, 0);
     }
 
+    /// 画面（ui/src/api/types.ts）が使う撮影日時の修正・タイムラインの形（LIB-16・ORG-01）。
+    #[test]
+    fn capture_time_and_timeline_commands_have_the_ui_forms() {
+        use serde_json::json;
+        let c: Command = serde_json::from_value(json!({
+            "type": "edit_capture_times",
+            "target": {"kind": "devices", "devices": [{"camera": null, "serial": null, "kind": "video"}]},
+            "edit": {"kind": "set_zone", "offset_minutes": 540, "mode": "keep_local"}
+        }))
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::EditCaptureTimes {
+                target: CaptureTarget::Devices {
+                    devices: vec![CaptureDeviceKey {
+                        camera: None,
+                        serial: None,
+                        kind: genzo_model::AssetKind::Video,
+                    }],
+                },
+                edit: CaptureTimeEdit::SetZone {
+                    offset_minutes: 540,
+                    mode: genzo_model::ZoneMode::KeepLocal,
+                },
+            }
+        );
+        let c: Command = serde_json::from_value(json!({
+            "type": "plan_capture_time_edit",
+            "target": {"kind": "variants", "variant_ids": [5]},
+            "edit": {"kind": "sync", "reference": 5, "correct": "2024-05-01T12:00:00"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            c,
+            Command::PlanCaptureTimeEdit {
+                edit: CaptureTimeEdit::Sync {
+                    offset_minutes: None,
+                    ..
+                },
+                ..
+            }
+        ));
+        let c: Command =
+            serde_json::from_value(json!({"type": "timeline", "generation": 2})).unwrap();
+        assert_eq!(
+            c,
+            Command::Timeline {
+                generation: 2,
+                gap_seconds: 0
+            }
+        );
+        let r = Response::CaptureTimeUndone { undone: None };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "capture_time_undone", "undone": null})
+        );
+        let r = Response::CaptureDevice(CaptureDeviceKey {
+            camera: Some("DJI".to_owned()),
+            serial: None,
+            kind: genzo_model::AssetKind::Video,
+        });
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "capture_device", "camera": "DJI", "serial": null, "kind": "video"})
+        );
+    }
+
     #[test]
     fn every_command_round_trips() {
         let commands = vec![
@@ -1489,6 +1810,93 @@ mod tests {
                     folder_rule: crate::FolderRule::Single,
                     rename: None,
                 },
+            },
+            Command::CaptureDevices,
+            Command::CaptureDeviceOf {
+                variant_id: VariantId::new(3),
+            },
+            Command::PlanCaptureTimeEdit {
+                target: CaptureTarget::Variants {
+                    variant_ids: vec![VariantId::new(1)],
+                },
+                edit: CaptureTimeEdit::Shift { seconds: -60 },
+            },
+            Command::EditCaptureTimes {
+                target: CaptureTarget::Devices {
+                    devices: vec![CaptureDeviceKey {
+                        camera: Some("SONY ILCE-7M4".to_owned()),
+                        serial: None,
+                        kind: genzo_model::AssetKind::Photo,
+                    }],
+                },
+                edit: CaptureTimeEdit::Sync {
+                    reference: VariantId::new(2),
+                    correct: "2024-05-01T12:00:00".to_owned(),
+                    offset_minutes: Some(540),
+                },
+            },
+            Command::CaptureTimeEdits,
+            Command::UndoCaptureTimeEdit,
+            Command::Volumes { refresh: true },
+            Command::PlanMoveFiles {
+                variant_ids: vec![VariantId::new(1)],
+                dest_folder: FolderId::new(4),
+            },
+            Command::MoveFiles {
+                variant_ids: vec![VariantId::new(1), VariantId::new(2)],
+                dest_folder: FolderId::new(4),
+            },
+            Command::PlanRenameFiles {
+                variant_ids: vec![VariantId::new(1)],
+                spec: RenameSpec::Template {
+                    rule: crate::RenameRule::default(),
+                },
+            },
+            Command::RenameFiles {
+                variant_ids: vec![VariantId::new(1)],
+                spec: RenameSpec::Name {
+                    name: "京都の朝".to_owned(),
+                },
+            },
+            Command::CreateFolder {
+                parent_id: FolderId::new(2),
+                name: "選別済み".to_owned(),
+            },
+            Command::RenameFolder {
+                folder_id: FolderId::new(3),
+                name: "2024 京都".to_owned(),
+            },
+            Command::MoveFolder {
+                folder_id: FolderId::new(3),
+                parent_id: FolderId::new(2),
+            },
+            Command::RemoveFolder {
+                folder_id: FolderId::new(3),
+            },
+            Command::CheckMissing { folder_id: None },
+            Command::FindRelinkCandidates {
+                variant_ids: Some(vec![VariantId::new(5)]),
+                search_dir: "/mnt/新しい場所".into(),
+                recursive: true,
+            },
+            Command::RelinkFiles {
+                links: vec![RelinkRequest {
+                    file_id: genzo_model::FileId::new(7),
+                    path: "/mnt/新しい場所/A.ARW".into(),
+                    accept_changed: false,
+                }],
+            },
+            Command::PlanRelocateFolder {
+                folder_id: FolderId::new(3),
+                path: "/media/me/SD/DCIM".into(),
+            },
+            Command::RelocateFolder {
+                folder_id: FolderId::new(3),
+                path: "/media/me/SD/DCIM".into(),
+            },
+            Command::Timeline {
+                generation: 4,
+                gap_seconds: 7_200,
             },
             Command::Range {
                 generation: 1,

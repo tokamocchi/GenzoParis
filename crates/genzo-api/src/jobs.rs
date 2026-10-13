@@ -158,6 +158,14 @@ impl JobRegistry {
         }
     }
 
+    /// 種類が `kind` の、実行中（待っているものを含む）のジョブ（`except` を除く）があるか。
+    pub(crate) fn is_running(&self, kind: JobKind, except: Option<u64>) -> bool {
+        self.entries
+            .lock()
+            .iter()
+            .any(|(id, e)| e.kind == kind && !e.state.is_finished() && Some(*id) != except)
+    }
+
     /// 実行中のジョブの数。
     pub(crate) fn running_count(&self) -> usize {
         self.entries
@@ -270,6 +278,9 @@ impl JobResult {
             JobResult::Import(r) => r.cancelled,
             JobResult::Export(r) => r.cancelled,
             JobResult::HashFiles(r) => r.cancelled,
+            JobResult::MoveFiles(r) => r.cancelled,
+            JobResult::CheckMissing(r) => r.cancelled,
+            JobResult::RelinkCandidates(r) => r.cancelled,
             _ => false,
         }
     }

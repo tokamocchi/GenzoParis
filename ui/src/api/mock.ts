@@ -4,6 +4,9 @@ import type { Bridge, Unlisten } from "./bridge";
 import type {
   AutoStackReport,
   BeforeInfo,
+  CaptureDevice,
+  CaptureTimeEditInfo,
+  CaptureTimePlan,
   CatalogSchema,
   ClearReport,
   CollectionInfo,
@@ -11,6 +14,14 @@ import type {
   CoreSettings,
   CrashReportSummary,
   DuplicateGroupList,
+  FileMovePlan,
+  FileMoveReport,
+  FileRenamePlan,
+  FolderInfo,
+  MissingCheckReport,
+  RelinkSearch,
+  RelocatePlan,
+  VolumeInfo,
   FrameInfo,
   ImportPreferences,
   ImportReport,
@@ -23,6 +34,8 @@ import type {
   NamePreview,
   SmartRule,
   StackInfo,
+  Timeline,
+  TimelineGroup,
   VariantDetails,
   VariantKeywords,
   VariantSummary,
@@ -113,7 +126,7 @@ export const MOCK_LOG_FOLDER: LogFolderInfo = {
 
 /** カタログの構造の見本（一部の表・ビューだけ）。 */
 export const MOCK_CATALOG_SCHEMA: CatalogSchema = {
-  schema_version: 10,
+  schema_version: 12,
   application_id: 0x475a4354,
   public_views: ["photos_v1", "photo_keywords_v1", "photo_collections_v1", "photo_stacks_v1", "photo_files_v1"],
   tables: [
@@ -505,4 +518,294 @@ export const MOCK_COPY_IMPORT_REPORT: ImportReport = {
     dry_run: false,
     next_sequence: 3,
   },
+};
+
+// ---------------------------------------------------------------------------
+// v1 の time: 撮影日時の一括修正（LIB-16）・タイムライン（ORG-01）の見本
+// ---------------------------------------------------------------------------
+
+/** 機材の一覧の見本（α7 IV（シリアルあり）・α7C の写真と、機材の情報のない動画（DJI など））。 */
+export const MOCK_CAPTURE_DEVICES: CaptureDevice[] = [
+  {
+    camera: "SONY ILCE-7C",
+    serial: null,
+    kind: "photo",
+    assets: 320,
+    with_time: 320,
+    adjusted: 0,
+    first: "2024-05-01T09:00:00+09:00",
+    last: "2024-05-03T18:20:00+09:00",
+  },
+  {
+    camera: "SONY ILCE-7M4",
+    serial: "4012345",
+    kind: "photo",
+    assets: 1200,
+    with_time: 1198,
+    adjusted: 0,
+    first: "2024-05-01T08:58:10+09:00",
+    last: "2024-05-03T19:02:00+09:00",
+  },
+  {
+    camera: null,
+    serial: null,
+    kind: "video",
+    assets: 42,
+    with_time: 42,
+    adjusted: 0,
+    first: "2024-05-01T18:10:00+09:00",
+    last: "2024-05-04T03:30:00+09:00",
+  },
+];
+
+/** 基準の写真に合わせる修正の見込みの見本（α7 IV の 1,200 枚を +1 時間 2 分 3 秒ずらす）。 */
+export const MOCK_CAPTURE_PLAN: CaptureTimePlan = {
+  assets: 1200,
+  changed: 1198,
+  unchanged: 0,
+  without_time: 2,
+  sources: { exif: 1198, utc_only: 0, user_default: 0, user_set: 0 },
+  shift_seconds: 3723,
+  examples: [
+    {
+      asset_id: 1,
+      file_name: "DSC00001.ARW",
+      before: {
+        raw: "2024:05:01 08:58:10",
+        offset: "+09:00",
+        tz_source: "exif",
+        tz_assumed: "+09:00",
+        correction_s: 0,
+        utc: "2024-04-30T23:58:10.000Z",
+      },
+      after: {
+        raw: "2024:05:01 08:58:10",
+        offset: "+09:00",
+        tz_source: "exif",
+        tz_assumed: "+09:00",
+        correction_s: 3723,
+        utc: "2024-05-01T01:00:13.000Z",
+      },
+    },
+  ],
+  edit_id: null,
+};
+
+/** 撮影日時の修正の履歴の見本（新しい順）。 */
+export const MOCK_CAPTURE_EDITS: CaptureTimeEditInfo[] = [
+  {
+    id: 2,
+    kind: "set_zone",
+    shift_seconds: null,
+    zone: "+09:00",
+    zone_mode: "keep_local",
+    asset_count: 42,
+    created_at: "2026-10-13T01:00:00.000Z",
+  },
+  {
+    id: 1,
+    kind: "sync",
+    shift_seconds: 3723,
+    zone: null,
+    zone_mode: null,
+    asset_count: 1198,
+    created_at: "2026-10-13T00:50:00.000Z",
+  },
+];
+
+/** まとまりの見本を作る。 */
+export function mockTimelineGroup(over: Partial<TimelineGroup> = {}): TimelineGroup {
+  return {
+    start: 0,
+    count: 1,
+    day: "2024-05-01",
+    new_day: true,
+    first: "2024-05-01T09:00:00",
+    last: "2024-05-01T09:00:00",
+    photos: 1,
+    videos: 0,
+    ...over,
+  };
+}
+
+/**
+ * タイムラインの見本（10 件: 5/1 の朝のイベント 4 枚と夕方 3 枚（動画 1）、5/2 の 2 枚、撮影日時なし 1 枚）。
+ */
+export const MOCK_TIMELINE: Timeline = {
+  generation: 1,
+  gap_seconds: 7200,
+  groups: [
+    mockTimelineGroup({ start: 0, count: 4, first: "2024-05-01T09:00:00", last: "2024-05-01T09:40:00", photos: 4 }),
+    mockTimelineGroup({
+      start: 4,
+      count: 3,
+      new_day: false,
+      first: "2024-05-01T17:10:00",
+      last: "2024-05-01T18:05:00",
+      photos: 2,
+      videos: 1,
+    }),
+    mockTimelineGroup({
+      start: 7,
+      count: 2,
+      day: "2024-05-02",
+      first: "2024-05-02T10:00:00",
+      last: "2024-05-02T10:30:00",
+      photos: 2,
+    }),
+    mockTimelineGroup({ start: 9, count: 1, day: null, new_day: false, first: null, last: null, photos: 1 }),
+  ],
+  events_merged: false,
+  days: 2,
+  without_time: 1,
+};
+
+// ---------------------------------------------------------------------------
+// v1 の files: ボリューム（FILE-03）・ファイル操作（FILE-02）・見つからない写真と再リンク（FILE-04）の見本
+// ---------------------------------------------------------------------------
+
+/** ボリュームの見本（内蔵はつながっている、SD カードはつながっていない）。 */
+export const MOCK_VOLUMES: VolumeInfo[] = [
+  {
+    volume_id: 1,
+    uuid: "uuid:1b2c3d4e-0000-4000-8000-000000000001",
+    label: null,
+    mount_path: "/",
+    online: true,
+    identified: true,
+    network: false,
+    fs_type: "ext4",
+    last_seen_at: "2026-10-13T01:00:00.000Z",
+  },
+  {
+    volume_id: 2,
+    uuid: "uuid:1234-ABCD",
+    label: "SD カード",
+    mount_path: "/media/me/SD",
+    online: false,
+    identified: true,
+    network: false,
+    fs_type: "exfat",
+    last_seen_at: "2026-10-01T09:00:00.000Z",
+  },
+];
+
+/** フォルダの見本（つながっている・つながっていない・見つからない）。 */
+export const MOCK_FOLDERS_FILES: FolderInfo[] = [
+  { folder_id: 11, volume_id: 1, parent_id: 10, rel_path: "home/me/写真", path: "/home/me/写真", online: true, missing: false, missing_files: 2 },
+  { folder_id: 21, volume_id: 2, parent_id: 20, rel_path: "DCIM", path: "/media/me/SD/DCIM", online: false, missing: false, missing_files: 0 },
+  { folder_id: 12, volume_id: 1, parent_id: 11, rel_path: "home/me/写真/旅行", path: "/home/me/写真/旅行", online: true, missing: true, missing_files: 5 },
+];
+
+/** 写真の移動の予定の見本（1 枚は別のドライブへコピー、1 枚は名前が重なって移せない）。 */
+export const MOCK_FILE_MOVE_PLAN: FileMovePlan = {
+  dest_folder: 31,
+  dest_path: "/mnt/外付け/選別済み",
+  movable: 1,
+  copy_bytes: 52_428_800,
+  photos: [
+    {
+      variant_id: 1,
+      asset_id: 1,
+      problem: null,
+      files: [
+        { file_id: 1, role: "primary", from: "/p/A.ARW", to: "/mnt/外付け/選別済み/A.ARW", method: "copy", size: 50_000_000 },
+        { file_id: 2, role: "sidecar_jpeg", from: "/p/A.JPG", to: "/mnt/外付け/選別済み/A.JPG", method: "copy", size: 2_428_800 },
+      ],
+    },
+    {
+      variant_id: 2,
+      asset_id: 2,
+      problem: "移動先に同じ名前のもの（B.jpg）があります",
+      files: [{ file_id: 3, role: "primary", from: "/p/B.jpg", to: "/mnt/外付け/選別済み/B.jpg", method: "copy", size: 1_000 }],
+    },
+  ],
+};
+
+/** 写真の移動の結果の見本（元のファイルの 1 つをゴミ箱へ移せなかった）。 */
+export const MOCK_FILE_MOVE_REPORT: FileMoveReport = {
+  moved: [
+    { file_id: 1, from: "/p/A.ARW", to: "/mnt/外付け/選別済み/A.ARW" },
+    { file_id: 2, from: "/p/A.JPG", to: "/mnt/外付け/選別済み/A.JPG" },
+  ],
+  photos: 1,
+  skipped: [{ path: "/p/B.jpg", reason: "移動先に同じ名前のもの（B.jpg）があります" }],
+  failed: [],
+  left_sources: [{ path: "/p/A.JPG", reason: "ゴミ箱が使えません" }],
+  bytes_copied: 52_428_800,
+  cancelled: false,
+};
+
+/** 写真の名前の変更の予定の見本。 */
+export const MOCK_FILE_RENAME_PLAN: FileRenamePlan = {
+  renamable: 1,
+  photos: [
+    {
+      variant_id: 1,
+      asset_id: 1,
+      problem: null,
+      files: [
+        { file_id: 1, role: "primary", from: "/p/DSC01.ARW", to: "/p/京都-0001.ARW", method: "rename", size: 50_000_000 },
+        { file_id: 2, role: "sidecar_jpeg", from: "/p/DSC01.JPG", to: "/p/京都-0001.JPG", method: "rename", size: 2_000_000 },
+      ],
+    },
+    {
+      variant_id: 2,
+      asset_id: 2,
+      problem: "今と同じ名前です",
+      files: [{ file_id: 3, role: "primary", from: "/p/京都-0002.jpg", to: "/p/京都-0002.jpg", method: "rename", size: 1_000 }],
+    },
+  ],
+};
+
+/** 見つからない写真の確認の結果の見本。 */
+export const MOCK_MISSING_REPORT: MissingCheckReport = {
+  checked: 120,
+  newly_missing: 2,
+  restored: 1,
+  missing: 7,
+  missing_folders: 1,
+  skipped_offline: 30,
+  skipped_network: 0,
+  cancelled: false,
+};
+
+/** 再リンクの候補の見本（内容が同じ・名前と撮影日時だけが同じ・候補なし）。 */
+export const MOCK_RELINK_SEARCH: RelinkSearch = {
+  search_dir: "/mnt/新しい",
+  scanned_files: 40,
+  unreadable: [],
+  cancelled: false,
+  targets: [
+    {
+      file_id: 1,
+      variant_id: 1,
+      role: "primary",
+      name: "A.ARW",
+      last_path: "/p/A.ARW",
+      size: 50_000_000,
+      candidates: [{ path: "/mnt/新しい/A.ARW", matched: "content", size: 50_000_000, same_name: true }],
+    },
+    {
+      file_id: 2,
+      variant_id: 2,
+      role: "primary",
+      name: "B.jpg",
+      last_path: "/p/B.jpg",
+      size: 1_000,
+      candidates: [{ path: "/mnt/新しい/B.jpg", matched: "name_and_time", size: 1_200, same_name: true }],
+    },
+    { file_id: 3, variant_id: 3, role: "primary", name: "C.jpg", last_path: "/p/C.jpg", size: 900, candidates: [] },
+  ],
+};
+
+/** フォルダの場所の指定し直しの予定の見本。 */
+export const MOCK_RELOCATE_PLAN: RelocatePlan = {
+  folder_id: 12,
+  from: "/home/me/写真/旅行",
+  to: "/home/me/写真/2024 京都旅行",
+  files: 12,
+  found: 11,
+  subfolders: 2,
+  problem: null,
 };

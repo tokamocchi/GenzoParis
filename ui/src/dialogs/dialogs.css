@@ -6,6 +6,9 @@
 .dlg-section {
   margin: 10px 0 14px;
 }
+.dialog-actions .spacer {
+  flex: 1;
+}
 .dlg-section > h3 {
   margin: 0 0 6px;
   font-size: 12px;

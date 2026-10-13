@@ -73,7 +73,7 @@ use crate::naming::{
     MAX_COLLISION_SUFFIX, NameInput, TemplatePart, join_extension, render_stem, safe_file_stem,
     split_extension, with_suffix,
 };
-use crate::paths::{VolumePath, absolute_lexical, join_rel, split_volume};
+use crate::paths::{VolumePath, absolute_lexical, join_rel};
 use crate::types::{CopiedFile, CopyReport, CopySettings, DuplicateFile, FileIssue, ImportReport};
 
 /// コピーの一時ファイルの名前の先頭（Unix・macOS では隠しファイル。取り込みの走査も飛ばす）。
@@ -136,7 +136,7 @@ impl CopyPlan {
             Err(e) => return Err(ApiError::io(&destination, e)),
         }
         // パスがボリュームと相対パスに分けられること（UTF-8 で表せるなど）。
-        split_volume(&destination)?;
+        crate::volumes::locate(inner.volume_probe.as_ref(), &destination)?;
         if excluded_dirs(inner)
             .contains(&destination, fs::canonicalize(&destination).ok().as_deref())
         {
@@ -395,9 +395,9 @@ enum GroupFailure {
     Fatal(String),
 }
 
-/// 1 ファイルのコピーの失敗。
+/// 1 ファイルのコピーの失敗（写真の移動（FILE-02。`fileops`）でも使う）。
 #[derive(Debug)]
-enum CopyFailure {
+pub(crate) enum CopyFailure {
     Cancelled,
     /// 確定の前に同じ名前ができていた。
     Exists,
@@ -407,10 +407,10 @@ enum CopyFailure {
 
 /// 1 ファイルのコピーの結果。
 #[derive(Debug)]
-struct CopiedInfo {
-    facts: FileFacts,
-    full_hash: String,
-    bytes: u64,
+pub(crate) struct CopiedInfo {
+    pub(crate) facts: FileFacts,
+    pub(crate) full_hash: String,
+    pub(crate) bytes: u64,
 }
 
 /// コピー先の名前の使える・使えない。
@@ -479,7 +479,7 @@ fn hash_reader(mut r: impl Read, token: &CancellationToken) -> Result<String, Ha
 
 /// 1 つのファイルを、一時ファイルに書いて確かめてから、上書きせずに `dest` として公開する（モジュールの
 /// doc の 4.。`hook` はテスト専用のフック）。
-fn copy_verified_with(
+pub(crate) fn copy_verified_with(
     hook: Option<&CopyImportHook>,
     source: &Path,
     facts: &FileFacts,
@@ -603,7 +603,7 @@ fn copy_verified_with(
 
 /// このジョブが公開したファイルを消す（公開した直後の内容と同じときだけ。ほかのものに置き換わっていれば
 /// 消さない）。消したら `true`。
-fn remove_own_copy(path: &Path, facts: &FileFacts) -> bool {
+pub(crate) fn remove_own_copy(path: &Path, facts: &FileFacts) -> bool {
     match FileFacts::read(path) {
         Ok(now) if now == *facts => match fs::remove_file(path) {
             Ok(()) => true,
@@ -620,7 +620,7 @@ fn remove_own_copy(path: &Path, facts: &FileFacts) -> bool {
 }
 
 /// 前のコピー取り込みが残した、古い一時ファイルを消す。
-fn remove_stale_temp_files(dir: &Path) {
+pub(crate) fn remove_stale_temp_files(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -1077,8 +1077,8 @@ pub(crate) fn run_copy_import(
     if is_inside(&plan.destination, &root) {
         excluded.add(&plan.destination);
     }
-    let src_vol = split_volume(&root)?;
-    let dest_vol = split_volume(&plan.destination)?;
+    let src_vol = crate::volumes::locate(inner.volume_probe.as_ref(), &root)?;
+    let dest_vol = crate::volumes::locate(inner.volume_probe.as_ref(), &plan.destination)?;
     let mut report = ImportReport {
         root: root.clone(),
         skip_duplicates: options.skip_duplicates,
@@ -1425,8 +1425,11 @@ fn flush(
             .ok_or_else(|| ApiError::InvalidArgument("UTF-8 で表せないパスです".to_owned()))?
             .to_owned();
         let uuid = state.dest_vol.uuid.clone();
+        let label = state.dest_vol.label.clone();
+        let fs_type = state.dest_vol.fs_type.clone();
         let (volume, folders): (VolumeId, HashMap<String, FolderId>) = inner.with_catalog(|c| {
-            let volume = c.ensure_volume(&uuid, None, Some(&mount))?;
+            let volume = c.ensure_volume(&uuid, label.as_deref(), Some(&mount))?;
+            c.note_volume_seen(volume, &mount, label.as_deref(), fs_type.as_deref())?;
             let mut map = HashMap::new();
             for rel in rels {
                 map.insert(rel.to_owned(), c.ensure_folder(volume, rel)?);

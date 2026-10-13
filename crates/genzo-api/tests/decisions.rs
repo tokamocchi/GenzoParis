@@ -74,6 +74,7 @@ fn write_version_3_catalog_with_utc_only_clip(path: &Path) -> chrono::DateTime<U
         offset: Some("+00:00".to_owned()),
         tz_source: TzSource::Exif,
         tz_assumed: Some("+00:00".to_owned()),
+        basis: None,
         correction_s: 0,
         utc: Some(instant),
     };

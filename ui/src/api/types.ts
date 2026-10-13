@@ -83,8 +83,13 @@ export interface CaptureTime {
   /** ファイルに記録されていたオフセット（"+09:00"。UTC の印だけなら "Z"）。 */
   offset: string | null;
   tz_source: TzSource;
-  /** UTC の推定に使ったオフセット（"+09:00"）。 */
+  /** 表示のオフセット（"+09:00"。basis がなければ UTC の推定にも使う）。 */
   tz_assumed: string | null;
+  /**
+   * UTC の計算に使ったオフセット（LIB-16。表示のオフセットと違う場合・UTC の印だけの値を現地時刻として読む場合
+   * だけ。"+09:00"）。古いコアでは無い。
+   */
+  basis?: string | null;
   correction_s: number;
   /** 補正後の UTC（RFC 3339）。日時が不明なら null。 */
   utc: string | null;
@@ -261,7 +266,10 @@ export type JobKind =
   | "integrity_check"
   | "reresolve_capture_times"
   | "collect_garbage"
-  | "hash_files";
+  | "hash_files"
+  | "move_files"
+  | "check_missing"
+  | "find_relink_candidates";
 export type JobState = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface FileIssue {
@@ -495,7 +503,10 @@ export type JobResult =
       previews_removed: number;
       temp_files_removed: number;
     }
-  | ({ type: "hash_files" } & HashReport);
+  | ({ type: "hash_files" } & HashReport)
+  | ({ type: "move_files" } & FileMoveReport)
+  | ({ type: "check_missing" } & MissingCheckReport)
+  | ({ type: "relink_candidates" } & RelinkSearch);
 
 export interface JobInfo {
   job_id: number;
@@ -658,6 +669,8 @@ export interface FileInfo {
 
 export interface VariantDetails {
   summary: VariantSummary;
+  /** カメラの本体のシリアル番号（LIB-16 の機材の区別）。古いコアでは無い。 */
+  camera_serial?: string | null;
   iso: number | null;
   aperture: number | null;
   shutter_s: number | null;
@@ -733,8 +746,14 @@ export interface FolderInfo {
   parent_id: FolderId | null;
   /** ボリュームの中の相対パス（"/" 区切り）。 */
   rel_path: string;
-  /** 絶対パス（ボリュームが分かれば）。 */
+  /** 絶対パス（ボリュームが分かれば。つながっていないボリュームは最後のマウント先からのパスで、表示用）。 */
   path: string | null;
+  /** ボリュームがつながっているか（FILE-03。省けば true）。 */
+  online?: boolean;
+  /** フォルダが見つからない（ボリュームはつながっているのに、フォルダがない。FILE-04）。 */
+  missing?: boolean;
+  /** このフォルダ（配下は含まない）の見つからないファイルの数。 */
+  missing_files?: number;
 }
 
 export interface FileCheckReport {
@@ -1237,7 +1256,28 @@ export type Command =
   | { type: "content_hash_status" }
   | { type: "duplicate_groups"; limit?: number }
   | { type: "identify_file"; path: string }
-  | { type: "import_name_preview"; copy: CopySettings };
+  | { type: "import_name_preview"; copy: CopySettings }
+  | { type: "capture_devices" }
+  | { type: "capture_device_of"; variant_id: VariantId }
+  | { type: "plan_capture_time_edit"; target: CaptureTarget; edit: CaptureTimeEdit }
+  | { type: "edit_capture_times"; target: CaptureTarget; edit: CaptureTimeEdit }
+  | { type: "capture_time_edits" }
+  | { type: "undo_capture_time_edit" }
+  | { type: "timeline"; generation: number; gap_seconds: number }
+  | { type: "volumes"; refresh?: boolean }
+  | { type: "plan_move_files"; variant_ids: VariantId[]; dest_folder: FolderId }
+  | { type: "move_files"; variant_ids: VariantId[]; dest_folder: FolderId }
+  | { type: "plan_rename_files"; variant_ids: VariantId[]; spec: RenameSpec }
+  | { type: "rename_files"; variant_ids: VariantId[]; spec: RenameSpec }
+  | { type: "create_folder"; parent_id: FolderId; name: string }
+  | { type: "rename_folder"; folder_id: FolderId; name: string }
+  | { type: "move_folder"; folder_id: FolderId; parent_id: FolderId }
+  | { type: "remove_folder"; folder_id: FolderId }
+  | { type: "check_missing"; folder_id?: FolderId | null }
+  | { type: "find_relink_candidates"; variant_ids?: VariantId[] | null; search_dir: string; recursive?: boolean }
+  | { type: "relink_files"; links: RelinkRequest[] }
+  | { type: "plan_relocate_folder"; folder_id: FolderId; path: string }
+  | { type: "relocate_folder"; folder_id: FolderId; path: string };
 
 /** 応答（genzo-api の Response）。 */
 export type Response =
@@ -1297,7 +1337,132 @@ export type Response =
   | ({ type: "content_hash_status" } & ContentHashStatus)
   | ({ type: "duplicate_groups" } & DuplicateGroupList)
   | ({ type: "file_identity" } & FileIdentity)
-  | ({ type: "name_preview" } & NamePreview);
+  | ({ type: "name_preview" } & NamePreview)
+  | { type: "capture_devices"; devices: CaptureDevice[] }
+  | ({ type: "capture_device" } & CaptureDeviceKey)
+  | ({ type: "capture_time_plan" } & CaptureTimePlan)
+  | { type: "capture_time_edits"; edits: CaptureTimeEditInfo[] }
+  | { type: "capture_time_undone"; undone: CaptureTimeUndo | null }
+  | ({ type: "timeline" } & Timeline)
+  | { type: "volumes"; volumes: VolumeInfo[] }
+  | ({ type: "move_plan" } & FileMovePlan)
+  | ({ type: "rename_plan" } & FileRenamePlan)
+  | ({ type: "files_moved" } & FileMoveReport)
+  | ({ type: "folder" } & FolderInfo)
+  | ({ type: "relinked" } & RelinkReport)
+  | ({ type: "relocate_plan" } & RelocatePlan);
+
+// ---------------------------------------------------------------------------
+// 撮影日時の一括修正（LIB-16）・タイムライン（ORG-01）
+// ---------------------------------------------------------------------------
+
+/** 機材（カメラの表示名・本体のシリアル番号・写真か動画か。genzo-api の CaptureDeviceKey）。 */
+export interface CaptureDeviceKey {
+  camera: string | null;
+  serial: string | null;
+  kind: AssetKind;
+}
+
+/** 機材と数（genzo-api の CaptureDevice）。 */
+export interface CaptureDevice extends CaptureDeviceKey {
+  /** 写真・動画の数（仮想コピーは数えない）。 */
+  assets: number;
+  /** 撮影日時の分かる数。 */
+  with_time: number;
+  /** 修正（時計のずれの補正・タイムゾーンの指定）のある数。 */
+  adjusted: number;
+  /** 最も早い・遅い撮影日時（既定のタイムゾーンの時刻。RFC 3339）。 */
+  first: string | null;
+  last: string | null;
+}
+
+/** 修正の対象。 */
+export type CaptureTarget =
+  | { kind: "variants"; variant_ids: VariantId[] }
+  | { kind: "devices"; devices: CaptureDeviceKey[] };
+
+/** タイムゾーンの指定の読み方（keep_local: 記録の時刻をその地域の時刻として読む、keep_instant: 撮影した瞬間はそのまま）。 */
+export type ZoneMode = "keep_local" | "keep_instant";
+
+/** 撮影日時の修正（genzo-api の CaptureTimeEdit）。 */
+export type CaptureTimeEdit =
+  | { kind: "shift"; seconds: number }
+  | { kind: "sync"; reference: VariantId; correct: string; offset_minutes?: number | null }
+  | { kind: "set_zone"; offset_minutes: number; mode: ZoneMode }
+  | { kind: "clear_zone" }
+  | { kind: "reset" };
+
+export interface CaptureSourceCounts {
+  exif: number;
+  utc_only: number;
+  user_default: number;
+  user_set: number;
+}
+
+export interface CaptureTimeExample {
+  asset_id: AssetId;
+  file_name: string;
+  before: CaptureTime;
+  after: CaptureTime;
+}
+
+/** 修正の見込み・結果（genzo-api の CaptureTimePlan）。 */
+export interface CaptureTimePlan {
+  assets: number;
+  changed: number;
+  unchanged: number;
+  without_time: number;
+  sources: CaptureSourceCounts;
+  /** ずらす秒数（ずらす・基準の写真に合わせるとき）。 */
+  shift_seconds: number | null;
+  examples: CaptureTimeExample[];
+  /** 記録した修正（結果のとき。変わったものがなければ null）。 */
+  edit_id: number | null;
+}
+
+export type CaptureEditKind = "shift" | "sync" | "set_zone" | "clear_zone" | "reset";
+
+export interface CaptureTimeEditInfo {
+  id: number;
+  kind: CaptureEditKind;
+  shift_seconds: number | null;
+  zone: string | null;
+  zone_mode: ZoneMode | null;
+  asset_count: number;
+  created_at: string;
+}
+
+export interface CaptureTimeUndo {
+  edit: CaptureTimeEditInfo;
+  restored: number;
+}
+
+/** タイムラインのまとまり（撮影日の中のイベント。genzo-api の TimelineGroup）。 */
+export interface TimelineGroup {
+  /** 検索結果の中の先頭の位置。 */
+  start: number;
+  count: number;
+  /** 撮影日（"2024-05-01"。撮影日時の分からないまとまりは null）。 */
+  day: string | null;
+  /** その日の最初のまとまりか（日付の見出しを出す）。 */
+  new_day: boolean;
+  /** 最初・最後の写真の現地時刻（"2024-05-01T09:12:05"）。 */
+  first: string | null;
+  last: string | null;
+  photos: number;
+  videos: number;
+}
+
+/** タイムライン（genzo-api の Timeline）。 */
+export interface Timeline {
+  generation: number;
+  gap_seconds: number;
+  groups: TimelineGroup[];
+  /** まとまりが多すぎるため、日付だけでまとめたか。 */
+  events_merged: boolean;
+  days: number;
+  without_time: number;
+}
 
 // ---------------------------------------------------------------------------
 // イベント（コア → UI。genzo-api の Event。Tauri のイベント名は "core-event"）
@@ -1316,7 +1481,9 @@ export type CatalogChange =
   | "keywords"
   | "collections"
   | "stacks"
-  | "variants";
+  | "variants"
+  | "files"
+  | "folders";
 
 export type WarningCode =
   | "unclean_shutdown"
@@ -1335,7 +1502,9 @@ export type WarningCode =
   | "cache_rebuilt"
   | "catalog_lock_unavailable"
   | "render_deps_changed"
-  | "import_copy_rolled_back";
+  | "import_copy_rolled_back"
+  | "volumes_rebound"
+  | "move_source_left";
 
 export type CoreEvent =
   | { type: "job_progress"; job_id: number; kind: JobKind; done: number; total: number }
@@ -1495,4 +1664,137 @@ export interface AppSettingsUpdate {
   ffmpeg_dir: string | null;
   gpu: GpuMode;
   backup_on_close: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// ボリューム（FILE-03）・アプリの中でのファイル操作（FILE-02）・見つからない写真と再リンク（FILE-04）
+// ---------------------------------------------------------------------------
+
+/** ボリューム（ドライブ）。genzo-api の `VolumeInfo`。 */
+export interface VolumeInfo {
+  volume_id: VolumeId;
+  /** ボリュームの ID（`uuid:`・`winvol:`・`net:` は OS のボリューム ID、`path:` はパスの先頭から作ったもの）。 */
+  uuid: string;
+  label: string | null;
+  /** マウント先（つながっていれば今のもの、つながっていなければ最後に確かめたもの）。 */
+  mount_path: string | null;
+  online: boolean;
+  /** OS のボリューム ID で識別しているか。 */
+  identified: boolean;
+  network: boolean;
+  fs_type: string | null;
+  last_seen_at: string | null;
+}
+
+export type MoveMethod = "rename" | "copy";
+
+export interface PlannedFileMove {
+  file_id: FileId;
+  role: FileRole;
+  from: string | null;
+  to: string | null;
+  method: MoveMethod;
+  size: number;
+}
+
+export interface PlannedPhotoMove {
+  variant_id: VariantId;
+  asset_id: AssetId;
+  files: PlannedFileMove[];
+  /** 移せない・名前を変えられない理由（あれば、この写真は飛ばす）。 */
+  problem: string | null;
+}
+
+export interface FileMovePlan {
+  dest_folder: FolderId;
+  dest_path: string | null;
+  photos: PlannedPhotoMove[];
+  movable: number;
+  copy_bytes: number;
+}
+
+export interface MovedFile {
+  file_id: FileId;
+  from: string;
+  to: string;
+}
+
+export interface FileMoveReport {
+  moved: MovedFile[];
+  photos: number;
+  skipped: FileIssue[];
+  failed: FileIssue[];
+  left_sources: FileIssue[];
+  bytes_copied: number;
+  cancelled: boolean;
+}
+
+/** 写真の名前の付け方（genzo-api の `RenameSpec`）。 */
+export type RenameSpec = { kind: "template"; rule: RenameRule } | { kind: "name"; name: string };
+
+export interface FileRenamePlan {
+  photos: PlannedPhotoMove[];
+  renamable: number;
+}
+
+export interface RelocatePlan {
+  folder_id: FolderId;
+  from: string | null;
+  to: string;
+  files: number;
+  found: number;
+  subfolders: number;
+  problem: string | null;
+}
+
+export interface MissingCheckReport {
+  checked: number;
+  newly_missing: number;
+  restored: number;
+  missing: number;
+  missing_folders: number;
+  skipped_offline: number;
+  skipped_network: number;
+  cancelled: boolean;
+}
+
+/** 再リンクの候補の一致の仕方（確からしい順）。 */
+export type RelinkMatch = "content" | "quick" | "name_and_time";
+
+export interface RelinkCandidate {
+  path: string;
+  matched: RelinkMatch;
+  size: number;
+  same_name: boolean;
+}
+
+export interface RelinkTarget {
+  file_id: FileId;
+  variant_id: VariantId;
+  role: FileRole;
+  name: string;
+  last_path: string | null;
+  size: number;
+  candidates: RelinkCandidate[];
+}
+
+export interface RelinkSearch {
+  search_dir: string;
+  targets: RelinkTarget[];
+  scanned_files: number;
+  unreadable: FileIssue[];
+  cancelled: boolean;
+}
+
+export interface RelinkRequest {
+  file_id: FileId;
+  path: string;
+  /** 内容が登録のものと違っても結び付けるか（name_and_time の候補を利用者が選んだとき）。 */
+  accept_changed?: boolean;
+}
+
+export interface RelinkReport {
+  linked: MovedFile[];
+  reread: string[];
+  failed: FileIssue[];
 }

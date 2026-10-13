@@ -57,21 +57,31 @@ fn catalog_files_in(inner: &Inner, dir: &Path) -> Result<Vec<PathBuf>, ApiError>
         let Ok(abs) = absolute_lexical(&d) else {
             continue;
         };
-        let Ok(vol) = split_volume(&abs) else {
-            continue;
-        };
-        inner.with_catalog(|c| {
-            let Some(volume) = c.volumes()?.into_iter().find(|v| v.uuid == vol.uuid) else {
-                return Ok(());
-            };
-            let Some(folder) = c.find_folder(volume.id, &vol.rel)? else {
-                return Ok(());
-            };
-            for f in c.files_in_folder(folder)? {
-                out.push(join_rel(&vol.mount, &vol.rel, &f.name));
-            }
-            Ok(())
-        })?;
+        // OS のボリューム ID のボリュームと、以前の形式（パスから作った ID）のボリューム（まだ移していない
+        // フォルダ。FILE-03）の両方で探す。
+        let mut vols = Vec::new();
+        if let Ok(v) = crate::volumes::locate(inner.volume_probe.as_ref(), &abs) {
+            vols.push(v);
+        }
+        if let Ok(v) = split_volume(&abs)
+            && !vols.contains(&v)
+        {
+            vols.push(v);
+        }
+        for vol in vols {
+            inner.with_catalog(|c| {
+                let Some(volume) = c.volumes()?.into_iter().find(|v| v.uuid == vol.uuid) else {
+                    return Ok(());
+                };
+                let Some(folder) = c.find_folder(volume.id, &vol.rel)? else {
+                    return Ok(());
+                };
+                for f in c.files_in_folder(folder)? {
+                    out.push(join_rel(&vol.mount, &vol.rel, &f.name));
+                }
+                Ok(())
+            })?;
+        }
     }
     Ok(out)
 }

@@ -25,6 +25,7 @@ import { Section } from "../components/Section";
 import { COLOR_LABEL_NAMES, formatAperture, formatBytes, formatCaptureTime, formatFocal, formatShutter } from "../format";
 import { comboLabel } from "../keyboard";
 import { actions, useApp } from "../state/app";
+import { openCaptureTimeDialog } from "../state/stacks";
 import {
   addTargetsToStack,
   createVirtualCopyOf,
@@ -281,9 +282,21 @@ function Details(props: { details: VariantDetails; stale: boolean; multi: boolea
           <dd>
             {formatCaptureTime(s.capture)}
             {note && <span className="note">{note}</span>}
+            <button
+              type="button"
+              className="btn small lib-capture-edit"
+              onClick={() => openCaptureTimeDialog()}
+              disabled={stale}
+              title="時計のずれ・タイムゾーンを、選んだ写真や機材ごとにまとめて直す（元のファイルは変えません）"
+            >
+              修正…
+            </button>
           </dd>
           <dt>カメラ</dt>
-          <dd>{s.camera ?? "—"}</dd>
+          <dd>
+            {s.camera ?? "—"}
+            {details.camera_serial && <span className="note">シリアル番号 {details.camera_serial}</span>}
+          </dd>
           {!isVideo && (
             <>
               <dt>レンズ</dt>

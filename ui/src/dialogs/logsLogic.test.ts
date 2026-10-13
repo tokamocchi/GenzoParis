@@ -86,7 +86,7 @@ describe("カタログの構造", () => {
     ]);
     const sql = schemaSql(MOCK_CATALOG_SCHEMA);
     expect(sql.startsWith(`-- GenzoParis のカタログ（スキーマの版 ${MOCK_CATALOG_SCHEMA.schema_version}）\n`)).toBe(true);
-    expect(MOCK_CATALOG_SCHEMA.schema_version).toBe(10);
+    expect(MOCK_CATALOG_SCHEMA.schema_version).toBe(12);
     expect(sql).toContain("CREATE TABLE asset (id INTEGER PRIMARY KEY, kind TEXT NOT NULL);\n\nCREATE VIEW photos_v1");
     expect(readOnlyCommand("C:\\Users\\u\\Pictures\\Genzo Paris\\catalog.db")).toBe(
       'sqlite3 -readonly "C:\\Users\\u\\Pictures\\Genzo Paris\\catalog.db"',

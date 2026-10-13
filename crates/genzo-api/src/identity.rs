@@ -432,7 +432,7 @@ fn folder_access(loc: &FileLocation) -> FolderAccess {
 }
 
 /// 対話の処理（現像のプレビューなど。P0）が動いている間、最大 [`INTERACTIVE_MAX_WAIT`] 待つ。
-fn wait_for_interactive(inner: &Inner, token: &CancellationToken) {
+pub(crate) fn wait_for_interactive(inner: &Inner, token: &CancellationToken) {
     let start = Instant::now();
     while !token.is_cancelled()
         && start.elapsed() < INTERACTIVE_MAX_WAIT

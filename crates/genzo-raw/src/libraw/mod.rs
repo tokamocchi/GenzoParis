@@ -451,6 +451,7 @@ impl<'a> Processor<'a> {
             datetime_original: c_string(&m.datetime_original),
             subsec_time_original: c_string(&m.subsec_time_original),
             offset_time_original: c_string(&m.offset_time_original),
+            body_serial: c_string(&m.body_serial),
             gps: GpsSnapshot {
                 parsed: m.gps_parsed != 0,
                 latitude: m.gps_latitude,

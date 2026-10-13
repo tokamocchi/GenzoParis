@@ -418,6 +418,8 @@ impl AppState {
         // ファイルの内容のハッシュ（ORG-03）を、開いている間にバックグラウンドで計算する（カタログの設定で
         // 止められる。CLI は計算しない）。
         config.background_hashing = true;
+        // 見つからない写真の確認（FILE-04）も、カタログを開いたときとドライブがつながったときに動かす。
+        config.background_file_check = true;
         let core = Arc::new(Core::open(config).map_err(api)?);
         // 色空間を指定してからセッションを公開するまで、色空間のロックを持つ（set_display_target の doc）。
         let display = self.display.lock();

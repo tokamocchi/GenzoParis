@@ -1,15 +1,16 @@
-// 写真のドラッグ＆ドロップ（グリッドの写真 → 左のパネルのコレクション・キーワード。LIB-09・LIB-10）。
+// 写真のドラッグ＆ドロップ（グリッドの写真 → 左のパネルのコレクション・キーワード・フォルダ。LIB-09・LIB-10・
+// FILE-02。フォルダに落とすと、移動のダイアログで予定を確かめてから移す）。
 //
 // - アプリのウィンドウは、フォルダのドロップでの取り込みのために Tauri のネイティブのドラッグ＆ドロップを
 //   有効にしている（tauri.conf.json の dragDropEnabled）。その設定では Windows の WebView2 で HTML5 の
 //   ドラッグ＆ドロップのイベントが届かないため、ポインターのイベントで自作する（決定事項ログ No.82）。
 // - ボタンを押したまま DRAG_THRESHOLD_PX より動かしたらドラッグを始める（クリック・ダブルクリックと
 //   見分ける）。選択中の写真をつかんだら選択中のすべて、選んでいない写真をつかんだらその 1 枚を運ぶ。
-// - 受け取る先は、要素の data 属性（data-drop-kind = "collection" | "keyword"、data-drop-id、
+// - 受け取る先は、要素の data 属性（data-drop-kind = "collection" | "keyword" | "folder"、data-drop-id、
 //   data-drop-ok = "1"（受け取れる）、data-drop-label）で示す。離した位置の要素から探す。
 // - Esc でやめる。ドラッグの後のクリックは選択を変えない（Grid が consumeDragClick で確かめる）。
 
-import type { CollectionId, KeywordId, VariantId } from "../api/types";
+import type { CollectionId, FolderId, KeywordId, VariantId } from "../api/types";
 import { createStore, useStore } from "../state/store";
 
 /** ドラッグを始めるまでに動かす距離（px。仮置き）。 */
@@ -17,7 +18,8 @@ export const DRAG_THRESHOLD_PX = 6;
 
 export type DropTarget =
   | { kind: "collection"; id: CollectionId; ok: boolean; label: string }
-  | { kind: "keyword"; id: KeywordId; ok: boolean; label: string };
+  | { kind: "keyword"; id: KeywordId; ok: boolean; label: string }
+  | { kind: "folder"; id: FolderId; ok: boolean; label: string };
 
 export interface PhotoDrag {
   ids: VariantId[];
@@ -50,6 +52,7 @@ export function parseDropTarget(data: DOMStringMap | Record<string, string | und
   const label = data.dropLabel ?? "";
   if (data.dropKind === "collection") return { kind: "collection", id, ok, label };
   if (data.dropKind === "keyword") return { kind: "keyword", id, ok, label };
+  if (data.dropKind === "folder") return { kind: "folder", id, ok, label };
   return null;
 }
 

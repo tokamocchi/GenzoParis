@@ -21,6 +21,7 @@ import type {
   DevelopSettings,
   ErrorInfo,
   Flag,
+  FolderId,
   ImportOptions,
   JobInfo,
   JobKind,
@@ -34,6 +35,7 @@ import type {
 } from "../api/types";
 import { describeImportReport } from "../dialogs/importLogic";
 import { notifyResult } from "../dialogs/resultLog";
+import { describeCheckJob } from "../library/fileOpsLogic";
 import { type CatalogChangeSet, searchCache, thumbRevs } from "./search";
 import { createStore, useStore } from "./store";
 
@@ -68,7 +70,20 @@ export type DialogState =
   | { kind: "add_to_collection"; variantIds: VariantId[] }
   // 仮想コピー（LIB-13）の名前の変更。スタック（LIB-12）: 撮影時刻の間隔による自動スタック。
   | { kind: "virtual_copy_name"; variantId: VariantId }
-  | { kind: "auto_stack" };
+  | { kind: "auto_stack" }
+  // 撮影日時の一括修正（LIB-16）: 対象の写真と、基準の写真（表示中の写真）。
+  | { kind: "capture_time"; variantIds: VariantId[]; current: VariantId | null }
+  // アプリの中でのファイル操作（FILE-02）: 写真の移動（落とした先のフォルダ。null ならダイアログで選ぶ）・
+  // 名前の変更・フォルダの作成（folderId の中へ）と名前の変更・フォルダの移動。見つからない写真（FILE-04）:
+  // 候補を探して結び付け直す（null ならすべての見つからない写真）・フォルダの場所の指定し直し・写真の登録されて
+  // いないフォルダをカタログから除く。
+  | { kind: "move_files"; variantIds: VariantId[]; destFolder: FolderId | null }
+  | { kind: "rename_files"; variantIds: VariantId[] }
+  | { kind: "folder_name"; mode: "create" | "rename"; folderId: FolderId; currentName?: string }
+  | { kind: "move_folder"; folderId: FolderId }
+  | { kind: "relink"; variantIds: VariantId[] | null }
+  | { kind: "relocate_folder"; folderId: FolderId }
+  | { kind: "remove_folder"; folderId: FolderId };
 
 export interface Toast {
   id: number;
@@ -138,6 +153,8 @@ export interface AppState {
   detailsVersion: number;
   /** キーワード・コレクションの一覧と、写真のキーワードを読み直す合図（LIB-09〜11。それらの変更・削除の後に増える）。 */
   organizeVersion: number;
+  /** 撮影日時の変化の通し番号（catalog_changed の capture_time で増える。タイムラインの読み直し。ORG-01・LIB-16）。 */
+  captureTimeVersion: number;
   /**
    * ターゲットコレクション（B キーで選んだ写真を入れる・外す手動のコレクション。LIB-10）。カタログごとに
    * ブラウザに保存する（state/organize.ts）。
@@ -209,6 +226,7 @@ export const appStore = createStore<AppState>({
   foldersVersion: 0,
   detailsVersion: 0,
   organizeVersion: 0,
+  captureTimeVersion: 0,
   targetCollection: null,
 });
 
@@ -263,9 +281,17 @@ export const JOB_LABEL: Record<JobKind, string> = {
   reresolve_capture_times: "撮影日時の推定し直し",
   collect_garbage: "キャッシュの整理",
   hash_files: "内容のハッシュの計算",
+  move_files: "写真の移動",
+  check_missing: "見つからない写真の確認",
+  find_relink_candidates: "再リンクの候補の探索",
 };
 
 const jobWaiters = new Map<number, ((info: JobInfo) => void)[]>();
+/**
+ * 画面が待ったジョブ（actions.waitJob。結果は待っている側が知らせる）。終わった後も覚えておく（待っている側の
+ * 問い合わせが先に終わっても、job_finished のイベントで重ねて知らせないため）。カタログを開く・閉じると忘れる。
+ */
+const attendedJobs = new Set<number>();
 
 /** ジョブを登録する（進捗の表示に使う）。 */
 function trackJob(jobId: number, kind: JobKind, label?: string): void {
@@ -287,6 +313,7 @@ function trackJob(jobId: number, kind: JobKind, label?: string): void {
 
 /** ジョブが終わるのを待って、結果を返す。 */
 function waitJob(jobId: number): Promise<JobInfo> {
+  attendedJobs.add(jobId);
   return new Promise((resolve, reject) => {
     const list = jobWaiters.get(jobId) ?? [];
     list.push(resolve);
@@ -942,6 +969,19 @@ const importVersionsThrottle = new Throttle(IMPORT_REFRESH_MS, () =>
   appStore.set((s) => ({ detailsVersion: s.detailsVersion + 1, foldersVersion: s.foldersVersion + 1 })),
 );
 
+/** フォルダの一覧を読み直す変更。 */
+const FOLDER_CHANGES = new Set<string>(["imported", "removed", "files", "folders", "file_status"]);
+
+/**
+ * 画面が待っていないジョブ（コアが自動で始めたもの）の結果。見つからない写真の確認（FILE-04）は、変わりが
+ * あったときだけ知らせる。
+ */
+function unattendedJobFinished(info: JobInfo): void {
+  if (info.kind !== "check_missing") return;
+  const notice = describeCheckJob(info, false);
+  if (notice) notifyResult(notice);
+}
+
 function handleEvent(e: CoreEvent): void {
   switch (e.type) {
     case "search_updated":
@@ -958,14 +998,16 @@ function handleEvent(e: CoreEvent): void {
       }
       appStore.set((s) => ({
         detailsVersion: s.detailsVersion + 1,
-        foldersVersion:
-          e.change === "imported" || e.change === "removed" ? s.foldersVersion + 1 : s.foldersVersion,
+        // フォルダの一覧（見つからない写真の数・つながっていないドライブの印を含む）は、取り込み・削除と、
+        // ファイルの場所・状態・フォルダの変更（FILE-02〜04）で読み直す。
+        foldersVersion: FOLDER_CHANGES.has(e.change) ? s.foldersVersion + 1 : s.foldersVersion,
         // キーワード・コレクションの一覧（件数を含む）は、それらの変更と、写真の削除・評価などの変更
         // （スマートコレクションの件数）で読み直す。
         organizeVersion:
           e.change === "keywords" || e.change === "collections" || e.change === "removed" || e.change === "marks"
             ? s.organizeVersion + 1
             : s.organizeVersion,
+        captureTimeVersion: e.change === "capture_time" ? s.captureTimeVersion + 1 : s.captureTimeVersion,
       }));
       break;
     case "thumbnail_updated":
@@ -1006,7 +1048,10 @@ function handleEvent(e: CoreEvent): void {
       void core
         .job(e.job_id)
         .then((info) => {
-          if (session === catalogSession) finishJob(info);
+          if (session !== catalogSession) return;
+          finishJob(info);
+          // 画面が待ったジョブ（actions.waitJob）は、待っている側が結果を知らせる。
+          if (!attendedJobs.has(info.job_id)) unattendedJobFinished(info);
         })
         .catch((err) => {
           if (session !== catalogSession) return;
@@ -1054,6 +1099,7 @@ let catalogSession = 0;
 
 /** 前のカタログの、待たせている読み直しとサムネイルの rev を捨てる（カタログを開いた・閉じたとき）。 */
 function forgetCatalogState(): void {
+  attendedJobs.clear();
   pendingSearch = null;
   searchThrottle.cancel();
   importVersionsThrottle.cancel();

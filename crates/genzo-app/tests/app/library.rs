@@ -620,3 +620,207 @@ pub fn copy_import_through_the_app() {
     let again = env.state();
     assert_eq!(again.settings().import, prefs);
 }
+
+/// 撮影日時の一括修正（LIB-16）とタイムライン（ORG-01）を画面と同じ JSON のコマンドで行う: 機材の一覧・見込み・
+/// 修正・履歴・取り消し・タイムライン。撮影日時のない画像（image crate で書いたもの）なので、修正では変わらない
+/// （撮影日時の分からない写真は変えない）。
+pub fn capture_times_and_timeline_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("時刻");
+    write_image(&photos.join("A.jpg"), (48, 32), 1);
+    write_image(&photos.join("B.png"), (48, 32), 2);
+    state.open_catalog(&env.catalog("時刻.db"), true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let a = by_name(&items, "A.jpg").variant_id;
+    let Response::CaptureDevices { devices } = ok(&state, json!({"type": "capture_devices"}))
+    else {
+        panic!("機材の一覧の応答ではない");
+    };
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].key.camera, None);
+    assert_eq!((devices[0].assets, devices[0].with_time), (2, 0));
+    let Response::CaptureDevice(key) = ok(
+        &state,
+        json!({"type": "capture_device_of", "variant_id": a}),
+    ) else {
+        panic!("写真の機材の応答ではない");
+    };
+    assert_eq!(key, devices[0].key);
+    let target =
+        json!({"kind": "devices", "devices": [{"camera": null, "serial": null, "kind": "photo"}]});
+    let Response::CaptureTimePlan(p) = ok(
+        &state,
+        json!({"type": "plan_capture_time_edit", "target": target, "edit": {"kind": "shift", "seconds": 60}}),
+    ) else {
+        panic!("見込みの応答ではない");
+    };
+    assert_eq!((p.assets, p.changed, p.without_time), (2, 0, 2));
+    let Response::CaptureTimePlan(r) = ok(
+        &state,
+        json!({"type": "edit_capture_times", "target": {"kind": "variants", "variant_ids": [a]},
+               "edit": {"kind": "set_zone", "offset_minutes": 120, "mode": "keep_instant"}}),
+    ) else {
+        panic!("修正の応答ではない");
+    };
+    assert_eq!((r.changed, r.edit_id), (0, None));
+    let Response::CaptureTimeEdits { edits } = ok(&state, json!({"type": "capture_time_edits"}))
+    else {
+        panic!("履歴の応答ではない");
+    };
+    assert!(edits.is_empty());
+    let Response::CaptureTimeUndone { undone } =
+        ok(&state, json!({"type": "undo_capture_time_edit"}))
+    else {
+        panic!("取り消しの応答ではない");
+    };
+    assert!(undone.is_none());
+    // タイムライン: 撮影日時のない 2 枚の 1 つのまとまり。
+    let Response::Search(s) = ok(
+        &state,
+        json!({"type": "search", "filter": {}, "sort": {"key": "capture_time", "direction": "ascending"}}),
+    ) else {
+        panic!("検索の応答ではない");
+    };
+    let Response::Timeline(t) = ok(
+        &state,
+        json!({"type": "timeline", "generation": s.generation, "gap_seconds": 3600}),
+    ) else {
+        panic!("タイムラインの応答ではない");
+    };
+    assert_eq!(t.groups.len(), 1);
+    assert_eq!((t.groups[0].count, t.days, t.without_time), (2, 0, 2));
+    assert_eq!(t.groups[0].day, None);
+}
+
+/// (v1 の files) アプリの中でのファイル操作・ボリューム・見つからない写真（FILE-02〜FILE-04）を、画面と同じ
+/// `core_execute` の JSON のコマンドで使う: ボリュームの一覧・フォルダの作成・写真の移動の予定と実行（ジョブ）・
+/// 名前の変更・見つからない写真の確認と、絞り込み・再リンクの候補と結び付け直し・フォルダの名前の変更。
+pub fn files_volumes_and_relink_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("ファイル 操作");
+    write_image(&photos.join("A.jpg"), (48, 32), 1);
+    write_image(&photos.join("B.png"), (48, 32), 2);
+    state
+        .open_catalog(&env.catalog("ファイル.db"), true)
+        .unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let a = by_name(&items, "A.jpg").variant_id.get();
+    let b = by_name(&items, "B.png").variant_id.get();
+    let Response::Volumes { volumes } = ok(&state, json!({"type": "volumes", "refresh": true}))
+    else {
+        panic!("ボリュームの一覧の応答ではない");
+    };
+    assert!(!volumes.is_empty());
+    assert!(volumes.iter().all(|v| v.online));
+    let Response::Folders { folders } = ok(&state, json!({"type": "folders"})) else {
+        panic!("フォルダの一覧の応答ではない");
+    };
+    let top = folders
+        .iter()
+        .find(|f| f.path.as_deref() == Some(photos.as_path()))
+        .unwrap();
+    assert!(top.online && !top.missing);
+    // フォルダを作って、写真を移す。
+    let Response::Folder(made) = ok(
+        &state,
+        json!({"type": "create_folder", "parent_id": top.folder_id, "name": "選別 済み"}),
+    ) else {
+        panic!("フォルダの応答ではない");
+    };
+    assert!(photos.join("選別 済み").is_dir());
+    let Response::MovePlan(plan) = ok(
+        &state,
+        json!({"type": "plan_move_files", "variant_ids": [a], "dest_folder": made.folder_id}),
+    ) else {
+        panic!("移動の予定の応答ではない");
+    };
+    assert_eq!(plan.movable, 1);
+    let Response::JobStarted { job_id } = ok(
+        &state,
+        json!({"type": "move_files", "variant_ids": [a], "dest_folder": made.folder_id}),
+    ) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    assert_eq!(info.state, JobState::Succeeded, "{info:?}");
+    assert!(photos.join("選別 済み").join("A.jpg").exists());
+    // 名前の変更（1 枚の写真の名前）。
+    let Response::FilesMoved(r) = ok(
+        &state,
+        json!({"type": "rename_files", "variant_ids": [a], "spec": {"kind": "name", "name": "京都 の 朝"}}),
+    ) else {
+        panic!("名前の変更の応答ではない");
+    };
+    assert_eq!(r.photos, 1);
+    assert!(photos.join("選別 済み").join("京都 の 朝.jpg").exists());
+    // アプリの外で B を移すと、確かめたときに見つからない印が付き、絞り込みで探せる。
+    let outside = env.root().join("外");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::rename(photos.join("B.png"), outside.join("B.png")).unwrap();
+    let Response::JobStarted { job_id } = ok(&state, json!({"type": "check_missing"})) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    assert_eq!(info.state, JobState::Succeeded, "{info:?}");
+    let Response::Count { count } = ok(
+        &state,
+        json!({"type": "count", "filter": {"file_statuses": ["missing"]}}),
+    ) else {
+        panic!("件数の応答ではない");
+    };
+    assert_eq!(count, 1);
+    let Response::JobStarted { job_id } = ok(
+        &state,
+        json!({"type": "find_relink_candidates", "variant_ids": [b], "search_dir": outside}),
+    ) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    let Some(genzo_api::JobResult::RelinkCandidates(found)) = info.result else {
+        panic!("候補の結果ではない: {info:?}");
+    };
+    let target = &found.targets[0];
+    assert_eq!(target.candidates.len(), 1);
+    let Response::Relinked(r) = ok(
+        &state,
+        json!({"type": "relink_files", "links": [{"file_id": target.file_id, "path": target.candidates[0].path}]}),
+    ) else {
+        panic!("再リンクの応答ではない");
+    };
+    assert_eq!(r.linked.len(), 1);
+    let Response::Count { count } = ok(
+        &state,
+        json!({"type": "count", "filter": {"file_statuses": ["missing"]}}),
+    ) else {
+        panic!("件数の応答ではない");
+    };
+    assert_eq!(count, 0);
+    // フォルダの名前の変更。
+    let Response::Folder(renamed) = ok(
+        &state,
+        json!({"type": "rename_folder", "folder_id": made.folder_id, "name": "選別"}),
+    ) else {
+        panic!("フォルダの応答ではない");
+    };
+    assert_eq!(renamed.folder_id, made.folder_id);
+    assert!(photos.join("選別").join("京都 の 朝.jpg").exists());
+    // 写真の登録されていないフォルダは、カタログから除ける（ディスクのフォルダはそのまま）。
+    let Response::Folder(empty) = ok(
+        &state,
+        json!({"type": "create_folder", "parent_id": top.folder_id, "name": "空"}),
+    ) else {
+        panic!("フォルダの応答ではない");
+    };
+    let Response::Updated { count } = ok(
+        &state,
+        json!({"type": "remove_folder", "folder_id": empty.folder_id}),
+    ) else {
+        panic!("件数の応答ではない");
+    };
+    assert_eq!(count, 1);
+    assert!(photos.join("空").is_dir());
+}

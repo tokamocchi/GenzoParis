@@ -141,6 +141,11 @@
 .loupe-notice strong {
   color: var(--warn);
 }
+/* 見つからない写真の再リンク（FILE-04）のボタン（重ねた案内の中でも押せるようにする）。 */
+.loupe-notice-actions {
+  margin-top: 4px;
+  pointer-events: auto;
+}
 
 .loupe-status {
   left: 50%;

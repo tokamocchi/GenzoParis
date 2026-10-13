@@ -340,7 +340,9 @@ describe("写真のドラッグ（LIB-09・LIB-10）", () => {
     });
     expect(parseDropTarget({ dropKind: "collection", dropId: "12", dropOk: "0" })?.ok).toBe(false);
     expect(parseDropTarget({ dropKind: "keyword", dropId: "2", dropOk: "1", dropLabel: "京都" })?.kind).toBe("keyword");
-    expect(parseDropTarget({ dropKind: "folder", dropId: "2" })).toBeNull();
+    // フォルダ（FILE-02）も受け取る先。知らない種類は受け取らない。
+    expect(parseDropTarget({ dropKind: "folder", dropId: "2" })).toEqual({ kind: "folder", id: 2, ok: false, label: "" });
+    expect(parseDropTarget({ dropKind: "stack", dropId: "2" })).toBeNull();
     expect(parseDropTarget({ dropKind: "keyword", dropId: "x" })).toBeNull();
   });
 });

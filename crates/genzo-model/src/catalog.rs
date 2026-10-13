@@ -122,6 +122,16 @@ string_enum!(
 );
 
 string_enum!(
+    /// フォルダの状態（`folder.status`。FILE-04。スキーマの版 12）。
+    FolderStatus {
+        /// 見つかった（またはまだ確かめていない）。
+        Ok => "ok",
+        /// ボリュームはつながっているのに、フォルダが見つからない（アプリの外で移動・名前の変更・削除された）。
+        Missing => "missing",
+    }
+);
+
+string_enum!(
     /// 撮影日時の UTC を推定するのに使ったオフセットの出どころ（`asset.tz_source`。レビュー R-18）。
     TzSource {
         /// ファイルのメタデータ（EXIF の OffsetTimeOriginal、動画の作成日時の `+09:00` など）に記録されていた。
@@ -342,6 +352,7 @@ mod tests {
         check(ColorLabel::ALL);
         check(FileRole::ALL);
         check(FileStatus::ALL);
+        check(FolderStatus::ALL);
         check(TzSource::ALL);
         check(FileOpKind::ALL);
         check(FileOpState::ALL);

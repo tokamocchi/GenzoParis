@@ -1,5 +1,5 @@
 // ショートカットの一覧（UX-02）の内容。登録は App.tsx（全体。キーワード・コレクションの B・Ctrl / ⌘ + K・N、スタック・仮想コピーの
-// Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + ' を含む）・library/Grid.tsx（グリッドの移動・Enter）・
+// Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + ' を含む）・library/Grid.tsx（グリッドの移動・Enter・タイムラインの T）・
 // viewer/Loupe.tsx（I・Z・等倍表示の Esc）・develop/DevelopView.tsx（W・R・Z・J・I・\・Y・
 // Shift ＋ Y と、切り抜き・スポイト・等倍表示の間の Esc・Enter）が持つ。ここは表示用の写しなので、キーを変えたらここも直す。
 
@@ -19,6 +19,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "表示",
     items: [
       { keys: ["g"], label: "グリッド" },
+      { keys: ["t"], label: "タイムライン表示の切り替え（グリッド。撮影日・イベントの見出しを入れて撮影日時の順に並べる）" },
       { keys: ["e"], label: "ルーペ" },
       { keys: ["d"], label: "現像" },
       { keys: ["Escape"], label: "グリッドに戻る（等倍表示・切り抜き・スポイトの間は、それを終える）" },
@@ -92,6 +93,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     items: [
       { keys: ["mod+shift+i"], label: "取り込み" },
       { keys: ["mod+shift+e"], label: "書き出し" },
+      { keys: ["F2"], label: "ファイルの名前を変える（グリッド・ルーペ。1 枚なら名前を入れる、複数ならテンプレート）" },
       {
         keys: ["Delete", "Backspace"],
         label:

@@ -8,7 +8,8 @@
 //   候補なしで動く（コーデックの欄は候補があるときだけ出す）。
 // - 長辺の画素数・動画の長さ・フレームレートの範囲（VID-03）は「詳しい条件」の中に置く（入力は全角の数字も
 //   読む。フォーカスを外したとき・Enter・入力から 600 ms 後に反映する）。マスターだけ（仮想コピーを除く。LIB-13）と
-//   スタックをすべて展開して表示（LIB-12。保存した折りたたみの状態は変えない）も同じ場所に置く。
+//   スタックをすべて展開して表示（LIB-12。保存した折りたたみの状態は変えない）・見つからない写真だけ（FILE-04）も
+//   同じ場所に置く。
 // - キーワードでの絞り込み（LIB-09。左のパネルのキーワードの名前で選ぶ）と、表示中のコレクション
 //   （LIB-10・LIB-11）は、名前の札（×で外す）で示す（OrganizeChips）。
 
@@ -61,6 +62,7 @@ import {
   utcToLocalDate,
 } from "./filterLogic";
 import { COLLECTION_KIND_LABEL, collectionPathText } from "./collectionLogic";
+import { isMissingOnly, missingOnlyPatch } from "./fileOpsLogic";
 import { keywordPath, keywordPathText } from "./keywordLogic";
 import "./library.css";
 
@@ -434,7 +436,7 @@ function MoreConditions({ filter }: { filter: SearchFilter }) {
         className={`btn small${count > 0 ? " active" : ""}`}
         aria-expanded={open}
         aria-controls={panelId}
-        title="長辺の画素数・動画の長さ・フレームレート・仮想コピーで絞り込む、スタックをすべて展開して表示する"
+        title="長辺の画素数・動画の長さ・フレームレート・仮想コピー・見つからない写真で絞り込む、スタックをすべて展開して表示する"
         onClick={() => setOpen((o) => !o)}
       >
         詳しい条件{count > 0 ? `（${count}）` : ""} ▾
@@ -459,6 +461,14 @@ function MoreConditions({ filter }: { filter: SearchFilter }) {
               onChange={(e) => actions.setFilter({ expand_stacks: e.target.checked })}
             />
             スタックをすべて展開して表示（折りたたみの状態は変えない）
+          </label>
+          <label className="lib-filter-check" title="元ファイルが見つからない写真（移動・削除された、フォルダの名前が変わったなど）">
+            <input
+              type="checkbox"
+              checked={isMissingOnly(filter)}
+              onChange={(e) => actions.setFilter(missingOnlyPatch(e.target.checked))}
+            />
+            見つからない写真だけ（元ファイルが見つからないもの）
           </label>
           <p className="hint">
             下限・上限ともその値を含みます。動画の長さ・フレームレートを指定すると、写真と、その値の分からない動画は

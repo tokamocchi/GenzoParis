@@ -9,17 +9,26 @@
 //   ほかの絞り込みの条件はそのまま残す。
 // - 行の開閉と「サブフォルダを含める」は、ブラウザに保存する（prefs.ts）。行の開閉はフォルダの ID に
 //   結びつくので、カタログごとに分ける。
+// - フォルダの印（FILE-03・FILE-04）: つながっていないドライブのフォルダは薄く「未接続」、見つからないフォルダは
+//   「!」、見つからない写真のあるフォルダはその数を出す。つながっていないドライブの名前は一覧の下に出す。
+//   ドライブのつながりは、ウィンドウに戻ったときに確かめ直す（state/files.ts の refreshVolumes）。
+// - フォルダの右クリック（FILE-02・FILE-04）: 写真をここへ移す・フォルダを作る・名前の変更・移動・見つからない
+//   写真の確認と表示・場所の指定し直し。写真をフォルダに落とすと、移動のダイアログを開く（library/photoDrag.ts）。
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import * as core from "../api/core";
-import type { CatalogStats, FolderId, FolderInfo } from "../api/types";
+import type { CatalogStats, FolderId, FolderInfo, VolumeInfo } from "../api/types";
+import { MENU_SEPARATOR, type MenuAt, MenuButton, type MenuEntry, PopupMenu } from "../components/Menu";
 import { Section } from "../components/Section";
 import { actions, useApp } from "../state/app";
+import { openMoveFiles, openRelink, refreshVolumes, showMissingOnly, startCheckMissing } from "../state/files";
 import { CollectionPanel } from "./CollectionPanel";
-import { ancestorKeys, buildFolderTree, type FolderNode, visibleFolderRows } from "./folderTree";
+import { folderMarks, offlineVolumesText } from "./fileOpsLogic";
+import { ancestorKeys, buildFolderTree, folderName, type FolderNode, visibleFolderRows } from "./folderTree";
 import { KeywordPanel } from "./KeywordPanel";
 import "./library.css";
+import { usePhotoDrag } from "./photoDrag";
 import { catalogKey, loadBoolean, loadJson, save } from "./prefs";
 
 /** 評価などの変更（detailsVersion）の後に、カタログの件数を読み直すまでの時間（ms。仮置き）。 */
@@ -64,7 +73,10 @@ export function LibraryLeftPanel() {
   const openKey = catalogKey("folderOpen", catalogPath);
 
   const [folders, setFolders] = useState<FolderInfo[] | null>(null);
+  const [volumes, setVolumes] = useState<VolumeInfo[] | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ at: MenuAt; folder: FolderInfo } | null>(null);
+  const drag = usePhotoDrag();
   const [reload, setReload] = useState(0);
   const [stats, setStats] = useState<CatalogStats | null>(null);
   const [subPref, setSubPref] = useState(() => loadBoolean("includeSubfolders", true));
@@ -73,6 +85,7 @@ export function LibraryLeftPanel() {
     // カタログが変わった: そのカタログの開閉を読み直し、前のカタログのフォルダを出さない（描画中に直す）。
     setOpenState({ key: openKey, open: loadOpen(openKey) });
     setFolders(null);
+    setVolumes(null);
     setStats(null);
   }
   const open = openState.open;
@@ -94,6 +107,32 @@ export function LibraryLeftPanel() {
       alive = false;
     };
   }, [foldersVersion, reload]);
+
+  // ボリュームの一覧（つながっていないドライブの案内。フォルダの一覧と一緒に読み直す）。
+  useEffect(() => {
+    let alive = true;
+    core
+      .volumes(false)
+      .then((v) => alive && setVolumes(v))
+      .catch((e: unknown) => console.warn("ボリュームの一覧を読めません", e));
+    return () => {
+      alive = false;
+    };
+  }, [foldersVersion, reload]);
+
+  // ウィンドウに戻ったとき（ドライブをつないだ・外した後など）に、ドライブのつながりを確かめ直す。
+  useEffect(() => {
+    let alive = true;
+    const onFocus = () =>
+      void refreshVolumes().then((v) => {
+        if (alive && v) setVolumes(v);
+      });
+    window.addEventListener("focus", onFocus);
+    return () => {
+      alive = false;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
 
   // カタログの件数（取り込み・削除の後はすぐに、仮想コピーの追加などの後は落ち着いてから読み直す。取り込み中は
   // state/app.ts が合図（foldersVersion）を IMPORT_REFRESH_MS に 1 回にまとめる）。
@@ -121,6 +160,8 @@ export function LibraryLeftPanel() {
   }, [foldersVersion, detailsVersion]);
 
   const tree = useMemo(() => buildFolderTree(folders ?? []), [folders]);
+  const byId = useMemo(() => new Map((folders ?? []).map((f) => [f.folder_id, f])), [folders]);
+  const offlineText = volumes ? offlineVolumesText(volumes) : null;
   const rows = visibleFolderRows(tree, (key, depth) => isOpenIn(open, key, depth));
 
   // 選んだフォルダ（外から変わった場合を含む）が見えるように、親の行を開く。
@@ -158,6 +199,71 @@ export function LibraryLeftPanel() {
     if (folderId !== null) actions.setFilter({ include_subfolders: v });
   };
 
+  const recheckVolumes = () =>
+    void refreshVolumes(true).then((v) => {
+      if (!v) return;
+      setVolumes(v);
+      const text = offlineVolumesText(v);
+      actions.notify("info", text ? `ドライブのつながりを確かめました。${text}` : "ドライブのつながりを確かめました（すべてつながっています）");
+    });
+
+  // フォルダの操作（右クリック・行の「…」）。
+  const folderMenu = (f: FolderInfo): MenuEntry[] => {
+    const marks = folderMarks(f);
+    const isRoot = f.parent_id === null || f.rel_path === "";
+    const name = folderName(f);
+    const targets = actions.targets().length;
+    return [
+      {
+        label: targets > 0 ? `操作の対象の写真（${targets.toLocaleString("ja-JP")} 枚）をここへ移す…` : "操作の対象の写真をここへ移す…",
+        disabled: targets === 0 || !marks.droppable,
+        onSelect: () => openMoveFiles(f.folder_id),
+      },
+      MENU_SEPARATOR,
+      {
+        label: "フォルダを作る…",
+        disabled: !marks.droppable,
+        onSelect: () => actions.openDialog({ kind: "folder_name", mode: "create", folderId: f.folder_id }),
+      },
+      {
+        label: "名前を変える…",
+        disabled: isRoot || !marks.droppable,
+        onSelect: () => actions.openDialog({ kind: "folder_name", mode: "rename", folderId: f.folder_id, currentName: name }),
+      },
+      {
+        label: "移動…",
+        disabled: isRoot || !marks.droppable,
+        onSelect: () => actions.openDialog({ kind: "move_folder", folderId: f.folder_id }),
+      },
+      MENU_SEPARATOR,
+      {
+        label: "見つからない写真を確かめる",
+        disabled: marks.offline,
+        onSelect: () => void startCheckMissing(f.folder_id, name),
+      },
+      {
+        label: "見つからない写真だけを表示",
+        onSelect: () => showMissingOnly(f.folder_id),
+      },
+      {
+        label: "場所を指定し直す…",
+        disabled: isRoot,
+        onSelect: () => actions.openDialog({ kind: "relocate_folder", folderId: f.folder_id }),
+      },
+      {
+        label: "カタログから除く…",
+        onSelect: () => actions.openDialog({ kind: "remove_folder", folderId: f.folder_id }),
+      },
+    ];
+  };
+  const allFoldersMenu = (): MenuEntry[] => [
+    { label: "見つからない写真を確かめる（すべて）", onSelect: () => void startCheckMissing(null) },
+    { label: "見つからない写真だけを表示", onSelect: () => showMissingOnly() },
+    { label: "見つからない写真を探す…", onSelect: () => openRelink(null) },
+    MENU_SEPARATOR,
+    { label: "ドライブのつながりを確かめ直す", onSelect: recheckVolumes },
+  ];
+
   return (
     <div className="lib-left">
       <Section id="lib.catalog" title="カタログ">
@@ -181,7 +287,7 @@ export function LibraryLeftPanel() {
         </div>
       </Section>
 
-      <Section id="lib.folders" title="フォルダ">
+      <Section id="lib.folders" title="フォルダ" right={<MenuButton label="…" title="フォルダの操作" items={allFoldersMenu} />}>
         {folderError && (
           <div>
             <p className="error-text">フォルダの一覧を読めません: {folderError}</p>
@@ -211,22 +317,61 @@ export function LibraryLeftPanel() {
                   {r.hasChildren ? (r.open ? "▾" : "▸") : ""}
                 </button>
                 <span className="lib-tree-segs">
-                  {r.node.segments.map((seg, i) => (
-                    <Fragment key={seg.id}>
-                      {i > 0 && <span className="lib-tree-sep">›</span>}
-                      <span
-                        className={`lib-tree-seg${seg.id === folderId ? " on" : ""}`}
-                        title={seg.fullPath}
-                        onClick={() => selectFolder(seg.id)}
-                      >
-                        {seg.name}
-                      </span>
-                    </Fragment>
-                  ))}
+                  {r.node.segments.map((seg, i) => {
+                    const info = byId.get(seg.id);
+                    const marks = info ? folderMarks(info) : null;
+                    const over = drag?.target?.kind === "folder" && drag.target.id === seg.id;
+                    const cls = [
+                      "lib-tree-seg",
+                      seg.id === folderId ? "on" : "",
+                      marks?.offline ? "offline" : "",
+                      marks?.missing ? "missing" : "",
+                      over ? (marks?.droppable ? "drop-over" : "drop-no") : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ");
+                    return (
+                      <Fragment key={seg.id}>
+                        {i > 0 && <span className="lib-tree-sep">›</span>}
+                        <span
+                          className={cls}
+                          title={marks?.title ?? seg.fullPath}
+                          onClick={() => selectFolder(seg.id)}
+                          onContextMenu={(e) => {
+                            if (!info) return;
+                            e.preventDefault();
+                            setMenu({ at: { x: e.clientX, y: e.clientY }, folder: info });
+                          }}
+                          data-drop-kind="folder"
+                          data-drop-id={seg.id}
+                          data-drop-ok={marks?.droppable ? "1" : "0"}
+                          data-drop-label={seg.name}
+                        >
+                          {seg.name}
+                        </span>
+                        {marks?.missing && (
+                          <span className="lib-tree-mark warn" aria-label="フォルダが見つかりません">
+                            !
+                          </span>
+                        )}
+                        {marks && !marks.missing && marks.missingFiles > 0 && (
+                          <span className="lib-tree-mark warn" aria-label={`見つからない写真 ${marks.missingFiles} 件`}>
+                            !{marks.missingFiles.toLocaleString("ja-JP")}
+                          </span>
+                        )}
+                      </Fragment>
+                    );
+                  })}
                 </span>
+                {byId.get(r.node.key)?.online === false && <span className="lib-tree-mark muted">未接続</span>}
               </div>
             ))}
           </div>
+        )}
+        {offlineText && (
+          <p className="hint" title="つなぐと、そのドライブの写真の表示・現像・書き出しができます">
+            {offlineText}
+          </p>
         )}
         <label className="check" title="選んだフォルダの下のフォルダの写真も表示する">
           <input type="checkbox" checked={subChecked} onChange={(e) => changeSub(e.target.checked)} />
@@ -239,6 +384,7 @@ export function LibraryLeftPanel() {
         </div>
       </Section>
 
+      {menu && <PopupMenu at={menu.at} items={folderMenu(menu.folder)} onClose={() => setMenu(null)} label="フォルダの操作" />}
       <CollectionPanel />
       <KeywordPanel />
     </div>

@@ -211,6 +211,7 @@ pub fn populate_dummy(catalog: &mut Catalog, spec: &DummySpec) -> Result<DummyRe
                     offset: Some("+00:00".to_owned()),
                     tz_source: TzSource::Exif,
                     tz_assumed: Some("+00:00".to_owned()),
+                    basis: None,
                     correction_s: 0,
                     utc: Some(t),
                 },
@@ -240,6 +241,7 @@ pub fn populate_dummy(catalog: &mut Catalog, spec: &DummySpec) -> Result<DummyRe
                         width: Some(3840),
                         height: Some(2160),
                         creation_time: capture.raw.clone(),
+                        ..Default::default()
                     }),
                     capture,
                     error: None,

@@ -62,6 +62,11 @@
 //! | `render` | GPU → CPU の切り替え、画面のプロファイル（[`Core::set_display_profile`]） | 2.4 節・6.3 節、IQ-05 |
 //! | `region` | 表示範囲の描画（[`Core::render_region`]。ルーペの等倍表示・拡大とパン。P0 の最新の 1 件だけ、取り消しあり） | PRV-03・LIB-02、2.7 節・6.1 節 |
 //! | `export` | 書き出し（[`Core::export`]） | EXP-01・04、2.4 節・6.4 節 |
+//! | `capture_time` | 撮影日時の一括修正（[`Core::capture_devices`]・[`Core::plan_capture_time_edit`]・[`Core::edit_capture_times`]・[`Core::undo_capture_time_edit`]。ずらす・基準の写真に合わせる・タイムゾーンの指定。カタログの中だけで、元のファイルには書かない） | LIB-16、3.13 節 |
+//! | `timeline` | 写真と動画の統合タイムライン（[`Core::timeline`]。表示中の検索結果を撮影日と、撮影の間隔によるイベントでまとめる） | ORG-01、3.13 節 |
+//! | `volumes` | ボリュームの識別（OS のボリューム ID。取れなければパスの先頭。OS ごとの取り方は `volumes::os`）・つながりの確認（[`Core::volumes`]・[`Core::refresh_volumes`]）・以前の形式のボリュームの移し替え | FILE-03、3.3 節・3.14 節 |
+//! | `fileops` | アプリの中でのファイル操作（[`Core::move_files`]・[`Core::rename_files`]・[`Core::create_folder`]・[`Core::rename_folder`]・[`Core::move_folder`]・[`Core::remove_folder`]）と、途中で終わった移動・名前の変更の確定 | FILE-02、6.4 節・3.14 節、DATA-07 |
+//! | `relink` | 見つからない写真の確認（[`Core::check_missing`]）・再リンクの候補と結び付け（[`Core::find_relink_candidates`]・[`Core::relink_files`]）・フォルダの場所の指定し直し（[`Core::relocate_folder`]） | FILE-04、3.3 節・3.14 節 |
 //! | `delete` | 削除（[`Core::plan_delete`]・[`Core::execute_delete`]）とファイル操作の確定 | FILE-01、6.4 節、DATA-07 |
 //! | `settings` | 設定（[`Core::settings`]・[`Core::update_settings`]） | SYS-05 |
 //! | [`maintenance`] | バックアップ・詳細チェック・復元（[`prepare_restore`]・[`apply_restore`]）、ジョブの操作 | SYS-04、DATA-04・05 |
@@ -75,8 +80,9 @@
 //! - **実行モデル**: 1.3 節の tokio の代わりに、同期の API ＋ 内部のスレッド（genzo-jobs のスケジューラ）
 //!   ＋ イベントのチャネル。DB 書き込みスレッドの代わりにカタログの接続を `Mutex` で守る。GPU スレッドは
 //!   置かない（`core` の doc）。
-//! - **ボリューム**: OS のボリューム ID（FILE-03、v1）の代わりに、パスの先頭（`/`・`C:\`）をボリュームと
-//!   する（`paths` の doc）。
+//! - **ボリューム**: OS のボリューム ID（FILE-03。`volumes` の doc）を取れないとき（コンテナの中・tmpfs・
+//!   Windows の UNC の共有と割り当てたネットワークドライブなど）は、MVP と同じくパスの先頭（`/`・`C:\`）を
+//!   ボリュームとする（`paths` の doc）。Windows・macOS の ID の取り方は実機で未確認。
 //! - **書き出しの原本の照合**: カタログ全体ではなく、今回の入力、書き出し先のフォルダにあるカタログの
 //!   ファイル、上書きの設定では書き出すファイルと同じ名前のカタログのファイルを保護の対象にする
 //!   （`export` の doc）。
@@ -108,6 +114,7 @@
 //!   描く。genzo-gpu の `render_preview` が [`genzo_pipeline::PreviewRequest::uncropped`] を見ないため）。
 
 mod before;
+mod capture_time;
 pub mod command;
 pub mod config;
 mod copy_import;
@@ -118,6 +125,7 @@ mod develop;
 pub mod error;
 pub mod events;
 mod export;
+mod fileops;
 mod identity;
 mod import;
 mod jobs;
@@ -130,17 +138,21 @@ mod organize;
 mod paths;
 mod previews;
 mod region;
+mod relink;
 mod render;
 mod search;
 mod settings;
 mod stacks;
+mod timeline;
 pub mod types;
+mod volumes;
 
+pub use capture_time::{CAPTURE_TIME_EXAMPLES, CAPTURE_ZONE_RANGE_MINUTES};
 pub use command::{Command, Response};
 pub use config::{CoreConfig, GpuMode, IMPORT_BATCH_FILES, WorkerLaunch};
 pub use core::{
-    CopyImportHook, CopyImportStage, Core, CoreHooks, DevelopSaveStage, RegionRequestStage,
-    SettingsUpdateStage,
+    CopyImportHook, CopyImportStage, Core, CoreHooks, DevelopSaveStage, FileOpHook, FileOpStage,
+    RegionRequestStage, SettingsUpdateStage,
 };
 pub use delete::{OsTrash, TrashBackend};
 pub use develop::{HISTORY_LABEL_GENERIC, HISTORY_LABEL_PASTE, describe_change};
@@ -153,6 +165,7 @@ pub use naming::{FolderRule, RenameRule};
 pub use organize::MAX_KEYWORD_HITS;
 pub use previews::{L0_FORMAT_VERSION, L1_FORMAT_VERSION};
 pub use region::{MAX_REGION_OUTPUT_PIXELS, MAX_REGION_SCALE, MAX_REGION_SOURCE_PIXELS};
+pub use relink::{MAX_RELINK_CANDIDATES, MAX_RELINK_TARGETS};
 pub use search::MAX_RANGE_LEN;
 pub use settings::{
     KEY_DEFAULT_EXPORT_COLOR_SPACE, KEY_DEFAULT_UTC_OFFSET_MINUTES, KEY_HASH_IN_BACKGROUND,
@@ -161,13 +174,16 @@ pub use settings::{
     UTC_OFFSET_RANGE_MINUTES,
 };
 pub use stacks::MAX_AUTO_STACK_GAP_SECONDS;
+pub use timeline::{MAX_TIMELINE_GAP_SECONDS, MAX_TIMELINE_GROUPS};
 pub use types::*;
+pub use volumes::{OsVolumes, VolumeIdentity, VolumeProbe};
 
 // 型付きのメソッドの引数・応答で使う、依存先の crate の型（UI がまとめて使えるように）。
+pub use genzo_catalog::{MAX_CAPTURE_SHIFT_SECONDS, MAX_CAPTURE_TIME_EDITS};
 pub use genzo_model::{
-    AssetId, AssetKind, CollectionId, CollectionKind, ColorLabel, DevelopSettings, ExportFormat,
-    ExportSettings, ExportSize, FileStatus, Flag, KeywordId, OutputColorSpace, Rating,
-    RenderQuality, SmartCondition, SmartRule, StackId, VariantId,
+    AssetId, AssetKind, CaptureTime, CollectionId, CollectionKind, ColorLabel, DevelopSettings,
+    ExportFormat, ExportSettings, ExportSize, FileStatus, Flag, KeywordId, OutputColorSpace,
+    Rating, RenderQuality, SmartCondition, SmartRule, StackId, VariantId, ZoneMode,
 };
 pub use genzo_worker::{Lane, TestHook, TestHookOutput};
 

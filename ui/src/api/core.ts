@@ -13,6 +13,13 @@ import type {
   CatalogSchema,
   CatalogStats,
   Capabilities,
+  CaptureDevice,
+  CaptureDeviceKey,
+  CaptureTarget,
+  CaptureTimeEdit,
+  CaptureTimeEditInfo,
+  CaptureTimePlan,
+  CaptureTimeUndo,
   CollectionId,
   CollectionInfo,
   CollectionKind,
@@ -34,6 +41,7 @@ import type {
   FileCheckReport,
   FileIdentity,
   Flag,
+  FolderId,
   FolderInfo,
   FrameInfo,
   HistoryEntryId,
@@ -64,9 +72,18 @@ import type {
   StackId,
   StackInfo,
   StartupReport,
+  Timeline,
   VariantDetails,
   VariantId,
   VariantKeywords,
+  VolumeInfo,
+  FileMovePlan,
+  FileMoveReport,
+  FileRenamePlan,
+  RelinkReport,
+  RelinkRequest,
+  RelocatePlan,
+  RenameSpec,
 } from "./types";
 
 type ResponseOf<T extends Response["type"]> = Extract<Response, { type: T }>;
@@ -370,4 +387,81 @@ export const identifyFile = async (path: string): Promise<FileIdentity> =>
 /** コピー取り込みの設定の、名前の例（見本の写真のコピー先。設定の誤りは error）。 */
 export const importNamePreview = async (copy: CopySettings): Promise<NamePreview> =>
   strip(await execute({ type: "import_name_preview", copy }, "name_preview"));
+
+// ---------------------------------------------------------------------------
+// 撮影日時の一括修正（LIB-16）・タイムライン（ORG-01）
+// ---------------------------------------------------------------------------
+
+/** 機材の一覧（カメラの表示名・シリアル番号・写真か動画か）。 */
+export const captureDevices = async (): Promise<CaptureDevice[]> =>
+  (await execute({ type: "capture_devices" }, "capture_devices")).devices;
+/** 写真の機材。 */
+export const captureDeviceOf = async (variant_id: VariantId): Promise<CaptureDeviceKey> =>
+  strip(await execute({ type: "capture_device_of", variant_id }, "capture_device"));
+/** 撮影日時の修正の見込み（何も変えない）。 */
+export const planCaptureTimeEdit = async (target: CaptureTarget, edit: CaptureTimeEdit): Promise<CaptureTimePlan> =>
+  strip(await execute({ type: "plan_capture_time_edit", target, edit }, "capture_time_plan"));
+/** 撮影日時を修正する（履歴に残す）。 */
+export const editCaptureTimes = async (target: CaptureTarget, edit: CaptureTimeEdit): Promise<CaptureTimePlan> =>
+  strip(await execute({ type: "edit_capture_times", target, edit }, "capture_time_plan"));
+/** 撮影日時の修正の履歴（新しい順）。 */
+export const captureTimeEdits = async (): Promise<CaptureTimeEditInfo[]> =>
+  (await execute({ type: "capture_time_edits" }, "capture_time_edits")).edits;
+/** 最後の撮影日時の修正を取り消す（履歴がなければ null）。 */
+export const undoCaptureTimeEdit = async (): Promise<CaptureTimeUndo | null> =>
+  (await execute({ type: "undo_capture_time_edit" }, "capture_time_undone")).undone;
+/** 表示中の検索結果のタイムライン（撮影日時の順のときだけ。古い世代なら stale）。 */
+export const timeline = async (generation: number, gap_seconds: number): Promise<Timeline> =>
+  strip(await execute({ type: "timeline", generation, gap_seconds }, "timeline"));
+
+// ---------------------------------------------------------------------------
+// ボリューム（FILE-03）・アプリの中でのファイル操作（FILE-02）・見つからない写真と再リンク（FILE-04）
+// ---------------------------------------------------------------------------
+
+/** ボリュームの一覧（refresh なら、つながりを確かめ直す）。 */
+export const volumes = async (refresh = false): Promise<VolumeInfo[]> =>
+  (await execute({ type: "volumes", refresh }, "volumes")).volumes;
+/** 写真の移動の予定（何も変えない）。 */
+export const planMoveFiles = async (variant_ids: VariantId[], dest_folder: FolderId): Promise<FileMovePlan> =>
+  strip(await execute({ type: "plan_move_files", variant_ids, dest_folder }, "move_plan"));
+/** 写真を移動する（ジョブ）。 */
+export const moveFiles = async (variant_ids: VariantId[], dest_folder: FolderId): Promise<number> =>
+  (await execute({ type: "move_files", variant_ids, dest_folder }, "job_started")).job_id;
+/** 写真の名前の変更の予定（何も変えない）。 */
+export const planRenameFiles = async (variant_ids: VariantId[], spec: RenameSpec): Promise<FileRenamePlan> =>
+  strip(await execute({ type: "plan_rename_files", variant_ids, spec }, "rename_plan"));
+/** 写真の名前を変える。 */
+export const renameFiles = async (variant_ids: VariantId[], spec: RenameSpec): Promise<FileMoveReport> =>
+  strip(await execute({ type: "rename_files", variant_ids, spec }, "files_moved"));
+/** フォルダを作る。 */
+export const createFolder = async (parent_id: FolderId, name: string): Promise<FolderInfo> =>
+  strip(await execute({ type: "create_folder", parent_id, name }, "folder"));
+/** フォルダの名前を変える。 */
+export const renameFolder = async (folder_id: FolderId, name: string): Promise<FolderInfo> =>
+  strip(await execute({ type: "rename_folder", folder_id, name }, "folder"));
+/** フォルダを別のフォルダの中へ移す。 */
+export const moveFolder = async (folder_id: FolderId, parent_id: FolderId): Promise<FolderInfo> =>
+  strip(await execute({ type: "move_folder", folder_id, parent_id }, "folder"));
+/** 写真が登録されていないフォルダ（と配下）をカタログから除く（ディスクには触れない）。除いたフォルダの数。 */
+export const removeFolder = async (folder_id: FolderId): Promise<number> =>
+  (await execute({ type: "remove_folder", folder_id }, "updated")).count;
+/** 見つからない写真を確かめる（ジョブ。フォルダを与えれば、その配下だけ）。 */
+export const checkMissing = async (folder_id: FolderId | null = null): Promise<number> =>
+  (await execute({ type: "check_missing", folder_id }, "job_started")).job_id;
+/** 再リンクの候補を探す（ジョブ。variant_ids が null なら、すべての見つからない写真）。 */
+export const findRelinkCandidates = async (
+  variant_ids: VariantId[] | null,
+  search_dir: string,
+  recursive = true,
+): Promise<number> =>
+  (await execute({ type: "find_relink_candidates", variant_ids, search_dir, recursive }, "job_started")).job_id;
+/** 見つからないファイルを結び付け直す。 */
+export const relinkFiles = async (links: RelinkRequest[]): Promise<RelinkReport> =>
+  strip(await execute({ type: "relink_files", links }, "relinked"));
+/** フォルダの場所の指定し直しの予定。 */
+export const planRelocateFolder = async (folder_id: FolderId, path: string): Promise<RelocatePlan> =>
+  strip(await execute({ type: "plan_relocate_folder", folder_id, path }, "relocate_plan"));
+/** フォルダの場所を指定し直す。 */
+export const relocateFolder = async (folder_id: FolderId, path: string): Promise<RelocatePlan> =>
+  strip(await execute({ type: "relocate_folder", folder_id, path }, "relocate_plan"));
 export type { DisplayInfo };

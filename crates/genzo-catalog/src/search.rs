@@ -25,7 +25,7 @@ use rusqlite::{Connection, params_from_iter};
 
 use crate::catalog::Catalog;
 use crate::error::{CatalogError, Result};
-use crate::register::capture_from_columns;
+use crate::register::{CaptureColumns, capture_from_columns};
 use crate::stack::StackBadge;
 use crate::text::{LIKE_ESCAPE, parse_text_query};
 use crate::util::{i64_to_u32, ids_to_json, parse_enum, utc_to_db_string};
@@ -609,7 +609,8 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
                 (SELECT count(*) FROM stack_member o
                   WHERE o.stack_id = sm.stack_id
                     AND (o.position < sm.position
-                         OR (o.position = sm.position AND o.variant_id < sm.variant_id))) + 1
+                         OR (o.position = sm.position AND o.variant_id < sm.variant_id))) + 1,
+                a.tz_basis
          FROM json_each(?1) j
          JOIN variant v ON v.id = j.value
          JOIN asset a ON a.id = v.asset_id
@@ -660,14 +661,15 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
             rating: Rating::try_from(rating).map_err(|e| CatalogError::Corrupt(e.to_string()))?,
             flag: Flag::try_from(flag).map_err(|e| CatalogError::Corrupt(e.to_string()))?,
             color_label: color_label.as_deref().map(parse_enum).transpose()?,
-            capture: capture_from_columns(
-                row.get(10)?,
-                row.get(11)?,
-                &tz_source,
-                row.get(13)?,
-                row.get(14)?,
-                utc.as_deref(),
-            )?,
+            capture: capture_from_columns(CaptureColumns {
+                raw: row.get(10)?,
+                offset: row.get(11)?,
+                tz_source: &tz_source,
+                tz_assumed: row.get(13)?,
+                basis: row.get(31)?,
+                correction_s: row.get(14)?,
+                utc: utc.as_deref(),
+            })?,
             camera: row.get(16)?,
             lens: row.get(17)?,
             width: row

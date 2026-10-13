@@ -245,6 +245,7 @@ pub(crate) fn filter_of(s: &Session, a: &FilterArgs) -> CliResult<SearchFilter> 
         folder_id,
         include_subfolders: !a.no_subfolders,
         masters_only: a.masters_only,
+        file_statuses: a.missing.then(|| vec![genzo_api::FileStatus::Missing]),
         keywords,
         collection_id: a.collection,
         smart_rule,
@@ -253,7 +254,7 @@ pub(crate) fn filter_of(s: &Session, a: &FilterArgs) -> CliResult<SearchFilter> 
 }
 
 /// フォルダのパスからカタログのフォルダを探す（パスのままと、リンクを解決したものの両方で比べる）。
-fn find_folder(s: &Session, path: &Path) -> CliResult<genzo_model::FolderId> {
+pub(crate) fn find_folder(s: &Session, path: &Path) -> CliResult<genzo_model::FolderId> {
     let mut candidates = Vec::new();
     if let Ok(p) = std::path::absolute(path) {
         candidates.push(p);

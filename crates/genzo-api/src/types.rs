@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use genzo_model::{
     AssetId, AssetKind, CaptureTime, CollectionId, CollectionKind, ColorLabel, DevelopSettings,
     FileId, FileRole, FileStatus, Flag, FolderId, GpsCoord, HistoryEntryId, IptcMetadata,
@@ -94,6 +94,13 @@ pub enum JobKind {
     /// ファイルの内容のハッシュ（全体の BLAKE3）の計算（ORG-03。3.11 節。専用の 1 本のスレッドで、
     /// 現像などの対話の処理の合間に進める）。
     HashFiles,
+    /// 写真の移動（FILE-02。別のボリュームへはコピーして照合し、元をゴミ箱へ移す）。
+    MoveFiles,
+    /// 見つからない写真の確認（FILE-04。すべてのファイルの存在を確かめて印を付ける。内容のハッシュの計算と
+    /// 同じ 1 本のスレッド）。
+    CheckMissing,
+    /// 再リンクの候補の探索（FILE-04。利用者が選んだフォルダから、見つからないファイルと同じものを探す）。
+    FindRelinkCandidates,
 }
 
 /// ジョブの状態。
@@ -164,6 +171,12 @@ pub enum JobResult {
     },
     /// ファイルの内容のハッシュの計算。
     HashFiles(HashReport),
+    /// 写真の移動。
+    MoveFiles(FileMoveReport),
+    /// 見つからない写真の確認。
+    CheckMissing(MissingCheckReport),
+    /// 再リンクの候補の探索。
+    RelinkCandidates(RelinkSearch),
 }
 
 /// ファイルの問題（読めない・登録できないなど）。
@@ -879,6 +892,10 @@ pub struct ShownVariants {
 pub struct VariantDetails {
     /// グリッドと同じ内容。
     pub summary: VariantSummary,
+    /// カメラの本体のシリアル番号（LIB-16 の機材の区別。記録しないカメラ・版 11 より前に取り込んだものは
+    /// `null`）。
+    #[serde(default)]
+    pub camera_serial: Option<String>,
     /// ISO 感度。
     pub iso: Option<u32>,
     /// 絞り値。
@@ -1101,9 +1118,19 @@ pub struct FolderInfo {
     pub parent_id: Option<FolderId>,
     /// ボリューム内の相対パス（'/' 区切り）。
     pub rel_path: String,
-    /// 絶対パス（マウント先が分からなければ `None`）。
+    /// 絶対パス（マウント先が分からなければ `None`。つながっていないボリュームは、最後に確かめたマウント先からの
+    /// パスで、表示用）。
     #[serde(serialize_with = "lossy_path")]
     pub path: Option<PathBuf>,
+    /// ボリュームがつながっているか（FILE-03。つながっていないボリュームのフォルダは「オフライン」と表示する）。
+    #[serde(default = "default_true")]
+    pub online: bool,
+    /// フォルダが見つからない（ボリュームはつながっているのに、フォルダがない。FILE-04）。
+    #[serde(default)]
+    pub missing: bool,
+    /// このフォルダ（配下は含まない）の見つからないファイルの数。
+    #[serde(default)]
+    pub missing_files: u64,
 }
 
 /// ファイルの状態の確認の結果（3.3 節）。
@@ -1981,4 +2008,516 @@ pub struct Capabilities {
     pub worker_version: String,
     /// GPU（使えれば、アダプターの説明）。
     pub gpu: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// 撮影日時の一括修正（LIB-16）・タイムライン（ORG-01）
+// ---------------------------------------------------------------------------
+
+/// 機材（カメラの表示名・本体のシリアル番号・写真か動画か。LIB-16。genzo-catalog の `DeviceKey`）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CaptureDeviceKey {
+    /// カメラの表示名（分からなければ `null`）。
+    pub camera: Option<String>,
+    /// 本体のシリアル番号（記録しないカメラ・版 11 より前に取り込んだものは `null`）。
+    pub serial: Option<String>,
+    /// 写真か動画か。
+    pub kind: AssetKind,
+}
+
+impl CaptureDeviceKey {
+    pub(crate) fn to_catalog(&self) -> genzo_catalog::DeviceKey {
+        genzo_catalog::DeviceKey {
+            camera: self.camera.clone(),
+            serial: self.serial.clone(),
+            kind: self.kind,
+        }
+    }
+}
+
+impl From<genzo_catalog::DeviceKey> for CaptureDeviceKey {
+    fn from(k: genzo_catalog::DeviceKey) -> Self {
+        Self {
+            camera: k.camera,
+            serial: k.serial,
+            kind: k.kind,
+        }
+    }
+}
+
+/// 機材と数（[`crate::Core::capture_devices`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureDevice {
+    /// 機材。
+    #[serde(flatten)]
+    pub key: CaptureDeviceKey,
+    /// 写真・動画の数（asset の数。仮想コピーは数えない）。
+    pub assets: u64,
+    /// 撮影日時の分かる数。
+    pub with_time: u64,
+    /// 修正（時計のずれの補正・タイムゾーンの指定）のある数。
+    pub adjusted: u64,
+    /// 最も早い撮影日時（既定のタイムゾーンの時刻。RFC 3339）。
+    pub first: Option<DateTime<FixedOffset>>,
+    /// 最も遅い撮影日時（既定のタイムゾーンの時刻）。
+    pub last: Option<DateTime<FixedOffset>>,
+}
+
+/// 撮影日時の修正の対象（[`crate::Core::edit_capture_times`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CaptureTarget {
+    /// 写真（同じ写真の仮想コピーは撮影日時を共有するので 1 枚）。
+    Variants {
+        /// variant。
+        variant_ids: Vec<VariantId>,
+    },
+    /// 機材のすべての写真・動画。
+    Devices {
+        /// 機材（[`crate::Core::capture_devices`] の値）。
+        devices: Vec<CaptureDeviceKey>,
+    },
+}
+
+/// 撮影日時の修正（LIB-16。[`crate::Core::edit_capture_times`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CaptureTimeEdit {
+    /// 時計のずれを足す（秒。正で後の時刻にする）。
+    Shift {
+        /// 秒（±[`genzo_catalog::MAX_CAPTURE_SHIFT_SECONDS`] まで）。
+        seconds: i64,
+    },
+    /// 基準の写真の正しい時刻から差を求めて、対象のすべてをその差だけずらす。
+    Sync {
+        /// 基準の写真（撮影日時の分かるもの）。
+        reference: VariantId,
+        /// 基準の写真の正しい撮影日時（`"2024-05-01T12:34:56"` の形。オフセットを付ければそれで読む）。
+        correct: String,
+        /// `correct` を読むオフセット（分。省略すると基準の写真の表示のオフセット）。
+        #[serde(default)]
+        offset_minutes: Option<i32>,
+    },
+    /// タイムゾーンを指定する。
+    SetZone {
+        /// オフセット（分。-18 時間〜+18 時間）。
+        offset_minutes: i32,
+        /// 読み方（`keep_local`: 記録の時刻をそのタイムゾーンの時刻として読む・`keep_instant`: 撮影した瞬間は
+        /// そのままで、そのタイムゾーンで表示する）。
+        mode: genzo_model::ZoneMode,
+    },
+    /// タイムゾーンの指定を取り消す（時計のずれの補正は保つ）。
+    ClearZone,
+    /// 修正をすべて取り消し、ファイルの値に戻す。
+    Reset,
+}
+
+/// 対象の撮影日時の出どころごとの数（修正の前。撮影日時の分かるもの）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CaptureSourceCounts {
+    /// ファイルにオフセットが記録されていた。
+    pub exif: u64,
+    /// UTC の印（`Z`）だけが記録されていた（動画など）。
+    pub utc_only: u64,
+    /// 記録がなく既定のタイムゾーンで推定した。
+    pub user_default: u64,
+    /// 利用者が指定した。
+    pub user_set: u64,
+}
+
+impl From<genzo_catalog::TzSourceCounts> for CaptureSourceCounts {
+    fn from(c: genzo_catalog::TzSourceCounts) -> Self {
+        Self {
+            exif: c.exif,
+            utc_only: c.utc_only,
+            user_default: c.user_default,
+            user_set: c.user_set,
+        }
+    }
+}
+
+/// 1 枚の修正の例。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureTimeExample {
+    /// asset。
+    pub asset_id: AssetId,
+    /// 主なファイルの名前。
+    pub file_name: String,
+    /// 修正の前。
+    pub before: CaptureTime,
+    /// 修正の後。
+    pub after: CaptureTime,
+}
+
+/// 撮影日時の修正の見込み・結果（[`crate::Core::plan_capture_time_edit`]・[`crate::Core::edit_capture_times`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CaptureTimePlan {
+    /// 対象の写真・動画の数（asset の数）。
+    pub assets: u64,
+    /// 変わる（変えた）数。
+    pub changed: u64,
+    /// 変わらない数（撮影日時の分かるもの）。
+    pub unchanged: u64,
+    /// 撮影日時の分からない数（変えない）。
+    pub without_time: u64,
+    /// 撮影日時の出どころごとの数。
+    pub sources: CaptureSourceCounts,
+    /// ずらす秒数（ずらす・基準の写真に合わせるとき。基準の写真から求めた差）。
+    pub shift_seconds: Option<i64>,
+    /// 変わるものの例（対象の順に最大 [`crate::CAPTURE_TIME_EXAMPLES`] 件）。
+    pub examples: Vec<CaptureTimeExample>,
+    /// 記録した修正（結果のとき。変わったものがなければ `null`。元に戻すのに使う）。
+    pub edit_id: Option<i64>,
+}
+
+/// 撮影日時の修正の履歴の 1 件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureTimeEditInfo {
+    /// ID。
+    pub id: i64,
+    /// 種類（`shift`・`sync`・`set_zone`・`clear_zone`・`reset`）。
+    pub kind: String,
+    /// ずらした秒数（`shift`・`sync`）。
+    pub shift_seconds: Option<i64>,
+    /// 指定したオフセット（`set_zone`。`"+09:00"` の形）。
+    pub zone: Option<String>,
+    /// 指定の読み方（`set_zone`）。
+    pub zone_mode: Option<genzo_model::ZoneMode>,
+    /// 変えた写真・動画の数。
+    pub asset_count: u64,
+    /// 修正した日時（UTC）。
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<genzo_catalog::CaptureEditRecord> for CaptureTimeEditInfo {
+    fn from(r: genzo_catalog::CaptureEditRecord) -> Self {
+        Self {
+            id: r.id,
+            kind: r.kind.as_str().to_owned(),
+            shift_seconds: r.shift_s,
+            zone: r.zone,
+            zone_mode: r.zone_mode,
+            asset_count: r.asset_count,
+            created_at: r.created_at,
+        }
+    }
+}
+
+/// 撮影日時の修正の取り消しの結果（[`crate::Core::undo_capture_time_edit`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureTimeUndo {
+    /// 取り消した修正。
+    pub edit: CaptureTimeEditInfo,
+    /// 戻した写真・動画の数。
+    pub restored: u64,
+}
+
+/// タイムラインのまとまり（ORG-01。[`crate::Core::timeline`]）。撮影日の中の、撮影の間隔で区切ったイベント。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineGroup {
+    /// 検索結果の中の先頭の位置。
+    pub start: u64,
+    /// 写真・動画の数（仮想コピー・折りたたんだスタックの代表を含む、表示する数）。
+    pub count: u64,
+    /// 撮影日（写真の表示のオフセットの現地の日付。`"2024-05-01"`。撮影日時の分からないまとまりは `null`）。
+    pub day: Option<String>,
+    /// その日の最初のまとまりか（日付の見出しを出す）。
+    pub new_day: bool,
+    /// 最初の写真の現地時刻（`"2024-05-01T09:12:05"`。並びの順で最初。分からなければ `null`）。
+    pub first: Option<String>,
+    /// 最後の写真の現地時刻。
+    pub last: Option<String>,
+    /// 写真の数。
+    pub photos: u64,
+    /// 動画の数。
+    pub videos: u64,
+}
+
+/// タイムライン（ORG-01。[`crate::Core::timeline`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Timeline {
+    /// 検索結果の世代。
+    pub generation: u64,
+    /// イベントの区切りに使った間隔（秒。0 ならイベントで分けない）。
+    pub gap_seconds: u32,
+    /// まとまり（検索結果の順。すべてのまとまりの数を足すと検索結果の件数）。
+    pub groups: Vec<TimelineGroup>,
+    /// まとまりが多すぎるため、イベントで分けずに日付だけでまとめたか（[`crate::MAX_TIMELINE_GROUPS`]）。
+    pub events_merged: bool,
+    /// 撮影日の数。
+    pub days: u64,
+    /// 撮影日時の分からない写真・動画の数。
+    pub without_time: u64,
+}
+
+// ---------------------------------------------------------------------------
+// ボリューム（FILE-03）・アプリの中でのファイル操作（FILE-02）・見つからない写真と再リンク（FILE-04）
+// ---------------------------------------------------------------------------
+
+/// ボリューム（ドライブ。FILE-03。[`crate::Core::volumes`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeInfo {
+    /// ボリューム。
+    pub volume_id: VolumeId,
+    /// ボリュームの ID（`uuid:`・`winvol:`・`net:` は OS のボリューム ID、`path:` はパスの先頭から作ったもの）。
+    pub uuid: String,
+    /// ラベル（ボリュームの名前）。
+    pub label: Option<String>,
+    /// マウント先（つながっていれば今のもの、つながっていなければ最後に確かめたもの）。
+    #[serde(serialize_with = "lossy_path")]
+    pub mount_path: Option<PathBuf>,
+    /// つながっているか。
+    pub online: bool,
+    /// OS のボリューム ID で識別しているか（`false` はパスの先頭から作った ID。マウント先が変わると追えない）。
+    pub identified: bool,
+    /// ネットワークのボリュームか（分からなければ `false`）。
+    pub network: bool,
+    /// ファイルシステムの種類。
+    pub fs_type: Option<String>,
+    /// つながっていることを最後に確かめた日時。
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+/// 移動の方法（FILE-02）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveMethod {
+    /// 同じボリュームの中の名前の変更。
+    Rename,
+    /// 別のボリュームへのコピー（照合してから公開し、元をゴミ箱へ移す）。
+    Copy,
+}
+
+/// 移動・リネームの予定の 1 ファイル。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedFileMove {
+    /// ファイル。
+    pub file_id: FileId,
+    /// 役割（RAW と同時記録の JPEG は一緒に動く）。
+    pub role: FileRole,
+    /// 今の場所。
+    #[serde(serialize_with = "lossy_path")]
+    pub from: Option<PathBuf>,
+    /// 移動先。
+    #[serde(serialize_with = "lossy_path")]
+    pub to: Option<PathBuf>,
+    /// 方法。
+    pub method: MoveMethod,
+    /// 大きさ（バイト）。
+    pub size: u64,
+}
+
+/// 移動・リネームの予定の 1 枚の写真（asset。仮想コピーは同じファイルなので 1 つにまとまる）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedPhotoMove {
+    /// 写真（マスターの variant）。
+    pub variant_id: VariantId,
+    /// asset。
+    pub asset_id: AssetId,
+    /// ファイル（主なファイルが先）。
+    pub files: Vec<PlannedFileMove>,
+    /// 移せない・名前を変えられない理由（あれば、この写真は飛ばす）。
+    pub problem: Option<String>,
+}
+
+/// 写真の移動の予定（[`crate::Core::plan_move_files`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileMovePlan {
+    /// 移動先のフォルダ。
+    pub dest_folder: FolderId,
+    /// 移動先のフォルダのパス。
+    #[serde(serialize_with = "lossy_path")]
+    pub dest_path: Option<PathBuf>,
+    /// 写真。
+    pub photos: Vec<PlannedPhotoMove>,
+    /// 移せる写真の数。
+    pub movable: u64,
+    /// 別のボリュームへコピーするバイト数（移せる写真の分）。
+    pub copy_bytes: u64,
+}
+
+/// 動かした 1 ファイル。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovedFile {
+    /// ファイル。
+    pub file_id: FileId,
+    /// 元の場所。
+    #[serde(serialize_with = "lossy_path")]
+    pub from: PathBuf,
+    /// 新しい場所。
+    #[serde(serialize_with = "lossy_path")]
+    pub to: PathBuf,
+}
+
+/// 写真の移動・リネームの結果（[`crate::Core::move_files`]・[`crate::Core::rename_files`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FileMoveReport {
+    /// 動かしたファイル。
+    pub moved: Vec<MovedFile>,
+    /// 動かした写真の数。
+    pub photos: u64,
+    /// 飛ばした写真（理由。予定の `problem` と、実行の直前に分かったもの）。
+    pub skipped: Vec<FileIssue>,
+    /// 失敗した写真（元の状態に戻した）。
+    pub failed: Vec<FileIssue>,
+    /// 別のボリュームへ移した写真の、ゴミ箱へ移せずに元の場所に残ったファイル（カタログは移動先を指す）。
+    pub left_sources: Vec<FileIssue>,
+    /// コピーしたバイト数。
+    pub bytes_copied: u64,
+    /// 取り消したか（途中までの結果）。
+    pub cancelled: bool,
+}
+
+/// 写真の名前の付け方（FILE-02 のリネーム。[`crate::Core::plan_rename_files`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RenameSpec {
+    /// リネームの規則（IMP-03 のテンプレート。連番は与えた写真の順。重なる名前には `-1` などを付ける）。
+    Template {
+        /// 規則。
+        rule: crate::naming::RenameRule,
+    },
+    /// 1 枚の写真の名前（拡張子を除く。拡張子は元のまま。使えない文字があればエラー）。
+    Name {
+        /// 名前。
+        name: String,
+    },
+}
+
+/// 写真の名前の変更の予定（[`crate::Core::plan_rename_files`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRenamePlan {
+    /// 写真（与えた順）。
+    pub photos: Vec<PlannedPhotoMove>,
+    /// 名前を変える写真の数（今と同じ名前・問題のある写真を除く）。
+    pub renamable: u64,
+}
+
+/// フォルダの場所の指定し直しの予定（FILE-04。[`crate::Core::plan_relocate_folder`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelocatePlan {
+    /// フォルダ。
+    pub folder_id: FolderId,
+    /// 今の（見つからない）場所。
+    #[serde(serialize_with = "lossy_path")]
+    pub from: Option<PathBuf>,
+    /// 新しい場所。
+    #[serde(serialize_with = "lossy_path")]
+    pub to: PathBuf,
+    /// フォルダ（配下を含む）に登録したファイルの数。
+    pub files: u64,
+    /// そのうち、新しい場所に同じ名前・大きさで見つかった数。
+    pub found: u64,
+    /// 配下のフォルダの数。
+    pub subfolders: u64,
+    /// 指定し直せない理由（あれば実行できない）。
+    pub problem: Option<String>,
+}
+
+/// 見つからない写真の確認の結果（FILE-04。[`crate::Core::check_missing`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MissingCheckReport {
+    /// 確かめたファイルの数。
+    pub checked: u64,
+    /// 新しく見つからない印を付けたファイルの数。
+    pub newly_missing: u64,
+    /// 見つからない印を外した（元の場所に戻っていた）ファイルの数。
+    pub restored: u64,
+    /// 確かめた後に見つからないファイルの数（範囲の中）。
+    pub missing: u64,
+    /// 見つからないフォルダの数。
+    pub missing_folders: u64,
+    /// つながっていないボリュームのため確かめなかったファイルの数。
+    pub skipped_offline: u64,
+    /// ネットワークのボリュームのため確かめなかったファイルの数（自動の確認）。
+    pub skipped_network: u64,
+    /// 取り消したか。
+    pub cancelled: bool,
+}
+
+/// 再リンクの候補の一致の仕方（FILE-04。確からしい順）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelinkMatch {
+    /// 内容（ファイル全体の BLAKE3）が登録のものと同じ。
+    Content,
+    /// 大きさと先頭・末尾（クイックハッシュ）が同じ（全体のハッシュの記録がないため、全体は比べていない）。
+    Quick,
+    /// 名前と撮影日時が同じで、内容は変わっている（ほかのソフトで書き換えたなど。結び付けると読み直す）。
+    NameAndTime,
+}
+
+/// 再リンクの候補の 1 ファイル。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelinkCandidate {
+    /// 場所。
+    #[serde(serialize_with = "lossy_path")]
+    pub path: PathBuf,
+    /// 一致の仕方。
+    pub matched: RelinkMatch,
+    /// 大きさ（バイト）。
+    pub size: u64,
+    /// 名前が同じか（大文字・小文字と Unicode の正規化を区別しない）。
+    pub same_name: bool,
+}
+
+/// 再リンクする見つからないファイルと、その候補。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelinkTarget {
+    /// ファイル。
+    pub file_id: FileId,
+    /// 写真（マスターの variant）。
+    pub variant_id: VariantId,
+    /// 役割。
+    pub role: FileRole,
+    /// 登録の名前。
+    pub name: String,
+    /// 登録の場所。
+    #[serde(serialize_with = "lossy_path")]
+    pub last_path: Option<PathBuf>,
+    /// 大きさ（バイト）。
+    pub size: u64,
+    /// 候補（確からしい順）。
+    pub candidates: Vec<RelinkCandidate>,
+}
+
+/// 再リンクの候補の探索の結果（FILE-04。[`crate::Core::find_relink_candidates`] のジョブ）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RelinkSearch {
+    /// 探したフォルダ。
+    #[serde(serialize_with = "lossy_path")]
+    pub search_dir: PathBuf,
+    /// 見つからないファイルと候補（候補がないものも含む）。
+    pub targets: Vec<RelinkTarget>,
+    /// 走査した写真・動画のファイルの数。
+    pub scanned_files: u64,
+    /// 読めなかったフォルダ・ファイル。
+    pub unreadable: Vec<FileIssue>,
+    /// 取り消したか。
+    pub cancelled: bool,
+}
+
+/// 再リンクの 1 件（[`crate::Core::relink_files`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelinkRequest {
+    /// 見つからないファイル。
+    pub file_id: FileId,
+    /// 結び付ける場所。
+    pub path: PathBuf,
+    /// 内容が登録のものと違っても結び付けるか（[`RelinkMatch::NameAndTime`] の候補を利用者が選んだとき。
+    /// 結び付けた後に読み直す）。
+    #[serde(default)]
+    pub accept_changed: bool,
+}
+
+/// 再リンクの結果。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RelinkReport {
+    /// 結び付けたファイル。
+    pub linked: Vec<MovedFile>,
+    /// 内容が変わっていたので読み直したファイル。
+    #[serde(serialize_with = "lossy_path")]
+    pub reread: Vec<PathBuf>,
+    /// 結び付けられなかったもの。
+    pub failed: Vec<FileIssue>,
 }

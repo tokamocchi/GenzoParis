@@ -151,6 +151,7 @@ pub(crate) struct Meta {
     pub flip: i32,
     pub width: u32,
     pub height: u32,
+    pub body_serial: [c_char; 64],
 }
 
 /// `genzo_lr_thumb`。
@@ -252,6 +253,7 @@ impl Meta {
             flip: 0,
             width: 0,
             height: 0,
+            body_serial: [0; 64],
         }
     }
 }

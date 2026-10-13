@@ -12,6 +12,7 @@
 //! [`Catalog::unfinished_file_ops`] で planned / executing のままの記録を列挙し、呼び出し側が
 //! 実際のファイルの場所を確認して done か failed に確定させる。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -151,6 +152,23 @@ pub struct FileOpPath {
     pub absolute_path: Option<String>,
 }
 
+/// ファイルの移動の方法（FILE-02。04 の 6.4 節）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveMethod {
+    /// 同じボリュームの中の名前の変更（OS の rename。上書きしない）。
+    #[default]
+    Rename,
+    /// 別のボリュームへのコピー（照合してから公開し、カタログを更新した後に元をゴミ箱へ移す）。
+    Copy,
+}
+
+impl MoveMethod {
+    fn is_rename(&self) -> bool {
+        *self == Self::Rename
+    }
+}
+
 /// ファイル操作の対象の 1 ファイル。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileOpEntry {
@@ -162,13 +180,62 @@ pub struct FileOpEntry {
     pub from: FileOpPath,
     /// 移動・リネーム先（ゴミ箱への移動では `None`）。
     pub to: Option<FileOpPath>,
+    /// 移動の方法（版 12 から。それより前の記録・ゴミ箱は `rename` で、JSON には書かない）。
+    #[serde(default, skip_serializing_if = "MoveMethod::is_rename")]
+    pub method: MoveMethod,
+}
+
+/// フォルダの移動・名前の変更（FILE-02。`file_op.payload_json` の `folder`）。フォルダの配下（ファイル・
+/// フォルダ）は OS の 1 回の名前の変更で一緒に動き、カタログでは相対パスを付け替える。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderOpEntry {
+    /// フォルダ。
+    pub folder_id: FolderId,
+    /// 元のボリューム内の相対パス。
+    pub from_rel: String,
+    /// 予定を記録したときの元の絶対パス（マウント先が分からなければ `None`）。
+    pub from_path: Option<String>,
+    /// 移動先のボリューム（OS の操作では元と同じ）。
+    pub to_volume: VolumeId,
+    /// 移動先のボリューム内の相対パス。
+    pub to_rel: String,
+    /// 予定を記録したときの移動先の絶対パス。
+    pub to_path: Option<String>,
 }
 
 /// ファイル操作の内容（`file_op.payload_json`）。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FileOpPayload {
-    /// 対象のファイル。
+    /// 対象のファイル（フォルダの操作では空）。
     pub entries: Vec<FileOpEntry>,
+    /// フォルダの移動・名前の変更（版 12 から。ファイルの操作では `None` で、JSON には書かない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<FolderOpEntry>,
+}
+
+/// 移動・リネームの 1 ファイルの要求（[`Catalog::plan_file_moves`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveRequest {
+    /// ファイル。
+    pub file_id: FileId,
+    /// 移動先のフォルダ（リネームでは今のフォルダ）。
+    pub dest_folder: FolderId,
+    /// 移動先の名前。
+    pub new_name: String,
+    /// 方法。
+    pub method: MoveMethod,
+}
+
+/// OS の操作を終えた 1 ファイル（[`Catalog::complete_file_op_entries`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedEntry {
+    /// ファイル。
+    pub file_id: FileId,
+    /// 移動先のファイルの大きさ・更新日時・クイックハッシュ（コピーで、移動先のファイルシステムが更新日時を
+    /// 丸めた場合など。内容は照合済みなのでリビジョンは上げない）。`None` なら記録のまま。
+    pub facts: Option<FileFacts>,
+    /// 照合で求めた全体のハッシュ（`None` なら記録のまま）。
+    pub full_hash: Option<String>,
 }
 
 /// ファイル操作の記録。
@@ -219,44 +286,78 @@ pub(crate) fn file_from_row(row: &rusqlite::Row<'_>) -> Result<FileRecord> {
     })
 }
 
-fn location(conn: &Connection, file_id: FileId) -> Result<FileLocation> {
-    conn.prepare_cached(
-        "SELECT v.id, v.uuid, v.last_mount_path, d.id, d.rel_path, f.name
-         FROM file f JOIN folder d ON d.id = f.folder_id JOIN volume v ON v.id = d.volume_id
-         WHERE f.id = ?1",
-    )?
-    .query_row([file_id.get()], |row| {
-        Ok(FileLocation {
-            volume_id: VolumeId::new(row.get(0)?),
-            volume_uuid: row.get(1)?,
-            mount_path: row.get(2)?,
-            folder_id: FolderId::new(row.get(3)?),
-            rel_dir: row.get(4)?,
-            name: row.get(5)?,
+/// つながっていないボリューム（[`Catalog::set_offline_volumes`]）。
+pub(crate) type OfflineVolumes = HashSet<VolumeId>;
+
+/// ファイルの場所（つながっていないボリュームのものは、マウント先を `None` にする）。
+pub(crate) fn location(
+    conn: &Connection,
+    offline: &OfflineVolumes,
+    file_id: FileId,
+) -> Result<FileLocation> {
+    let mut loc = conn
+        .prepare_cached(
+            "SELECT v.id, v.uuid, v.last_mount_path, d.id, d.rel_path, f.name
+             FROM file f JOIN folder d ON d.id = f.folder_id JOIN volume v ON v.id = d.volume_id
+             WHERE f.id = ?1",
+        )?
+        .query_row([file_id.get()], |row| {
+            Ok(FileLocation {
+                volume_id: VolumeId::new(row.get(0)?),
+                volume_uuid: row.get(1)?,
+                mount_path: row.get(2)?,
+                folder_id: FolderId::new(row.get(3)?),
+                rel_dir: row.get(4)?,
+                name: row.get(5)?,
+            })
         })
-    })
-    .optional()?
-    .ok_or_else(|| CatalogError::NotFound(format!("ファイル {file_id}")))
+        .optional()?
+        .ok_or_else(|| CatalogError::NotFound(format!("ファイル {file_id}")))?;
+    if offline.contains(&loc.volume_id) {
+        loc.mount_path = None;
+    }
+    Ok(loc)
+}
+
+/// フォルダの場所（ボリューム・マウント先・相対パス。つながっていないボリュームのものは、マウント先を `None`
+/// にする）。
+pub(crate) fn folder_location(
+    conn: &Connection,
+    offline: &OfflineVolumes,
+    folder_id: FolderId,
+) -> Result<FileLocation> {
+    let mut loc = conn
+        .prepare_cached(
+            "SELECT v.id, v.uuid, v.last_mount_path, d.rel_path FROM folder d
+             JOIN volume v ON v.id = d.volume_id WHERE d.id = ?1",
+        )?
+        .query_row([folder_id.get()], |row| {
+            Ok(FileLocation {
+                volume_id: VolumeId::new(row.get(0)?),
+                volume_uuid: row.get(1)?,
+                mount_path: row.get(2)?,
+                folder_id,
+                rel_dir: row.get(3)?,
+                name: String::new(),
+            })
+        })
+        .optional()?
+        .ok_or_else(|| CatalogError::NotFound(format!("フォルダ {folder_id}")))?;
+    if offline.contains(&loc.volume_id) {
+        loc.mount_path = None;
+    }
+    Ok(loc)
 }
 
 /// フォルダの絶対パス上の、`name` のファイルの絶対パス（記録用）。
-fn folder_file_path(conn: &Connection, folder_id: FolderId, name: &str) -> Result<Option<String>> {
-    let (mount, rel_dir): (Option<String>, String) = conn
-        .prepare_cached(
-            "SELECT v.last_mount_path, d.rel_path FROM folder d JOIN volume v ON v.id = d.volume_id
-             WHERE d.id = ?1",
-        )?
-        .query_row([folder_id.get()], |row| Ok((row.get(0)?, row.get(1)?)))
-        .optional()?
-        .ok_or_else(|| CatalogError::NotFound(format!("フォルダ {folder_id}")))?;
-    let loc = FileLocation {
-        volume_id: VolumeId::new(0),
-        volume_uuid: String::new(),
-        mount_path: mount,
-        folder_id,
-        rel_dir,
-        name: name.to_owned(),
-    };
+fn folder_file_path(
+    conn: &Connection,
+    offline: &OfflineVolumes,
+    folder_id: FolderId,
+    name: &str,
+) -> Result<Option<String>> {
+    let mut loc = folder_location(conn, offline, folder_id)?;
+    loc.name = name.to_owned();
     Ok(loc
         .absolute_path()
         .map(|p| p.to_string_lossy().into_owned()))
@@ -374,9 +475,15 @@ impl Catalog {
         Ok(out)
     }
 
-    /// ファイルの場所。
+    /// ファイルの場所（つながっていないボリューム（[`Catalog::set_offline_volumes`]）のものは、マウント先が
+    /// `None`）。
     pub fn file_location(&self, file_id: FileId) -> Result<FileLocation> {
-        location(&self.conn, file_id)
+        location(&self.conn, &self.offline_volumes, file_id)
+    }
+
+    /// フォルダの場所（`name` は空。つながっていないボリュームのものは、マウント先が `None`）。
+    pub fn folder_location(&self, folder_id: FolderId) -> Result<FileLocation> {
+        folder_location(&self.conn, &self.offline_volumes, folder_id)
     }
 
     /// 指定した状態のファイルの一覧（ID の順）。
@@ -495,13 +602,13 @@ impl Catalog {
 
     /// ゴミ箱への移動で影響を受けるファイルと variant の一覧を返す（6.4 節。変更はしない）。
     pub fn trash_plan(&self, asset_ids: &[AssetId]) -> Result<TrashPlan> {
-        trash_plan(&self.conn, asset_ids)
+        trash_plan(&self.conn, &self.offline_volumes, asset_ids)
     }
 
     /// ゴミ箱への移動の予定を `file_op` に記録する（planned）。記録した ID と影響の一覧を返す。
     pub fn plan_trash(&mut self, asset_ids: &[AssetId]) -> Result<(FileOpId, TrashPlan)> {
         let tx = self.conn.transaction()?;
-        let plan = trash_plan(&tx, asset_ids)?;
+        let plan = trash_plan(&tx, &self.offline_volumes, asset_ids)?;
         if plan.files.is_empty() {
             return Err(CatalogError::InvalidInput(
                 "ゴミ箱へ移すファイルがありません".to_owned(),
@@ -523,68 +630,137 @@ impl Catalog {
                             .map(|p| p.to_string_lossy().into_owned()),
                     },
                     to: None,
+                    method: MoveMethod::Rename,
                 })
                 .collect(),
+            folder: None,
         };
         let id = insert_file_op(&tx, FileOpKind::Trash, &payload)?;
         tx.commit()?;
         Ok((id, plan))
     }
 
-    /// ファイルを別のフォルダへ移動する予定を記録する（FILE-02）。
+    /// ファイルを別のフォルダへ移動する予定を記録する（FILE-02。同じボリュームの中の名前の変更）。
     ///
     /// 移動先に、カタログ上で同じ名前のファイルがあればエラー（[`CatalogError::Conflict`]）。
     pub fn plan_move(&mut self, file_ids: &[FileId], dest_folder: FolderId) -> Result<FileOpId> {
-        let tx = self.conn.transaction()?;
-        let mut entries = Vec::with_capacity(file_ids.len());
+        let mut requests = Vec::with_capacity(file_ids.len());
         for &file_id in file_ids {
-            let name: String = tx
-                .query_row(
-                    "SELECT name FROM file WHERE id = ?1",
-                    [file_id.get()],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or_else(|| CatalogError::NotFound(format!("ファイル {file_id}")))?;
-            entries.push(planned_entry(&tx, file_id, dest_folder, &name)?);
+            requests.push(MoveRequest {
+                file_id,
+                dest_folder,
+                new_name: self.file(file_id)?.name,
+                method: MoveMethod::Rename,
+            });
         }
-        check_destinations(&tx, &entries)?;
-        let id = insert_file_op(&tx, FileOpKind::Move, &FileOpPayload { entries })?;
-        tx.commit()?;
-        Ok(id)
+        self.plan_file_moves(FileOpKind::Move, &requests)
     }
 
     /// ファイルの名前を変える予定を記録する（FILE-02）。`renames` は (ファイル, 新しい名前)。
     pub fn plan_rename(&mut self, renames: &[(FileId, String)]) -> Result<FileOpId> {
-        let tx = self.conn.transaction()?;
-        let mut entries = Vec::with_capacity(renames.len());
+        let mut requests = Vec::with_capacity(renames.len());
         for (file_id, new_name) in renames {
-            if new_name.is_empty()
-                || new_name == "."
-                || new_name == ".."
-                || new_name.contains(['/', '\0'])
-            {
-                return Err(CatalogError::InvalidInput(format!(
-                    "ファイル名が不正です: {new_name:?}"
-                )));
-            }
-            let folder: i64 = tx
-                .query_row(
-                    "SELECT folder_id FROM file WHERE id = ?1",
-                    [file_id.get()],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or_else(|| CatalogError::NotFound(format!("ファイル {file_id}")))?;
-            entries.push(planned_entry(
+            requests.push(MoveRequest {
+                file_id: *file_id,
+                dest_folder: self.file(*file_id)?.folder_id,
+                new_name: new_name.clone(),
+                method: MoveMethod::Rename,
+            });
+        }
+        self.plan_file_moves(FileOpKind::Rename, &requests)
+    }
+
+    /// ファイルの移動・リネームの予定を記録する（FILE-02。`kind` は `move` か `rename`。1 つのトランザクション）。
+    ///
+    /// 名前（空・`/`・NUL・`.`・`..` はエラー）と、移動先にこの操作の対象でない同じ名前（比較キー）のファイルが
+    /// カタログにないこと（あれば [`CatalogError::Conflict`]）を確かめる。ファイルシステムの上の衝突は呼び出し側が
+    /// 確かめる（OS の操作は上書きしない）。
+    pub fn plan_file_moves(
+        &mut self,
+        kind: FileOpKind,
+        requests: &[MoveRequest],
+    ) -> Result<FileOpId> {
+        if kind == FileOpKind::Trash {
+            return Err(CatalogError::InvalidInput(
+                "ゴミ箱への移動は plan_trash で記録します".to_owned(),
+            ));
+        }
+        if requests.is_empty() {
+            return Err(CatalogError::InvalidInput(
+                "移動・名前の変更をするファイルがありません".to_owned(),
+            ));
+        }
+        let tx = self.conn.transaction()?;
+        let mut entries = Vec::with_capacity(requests.len());
+        for r in requests {
+            check_file_name(&r.new_name)?;
+            let mut e = planned_entry(
                 &tx,
-                *file_id,
-                FolderId::new(folder),
-                new_name,
-            )?);
+                &self.offline_volumes,
+                r.file_id,
+                r.dest_folder,
+                &r.new_name,
+            )?;
+            e.method = r.method;
+            entries.push(e);
         }
         check_destinations(&tx, &entries)?;
-        let id = insert_file_op(&tx, FileOpKind::Rename, &FileOpPayload { entries })?;
+        let id = insert_file_op(
+            &tx,
+            kind,
+            &FileOpPayload {
+                entries,
+                folder: None,
+            },
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// フォルダの移動・名前の変更（同じボリュームの中。OS の 1 回の名前の変更）の予定を記録する（FILE-02）。
+    /// `to_rel` は移動先のボリューム内の相対パス。
+    ///
+    /// ボリュームのルートは動かせない。自分の配下へは移せない。移動先と配下の新しい相対パスに、ほかのフォルダが
+    /// 登録されていれば [`CatalogError::Conflict`]（大文字・小文字だけの名前の変更は、自分と同じなのでよい）。
+    pub fn plan_folder_op(
+        &mut self,
+        kind: FileOpKind,
+        folder_id: FolderId,
+        to_rel: &str,
+    ) -> Result<FileOpId> {
+        if kind == FileOpKind::Trash {
+            return Err(CatalogError::InvalidInput(
+                "フォルダはゴミ箱へ移せません".to_owned(),
+            ));
+        }
+        let to_rel = crate::register::normalize_rel_path(to_rel)?;
+        let tx = self.conn.transaction()?;
+        let from = folder_location(&tx, &self.offline_volumes, folder_id)?;
+        crate::folders::check_rebase(&tx, folder_id, from.volume_id, &to_rel)?;
+        let to_path = FileLocation {
+            rel_dir: to_rel.clone(),
+            ..from.clone()
+        };
+        let folder = FolderOpEntry {
+            folder_id,
+            from_rel: from.rel_dir.clone(),
+            from_path: from
+                .absolute_path()
+                .map(|p| p.to_string_lossy().into_owned()),
+            to_volume: from.volume_id,
+            to_rel,
+            to_path: to_path
+                .absolute_path()
+                .map(|p| p.to_string_lossy().into_owned()),
+        };
+        let id = insert_file_op(
+            &tx,
+            kind,
+            &FileOpPayload {
+                entries: Vec::new(),
+                folder: Some(folder),
+            },
+        )?;
         tx.commit()?;
         Ok(id)
     }
@@ -633,6 +809,21 @@ impl Catalog {
         self.transition_file_op(id, FileOpState::Done, None)
     }
 
+    /// OS の操作を終えたファイル `applied` だけについてカタログを更新して done にする（移動・リネーム。同じ
+    /// トランザクション）。`note` は記録に残す説明（一部のファイルを元の場所に残したときなど）。
+    ///
+    /// 起動時の確定（DATA-07）で、移動先にあるファイルだけを反映するのに使う（カタログの記録と実際のファイルの
+    /// 場所を食い違わせない）。`applied` に入れた大きさ・更新日時・ハッシュは、内容を照合したもの（コピー）
+    /// として、リビジョンを上げずに記録する。
+    pub fn complete_file_op_entries(
+        &mut self,
+        id: FileOpId,
+        applied: &[AppliedEntry],
+        note: Option<&str>,
+    ) -> Result<()> {
+        self.transition_file_op_with(id, FileOpState::Done, note, Some(applied))
+    }
+
     /// OS の操作が失敗したので failed にする（カタログは元のまま）。
     pub fn fail_file_op(&mut self, id: FileOpId, error: &str) -> Result<()> {
         self.transition_file_op(id, FileOpState::Failed, Some(error))
@@ -646,6 +837,18 @@ impl Catalog {
         id: FileOpId,
         next: FileOpState,
         error: Option<&str>,
+    ) -> Result<()> {
+        self.transition_file_op_with(id, next, error, None)
+    }
+
+    /// [`Catalog::transition_file_op`]。`applied` が `Some` なら、done にするときの更新を、その中のファイルだけに
+    /// する。
+    fn transition_file_op_with(
+        &mut self,
+        id: FileOpId,
+        next: FileOpState,
+        error: Option<&str>,
+        applied: Option<&[AppliedEntry]>,
     ) -> Result<()> {
         let now = now_utc_string();
         let tx = self.conn.transaction()?;
@@ -668,7 +871,7 @@ impl Catalog {
         if next == FileOpState::Done {
             let kind: FileOpKind = parse_enum(&kind)?;
             let payload: FileOpPayload = serde_json::from_str(&payload)?;
-            apply_file_op(&tx, kind, &payload)?;
+            apply_file_op(&tx, kind, &payload, applied)?;
         }
         tx.execute(
             "UPDATE file_op SET state = ?2, error = ?3, updated_at = ?4 WHERE id = ?1",
@@ -676,6 +879,98 @@ impl Catalog {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// ファイルの場所を、別のフォルダ・名前に結び付け直す（FILE-04 の再リンク。カタログの中だけで、ファイルには
+    /// 触れない）。状態・大きさ・更新日時・ハッシュは変えない（呼び出し側が、新しい場所のファイルを登録のものと
+    /// 照合し直す。内容が変わっていれば、取り込みと同じ経路で読み直す）。テキスト検索の索引（ファイル名）も
+    /// 更新する。
+    ///
+    /// 移動先に別のファイルが登録されていれば [`CatalogError::Conflict`]（同じファイルを 2 つの写真に結び
+    /// 付けない）。
+    pub fn relink_file(&mut self, file_id: FileId, folder_id: FolderId, name: &str) -> Result<()> {
+        check_file_name(name)?;
+        let key = path_key(name);
+        let tx = self.conn.transaction()?;
+        let other: Option<i64> = tx
+            .prepare_cached("SELECT id FROM file WHERE folder_id = ?1 AND name_key = ?2")?
+            .query_row(params![folder_id.get(), key], |row| row.get(0))
+            .optional()?;
+        if let Some(other) = other
+            && other != file_id.get()
+        {
+            return Err(CatalogError::Conflict(name.to_owned()));
+        }
+        let asset: Option<i64> = tx
+            .prepare_cached(
+                "UPDATE file SET folder_id = ?2, name = ?3, name_key = ?4 WHERE id = ?1
+                 RETURNING asset_id",
+            )?
+            .query_row(params![file_id.get(), folder_id.get(), name, key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let asset = asset.ok_or_else(|| CatalogError::NotFound(format!("ファイル {file_id}")))?;
+        refresh_asset_text(&tx, asset)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 見つからない（`missing`）ファイル（ID の順。`after` より後を `limit` 件まで）。`folders` を与えれば、
+    /// そのフォルダのファイルだけ（配下のフォルダは呼び出し側が並べる）。
+    ///
+    /// 索引 `file_not_ok`（スキーマの版 12）で、ファイルの表を全部は読まない。
+    pub fn missing_files(
+        &self,
+        folders: Option<&[FolderId]>,
+        after: Option<FileId>,
+        limit: usize,
+    ) -> Result<Vec<FileRecord>> {
+        let after = after.map_or(0, FileId::get);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut out = Vec::new();
+        match folders {
+            None => {
+                let mut stmt = self.conn.prepare_cached(&format!(
+                    "SELECT {FILE_COLUMNS} FROM file
+                     WHERE status <> 'ok' AND status = 'missing' AND id > ?1 ORDER BY id LIMIT ?2"
+                ))?;
+                let mut rows = stmt.query(params![after, limit])?;
+                while let Some(row) = rows.next()? {
+                    out.push(file_from_row(row)?);
+                }
+            }
+            Some(ids) => {
+                let json = ids_to_json(ids);
+                let mut stmt = self.conn.prepare_cached(&format!(
+                    "SELECT {FILE_COLUMNS} FROM file
+                     WHERE folder_id IN (SELECT value FROM json_each(?1))
+                       AND status <> 'ok' AND status = 'missing' AND id > ?2
+                     ORDER BY id LIMIT ?3"
+                ))?;
+                let mut rows = stmt.query(params![json, after, limit])?;
+                while let Some(row) = rows.next()? {
+                    out.push(file_from_row(row)?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// ファイルを ID の順に読む（`after` より後を `limit` 件まで。存在の確認のジョブ用。FILE-04）。
+    pub fn files_page(&self, after: Option<FileId>, limit: usize) -> Result<Vec<FileRecord>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {FILE_COLUMNS} FROM file WHERE id > ?1 ORDER BY id LIMIT ?2"
+        ))?;
+        let mut rows = stmt.query(params![
+            after.map_or(0, FileId::get),
+            i64::try_from(limit).unwrap_or(i64::MAX)
+        ])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(file_from_row(row)?);
+        }
+        Ok(out)
     }
 
     /// 終わった（done / failed の）ファイル操作の記録のうち、新しい `keep` 件を残して削除する。
@@ -719,7 +1014,11 @@ pub(crate) fn remove_assets_tx(
     })
 }
 
-fn trash_plan(conn: &Connection, asset_ids: &[AssetId]) -> Result<TrashPlan> {
+fn trash_plan(
+    conn: &Connection,
+    offline: &OfflineVolumes,
+    asset_ids: &[AssetId],
+) -> Result<TrashPlan> {
     let json = ids_to_json(asset_ids);
     let mut stmt = conn.prepare_cached(
         "SELECT id FROM asset WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id",
@@ -745,7 +1044,7 @@ fn trash_plan(conn: &Connection, asset_ids: &[AssetId]) -> Result<TrashPlan> {
                 file_id,
                 asset_id,
                 role: parse_enum(&role)?,
-                location: location(conn, file_id)?,
+                location: location(conn, offline, file_id)?,
             });
         }
         let mut vstmt = conn.prepare_cached(
@@ -766,14 +1065,25 @@ fn trash_plan(conn: &Connection, asset_ids: &[AssetId]) -> Result<TrashPlan> {
     Ok(plan)
 }
 
+/// 名前（ファイル・フォルダの 1 つの部分）を確かめる（空・`/`・NUL・`.`・`..` はエラー）。
+pub(crate) fn check_file_name(name: &str) -> Result<()> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+        return Err(CatalogError::InvalidInput(format!(
+            "ファイル名が不正です: {name:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// 移動・リネームの 1 ファイルの予定を作る。
 fn planned_entry(
     tx: &Transaction<'_>,
+    offline: &OfflineVolumes,
     file_id: FileId,
     dest_folder: FolderId,
     new_name: &str,
 ) -> Result<FileOpEntry> {
-    let loc = location(tx, file_id)?;
+    let loc = location(tx, offline, file_id)?;
     let asset_id: i64 = tx.query_row(
         "SELECT asset_id FROM file WHERE id = ?1",
         [file_id.get()],
@@ -792,8 +1102,9 @@ fn planned_entry(
         to: Some(FileOpPath {
             folder_id: dest_folder,
             name: new_name.to_owned(),
-            absolute_path: folder_file_path(tx, dest_folder, new_name)?,
+            absolute_path: folder_file_path(tx, offline, dest_folder, new_name)?,
         }),
+        method: MoveMethod::Rename,
     })
 }
 
@@ -851,8 +1162,13 @@ fn file_op_from_row(row: &rusqlite::Row<'_>) -> Result<FileOpRecord> {
     })
 }
 
-/// done にするときのカタログの更新。
-fn apply_file_op(tx: &Transaction<'_>, kind: FileOpKind, payload: &FileOpPayload) -> Result<()> {
+/// done にするときのカタログの更新（`applied` が `Some` なら、移動・リネームはその中のファイルだけ）。
+fn apply_file_op(
+    tx: &Transaction<'_>,
+    kind: FileOpKind,
+    payload: &FileOpPayload,
+    applied: Option<&[AppliedEntry]>,
+) -> Result<()> {
     match kind {
         FileOpKind::Trash => {
             let mut assets: Vec<AssetId> = payload.entries.iter().map(|e| e.asset_id).collect();
@@ -861,16 +1177,32 @@ fn apply_file_op(tx: &Transaction<'_>, kind: FileOpKind, payload: &FileOpPayload
             remove_assets_tx(tx, &assets)?;
         }
         FileOpKind::Move | FileOpKind::Rename => {
+            if let Some(f) = &payload.folder {
+                // フォルダの移動・名前の変更: 配下のフォルダの相対パスを付け替える（ファイルはフォルダの ID で
+                // 結び付いているので変えない）。
+                crate::folders::rebase_folder_tx(tx, f.folder_id, f.to_volume, &f.to_rel)?;
+            }
+            let entries: Vec<(&FileOpEntry, Option<&AppliedEntry>)> = payload
+                .entries
+                .iter()
+                .filter_map(|e| match applied {
+                    None => Some((e, None)),
+                    Some(list) => list
+                        .iter()
+                        .find(|a| a.file_id == e.file_id)
+                        .map(|a| (e, Some(a))),
+                })
+                .collect();
             // 同じ操作の中で名前を入れ替える場合（A → B、B → A）に、途中で UNIQUE(folder_id, name_key)
             // に違反しないよう、先に比較キーを一時的な値（NUL は名前に含まれないので衝突しない）にする。
-            for e in &payload.entries {
+            for (e, _) in &entries {
                 tx.execute(
                     "UPDATE file SET name_key = char(0) || id WHERE id = ?1",
                     [e.file_id.get()],
                 )?;
             }
             let mut touched = Vec::new();
-            for e in &payload.entries {
+            for (e, done) in entries {
                 let to = e.to.as_ref().ok_or_else(|| {
                     CatalogError::Corrupt(format!(
                         "ファイル操作に移動先がありません（ファイル {}）",
@@ -881,9 +1213,14 @@ fn apply_file_op(tx: &Transaction<'_>, kind: FileOpKind, payload: &FileOpPayload
                 // ので飛ばす（ゴミ箱の done と同じく、存在しないものは無視する）。OS の操作は
                 // 成功しているので、NotFound にすると記録を done にできなくなる（レビューで再現）。
                 // テキスト検索の索引は、記録の asset ではなく、ファイルの現在の asset で作り直す。
+                // 移動先にファイルがあることは OS の操作で確かめたので、見つからない印は外す（存在の確認の
+                // ジョブが、移している途中で元の場所にないとして印を付けた場合）。
                 let asset: Option<i64> = tx
                     .prepare_cached(
-                        "UPDATE file SET folder_id = ?2, name = ?3, name_key = ?4 WHERE id = ?1
+                        "UPDATE file SET folder_id = ?2, name = ?3, name_key = ?4,
+                             status = CASE status WHEN 'missing' THEN 'ok' ELSE status END,
+                             status_reason = CASE status WHEN 'missing' THEN NULL ELSE status_reason END
+                         WHERE id = ?1
                          RETURNING asset_id",
                     )?
                     .query_row(
@@ -896,8 +1233,39 @@ fn apply_file_op(tx: &Transaction<'_>, kind: FileOpKind, payload: &FileOpPayload
                         |row| row.get(0),
                     )
                     .optional()?;
-                if let Some(asset) = asset {
-                    touched.push(asset);
+                let Some(asset) = asset else {
+                    continue;
+                };
+                touched.push(asset);
+                if let Some(done) = done {
+                    if let Some(f) = &done.facts {
+                        if !is_hex64(&f.quick_hash) {
+                            return Err(CatalogError::InvalidInput(format!(
+                                "クイックハッシュが 16 進数の小文字 64 文字ではありません: {:?}",
+                                f.quick_hash
+                            )));
+                        }
+                        tx.execute(
+                            "UPDATE file SET size = ?2, mtime = ?3, quick_hash = ?4 WHERE id = ?1",
+                            params![
+                                e.file_id.get(),
+                                u64_to_i64(f.size, "ファイルサイズ")?,
+                                f.mtime_ns,
+                                f.quick_hash
+                            ],
+                        )?;
+                    }
+                    if let Some(h) = &done.full_hash {
+                        if !is_hex64(h) {
+                            return Err(CatalogError::InvalidInput(format!(
+                                "全体のハッシュが 16 進数の小文字 64 文字ではありません: {h:?}"
+                            )));
+                        }
+                        tx.execute(
+                            "UPDATE file SET full_hash = ?2 WHERE id = ?1",
+                            params![e.file_id.get(), h],
+                        )?;
+                    }
                 }
             }
             touched.sort_unstable();

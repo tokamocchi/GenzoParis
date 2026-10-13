@@ -2,10 +2,12 @@
 
 import type { CaptureTime, Flag, Rating } from "./api/types";
 
-/** 撮影日時（記録されていたオフセット、なければ推定に使ったオフセットの現地時刻）。 */
+/** 撮影日時（表示のオフセットの現地時刻。なければ記録されていたオフセット）。 */
 export function formatCaptureTime(c: CaptureTime | null | undefined): string {
   if (!c || !c.utc) return "日時不明";
-  const offset = c.offset && c.offset !== "Z" ? c.offset : c.tz_assumed;
+  // 表示のオフセット（tz_assumed）で表す（利用者がタイムゾーンを指定した写真は、記録のオフセットと違う。
+  // LIB-16）。表示のオフセットがなければ記録のオフセット。
+  const offset = c.tz_assumed ?? (c.offset && c.offset !== "Z" ? c.offset : null);
   const minutes = parseOffset(offset);
   const t = new Date(Date.parse(c.utc) + (minutes ?? 0) * 60_000);
   const p = (n: number) => String(n).padStart(2, "0");

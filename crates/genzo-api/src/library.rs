@@ -171,6 +171,7 @@ impl Core {
         let rev = inner.with_cache(|c| c.thumbs.cache_key(variant_id))?;
         Ok(VariantDetails {
             summary: VariantSummary::from_catalog(summary, rev),
+            camera_serial: asset.camera_serial,
             iso: asset.iso,
             aperture: asset.aperture,
             shutter_s: asset.shutter_s,
@@ -210,24 +211,33 @@ impl Core {
             .with_catalog(|c| Ok(CatalogSchema::from(c.describe_schema()?)))
     }
 
-    /// 登録されているフォルダ（LIB-06。ボリュームごと、相対パスの順）。
+    /// 登録されているフォルダ（LIB-06。ボリュームごと、相対パスの順）。ボリュームのつながり（FILE-03）・
+    /// 見つからない印と見つからないファイルの数（FILE-04）を含む。
     pub fn folders(&self) -> Result<Vec<FolderInfo>, ApiError> {
         self.inner.check_open()?;
         self.inner.with_catalog(|c| {
+            let mounts: std::collections::HashMap<genzo_model::VolumeId, Option<String>> = c
+                .volume_records()?
+                .into_iter()
+                .map(|v| (v.id, v.last_mount_path))
+                .collect();
+            let missing = c.missing_file_counts()?;
             let mut out = Vec::new();
-            for v in c.volumes()? {
-                let mount = v.last_mount_path.clone();
-                for f in c.folders(v.id)? {
-                    out.push(FolderInfo {
-                        folder_id: f.id,
-                        volume_id: f.volume_id,
-                        parent_id: f.parent_id,
-                        path: mount
-                            .as_deref()
-                            .map(|m| join_rel(std::path::Path::new(m), &f.rel_path, "")),
-                        rel_path: f.rel_path,
-                    });
-                }
+            for r in c.folder_records()? {
+                let f = r.folder;
+                let mount = mounts.get(&f.volume_id).cloned().flatten();
+                out.push(FolderInfo {
+                    folder_id: f.id,
+                    volume_id: f.volume_id,
+                    parent_id: f.parent_id,
+                    path: mount
+                        .as_deref()
+                        .map(|m| join_rel(std::path::Path::new(m), &f.rel_path, "")),
+                    online: !c.is_volume_offline(f.volume_id),
+                    missing: r.status == genzo_model::FolderStatus::Missing,
+                    missing_files: missing.get(&f.id).copied().unwrap_or(0),
+                    rel_path: f.rel_path,
+                });
             }
             Ok(out)
         })
@@ -336,11 +346,17 @@ pub(crate) fn refresh_file(
     let meta = match std::fs::metadata(path) {
         Ok(m) if m.is_file() => m,
         // 通常のファイルでない（同じ名前のフォルダになっているなど）: 元のファイルはない。
-        Ok(_) => return Ok(Refreshed::Missing),
+        Ok(_) => {
+            same_volume_still_mounted(inner, rec, path)?;
+            return Ok(Refreshed::Missing);
+        }
         // 見つからない（フォルダごとなくなった・ドライブが外れた場合も含む）。`missing` は、戻れば `ok` に
         // 戻せる印なので記録してよい（ゴミ箱への移動は、フォルダごと見えなければ移さず失敗にする。移す
         // という取り消せない操作は、ないと確かめられたものだけを扱うため。delete.rs）。
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Refreshed::Missing),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            same_volume_still_mounted(inner, rec, path)?;
+            return Ok(Refreshed::Missing);
+        }
         // それ以外（権限がない・フォルダの部分がフォルダでない・一時的な入出力のエラーなど）は、あるか
         // ないかが分からない。見つからないものとして記録せず（状態を変えず）、読めないエラーにする。
         Err(e) => {
@@ -389,9 +405,50 @@ pub(crate) fn refresh_file(
         }
         return Ok(Refreshed::Restored);
     }
-    // 内容が変わった: メタデータを読み直して登録し直す。
+    // 内容が変わった: メタデータを読み直して登録し直す（マウント先に別のドライブがつながっていれば、別の写真の
+    // 内容で登録し直さない）。
+    same_volume_still_mounted(inner, rec, path)?;
     reread(inner, rec, path, facts, lane, token)?;
     Ok(Refreshed::Changed)
+}
+
+/// ファイルのボリュームのマウント先に、今も同じボリュームがつながっているか（FILE-03。最後に確かめた後に
+/// ドライブを入れ替えた場合に、別のドライブのファイルで見つからない印を付けたり、登録し直したりしない）。
+/// つながっていなければ [`ApiError::FileAccess`]（状態は変えない。次にボリュームを確かめ直したときに、
+/// つながっていないボリュームになる）。パスから作った ID のボリュームは確かめられないので確かめない。
+///
+/// 確かめ方はボリュームを確かめ直すとき（`volumes::refresh_volumes`）と同じで、マウント先のボリュームの ID が
+/// 違えば、つながっているボリュームの一覧からも同じ ID・同じマウント先のものを探す（macOS の起動ディスクは、
+/// データのボリュームのマウント先を `/` として記録するが、`/` を問い合わせると読み取り専用のシステムの
+/// ボリュームの ID が返る。検証のラウンド 1 の指摘）。
+fn same_volume_still_mounted(inner: &Inner, rec: &FileRecord, path: &Path) -> Result<(), ApiError> {
+    let loc = inner.with_catalog(|c| c.folder_location(rec.folder_id))?;
+    if loc
+        .volume_uuid
+        .starts_with(crate::paths::PATH_VOLUME_PREFIX)
+    {
+        return Ok(());
+    }
+    let Some(mount) = loc.mount_path.as_deref() else {
+        return Ok(());
+    };
+    let mount = Path::new(mount);
+    let matches = |id: &crate::volumes::VolumeIdentity| {
+        id.uuid == loc.volume_uuid && crate::volumes::same_path(&id.mount, mount)
+    };
+    let same = inner
+        .volume_probe
+        .identify(mount)
+        .is_some_and(|id| matches(&id))
+        || inner.volume_probe.mounted().iter().any(matches);
+    if same {
+        Ok(())
+    } else {
+        Err(ApiError::FileAccess {
+            path: path.to_path_buf(),
+            message: "ファイルのドライブがつながっていないか、別のドライブに入れ替わっています（ドライブを確かめ直してください）".to_owned(),
+        })
+    }
 }
 
 /// ワーカーでメタデータを読み直し、取り込みと同じ経路（`register_file`）で登録し直す。

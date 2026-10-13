@@ -126,6 +126,10 @@ pub struct Catalog {
     report: OpenReport,
     /// 読んだスタックの所属（[`Catalog::stack_layout`]。カタログが変わっていなければ使い回す）。
     pub(crate) stack_cache: crate::stack::StackLayoutCache,
+    /// つながっていないボリューム（FILE-03。[`Catalog::set_offline_volumes`]）。このボリュームのファイル・
+    /// フォルダの場所はマウント先が分からないものとして返す（記録したマウント先に別のドライブがつながって
+    /// いても、そのファイルを読まないため）。カタログには保存しない（開いている間だけの状態）。
+    pub(crate) offline_volumes: std::collections::HashSet<genzo_model::VolumeId>,
 }
 
 impl std::fmt::Debug for Catalog {
@@ -191,6 +195,7 @@ impl Catalog {
                 migration_backup: outcome.backup,
             },
             stack_cache: Default::default(),
+            offline_volumes: Default::default(),
         })
     }
 
@@ -212,6 +217,7 @@ impl Catalog {
                 migration_backup: None,
             },
             stack_cache: Default::default(),
+            offline_volumes: Default::default(),
         })
     }
 
@@ -242,6 +248,7 @@ impl Catalog {
                 migration_backup: None,
             },
             stack_cache: Default::default(),
+            offline_volumes: Default::default(),
         })
     }
 

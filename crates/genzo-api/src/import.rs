@@ -53,7 +53,7 @@ use crate::error::ApiError;
 use crate::events::{CatalogChange, Event};
 use crate::identity::{ContentCheck, ExistingCopy, ImportSeen, check_catalog_duplicate};
 use crate::jobs::{JobCtx, spawn_job};
-use crate::paths::{absolute_lexical, join_rel, split_volume};
+use crate::paths::{VolumePath, absolute_lexical, join_rel};
 use crate::previews::{source_thumb_rev, spawn_regenerate};
 use crate::types::{DuplicateFile, FileIssue, ImportOptions, ImportReport, JobKind, JobResult};
 
@@ -213,6 +213,36 @@ pub(crate) fn excluded_dirs(inner: &crate::core::Inner) -> ExcludedDirs {
     ];
     dirs.extend(open_preview_dir.as_deref());
     ExcludedDirs::new(dirs)
+}
+
+/// 走査したフォルダ（取り込むフォルダ `root` のボリューム `vol` の中の相対パス `rel`）のボリューム。Unix では、
+/// 装置番号が取り込むフォルダと違えば（走査が別のボリュームのマウント先に入った）、そのボリュームとする。
+/// Windows では、ボリュームを割り当てたフォルダ（マウント先のフォルダ）を見分けず、取り込むフォルダのボリュームと
+/// する（実機で未確認）。
+fn dir_volume(
+    inner: &crate::core::Inner,
+    root: &Path,
+    vol: &VolumePath,
+    rel: &str,
+) -> Result<VolumePath, ApiError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let abs = join_rel(&vol.mount, rel, "");
+        let crossed = match (fs::metadata(root), fs::metadata(&abs)) {
+            (Ok(a), Ok(b)) => a.dev() != b.dev(),
+            _ => false,
+        };
+        if crossed {
+            return crate::volumes::locate(inner.volume_probe.as_ref(), &abs);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (inner, root);
+    Ok(VolumePath {
+        rel: rel.to_owned(),
+        ..vol.clone()
+    })
 }
 
 /// フォルダを走査する（シンボリックリンク・ジャンクションはたどらない。`excluded` の中は飛ばす）。
@@ -608,7 +638,8 @@ fn run_import(
             root.display()
         )));
     }
-    let vol = split_volume(&root)?;
+    // ボリューム（FILE-03。OS のボリューム ID。取れなければパスの先頭）。
+    let vol = crate::volumes::locate(inner.volume_probe.as_ref(), &root)?;
     let mut report = ImportReport {
         root: root.clone(),
         skip_duplicates: options.skip_duplicates,
@@ -628,23 +659,42 @@ fn run_import(
         report.cancelled = true;
         return Ok(report);
     }
-    let mount = vol
-        .mount
-        .to_str()
-        .ok_or_else(|| ApiError::InvalidArgument("UTF-8 で表せないパスです".to_owned()))?
-        .to_owned();
+    // 走査したフォルダのボリューム（ふつうは取り込むフォルダと同じ。走査が別のボリュームのマウント先に入った
+    // とき（Unix で装置番号が違う）は、そのボリューム。FILE-03）。
+    let dir_vols: std::collections::HashMap<String, VolumePath> = scanned
+        .dirs
+        .iter()
+        .map(|rel| Ok((rel.clone(), dir_volume(inner, &root, &vol, rel)?)))
+        .collect::<Result<_, ApiError>>()?;
     // フォルダを確保する（取り込んだフォルダは、ファイルがなくてもフォルダツリーに出す）。
-    let mut stored_rel: std::collections::HashMap<String, String> =
+    // 走査の相対パス → （ボリュームのマウント先, 登録済みのフォルダの相対パス, 走査したフォルダの相対パス）。
+    let mut stored_rel: std::collections::HashMap<String, (PathBuf, String, String)> =
         std::collections::HashMap::new();
-    let folders: std::collections::HashMap<String, FolderId> = inner.with_catalog(|c| {
-        let volume = c.ensure_volume(&vol.uuid, None, Some(&mount))?;
+    let folders: std::collections::HashMap<String, FolderId> = inner.with_catalog_api(|c| {
+        let mut volumes: std::collections::HashMap<String, genzo_model::VolumeId> =
+            std::collections::HashMap::new();
         let mut map = std::collections::HashMap::new();
         for rel in &scanned.dirs {
-            if !map.contains_key(rel) {
-                let id = c.ensure_folder(volume, rel)?;
-                stored_rel.insert(rel.clone(), c.folder(id)?.rel_path);
-                map.insert(rel.clone(), id);
+            if map.contains_key(rel) {
+                continue;
             }
+            let v = &dir_vols[rel];
+            let volume = match volumes.get(&v.uuid) {
+                Some(&id) => id,
+                None => {
+                    let mount = crate::volumes::mount_str(&v.mount)?;
+                    let id = c.ensure_volume(&v.uuid, v.label.as_deref(), Some(&mount))?;
+                    c.note_volume_seen(id, &mount, v.label.as_deref(), v.fs_type.as_deref())?;
+                    volumes.insert(v.uuid.clone(), id);
+                    id
+                }
+            };
+            let id = c.ensure_folder(volume, &v.rel)?;
+            stored_rel.insert(
+                rel.clone(),
+                (v.mount.clone(), c.folder(id)?.rel_path, v.rel.clone()),
+            );
+            map.insert(rel.clone(), id);
         }
         Ok(map)
     })?;
@@ -652,18 +702,18 @@ fn run_import(
     // フォルダのファイルは登録しない（登録済みのフォルダのレコードにまとめると、記録するパスが別のフォルダを
     // 指すため。F08）。同じフォルダ（大文字・小文字を区別しないボリュームで、名前の書き方が違うだけ）なら
     // 登録する。
-    let clashing_dirs: std::collections::HashMap<&str, &str> = stored_rel
+    let clashing_dirs: std::collections::HashMap<&str, PathBuf> = stored_rel
         .iter()
-        .filter(|(rel, stored)| {
-            if rel == stored {
+        .filter(|(_, (mount, stored, scanned_rel))| {
+            if stored == scanned_rel {
                 return false;
             }
-            let stored_path = join_rel(&vol.mount, stored, "");
-            let scanned_path = join_rel(&vol.mount, rel, "");
+            let stored_path = join_rel(mount, stored, "");
+            let scanned_path = join_rel(mount, scanned_rel, "");
             stored_path.exists()
                 && !same_file::is_same_file(&stored_path, &scanned_path).unwrap_or(false)
         })
-        .map(|(rel, stored)| (rel.as_str(), stored.as_str()))
+        .map(|(rel, (mount, stored, _))| (rel.as_str(), join_rel(mount, stored, "")))
         .collect();
     let mut files = Vec::with_capacity(scanned.files.len());
     for c in scanned.files {
@@ -671,7 +721,7 @@ fn run_import(
             Some(stored) => report.not_registered.push(FileIssue {
                 reason: format!(
                     "登録済みのフォルダ {} と、大文字・小文字か Unicode の正規化だけが違う名前のフォルダにあり、カタログでは区別できないため登録しません",
-                    join_rel(&vol.mount, stored, "").display()
+                    stored.display()
                 ),
                 path: c.path,
             }),
@@ -1068,6 +1118,13 @@ impl Core {
     ) -> Result<u64, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
+        // 写真の移動（FILE-02）の実行中は取り込まない（移している途中のファイルを登録し直さないため）。
+        if inner.jobs.is_running(JobKind::MoveFiles, None) {
+            return Err(ApiError::InvalidArgument(
+                "写真の移動の実行中は取り込めません。移動が終わってからやり直してください"
+                    .to_owned(),
+            ));
+        }
         let resolved = {
             let s = inner.settings.lock();
             ResolvedOptions {

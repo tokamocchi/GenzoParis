@@ -62,6 +62,7 @@ pub mod orientation;
 pub mod png_io;
 pub mod process;
 mod profiles;
+pub mod rename;
 pub mod resize;
 pub mod safe_write;
 pub mod tiff_io;
@@ -84,6 +85,7 @@ pub use export::{
     EXPORT_ICC_VERSION, encode_export, export_icc_profile, export_image, standard_profile_for,
 };
 pub use orientation::{apply_orientation, apply_orientation_dyn};
+pub use rename::{RENAME_TEMP_PREFIX, case_rename_temp_path, rename_case_safe, rename_no_replace};
 pub use safe_write::{
     Destination, ProtectedFiles, WriteOutcome, resolve_destination, write_atomically,
 };

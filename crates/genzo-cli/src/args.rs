@@ -47,7 +47,8 @@ pub const EXIT_CODES_HELP: &str = "終了コード:
   1    エラー（処理できなかった。trash を --yes なしで中止した場合を含む）
   2    使い方の誤り（引数の誤り・カタログの指定がない）
   3    結果は出したが、一部が失敗した・問題が見つかった（書き出し・削除・サムネイルの作り直しの一部の
-       失敗、取り込みで登録できなかったファイル、catalog check で見つかった問題、bench での悪化）
+       失敗、取り込みで登録できなかったファイル、写真の移動・名前の変更・再リンクで飛ばした・失敗した
+       写真、catalog check で見つかった問題、missing check で見つかった見つからない写真、bench での悪化）
   130  Ctrl+C で中断した";
 
 /// 全体のオプション（どのサブコマンドの後にも書ける）。
@@ -221,6 +222,382 @@ pub enum Command {
     /// 識別（場所・名前によらず、同じ内容の登録済みの写真を探す）
     #[command(subcommand)]
     Hash(HashCommand),
+    /// 撮影日時の一括修正（LIB-16）: 機材の一覧・ずらす・基準の写真に合わせる・タイムゾーンの指定と取り消し・
+    /// ファイルの値に戻す・履歴・元に戻す。カタログの中だけを変え、元のファイルには書かない。対象は variant の
+    /// ID か、--device-of で指定した写真と同じ機材（カメラの機種・シリアル番号・写真か動画か）のすべて
+    #[command(subcommand)]
+    Time(TimeCommand),
+    /// 写真と動画のタイムライン（ORG-01）: 撮影日時の順に並べ、撮影日と、撮影の間隔によるイベントで
+    /// まとめて表示する（条件は search と同じ）
+    Timeline(Box<TimelineArgs>),
+    /// ボリューム（ドライブ。FILE-03）: 一覧（OS のボリューム ID・つながっているか・マウント先）
+    #[command(subcommand)]
+    Volume(VolumeCommand),
+    /// フォルダ（FILE-02・FILE-04）: 一覧・作る・名前の変更・移動（ディスクのフォルダも変える。上書きしない）・
+    /// カタログから除く・場所の指定し直し（カタログの中だけ）。フォルダは ID（`folder list`）か、登録した
+    /// フォルダのパスで指定する
+    #[command(subcommand)]
+    Folder(FolderCommand),
+    /// 写真のファイル（FILE-02）: 別のフォルダへ移す・名前を変える。RAW と同時記録の JPEG は一緒に動かし、
+    /// 同じ名前のファイルがあればその写真は飛ばす（上書きしない）。別のドライブへはコピーして照合してから
+    /// 登録し、元のファイルはゴミ箱へ移す
+    #[command(subcommand)]
+    File(FileCommand),
+    /// 見つからない写真（FILE-04）: 存在の確認・候補を探して結び付け直す（再リンク）・1 つのファイルの
+    /// 結び付け直し。見つからない写真の一覧は `search --missing`
+    #[command(subcommand)]
+    Missing(MissingCommand),
+}
+
+/// フォルダの指定（ID か、登録したフォルダのパス）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderArg {
+    /// フォルダの ID（数字だけ）。
+    Id(genzo_model::FolderId),
+    /// 登録したフォルダのパス。
+    Path(PathBuf),
+}
+
+/// フォルダの指定を解釈する（数字だけなら ID。数字だけの名前のフォルダは `./2024` のようにパスで書く）。
+pub fn parse_folder_arg(s: &str) -> Result<FolderArg, String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Err("フォルダを ID かパスで指定してください".to_owned());
+    }
+    if t.bytes().all(|b| b.is_ascii_digit()) {
+        return match t.parse::<i64>() {
+            Ok(n) if n >= 1 => Ok(FolderArg::Id(genzo_model::FolderId::new(n))),
+            _ => Err(format!("フォルダの ID は 1 以上の整数です（{s}）")),
+        };
+    }
+    Ok(FolderArg::Path(PathBuf::from(s)))
+}
+
+/// ファイルの ID（1 以上の整数。`missing relink --dry-run`・`show` で見られる）。
+pub fn parse_file_id(s: &str) -> Result<genzo_model::FileId, String> {
+    match s.trim().parse::<i64>() {
+        Ok(n) if n >= 1 => Ok(genzo_model::FileId::new(n)),
+        _ => Err(format!("ファイルの ID は 1 以上の整数です（{s}）")),
+    }
+}
+
+/// `volume` のサブコマンド（FILE-03）。
+#[derive(Debug, Subcommand)]
+pub enum VolumeCommand {
+    /// ボリュームの一覧（ID・識別の方法・ラベル・マウント先・つながっているか）
+    List {
+        /// つながりを確かめ直す（つないだドライブのフォルダのオフラインの印を外す。古い形式のボリュームを
+        /// OS のボリューム ID に移す）
+        #[arg(long)]
+        refresh: bool,
+    },
+}
+
+/// `folder` のサブコマンド（FILE-02・FILE-04）。
+#[derive(Debug, Subcommand)]
+pub enum FolderCommand {
+    /// フォルダの一覧（ID・状態（オフライン・見つからない）・見つからない写真の数・パス）
+    List,
+    /// フォルダを作る（ディスクに作り、カタログに登録する）
+    Create {
+        /// 作る場所（フォルダの ID かパス）
+        #[arg(value_parser = parse_folder_arg)]
+        parent: FolderArg,
+        /// 新しいフォルダの名前
+        name: String,
+    },
+    /// フォルダの名前を変える（ディスクのフォルダも。中の写真の登録はそのまま）
+    Rename {
+        /// フォルダ（ID かパス）
+        #[arg(value_parser = parse_folder_arg)]
+        folder: FolderArg,
+        /// 新しい名前
+        name: String,
+    },
+    /// フォルダを別のフォルダの中へ移す（ディスクの上で。同じドライブの中だけ）
+    Move {
+        /// 移すフォルダ（ID かパス）
+        #[arg(value_parser = parse_folder_arg)]
+        folder: FolderArg,
+        /// 移動先（この中へ。ID かパス）
+        #[arg(value_parser = parse_folder_arg)]
+        parent: FolderArg,
+    },
+    /// フォルダ（と配下）をカタログから除く（写真が登録されていないフォルダだけ。見つからないフォルダ・再リンクで
+    /// 空になったフォルダの片付け。カタログの中だけを変え、ディスクのフォルダには触れない）
+    Remove {
+        /// フォルダ（ID かパス）
+        #[arg(value_parser = parse_folder_arg)]
+        folder: FolderArg,
+    },
+    /// フォルダの場所を指定し直す（OS の側で移した・名前を変えたフォルダを、新しい場所に結び付け直す。
+    /// カタログの中だけを変え、ファイルは動かさない。配下のフォルダも）
+    Relocate {
+        /// フォルダ（ID か、カタログに登録した前のパス）
+        #[arg(value_parser = parse_folder_arg)]
+        folder: FolderArg,
+        /// 新しい場所
+        path: PathBuf,
+        /// 変えずに、見つかるファイルの数だけを出す
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// `file` のサブコマンド（FILE-02）。
+#[derive(Debug, Subcommand)]
+pub enum FileCommand {
+    /// 写真を別のフォルダへ移す（進捗は標準エラー）
+    Move {
+        /// variant の ID（複数可。仮想コピーは元の写真と同じファイル）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// 移動先のフォルダ（ID か、登録したフォルダのパス。新しいフォルダは folder create で作る）
+        #[arg(long, value_name = "FOLDER", value_parser = parse_folder_arg)]
+        to: FolderArg,
+        /// 移さずに、予定（移せない写真と理由・コピーの量）だけを出す
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 写真のファイルの名前を変える（拡張子は変えない。--name か --template のどちらか）
+    Rename {
+        /// variant の ID（複数可。--name なら 1 つ）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// 新しい名前（拡張子を除く。1 枚だけ）
+        #[arg(
+            long,
+            conflicts_with = "template",
+            required_unless_present = "template"
+        )]
+        name: Option<String>,
+        /// 名前のテンプレート（import --rename と同じ項目。例: "{date}-{seq}"。連番は指定した順）
+        #[arg(long, value_name = "TEMPLATE")]
+        template: Option<String>,
+        /// テンプレートの {text} に入れる文字
+        #[arg(
+            long,
+            value_name = "TEXT",
+            requires = "template",
+            conflicts_with = "name",
+            default_value = ""
+        )]
+        text: String,
+        /// 連番（{seq}）の開始番号
+        #[arg(
+            long,
+            value_name = "N",
+            requires = "template",
+            conflicts_with = "name",
+            default_value_t = 1
+        )]
+        seq_start: u32,
+        /// 連番（{seq}）の桁数（1〜9）
+        #[arg(long, value_name = "N", requires = "template", conflicts_with = "name", default_value_t = 4,
+              value_parser = clap::value_parser!(u8).range(1..=9))]
+        seq_digits: u8,
+        /// 変えずに、新しい名前と変えられない理由だけを出す
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// `missing` のサブコマンド（FILE-04）。
+#[derive(Debug, Subcommand)]
+pub enum MissingCommand {
+    /// 登録したファイルがあるかを確かめ、見つからない印を付ける・外す（つながっていないドライブは飛ばす。
+    /// 進捗は標準エラー）
+    Check {
+        /// このフォルダ（配下を含む。ID かパス）だけを確かめる
+        #[arg(long, value_name = "FOLDER", value_parser = parse_folder_arg)]
+        folder: Option<FolderArg>,
+    },
+    /// 見つからない写真の候補をフォルダから探し（名前・大きさ・撮影日時・内容のハッシュ）、確からしい候補が
+    /// 1 つだけのものを結び付け直す
+    Relink {
+        /// 探すフォルダ
+        #[arg(long = "in", value_name = "DIR")]
+        dir: PathBuf,
+        /// 対象の写真（variant の ID。省略するとすべての見つからない写真）
+        #[arg(value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// サブフォルダを探さない
+        #[arg(long)]
+        no_recursive: bool,
+        /// 名前と撮影日時だけが同じ（内容が変わっている）候補も、それしかなければ結び付ける（読み直す）
+        #[arg(long)]
+        accept_changed: bool,
+        /// 結び付けずに、候補だけを出す
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 見つからないファイルを、指定したファイルに結び付け直す（ファイルの ID は relink --dry-run で見られる）
+    Link {
+        /// ファイルの ID
+        #[arg(value_parser = parse_file_id)]
+        file: genzo_model::FileId,
+        /// 結び付けるファイル
+        path: PathBuf,
+        /// 内容が登録のものと違っても結び付ける（読み直す）
+        #[arg(long)]
+        accept_changed: bool,
+    },
+}
+
+/// `time` の対象（LIB-16）。
+#[derive(Debug, Args)]
+pub struct TimeTargetArgs {
+    /// variant の ID（複数可。同じ写真の仮想コピーは撮影日時を共有する）
+    #[arg(value_parser = parse_variant_id)]
+    pub variants: Vec<VariantId>,
+    /// この写真と同じ機材のすべての写真・動画を対象にする（複数可）
+    #[arg(long, value_name = "ID", value_parser = parse_variant_id)]
+    pub device_of: Vec<VariantId>,
+    /// 変えずに、変わる数と例だけを出す
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// `time` のサブコマンド（LIB-16）。
+#[derive(Debug, Subcommand)]
+pub enum TimeCommand {
+    /// 機材の一覧（カメラの機種・シリアル番号・写真か動画か・数・撮影日時の範囲（既定のタイムゾーン））
+    Devices,
+    /// 撮影日時をずらす（時計のずれの補正に足す。例: +1h、-90s、+1d2h3m4s、3600（秒））
+    Shift {
+        /// ずらす量（正で後の時刻にする。d・h・m・s の組み合わせか、秒の整数）
+        #[arg(allow_hyphen_values = true, value_parser = parse_shift)]
+        amount: i64,
+        /// 対象。
+        #[command(flatten)]
+        target: TimeTargetArgs,
+    },
+    /// 基準の写真の正しい撮影日時から差を求めて、対象のすべてをその差だけずらす（対象を省略すると、基準の
+    /// 写真と同じ機材のすべて）
+    Sync {
+        /// 基準の写真（variant の ID）
+        #[arg(value_parser = parse_variant_id)]
+        reference: VariantId,
+        /// 基準の写真の正しい撮影日時（例: "2024-05-01 12:34:56"。オフセットを付けるとそれで読む）
+        correct: String,
+        /// 正しい撮影日時を読むタイムゾーン（例: +09:00。省略すると基準の写真の表示のタイムゾーン）
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_zone_minutes)]
+        zone: Option<i32>,
+        /// 対象。
+        #[command(flatten)]
+        target: TimeTargetArgs,
+    },
+    /// タイムゾーンを指定する（既定: 記録の時刻をそのタイムゾーンの時刻として読む。UTC の印だけの動画なども
+    /// 現地時刻として読む。--keep-instant: 撮影した瞬間はそのままで、そのタイムゾーンの時刻で表示する）
+    Zone {
+        /// オフセット（例: +09:00、-05:30）
+        #[arg(allow_hyphen_values = true, value_parser = parse_zone_minutes)]
+        offset: i32,
+        /// 撮影した瞬間を変えずに、表示だけを変える
+        #[arg(long)]
+        keep_instant: bool,
+        /// 対象。
+        #[command(flatten)]
+        target: TimeTargetArgs,
+    },
+    /// タイムゾーンの指定を取り消す（ファイルの記録、なければ既定のタイムゾーンに戻す。ずれの補正は保つ）
+    ClearZone {
+        /// 対象。
+        #[command(flatten)]
+        target: TimeTargetArgs,
+    },
+    /// 修正をすべて取り消し、ファイルの値に戻す
+    Reset {
+        /// 対象。
+        #[command(flatten)]
+        target: TimeTargetArgs,
+    },
+    /// 修正の履歴（新しい順）
+    History,
+    /// 最後の修正を取り消す
+    Undo,
+}
+
+/// `timeline` の引数（ORG-01）。
+#[derive(Debug, Args)]
+pub struct TimelineArgs {
+    /// イベントの区切りの間隔（例: 2h、30m。0 ならイベントで分けない。既定 2h）
+    #[arg(long, value_parser = parse_gap, default_value = "2h")]
+    pub gap: u32,
+    /// 新しい順にする
+    #[arg(long)]
+    pub desc: bool,
+    /// スタックをすべて展開して並べる
+    #[arg(long)]
+    pub expand_stacks: bool,
+    /// 対象の写真の条件（search と同じ）。
+    #[command(flatten)]
+    pub filter: FilterArgs,
+}
+
+/// 撮影日時をずらす量（`+1d2h3m4s`・`-90s`・`3600`）を秒にする。
+pub fn parse_shift(s: &str) -> Result<i64, String> {
+    let bad =
+        || format!("ずらす量は +1h・-90s・+1d2h3m4s・3600（秒）の形で指定してください（{s}）");
+    let t = s.trim();
+    let (sign, body) = match t.as_bytes().first() {
+        Some(b'+') => (1i64, &t[1..]),
+        Some(b'-') => (-1i64, &t[1..]),
+        _ => (1i64, t),
+    };
+    if body.is_empty() {
+        return Err(bad());
+    }
+    if body.bytes().all(|b| b.is_ascii_digit()) {
+        return body.parse::<i64>().map(|v| sign * v).map_err(|_| bad());
+    }
+    let mut total: i64 = 0;
+    let mut number = String::new();
+    let mut last_unit = 0usize;
+    for c in body.chars() {
+        if c.is_ascii_digit() {
+            number.push(c);
+            continue;
+        }
+        let (rank, unit) = match c.to_ascii_lowercase() {
+            'd' => (1, 86_400),
+            'h' => (2, 3_600),
+            'm' => (3, 60),
+            's' => (4, 1),
+            _ => return Err(bad()),
+        };
+        // 単位は大きい順に 1 回ずつ。
+        if number.is_empty() || rank <= last_unit {
+            return Err(bad());
+        }
+        last_unit = rank;
+        let v: i64 = number.parse().map_err(|_| bad())?;
+        total = v
+            .checked_mul(unit)
+            .and_then(|x| total.checked_add(x))
+            .ok_or_else(bad)?;
+        number.clear();
+    }
+    if !number.is_empty() {
+        return Err(bad());
+    }
+    Ok(sign * total)
+}
+
+/// イベントの区切りの間隔（`2h`・`30m`・`0`）を秒にする（0〜1 日）。
+pub fn parse_gap(s: &str) -> Result<u32, String> {
+    let v = parse_shift(s)?;
+    if !(0..=i64::from(genzo_api::MAX_TIMELINE_GAP_SECONDS)).contains(&v) {
+        return Err(format!("間隔は 0〜24h で指定してください（{s}）"));
+    }
+    Ok(v as u32)
+}
+
+/// タイムゾーンのオフセット（`+09:00`・`-0530`）を分にする。
+pub fn parse_zone_minutes(s: &str) -> Result<i32, String> {
+    let o = genzo_model::capture_time::parse_offset(s)
+        .map_err(|_| format!("タイムゾーンは +09:00・-05:30 の形で指定してください（{s}）"))?;
+    Ok(o.local_minus_utc() / 60)
 }
 
 /// `hash` のサブコマンド。
@@ -730,6 +1107,9 @@ pub struct FilterArgs {
     /// マスターだけ（仮想コピーを除く）
     #[arg(long)]
     pub masters_only: bool,
+    /// 元ファイルが見つからない写真だけ（FILE-04。missing check で確かめた結果）
+    #[arg(long)]
+    pub missing: bool,
     /// キーワード（パスか id:N。下の階層を含む。複数指定ですべてを持つ）
     #[arg(long, value_name = "KEYWORD")]
     pub keyword: Vec<String>,
@@ -1469,6 +1849,90 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         parse_from(os(args))
+    }
+
+    /// フォルダの指定（FILE-02）: 数字だけなら ID、それ以外はパス。`file rename` は --name か --template。
+    #[test]
+    fn folder_arguments_and_file_rename_options() {
+        assert_eq!(
+            parse_folder_arg("12"),
+            Ok(FolderArg::Id(genzo_model::FolderId::new(12)))
+        );
+        assert_eq!(
+            parse_folder_arg("./2024"),
+            Ok(FolderArg::Path(PathBuf::from("./2024")))
+        );
+        assert_eq!(
+            parse_folder_arg("/写真/京都"),
+            Ok(FolderArg::Path(PathBuf::from("/写真/京都")))
+        );
+        assert!(parse_folder_arg("0").is_err());
+        assert!(parse_folder_arg(" ").is_err());
+        assert!(parse(&["genzo", "folder", "remove", "3"]).is_ok());
+        assert!(
+            parse(&["genzo", "folder", "remove"]).is_err(),
+            "フォルダは必須"
+        );
+        assert!(parse(&["genzo", "file", "move", "1", "--to", "3"]).is_ok());
+        assert!(
+            parse(&["genzo", "file", "move", "1"]).is_err(),
+            "--to は必須"
+        );
+        assert!(parse(&["genzo", "file", "rename", "1"]).is_err());
+        assert!(
+            parse(&[
+                "genzo",
+                "file",
+                "rename",
+                "1",
+                "--name",
+                "a",
+                "--template",
+                "{seq}"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&["genzo", "file", "rename", "1", "--text", "x", "--name", "a"]).is_err(),
+            "--text は --template と"
+        );
+        assert!(
+            parse(&[
+                "genzo",
+                "file",
+                "rename",
+                "1",
+                "2",
+                "--template",
+                "{seq}",
+                "--seq-digits",
+                "3"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "genzo",
+                "missing",
+                "relink",
+                "--in",
+                "/x",
+                "1",
+                "2",
+                "--dry-run"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&["genzo", "missing", "relink", "1"]).is_err(),
+            "--in は必須"
+        );
+        assert!(parse(&["genzo", "missing", "link", "0", "/x"]).is_err());
+        let cli = parse(&["genzo", "search", "--missing"]).unwrap();
+        let Command::Search(a) = cli.command else {
+            panic!("search");
+        };
+        assert!(a.filter.missing);
     }
 
     /// コピー取り込み・リネーム・まとめて付けるものの引数（IMP-02・IMP-03・IMP-05）。

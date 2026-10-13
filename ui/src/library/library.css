@@ -170,6 +170,71 @@
 .lib-grid-toolbar .spacer {
   flex: 1;
 }
+.lib-grid-toolbar select {
+  max-width: 200px;
+  font-size: 12px;
+}
+.lib-grid-toolbar .hint {
+  color: var(--fg-2);
+}
+.lib-tl-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+/* タイムライン（ORG-01）の日付・イベントの見出しの行。 */
+.lib-tl-day,
+.lib-tl-event {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  box-sizing: border-box;
+  padding-bottom: 4px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.lib-tl-day {
+  color: var(--fg-0);
+  font-size: 15px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 2px;
+}
+.lib-tl-event {
+  color: var(--fg-1);
+  font-size: 12px;
+}
+.lib-tl-day .meta,
+.lib-tl-event .meta {
+  font-weight: normal;
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.lib-tl-day:hover .title,
+.lib-tl-event:hover .meta {
+  text-decoration: underline;
+}
+/* スクロールして日付の見出しが隠れたときに上端に出す、今の日付。 */
+.lib-tl-sticky {
+  position: absolute;
+  top: 6px;
+  left: 12px;
+  padding: 2px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  color: var(--fg-0);
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+  opacity: 0.92;
+}
 .lib-grid-toolbar input[type="range"] {
   width: 140px;
   accent-color: var(--fg-1);
@@ -847,4 +912,39 @@
   gap: 6px;
   margin: 4px 0;
   white-space: nowrap;
+}
+
+/* 右のパネルの撮影日時の「修正…」（LIB-16）。 */
+.lib-capture-edit {
+  margin-left: 6px;
+  vertical-align: baseline;
+}
+
+/* ------------------------------------------------------------------ フォルダの印・ドロップ（FILE-02〜04） */
+
+.lib-tree-seg.offline {
+  color: var(--fg-3);
+}
+.lib-tree-seg.missing {
+  color: var(--warn);
+}
+.lib-tree-seg.drop-over {
+  background: var(--bg-4);
+  outline: 1px solid var(--accent);
+}
+.lib-tree-seg.drop-no {
+  outline: 1px dashed var(--warn);
+}
+.lib-tree-mark {
+  flex: none;
+  padding: 0 2px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.lib-tree-mark.warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+.lib-tree-mark.muted {
+  color: var(--fg-3);
 }

@@ -27,10 +27,10 @@ pub mod phase;
 pub mod smart;
 
 pub use cache_key::{CacheColorSpace, CacheFormat, CacheKey, CacheKind, RenderQuality};
-pub use capture_time::{CaptureTime, CaptureTimeError, UTC_ONLY_OFFSET};
+pub use capture_time::{CaptureTime, CaptureTimeError, UTC_ONLY_OFFSET, ZoneMode};
 pub use catalog::{
     AssetKind, CollectionKind, ColorLabel, FileOpKind, FileOpState, FileRole, FileStatus, Flag,
-    ParseEnumError, Rating, TzSource,
+    FolderStatus, ParseEnumError, Rating, TzSource,
 };
 pub use develop::{
     AspectRatio, ColorParams, CropRect, CurvePoint, DataRef, DetailParams, DevelopError,
@@ -49,7 +49,10 @@ pub use iptc::{
     CopyrightStatus, IptcMetadata, MAX_METADATA_CHARS, MetadataField, MetadataValueError,
     normalize_metadata_value,
 };
-pub use metadata::{CaptureInfo, GpsCoord, Orientation, PhotoMetadata, VideoMetadata};
+pub use metadata::{
+    CaptureInfo, GpsCoord, Orientation, PhotoMetadata, VideoMetadata, camera_display_name,
+    normalize_serial,
+};
 pub use phase::Phase;
 pub use smart::{
     ContainsOp, DateOp, EqualityOp, KeywordOp, MAX_SMART_CONDITIONS, MAX_SMART_DAYS,

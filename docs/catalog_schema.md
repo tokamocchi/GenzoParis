@@ -19,7 +19,7 @@ GenzoParis のカタログ（SQLite のデータベース）の構造と、外�
 
 スキーマの版は `PRAGMA user_version`、GenzoParis のファイルであることの印は `PRAGMA application_id` に入っています。
 
-- catalog.db のスキーマの版: **10**（`application_id` は 1197097812 = 16 進数の 0x475A4354 = ASCII の `GZCT`）
+- catalog.db のスキーマの版: **12**（`application_id` は 1197097812 = 16 進数の 0x475A4354 = ASCII の `GZCT`）
 - thumbs.db のスキーマの版: **2**（`application_id` は 1197102152 = 16 進数の 0x475A5448 = ASCII の `GZTH`）
 
 アプリは、古い版のカタログを開くと、自動でバックアップを作ってから新しい版に移行します。新しい版のカタログは、古いアプリでは開けません（壊さないため）。
@@ -36,6 +36,8 @@ GenzoParis のカタログ（SQLite のデータベース）の構造と、外�
 | 8 | フォルダ・キーワード・コレクションの ID を使い回さない（`folder`・`keyword`・`collection` を `AUTOINCREMENT` で作り直す。列・索引は変えない） | `catalog_0008_stable_ids.sql`（連番の初めの値は Rust の処理。6 章） |
 | 9 | スタック（LIB-12）を使い始める（`stack` を `AUTOINCREMENT` で作り直し、折りたたみの状態 `collapsed` を足す。トリガー `stack_member_after_delete`、公開ビュー `photo_stacks_v1`） | `catalog_0009_stacks.sql`（既存の行の位置の付け直しなどは Rust の処理。6 章） |
 | 10 | 内容による同一性（ORG-03・IMP-04・IMP-06）: クイックハッシュ・全体のハッシュの索引（`file_quick_hash`・`file_full_hash`）、公開ビュー `photo_files_v1`。既存のファイルの全体のハッシュは移行では計算しない（アプリがバックグラウンドで計算する） | `catalog_0010_content_identity.sql` |
+| 11 | 撮影日時の一括修正（LIB-16）: カメラの本体のシリアル番号（`asset.camera_serial`）と UTC の計算に使ったオフセット（`asset.tz_basis`）の列、修正の履歴（`capture_time_edit`・`capture_time_edit_item`）、`photos_v1` の列 `camera_serial`。既存の行の 2 つの列は NULL のまま（撮影日時は変わらない） | `catalog_0011_capture_time_edits.sql` |
+| 12 | 外付けドライブの識別（FILE-03）・見つからない写真（FILE-04）: ボリュームのファイルシステムの種類（`volume.fs_type`）と最後につながった日時（`volume.last_seen_at`）、フォルダの状態（`folder.status`・`folder.status_at`）、状態が `ok` でないファイルの部分索引（`file_not_ok`）。版 11 までのパスから作ったボリュームの ID（`path:`）は移行では変えない（アプリが開いたときに、見えるフォルダから OS のボリューム ID へ移す。2.4 節） | `catalog_0012_volumes_and_missing.sql` |
 
 ## 2. 読み方
 
@@ -46,7 +48,7 @@ SQLite の CLI（`sqlite3`）:
 ```sh
 # 読み取り専用で開く（-readonly）。Windows ではパスを "C:\Users\...\catalog.db" のように書く。
 sqlite3 -readonly ~/Pictures/GenzoParis/catalog.db
-sqlite> PRAGMA user_version;            -- スキーマの版（10）
+sqlite> PRAGMA user_version;            -- スキーマの版（12）
 sqlite> .mode box
 sqlite> SELECT variant_id, file_name, captured_at_local, rating
    ...> FROM photos_v1 WHERE rating >= 4 ORDER BY captured_at_utc;
@@ -85,11 +87,11 @@ DB Browser for SQLite では、「データベースを開く」の代わりに�
 |---|---|---|
 | `*_at`（`created_at`・`updated_at`・`status_at`・`captured_at_utc` など）、`app_state` の日時 | UTC の ISO 8601（RFC 3339）。ミリ秒まで、末尾は `Z`。桁数が一定なので、文字列の比較で時刻順になる | `2024-05-01T03:00:00.000Z` |
 | `asset.captured_at_raw` | ファイルに記録されていた元の文字列（EXIF の `2024:05:01 12:00:00`、動画の `2024-05-01T03:00:00.000000Z` など） | `2024:05:01 12:00:00` |
-| `asset.captured_offset`・`asset.tz_assumed` | UTC からのオフセット（`±HH:MM`）。`captured_offset` は UTC の印だけのとき `Z` | `+09:00` |
+| `asset.captured_offset`・`asset.tz_assumed`・`asset.tz_basis` | UTC からのオフセット（`±HH:MM`）。`captured_offset` は UTC の印だけのとき `Z` | `+09:00` |
 | `file.mtime` | ファイルの更新日時。UNIX 時刻（1970-01-01T00:00:00Z）からのナノ秒の整数 | `1714532400000000000` |
 | `photos_v1.captured_at_local` | 補正後の UTC を表示のオフセット（`tz_assumed`）で表した現地時刻（オフセットなし。秒の小数 3 桁） | `2024-05-01T12:00:00.000` |
 
-撮影日時（`asset`）は、元の値と推定に使った情報を分けて持ちます（04 の 3.1 節）。表示する撮影日時は `captured_at_utc`（補正後の UTC）を `tz_assumed` のオフセットで表したものです（`photos_v1.captured_at_local`）。撮影日時が分からない写真は `captured_at_utc` が NULL です（並べ替えでは最後に並べる）。SQLite の日時の関数で現地時刻を求めるには `strftime('%Y-%m-%dT%H:%M:%f', captured_at_utc, tz_assumed)` と書きます（`tz_assumed` の `±HH:MM` を時刻の修飾子として足す。アプリが同梱する SQLite と、SQLite 3.45 で動くことを確かめています。古い SQLite で使うときは、結果を確かめてください）。
+撮影日時（`asset`）は、元の値と推定に使った情報を分けて持ちます（04 の 3.1 節）。利用者の修正（時計のずれの補正・タイムゾーンの指定。LIB-16）は `time_correction_s`・`tz_source = 'user_set'`・`tz_assumed`・`tz_basis` に入り、元の値（`captured_at_raw`・`captured_offset`）は変えません。UTC は `captured_at_raw` の時刻を `tz_basis`（NULL なら `tz_assumed`。UTC の印だけの値で `tz_basis` が NULL なら UTC）のオフセットで読み、`time_correction_s` を足したものです。表示する撮影日時は `captured_at_utc`（補正後の UTC）を `tz_assumed` のオフセットで表したものです（`photos_v1.captured_at_local`）。撮影日時が分からない写真は `captured_at_utc` が NULL です（並べ替えでは最後に並べる）。SQLite の日時の関数で現地時刻を求めるには `strftime('%Y-%m-%dT%H:%M:%f', captured_at_utc, tz_assumed)` と書きます（`tz_assumed` の `±HH:MM` を時刻の修飾子として足す。アプリが同梱する SQLite と、SQLite 3.45 で動くことを確かめています。古い SQLite で使うときは、結果を確かめてください）。
 
 ### 2.4 ID の関係
 
@@ -108,7 +110,7 @@ volume ─< folder ─< file >─ asset ─< variant ─< history_entry
 - 画面・CLI の「写真の ID」は variant の ID（`variant.id`）です。
 - `asset.id`・`variant.id`・`file.id`・`history_entry.id`・`snapshot.id`・`file_op.id` は、削除した後も同じ値を使い回しません（`AUTOINCREMENT`。サムネイル DB などの外部のキャッシュが ID で参照するため）。`folder.id`・`keyword.id`・`collection.id` も、版 8 から使い回しません（スマートコレクションの条件や画面のターゲットコレクションが ID で参照し、削除したものを参照する条件が、後から作ったものに付け替わらないようにするため。版 7 までに削除したものも、条件が参照している ID は使いません）。`stack.id` も版 9 から使い回しません（画面・CLI がスタックを ID で指すため）。`volume` の ID は使い回すことがあります。
 - 外部キーは、asset を消すと file・variant・履歴・キーワードの付与などが消える（`ON DELETE CASCADE`）ように定義しています。キーワード・コレクションそのものは残ります。外部キーの確認は接続ごとの設定（`PRAGMA foreign_keys`）で、アプリはすべての接続で有効にしています。
-- 元ファイルの絶対パスは「ボリュームのマウント先（`volume.last_mount_path`）＋ フォルダ（`folder.rel_path`。区切りは `/`）＋ ファイル名（`file.name`）」です。今の版では、パスの先頭（Linux・macOS の `/`、Windows の `C:\` や `\\server\share\`）をボリュームとしています（`volume.uuid` は `path:/`・`path:C:\` の形。外付けドライブの識別（FILE-03）で変わる予定）。
+- 元ファイルの絶対パスは「ボリュームのマウント先（`volume.last_mount_path`）＋ フォルダ（`folder.rel_path`。区切りは `/`）＋ ファイル名（`file.name`）」です。版 12 から（FILE-03）、ボリュームは OS のボリューム ID で識別し（`volume.uuid` が `uuid:<ファイルシステムの UUID>`（Linux・macOS）・`winvol:<ファイルシステム>:<シリアル番号>`（Windows）・`net:<共有の名前>`（ネットワークのボリューム）の形）、ドライブ文字やマウント先が変わると、アプリが `last_mount_path` を新しいマウント先にします。ボリューム ID を取れないファイルシステム（コンテナの中・一時的なファイルシステムなど）と版 11 までに登録したものは、パスの先頭のマウント先から作った `path:/`・`path:C:\` の形です。**つながっていないボリュームの `last_mount_path` には、別のドライブがつながっていることがあります**（外部のツールでそのパスを開くと、別のファイルを読みうる）。
 
 ### 2.5 文字列の正規化と JSON
 
@@ -116,7 +118,7 @@ volume ─< folder ─< file >─ asset ─< variant ─< history_entry
 - `collection.smart_rule_json` はスマートコレクションの条件の JSON（genzo-model の `SmartRule`。版付き。04 の 3.9 節）です: `{"version": 1, "match": "all", "rules": [{"type": "rating", "op": "gte", "value": 3}, {"type": "group", "match": "any", "rules": [...]}]}`。条件の種類は `rating`・`flag`・`color_label`・`keyword`・`capture_time`・`camera`・`lens`・`kind`・`text`・`folder`・`collection`・`group`（入れ子）です。
 - `asset_text.text_norm` は、ファイル名・キャプションと、説明のメタデータのうち検索の対象の項目（タイトル・見出し・作成者・著作権表示・撮影場所の 4 項目・クレジット・提供元。連絡先・URL・著作権の状態・使用条件・指示は含めない）を NFKC に正規化して小文字にし、改行でつないだ検索用の文字列です。3 文字以上の語は全文検索の索引（`asset_fts`。FTS5 の trigram）で、1〜2 文字の語は `text_norm` への `LIKE` で探します（04 の 3.6 節）。
 - `variant.develop_json`・`history_entry.develop_json`・`snapshot.develop_json` は現像設定の JSON（genzo-model の `DevelopSettings`。04 の 2.5 節）です。**NULL は「その処理バージョン（`process_version`）の既定の設定」**です（未調整の写真の容量を抑えるため）。JSON の項目は処理バージョンとともに増えます。
-- `file_op.payload_json` はファイル操作の対象（`{"entries": [{"file_id", "asset_id", "from": {"folder_id", "name", "absolute_path"}, "to": …}]}`）です。
+- `file_op.payload_json` はファイル操作の対象（`{"entries": [{"file_id", "asset_id", "from": {"folder_id", "name", "absolute_path"}, "to": …}]}`）です。版 12 から、別のボリュームへの移動（コピーして照合し、元をゴミ箱へ移す）の項目には `"method": "copy"` が付き、フォルダの移動・名前の変更は `"entries": []` と `"folder": {"folder_id", "from_rel", "from_path", "to_volume", "to_rel", "to_path"}` です。
 - 真偽値は 0 / 1 の整数です（`variant.is_master`・`stack.collapsed`・`photos_v1.is_virtual_copy`・`photo_stacks_v1.is_top`）。
 - **スタック**（LIB-12。版 9 から）: 1 つの variant は高々 1 つのスタックに入ります。スタックの中の順は `stack_member` の `(position, variant_id)` で、一番上の写真（`stack.top_variant_id`）は常に最初です。写真が 1 枚以下になったスタックはトリガー（`stack_member_after_delete`）が消すので、スタックは常に 2 枚以上です。仮想コピーは、作ると元の写真と同じスタックに入ります（04 の 3.10 節）。
 
@@ -175,7 +177,7 @@ GROUP BY full_hash HAVING count(*) > 1;
 
 ## 3. 公開ビュー
 
-外部から読むための安定した入口です（スキーマの版 5 から。版 6 で `photos_v1` に列を足した。版 7 で `photo_collections_v1`、版 9 で `photo_stacks_v1`、版 10 で `photo_files_v1` を足した）。
+外部から読むための安定した入口です（スキーマの版 5 から。版 6・版 11 で `photos_v1` に列を足した。版 7 で `photo_collections_v1`、版 9 で `photo_stacks_v1`、版 10 で `photo_files_v1` を足した）。
 
 - **約束**: 名前の末尾の版（`_v1`）が同じ間は、列の名前・意味・値の形を変えず、列を減らしません。変える必要があれば、別の名前（`_v2`）のビューを足します。列を足すことはあるので、`SELECT *` ではなく列の名前を指定して読んでください。行の並び順は決めていないので、`ORDER BY` を指定してください。
 - ビューは読むためのものです（書き込めません）。
@@ -228,6 +230,7 @@ GROUP BY full_hash HAVING count(*) > 1;
 | `title` | TEXT | タイトル（`asset_iptc.title`。版 6 から。なければ NULL） |
 | `creator` | TEXT | 作成者（`asset_iptc.creator`。版 6 から） |
 | `copyright` | TEXT | 著作権表示（`asset_iptc.copyright`。版 6 から） |
+| `camera_serial` | TEXT | カメラの本体のシリアル番号（`asset.camera_serial`。版 11 から。記録しないカメラ・版 11 より前に取り込んだものは NULL） |
 
 そのほかの説明のメタデータ（見出し・連絡先・撮影場所など）は、表 `asset_iptc`（4 章）を `asset_id` で結んで読みます（表の構造は変わることがあります）。
 
@@ -294,9 +297,11 @@ GROUP BY full_hash HAVING count(*) > 1;
 | 列 | 型 | NULL | 既定値 | 意味 |
 |---|---|---|---|---|
 | `id` | INTEGER | 不可 | | 主キー |
-| `uuid` | TEXT | 不可 | | ボリュームの識別子（`UNIQUE`。今の版はパスの先頭から作った `path:/`・`path:C:\` の形。2.4 節） |
-| `label` | TEXT | 可 | | 表示名 |
-| `last_mount_path` | TEXT | 可 | | 最後に確認したマウント先（`/`・`C:\` など） |
+| `uuid` | TEXT | 不可 | | ボリュームの識別子（`UNIQUE`。OS のボリューム ID（`uuid:`・`winvol:`・`net:`）か、パスの先頭から作った `path:/`・`path:C:\` の形。2.4 節） |
+| `label` | TEXT | 可 | | 表示名（ボリュームのラベル） |
+| `last_mount_path` | TEXT | 可 | | 最後に確認したマウント先（`/`・`/media/me/SD`・`E:\` など） |
+| `fs_type` | TEXT | 可 | | ファイルシステムの種類（`ext4`・`apfs`・`NTFS`・`exFAT` など。表示用。版 12 から） |
+| `last_seen_at` | TEXT | 可 | | つながっていることを最後に確かめた日時（UTC。版 12 から） |
 
 ### `folder`
 
@@ -309,6 +314,8 @@ GROUP BY full_hash HAVING count(*) > 1;
 | `parent_id` | INTEGER | 可 | | 親のフォルダ（→ `folder.id`。最上位は NULL） |
 | `rel_path` | TEXT | 不可 | | ボリュームの中の相対パス（表示用。区切りは `/`） |
 | `rel_path_key` | TEXT | 不可 | | 比較用のキー（NFC ＋ 小文字。2.5 節） |
+| `status` | TEXT | 不可 | `'ok'` | `ok` / `missing`（ボリュームはつながっているのに、フォルダが見つからない）（`CHECK`。版 12 から。アプリのバックグラウンドの確認で付く） |
+| `status_at` | TEXT | 可 | | 状態を最後に記録した日時（UTC。版 12 から） |
 
 ### `asset`
 
@@ -321,7 +328,7 @@ GROUP BY full_hash HAVING count(*) > 1;
 | `captured_at_raw` | TEXT | 可 | | ファイルに記録されていた日時の元の文字列 |
 | `captured_offset` | TEXT | 可 | | ファイルに記録されていたオフセット（`+09:00`。UTC の印だけなら `Z`。なければ NULL） |
 | `tz_source` | TEXT | 不可 | `'user_default'` | UTC の推定に使ったオフセットの出どころ: `exif`（ファイルの記録）/ `utc_only`（UTC の印だけ。表示のオフセットは既定のタイムゾーン）/ `user_default`（記録がなく既定のタイムゾーン）/ `user_set`（利用者が指定）（`CHECK`） |
-| `tz_assumed` | TEXT | 可 | | 推定・表示に使ったオフセット（`+09:00`。日時がなければ NULL） |
+| `tz_assumed` | TEXT | 可 | | 表示に使うオフセット（`+09:00`。`tz_basis` がなければ UTC の推定にも使う。日時がなければ NULL） |
 | `time_correction_s` | INTEGER | 不可 | `0` | 時計のずれの補正（秒。UTC に加える） |
 | `captured_at_utc` | TEXT | 可 | | 補正後の UTC（2.3 節の形式。不明なら NULL） |
 | `camera` | TEXT | 可 | | カメラ（`photos_v1.camera` と同じ） |
@@ -337,6 +344,8 @@ GROUP BY full_hash HAVING count(*) > 1;
 | `gps_lon` | REAL | 可 | | 経度（度） |
 | `caption` | TEXT | 可 | | キャプション |
 | `created_at` | TEXT | 不可 | | 登録した日時（UTC） |
+| `camera_serial` | TEXT | 可 | | カメラの本体のシリアル番号（Exif の BodySerialNumber。機材ごとの時刻の補正に機種と組で使う。版 11 から） |
+| `tz_basis` | TEXT | 可 | | UTC の計算に使ったオフセット（`+09:00`）。表示のオフセット（`tz_assumed`）と違う場合（撮影した瞬間を変えずに別のタイムゾーンで表示する）と、UTC の印だけの値を現地時刻として読む場合だけ持つ。NULL なら `tz_assumed`（UTC の印だけの値は UTC）で計算する（版 11 から。2.3 節） |
 
 ### `file`
 
@@ -541,12 +550,39 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 | 列 | 型 | NULL | 既定値 | 意味 |
 |---|---|---|---|---|
 | `id` | INTEGER | 不可 | | 主キー（`AUTOINCREMENT`） |
-| `kind` | TEXT | 不可 | | `move` / `rename` / `trash`（`CHECK`） |
+| `kind` | TEXT | 不可 | | `move` / `rename` / `trash`（`CHECK`。版 12 から、フォルダの移動・名前の変更も `move` / `rename`） |
 | `state` | TEXT | 不可 | | `planned`（予定）/ `executing`（実行中）/ `done`（完了）/ `failed`（失敗）（`CHECK`） |
 | `payload_json` | TEXT | 不可 | | 対象のファイルと移動先（2.5 節） |
 | `error` | TEXT | 可 | | 失敗の理由 |
 | `created_at` | TEXT | 不可 | | 記録した日時（UTC） |
 | `updated_at` | TEXT | 不可 | | 最後に状態を変えた日時（UTC） |
+
+### `capture_time_edit`
+
+撮影日時の修正の履歴（LIB-16。版 11 から）。1 行が 1 回の修正（ずらす・基準の写真に合わせる・タイムゾーンの指定と取り消し・元に戻す）です。アプリは新しい順に 20 回分を残し（`capture.rs` の `MAX_CAPTURE_TIME_EDITS`）、最後の修正から順に取り消せます。
+
+| 列 | 型 | NULL | 既定値 | 意味 |
+|---|---|---|---|---|
+| `id` | INTEGER | 不可 | | 主キー（`AUTOINCREMENT`） |
+| `kind` | TEXT | 不可 | | `shift`（ずらす）/ `sync`（基準の写真の正しい時刻に合わせる）/ `set_zone`（タイムゾーンの指定）/ `clear_zone`（指定の取り消し）/ `reset`（ファイルの値に戻す）（`CHECK`） |
+| `shift_s` | INTEGER | 可 | | ずらした秒数（`shift`・`sync`） |
+| `zone` | TEXT | 可 | | 指定したオフセット（`set_zone`。`+09:00` の形） |
+| `zone_mode` | TEXT | 可 | | `keep_local`（記録の時刻をそのタイムゾーンの時刻として読む）/ `keep_instant`（撮影した瞬間はそのままで、そのタイムゾーンで表示する）（`set_zone`。`CHECK`） |
+| `asset_count` | INTEGER | 不可 | | 変えた asset の数（`CHECK`） |
+| `created_at` | TEXT | 不可 | | 修正した日時（UTC） |
+
+### `capture_time_edit_item`
+
+修正で変えた asset ごとの、変える前の修正の状態（版 11 から。`WITHOUT ROWID`）。元の値（`captured_at_raw`・`captured_offset`）は修正で変えないので記録しません。
+
+| 列 | 型 | NULL | 既定値 | 意味 |
+|---|---|---|---|---|
+| `edit_id` | INTEGER | 不可 | | `capture_time_edit.id`（主キーの 1 つ目。修正の行を消すと消える） |
+| `asset_id` | INTEGER | 不可 | | `asset.id`（主キーの 2 つ目。asset を消すと消える） |
+| `prev_tz_source` | TEXT | 不可 | | 変える前の `tz_source`（`CHECK`） |
+| `prev_tz_assumed` | TEXT | 可 | | 変える前の `tz_assumed` |
+| `prev_tz_basis` | TEXT | 可 | | 変える前の `tz_basis` |
+| `prev_correction_s` | INTEGER | 不可 | | 変える前の `time_correction_s` |
 
 ### `app_state`
 
@@ -598,6 +634,7 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 | `file_name_key` | `file(name_key)` | 名前でファイルを探す（書き出しの原本の照合。版 3） |
 | `file_quick_hash` | `file(quick_hash)` | クイックハッシュが同じファイル（取り込みでの重複の候補。版 10） |
 | `file_full_hash` | `file(full_hash) WHERE full_hash IS NOT NULL` | 内容（全体のハッシュ）でファイルを探す・重複の組をまとめる（版 10） |
+| `file_not_ok` | `file(folder_id, status) WHERE status <> 'ok'` | 見つからない・読めないファイルの一覧と、フォルダごとの数（版 12。問い合わせの条件に `status <> 'ok'` を含めると使われる） |
 | `variant_one_master` | `variant(asset_id) WHERE is_master = 1`（`UNIQUE`） | asset ごとにマスターは 1 つ |
 | `variant_asset` | `variant(asset_id)` | asset の variant |
 | `variant_rating` | `variant(rating)` | 評価での絞り込み |
@@ -613,6 +650,7 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 | `collection_member_variant` | `collection_member(variant_id)` | variant の入ったコレクション |
 | `stack_top_variant` | `stack(top_variant_id)` | variant を消すときの参照の確認（版 2） |
 | `file_op_unfinished` | `file_op(id) WHERE state IN ('planned', 'executing')` | 起動時に終わっていない記録を探す |
+| `capture_time_edit_item_asset` | `capture_time_edit_item(asset_id)` | asset を消すときの参照の確認（版 11） |
 
 `UNIQUE` の制約と主キーには、SQLite が自動で索引（`sqlite_autoindex_*`）を作ります。
 

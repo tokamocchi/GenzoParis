@@ -143,34 +143,44 @@ pub struct PhotoMetadata {
     pub gps: Option<GpsCoord>,
     /// 撮影日時（元の文字列とオフセット）。
     pub capture: CaptureInfo,
+    /// カメラの本体のシリアル番号（Exif の BodySerialNumber。LIB-16 の機材の区別。カタログの
+    /// `asset.camera_serial`）。記録しないカメラもある。
+    pub body_serial: Option<String>,
+}
+
+/// メーカーと機種から、カタログの `asset.camera` に入れる表示名を作る（写真・動画で共通）。
+///
+/// 機種名がメーカー名で始まる場合は重ねない（例: `"Canon"` ＋ `"Canon EOS R5"`）。前後の空白は除き、
+/// 空の値は無いものとする。
+pub fn camera_display_name(make: Option<&str>, model: Option<&str>) -> Option<String> {
+    let make = make.map(str::trim).filter(|s| !s.is_empty());
+    let model = model.map(str::trim).filter(|s| !s.is_empty());
+    match (make, model) {
+        (Some(make), Some(model)) => {
+            if model.to_lowercase().starts_with(&make.to_lowercase()) {
+                Some(model.to_owned())
+            } else {
+                Some(format!("{make} {model}"))
+            }
+        }
+        (Some(one), None) | (None, Some(one)) => Some(one.to_owned()),
+        (None, None) => None,
+    }
+}
+
+/// シリアル番号の値を整える（前後の空白と NUL を除き、空・すべて 0 のものは無いものとする。64 文字まで）。
+pub fn normalize_serial(value: Option<&str>) -> Option<String> {
+    let v = value?.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+    if v.is_empty() || v.chars().all(|c| c == '0') || v.chars().any(char::is_control) {
+        return None;
+    }
+    Some(v.chars().take(64).collect())
 }
 
 impl PhotoMetadata {
-    /// カタログの `asset.camera` に入れる表示名（メーカーと機種）。
-    ///
-    /// 機種名がメーカー名で始まる場合は重ねない（例: `"Canon"` ＋ `"Canon EOS R5"`）。
+    /// カタログの `asset.camera` に入れる表示名（メーカーと機種。[`camera_display_name`]）。
     pub fn camera_name(&self) -> Option<String> {
-        let make = self
-            .make
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        let model = self
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        match (make, model) {
-            (Some(make), Some(model)) => {
-                if model.to_lowercase().starts_with(&make.to_lowercase()) {
-                    Some(model.to_owned())
-                } else {
-                    Some(format!("{make} {model}"))
-                }
-            }
-            (Some(one), None) | (None, Some(one)) => Some(one.to_owned()),
-            (None, None) => None,
-        }
+        camera_display_name(self.make.as_deref(), self.model.as_deref())
     }
 
     /// 向きを適用した表示上の寸法（幅, 高さ）。
@@ -206,11 +216,47 @@ pub struct VideoMetadata {
     pub height: Option<u32>,
     /// 作成日時（ffprobe の creation_time などの元の文字列）。
     pub creation_time: Option<String>,
+    /// 撮影した機材のメーカー（コンテナのタグ。`com.apple.quicktime.make`・`make`。LIB-16 の機材の区別）。
+    /// 記録しない機材が多い（DJI・Sony の動画のタグは実データで未確認。PoC-7）。
+    pub make: Option<String>,
+    /// 撮影した機材の機種（コンテナのタグ。`com.apple.quicktime.model`・`model`）。
+    pub model: Option<String>,
+}
+
+impl VideoMetadata {
+    /// カタログの `asset.camera` に入れる表示名（メーカーと機種。[`camera_display_name`]）。
+    pub fn camera_name(&self) -> Option<String> {
+        camera_display_name(self.make.as_deref(), self.model.as_deref())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serials_are_normalized() {
+        assert_eq!(
+            normalize_serial(Some(" 1234567 ")).as_deref(),
+            Some("1234567")
+        );
+        assert_eq!(normalize_serial(Some("0000000")), None);
+        assert_eq!(normalize_serial(Some("  ")), None);
+        assert_eq!(normalize_serial(Some("12\u{1}3")), None);
+        assert_eq!(normalize_serial(None), None);
+        assert_eq!(normalize_serial(Some(&"9".repeat(80))).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn video_camera_name() {
+        let v = VideoMetadata {
+            make: Some("Apple".to_owned()),
+            model: Some("iPhone 15".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(v.camera_name().as_deref(), Some("Apple iPhone 15"));
+        assert_eq!(VideoMetadata::default().camera_name(), None);
+    }
 
     #[test]
     fn gps_coord_validation() {

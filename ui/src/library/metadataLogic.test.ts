@@ -82,10 +82,18 @@ describe("撮影日時の補足", () => {
     expect(captureNote(capture({ tz_source: "utc_only", offset: "Z" }))).toBe(
       "UTC だけが記録されているため、既定のタイムゾーン（+09:00）で表示",
     );
-    expect(captureNote(capture({ correction_s: -3600 }))).toBe("時刻を −3,600 秒補正");
+    expect(captureNote(capture({ correction_s: -3600 }))).toBe("時刻を -1 時間 補正");
     expect(captureNote(capture({ tz_source: "user_set", tz_assumed: "+02:00", correction_s: 5 }))).toBe(
-      "タイムゾーンは設定した値（+02:00）、時刻を +5 秒補正",
+      "タイムゾーンは設定した値（+02:00）、時刻を +5 秒 補正",
     );
+    // 撮影した瞬間はそのままで表示だけを変えた（LIB-16）。
+    expect(captureNote(capture({ tz_source: "user_set", tz_assumed: "+02:00", basis: "+09:00" }))).toBe(
+      "タイムゾーンは設定した値（+02:00。撮影した瞬間はそのまま）",
+    );
+    // UTC の印付きの時刻を現地時刻として読む（DJI など）。
+    expect(
+      captureNote(capture({ tz_source: "user_set", offset: "Z", tz_assumed: "+09:00", basis: "+09:00", correction_s: 90 })),
+    ).toBe("UTC の印付きの時刻を +09:00 の現地時刻として読む（設定した値）、時刻を +1 分 30 秒 補正");
   });
 });
 

@@ -3006,3 +3006,349 @@ fn copy_import_with_rename_and_metadata_from_the_cli() {
     );
     assert_eq!(hashes(&card), before);
 }
+
+/// `time`（LIB-16）と `timeline`（ORG-01）: 機材の一覧・基準の写真に合わせる（見込み・実行）・タイムゾーン・
+/// 履歴・元に戻す・タイムラインの表。元ファイルは変わらない。
+#[test]
+fn time_commands_correct_capture_times_and_timeline_groups_them() {
+    let env = Env::new();
+    write_jpeg(
+        &env.photos.join("A.jpg"),
+        (64, 48),
+        1,
+        Some("2024-05-01 10:00:00"),
+        false,
+    );
+    write_jpeg(
+        &env.photos.join("B.jpg"),
+        (64, 48),
+        2,
+        Some("2024-05-01 10:20:00"),
+        false,
+    );
+    write_jpeg(
+        &env.photos.join("C.jpg"),
+        (64, 48),
+        3,
+        Some("2024-05-02 09:00:00"),
+        false,
+    );
+    let before = hashes(&env.photos);
+    let photos = env.photos.to_string_lossy().into_owned();
+    env.json(&["catalog", "init"]);
+    env.json(&["import", &photos]);
+    let found = env.json(&["search"]);
+    let a = id_of(&found, "A.jpg").to_string();
+    let b = id_of(&found, "B.jpg").to_string();
+
+    let devices = env.json(&["time", "devices"]);
+    assert_eq!(devices["devices"][0]["camera"], "GenzoTest Synthetic");
+    assert_eq!(devices["devices"][0]["assets"], 3);
+    let human = env.run(&["time", "devices"]);
+    assert!(
+        human.stdout.contains("GenzoTest Synthetic"),
+        "{}",
+        human.stdout
+    );
+
+    // A の正しい時刻は 10:05:30（同じ機材の 3 枚を 5 分 30 秒ずらす）。見込みでは変えない。
+    let dry = env.json(&["time", "sync", &a, "2024-05-01 10:05:30", "--dry-run"]);
+    assert_eq!(dry["plan"]["shift_seconds"], 330);
+    assert_eq!(dry["plan"]["changed"], 3);
+    let show = env.json(&["show", &a]);
+    assert!(show.to_string().contains("10:00:00"), "{show}");
+    let r = env.run(&["time", "sync", &a, "2024-05-01 10:05:30"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("ずらす量: +5 分 30 秒"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("3 枚の撮影日時を変えました"),
+        "{}",
+        r.stdout
+    );
+
+    // B だけをパリの時刻で表示（撮影した瞬間はそのまま）。
+    let z = env.json(&["time", "zone", "+02:00", "--keep-instant", &b]);
+    assert_eq!(z["plan"]["changed"], 1);
+    assert_eq!(z["plan"]["examples"][0]["after"]["tz_assumed"], "+02:00");
+    // ずらす量の書き方の誤り・対象なし・タイムゾーンの書き方の誤り。
+    assert_eq!(env.run(&["time", "shift", "1x", &a]).code, 2);
+    assert_eq!(env.run(&["time", "shift", "+1h"]).code, 2);
+    assert_eq!(env.run(&["time", "zone", "JST", &a]).code, 2);
+    // 負の量も値として読む。
+    let back = env.json(&["time", "shift", "-30s", "--device-of", &a, "--dry-run"]);
+    assert_eq!(back["plan"]["shift_seconds"], -30);
+
+    let history = env.json(&["time", "history"]);
+    assert_eq!(history["edits"].as_array().unwrap().len(), 2);
+    assert_eq!(history["edits"][0]["kind"], "set_zone");
+    let undo = env.run(&["time", "undo"]);
+    assert!(undo.stdout.contains("取り消しました"), "{}", undo.stdout);
+
+    // タイムライン: 5/1 の 2 枚（間隔 20 分）と 5/2 の 1 枚。
+    let t = env.json(&["timeline", "--gap", "1h"]);
+    let groups = t["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{t}");
+    assert_eq!(groups[0]["day"], "2024-05-01");
+    assert_eq!(groups[0]["count"], 2);
+    assert_eq!(groups[0]["first"], "2024-05-01T10:05:30");
+    assert_eq!(groups[1]["day"], "2024-05-02");
+    let human = env.run(&["timeline", "--gap", "10m"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(human.stdout.contains("2024-05-01"), "{}", human.stdout);
+    assert!(
+        human.stdout.contains("3 件・2 日・3 のまとまり"),
+        "{}",
+        human.stdout
+    );
+    assert_eq!(env.run(&["timeline", "--gap", "2d"]).code, 2);
+    assert_eq!(hashes(&env.photos), before);
+}
+
+/// フォルダの一覧の中で、パスが `dir` のフォルダの ID。
+fn folder_id_of(env: &Env, dir: &Path) -> i64 {
+    let list = env.json(&["folder", "list"]);
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"].as_str() == dir.to_str())
+        .unwrap_or_else(|| panic!("{} がない: {list}", dir.display()))["folder_id"]
+        .as_i64()
+        .unwrap()
+}
+
+/// ファイルの内容のハッシュの多重集合（場所によらない。移動・名前の変更で内容が変わらないことの確認）。
+fn content_hashes(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = hashes(dir).into_values().collect();
+    v.sort();
+    v
+}
+
+/// ボリューム（FILE-03）・アプリの中でのファイル操作（FILE-02）・見つからない写真（FILE-04）:
+/// `volume list`・`folder list / create / rename / move / remove / relocate`・`file move / rename`・
+/// `missing check / relink / link`・`search --missing`。ファイルの内容は変えない（DATA-01）。
+#[test]
+fn files_folders_and_missing_photos_from_the_cli() {
+    let env = Env::new();
+    let a = env.photos.join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    write_jpeg(
+        &a.join("A.jpg"),
+        (64, 48),
+        1,
+        Some("2024-05-01 12:00:00"),
+        false,
+    );
+    std::fs::write(a.join("X.dng"), b"not really a dng").unwrap();
+    write_jpeg(&a.join("X.jpg"), (32, 24), 2, None, false);
+    let contents = content_hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", a.to_str().unwrap()]);
+    let s = env.json(&["search"]);
+    let (id_a, id_x) = (id_of(&s, "A.jpg"), id_of(&s, "X.dng"));
+
+    let volumes = env.json(&["volume", "list", "--refresh"]);
+    assert!(!volumes.as_array().unwrap().is_empty(), "{volumes}");
+    assert!(volumes[0]["online"].as_bool().unwrap(), "{volumes}");
+
+    // フォルダを作り、写真を移す（予定 → 実行）。
+    let sub = a.join("選別済み");
+    let created = env.json(&["folder", "create", a.to_str().unwrap(), "選別済み"]);
+    assert_eq!(created["path"].as_str(), sub.to_str());
+    assert!(sub.is_dir());
+    let sub_id = folder_id_of(&env, &sub).to_string();
+    let plan = env.json(&[
+        "file",
+        "move",
+        &id_a.to_string(),
+        &id_x.to_string(),
+        "--to",
+        &sub_id,
+        "--dry-run",
+    ]);
+    assert_eq!(plan["movable"], 2, "{plan}");
+    assert!(a.join("A.jpg").is_file(), "予定では移さない");
+    let r = env.json(&[
+        "file",
+        "move",
+        &id_a.to_string(),
+        &id_x.to_string(),
+        "--to",
+        sub.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        (r["photos"].as_u64(), r["moved"].as_array().unwrap().len()),
+        (Some(2), 3),
+        "{r}"
+    );
+    for n in ["A.jpg", "X.dng", "X.jpg"] {
+        assert!(sub.join(n).is_file(), "{n}");
+        assert!(!a.join(n).exists(), "{n}");
+    }
+    // 同じフォルダへは移せない（飛ばして終了コード 3）。
+    let again = env.run(&["file", "move", &id_a.to_string(), "--to", &sub_id]);
+    assert_eq!(again.code, 3, "{}", again.stdout);
+    assert!(
+        again.stdout.contains("0 枚の写真を移しました"),
+        "{}",
+        again.stdout
+    );
+
+    // 名前の変更: 1 枚の名前（RAW と組の JPEG も）・テンプレート。
+    let plan = env.json(&[
+        "file",
+        "rename",
+        &id_x.to_string(),
+        "--name",
+        "京都",
+        "--dry-run",
+    ]);
+    assert_eq!(plan["renamable"], 1, "{plan}");
+    env.json(&["file", "rename", &id_x.to_string(), "--name", "京都"]);
+    assert!(sub.join("京都.dng").is_file() && sub.join("京都.jpg").is_file());
+    env.json(&[
+        "file",
+        "rename",
+        &id_a.to_string(),
+        "--template",
+        "{text}-{seq}",
+        "--text",
+        "旅",
+        "--seq-digits",
+        "2",
+    ]);
+    assert!(sub.join("旅-01.jpg").is_file());
+    assert_eq!(names(&env.json(&["search"])), ["京都.dng", "旅-01.jpg"]);
+    // --name と --template のどちらもなければ使い方の誤り。名前に使えない文字はエラー。
+    assert_eq!(env.run(&["file", "rename", &id_a.to_string()]).code, 2);
+    assert_eq!(
+        env.run(&["file", "rename", &id_a.to_string(), "--name", "a/b"])
+            .code,
+        1
+    );
+
+    // フォルダの名前の変更と移動（中の写真の場所も変わる）。
+    env.json(&["folder", "rename", &sub_id, "残す"]);
+    let kept = a.join("残す");
+    assert!(kept.join("旅-01.jpg").is_file());
+    env.json(&["folder", "create", env.photos.to_str().unwrap(), "b"]);
+    let b = env.photos.join("b");
+    env.json(&[
+        "folder",
+        "move",
+        kept.to_str().unwrap(),
+        b.to_str().unwrap(),
+    ]);
+    let moved = b.join("残す");
+    assert!(moved.join("旅-01.jpg").is_file());
+    assert_eq!(env.run(&["missing", "check"]).code, 0);
+
+    // 見つからない写真: カタログの外で移すと見つからない印が付き、探して結び付け直せる。
+    let elsewhere = env.path("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::rename(moved.join("旅-01.jpg"), elsewhere.join("旅-01.jpg")).unwrap();
+    let check = env.run(&["missing", "check", "--json"]);
+    assert_eq!(check.code, 3, "{}", check.stderr);
+    assert_eq!(check.json()["newly_missing"], 1);
+    assert_eq!(env.json(&["search", "--missing"])["count"], 1);
+    let dry = env.json(&[
+        "missing",
+        "relink",
+        "--in",
+        elsewhere.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(dry["chosen"].as_array().unwrap().len(), 1, "{dry}");
+    assert!(dry["report"].is_null());
+    let done = env.json(&["missing", "relink", "--in", elsewhere.to_str().unwrap()]);
+    assert_eq!(
+        done["report"]["linked"].as_array().unwrap().len(),
+        1,
+        "{done}"
+    );
+    assert_eq!(env.json(&["search", "--missing"])["count"], 0);
+
+    // 1 つのファイルを結び付け直す（ファイルの ID は relink --dry-run で見られる）。
+    std::fs::rename(elsewhere.join("旅-01.jpg"), env.path("旅-01.jpg")).unwrap();
+    assert_eq!(env.run(&["missing", "check"]).code, 3);
+    let dry = env.json(&[
+        "missing",
+        "relink",
+        "--in",
+        env.path("").to_str().unwrap(),
+        "--no-recursive",
+        "--dry-run",
+    ]);
+    let file_id = dry["search"]["targets"][0]["file_id"]
+        .as_i64()
+        .unwrap()
+        .to_string();
+    let linked = env.json(&[
+        "missing",
+        "link",
+        &file_id,
+        env.path("旅-01.jpg").to_str().unwrap(),
+    ]);
+    assert_eq!(linked["linked"].as_array().unwrap().len(), 1, "{linked}");
+
+    // フォルダの場所の指定し直し（OS の側で名前を変えたフォルダ。カタログの中だけを変える）。
+    let renamed = env.photos.join("b-moved");
+    std::fs::rename(&b, &renamed).unwrap();
+    assert_eq!(env.run(&["missing", "check"]).code, 3);
+    let plan = env.json(&[
+        "folder",
+        "relocate",
+        moved.to_str().unwrap(),
+        renamed.join("残す").to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(
+        (
+            plan["plan"]["files"].as_u64(),
+            plan["plan"]["found"].as_u64()
+        ),
+        (Some(2), Some(2)),
+        "{plan}"
+    );
+    env.json(&[
+        "folder",
+        "relocate",
+        moved.to_str().unwrap(),
+        renamed.join("残す").to_str().unwrap(),
+    ]);
+    let check = env.run(&["missing", "check", "--json"]);
+    assert_eq!(check.code, 0, "{}", check.stdout);
+    assert_eq!(check.json()["missing"], 0);
+    // 見つからないまま残った空のフォルダ（OS の側で名前を変えた b）は、カタログから除ける。写真の登録された
+    // フォルダは除かない（終了コード 1）。ディスクには触れない。
+    assert_eq!(check.json()["missing_folders"], 1, "{}", check.stdout);
+    let refused = env.run(&["folder", "remove", renamed.join("残す").to_str().unwrap()]);
+    assert_eq!(refused.code, 1, "{}", refused.stdout);
+    assert!(
+        refused.stderr.contains("写真のファイル"),
+        "{}",
+        refused.stderr
+    );
+    let removed = env.run(&["folder", "remove", b.to_str().unwrap()]);
+    assert_eq!(removed.code, 0, "{}", removed.stderr);
+    assert!(
+        removed.stdout.contains("カタログから除きました"),
+        "{}",
+        removed.stdout
+    );
+    assert!(renamed.join("残す").join("京都.dng").is_file());
+    let check = env.json(&["missing", "check"]);
+    assert_eq!(check["missing_folders"], 0, "{check}");
+    assert_eq!(env.run(&["folder", "remove", b.to_str().unwrap()]).code, 1);
+
+    // 人が読む出力。
+    let human = env.run(&["folder", "list"]);
+    assert!(human.stdout.contains("残す"), "{}", human.stdout);
+    let human = env.run(&["volume", "list"]);
+    assert!(human.stdout.contains("つながっている"), "{}", human.stdout);
+    // 内容は変わらない（場所と名前だけが変わる）。
+    let mut now = content_hashes(&env.photos);
+    now.extend(content_hashes(&elsewhere));
+    now.push(genzo_testkit::record::sha256_file_hex(env.path("旅-01.jpg")).unwrap());
+    now.sort();
+    assert_eq!(now, contents);
+}

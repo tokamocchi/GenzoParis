@@ -210,7 +210,8 @@ const TEST_REBUILD_ASSET: Migration = Migration {
               time_correction_s INTEGER NOT NULL DEFAULT 0, captured_at_utc TEXT, camera TEXT,
               lens TEXT, iso INTEGER, aperture REAL, shutter REAL, focal REAL, width INTEGER,
               height INTEGER, orientation INTEGER NOT NULL DEFAULT 1, gps_lat REAL, gps_lon REAL,
-              caption TEXT, created_at TEXT NOT NULL, test_note TEXT) STRICT;
+              caption TEXT, created_at TEXT NOT NULL, camera_serial TEXT, tz_basis TEXT,
+              test_note TEXT) STRICT;
           INSERT INTO asset_new SELECT *, NULL FROM asset;
           DROP TABLE asset;
           ALTER TABLE asset_new RENAME TO asset;

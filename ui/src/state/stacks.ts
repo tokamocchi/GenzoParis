@@ -16,6 +16,7 @@ import type { StackInfo, VariantId } from "../api/types";
 import type { PhotoMenuAction } from "../library/stackLogic";
 import { actions, appStore } from "./app";
 import { enqueue } from "./develop";
+import { openMoveFiles, openRelink, openRenameFiles } from "./files";
 import { shownManualCollection } from "./organize";
 import { searchCache } from "./search";
 
@@ -278,5 +279,22 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
     case "auto_stack":
       actions.openDialog({ kind: "auto_stack" });
       return;
+    case "edit_capture_time":
+      openCaptureTimeDialog();
+      return;
+    case "move_to_folder":
+      openMoveFiles(null);
+      return;
+    case "rename_files":
+      openRenameFiles();
+      return;
+    case "relink":
+      openRelink(actions.targets());
+      return;
   }
+}
+
+/** 撮影日時の修正のダイアログを開く（LIB-16。対象は操作の対象の写真、基準は表示中の写真）。 */
+export function openCaptureTimeDialog(): void {
+  actions.openDialog({ kind: "capture_time", variantIds: actions.targets(), current: appStore.get().selection.current });
 }

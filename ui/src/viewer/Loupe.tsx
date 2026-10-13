@@ -42,6 +42,7 @@ import { formatDuration } from "../format";
 import { isTyping, useHotkeys } from "../keyboard";
 import { actions, appStore, useApp } from "../state/app";
 import { useDevelop } from "../state/develop";
+import { openRelink } from "../state/files";
 import { cancelRegionRender, regionFor, renderRegion } from "../state/region";
 import { searchCache, useSearchVersion } from "../state/search";
 import { useCoreEvent, useViewRect } from "./hooks";
@@ -925,6 +926,13 @@ function FileNotice(props: { summary: VariantSummary }) {
           : "ファイルが壊れているか、読み取れない形式の可能性があります。"}
         {photo ? "等倍表示はできません。" : missing ? "再生できません。" : ""}
       </div>
+      {missing && (
+        <div className="loupe-notice-actions">
+          <button type="button" className="btn small" onClick={() => openRelink([summary.variant_id])}>
+            探して結び付け直す…
+          </button>
+        </div>
+      )}
     </div>
   );
 }

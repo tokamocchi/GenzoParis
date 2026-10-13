@@ -33,6 +33,7 @@ import { MetadataPanel } from "./library/MetadataPanel";
 import { PhotoDragGhost } from "./library/PhotoDragGhost";
 import { actions, appStore, useApp } from "./state/app";
 import { developStore, installDevelopEvents, redo, undo } from "./state/develop";
+import { openRenameFiles } from "./state/files";
 import { deleteKeyAction, focusKeywordInput, toggleTargetCollection } from "./state/organize";
 import { createVirtualCopyOf, groupIntoStack, setStackTop, toggleStack, unstackTargets } from "./state/stacks";
 import { Filmstrip } from "./viewer/Filmstrip";
@@ -149,6 +150,10 @@ function useGlobalHotkeys(enabled: boolean) {
           parentId: null,
           variantIds: actions.targets(),
         });
+      },
+      // ファイルの名前の変更（FILE-02）。現像の画面では使わない（入力欄の F2 とも重ならないように）。
+      F2: () => {
+        if (appStore.get().mode !== "develop") openRenameFiles();
       },
       // 現像設定のコピー・貼り付け（DEV-30）と Undo / Redo（DEV-27）
       "mod+shift+c": async () => {

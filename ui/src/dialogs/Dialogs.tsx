@@ -5,11 +5,21 @@ import { useEffect, useState } from "react";
 
 import * as appApi from "../api/app";
 import { actions, appStore, useApp } from "../state/app";
+import { CaptureTimeDialog } from "./CaptureTimeDialog";
 import { CloseFailedDialog } from "./CloseFailedDialog";
 import { CrashReportsDialog } from "./CrashReportsDialog";
 import { DeleteDialog } from "./DeleteDialog";
 import "./dialogs.css";
 import { ExportDialog } from "./ExportDialog";
+import {
+  FolderNameDialog,
+  MoveFilesDialog,
+  MoveFolderDialog,
+  RelinkDialog,
+  RelocateFolderDialog,
+  RemoveFolderDialog,
+  RenameFilesDialog,
+} from "./FileDialogs";
 import { ImportDialog } from "./ImportDialog";
 import { offerImportFolders } from "./importDrop";
 import { splitDroppedPaths } from "./importLogic";
@@ -147,6 +157,30 @@ export function Dialogs() {
       break;
     case "auto_stack":
       body = <AutoStackDialog />;
+      break;
+    case "capture_time":
+      body = <CaptureTimeDialog variantIds={dialog.variantIds} current={dialog.current} />;
+      break;
+    case "move_files":
+      body = <MoveFilesDialog variantIds={dialog.variantIds} destFolder={dialog.destFolder} />;
+      break;
+    case "rename_files":
+      body = <RenameFilesDialog variantIds={dialog.variantIds} />;
+      break;
+    case "folder_name":
+      body = <FolderNameDialog mode={dialog.mode} folderId={dialog.folderId} currentName={dialog.currentName} />;
+      break;
+    case "move_folder":
+      body = <MoveFolderDialog folderId={dialog.folderId} />;
+      break;
+    case "relink":
+      body = <RelinkDialog variantIds={dialog.variantIds} />;
+      break;
+    case "relocate_folder":
+      body = <RelocateFolderDialog folderId={dialog.folderId} />;
+      break;
+    case "remove_folder":
+      body = <RemoveFolderDialog folderId={dialog.folderId} />;
       break;
     case undefined:
       break;

@@ -268,10 +268,16 @@ export function numericRangeCount(f: SearchFilter): number {
 }
 
 /**
- * 「詳しい条件」の中で指定しているものの数（数値の範囲・マスターだけ・スタックをすべて展開。ボタンの数の表示）。
+ * 「詳しい条件」の中で指定しているものの数（数値の範囲・マスターだけ・スタックをすべて展開・ファイルの状態
+ * （見つからない写真だけ。FILE-04）。ボタンの数の表示）。
  */
 export function moreConditionCount(f: SearchFilter): number {
-  return numericRangeCount(f) + (f.masters_only ? 1 : 0) + (f.expand_stacks ? 1 : 0);
+  return (
+    numericRangeCount(f) +
+    (f.masters_only ? 1 : 0) +
+    (f.expand_stacks ? 1 : 0) +
+    (Array.isArray(f.file_statuses) && f.file_statuses.length > 0 ? 1 : 0)
+  );
 }
 
 // ---------------------------------------------------------------------------

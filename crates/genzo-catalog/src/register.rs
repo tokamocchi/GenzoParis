@@ -21,7 +21,7 @@ use std::path::{Component, Path};
 
 use genzo_model::{
     AssetId, AssetKind, CaptureTime, FileId, FileRole, FileStatus, FolderId, MetadataField,
-    PhotoMetadata, TzSource, VariantId, VideoMetadata, VolumeId,
+    PhotoMetadata, VariantId, VideoMetadata, VolumeId,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -941,14 +941,36 @@ pub(crate) fn master_variant(tx: &rusqlite::Connection, asset_id: i64) -> Result
         })
 }
 
+/// 版 11（[`crate::CAPTURE_TIME_EDITS_SCHEMA_VERSION`]）より前のスキーマに、その列がないためのエラーか。
+///
+/// 移行の前の版で開いた試験用のカタログ（`testing::open_at_version`）に登録するときだけ起きる。アプリが開く
+/// カタログは、開くときに最新の版へ移行している（`asset_iptc` の表がない場合と同じ扱い。refresh_asset_text）。
+pub(crate) fn is_missing_v11_column(e: &rusqlite::Error) -> bool {
+    let message = match e {
+        rusqlite::Error::SqliteFailure(_, Some(m)) => m.as_str(),
+        rusqlite::Error::SqlInputError { msg, .. } => msg.as_str(),
+        _ => return false,
+    };
+    message.contains("no such column: tz_basis")
+        || message.contains("no such column: camera_serial")
+}
+
 /// asset の撮影日時の列を読む。
 pub(crate) fn load_capture(conn: &rusqlite::Connection, asset_id: i64) -> Result<CaptureTime> {
-    let row = conn
-        .prepare_cached(
+    let sql = |basis: &str| {
+        format!(
             "SELECT captured_at_raw, captured_offset, tz_source, tz_assumed, time_correction_s,
-                    captured_at_utc
-             FROM asset WHERE id = ?1",
-        )?
+                    captured_at_utc, {basis}
+             FROM asset WHERE id = ?1"
+        )
+    };
+    let mut stmt = match conn.prepare_cached(&sql("tz_basis")) {
+        Ok(stmt) => stmt,
+        // 版 11 より前のスキーマ（試験用のカタログ）。計算に使うオフセットはない。
+        Err(e) if is_missing_v11_column(&e) => conn.prepare_cached(&sql("NULL"))?,
+        Err(e) => return Err(e.into()),
+    };
+    let row = stmt
         .query_row([asset_id], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
@@ -957,51 +979,51 @@ pub(crate) fn load_capture(conn: &rusqlite::Connection, asset_id: i64) -> Result
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })
         .optional()?
         .ok_or_else(|| CatalogError::NotFound(format!("asset {asset_id}")))?;
-    capture_from_columns(row.0, row.1, &row.2, row.3, row.4, row.5.as_deref())
-}
-
-/// asset の撮影日時の列から [`CaptureTime`] を作る。
-pub(crate) fn capture_from_columns(
-    raw: Option<String>,
-    offset: Option<String>,
-    tz_source: &str,
-    tz_assumed: Option<String>,
-    correction_s: i64,
-    utc: Option<&str>,
-) -> Result<CaptureTime> {
-    Ok(CaptureTime {
-        raw,
-        offset,
-        tz_source: parse_enum(tz_source)?,
-        tz_assumed,
-        correction_s,
-        utc: utc.map(crate::util::parse_db_utc).transpose()?,
+    capture_from_columns(CaptureColumns {
+        raw: row.0,
+        offset: row.1,
+        tz_source: &row.2,
+        tz_assumed: row.3,
+        basis: row.6,
+        correction_s: row.4,
+        utc: row.5.as_deref(),
     })
 }
 
-/// 内容が変わったファイルの新しい撮影日時に、ユーザーの修正（タイムゾーンの指定・時計のずれの補正。
-/// LIB-16）を引き継ぐ。
+/// asset の撮影日時の列（`captured_at_raw`・`captured_offset`・`tz_source`・`tz_assumed`・`tz_basis`・
+/// `time_correction_s`・`captured_at_utc`）。
+pub(crate) struct CaptureColumns<'a> {
+    pub raw: Option<String>,
+    pub offset: Option<String>,
+    pub tz_source: &'a str,
+    pub tz_assumed: Option<String>,
+    pub basis: Option<String>,
+    pub correction_s: i64,
+    pub utc: Option<&'a str>,
+}
+
+/// asset の撮影日時の列から [`CaptureTime`] を作る。
+pub(crate) fn capture_from_columns(c: CaptureColumns<'_>) -> Result<CaptureTime> {
+    Ok(CaptureTime {
+        raw: c.raw,
+        offset: c.offset,
+        tz_source: parse_enum(c.tz_source)?,
+        tz_assumed: c.tz_assumed,
+        basis: c.basis,
+        correction_s: c.correction_s,
+        utc: c.utc.map(crate::util::parse_db_utc).transpose()?,
+    })
+}
+
+/// 内容が変わったファイルの新しい撮影日時に、ユーザーの修正（タイムゾーンの指定とその読み方・時計のずれの
+/// 補正。LIB-16）を引き継ぐ（genzo-model の `CaptureTime::with_user_changes_of`）。
 fn carry_over_user_corrections(previous: &CaptureTime, new: &CaptureTime) -> CaptureTime {
-    let mut out = new.clone();
-    if previous.tz_source == TzSource::UserSet
-        && let Some(offset) = previous
-            .tz_assumed
-            .as_deref()
-            .and_then(|s| genzo_model::capture_time::parse_offset(s).ok())
-        && let Ok(c) = out.with_user_offset(offset)
-    {
-        out = c;
-    }
-    if previous.correction_s != 0
-        && let Ok(c) = out.with_correction(previous.correction_s)
-    {
-        out = c;
-    }
-    out
+    new.with_user_changes_of(previous)
 }
 
 /// asset のメタデータ（撮影情報・寸法・撮影日時・動画の情報）を、登録の要求の内容で書く。
@@ -1046,6 +1068,15 @@ fn update_asset_metadata(
         cols.gps_lat,
         cols.gps_lon,
     ])?;
+    // 版 11 の列（UTC の計算に使ったオフセット・本体のシリアル番号）。版 11 より前のスキーマ（試験用の
+    // カタログ）では書かない（値は NULL のはずなので失うものはない）。
+    match tx.prepare_cached("UPDATE asset SET tz_basis = ?2, camera_serial = ?3 WHERE id = ?1") {
+        Ok(mut stmt) => {
+            stmt.execute(params![asset_id, capture.basis, cols.camera_serial])?;
+        }
+        Err(e) if is_missing_v11_column(&e) => {}
+        Err(e) => return Err(e.into()),
+    }
     if let MediaMetadata::Video(v) = &req.metadata {
         tx.prepare_cached(
             "INSERT INTO video_meta(asset_id, duration_s, fps, codec, bit_depth, color_transfer,
@@ -1072,6 +1103,8 @@ fn update_asset_metadata(
 /// asset のテーブルに入れる撮影情報の列。
 struct AssetColumns {
     camera: Option<String>,
+    /// 本体のシリアル番号（LIB-16 の機材の区別）。
+    camera_serial: Option<String>,
     lens: Option<String>,
     iso: Option<i64>,
     aperture: Option<f64>,
@@ -1092,6 +1125,7 @@ impl AssetColumns {
                 let gps = p.gps.filter(|g| g.is_valid());
                 Self {
                     camera: p.camera_name(),
+                    camera_serial: genzo_model::normalize_serial(p.body_serial.as_deref()),
                     lens: p
                         .lens
                         .as_deref()
@@ -1110,6 +1144,8 @@ impl AssetColumns {
                 }
             }
             MediaMetadata::Video(v) => Self {
+                // 機材のタグ（Apple の端末など。記録しない機材が多い）。LIB-16 の機材の区別・カメラの絞り込みに使う。
+                camera: v.camera_name(),
                 width: v.width.map(i64::from),
                 height: v.height.map(i64::from),
                 ..Self::empty()
@@ -1121,6 +1157,7 @@ impl AssetColumns {
     fn empty() -> Self {
         Self {
             camera: None,
+            camera_serial: None,
             lens: None,
             iso: None,
             aperture: None,
@@ -1253,7 +1290,7 @@ mod tests {
             .unwrap();
         let new = CaptureTime::resolve(Some("2024:05:01 12:00:30"), None, jst).unwrap();
         let merged = carry_over_user_corrections(&previous, &new);
-        assert_eq!(merged.tz_source, TzSource::UserSet);
+        assert_eq!(merged.tz_source, genzo_model::TzSource::UserSet);
         assert_eq!(merged.correction_s, 60);
         assert_eq!(
             merged.utc_db_string().as_deref(),

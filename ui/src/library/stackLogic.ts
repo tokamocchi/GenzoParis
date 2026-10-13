@@ -6,9 +6,19 @@
 //   付く。削除のダイアログでは、折りたたんだスタックの中に隠れた写真も含めるかを選べる（hiddenStackMembers。
 //   既定は含めない）。
 // - 写真の右クリックのメニュー（photoMenuEntries）は、項目の種類・文言・使えるかだけを決める（実行は
-//   state/stacks.ts）。
+//   state/stacks.ts）。撮影日時の修正（LIB-16）・フォルダへの移動と名前の変更（FILE-02）・見つからない写真の
+//   再リンク（FILE-04）のダイアログも、このメニューから開ける。
 
-import type { AutoStackReport, DeleteKind, StackBadge, StackInfo, VariantBrief, VariantId, VariantSummary } from "../api/types";
+import type {
+  AutoStackReport,
+  DeleteKind,
+  FileStatus,
+  StackBadge,
+  StackInfo,
+  VariantBrief,
+  VariantId,
+  VariantSummary,
+} from "../api/types";
 import { parseRangeInput } from "./filterLogic";
 
 /** 仮想コピーの名前の文字数の上限（genzo-catalog の MAX_VARIANT_NAME_CHARS と同じ）。 */
@@ -116,7 +126,11 @@ export type PhotoMenuAction =
   | "unstack"
   | "expand_all"
   | "collapse_all"
-  | "auto_stack";
+  | "auto_stack"
+  | "edit_capture_time"
+  | "move_to_folder"
+  | "rename_files"
+  | "relink";
 
 export interface PhotoMenuEntry {
   action: PhotoMenuAction;
@@ -135,9 +149,10 @@ export const PHOTO_MENU_SEPARATOR = "separator" as const;
  */
 export function photoMenuEntries(
   targets: number,
-  current: Pick<VariantSummary, "is_master" | "stack" | "kind"> | undefined,
+  current: (Pick<VariantSummary, "is_master" | "stack" | "kind"> & { file_status?: FileStatus }) | undefined,
 ): (PhotoMenuEntry | typeof PHOTO_MENU_SEPARATOR)[] {
   const stack = current?.stack ?? null;
+  const any = targets >= 1 || current !== undefined;
   const isCopy = current?.is_master === false;
   const isVideo = current?.kind === "video";
   return [
@@ -160,5 +175,11 @@ export function photoMenuEntries(
     { action: "expand_all", label: "すべてのスタックを展開", enabled: true },
     { action: "collapse_all", label: "すべてのスタックを折りたたむ", enabled: true },
     { action: "auto_stack", label: "撮影時刻でスタック…", enabled: true },
+    PHOTO_MENU_SEPARATOR,
+    { action: "edit_capture_time", label: "撮影日時を修正…", enabled: any },
+    PHOTO_MENU_SEPARATOR,
+    { action: "move_to_folder", label: "フォルダへ移動…", enabled: any },
+    { action: "rename_files", label: "ファイルの名前を変える…", keys: "F2", enabled: any },
+    { action: "relink", label: "見つからない写真を探す…", enabled: current?.file_status === "missing" },
   ];
 }

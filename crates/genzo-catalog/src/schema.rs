@@ -116,7 +116,33 @@ pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[
         sql: include_str!("sql/catalog_0010_content_identity.sql"),
         post: None,
     },
+    Migration {
+        version: CAPTURE_TIME_EDITS_SCHEMA_VERSION,
+        description: "撮影日時の一括修正（LIB-16）: 機材のシリアル番号・UTC の計算に使ったオフセットの列、修正の履歴の表、photos_v1 の camera_serial",
+        sql: include_str!("sql/catalog_0011_capture_time_edits.sql"),
+        post: None,
+    },
+    Migration {
+        version: VOLUMES_SCHEMA_VERSION,
+        description: "外付けドライブの識別・見つからない写真（FILE-03・FILE-04）: ボリュームのファイルシステムの種類と最後につながった日時、フォルダの状態、状態が ok でないファイルの索引",
+        sql: include_str!("sql/catalog_0012_volumes_and_missing.sql"),
+        post: None,
+    },
 ];
+
+/// 外付けドライブの識別（FILE-03）・見つからない写真の検出（FILE-04）を使い始めたカタログのスキーマの版
+/// （`volume.fs_type`・`volume.last_seen_at`、`folder.status`・`folder.status_at`、索引 `file_not_ok`）。
+///
+/// 版 11 までのボリュームの ID（パスの先頭から作った `path:` の形）は移行では変えない（genzo-api がカタログを
+/// 開いたときに、見えるフォルダから OS のボリューム ID へ移す）。
+pub const VOLUMES_SCHEMA_VERSION: u32 = 12;
+
+/// 撮影日時の一括修正（LIB-16）を使い始めたカタログのスキーマの版（`asset.camera_serial`・`asset.tz_basis`、
+/// 修正の履歴 `capture_time_edit`・`capture_time_edit_item`、公開ビュー `photos_v1` の `camera_serial`）。
+///
+/// 既存の asset の 2 つの列は NULL のまま（`tz_basis` が NULL なら撮影日時の計算は版 10 と同じ。シリアル番号は
+/// ファイルを読み直したときに入る）。
+pub const CAPTURE_TIME_EDITS_SCHEMA_VERSION: u32 = 11;
 
 /// 内容による同一性（ORG-03）・重複の検出（IMP-04）を使い始めたカタログのスキーマの版（索引
 /// `file_quick_hash`・`file_full_hash` と、公開ビュー `photo_files_v1`）。
@@ -339,7 +365,7 @@ pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[
 ];
 
 /// このアプリのカタログのスキーマの版。
-pub const CATALOG_SCHEMA_VERSION: u32 = 10;
+pub const CATALOG_SCHEMA_VERSION: u32 = 12;
 
 /// このアプリのサムネイル DB のスキーマの版。
 pub const THUMBS_SCHEMA_VERSION: u32 = 2;

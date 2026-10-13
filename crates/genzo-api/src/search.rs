@@ -146,6 +146,23 @@ pub(crate) fn refresh(inner: &Inner, marked: &[VariantId]) {
     shared.changed.notify_all();
 }
 
+/// 表示中の検索結果の id と並べ替え（世代が違えば [`ApiError::Stale`]。タイムライン（ORG-01）など、結果の全体を
+/// 読む処理が使う。id は共有するので複製しない）。
+pub(crate) fn current_ids(
+    inner: &Inner,
+    generation: u64,
+) -> Result<(Arc<Vec<VariantId>>, SearchSort), ApiError> {
+    let state = inner.search.lock();
+    let current = state.current_generation();
+    match state.current.as_ref() {
+        Some(c) if c.generation == generation => Ok((Arc::clone(&c.ids), c.sort)),
+        _ => Err(ApiError::Stale {
+            requested: generation,
+            current,
+        }),
+    }
+}
+
 /// 作り直しの 1 回分の材料（要求を受け取った時点の条件）。
 struct Snapshot {
     target: u64,

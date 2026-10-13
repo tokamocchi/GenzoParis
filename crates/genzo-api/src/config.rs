@@ -171,6 +171,12 @@ pub struct CoreConfig {
     /// （[`crate::Core::compute_content_hashes`]）と、取り込みの重複の確認での計算は、これによらず行う。
     #[serde(default)]
     pub background_hashing: bool,
+    /// 見つからない写真のバックグラウンドの確認（FILE-04。カタログを開いたときと、ボリュームがつながったときに、
+    /// すべてのファイルの存在を確かめて印を付ける。`relink` の doc）を自動で動かすか。既定は `false`（CLI・
+    /// テストは短い間だけ開くので、`genzo missing check` で明示的に確かめる）。デスクトップアプリは `true` にする。
+    /// 明示的な確認（[`crate::Core::check_missing`]）は、これによらず動く。
+    #[serde(default)]
+    pub background_file_check: bool,
     /// バッチ用のワーカーの数（1〜2）。`None` なら genzo-worker の既定値。
     #[serde(default)]
     pub batch_workers: Option<usize>,
@@ -218,6 +224,7 @@ impl CoreConfig {
             backup_on_close: false,
             render_previews_after_import: false,
             background_hashing: false,
+            background_file_check: false,
             batch_workers: None,
             background_threads: None,
             worker_test_hooks: false,

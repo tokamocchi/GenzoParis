@@ -944,6 +944,7 @@ fn version_3_catalog_is_migrated_to_utc_only() {
         offset: Some("+00:00".to_owned()),
         tz_source,
         tz_assumed: Some(assumed.to_owned()),
+        basis: None,
         correction_s: 0,
         utc: Some(Utc.with_ymd_and_hms(2024, 5, 1, utc_hour, 0, 0).unwrap()),
     };

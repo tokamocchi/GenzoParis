@@ -103,6 +103,14 @@ const TESTS: &[(&str, fn())] = &[
         library::copy_import_through_the_app,
     ),
     (
+        "library::capture_times_and_timeline_through_the_app",
+        library::capture_times_and_timeline_through_the_app,
+    ),
+    (
+        "library::files_volumes_and_relink_through_the_app",
+        library::files_volumes_and_relink_through_the_app,
+    ),
+    (
         "develop::develop_and_region_frames_match_their_headers",
         develop::develop_and_region_frames_match_their_headers,
     ),

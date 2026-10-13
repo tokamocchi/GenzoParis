@@ -14,6 +14,13 @@
 //! - 撮影日時がないファイルは、現在時刻などで置き換えず `utc = None` とする
 //!   （撮影日時順の並べ替えでは最後に並べる）。
 //!
+//! - 利用者のタイムゾーンの指定（LIB-16。`tz_source = user_set`）には 2 つの読み方がある（[`ZoneMode`]）:
+//!   記録の時刻（現地時刻）をその地域の時刻として読み直す（[`ZoneMode::KeepLocal`]。カメラの時計がその地域の
+//!   時刻に合っていた。撮影した瞬間（UTC）が変わる）と、撮影した瞬間はそのままで、その地域の時刻で表示する
+//!   （[`ZoneMode::KeepInstant`]。表示の時刻が変わる）。UTC の計算に使うオフセットが表示のオフセットと違う
+//!   ときと、UTC の印（`Z`）だけの値を現地時刻として読むときは、計算に使うオフセットを `basis`（`tz_basis`）に
+//!   持つ（カタログのスキーマの版 11。決定事項ログ No.102）。
+//!
 //! タイムゾーンは固定のオフセット（`+09:00` など）で扱う。夏時間のある地域の既定の
 //! タイムゾーンを、日付ごとのオフセットに変換する処理（IANA のタイムゾーンの表が必要）は
 //! まだない。レビュー R-18 の確認方法にある「夏時間の重複時刻」は、その処理を追加するときに
@@ -33,6 +40,17 @@ use crate::catalog::TzSource;
 /// UTC の印（`Z`）だけが記録されていたことを表す、元のオフセット（[`CaptureTime::offset`]・
 /// `captured_offset`）の値。
 pub const UTC_ONLY_OFFSET: &str = "Z";
+
+/// 利用者がタイムゾーンを指定するときの読み方（LIB-16。[`CaptureTime::with_zone`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZoneMode {
+    /// 記録の時刻（現地時刻）はそのままで、指定したタイムゾーンの時刻として読み直す（カメラの時計がその
+    /// 地域の時刻に合っていた場合。撮影した瞬間（UTC）が変わる）。UTC の印（`Z`）だけの値も現地時刻として読む。
+    KeepLocal,
+    /// 撮影した瞬間（UTC）はそのままで、指定したタイムゾーンの時刻で表示する（表示の時刻が変わる）。
+    KeepInstant,
+}
 
 /// 撮影日時の解析・計算のエラー。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -59,8 +77,14 @@ pub struct CaptureTime {
     /// UTC の推定に使ったオフセットの出どころ（`tz_source`）。
     /// 日時がない場合は、日時が分かったときに使う既定の扱い（`user_default`）にしておく。
     pub tz_source: TzSource,
-    /// UTC の推定に使ったオフセット（`tz_assumed`。`"+09:00"` 形式）。日時がなければ `None`。
+    /// 表示のオフセット（`tz_assumed`。`"+09:00"` 形式）。ふつうは UTC の推定にも使う（[`basis`](Self::basis)
+    /// がなければ）。日時がなければ `None`。
     pub tz_assumed: Option<String>,
+    /// UTC の計算に使ったオフセット（`tz_basis`。`"+09:00"` 形式）。表示のオフセット（`tz_assumed`）と違う
+    /// 場合（[`ZoneMode::KeepInstant`] で表示だけを変えた）と、UTC の印（`Z`）だけの値を現地時刻として読む
+    /// 場合（[`ZoneMode::KeepLocal`]）だけ持つ。`None` なら `tz_assumed`（UTC の印だけの値は UTC）で計算する。
+    #[serde(default)]
+    pub basis: Option<String>,
     /// 時計のずれの補正（秒。`time_correction_s`）。UTC に加える。
     pub correction_s: i64,
     /// 補正後の UTC（`captured_at_utc`）。日時が不明なら `None`。
@@ -75,6 +99,7 @@ impl CaptureTime {
             offset: None,
             tz_source: TzSource::UserDefault,
             tz_assumed: None,
+            basis: None,
             correction_s: 0,
             utc: None,
         }
@@ -126,6 +151,7 @@ impl CaptureTime {
             offset: recorded,
             tz_source,
             tz_assumed: Some(format_offset(assumed)),
+            basis: None,
             correction_s: 0,
             utc: Some(to_utc(local, base, 0)?),
         })
@@ -181,19 +207,51 @@ impl CaptureTime {
         )
     }
 
-    /// ユーザーが指定したオフセットで UTC を推定し直す（LIB-16。`tz_source = user_set`）。
+    /// ユーザーが指定したオフセットで推定し直す（LIB-16。`tz_source = user_set`）。
     ///
-    /// 日時がない場合は何もしない。UTC の印（`Z`）だけが記録されていた場合
-    /// （[`records_utc_only`](Self::records_utc_only)）は、UTC はそのままで表示のオフセットだけを
-    /// 変える（撮影した瞬間は分かっているため）。カメラが現地時刻を UTC として書いていた場合の
-    /// ずれは、時計のずれの補正（[`with_correction`](Self::with_correction)）で直す。
+    /// UTC の印（`Z`）だけが記録されていた場合（[`records_utc_only`](Self::records_utc_only)）は
+    /// [`ZoneMode::KeepInstant`]（UTC はそのままで表示のオフセットだけを変える。撮影した瞬間は分かっている
+    /// ため）、それ以外は [`ZoneMode::KeepLocal`]（記録の現地時刻をそのオフセットで読み直す）。読み方を選ぶ
+    /// ときは [`with_zone`](Self::with_zone)。日時がない場合は何もしない。
     pub fn with_user_offset(&self, offset: FixedOffset) -> Result<Self, CaptureTimeError> {
+        let mode = if self.records_utc_only() {
+            ZoneMode::KeepInstant
+        } else {
+            ZoneMode::KeepLocal
+        };
+        self.with_zone(offset, mode)
+    }
+
+    /// ユーザーがタイムゾーンを指定する（LIB-16。`tz_source = user_set`。読み方は [`ZoneMode`]）。
+    ///
+    /// - [`ZoneMode::KeepLocal`]: 記録の時刻（現地時刻）を `offset` の時刻として読み、UTC を計算し直す。UTC の
+    ///   印（`Z`）だけの値も、その時刻を `offset` の現地時刻として読む（DJI などで現地時刻が UTC として
+    ///   書かれていた場合）。
+    /// - [`ZoneMode::KeepInstant`]: UTC（撮影した瞬間）はそのままで、表示のオフセットだけを `offset` にする
+    ///   （UTC の計算に使うオフセットを `basis` に残す）。
+    ///
+    /// 時計のずれの補正値は保つ。日時がない場合は何もしない。
+    pub fn with_zone(&self, offset: FixedOffset, mode: ZoneMode) -> Result<Self, CaptureTimeError> {
         if self.utc.is_none() {
             return Ok(self.clone());
         }
         let mut next = self.clone();
         next.tz_source = TzSource::UserSet;
         next.tz_assumed = Some(format_offset(offset));
+        next.basis = match mode {
+            ZoneMode::KeepLocal => self.records_utc_only().then(|| format_offset(offset)),
+            ZoneMode::KeepInstant => {
+                let base = self.base_offset()?;
+                if self.records_utc_only() {
+                    // None は UTC で計算する（UTC の印だけの値）ので、そのまま残す。
+                    self.basis.clone()
+                } else if base == offset {
+                    None
+                } else {
+                    Some(format_offset(base))
+                }
+            }
+        };
         next.recomputed()
     }
 
@@ -209,6 +267,7 @@ impl CaptureTime {
             return Ok(self.clone());
         }
         let mut next = self.clone();
+        next.basis = None;
         match self.offset.as_deref() {
             Some(_) if self.records_utc_only() => {
                 next.tz_source = TzSource::UtcOnly;
@@ -251,25 +310,86 @@ impl CaptureTime {
         next.recomputed()
     }
 
-    /// 元の文字列・推定に使ったオフセット・補正値から UTC を計算し直す。
+    /// ユーザーの修正（タイムゾーンの指定・時計のずれの補正。LIB-16）をすべて取り消し、ファイルの値
+    /// （オフセットがなければ `default_offset`）に戻す。日時がない場合は補正値だけを 0 にする。
+    pub fn without_user_changes(
+        &self,
+        default_offset: FixedOffset,
+    ) -> Result<Self, CaptureTimeError> {
+        let base = if self.tz_source == TzSource::UserSet {
+            self.without_user_offset(default_offset)?
+        } else {
+            self.clone()
+        };
+        base.with_correction(0)
+    }
+
+    /// ユーザーの修正（タイムゾーンの指定か、時計のずれの補正）があるか。
+    pub fn has_user_changes(&self) -> bool {
+        self.tz_source == TzSource::UserSet || self.correction_s != 0
+    }
+
+    /// ほかの撮影日時のユーザーの修正（タイムゾーンの指定とその読み方・時計のずれの補正）を、この撮影日時に
+    /// 移す（内容の変わったファイルを読み直したとき）。指定のオフセットを読めない・範囲外になるときは、その
+    /// 修正を移さない。
+    pub fn with_user_changes_of(&self, previous: &CaptureTime) -> Self {
+        let mut out = self.clone();
+        if previous.tz_source == TzSource::UserSet
+            && out.utc.is_some()
+            && let Some(assumed) = previous
+                .tz_assumed
+                .as_deref()
+                .and_then(|s| parse_offset(s).ok())
+        {
+            let mut next = out.clone();
+            next.tz_source = TzSource::UserSet;
+            next.tz_assumed = Some(format_offset(assumed));
+            // UTC の印だけかどうかが前と変わったら、計算に使うオフセットは移さない（意味が変わるため）。
+            next.basis = if previous.records_utc_only() == out.records_utc_only() {
+                previous.basis.clone()
+            } else {
+                None
+            };
+            if let Ok(c) = next.recomputed() {
+                out = c;
+            }
+        }
+        if previous.correction_s != 0
+            && let Ok(c) = out.with_correction(previous.correction_s)
+        {
+            out = c;
+        }
+        out
+    }
+
+    /// UTC の計算に使うオフセット（`basis`、なければ UTC の印だけの値は UTC、ほかは `tz_assumed`）。
+    pub fn base_offset(&self) -> Result<FixedOffset, CaptureTimeError> {
+        if let Some(b) = self.basis.as_deref() {
+            return parse_offset(b);
+        }
+        if self.records_utc_only() {
+            return Ok(utc_offset());
+        }
+        match self.tz_assumed.as_deref() {
+            Some(a) => parse_offset(a),
+            None => Err(CaptureTimeError::InvalidOffset(String::new())),
+        }
+    }
+
+    /// 元の文字列・計算に使うオフセット（[`base_offset`](Self::base_offset)）・補正値から UTC を計算し直す。
     ///
-    /// UTC の印（`Z`）だけが記録されていた場合は、`tz_assumed`（表示のオフセット）によらず、
-    /// 元の文字列を UTC として読む。
+    /// UTC の印（`Z`）だけが記録されていた場合は、`basis` がなければ `tz_assumed`（表示のオフセット）に
+    /// よらず、元の文字列を UTC として読む。
     fn recomputed(mut self) -> Result<Self, CaptureTimeError> {
         let parsed = match self.raw.as_deref() {
             Some(raw) => parse_datetime(raw)?,
             None => None,
         };
-        let (Some((local, _)), Some(assumed)) = (parsed, self.tz_assumed.as_deref()) else {
+        let (Some((local, _)), Some(_)) = (parsed, self.tz_assumed.as_deref()) else {
             self.utc = None;
             return Ok(self);
         };
-        let assumed = parse_offset(assumed)?;
-        let base = if self.records_utc_only() {
-            utc_offset()
-        } else {
-            assumed
-        };
+        let base = self.base_offset()?;
         self.utc = Some(to_utc(local, base, self.correction_s)?);
         Ok(self)
     }
@@ -790,11 +910,151 @@ mod tests {
     }
 
     #[test]
+    fn zone_modes_keep_the_local_time_or_the_instant() {
+        let paris = FixedOffset::east_opt(2 * 3600).unwrap();
+        // カメラの時計を東京の時刻のまま、オフセット +09:00 を記録していた（パリで撮影）。
+        let t = CaptureTime::resolve(Some("2024:05:01 12:00:00"), Some("+09:00"), jst()).unwrap();
+        let instant = utc(2024, 5, 1, 3, 0, 0);
+        assert_eq!(t.utc, Some(instant));
+
+        // 撮影した瞬間はそのままで、パリの時刻で表示する。
+        let shown = t.with_zone(paris, ZoneMode::KeepInstant).unwrap();
+        assert_eq!(shown.tz_source, TzSource::UserSet);
+        assert_eq!(shown.utc, Some(instant));
+        assert_eq!(shown.basis.as_deref(), Some("+09:00"));
+        assert_eq!(shown.to_string(), "2024-05-01 05:00:00 +02:00");
+        // 続けて補正しても、計算に使うオフセットは変わらない。
+        let fixed = shown.with_correction(60).unwrap();
+        assert_eq!(fixed.utc, Some(utc(2024, 5, 1, 3, 1, 0)));
+        // 同じ指定を繰り返しても変わらない。
+        assert_eq!(
+            shown.with_zone(paris, ZoneMode::KeepInstant).unwrap(),
+            shown
+        );
+        // 取り消すと、記録のオフセットに戻る。
+        assert_eq!(shown.without_user_offset(jst()).unwrap(), t);
+
+        // 記録の時刻（12:00）をパリの時刻として読み直す（カメラの時計がパリの時刻だった）。
+        let local = t.with_zone(paris, ZoneMode::KeepLocal).unwrap();
+        assert_eq!(local.basis, None);
+        assert_eq!(local.utc, Some(utc(2024, 5, 1, 10, 0, 0)));
+        assert_eq!(local.to_string(), "2024-05-01 12:00:00 +02:00");
+        // 表示だけを変えた後に読み直しても、計算に使うオフセットは指定したものになる。
+        assert_eq!(shown.with_zone(paris, ZoneMode::KeepLocal).unwrap(), local);
+        // 表示のオフセットが計算に使うオフセットと同じになれば、basis は持たない。
+        let back = shown.with_zone(jst(), ZoneMode::KeepInstant).unwrap();
+        assert_eq!(back.basis, None);
+        assert_eq!(back.utc, Some(instant));
+    }
+
+    #[test]
+    fn utc_only_values_can_be_read_as_local_time() {
+        // DJI などで、現地時刻（12:00 +09:00）が UTC の印付きで書かれていた。
+        let t = CaptureTime::resolve(Some("2024-05-01T12:00:00Z"), None, jst()).unwrap();
+        assert_eq!(t.to_string(), "2024-05-01 21:00:00 +09:00");
+        let fixed = t.with_zone(jst(), ZoneMode::KeepLocal).unwrap();
+        assert_eq!(fixed.tz_source, TzSource::UserSet);
+        assert_eq!(fixed.basis.as_deref(), Some("+09:00"));
+        assert_eq!(fixed.utc, Some(utc(2024, 5, 1, 3, 0, 0)));
+        assert_eq!(fixed.to_string(), "2024-05-01 12:00:00 +09:00");
+        // 繰り返しても同じ（補正値に足し込まないので、二重にずれない）。
+        assert_eq!(fixed.with_zone(jst(), ZoneMode::KeepLocal).unwrap(), fixed);
+        // その後に表示だけを変えても、撮影した瞬間は保つ。
+        let paris = FixedOffset::east_opt(2 * 3600).unwrap();
+        let shown = fixed.with_zone(paris, ZoneMode::KeepInstant).unwrap();
+        assert_eq!(shown.utc, fixed.utc);
+        assert_eq!(shown.basis.as_deref(), Some("+09:00"));
+        assert_eq!(shown.to_string(), "2024-05-01 05:00:00 +02:00");
+        // 既定のタイムゾーンを変えても、指定したものは変わらない。
+        assert_eq!(
+            fixed
+                .with_default_offset(FixedOffset::east_opt(0).unwrap())
+                .unwrap(),
+            fixed
+        );
+        // 取り消すと UTC の印だけの値に戻る。
+        assert_eq!(fixed.without_user_offset(jst()).unwrap(), t);
+        // 表示だけの指定（KeepInstant）は、UTC の印だけの値の UTC を変えない（従来の with_user_offset）。
+        assert_eq!(
+            t.with_zone(paris, ZoneMode::KeepInstant).unwrap(),
+            t.with_user_offset(paris).unwrap()
+        );
+    }
+
+    #[test]
+    fn keep_instant_on_default_offset_values() {
+        // オフセットの記録がなく、既定の +09:00 で推定した（カメラの時計は東京の時刻のまま）。
+        let t = CaptureTime::resolve(Some("2024:05:01 12:00:00"), None, jst()).unwrap();
+        let paris = FixedOffset::east_opt(2 * 3600).unwrap();
+        let shown = t.with_zone(paris, ZoneMode::KeepInstant).unwrap();
+        assert_eq!(shown.utc, t.utc);
+        assert_eq!(shown.basis.as_deref(), Some("+09:00"));
+        assert_eq!(shown.to_string(), "2024-05-01 05:00:00 +02:00");
+        // 既定のタイムゾーンを変えても、指定したものは変わらない（UTC も表示も）。
+        let utc0 = FixedOffset::east_opt(0).unwrap();
+        assert_eq!(shown.with_default_offset(utc0).unwrap(), shown);
+        // 取り消すと、その時点の既定のオフセットで推定し直す。
+        let undone = shown.without_user_offset(utc0).unwrap();
+        assert_eq!(undone.tz_source, TzSource::UserDefault);
+        assert_eq!(undone.basis, None);
+        assert_eq!(undone.utc, Some(utc(2024, 5, 1, 12, 0, 0)));
+    }
+
+    #[test]
+    fn user_changes_can_be_removed_and_carried_over() {
+        let paris = FixedOffset::east_opt(2 * 3600).unwrap();
+        let t = CaptureTime::resolve(Some("2024:05:01 12:00:00"), Some("+09:00"), jst()).unwrap();
+        assert!(!t.has_user_changes());
+        let changed = t
+            .with_zone(paris, ZoneMode::KeepInstant)
+            .unwrap()
+            .with_correction(-30)
+            .unwrap();
+        assert!(changed.has_user_changes());
+        assert!(t.with_correction(5).unwrap().has_user_changes());
+        // すべて取り消す。
+        assert_eq!(changed.without_user_changes(jst()).unwrap(), t);
+        // 日時がなくても補正値は 0 に戻る。
+        let unknown = CaptureTime::unknown().with_correction(5).unwrap();
+        assert_eq!(
+            unknown.without_user_changes(jst()).unwrap(),
+            CaptureTime::unknown()
+        );
+
+        // 内容の変わったファイル（日時が 1 秒違う）を読み直したときに、修正を移す。
+        let reread =
+            CaptureTime::resolve(Some("2024:05:01 12:00:01"), Some("+09:00"), jst()).unwrap();
+        let carried = reread.with_user_changes_of(&changed);
+        assert_eq!(carried.tz_source, TzSource::UserSet);
+        assert_eq!(carried.tz_assumed.as_deref(), Some("+02:00"));
+        assert_eq!(carried.basis.as_deref(), Some("+09:00"));
+        assert_eq!(carried.correction_s, -30);
+        assert_eq!(
+            carried.utc,
+            Some(utc(2024, 5, 1, 3, 0, 1) - TimeDelta::seconds(30))
+        );
+        // 修正のないものからは何も移さない。
+        assert_eq!(reread.with_user_changes_of(&t), reread);
+        // UTC の印だけかどうかが変わったら、計算に使うオフセットは移さない。
+        let dji = CaptureTime::resolve(Some("2024-05-01T12:00:00Z"), None, jst())
+            .unwrap()
+            .with_zone(jst(), ZoneMode::KeepLocal)
+            .unwrap();
+        let carried = t.with_user_changes_of(&dji);
+        assert_eq!(carried.basis, None);
+        assert_eq!(carried.utc, t.utc);
+    }
+
+    #[test]
     fn serde_round_trip() {
         let t = CaptureTime::resolve(Some("2024:05:01 12:00:00"), None, jst()).unwrap();
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains("\"tz_source\":\"user_default\""), "{json}");
         let back: CaptureTime = serde_json::from_str(&json).unwrap();
         assert_eq!(back, t);
+        // basis のない古い JSON も読める。
+        let old = json.replace(",\"basis\":null", "");
+        assert_ne!(old, json);
+        assert_eq!(serde_json::from_str::<CaptureTime>(&old).unwrap(), t);
     }
 }

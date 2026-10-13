@@ -22,10 +22,15 @@ serde_json.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 
-# ロックファイルの排他（flock。標準ライブラリの File::try_lock は Rust 1.89 からのため。`file_lock` の doc）。
-# tempfile が既に使っている版と同じ。
+# ロックファイルの排他（flock。標準ライブラリの File::try_lock は Rust 1.89 からのため。`file_lock` の doc）と、
+# 上書きしない名前の変更（renameat2 の RENAME_NOREPLACE。`rename` の doc。FILE-02）。tempfile が既に使っている版と同じ。
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", features = ["fs"] }
+
+# Windows: 上書きしない名前の変更（MoveFileExW。`rename` の doc。FILE-02）。Microsoft の Win32 API の宣言だけの
+# crate。版と機能は依存の木に既にあるもの（tempfile・genzo-api と同じ 0.61.2 の Win32_Storage_FileSystem）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [lints]
 workspace = true

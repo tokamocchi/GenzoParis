@@ -13,6 +13,12 @@
 // - 描く行の範囲は @tanstack/react-virtual が内容の位置（仮想）から求める。react-virtual はスクロールの位置を
 //   要素の scrollTop から読み、scrollTo で書くため、この対応は Grid の ScrollMapper（scrollMapper.ts）が
 //   その間に入って行う（react-virtual の observeElementOffset・scrollToFn を差し替える）。
+// - タイムライン（ORG-01）: 撮影日の見出し・イベントの見出しの行を、セルの行の間に入れる（withTimeline。
+//   GridLayout の timeline に行の表を持つ）。行の上端は表（Float64Array）で引き、位置 → 行はまとまりの二分探索
+//   （まとまりの数の対数）、内容の位置 → 行は上端の二分探索（行の数の対数）で求める。表を作る手間は行の数に
+//   比例する（50 万件・5 列でも 10 万行ほど）。見出しの行の高さは一定（DAY_HEADER_HEIGHT・EVENT_HEADER_HEIGHT）。
+
+import type { TimelineGroup } from "../api/types";
 
 /** セルの間と外側の余白（px。仮置き）。 */
 export const GRID_GAP = 6;
@@ -52,6 +58,43 @@ export interface GridLayout {
   contentHeight: number;
   /** スクロールの領域の高さ（物理。px。MAX_SCROLL_PX まで）。 */
   scrollHeight: number;
+  /** タイムライン（ORG-01）の行の表（見出しの行を含む。なければふつうのグリッド）。rows はこの表の行の数。 */
+  timeline?: TimelineRows;
+}
+
+/** タイムラインの日付の見出しの行の高さ（px。仮置き）。 */
+export const DAY_HEADER_HEIGHT = 36;
+
+/** タイムラインのイベントの見出しの行の高さ（px。仮置き）。 */
+export const EVENT_HEADER_HEIGHT = 24;
+
+/** タイムラインの行の種類。 */
+export const ROW_CELLS = 0;
+export const ROW_DAY = 1;
+export const ROW_EVENT = 2;
+
+/** タイムラインの行の表（withTimeline）。 */
+export interface TimelineRows {
+  /** まとまり（件数に合わせて整えたもの。連続し、数の合計は件数）。 */
+  groups: TimelineGroup[];
+  /** 日付の見出しを出すまとまりか。 */
+  dayStart: Uint8Array;
+  /** イベントの見出しを出すまとまりか（同じ日にまとまりが 2 つ以上あるとき）。 */
+  eventHeader: Uint8Array;
+  /** まとまりの属する日の、最初のまとまり（日付の見出しの行のあるもの）。 */
+  dayGroup: Int32Array;
+  /** まとまりの最初の行（見出しを含む）。 */
+  groupFirstRow: Int32Array;
+  /** まとまりの最初のセルの行。 */
+  groupFirstCellRow: Int32Array;
+  /** 行の数。 */
+  count: number;
+  /** 行の上端（仮想。px）。長さは行の数 + 1（最後は内容の高さ）。 */
+  top: Float64Array;
+  /** 行の種類（ROW_CELLS・ROW_DAY・ROW_EVENT）。 */
+  kind: Uint8Array;
+  /** 行のまとまり。 */
+  group: Int32Array;
 }
 
 /** 幅と件数とセルの大きさの目安から配置を決める。 */
@@ -78,9 +121,170 @@ export function gridLayout(width: number, count: number, targetSize: number): Gr
   };
 }
 
+/**
+ * タイムラインの行の表を作り、配置に入れる（ORG-01）。まとまりは件数 `count` に合わせて整える（古い世代の
+ * まとまりが届いている間も、件数の分だけ並べる。足りない分は見出しのないまとまりにする）。
+ */
+export function withTimeline(base: GridLayout, source: readonly TimelineGroup[], count: number): GridLayout {
+  const groups: TimelineGroup[] = [];
+  let covered = 0;
+  for (const g of source) {
+    if (covered >= count) break;
+    const n = Math.min(g.count, count - covered);
+    if (n <= 0) continue;
+    groups.push(g.start === covered && n === g.count ? g : { ...g, start: covered, count: n });
+    covered += n;
+  }
+  if (covered < count) {
+    groups.push({
+      start: covered,
+      count: count - covered,
+      day: null,
+      new_day: false,
+      first: null,
+      last: null,
+      photos: 0,
+      videos: 0,
+    });
+  }
+  const n = groups.length;
+  const dayStart = new Uint8Array(n);
+  const eventHeader = new Uint8Array(n);
+  const dayGroup = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    const g = groups[i];
+    const prev = i > 0 ? groups[i - 1] : null;
+    const starts = g.day === null ? prev === null || prev.day !== null : g.new_day || prev === null;
+    dayStart[i] = starts ? 1 : 0;
+    dayGroup[i] = starts ? i : dayGroup[i - 1];
+  }
+  // 同じ日（日付の見出しから次の見出しまで）にまとまりが 2 つ以上あれば、イベントの見出しを出す。
+  for (let i = 0; i < n; ) {
+    let j = i + 1;
+    while (j < n && !dayStart[j]) j++;
+    if (j - i >= 2 && groups[i].day !== null) eventHeader.fill(1, i, j);
+    i = j;
+  }
+  const cols = Math.max(1, base.cols);
+  let rows = 0;
+  for (let i = 0; i < n; i++) rows += dayStart[i] + eventHeader[i] + Math.ceil(groups[i].count / cols);
+  const top = new Float64Array(rows + 1);
+  const kind = new Uint8Array(rows);
+  const group = new Int32Array(rows);
+  const groupFirstRow = new Int32Array(n);
+  const groupFirstCellRow = new Int32Array(n);
+  let r = 0;
+  let y = GRID_GAP;
+  const push = (k: number, g: number, h: number) => {
+    top[r] = y;
+    kind[r] = k;
+    group[r] = g;
+    y += h;
+    r++;
+  };
+  for (let i = 0; i < n; i++) {
+    groupFirstRow[i] = r;
+    if (dayStart[i]) push(ROW_DAY, i, DAY_HEADER_HEIGHT);
+    if (eventHeader[i]) push(ROW_EVENT, i, EVENT_HEADER_HEIGHT);
+    groupFirstCellRow[i] = r;
+    const cellRows = Math.ceil(groups[i].count / cols);
+    for (let k = 0; k < cellRows; k++) push(ROW_CELLS, i, base.rowHeight);
+  }
+  top[rows] = rows > 0 ? y : 0;
+  const contentHeight = top[rows];
+  return {
+    ...base,
+    rows,
+    contentHeight,
+    scrollHeight: Math.min(contentHeight, MAX_SCROLL_PX),
+    timeline: {
+      groups,
+      dayStart,
+      eventHeader,
+      dayGroup,
+      groupFirstRow,
+      groupFirstCellRow,
+      count: rows,
+      top,
+      kind,
+      group,
+    },
+  };
+}
+
 /** 行の上端（仮想。px）。 */
 export function rowTop(layout: GridLayout, row: number): number {
+  const tl = layout.timeline;
+  if (tl) return tl.top[Math.max(0, Math.min(row, tl.count))];
   return GRID_GAP + row * layout.rowHeight;
+}
+
+/** 行の高さ（次の行の上端まで。セルの行は行の間隔、見出しの行は見出しの高さ）。 */
+export function rowSize(layout: GridLayout, row: number): number {
+  const tl = layout.timeline;
+  if (tl) return row >= 0 && row < tl.count ? tl.top[row + 1] - tl.top[row] : layout.rowHeight;
+  return layout.rowHeight;
+}
+
+/** 位置 `start` 以下で最後に始まるまとまり（二分探索）。 */
+function groupAt(tl: TimelineRows, index: number): number {
+  let lo = 0;
+  let hi = tl.groups.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (tl.groups[mid].start <= index) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/** 位置 `index` のセルの行。 */
+export function rowOfIndex(layout: GridLayout, index: number): number {
+  const tl = layout.timeline;
+  if (!tl) return Math.floor(index / layout.cols);
+  if (tl.groups.length === 0) return 0;
+  const g = groupAt(tl, Math.max(0, index));
+  const within = Math.max(0, index - tl.groups[g].start);
+  return tl.groupFirstCellRow[g] + Math.floor(within / Math.max(1, layout.cols));
+}
+
+/** 行のセルの範囲 [start, end)（見出しの行は null）。 */
+export function rowCells(layout: GridLayout, row: number, count: number): { start: number; end: number } | null {
+  const tl = layout.timeline;
+  if (!tl) {
+    const start = row * layout.cols;
+    return { start, end: Math.min(count, start + layout.cols) };
+  }
+  if (row < 0 || row >= tl.count || tl.kind[row] !== ROW_CELLS) return null;
+  const g = tl.group[row];
+  const grp = tl.groups[g];
+  const start = grp.start + (row - tl.groupFirstCellRow[g]) * Math.max(1, layout.cols);
+  return { start, end: Math.min(grp.start + grp.count, start + layout.cols, count) };
+}
+
+/** 内容の位置（仮想）`y` にかかる行（上端が y 以下の最後の行。二分探索）。 */
+export function rowAt(layout: GridLayout, y: number): number {
+  const tl = layout.timeline;
+  if (!tl) return Math.max(0, Math.min(layout.rows - 1, Math.floor((y - GRID_GAP) / layout.rowHeight)));
+  if (tl.count === 0) return 0;
+  let lo = 0;
+  let hi = tl.count - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (tl.top[mid] <= y) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/** セルの行を見せるときの上端（タイムラインで、まとまりの最初のセルの行なら、その上の見出しも含める）。 */
+function revealTop(layout: GridLayout, row: number): number {
+  const tl = layout.timeline;
+  if (tl && row >= 0 && row < tl.count) {
+    const g = tl.group[row];
+    if (tl.groupFirstCellRow[g] === row) return tl.top[tl.groupFirstRow[g]];
+  }
+  return rowTop(layout, row);
 }
 
 /** スクロールの位置を縮めているか（内容が上限を超える）。 */
@@ -119,7 +323,7 @@ export function revealOffset(
   center = false,
 ): number | null {
   if (layout.rows === 0 || index < 0) return null;
-  const row = Math.min(layout.rows - 1, Math.floor(index / layout.cols));
+  const row = Math.min(layout.rows - 1, rowOfIndex(layout, index));
   const top = rowTop(layout, row);
   const bottom = top + layout.cellHeight;
   const clamp = (v: number) => clampVirtual(v, layout, viewHeight);
@@ -127,7 +331,8 @@ export function revealOffset(
     const target = clamp(top - (viewHeight - layout.cellHeight) / 2);
     return Math.abs(target - virtual) < 1 ? null : target;
   }
-  if (top - GRID_GAP < virtual) return clamp(top - GRID_GAP);
+  const head = revealTop(layout, row);
+  if (head - GRID_GAP < virtual) return clamp(head - GRID_GAP);
   if (bottom + GRID_GAP > virtual + viewHeight) {
     // 表示の高さよりセルが高いときは、上端を合わせる。
     if (layout.cellHeight + 2 * GRID_GAP > viewHeight) return clamp(top - GRID_GAP);
@@ -150,6 +355,15 @@ export function clampVirtual(virtual: number, layout: GridLayout, viewHeight: nu
 /** 表示の上端にかかっている行の先頭のセルの位置（件数が 0 なら null）。 */
 export function firstVisibleIndex(layout: GridLayout, virtual: number, count: number): number | null {
   if (layout.rows === 0 || count <= 0) return null;
+  const tl = layout.timeline;
+  if (tl) {
+    // 上端にかかる行から、下端が表示に入っている最初のセルの行を探す。
+    for (let r = rowAt(layout, Math.max(0, virtual)); r < tl.count; r++) {
+      const cells = rowCells(layout, r, count);
+      if (cells && cells.start < count && tl.top[r] + layout.cellHeight > virtual) return cells.start;
+    }
+    return count - 1;
+  }
   const row = Math.floor((Math.max(0, virtual) - GRID_GAP + layout.rowHeight - layout.cellHeight) / layout.rowHeight);
   const r = Math.min(layout.rows - 1, Math.max(0, row));
   return Math.min(count - 1, r * layout.cols);
@@ -158,7 +372,7 @@ export function firstVisibleIndex(layout: GridLayout, virtual: number, count: nu
 /** 位置 `index` のセルの全体が見えているか。 */
 export function isFullyVisible(layout: GridLayout, index: number, virtual: number, viewHeight: number): boolean {
   if (layout.rows === 0 || index < 0) return false;
-  const top = rowTop(layout, Math.floor(index / layout.cols));
+  const top = rowTop(layout, rowOfIndex(layout, index));
   return top >= virtual && top + layout.cellHeight <= virtual + viewHeight;
 }
 
@@ -174,8 +388,8 @@ export function anchoredOffset(
   anchor: number,
 ): number {
   if (next.rows === 0 || anchor < 0) return 0;
-  const oldTop = rowTop(prev, Math.floor(anchor / prev.cols));
-  const newTop = rowTop(next, Math.min(next.rows - 1, Math.floor(anchor / next.cols)));
+  const oldTop = rowTop(prev, rowOfIndex(prev, anchor));
+  const newTop = rowTop(next, Math.min(next.rows - 1, rowOfIndex(next, anchor)));
   const maxRel = Math.max(0, viewHeight - next.cellHeight - GRID_GAP);
   const rel = Math.min(maxRel, Math.max(0, oldTop - virtual));
   return clampVirtual(newTop - rel, next, viewHeight);
@@ -277,5 +491,40 @@ export function navigate(
       next = Math.min(last, current + Math.max(1, pageSize) * c);
       break;
   }
+  return next === current ? null : next;
+}
+
+/**
+ * キーで移る先の位置（配置に合わせる。ふつうのグリッドは navigate と同じ）。タイムラインでは、↑↓・PageUp・
+ * PageDown は見出しの行を飛ばしてセルの行を数え、同じ列（その行が短ければ行の最後のセル）に移る。
+ */
+export function navigateLayout(
+  key: NavKey,
+  current: number | null,
+  count: number,
+  layout: GridLayout,
+  pageSize: number,
+): number | null {
+  const tl = layout.timeline;
+  if (!tl || current === null || current < 0 || current >= count) {
+    return navigate(key, current, count, layout.cols, pageSize);
+  }
+  const steps = key === "ArrowUp" || key === "ArrowDown" ? 1 : key === "PageUp" || key === "PageDown" ? Math.max(1, pageSize) : 0;
+  if (steps === 0) return navigate(key, current, count, layout.cols, pageSize);
+  const dir = key === "ArrowUp" || key === "PageUp" ? -1 : 1;
+  const row = rowOfIndex(layout, current);
+  const here = rowCells(layout, row, count);
+  if (!here) return null;
+  const col = current - here.start;
+  let target: { start: number; end: number } | null = null;
+  let moved = 0;
+  for (let r = row + dir; r >= 0 && r < tl.count && moved < steps; r += dir) {
+    const cells = rowCells(layout, r, count);
+    if (!cells || cells.end <= cells.start) continue;
+    target = cells;
+    moved++;
+  }
+  if (!target) return null;
+  const next = Math.min(target.start + col, target.end - 1);
   return next === current ? null : next;
 }

@@ -166,9 +166,14 @@ export function focusKeywordInput(): boolean {
   return false;
 }
 
-/** グリッドの写真を左のパネルのコレクション・キーワードに落としたとき（library/photoDrag.ts）。 */
+/** グリッドの写真を左のパネルのコレクション・キーワード・フォルダに落としたとき（library/photoDrag.ts）。 */
 export async function dropPhotos(ids: VariantId[], target: DropTarget): Promise<void> {
   if (!target.ok || ids.length === 0) return;
+  if (target.kind === "folder") {
+    // フォルダ（FILE-02）: すぐには移さず、移動のダイアログで予定（移せない写真・コピーの量）を確かめてから移す。
+    actions.openDialog({ kind: "move_files", variantIds: ids, destFolder: target.id });
+    return;
+  }
   if (target.kind === "collection") {
     await addToCollection(target.id, ids, target.label);
     return;

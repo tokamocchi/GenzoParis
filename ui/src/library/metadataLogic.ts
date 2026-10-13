@@ -12,6 +12,7 @@ import type {
   VideoMetadata,
 } from "../api/types";
 import { formatDuration } from "../format";
+import { formatShift } from "./captureTimeLogic";
 
 /** 寸法の表示（向きを反映した幅 × 高さ。EXIF の向き 5〜8 は 90 度回すので幅と高さを入れ替える）。 */
 export function formatDimensions(
@@ -76,15 +77,19 @@ export function captureNote(c: CaptureTime | null | undefined): string | null {
       notes.push(`タイムゾーンは既定の値（${c.tz_assumed ?? "要確認"}）で推定`);
       break;
     case "user_set":
-      notes.push(`タイムゾーンは設定した値（${c.tz_assumed ?? "要確認"}）`);
+      if (c.offset === "Z" && c.basis) {
+        notes.push(`UTC の印付きの時刻を ${c.basis} の現地時刻として読む（設定した値）`);
+        if (c.tz_assumed !== c.basis) notes.push(`${c.tz_assumed ?? "要確認"} の時刻で表示`);
+      } else if (c.basis && c.basis !== c.tz_assumed) {
+        notes.push(`タイムゾーンは設定した値（${c.tz_assumed ?? "要確認"}。撮影した瞬間はそのまま）`);
+      } else {
+        notes.push(`タイムゾーンは設定した値（${c.tz_assumed ?? "要確認"}）`);
+      }
       break;
     case "exif":
       break;
   }
-  if (c.correction_s) {
-    const sign = c.correction_s > 0 ? "+" : "−";
-    notes.push(`時刻を ${sign}${Math.abs(c.correction_s).toLocaleString("ja-JP")} 秒補正`);
-  }
+  if (c.correction_s) notes.push(`時刻を ${formatShift(c.correction_s)} 補正`);
   return notes.length > 0 ? notes.join("、") : null;
 }
 

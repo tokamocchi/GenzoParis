@@ -1,12 +1,13 @@
 //! パスとボリュームの対応（04 の 3.3 節「ファイルの場所は『ボリューム ＋ ボリューム内の相対パス』で
 //! 管理する」）。
 //!
-//! **設計からの逸脱（仮置き）**: OS のボリューム ID の取得（外付けドライブの識別。FILE-03、v1）はまだ
-//! ない。MVP では、パスの先頭（Unix の `/`、Windows のドライブ `C:\` や UNC の `\\server\share\`）を
-//! ボリュームとし、その文字列から ID（`path:/`、`path:C:\` など）を作る。ドライブ文字やマウント先が
-//! 変わると別のボリュームになる（FILE-03 で OS のボリューム ID に置き換える）。ドライブ文字は大文字に、
-//! UNC のサーバー名・共有名は小文字にそろえる（書き方の大文字・小文字の違いでは分かれない）が、同じ共有を
-//! 別の名前（FQDN と短い名前、IP アドレス、割り当てたドライブ `Z:` と UNC）で指定すると別のボリュームになる。
+//! 2026-10-13 から（FILE-03）、ボリュームは OS のボリューム ID で識別する（`volumes` の `locate`）。ここの
+//! [`split_volume`] は、OS のボリューム ID を取れないとき（コンテナの中・tmpfs・UNC の共有・割り当てたネット
+//! ワークドライブなど）の代わりで、MVP と同じく、パスの先頭（Unix の `/`、Windows のドライブ `C:\` や UNC の
+//! `\\server\share\`）をボリュームとし、その文字列から ID（`path:/`、`path:C:\` など）を作る。この ID の
+//! ボリュームは、ドライブ文字やマウント先が変わると別のボリュームになる。ドライブ文字は大文字に、UNC のサーバー
+//! 名・共有名は小文字にそろえる（書き方の大文字・小文字の違いでは分かれない）が、同じ共有を別の名前（FQDN と
+//! 短い名前、IP アドレス、割り当てたドライブ `Z:` と UNC）で指定すると別のボリュームになる。
 
 use std::path::{Component, Path, PathBuf, Prefix};
 
@@ -24,6 +25,10 @@ pub(crate) struct VolumePath {
     pub mount: PathBuf,
     /// ボリューム内の相対パス（'/' 区切り。ルートは空文字列）。
     pub rel: String,
+    /// ボリュームのラベル（OS のボリューム ID で識別したときだけ）。
+    pub label: Option<String>,
+    /// ファイルシステムの種類（同上）。
+    pub fs_type: Option<String>,
 }
 
 /// 絶対パスにして、`.` と `..` を取り除く（`..` の直前のシンボリックリンクを除き、リンクは解決しない）。
@@ -104,6 +109,8 @@ pub(crate) fn split_volume(abs: &Path) -> Result<VolumePath, ApiError> {
         uuid: format!("{PATH_VOLUME_PREFIX}{mount}"),
         mount: PathBuf::from(mount),
         rel,
+        label: None,
+        fs_type: None,
     })
 }
 

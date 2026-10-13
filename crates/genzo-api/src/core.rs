@@ -104,6 +104,27 @@ pub struct CoreHooks {
     /// 登録の失敗）として扱うので、失敗したときの後始末（このジョブが作ったファイルだけを消す）を確かめられる。
     #[doc(hidden)]
     pub on_copy_import: Option<CopyImportHook>,
+    /// OS のボリューム ID の問い合わせ（FILE-03。既定は [`crate::OsVolumes`]。テストでは偽物を渡して、ドライブの
+    /// 付け外し・マウント先の変化を確かめる）。
+    pub volumes: Arc<dyn crate::volumes::VolumeProbe>,
+    /// テスト専用: アプリの中でのファイル操作（FILE-02）が途中の段階に着いたときに呼ぶ（[`FileOpStage`]）。
+    /// `Err` を返すと、その段階の失敗として扱うので、途中で失敗したときの戻し方を確かめられる。
+    #[doc(hidden)]
+    pub on_file_op: Option<FileOpHook>,
+}
+
+/// [`CoreHooks::on_file_op`] の関数。
+#[doc(hidden)]
+pub type FileOpHook = Arc<dyn Fn(&FileOpStage) -> Result<(), String> + Send + Sync>;
+
+/// アプリの中でのファイル操作の途中の段階（テスト専用のフック [`CoreHooks::on_file_op`] に渡す）。
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileOpStage {
+    /// 1 つのファイルを移した（名前を変えた・コピーして公開した）直後（値は移動先）。`Err` は次のファイルの失敗。
+    Moved(std::path::PathBuf),
+    /// カタログを更新する直前（値は記録の ID）。`Err` はカタログの更新の失敗。
+    Completing(i64),
 }
 
 /// [`CoreHooks::on_copy_import`] の関数。
@@ -172,6 +193,8 @@ impl Default for CoreHooks {
             on_develop_save: None,
             on_regenerate_start: None,
             on_copy_import: None,
+            volumes: Arc::new(crate::volumes::OsVolumes),
+            on_file_op: None,
         }
     }
 }
@@ -217,6 +240,17 @@ pub(crate) struct Inner {
     pub on_regenerate_start: Option<Arc<dyn Fn(VariantId) + Send + Sync>>,
     /// [`CoreHooks::on_copy_import`]。
     pub on_copy_import: Option<CopyImportHook>,
+    /// [`CoreHooks::volumes`]。
+    pub volume_probe: Arc<dyn crate::volumes::VolumeProbe>,
+    /// ボリュームのつながりの状態（`volumes` の doc。最後に確かめたもの）。
+    pub volume_states: Mutex<HashMap<genzo_model::VolumeId, crate::volumes::VolumeState>>,
+    /// [`CoreHooks::on_file_op`]。
+    pub on_file_op: Option<FileOpHook>,
+    /// アプリの中でのファイル操作（移動・リネーム・フォルダの操作・再リンク。FILE-02・FILE-04）を 1 つずつに
+    /// するロック（ほかのロックを持たずに最初に取る。持っている間にカタログ・キャッシュのロックを短く取る）。
+    pub file_ops: Mutex<()>,
+    /// 見つからない写真の確認のジョブの状態（`relink` の doc）。
+    pub check: Mutex<crate::relink::CheckJobState>,
     pub settings: Mutex<CoreSettings>,
     /// 設定の更新（[`Core::update_settings`]）を 1 つずつにするロック（保存・メモリ上の設定への反映・
     /// キャッシュの上限への反映を、別々のロックで行うので、更新全体を守る。ロックの順序の節）。
@@ -434,7 +468,7 @@ impl Core {
 
         // ここから先で失敗したら、カタログを閉じてから返す（開いたままにすると、次に開いたときに
         // 「前回は正常に終了しなかった」と報告してしまうため）。
-        let parts = match build_parts(&mut catalog, &config, &events) {
+        let parts = match build_parts(&mut catalog, &config, &events, hooks.volumes.as_ref()) {
             Ok(p) => p,
             Err(e) => {
                 if let Err(close_err) = catalog.close() {
@@ -445,6 +479,7 @@ impl Core {
         };
         let Parts {
             recovered,
+            volume_states,
             reresolve_capture_times,
             cache_generation,
             raw_decoder,
@@ -483,6 +518,11 @@ impl Core {
             on_develop_save: hooks.on_develop_save,
             on_regenerate_start: hooks.on_regenerate_start,
             on_copy_import: hooks.on_copy_import,
+            volume_probe: hooks.volumes,
+            volume_states: Mutex::new(volume_states),
+            on_file_op: hooks.on_file_op,
+            file_ops: Mutex::new(()),
+            check: Mutex::new(crate::relink::CheckJobState::default()),
             settings: Mutex::new(settings),
             settings_update: Mutex::new(()),
             reresolve_job: Mutex::new(None),
@@ -541,6 +581,9 @@ impl Core {
         }
         // 前回作り直せなかった L0 / L1（編集の直後に終了したなど）を作り直す。
         crate::previews::regenerate_pending(&inner);
+        // 見つからない写真を確かめる（FILE-04。アプリが許したときだけ）。内容のハッシュの計算と同じ 1 本の
+        // スレッドで、先に動かす（ハッシュの計算は見つからないファイルを飛ばすため）。
+        crate::relink::request_background_check(&inner);
         // ファイルの内容のハッシュのまだないファイル（版 10 より前から移行したカタログを含む）を、バックグラウンド
         // で計算する（ORG-03。アプリが許し、設定が有効なときだけ）。
         crate::identity::request_background_hashing(&inner);
@@ -745,6 +788,7 @@ fn close_inner(inner: &Arc<Inner>, mode: CloseMode) -> Result<(), ApiError> {
 /// カタログを開いた後に用意する部品。
 struct Parts {
     recovered: u64,
+    volume_states: HashMap<genzo_model::VolumeId, crate::volumes::VolumeState>,
     reresolve_capture_times: bool,
     cache_generation: String,
     raw_decoder: Option<String>,
@@ -764,7 +808,29 @@ fn build_parts(
     catalog: &mut Catalog,
     config: &CoreConfig,
     events: &EventHub,
+    probe: &dyn crate::volumes::VolumeProbe,
 ) -> Result<Parts, ApiError> {
+    // ボリューム（FILE-03）: 以前の形式（パスから作った ID）のボリュームのフォルダを、見えるものから OS の
+    // ボリューム ID のボリュームへ移し、つながっているかを確かめる（つながっていないボリュームのファイルの場所は
+    // 分からないものとして扱う。ファイル操作の確定も、今のマウント先で確かめる）。
+    match crate::volumes::rebind_path_volumes(catalog, probe) {
+        Ok(Some(r)) => events.emit_sticky(Event::Warning {
+            code: WarningCode::VolumesRebound,
+            message: crate::volumes::rebind_message(&r),
+            variant_id: None,
+            path: None,
+        }),
+        Ok(None) => {}
+        Err(e) => events.emit_sticky(Event::Warning {
+            code: WarningCode::VolumesRebound,
+            message: format!(
+                "以前の形式のボリュームのフォルダを、ドライブの ID で識別するように移せませんでした（次に開いたときに試し直します）: {e}"
+            ),
+            variant_id: None,
+            path: None,
+        }),
+    }
+    let volume_states = crate::volumes::refresh_volumes(catalog, probe)?;
     // 終わっていないファイル操作の確定（6.4 節。DATA-07）。
     let recovered = recover_file_ops(catalog, events)?;
     // 設定（SYS-05）。既定のタイムゾーンは、まだ保存していなければ保存する。
@@ -829,6 +895,7 @@ fn build_parts(
     let display = DisplayState::assumed_srgb()?;
     Ok(Parts {
         recovered,
+        volume_states,
         reresolve_capture_times,
         cache_generation,
         raw_decoder,

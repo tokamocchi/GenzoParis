@@ -18,6 +18,12 @@
 //! genzo search --keyword "場所" --collection 1
 //! genzo stack auto --gap 2 --folder ~/Pictures/2024-05-01 --dry-run
 //! genzo stack create 12 13 14 --top 13
+//! genzo time sync 12 "2024-05-01 12:34:56" --dry-run   # 12 と同じ機材の写真を、12 の正しい時刻に合わせる
+//! genzo time zone +02:00 --keep-instant 12 13       # 撮影した瞬間はそのままで、パリの時刻で表示する
+//! genzo timeline --gap 2h --folder ~/Pictures/2024-05-01
+//! genzo file move 12 13 --to ~/Pictures/選別済み --dry-run   # 移す予定（移せない写真・コピーの量）
+//! genzo file rename 12 13 --template "{date}-{seq}"
+//! genzo missing check && genzo missing relink --in /media/me/外付け --dry-run
 //! echo '{"exposure_ev": 0.5}' | genzo develop set 12 --json -
 //! genzo export 12 13 --out ~/out --format jpeg --quality 90 --long-edge 2048 --remove-gps
 //! genzo render DSC00001.ARW --out out.tif --settings settings.json   # カタログなし
@@ -35,7 +41,8 @@
 //!   [`EXIT_PARTIAL`]（3）結果は出したが一部が失敗した・問題が見つかった、[`EXIT_INTERRUPTED`]（130）
 //!   Ctrl+C で中断した（下の「Ctrl+C」）。
 //!   - 3 にするもの: 書き出し・削除・サムネイルの作り直しで一部が失敗した、取り込みで読めずに登録
-//!     できなかったファイルがある（メタデータを読めずに `status = error` で登録したものは 0）、
+//!     できなかったファイルがある（メタデータを読めずに `status = error` で登録したものは 0）、写真の移動・
+//!     名前の変更・再リンクで一部の写真を飛ばした・失敗した、`missing check` で見つからない写真があった、
 //!     `catalog check` で問題が見つかった、`bench` で前回より悪化した（今回の回数が 1.8 節の規則を満たす
 //!     計測だけ）。問題の検出も「結果は出したが、問題がある」として 3 にまとめる（スクリプトは 3 を見て
 //!     結果の JSON を確かめる）。
@@ -72,6 +79,8 @@
 //! | `bench` | `bench preview / export`（genzo-testkit の計測と記録） |
 //! | `logs` | `log info / clear`（ログ・クラッシュレポート。カタログは使わない。SYS-07） |
 //! | `identity` | `hash compute / status / duplicates / identify`（ファイルの内容による同一性。ORG-03・IMP-04） |
+//! | `time` | `time devices / shift / sync / zone / clear-zone / reset / history / undo`（撮影日時の一括修正。LIB-16）と `timeline`（写真と動画のタイムライン。ORG-01） |
+//! | `files` | `volume list`（FILE-03）・`folder list / create / rename / move / relocate`・`file move / rename`（FILE-02）・`missing check / relink / link`（FILE-04） |
 //!
 //! # ログ（SYS-07）
 //!
@@ -110,6 +119,7 @@ mod catalog;
 mod develop;
 mod error;
 mod export;
+mod files;
 mod identity;
 mod interrupt;
 mod library;
@@ -119,6 +129,7 @@ pub mod output;
 mod session;
 mod stacks;
 mod standalone;
+mod time;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -333,6 +344,12 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         Command::Bench(a) => bench::run(&g, out, a),
         Command::Log(c) => logs::run(&g, out, c),
         Command::Hash(c) => identity::run(&g, out, c),
+        Command::Time(c) => time::run(&g, out, c),
+        Command::Timeline(a) => time::timeline(&g, out, &a),
+        Command::Volume(c) => files::volume(&g, out, c),
+        Command::Folder(c) => files::folder(&g, out, c),
+        Command::File(c) => files::file(&g, out, c),
+        Command::Missing(c) => files::missing(&g, out, c),
     }
 }
 

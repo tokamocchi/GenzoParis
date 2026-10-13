@@ -1,10 +1,12 @@
 //! カタログの結合テスト（内部の接続にも触れるため、crate の中に置く）。
 
 mod backup;
+mod capture;
 mod collections;
 mod develop;
 mod dummy;
 mod file_ops;
+mod folders;
 mod identity;
 mod iptc;
 mod keywords;
@@ -89,6 +91,7 @@ pub(crate) fn video_req(folder: FolderId, name: &str, n: u64, when: Option<&str>
             width: Some(3840),
             height: Some(2160),
             creation_time: when.map(str::to_owned),
+            ..Default::default()
         },
         capture(when),
     )

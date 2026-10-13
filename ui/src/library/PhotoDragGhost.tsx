@@ -10,10 +10,15 @@ export function PhotoDragGhost() {
   let text = `${n} 枚`;
   let cls = "photo-drag-ghost";
   if (t && t.ok) {
-    text = t.kind === "collection" ? `${n} 枚を「${t.label}」に入れる` : `${n} 枚にキーワード「${t.label}」を付ける`;
+    if (t.kind === "collection") text = `${n} 枚を「${t.label}」に入れる`;
+    else if (t.kind === "keyword") text = `${n} 枚にキーワード「${t.label}」を付ける`;
+    else text = `${n} 枚を「${t.label}」へ移す（予定を確かめてから）`;
     cls += " ok";
   } else if (t) {
-    text = `「${t.label}」には入れられません（写真を入れられるのは手動のコレクションだけです）`;
+    text =
+      t.kind === "folder"
+        ? `「${t.label}」へは移せません（ドライブがつながっていないか、フォルダが見つかりません）`
+        : `「${t.label}」には入れられません（写真を入れられるのは手動のコレクションだけです）`;
     cls += " no";
   }
   return (

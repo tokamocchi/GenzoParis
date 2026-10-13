@@ -205,6 +205,7 @@ pub fn photo_metadata_from_exif(e: &Exif) -> PhotoMetadata {
         orientation: exif_orientation(e),
         gps: gps(e),
         capture: capture(e),
+        body_serial: genzo_model::normalize_serial(ascii(e, Tag::BodySerialNumber).as_deref()),
     }
 }
 
@@ -259,6 +260,31 @@ pub(crate) mod test_support {
             entry(&mut out, 0x0001, ASCII, 4, [b[0], b[1], b[2], 0]);
             out.extend_from_slice(&0u32.to_le_bytes());
         }
+        out
+    }
+
+    /// BodySerialNumber（Exif IFD の 0xA431。ASCII）だけを持つ Exif を手で組み立てる（リトルエンディアン）。
+    /// exif_write はシリアル番号を書かないため（書き出したファイルに本体の番号を残さない）。
+    pub(crate) fn body_serial_exif(serial: &str) -> Vec<u8> {
+        let mut value = serial.as_bytes().to_vec();
+        value.push(0);
+        let mut out = b"II*\0".to_vec();
+        out.extend_from_slice(&8u32.to_le_bytes());
+        let exif_ifd: u32 = 8 + 2 + 12 + 4;
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&0x8769u16.to_le_bytes());
+        out.extend_from_slice(&4u16.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&exif_ifd.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let data = exif_ifd + 2 + 12 + 4;
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&0xA431u16.to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&value);
         out
     }
 }
@@ -396,6 +422,23 @@ mod tests {
         };
         let e = parse_exif(encode_exif_tiff(&ifds, ByteOrder::Big).unwrap()).unwrap();
         assert_eq!(exif_orientation(&e), Orientation::Normal);
+    }
+
+    /// 本体のシリアル番号（BodySerialNumber。LIB-16 の機材の区別）。
+    #[test]
+    fn body_serial_is_read_and_normalized() {
+        let m = photo_metadata_from_exif(
+            &parse_exif(test_support::body_serial_exif(" 4012345 ")).unwrap(),
+        );
+        assert_eq!(m.body_serial.as_deref(), Some("4012345"));
+        let zero =
+            photo_metadata_from_exif(&parse_exif(test_support::body_serial_exif("0000")).unwrap());
+        assert_eq!(zero.body_serial, None);
+        // このアプリの書き出しの Exif にはシリアル番号を書かない。
+        let mut meta = sample();
+        meta.body_serial = Some("4012345".to_owned());
+        let back = photo_metadata_from_exif(&parse_exif(write(&meta)).unwrap());
+        assert_eq!(back.body_serial, None);
     }
 
     /// ICC のない画像の色空間の手がかり（DCF のオプション色空間。指摘 F28）。
