@@ -21,6 +21,10 @@
 //!   [`Catalog::export_keywords`]
 //! - コレクション（LIB-10）・スマートコレクション（LIB-11）: [`Catalog::collections`]、
 //!   [`Catalog::create_collection`]、[`Catalog::add_to_collection`]、[`Filter::collection`]
+//! - スタック（LIB-12）: [`Catalog::create_stack`]、[`Catalog::set_stacks_collapsed`]、
+//!   [`Catalog::stack_layout`] と [`StackLayout::group`]（検索結果のまとめ方）、[`Catalog::auto_stack`]
+//! - 仮想コピー（LIB-13）: [`Catalog::create_virtual_copy`]、[`Catalog::rename_virtual_copy`]、
+//!   [`Catalog::set_as_master`]、[`Catalog::delete_virtual_copies`]
 //! - 説明のメタデータ（LIB-15。タイトル・キャプション・作成者・著作権など）: [`Catalog::asset_metadata`]、
 //!   [`Catalog::set_asset_metadata`]（一括編集）、[`Catalog::metadata_summary`]
 //! - 現像設定・履歴: [`Catalog::save_develop`]、[`Catalog::apply_develop_to_many`]、
@@ -33,6 +37,10 @@
 //!   docs/catalog_schema.md（実際のスキーマと食い違わないことをテストで確かめる）
 //! - キャッシュ: [`ThumbStore`]（L0）、[`PreviewCache`]（L1）
 //! - ハッシュ: [`FileFacts::read`]、[`quick_hash`]、[`full_hash`]
+//! - 内容による同一性（ORG-03）・重複（IMP-04）・RAW と JPEG のペア（IMP-06）:
+//!   [`Catalog::files_with_quick_hash`]、[`Catalog::set_full_hash_if_current`]、
+//!   [`Catalog::files_without_full_hash`]、[`Catalog::duplicate_groups`]、[`Catalog::companion_files`]、
+//!   [`RegisterOptions`]
 
 mod backup;
 mod catalog;
@@ -42,6 +50,7 @@ pub mod dummy;
 mod error;
 mod files;
 mod hash;
+mod identity;
 mod iptc;
 mod keyword;
 mod library;
@@ -50,6 +59,7 @@ mod register;
 mod schema;
 mod search;
 mod smart_sql;
+mod stack;
 pub mod text;
 mod thumbs;
 mod util;
@@ -73,8 +83,8 @@ pub use catalog::{
 };
 pub use collection::{Collection, MAX_COLLECTION_DEPTH, MAX_COLLECTION_NAME_CHARS};
 pub use develop::{
-    DevelopState, HISTORY_LABEL_IMPORT, HISTORY_LABEL_VIRTUAL_COPY, HistoryEntry, Snapshot,
-    VariantInfo,
+    DevelopState, HISTORY_LABEL_IMPORT, HISTORY_LABEL_VIRTUAL_COPY, HistoryEntry,
+    MAX_VARIANT_NAME_CHARS, Snapshot, VariantInfo,
 };
 pub use dummy::{DummyReport, DummySpec, populate_dummy};
 pub use error::{CatalogError, Result};
@@ -85,10 +95,11 @@ pub use files::{
 pub use hash::{
     FileFacts, QUICK_HASH_CHUNK, full_hash, full_hash_reader, quick_hash, quick_hash_reader,
 };
+pub use identity::{ContentHashCounts, DuplicateGroup, DuplicateGroups};
 pub use iptc::{MetadataFieldSummary, MetadataSummary};
 pub use keyword::{
     KEYWORD_NAME_SEPARATORS, Keyword, KeywordMatch, KeywordNode, KeywordUsage, MAX_KEYWORD_DEPTH,
-    MAX_KEYWORD_NAME_CHARS,
+    MAX_KEYWORD_NAME_CHARS, check_keyword_path,
 };
 pub use library::{AssetRecord, CatalogCounts};
 pub use preview_cache::{
@@ -96,14 +107,19 @@ pub use preview_cache::{
     PreviewScan, ReconcileReport, scan_preview_dir,
 };
 pub use register::{
-    Folder, JPEG_EXTENSIONS, MediaMetadata, PairClass, RAW_EXTENSIONS, RegisterFile,
-    RegisterOutcome, RegisterStatus, Volume, normalize_rel_path, pair_class, rel_path_from_path,
+    Folder, ImportTags, JPEG_EXTENSIONS, MediaMetadata, PairClass, RAW_EXTENSIONS, RegisterFile,
+    RegisterOptions, RegisterOutcome, RegisterStatus, TagOutcome, Volume, normalize_rel_path,
+    pair_class, rel_path_from_path,
 };
 pub use schema::{
     BUSY_TIMEOUT, CACHE_SIZE_KIB, CATALOG_APPLICATION_ID, CATALOG_SCHEMA_VERSION,
-    COLLECTIONS_SCHEMA_VERSION, ColumnInfo, IPTC_SCHEMA_VERSION, PUBLIC_VIEWS,
-    PUBLIC_VIEWS_SCHEMA_VERSION, STABLE_IDS_SCHEMA_VERSION, SchemaDescription, SchemaObject,
-    THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, TableInfo, UTC_ONLY_SCHEMA_VERSION,
+    COLLECTIONS_SCHEMA_VERSION, CONTENT_IDENTITY_SCHEMA_VERSION, ColumnInfo, IPTC_SCHEMA_VERSION,
+    PUBLIC_VIEWS, PUBLIC_VIEWS_SCHEMA_VERSION, STABLE_IDS_SCHEMA_VERSION, STACKS_SCHEMA_VERSION,
+    SchemaDescription, SchemaObject, THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, TableInfo,
+    UTC_ONLY_SCHEMA_VERSION,
 };
 pub use search::{Facets, Filter, FolderFilter, Sort, SortDirection, SortKey, VariantSummary};
+pub use stack::{
+    AutoStackReport, GroupedIds, MAX_AUTO_STACK_GAP, StackBadge, StackInfo, StackLayout,
+};
 pub use thumbs::{ThumbStore, Thumbnail};

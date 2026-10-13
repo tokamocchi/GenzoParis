@@ -1,4 +1,4 @@
-// 小さなメニュー（行の「…」のボタン・右クリック。キーワード・コレクションの一覧で使う）。
+// 小さなメニュー（行の「…」のボタン・右クリック。キーワード・コレクションの一覧、グリッドの写真で使う）。
 //
 // - 外をクリックする・Esc・項目を選ぶと閉じる。画面の端からはみ出さないように位置を寄せる。
 // - 項目は button（キーボードの Tab・Enter で選べる）。開いたら最初の項目にフォーカスを移す。
@@ -13,6 +13,8 @@ export interface MenuItem {
   checked?: boolean;
   /** 危険な操作（削除）。 */
   danger?: boolean;
+  /** 右に添える短い文字（ショートカットなど）。 */
+  hint?: string;
 }
 
 /** 区切り線。 */
@@ -90,6 +92,7 @@ export function PopupMenu(props: { at: MenuAt | null; items: MenuEntry[]; onClos
           >
             <span className="menu-check">{it.checked ? "✓" : ""}</span>
             {it.label}
+            {it.hint && <span className="menu-hint">{it.hint}</span>}
           </button>
         ),
       )}

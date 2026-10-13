@@ -1,12 +1,17 @@
 // 削除のダイアログ（FILE-01）: 種類（カタログから除去・ゴミ箱に移す・仮想コピーだけを削除）を選ぶたびに
 // 影響の一覧（計画）を見せ、確認してから実行する。計画の後にカタログが変わっていたら、計画し直して確かめ直す。
+//
+// 折りたたんだスタック（LIB-12）の代表を選んでいるときは、スタックの中に隠れている写真も含めるかを選べる
+// （既定は含めない。選んで見えている写真だけを消す。決定事項ログ No.86）。仮想コピーだけの削除では選べない
+// （隠れた写真にマスターが含まれうるため）。
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
 import type { DeleteKind, DeletePlan, ErrorInfo, VariantId } from "../api/types";
 import { Dialog } from "../components/Dialog";
+import { hiddenStackMembers } from "../library/stackLogic";
 import { actions } from "../state/app";
 import {
   DELETE_KIND_OPTIONS,
@@ -37,8 +42,24 @@ function PlanList(props: { lines: string[]; rest: number }) {
 }
 
 export function DeleteDialog(props: { deleteKind: DeleteKind; variantIds: VariantId[] }) {
-  const ids = props.variantIds;
+  const selectedIds = props.variantIds;
   const [kind, setKind] = useState<DeleteKind>(props.deleteKind);
+  // 折りたたんだスタックの中に隠れている写真（選んだ代表のスタックの、選んでいない写真）。
+  const [hidden, setHidden] = useState<VariantId[]>([]);
+  const [includeHidden, setIncludeHidden] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    core
+      .variantStacks(selectedIds)
+      .then((stacks) => alive && setHidden(hiddenStackMembers(selectedIds, stacks)))
+      .catch(() => alive && setHidden([]));
+    return () => {
+      alive = false;
+    };
+  }, [selectedIds]);
+  const canIncludeHidden = hidden.length > 0 && kind !== "virtual_copies";
+  const withHidden = canIncludeHidden && includeHidden;
+  const ids = useMemo(() => (withHidden ? [...selectedIds, ...hidden] : selectedIds), [withHidden, selectedIds, hidden]);
   const [plan, setPlan] = useState<DeletePlan | null>(null);
   const [planError, setPlanError] = useState<ErrorInfo | null>(null);
   const [planning, setPlanning] = useState(false);
@@ -105,7 +126,7 @@ export function DeleteDialog(props: { deleteKind: DeleteKind; variantIds: Varian
 
   return (
     <Dialog
-      title={`削除（${formatCount(ids.length)} 件を選択）`}
+      title={`削除（${formatCount(selectedIds.length)} 件を選択${withHidden ? `。スタックの中の ${formatCount(hidden.length)} 枚を含む` : ""}）`}
       width={640}
       onClose={actions.closeDialog}
       busy={busy}
@@ -139,6 +160,23 @@ export function DeleteDialog(props: { deleteKind: DeleteKind; variantIds: Varian
           </label>
         ))}
       </div>
+
+      {canIncludeHidden && (
+        <label className="dlg-check">
+          <input
+            type="checkbox"
+            checked={includeHidden}
+            disabled={busy}
+            onChange={(e) => setIncludeHidden(e.target.checked)}
+          />
+          <span>
+            折りたたんだスタックの中の写真（ほか {formatCount(hidden.length)} 枚）も含める
+            <span className="desc">
+              含めなければ、選んで見えている写真（スタックの代表）だけが対象です。スタックのほかの写真は残ります。
+            </span>
+          </span>
+        </label>
+      )}
 
       <div className="dlg-section">
         <h3>影響の一覧</h3>

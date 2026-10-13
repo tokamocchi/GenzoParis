@@ -145,6 +145,19 @@ export function virtualCopyLabel(s: Pick<VariantSummary, "is_master" | "variant_
   return s.variant_name ? `仮想コピー: ${s.variant_name}` : "仮想コピー";
 }
 
+/**
+ * RAW と同時記録の JPEG を 1 枚の写真にまとめた写真の印の説明（IMP-06。まとめていなければ null）。グリッドの印・
+ * セルとフィルムストリップの説明に使う。
+ */
+export function pairLabel(s: Pick<VariantSummary, "has_sidecar_jpeg">): string | null {
+  return s.has_sidecar_jpeg ? "RAW + JPEG（同時記録の JPEG を 1 枚の写真として扱う）" : null;
+}
+
+/** 内容のハッシュ（BLAKE3）の短い表示（先頭 12 文字。まだ計算していなければ「未計算」）。 */
+export function shortHash(full: string | null | undefined): string {
+  return full ? `${full.slice(0, 12)}…` : "未計算";
+}
+
 /** 元ファイルを確かめ直した結果の知らせ。 */
 export interface FileCheckNotice {
   level: "success" | "warning";

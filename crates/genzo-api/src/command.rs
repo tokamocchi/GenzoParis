@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use genzo_model::{
     CollectionId, CollectionKind, ColorLabel, CropRect, DevelopSettings, ExportSettings, Flag,
-    HistoryEntryId, KeywordId, MetadataField, Rating, SmartRule, VariantId,
+    HistoryEntryId, KeywordId, MetadataField, Rating, SmartRule, StackId, VariantId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,12 +24,14 @@ use crate::core::Core;
 use crate::error::ApiError;
 use crate::maintenance::RestorePlan;
 use crate::types::{
-    BackupEntry, BeforeInfo, BeforeSource, Capabilities, CatalogSchema, CatalogStats,
-    CollectionInfo, CoreSettings, DeleteKind, DeletePlan, DeleteReport, DevelopState, DisplayInfo,
-    Facets, FileCheckReport, FolderInfo, FrameInfo, HistoryItem, IndexOf, JobInfo, KeywordHit,
-    KeywordInfo, KeywordUsage, MetadataSummary, PickedWhiteBalance, RangeResult, RegionInfo,
-    RegionRequest, SearchFilter, SearchResult, SearchSort, SettingGroups, SettingsUpdate,
-    StartupReport, ThumbnailData, VariantDetails, VariantKeywords,
+    AutoStackReport, BackupEntry, BeforeInfo, BeforeSource, Capabilities, CatalogSchema,
+    CatalogStats, CollectionInfo, ContentHashStatus, CopySettings, CoreSettings, DeleteKind,
+    DeletePlan, DeleteReport, DevelopState, DisplayInfo, DuplicateGroupList, Facets,
+    FileCheckReport, FileIdentity, FolderInfo, FrameInfo, HistoryItem, ImportOptions, IndexOf,
+    JobInfo, KeywordHit, KeywordInfo, KeywordUsage, MetadataSummary, NamePreview,
+    PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest, SearchFilter, SearchResult,
+    SearchSort, SettingGroups, SettingsUpdate, ShownVariants, StackInfo, StartupReport,
+    ThumbnailData, VariantDetails, VariantKeywords,
 };
 
 /// コマンド（UI → コア）。
@@ -43,6 +45,9 @@ pub enum Command {
         path: PathBuf,
         /// 配下のフォルダも取り込むか。
         recursive: bool,
+        /// 重複と思われるもの・RAW と JPEG の扱い（IMP-04・IMP-06。省いた項目はカタログの設定に従う）。
+        #[serde(default)]
+        options: ImportOptions,
     },
     /// ジョブの情報。→ [`Response::Job`]
     Job {
@@ -86,6 +91,12 @@ pub enum Command {
     IndexOf {
         /// variant。
         variant_id: VariantId,
+    },
+    /// 写真のうち、表示中の検索結果に出ているもの（選択を表示している写真だけにする。折りたたんだスタックに
+    /// 隠れた写真・絞り込みに合わない写真は含まない。LIB-12）。→ [`Response::ShownVariants`]
+    ShownVariants {
+        /// variant。
+        variant_ids: Vec<VariantId>,
     },
     /// 絞り込みの候補（カメラ・レンズ・動画のコーデックと件数。[`crate::Core::facets`]）。
     /// → [`Response::Facets`]
@@ -294,6 +305,77 @@ pub enum Command {
     /// 写真が入っている手動のコレクション。→ [`Response::VariantCollections`]
     VariantCollections {
         /// 写真。
+        variant_id: VariantId,
+    },
+
+    // --- スタック（LIB-12） ---
+    /// 写真をまとめて 1 つのスタックにする（既にスタックに入っている写真があれば、そのスタックもまとめる）。
+    /// → [`Response::Stack`]
+    CreateStack {
+        /// 写真（2 枚以上）。
+        variant_ids: Vec<VariantId>,
+        /// 一番上にする写真（省略時は撮影日時の最も早いもの）。
+        #[serde(default)]
+        top: Option<VariantId>,
+    },
+    /// スタックに写真を足す（ほかのスタックの写真は移す）。→ [`Response::Updated`]（新しく足した数）
+    AddToStack {
+        /// スタック。
+        stack_id: StackId,
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+    },
+    /// 写真をスタックから外す（1 枚以下になったスタックは消える）。→ [`Response::Updated`]（外した数）
+    RemoveFromStack {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+    },
+    /// 写真が入っているスタックを解除する（写真は消えない）。→ [`Response::Updated`]（解除したスタックの数）
+    Unstack {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+    },
+    /// 写真をそのスタックの一番上にする。→ [`Response::Stack`]
+    SetStackTop {
+        /// 写真。
+        variant_id: VariantId,
+    },
+    /// スタックの折りたたみの状態を変える。→ [`Response::Updated`]（状態の変わったスタックの数）
+    SetStacksCollapsed {
+        /// スタック（`null` ですべてのスタック）。
+        #[serde(default)]
+        stack_ids: Option<Vec<StackId>>,
+        /// 折りたたむか（偽で展開）。
+        collapsed: bool,
+    },
+    /// 写真が入っているスタック。→ [`Response::Stacks`]
+    VariantStacks {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+    },
+    /// 撮影時刻の間隔で自動的にスタックを作る（[`crate::Core::auto_stack`]）。→ [`Response::AutoStack`]
+    AutoStack {
+        /// 対象（条件に合う写真のうち、スタックに入っていないもの）。
+        #[serde(default)]
+        filter: Box<SearchFilter>,
+        /// 前の写真との間隔の上限（秒。0〜3,600）。
+        gap_seconds: f64,
+        /// 数えるだけ（何も変えない）か。
+        #[serde(default)]
+        dry_run: bool,
+    },
+
+    // --- 仮想コピー（LIB-13） ---
+    /// 仮想コピーの名前を変える。→ [`Response::Ok`]
+    RenameVirtualCopy {
+        /// 仮想コピー。
+        variant_id: VariantId,
+        /// 新しい名前。
+        name: String,
+    },
+    /// 仮想コピーをマスター（元の写真）にする（前のマスターは仮想コピーになる）。→ [`Response::MasterChanged`]
+    SetAsMaster {
+        /// 仮想コピー。
         variant_id: VariantId,
     },
 
@@ -514,6 +596,39 @@ pub enum Command {
     CatalogSchema,
     /// 機能の有無。→ [`Response::Capabilities`]
     Capabilities,
+
+    // --- 内容による同一性（ORG-03・IMP-04） ---
+    /// 全体のハッシュのないファイルの内容のハッシュを計算する（専用のスレッドのジョブ。既に計算中なら、
+    /// そのジョブ）。→ [`Response::JobStarted`]
+    ComputeContentHashes {
+        /// ネットワークのボリュームのファイルも読むか。
+        #[serde(default)]
+        include_network: bool,
+    },
+    /// 内容のハッシュの状況。→ [`Response::ContentHashStatus`]
+    ContentHashStatus,
+    /// 内容が同じファイルの組。→ [`Response::DuplicateGroups`]
+    DuplicateGroups {
+        /// 返す組の上限（最大 [`crate::DUPLICATE_GROUPS_MAX`]）。
+        #[serde(default = "default_duplicate_groups_limit")]
+        limit: usize,
+    },
+    /// ファイルの内容で、同じ内容の登録済みのファイルを探す。→ [`Response::FileIdentity`]
+    IdentifyFile {
+        /// 調べるファイル。
+        path: PathBuf,
+    },
+    /// コピー取り込みの設定の、名前の例（IMP-03。見本の写真のコピー先。カタログ・ファイルは使わない）。
+    /// → [`Response::NamePreview`]
+    ImportNamePreview {
+        /// コピーの設定（コピー先のフォルダは使わない）。
+        copy: CopySettings,
+    },
+}
+
+/// [`Command::DuplicateGroups`] の上限の既定値。
+fn default_duplicate_groups_limit() -> usize {
+    100
 }
 
 /// 応答（[`Command`] ごとの結果）。
@@ -535,6 +650,8 @@ pub enum Response {
     Range(RangeResult),
     /// variant の位置。
     IndexOf(IndexOf),
+    /// 表示中の検索結果に出ている写真。
+    ShownVariants(ShownVariants),
     /// 絞り込みの候補。
     Facets(Facets),
     /// 変更した数。
@@ -591,6 +708,20 @@ pub enum Response {
     VariantCollections {
         /// コレクション（名前の順）。
         collection_ids: Vec<CollectionId>,
+    },
+    /// スタック。
+    Stack(StackInfo),
+    /// スタックの一覧。
+    Stacks {
+        /// スタック。
+        stacks: Vec<StackInfo>,
+    },
+    /// 自動スタックの結果。
+    AutoStack(AutoStackReport),
+    /// マスターを入れ替えた。
+    MasterChanged {
+        /// 前のマスター（仮想コピーになった。すでにマスターだったなら自分）。
+        previous_master: VariantId,
     },
     /// サムネイル（なければ `null`）。
     Thumbnail {
@@ -685,6 +816,14 @@ pub enum Response {
     CatalogSchema(CatalogSchema),
     /// 機能の有無。
     Capabilities(Capabilities),
+    /// 内容のハッシュの状況。
+    ContentHashStatus(ContentHashStatus),
+    /// 内容が同じファイルの組。
+    DuplicateGroups(DuplicateGroupList),
+    /// ファイルの内容による識別の結果。
+    FileIdentity(FileIdentity),
+    /// コピー先の名前の例。
+    NamePreview(NamePreview),
 }
 
 fn ms(v: u64) -> Duration {
@@ -697,8 +836,12 @@ impl Core {
         use Command as C;
         use Response as R;
         Ok(match command {
-            C::ImportFolder { path, recursive } => R::JobStarted {
-                job_id: self.import_folder(&path, recursive)?,
+            C::ImportFolder {
+                path,
+                recursive,
+                options,
+            } => R::JobStarted {
+                job_id: self.import_folder_with(&path, recursive, &options)?,
             },
             C::Job { job_id } => R::Job(self.job(job_id)?),
             C::WaitJob { job_id, timeout_ms } => R::Job(self.wait_job(job_id, timeout_ms.map(ms))?),
@@ -713,6 +856,9 @@ impl Core {
                 len,
             } => R::Range(self.range(generation, start, len)?),
             C::IndexOf { variant_id } => R::IndexOf(self.index_of(variant_id)?),
+            C::ShownVariants { variant_ids } => {
+                R::ShownVariants(self.shown_variants(&variant_ids)?)
+            }
             C::Facets => R::Facets(self.facets()?),
             C::SetRating {
                 variant_ids,
@@ -856,6 +1002,41 @@ impl Core {
             C::VariantCollections { variant_id } => R::VariantCollections {
                 collection_ids: self.variant_collections(variant_id)?,
             },
+            C::CreateStack { variant_ids, top } => R::Stack(self.create_stack(&variant_ids, top)?),
+            C::AddToStack {
+                stack_id,
+                variant_ids,
+            } => R::Updated {
+                count: self.add_to_stack(stack_id, &variant_ids)? as u64,
+            },
+            C::RemoveFromStack { variant_ids } => R::Updated {
+                count: self.remove_from_stack(&variant_ids)? as u64,
+            },
+            C::Unstack { variant_ids } => R::Updated {
+                count: self.unstack(&variant_ids)? as u64,
+            },
+            C::SetStackTop { variant_id } => R::Stack(self.set_stack_top(variant_id)?),
+            C::SetStacksCollapsed {
+                stack_ids,
+                collapsed,
+            } => R::Updated {
+                count: self.set_stacks_collapsed(stack_ids.as_deref(), collapsed)? as u64,
+            },
+            C::VariantStacks { variant_ids } => R::Stacks {
+                stacks: self.variant_stacks(&variant_ids)?,
+            },
+            C::AutoStack {
+                filter,
+                gap_seconds,
+                dry_run,
+            } => R::AutoStack(self.auto_stack(&filter, gap_seconds, dry_run)?),
+            C::RenameVirtualCopy { variant_id, name } => {
+                self.rename_virtual_copy(variant_id, &name)?;
+                R::Ok
+            }
+            C::SetAsMaster { variant_id } => R::MasterChanged {
+                previous_master: self.set_as_master(variant_id)?,
+            },
             C::Thumbnail { variant_id } => R::Thumbnail {
                 thumbnail: self.thumbnail(variant_id)?,
             },
@@ -989,6 +1170,13 @@ impl Core {
             C::CatalogStats => R::CatalogStats(self.catalog_stats()?),
             C::CatalogSchema => R::CatalogSchema(self.catalog_schema()?),
             C::Capabilities => R::Capabilities(self.capabilities()?),
+            C::ComputeContentHashes { include_network } => R::JobStarted {
+                job_id: self.compute_content_hashes(include_network)?,
+            },
+            C::ContentHashStatus => R::ContentHashStatus(self.content_hash_status()?),
+            C::DuplicateGroups { limit } => R::DuplicateGroups(self.duplicate_groups(limit)?),
+            C::IdentifyFile { path } => R::FileIdentity(self.identify_file(&path)?),
+            C::ImportNamePreview { copy } => R::NamePreview(self.import_name_preview(&copy)),
         })
     }
 
@@ -1045,6 +1233,7 @@ mod tests {
         let json = serde_json::to_value(Response::Search(SearchResult {
             generation: 3,
             count: 10,
+            hidden: 0,
         }))
         .unwrap();
         assert_eq!(
@@ -1184,12 +1373,122 @@ mod tests {
         assert_eq!(serde_json::to_value(&new).unwrap(), frame);
     }
 
+    /// 画面（ui/src/api/types.ts）が使うスタック・仮想コピーの形（LIB-12・LIB-13）。
+    #[test]
+    fn stack_and_virtual_copy_commands_have_the_ui_forms() {
+        use serde_json::json;
+        let c: Command =
+            serde_json::from_value(json!({"type": "create_stack", "variant_ids": [1, 2]})).unwrap();
+        assert_eq!(
+            c,
+            Command::CreateStack {
+                variant_ids: vec![VariantId::new(1), VariantId::new(2)],
+                top: None,
+            }
+        );
+        let c: Command = serde_json::from_value(
+            json!({"type": "set_stacks_collapsed", "stack_ids": [4], "collapsed": true}),
+        )
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::SetStacksCollapsed {
+                stack_ids: Some(vec![StackId::new(4)]),
+                collapsed: true,
+            }
+        );
+        let c: Command =
+            serde_json::from_value(json!({"type": "auto_stack", "gap_seconds": 2})).unwrap();
+        assert_eq!(
+            c,
+            Command::AutoStack {
+                filter: Box::default(),
+                gap_seconds: 2.0,
+                dry_run: false,
+            }
+        );
+        let r = Response::Stack(StackInfo {
+            stack_id: StackId::new(4),
+            top_variant_id: VariantId::new(2),
+            collapsed: true,
+            members: vec![VariantId::new(2), VariantId::new(1)],
+        });
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "stack", "stack_id": 4, "top_variant_id": 2, "collapsed": true, "members": [2, 1]})
+        );
+        let r = Response::MasterChanged {
+            previous_master: VariantId::new(7),
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "master_changed", "previous_master": 7})
+        );
+        // 検索の結果: 隠した写真がなければ hidden を書かない（前の形と同じ）。
+        let r = Response::Search(SearchResult {
+            generation: 1,
+            count: 3,
+            hidden: 2,
+        });
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "search", "generation": 1, "count": 3, "hidden": 2})
+        );
+        let back: SearchResult =
+            serde_json::from_value(json!({"generation": 1, "count": 3})).unwrap();
+        assert_eq!(back.hidden, 0);
+    }
+
     #[test]
     fn every_command_round_trips() {
         let commands = vec![
             Command::ImportFolder {
                 path: "/p".into(),
                 recursive: true,
+                options: ImportOptions::default(),
+            },
+            Command::ImportFolder {
+                path: "/p".into(),
+                recursive: false,
+                options: ImportOptions {
+                    skip_duplicates: Some(false),
+                    separate_raw_jpeg: Some(true),
+                    ..ImportOptions::default()
+                },
+            },
+            Command::ComputeContentHashes {
+                include_network: true,
+            },
+            Command::ContentHashStatus,
+            Command::DuplicateGroups { limit: 5 },
+            Command::IdentifyFile {
+                path: "/p/a.ARW".into(),
+            },
+            Command::ImportFolder {
+                path: "/sd".into(),
+                recursive: true,
+                options: ImportOptions {
+                    copy: Some(CopySettings {
+                        destination: "/photos".into(),
+                        folder_rule: crate::FolderRule::YearMonthDay,
+                        rename: Some(crate::RenameRule::default()),
+                    }),
+                    metadata: crate::ImportMetadata {
+                        keywords: vec![vec!["場所".to_owned(), "京都".to_owned()]],
+                        fields: [(genzo_model::MetadataField::Creator, "岡本".to_owned())]
+                            .into_iter()
+                            .collect(),
+                    },
+                    dry_run: true,
+                    ..ImportOptions::default()
+                },
+            },
+            Command::ImportNamePreview {
+                copy: CopySettings {
+                    destination: "/photos".into(),
+                    folder_rule: crate::FolderRule::Single,
+                    rename: None,
+                },
             },
             Command::Range {
                 generation: 1,
@@ -1238,6 +1537,23 @@ mod tests {
                 uncropped: Some(false),
             },
             Command::SetDevelopView { uncropped: true },
+            Command::CreateStack {
+                variant_ids: vec![VariantId::new(1), VariantId::new(2)],
+                top: Some(VariantId::new(2)),
+            },
+            Command::SetStacksCollapsed {
+                stack_ids: None,
+                collapsed: false,
+            },
+            Command::AutoStack {
+                filter: Box::default(),
+                gap_seconds: 1.5,
+                dry_run: true,
+            },
+            Command::RenameVirtualCopy {
+                variant_id: VariantId::new(3),
+                name: "白黒".to_owned(),
+            },
             Command::ConstrainCrop {
                 variant_id: VariantId::new(1),
                 crop: CropRect {

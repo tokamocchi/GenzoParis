@@ -25,6 +25,7 @@ import { PasteSettingsDialog } from "./PasteSettingsDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { SmartCollectionDialog } from "./SmartCollectionDialog";
+import { AutoStackDialog, VirtualCopyNameDialog } from "./StackDialogs";
 
 /** ドロップを受け付けるか（カタログを開いていて、ほかのダイアログを開いていない）。 */
 function canAcceptDrop(): boolean {
@@ -140,6 +141,12 @@ export function Dialogs() {
       break;
     case "add_to_collection":
       body = <AddToCollectionDialog variantIds={dialog.variantIds} />;
+      break;
+    case "virtual_copy_name":
+      body = <VirtualCopyNameDialog variantId={dialog.variantId} />;
+      break;
+    case "auto_stack":
+      body = <AutoStackDialog />;
       break;
     case undefined:
       break;

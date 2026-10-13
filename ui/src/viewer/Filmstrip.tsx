@@ -16,6 +16,8 @@
 // - 横のスクロールバーは常に場所を取る（viewer.css の overflow-x: scroll）。項目の大きさを内側の高さから
 //   決めるので、スクロールバーが出入りすると大きさが変わり、内容の幅が変わって、またスクロールバーが
 //   出入りする、を繰り返すため。
+// - スタック（LIB-12）の印（library/StackBadge.tsx。クリックで展開・折りたたみ）を出す。並びはグリッドと同じ
+//   （コアがスタックでまとめた検索結果）。
 
 import { elementScroll, observeElementOffset, useVirtualizer } from "@tanstack/react-virtual";
 import { type MouseEvent, type WheelEvent, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -25,6 +27,7 @@ import { thumbUrl } from "../api/uri";
 import { FlagMark, LabelDot } from "../components/Marks";
 import { formatCaptureTime } from "../format";
 import { FastScrollDetector } from "../library/scrollMapper";
+import { StackBadgeButton } from "../library/StackBadge";
 import { actions, useApp } from "../state/app";
 import { searchCache, thumbRevs, useSearchVersion } from "../state/search";
 import {
@@ -230,6 +233,19 @@ export function filmstripClickOptions(
   return { extend: mods.shiftKey, toggle: mods.ctrlKey || mods.metaKey, keepCurrent: true, expect: id };
 }
 
+/** 項目のツールチップ（ファイル名・撮影日時と、仮想コピー・スタックの印の説明）。 */
+function filmstripTitle(v: VariantSummary): string {
+  const lines = [v.file_name, formatCaptureTime(v.capture)];
+  if (!v.is_master) lines.push(v.variant_name ? `仮想コピー: ${v.variant_name}` : "仮想コピー");
+  if (v.has_sidecar_jpeg) lines.push("RAW + JPEG（同時記録の JPEG を 1 枚の写真として扱う）");
+  if (v.stack) {
+    lines.push(
+      v.stack.collapsed ? `スタック（${v.stack.count} 枚を折りたたみ中）` : `スタックの ${v.stack.position} 枚目（${v.stack.count} 枚）`,
+    );
+  }
+  return lines.join("\n");
+}
+
 /** 項目（その項目の値だけを受け取る。サムネイルの rev などが変わった項目だけを描き直す）。 */
 export const FilmstripCell = memo(function FilmstripCell(props: {
   index: number;
@@ -263,7 +279,7 @@ export const FilmstripCell = memo(function FilmstripCell(props: {
       className={cls}
       style={{ transform: `translateX(${props.left}px)`, width: props.size, height: props.size }}
       onClick={onClick}
-      title={v ? `${v.file_name}\n${formatCaptureTime(v.capture)}` : undefined}
+      title={v ? filmstripTitle(v) : undefined}
     >
       <div className="filmstrip-frame">
         {url && failed !== url ? (
@@ -282,6 +298,14 @@ export const FilmstripCell = memo(function FilmstripCell(props: {
           <span className="filmstrip-kind" title="動画">
             ▶
           </span>
+        )}
+        {v?.stack && (
+          <StackBadgeButton
+            id={v.variant_id}
+            badge={v.stack}
+            wide={false}
+            className={`filmstrip-stack${v.kind === "video" ? " after-kind" : ""}`}
+          />
         )}
         {v && v.file_status !== "ok" && (
           <span

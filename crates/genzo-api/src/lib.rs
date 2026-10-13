@@ -49,10 +49,14 @@
 //! | [`events`] | [`Event`]（ジョブの進捗・カタログの変更・プレビューの更新・検索結果の世代・警告） | 1.5 節 |
 //! | [`error`] | [`ApiError`] と UI に見せる分類（[`ErrorInfo`]・[`ErrorKind`]） | 6.3 節 |
 //! | [`types`] | 引数・応答の型（serde の素直な形） | 1.5 節 |
-//! | `import` | 取り込み（[`Core::import_folder`]） | IMP-01・VID-01・PRV-01、3.5 節 |
-//! | `search` | 検索と世代（[`Core::search`]・[`Core::range`]・[`Core::index_of`]）、結果のバックグラウンドの作り直し、絞り込みの候補（[`Core::facets`]） | LIB-07・08、3.2 節・3.7 節 |
+//! | `import` | 取り込み（[`Core::import_folder`]・[`Core::import_folder_with`]。重複と思われるものを取り込まない・RAW と JPEG の扱い・コピー・まとめて付けるキーワードとメタデータの設定は [`ImportOptions`]） | IMP-01・04〜06・VID-01・PRV-01、3.5 節・3.11 節 |
+//! | `copy_import` | コピー取り込み（[`CopySettings`]。一時ファイルに書いて全体のハッシュで照合してから上書きせずに公開し、失敗・取り消しではこのジョブが作ったファイルだけを片付ける）と、名前の例（[`Core::import_name_preview`]） | IMP-02・03、3.12 節・6.4 節 |
+//! | [`naming`] | コピー先の名前: フォルダの規則（[`FolderRule`]）・リネームの規則（[`RenameRule`]）・OS で使えない名前の処理 | IMP-02・03、3.12 節 |
+//! | `identity` | ファイルの内容による同一性: 内容のハッシュのバックグラウンドの計算（[`Core::compute_content_hashes`]）・状況（[`Core::content_hash_status`]）・重複の組（[`Core::duplicate_groups`]）・ファイルの識別（[`Core::identify_file`]）、取り込みの重複の確認 | ORG-03・IMP-04、3.3 節・3.11 節 |
+//! | `search` | 検索と世代（[`Core::search`]・[`Core::range`]・[`Core::index_of`]・[`Core::shown_variants`]）、結果のバックグラウンドの作り直し、絞り込みの候補（[`Core::facets`]） | LIB-07・08、3.2 節・3.7 節 |
 //! | `library` | 選別（[`Core::set_rating`] など）・詳細・フォルダ・ファイルの状態（[`Core::check_files`]） | LIB-04・14、3.3 節 |
 //! | `organize` | 階層キーワード（[`Core::keyword_tree`]・[`Core::add_keywords`]）・コレクションとスマートコレクション（[`Core::collections`]・[`Core::add_to_collection`]・[`Core::set_smart_rule`]）。絞り込みは [`SearchFilter::collection_id`]・[`SearchFilter::keywords`] | LIB-09〜11、3.9 節 |
+//! | `stacks` | スタック（[`Core::create_stack`]・[`Core::set_stacks_collapsed`]・[`Core::auto_stack`]。検索結果のまとめ方は `search`）と仮想コピーの名前・マスターの入れ替え（[`Core::rename_virtual_copy`]・[`Core::set_as_master`]） | LIB-12・13、3.10 節 |
 //! | `previews` | サムネイル（[`Core::thumbnail`]）・L1（[`Core::preview_path`]）と、現像結果からの作り直し | 4 章・4.1 節、PRV-01・02・04 |
 //! | `develop` | 現像のセッション（[`Core::open_develop`]・[`Core::set_settings`]・Undo / Redo・一括適用・仮想コピー）、WB のスポイト（[`Core::white_balance_at`]）、切り抜きの編集の支え（[`Core::set_develop_view`]・[`Core::constrain_crop`]） | DEV-00〜08・15・26・27・30、6.2 節 |
 //! | `render` | GPU → CPU の切り替え、画面のプロファイル（[`Core::set_display_profile`]） | 2.4 節・6.3 節、IQ-05 |
@@ -106,6 +110,7 @@
 mod before;
 pub mod command;
 pub mod config;
+mod copy_import;
 mod core;
 mod delete;
 mod deps;
@@ -113,12 +118,14 @@ mod develop;
 pub mod error;
 pub mod events;
 mod export;
+mod identity;
 mod import;
 mod jobs;
 mod library;
 mod lock;
 pub mod logging;
 pub mod maintenance;
+pub mod naming;
 mod organize;
 mod paths;
 mod previews;
@@ -126,32 +133,41 @@ mod region;
 mod render;
 mod search;
 mod settings;
+mod stacks;
 pub mod types;
 
 pub use command::{Command, Response};
-pub use config::{CoreConfig, GpuMode, WorkerLaunch};
-pub use core::{Core, CoreHooks, DevelopSaveStage, RegionRequestStage, SettingsUpdateStage};
+pub use config::{CoreConfig, GpuMode, IMPORT_BATCH_FILES, WorkerLaunch};
+pub use core::{
+    CopyImportHook, CopyImportStage, Core, CoreHooks, DevelopSaveStage, RegionRequestStage,
+    SettingsUpdateStage,
+};
 pub use delete::{OsTrash, TrashBackend};
 pub use develop::{HISTORY_LABEL_GENERIC, HISTORY_LABEL_PASTE, describe_change};
 pub use error::{ApiError, ErrorInfo, ErrorKind};
 pub use events::{CatalogChange, Event, WarningCode};
+pub use identity::{DUPLICATE_GROUPS_MAX, HASH_FAILURES_KEPT, INTERACTIVE_MAX_WAIT};
 pub use import::{IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS, media_kind};
 pub use maintenance::{RestorePlan, apply_restore, prepare_restore};
+pub use naming::{FolderRule, RenameRule};
 pub use organize::MAX_KEYWORD_HITS;
 pub use previews::{L0_FORMAT_VERSION, L1_FORMAT_VERSION};
 pub use region::{MAX_REGION_OUTPUT_PIXELS, MAX_REGION_SCALE, MAX_REGION_SOURCE_PIXELS};
 pub use search::MAX_RANGE_LEN;
 pub use settings::{
-    KEY_DEFAULT_EXPORT_COLOR_SPACE, KEY_DEFAULT_UTC_OFFSET_MINUTES, KEY_PREVIEW_CACHE_BYTES,
-    KEY_PREVIEW_CACHE_DIR, MIN_PREVIEW_CACHE_BYTES, UTC_OFFSET_RANGE_MINUTES,
+    KEY_DEFAULT_EXPORT_COLOR_SPACE, KEY_DEFAULT_UTC_OFFSET_MINUTES, KEY_HASH_IN_BACKGROUND,
+    KEY_HASH_NETWORK_VOLUMES, KEY_IMPORT_SEPARATE_RAW_JPEG, KEY_IMPORT_SKIP_DUPLICATES,
+    KEY_PREVIEW_CACHE_BYTES, KEY_PREVIEW_CACHE_DIR, MIN_PREVIEW_CACHE_BYTES,
+    UTC_OFFSET_RANGE_MINUTES,
 };
+pub use stacks::MAX_AUTO_STACK_GAP_SECONDS;
 pub use types::*;
 
 // 型付きのメソッドの引数・応答で使う、依存先の crate の型（UI がまとめて使えるように）。
 pub use genzo_model::{
     AssetId, AssetKind, CollectionId, CollectionKind, ColorLabel, DevelopSettings, ExportFormat,
     ExportSettings, ExportSize, FileStatus, Flag, KeywordId, OutputColorSpace, Rating,
-    RenderQuality, SmartCondition, SmartRule, VariantId,
+    RenderQuality, SmartCondition, SmartRule, StackId, VariantId,
 };
 pub use genzo_worker::{Lane, TestHook, TestHookOutput};
 

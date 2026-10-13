@@ -92,8 +92,11 @@ pub enum Event {
     SearchUpdated {
         /// 新しい世代。
         generation: u64,
-        /// 件数。
+        /// 件数（表示する写真の数。折りたたんだスタックは 1 枚に数える）。
         count: u64,
+        /// 折りたたんだスタックの中に隠した写真の数（LIB-12。0 なら JSON に書かない）。
+        #[serde(default, skip_serializing_if = "crate::types::is_zero")]
+        hidden: u64,
     },
     /// 警告（GPU から CPU への切り替え、前回の異常終了など。6.3 節）。
     Warning {
@@ -138,6 +141,11 @@ pub enum CatalogChange {
     /// コレクション（メンバーの追加・削除、コレクションの作成・名前の変更・移動・削除・条件の変更。
     /// LIB-10・LIB-11）。コレクションそのものの変更では `variant_ids` は空。
     Collections,
+    /// スタック（作る・解除・写真の追加と除外・一番上の写真・折りたたみ・自動スタック。LIB-12）。
+    /// `variant_ids` は、印（位置・数・折りたたみ）の変わったスタックの写真。
+    Stacks,
+    /// 仮想コピーの名前・マスターの入れ替え（LIB-13）。
+    Variants,
 }
 
 /// 警告の種類。
@@ -178,6 +186,9 @@ pub enum WarningCode {
     /// 現像設定に記録したカメラ行列・RAW デコーダ（render_deps）が、今の値と違う（LibRaw を更新したなど。
     /// 同じ設定でも色が変わりうる）。
     RenderDepsChanged,
+    /// コピー取り込みで、カタログへの登録に失敗したため、そのバッチでコピーしたファイルを消した（IMP-02。
+    /// 元のファイルはそのまま）。
+    ImportCopyRolledBack,
 }
 
 /// イベントの購読者の一覧。
@@ -245,6 +256,7 @@ mod tests {
         hub.emit(Event::SearchUpdated {
             generation: 1,
             count: 0,
+            hidden: 0,
         });
         hub.emit_sticky(Event::Warning {
             code: WarningCode::UncleanShutdown,
@@ -265,18 +277,21 @@ mod tests {
         hub.emit(Event::SearchUpdated {
             generation: 2,
             count: 3,
+            hidden: 0,
         });
         assert_eq!(
             rx.try_recv().unwrap(),
             Event::SearchUpdated {
                 generation: 2,
-                count: 3
+                count: 3,
+                hidden: 0,
             }
         );
         drop(rx);
         hub.emit(Event::SearchUpdated {
             generation: 3,
             count: 0,
+            hidden: 0,
         });
         assert!(hub.subscribers.lock().is_empty(), "drop した購読者は外す");
         // JSON の形。

@@ -10,7 +10,7 @@ use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use genzo_api::{
     BeforeSource, CollectionId, ColorLabel, Flag, GpuMode, SettingGroups, SortDirection, SortKey,
-    VariantId,
+    StackId, VariantId,
 };
 use genzo_model::{
     ConflictPolicy, ExportFormat, HistoryEntryId, MetadataField, OutputColorSpace, SnapshotId,
@@ -177,6 +177,10 @@ pub enum Command {
     /// 外す・名前の変更・移動・削除・条件。コレクションは ID で指定する（`collection list` で見られる）
     #[command(subcommand)]
     Collection(CollectionCommand),
+    /// スタック（LIB-12）: まとめる・写真の追加と除外・解除・一番上の写真・折りたたみ・撮影時刻による自動
+    /// スタック・表示。スタックは ID（`stack show` で見られる）で、写真は variant の ID で指定する
+    #[command(subcommand)]
+    Stack(StackCommand),
     /// 現像設定の表示・変更・履歴・コピー・仮想コピー
     #[command(subcommand)]
     Develop(DevelopCommand),
@@ -213,6 +217,37 @@ pub enum Command {
     /// ログ・クラッシュレポートの場所と中身の表示・消去（カタログは使わない。SYS-07）
     #[command(subcommand)]
     Log(LogCommand),
+    /// ファイルの内容のハッシュ（全体の BLAKE3。ORG-03）: 計算・状況・内容が同じファイルの組・ファイルの
+    /// 識別（場所・名前によらず、同じ内容の登録済みの写真を探す）
+    #[command(subcommand)]
+    Hash(HashCommand),
+}
+
+/// `hash` のサブコマンド。
+#[derive(Debug, Subcommand)]
+pub enum HashCommand {
+    /// 全体のハッシュのないファイルの内容のハッシュを計算して記録する（進捗は標準エラー。終わるまで待つ）。
+    /// ネットワークのボリューム（SMB・NFS など）のファイルは、--include-network のときだけ読む。読めなかった
+    /// ファイルがあれば終了コード 3
+    Compute {
+        /// ネットワークのボリュームのファイルも読む
+        #[arg(long)]
+        include_network: bool,
+    },
+    /// 計算済みのファイルの数・計算の対象の数・内容が同じファイルの組の数
+    Status,
+    /// 内容が同じファイルの組（全体のハッシュを記録したファイルの中で。最初に登録したファイルの順）
+    Duplicates {
+        /// 表示する組の上限（1〜1000）
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u64).range(1..=1000))]
+        limit: u64,
+    },
+    /// ファイルの内容で、同じ内容の登録済みのファイル（写真）を探す（アプリの外で移した・名前を変えた
+    /// ファイルにも使える。ファイルは読むだけ）
+    Identify {
+        /// 調べるファイル
+        file: PathBuf,
+    },
 }
 
 /// `keyword` のサブコマンド。
@@ -386,6 +421,98 @@ pub fn parse_collection_id(s: &str) -> Result<CollectionId, String> {
     }
 }
 
+/// スタックの ID（1 以上の整数）。
+pub fn parse_stack_id(s: &str) -> Result<StackId, String> {
+    match s.trim().parse::<i64>() {
+        Ok(n) if n > 0 => Ok(StackId::new(n)),
+        _ => Err(format!("スタックの ID は 1 以上の整数です: {s}")),
+    }
+}
+
+/// `stack` のサブコマンド（LIB-12）。
+#[derive(Debug, Subcommand)]
+pub enum StackCommand {
+    /// 写真をまとめて 1 つのスタックにする（2 枚以上。既にスタックに入っている写真があれば、そのスタックの写真も
+    /// まとめる。順は撮影日時の順で、作ったスタックは折りたたむ）
+    Create {
+        /// variant の ID（2 枚以上）
+        #[arg(required = true, num_args = 2.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// 一番上にする写真（省略すると撮影日時の最も早いもの）
+        #[arg(long, value_name = "ID", value_parser = parse_variant_id)]
+        top: Option<VariantId>,
+    },
+    /// スタックに写真を足す（最後に、撮影日時の順で。ほかのスタックの写真は移す）
+    Add {
+        /// スタックの ID
+        #[arg(value_parser = parse_stack_id)]
+        stack: StackId,
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// 写真をスタックから外す（写真は消えない。1 枚になったスタックは消える）
+    Remove {
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// 写真が入っているスタックを解除する（写真は消えない）
+    Unstack {
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// 写真をそのスタックの一番上にする
+    Top {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+    },
+    /// スタックを折りたたむ（画面のグリッドと search で、一番上の写真（代表）だけを出す）
+    Collapse {
+        /// スタックの ID（複数可）
+        #[arg(value_parser = parse_stack_id, required_unless_present = "all")]
+        stacks: Vec<StackId>,
+        /// すべてのスタック
+        #[arg(long, conflicts_with = "stacks")]
+        all: bool,
+    },
+    /// スタックを展開する（スタックの写真をすべて、スタックの中の順に並べる）
+    Expand {
+        /// スタックの ID（複数可）
+        #[arg(value_parser = parse_stack_id, required_unless_present = "all")]
+        stacks: Vec<StackId>,
+        /// すべてのスタック
+        #[arg(long, conflicts_with = "stacks")]
+        all: bool,
+    },
+    /// 写真が入っているスタック（ID・写真の順（最初が一番上）・折りたたみ）
+    Show {
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// 撮影時刻の間隔で自動的にスタックを作る（条件は search と同じ。条件に合う写真のうち、スタックに入って
+    /// いない、撮影日時の分かるものを撮影日時の順に並べ、前の写真との間隔が --gap 以下のものをまとめる）
+    // 条件が多く大きいので、ほかのサブコマンドと大きさをそろえるため箱に入れる。
+    Auto(Box<AutoStackArgs>),
+}
+
+/// `stack auto` の引数。
+#[derive(Debug, Args)]
+pub struct AutoStackArgs {
+    /// 前の写真との間隔の上限（秒。0〜3600。小数も使える）
+    #[arg(long, value_name = "SEC", value_parser = parse_non_negative)]
+    pub gap: f64,
+    /// 作らずに、作るスタックの数の見込みだけを出す
+    #[arg(long)]
+    pub dry_run: bool,
+    /// 対象の写真の条件（search と同じ）。
+    #[command(flatten)]
+    pub filter: FilterArgs,
+}
+
 /// `log` のサブコマンド。
 #[derive(Debug, Subcommand)]
 pub enum LogCommand {
@@ -447,11 +574,101 @@ pub struct ImportArgs {
     /// 残す）
     #[arg(long, hide = true)]
     pub no_previews: bool,
+    /// 重複と思われるもの（内容が同じファイルが別の場所で登録済みのもの。全体のハッシュで確かめる）も、
+    /// 別の写真として取り込む（省略時はカタログの設定。その既定は取り込まない）
+    #[arg(long, conflicts_with = "skip_duplicates")]
+    pub keep_duplicates: bool,
+    /// 重複と思われるものを取り込まない（省略時はカタログの設定）
+    #[arg(long)]
+    pub skip_duplicates: bool,
+    /// 同じフォルダで拡張子だけが違う RAW と JPEG を、別々の写真として取り込む（省略時はカタログの設定。
+    /// その既定は 1 枚にまとめる）
+    #[arg(long, conflicts_with = "pair_raw_jpeg")]
+    pub separate_raw_jpeg: bool,
+    /// RAW と JPEG を 1 枚の写真（RAW が主、JPEG は付属）にまとめる（省略時はカタログの設定）
+    #[arg(long)]
+    pub pair_raw_jpeg: bool,
+    /// コピーして取り込む（IMP-02）: DIR の写真・動画をこのフォルダ（あるフォルダ）へコピーし、内容を元と照合して
+    /// から登録する（元のファイルは変更・削除しない。同じ名前があれば上書きせず -1 などを付ける）
+    #[arg(long, value_name = "DEST")]
+    pub copy_to: Option<PathBuf>,
+    /// コピー先の中のフォルダの規則（year-date: 2026/2026-10-13、year-month-day: 2026/10/13、year-month:
+    /// 2026/2026-10、date: 2026-10-13、date-compact: 20261013、single: コピー先にそのまま、source: 元の
+    /// フォルダの構成のまま。撮影日時がなければファイルの更新日時）
+    #[arg(long, value_name = "RULE", default_value = "year-date", value_parser = parse_folder_rule, requires = "copy_to")]
+    pub folders: genzo_api::FolderRule,
+    /// コピー先のファイル名のテンプレート（IMP-03。{date} {time} {year} {month} {day} {hour} {minute}
+    /// {second} {seq} {name} {camera} {text}。例: "{date}-{seq}"。省略時は元の名前のまま）
+    #[arg(long, value_name = "TEMPLATE", requires = "copy_to")]
+    pub rename: Option<String>,
+    /// テンプレートの {text} に入れる文字
+    #[arg(long, value_name = "TEXT", requires = "rename", default_value = "")]
+    pub text: String,
+    /// 連番（{seq}）の開始番号
+    #[arg(long, value_name = "N", requires = "rename", default_value_t = 1)]
+    pub seq_start: u32,
+    /// 連番（{seq}）の桁数（1〜9）
+    #[arg(long, value_name = "N", requires = "rename", default_value_t = 4,
+          value_parser = clap::value_parser!(u8).range(1..=9))]
+    pub seq_digits: u8,
+    /// コピー先の名前を決めて表示するだけで、コピー・登録をしない
+    #[arg(long, requires = "copy_to")]
+    pub dry_run: bool,
+    /// 新しく登録した写真に付けるキーワード（IMP-05。「場所>京都」のような階層のパス。複数可）
+    #[arg(long = "keyword", value_name = "PATH")]
+    pub keywords: Vec<String>,
+    /// 新しく登録した写真に付ける説明のメタデータ（項目=値。例: --meta creator="山田 太郎"。複数可。項目の一覧は
+    /// genzo metadata --help）
+    #[arg(long = "meta", value_name = "FIELD=VALUE", value_parser = parse_metadata_assignment)]
+    pub meta: Vec<(MetadataField, String)>,
 }
 
-/// `search` の引数。
+impl ImportArgs {
+    /// 取り込みの設定（指定しなかった項目はカタログの設定に従う）。
+    pub fn options(&self) -> genzo_api::ImportOptions {
+        let pick = |yes: bool, no: bool| match (yes, no) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        };
+        genzo_api::ImportOptions {
+            skip_duplicates: pick(self.skip_duplicates, self.keep_duplicates),
+            separate_raw_jpeg: pick(self.separate_raw_jpeg, self.pair_raw_jpeg),
+            copy: self.copy_to.as_ref().map(|dest| genzo_api::CopySettings {
+                destination: dest.clone(),
+                folder_rule: self.folders,
+                rename: self.rename.as_ref().map(|t| genzo_api::RenameRule {
+                    template: t.clone(),
+                    custom_text: self.text.clone(),
+                    sequence_start: self.seq_start,
+                    sequence_digits: self.seq_digits,
+                }),
+            }),
+            metadata: genzo_api::ImportMetadata {
+                keywords: self
+                    .keywords
+                    .iter()
+                    .map(|k| crate::organize::parse_keyword_path(k))
+                    .collect(),
+                fields: self.meta.iter().cloned().collect(),
+            },
+            dry_run: self.dry_run,
+        }
+    }
+}
+
+/// コピー先のフォルダの規則の名前を解釈する（`year-date`・`year_date`）。
+pub fn parse_folder_rule(s: &str) -> Result<genzo_api::FolderRule, String> {
+    genzo_api::FolderRule::from_name(s).ok_or_else(|| {
+        format!(
+            "フォルダの規則ではありません（{s}。year-date・year-month-day・year-month・date・date-compact・single・source）"
+        )
+    })
+}
+
+/// 写真の絞り込みの条件（`search`・`stack auto` で共通）。
 #[derive(Debug, Args)]
-pub struct SearchArgs {
+pub struct FilterArgs {
     /// 評価の下限（0〜5）
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=5))]
     pub min_rating: Option<u8>,
@@ -522,6 +739,18 @@ pub struct SearchArgs {
     /// スマートコレクションの条件の JSON のファイル（- で標準入力。保存していない条件で探す）
     #[arg(long, value_name = "FILE")]
     pub rule: Option<String>,
+}
+
+/// `search` の引数。
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// 絞り込みの条件。
+    #[command(flatten)]
+    pub filter: FilterArgs,
+    /// スタック（LIB-12）を、保存した折りたたみの状態によらず、すべて展開して並べる（既定では画面と同じく、
+    /// 折りたたんだスタックは一番上の写真（代表）だけを出す）
+    #[arg(long)]
+    pub expand_stacks: bool,
     /// 並べ替え
     #[arg(long, value_enum, default_value_t = SortArg::Capture)]
     pub sort: SortArg,
@@ -608,7 +837,7 @@ pub enum DevelopCommand {
         #[arg(long, value_enum, value_delimiter = ',')]
         groups: Vec<GroupArg>,
     },
-    /// 仮想コピーを作る（LIB-13）
+    /// 仮想コピーを作る（LIB-13。元の写真と同じスタックに入る（展開する））
     VirtualCopy {
         /// 元の variant の ID
         #[arg(value_parser = parse_variant_id)]
@@ -619,6 +848,21 @@ pub enum DevelopCommand {
     },
     /// 仮想コピーを削除する（マスターは削除できない）
     DeleteCopy {
+        /// 仮想コピーの variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+    },
+    /// 仮想コピーの名前を変える（LIB-13。200 文字まで。書き出すファイルの名前は「元のファイル名-名前」）
+    RenameCopy {
+        /// 仮想コピーの variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// 新しい名前
+        name: String,
+    },
+    /// 仮想コピーを元の写真（マスター）にする（LIB-13。前のマスターは仮想コピーになり、名前を受け継ぐ。現像設定・
+    /// 評価などはそれぞれのまま）
+    MakeMaster {
         /// 仮想コピーの variant の ID
         #[arg(value_parser = parse_variant_id)]
         variant: VariantId,
@@ -1227,6 +1471,99 @@ mod tests {
         parse_from(os(args))
     }
 
+    /// コピー取り込み・リネーム・まとめて付けるものの引数（IMP-02・IMP-03・IMP-05）。
+    #[test]
+    fn copy_import_arguments_are_parsed() {
+        let cli = parse(&[
+            "genzo",
+            "import",
+            "/sd",
+            "--copy-to",
+            "/photos",
+            "--folders",
+            "date-compact",
+            "--rename",
+            "{date}-{seq}",
+            "--seq-start",
+            "3",
+            "--keyword",
+            "場所 > 京都",
+            "--keyword",
+            "家族",
+            "--meta",
+            "creator=岡本",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Command::Import(a) = cli.command else {
+            panic!("import ではない");
+        };
+        let o = a.options();
+        let copy = o.copy.unwrap();
+        assert_eq!(copy.destination, PathBuf::from("/photos"));
+        assert_eq!(copy.folder_rule, genzo_api::FolderRule::DateCompact);
+        let rename = copy.rename.unwrap();
+        assert_eq!(
+            (
+                rename.template.as_str(),
+                rename.sequence_start,
+                rename.sequence_digits
+            ),
+            ("{date}-{seq}", 3, 4)
+        );
+        assert!(o.dry_run);
+        assert_eq!(
+            o.metadata.keywords,
+            vec![
+                vec!["場所".to_owned(), "京都".to_owned()],
+                vec!["家族".to_owned()]
+            ]
+        );
+        assert_eq!(
+            o.metadata
+                .fields
+                .get(&MetadataField::Creator)
+                .map(String::as_str),
+            Some("岡本")
+        );
+        // コピーしない取り込みでは copy を送らない。--folders・--rename・--dry-run は --copy-to と一緒に。
+        let Command::Import(plain) = parse(&["genzo", "import", "/sd"]).unwrap().command else {
+            panic!();
+        };
+        assert_eq!(plain.options().copy, None);
+        for bad in [
+            vec!["genzo", "import", "/sd", "--rename", "{seq}"],
+            vec!["genzo", "import", "/sd", "--dry-run"],
+            vec![
+                "genzo",
+                "import",
+                "/sd",
+                "--copy-to",
+                "/p",
+                "--folders",
+                "weekly",
+            ],
+            vec!["genzo", "import", "/sd", "--copy-to", "/p", "--text", "x"],
+            vec![
+                "genzo",
+                "import",
+                "/sd",
+                "--copy-to",
+                "/p",
+                "--rename",
+                "{seq}",
+                "--seq-digits",
+                "10",
+            ],
+        ] {
+            assert!(parse(&bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            parse_folder_rule("year_date"),
+            Ok(genzo_api::FolderRule::YearDate)
+        );
+    }
+
     #[test]
     fn metadata_fields_and_assignments_are_parsed() {
         assert_eq!(parse_metadata_field("title"), Ok(MetadataField::Title));
@@ -1338,7 +1675,7 @@ mod tests {
         let Command::Search(s) = cli.command else {
             panic!()
         };
-        assert_eq!(s.min_rating, Some(3));
+        assert_eq!(s.filter.min_rating, Some(3));
         assert_eq!(s.limit, DEFAULT_SEARCH_LIMIT);
         assert!(parse(&["genzo", "search", "--flag", "maybe"]).is_err());
         assert!(parse(&["genzo", "search", "--no-subfolders"]).is_err());

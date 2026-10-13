@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { MOCK_CRASH_REPORT, MOCK_LOG_STATUS } from "../api/mock";
+import { MOCK_CORE_SETTINGS, MOCK_CRASH_REPORT, MOCK_IMPORT_PREFERENCES, MOCK_LOG_STATUS } from "../api/mock";
 import type { AppStatus, CatalogStatus, DevelopSettings, ErrorInfo } from "../api/types";
 import { appStore } from "../state/app";
 import { CatalogErrorScreen } from "./CatalogErrorScreen";
@@ -54,12 +54,7 @@ const catalog: CatalogStatus = {
   worker_error: null,
   display: { assumed_srgb: false, reason: null, description: "Display P3" },
   tools: { ffmpeg: null, ffprobe: null },
-  core_settings: {
-    preview_cache_dir: "/home/u/Pictures/GenzoParis/catalog-data/previews",
-    preview_cache_bytes: 20_000_000_000,
-    default_export_color_space: "srgb",
-    default_utc_offset_minutes: 540,
-  },
+  core_settings: MOCK_CORE_SETTINGS,
 };
 
 const error = (kind: ErrorInfo["kind"]): ErrorInfo => ({
@@ -127,6 +122,45 @@ describe("ダイアログ", () => {
     const html = render(createElement(ImportDialog));
     expect(html).toContain("サブフォルダも含める");
     expect(html).toContain("ffprobe");
+    // 重複と思われるもの（IMP-04）・RAW と JPEG（IMP-06）の選択。初めの値はカタログの設定。
+    expect(html).toContain("重複と思われるものを取り込まない");
+    expect(html).toContain("RAW と同時記録の JPEG を別々の写真として取り込む");
+    expect(html).toMatch(/<input type="checkbox" checked=""\/><span>重複と思われるもの/);
+    expect(html).toMatch(/<input type="checkbox"\/><span>RAW と同時記録の JPEG/);
+  });
+
+  it("取り込み（既定はその場で追加。コピーの欄は出さない）", () => {
+    const html = render(createElement(ImportDialog));
+    expect(html).toMatch(/<input type="radio" name="import-mode" checked=""\/><span class="title">その場で追加/);
+    expect(html).toContain("コピーして追加");
+    expect(html).not.toContain("import-folder-rule");
+    expect(html).toContain("取り込み時に付けるキーワード・メタデータ");
+    expect(html).toContain(">取り込む</button>");
+  });
+
+  it("取り込み（アプリに保存したコピーの設定: コピー先・規則・名前・付けるもの。IMP-02・03・05）", () => {
+    appStore.set({ status: { ...status, settings: { ...status.settings, import: MOCK_IMPORT_PREFERENCES } } });
+    const html = render(createElement(ImportDialog));
+    expect(html).toMatch(/<input type="radio" name="import-mode" checked=""\/><span class="title">コピーして追加/);
+    expect(html).toContain("/home/u/写真");
+    expect(html).toContain('<option value="year_date" selected="">撮影日別（2026/2026-10-13）</option>');
+    expect(html).toContain('value="{date}_{text}-{seq}"');
+    expect(html).toContain("任意の文字");
+    expect(html).toContain('value="京都"');
+    expect(html).toContain("桁数");
+    expect(html).toContain("撮影時刻");
+    expect(html).toContain("取り込み時に付けるキーワード・メタデータ（4 件）");
+    expect(html).toContain('value="場所 &gt; 京都, 家族"');
+    expect(html).toContain('value="岡本"');
+    expect(html).toContain("内容（ハッシュ）が同じことを確かめてから");
+    expect(html).toContain(">コピーして取り込む</button>");
+    // コピー先がなければ、理由を出して取り込めない。
+    appStore.set({
+      status: { ...status, settings: { ...status.settings, import: { ...MOCK_IMPORT_PREFERENCES, destination: null } } },
+    });
+    const empty = render(createElement(ImportDialog));
+    expect(empty).toContain("コピー先のフォルダを選んでください");
+    expect(empty).toMatch(/<button class="btn primary" disabled="">コピーして取り込む<\/button>/);
   });
 
   it("取り込み（点を含む名前のフォルダに、名前だけで注意を出さない）", () => {
@@ -192,6 +226,19 @@ describe("ダイアログ", () => {
     expect(html).toContain(`sqlite3 -readonly &quot;${catalog.catalog_path}&quot;`);
     expect(html).toContain("今のスキーマの版は 3 です");
     expect(render(createElement(SettingsSchema, { catalogPath: "/c.db", schemaVersion: null }))).toContain("構造を表示");
+  });
+
+  it("設定のカタログ: 取り込みの既定・内容による同一性（IMP-04・IMP-06・ORG-03）", () => {
+    const html = render(createElement(SettingsDialog, { tab: "catalog" }));
+    expect(html).toContain("取り込みで、重複と思われるものを取り込まない");
+    expect(html).toContain("RAW と同時記録の JPEG を別々の写真として取り込む");
+    expect(html).toContain("内容のハッシュをバックグラウンドで計算する");
+    expect(html).toContain("ネットワークのボリューム（NAS など）のファイルも計算する");
+    expect(html).toContain("内容による同一性（重複の検出）");
+    expect(html).toContain("今すぐ計算する");
+    expect(html).toContain("内容が同じファイルを表示");
+    // 状況は開いた後に読む（renderToString では効果が動かない）。
+    expect(html).toContain("状況を読んでいます");
   });
 
   it("前回の異常終了の知らせ", () => {

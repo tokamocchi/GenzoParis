@@ -1,4 +1,5 @@
-// ショートカットの一覧（UX-02）の内容。登録は App.tsx（全体。キーワード・コレクションの B・Ctrl / ⌘ + K・N を含む）・library/Grid.tsx（グリッドの移動・Enter）・
+// ショートカットの一覧（UX-02）の内容。登録は App.tsx（全体。キーワード・コレクションの B・Ctrl / ⌘ + K・N、スタック・仮想コピーの
+// Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + ' を含む）・library/Grid.tsx（グリッドの移動・Enter）・
 // viewer/Loupe.tsx（I・Z・等倍表示の Esc）・develop/DevelopView.tsx（W・R・Z・J・I・\・Y・
 // Shift ＋ Y と、切り抜き・スポイト・等倍表示の間の Esc・Enter）が持つ。ここは表示用の写しなので、キーを変えたらここも直す。
 
@@ -45,6 +46,16 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     ],
   },
   {
+    title: "スタック・仮想コピー",
+    items: [
+      { keys: ["mod+g"], label: "選んだ写真をスタックにまとめる（一番上は表示中の写真。作ったスタックは折りたたむ）" },
+      { keys: ["mod+shift+g"], label: "スタックを解除（写真は消えない）" },
+      { keys: ["s"], label: "スタックの展開・折りたたみ（印のクリックでも）" },
+      { keys: ["shift+s"], label: "表示中の写真をスタックの一番上にする" },
+      { keys: ["mod+'", "mod+shift+7"], label: "仮想コピーを作る（日本語配列は Shift + 7 の「'」。元の写真と同じスタックに入る）" },
+    ],
+  },
+  {
     title: "選択（グリッド）",
     items: [
       { keys: ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"], label: "選択を移す" },
@@ -83,7 +94,8 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["mod+shift+e"], label: "書き出し" },
       {
         keys: ["Delete", "Backspace"],
-        label: "削除（カタログから除去など）。手動のコレクションを表示している間は、そのコレクションから外す（写真は消えない）",
+        label:
+          "削除（カタログから除去など。仮想コピーだけを選んでいれば仮想コピーの削除）。手動のコレクションを表示している間は、そのコレクションから外す（写真は消えない）",
       },
       { keys: ["mod+,"], label: "設定" },
       { keys: ["shift+?"], label: "ショートカットの一覧" },

@@ -1,6 +1,7 @@
 // 設定の「カタログ」（SYS-05）: カタログに保存する設定（キャッシュの場所と上限・既定の書き出しの色空間・
-// 既定のタイムゾーン）、カタログの情報、カタログの構造（ORG-07。SettingsSchema）、カタログの切り替え、
-// キャッシュの整理。
+// 既定のタイムゾーン・取り込みの既定（重複と思われるもの・RAW と JPEG。IMP-04・IMP-06）・内容のハッシュの
+// バックグラウンドの計算（ORG-03））、内容による同一性の状況（SettingsIdentity）、カタログの情報、カタログの
+// 構造（ORG-07。SettingsSchema）、カタログの切り替え、キャッシュの整理。
 
 import { useEffect, useRef, useState } from "react";
 
@@ -15,6 +16,7 @@ import { COLOR_SPACE_OPTIONS } from "./exportLogic";
 import { chooseFolder } from "./native";
 import { useNewCatalogPicker } from "./NewCatalogPicker";
 import { Busy, ErrorBox, PathBox } from "./parts";
+import { SettingsIdentity } from "./SettingsIdentity";
 import { SettingsSchema } from "./SettingsSchema";
 import {
   type CatalogSettingsForm,
@@ -140,6 +142,10 @@ export function SettingsCatalog() {
       if (r.update.default_utc_offset_minutes !== undefined) {
         notes.push("既定のタイムゾーンで推定していた撮影日時を、バックグラウンドで推定し直します。");
       }
+      if (r.update.hash_in_background === false) notes.push("実行中の内容のハッシュの計算を取り消しました。");
+      if (r.update.hash_in_background === true || r.update.hash_network_volumes === true) {
+        notes.push("内容のハッシュのないファイルを、バックグラウンドで計算します。");
+      }
       actions.notify("success", "カタログの設定を保存しました", notes.length > 0 ? notes.join("\n") : undefined);
     } catch (e) {
       setError(toApiError(e).info);
@@ -238,6 +244,55 @@ export function SettingsCatalog() {
         <p className="hint" style={{ marginLeft: 148 }}>
           撮影日時にタイムゾーンの記録がない写真・動画の時刻を、このタイムゾーンとみなします。変えると、このタイムゾーンで推定していた撮影日時を推定し直します。
         </p>
+        <label className="dlg-check">
+          <input
+            type="checkbox"
+            checked={form.importSkipDuplicates}
+            onChange={(e) => update({ importSkipDuplicates: e.target.checked })}
+          />
+          <span>
+            取り込みで、重複と思われるものを取り込まない
+            <span className="desc">内容が同じファイルが別の場所で登録済みなら登録しません（取り込みのダイアログの既定）</span>
+          </span>
+        </label>
+        <label className="dlg-check">
+          <input
+            type="checkbox"
+            checked={form.importSeparateRawJpeg}
+            onChange={(e) => update({ importSeparateRawJpeg: e.target.checked })}
+          />
+          <span>
+            RAW と同時記録の JPEG を別々の写真として取り込む
+            <span className="desc">
+              外すと 1 枚の写真（RAW が主、JPEG は付属）にまとめます。取り込み済みの写真は変わりません（取り込みのダイアログの既定）
+            </span>
+          </span>
+        </label>
+        <label className="dlg-check">
+          <input
+            type="checkbox"
+            checked={form.hashInBackground}
+            onChange={(e) => update({ hashInBackground: e.target.checked })}
+          />
+          <span>
+            内容のハッシュをバックグラウンドで計算する
+            <span className="desc">
+              カタログを開いている間、ファイルの全体を少しずつ読みます（現像などの操作の間は待ちます）。外すと、実行中の計算を取り消します
+            </span>
+          </span>
+        </label>
+        <label className="dlg-check">
+          <input
+            type="checkbox"
+            checked={form.hashNetworkVolumes}
+            disabled={!form.hashInBackground}
+            onChange={(e) => update({ hashNetworkVolumes: e.target.checked })}
+          />
+          <span>
+            ネットワークのボリューム（NAS など）のファイルも計算する
+            <span className="desc">ファイルの全体をネットワーク越しに読むため、時間と通信量がかかります</span>
+          </span>
+        </label>
         {formError && <div className="dlg-field-error">{formError}</div>}
         <ErrorBox error={error} title="保存できません" />
         <div className="dlg-row end">
@@ -247,6 +302,8 @@ export function SettingsCatalog() {
           </button>
         </div>
       </div>
+
+      <SettingsIdentity includeNetwork={form.hashNetworkVolumes} />
 
       <div className="dlg-section">
         <h3>このカタログ</h3>
@@ -266,6 +323,8 @@ export function SettingsCatalog() {
                 {formatCount(stats.assets)} 枚（仮想コピーを含めて {formatCount(stats.variants)} 件、ファイル{" "}
                 {formatCount(stats.files)} 個）
               </dd>
+              <dt>スタック</dt>
+              <dd>{formatCount(stats.stacks ?? 0)} 個</dd>
               <dt>履歴</dt>
               <dd>{formatCount(stats.history_entries)} 件</dd>
               <dt>スキーマの版</dt>

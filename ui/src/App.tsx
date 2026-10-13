@@ -34,6 +34,7 @@ import { PhotoDragGhost } from "./library/PhotoDragGhost";
 import { actions, appStore, useApp } from "./state/app";
 import { developStore, installDevelopEvents, redo, undo } from "./state/develop";
 import { deleteKeyAction, focusKeywordInput, toggleTargetCollection } from "./state/organize";
+import { createVirtualCopyOf, groupIntoStack, setStackTop, toggleStack, unstackTargets } from "./state/stacks";
 import { Filmstrip } from "./viewer/Filmstrip";
 import { Loupe } from "./viewer/Loupe";
 
@@ -125,6 +126,14 @@ function useGlobalHotkeys(enabled: boolean) {
       // 手動のコレクションを表示している間は、そのコレクションから外す（写真は消えない。state/organize.ts）。
       Delete: () => void deleteKeyAction(),
       Backspace: () => void deleteKeyAction(),
+      // スタック（LIB-12）・仮想コピー（LIB-13）。state/stacks.ts
+      "mod+g": () => void groupIntoStack(),
+      "mod+shift+g": () => void unstackTargets(),
+      s: () => void toggleStack(),
+      "shift+s": () => void setStackTop(),
+      "mod+'": () => void createVirtualCopyOf(),
+      // 日本語配列では「'」が Shift + 7 にある（keyboard.ts は Shift の付いた数字のキーを数字で表す）。
+      "mod+shift+7": () => void createVirtualCopyOf(),
       // キーワード・コレクション（LIB-09・LIB-10）
       b: () => void toggleTargetCollection(),
       "mod+k": () => {

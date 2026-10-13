@@ -13,6 +13,11 @@
 //   ルーペ。評価・フラグなどのキーは App.tsx が持つ。
 // - selection.current が変わったら、そのセルが見えるようにスクロールする。グリッドを開き直したときは
 //   真ん中に置く。絞り込み・並べ替えを変えたら先頭に戻し、操作の対象が残っていればそこを見せる。
+// - スタック（LIB-12）: 検索結果はコアがスタックでまとめている（折りたたんだスタックは代表の 1 枚）。セルに
+//   スタックの印（StackBadge.tsx。クリックで展開・折りたたみ）を出し、展開したスタックの写真には下端に帯を付ける。
+// - 写真の右クリックのメニュー（仮想コピー・スタックの操作。library/stackLogic.ts の photoMenuEntries）。選んで
+//   いない写真を右クリックしたら、その 1 枚を選んでから出す。下の帯の「スタック」のボタンからは、すべての
+//   スタックの展開・折りたたみと、撮影時刻による自動スタック。
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -30,11 +35,13 @@ import {
 import type { SearchFilter, VariantId, VariantSummary } from "../api/types";
 import { thumbUrl } from "../api/uri";
 import { FlagMark, LabelDot, Stars } from "../components/Marks";
+import { MENU_SEPARATOR, type MenuAt, type MenuEntry, MenuButton, PopupMenu } from "../components/Menu";
 import { formatCaptureTime } from "../format";
-import { useHotkeys } from "../keyboard";
+import { comboLabel, useHotkeys } from "../keyboard";
 import { actions, appStore, type Selection, useApp } from "../state/app";
 import { dropPhotos } from "../state/organize";
 import { searchCache, thumbRevs, useSearchVersion } from "../state/search";
+import { addTargetsToStack, runPhotoMenu, setAllStacksCollapsed } from "../state/stacks";
 import { activeConditionCount, clearConditions } from "./filterLogic";
 import {
   anchoredOffset,
@@ -53,10 +60,12 @@ import {
   revealOffset,
 } from "./gridMath";
 import "./library.css";
-import { extensionMark, fileStatusTitle, virtualCopyLabel } from "./metadataLogic";
+import { extensionMark, fileStatusTitle, pairLabel, virtualCopyLabel } from "./metadataLogic";
 import { consumeDragClick, dragIds, watchPhotoDrag } from "./photoDrag";
 import { loadNumber, save } from "./prefs";
 import { ScrollMapper } from "./scrollMapper";
+import { StackBadgeButton } from "./StackBadge";
+import { PHOTO_MENU_SEPARATOR, photoMenuEntries } from "./stackLogic";
 
 /** セルの帯にファイル名を出す、印を言葉で書くセルの幅（px。仮置き）。 */
 const WIDE_CELL = 140;
@@ -352,6 +361,35 @@ export function Grid() {
     // 選べなかったら（出していた写真が結果から外れたなど）、前の写真でルーペを開かない。
     void actions.openInLoupe(c.index, c.expect);
   };
+  // 写真の右クリックのメニュー（選んでいない写真なら、その 1 枚を選んでから出す）。
+  const [menuAt, setMenuAt] = useState<MenuAt | null>(null);
+  const onContextMenu = (e: MouseEvent) => {
+    const c = cellOf(e);
+    if (c === null) return;
+    e.preventDefault();
+    const at = { x: e.clientX, y: e.clientY };
+    const sel = appStore.get().selection;
+    void (async () => {
+      if (c.expect === undefined || !sel.ids.includes(c.expect)) {
+        if (!(await actions.selectIndex(c.index, { expect: c.expect }))) return;
+      }
+      setMenuAt(at);
+    })();
+  };
+  const menuItems = (): MenuEntry[] => {
+    const cur = appStore.get().selection.current;
+    const item = cur === null ? undefined : searchCache.getLoadedById(cur);
+    return photoMenuEntries(actions.targets().length, item).map((m) =>
+      m === PHOTO_MENU_SEPARATOR
+        ? MENU_SEPARATOR
+        : {
+            label: m.label,
+            hint: m.keys ? comboLabel(m.keys) : undefined,
+            disabled: !m.enabled,
+            onSelect: () => void runPhotoMenu(m.action),
+          },
+    );
+  };
 
   const changeCellSize = (v: number) => {
     setCellSize(v);
@@ -382,6 +420,7 @@ export function Grid() {
         onClick={onClick}
         onDoubleClick={onDoubleClick}
         onPointerDown={onPointerDown}
+        onContextMenu={onContextMenu}
       >
         <div className="lib-grid-spacer" style={{ height: layout.scrollHeight }}>
           <div ref={layerRef} className="lib-grid-layer">
@@ -425,7 +464,26 @@ export function Grid() {
         </div>
         {searched && count === 0 && <EmptyState filter={filter} />}
       </div>
+      {menuAt && <PopupMenu at={menuAt} items={menuItems()} onClose={() => setMenuAt(null)} label="写真の操作" />}
       <div className="lib-grid-toolbar">
+        <MenuButton
+          label="スタック"
+          title="選んだ写真をスタックに足す・スタックの表示・撮影時刻による自動スタック"
+          items={() => [
+            {
+              label: "選んだ写真をスタックに足す",
+              disabled: actions.targets().length < 2,
+              onSelect: () => void addTargetsToStack(),
+            },
+            MENU_SEPARATOR,
+            { label: "すべてのスタックを展開", onSelect: () => void setAllStacksCollapsed(false) },
+            { label: "すべてのスタックを折りたたむ", onSelect: () => void setAllStacksCollapsed(true) },
+            MENU_SEPARATOR,
+            { label: "撮影時刻でスタック…", onSelect: () => actions.openDialog({ kind: "auto_stack" }) },
+          ]}
+        >
+          スタック ▾
+        </MenuButton>
         <span className="spacer" />
         <label htmlFor="lib-cell-size">サムネイルの大きさ</label>
         <input
@@ -471,7 +529,10 @@ interface CellProps {
 
 const GridCell = memo(function GridCell(p: CellProps) {
   const { item } = p;
-  const cls = `lib-cell${p.selected ? " selected" : ""}${p.current ? " current" : ""}${item ? "" : " loading"}`;
+  const stack = item?.stack ?? null;
+  // 展開したスタックの写真は、下端の帯でまとまりを示す（一番上の写真は帯の左端を空ける）。
+  const stackCls = stack && !stack.collapsed ? ` stack-member${stack.position === 1 ? " stack-first" : ""}` : "";
+  const cls = `lib-cell${p.selected ? " selected" : ""}${p.current ? " current" : ""}${item ? "" : " loading"}${stackCls}`;
   // セルの枠（上下 1 px ずつ）を除いた高さを、サムネイルの枠と下の帯に分ける。
   const thumbHeight = Math.max(0, p.height - CELL_FOOTER - 2);
   return (
@@ -504,6 +565,15 @@ function cellTitle(item: VariantSummary): string {
   const lines = [item.file_name, formatCaptureTime(item.capture)];
   const vc = virtualCopyLabel(item);
   if (vc) lines.push(vc);
+  const pair = pairLabel(item);
+  if (pair) lines.push(pair);
+  if (item.stack) {
+    lines.push(
+      item.stack.collapsed
+        ? `スタック（${item.stack.count} 枚を折りたたみ中）`
+        : `スタックの ${item.stack.position} 枚目（${item.stack.count} 枚）`,
+    );
+  }
   const status = fileStatusTitle(item.file_status);
   if (status) lines.push(status);
   return lines.join("\n");
@@ -531,13 +601,16 @@ function Thumb({ item, rev, paused }: { item: VariantSummary; rev: string | null
   );
 }
 
-/** 動画・仮想コピー・元ファイルがないことの印。 */
+/** 動画・仮想コピー・RAW と JPEG のペア・スタック・元ファイルがないことの印。 */
 function Badges({ item, wide }: { item: VariantSummary; wide: boolean }) {
   const vc = virtualCopyLabel(item);
+  const pair = pairLabel(item);
   const status = fileStatusTitle(item.file_status);
-  if (item.kind !== "video" && !vc && !status) return null;
+  const stack = item.stack ?? null;
+  if (item.kind !== "video" && !vc && !pair && !status && !stack) return null;
   return (
     <div className="lib-cell-badges">
+      {stack && <StackBadgeButton id={item.variant_id} badge={stack} wide={wide} />}
       {item.kind === "video" && (
         <span className="lib-badge" title="動画">
           {wide ? "▶ 動画" : "▶"}
@@ -546,6 +619,11 @@ function Badges({ item, wide }: { item: VariantSummary; wide: boolean }) {
       {vc && (
         <span className="lib-badge" title={vc}>
           {wide ? "仮想コピー" : "仮想"}
+        </span>
+      )}
+      {pair && (
+        <span className="lib-badge" title={pair}>
+          {wide ? "RAW+JPEG" : "+J"}
         </span>
       )}
       <span className="spacer" />

@@ -162,6 +162,15 @@ pub struct CoreConfig {
     /// 表示に L1 が要るとき（[`crate::Core::request_preview`]）に作る。
     #[serde(default)]
     pub render_previews_after_import: bool,
+    /// ファイルの内容のハッシュ（全体の BLAKE3。ORG-03）を、バックグラウンドで自動的に計算してよいか
+    /// （開いたとき・取り込みの後。カタログの設定 [`crate::CoreSettings::hash_in_background`] が有効なとき
+    /// だけ動く）。
+    ///
+    /// 既定は `false`: 短い間だけ開く CLI・テストでは、すべてのファイルを読む計算を始めない（CLI は
+    /// `genzo hash compute` で明示的に計算する）。デスクトップアプリは `true` にする。明示的な計算
+    /// （[`crate::Core::compute_content_hashes`]）と、取り込みの重複の確認での計算は、これによらず行う。
+    #[serde(default)]
+    pub background_hashing: bool,
     /// バッチ用のワーカーの数（1〜2）。`None` なら genzo-worker の既定値。
     #[serde(default)]
     pub batch_workers: Option<usize>,
@@ -208,6 +217,7 @@ impl CoreConfig {
             backup_generations: default_backup_generations(),
             backup_on_close: false,
             render_previews_after_import: false,
+            background_hashing: false,
             batch_workers: None,
             background_threads: None,
             worker_test_hooks: false,
@@ -265,6 +275,10 @@ mod tests {
         assert!(
             !CoreConfig::new("/a.db", "/d").render_previews_after_import,
             "決定 No.24"
+        );
+        assert!(
+            !min.background_hashing && !CoreConfig::new("/a.db", "/d").background_hashing,
+            "内容のハッシュのバックグラウンドの計算は、アプリが有効にしたときだけ"
         );
         assert_eq!(min.backup_dir(), PathBuf::from("/d").join("backups"));
         let w: WorkerLaunch = serde_json::from_str(

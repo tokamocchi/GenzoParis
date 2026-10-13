@@ -104,7 +104,69 @@ pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[
         sql: include_str!("sql/catalog_0008_stable_ids.sql"),
         post: Some(migrate_id_sequences),
     },
+    Migration {
+        version: STACKS_SCHEMA_VERSION,
+        description: "スタック（LIB-12）: stack の作り直し（AUTOINCREMENT・折りたたみの状態）・抜けた後の整えのトリガー・公開ビュー photo_stacks_v1",
+        sql: include_str!("sql/catalog_0009_stacks.sql"),
+        post: Some(migrate_stacks),
+    },
+    Migration {
+        version: CONTENT_IDENTITY_SCHEMA_VERSION,
+        description: "内容による同一性（ORG-03・IMP-04・IMP-06）: クイックハッシュ・全体のハッシュの索引と公開ビュー photo_files_v1",
+        sql: include_str!("sql/catalog_0010_content_identity.sql"),
+        post: None,
+    },
 ];
+
+/// 内容による同一性（ORG-03）・重複の検出（IMP-04）を使い始めたカタログのスキーマの版（索引
+/// `file_quick_hash`・`file_full_hash` と、公開ビュー `photo_files_v1`）。
+///
+/// 既存のファイルの全体のハッシュ（`file.full_hash`）は、移行では計算しない（ファイルを読むため）。移行の後に
+/// genzo-api がバックグラウンドのジョブで計算する。
+pub const CONTENT_IDENTITY_SCHEMA_VERSION: u32 = 10;
+
+/// スタック（LIB-12）を使い始めたカタログのスキーマの版（`stack` の作り直しと `collapsed`、トリガー
+/// `stack_member_after_delete`、公開ビュー `photo_stacks_v1`）。
+pub const STACKS_SCHEMA_VERSION: u32 = 9;
+
+/// 版 9 の SQL の後の処理: 既存のスタック（版 8 まではアプリが作らないが、外部のツールで作られた行がありうる）を
+/// アプリの約束にそろえる。写真が 1 枚以下のスタックは消し、残りは一番上の写真（`top_variant_id`。メンバーで
+/// なければ位置の最初のもの）を先頭に、`(position, variant_id)` の順で位置を 0 から付け直す。
+///
+/// マイグレーションの間は外部キーの確認を止めているため、`ON DELETE CASCADE` が働かない。スタックを消すときは、
+/// 先にメンバーの行を消す。
+fn migrate_stacks(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "DELETE FROM stack_member WHERE stack_id IN (
+             SELECT stack_id FROM stack_member GROUP BY stack_id HAVING count(*) < 2);
+         DELETE FROM stack WHERE NOT EXISTS (SELECT 1 FROM stack_member m WHERE m.stack_id = stack.id);",
+    )?;
+    let stacks: Vec<(i64, Option<i64>)> = {
+        let mut stmt = tx.prepare("SELECT id, top_variant_id FROM stack ORDER BY id")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let mut members_of = tx.prepare(
+        "SELECT variant_id FROM stack_member WHERE stack_id = ?1 ORDER BY position, variant_id",
+    )?;
+    let mut set_position = tx
+        .prepare("UPDATE stack_member SET position = ?3 WHERE stack_id = ?1 AND variant_id = ?2")?;
+    let mut set_top = tx.prepare("UPDATE stack SET top_variant_id = ?2 WHERE id = ?1")?;
+    for (stack, top) in stacks {
+        let mut members: Vec<i64> = members_of
+            .query_map([stack], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if let Some(i) = top.and_then(|t| members.iter().position(|&m| m == t)) {
+            let t = members.remove(i);
+            members.insert(0, t);
+        }
+        for (pos, &v) in members.iter().enumerate() {
+            set_position.execute(rusqlite::params![stack, v, pos as i64])?;
+        }
+        set_top.execute(rusqlite::params![stack, members[0]])?;
+    }
+    Ok(())
+}
 
 /// フォルダ・キーワード・コレクションの ID を、削除した後に使い回さない（`AUTOINCREMENT`）ようにした
 /// カタログのスキーマの版。
@@ -241,7 +303,13 @@ pub const PUBLIC_VIEWS_SCHEMA_VERSION: u32 = 5;
 ///
 /// 名前の末尾の版（`_v1`）の約束: 列の名前・意味・値の形を変えず、列を減らさない（変えるときは `_v2` を
 /// 足す）。列を足すことはある。
-pub const PUBLIC_VIEWS: &[&str] = &["photos_v1", "photo_keywords_v1", "photo_collections_v1"];
+pub const PUBLIC_VIEWS: &[&str] = &[
+    "photos_v1",
+    "photo_keywords_v1",
+    "photo_collections_v1",
+    "photo_stacks_v1",
+    "photo_files_v1",
+];
 
 /// `tz_source = 'utc_only'`（UTC の印 `Z` だけの撮影日時）を足したカタログのスキーマの版。
 ///
@@ -271,7 +339,7 @@ pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[
 ];
 
 /// このアプリのカタログのスキーマの版。
-pub const CATALOG_SCHEMA_VERSION: u32 = 8;
+pub const CATALOG_SCHEMA_VERSION: u32 = 10;
 
 /// このアプリのサムネイル DB のスキーマの版。
 pub const THUMBS_SCHEMA_VERSION: u32 = 2;

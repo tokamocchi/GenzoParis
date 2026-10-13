@@ -147,10 +147,17 @@ fn catalog_schema_lists_tables_and_public_views() {
         core.catalog_stats().unwrap().schema_version
     );
     assert_eq!(schema.application_id, genzo_catalog::CATALOG_APPLICATION_ID);
-    // 版 7 で photo_collections_v1 を足した（LIB-10）。
+    // 版 7 で photo_collections_v1（LIB-10）、版 9 で photo_stacks_v1（LIB-12）、版 10 で photo_files_v1
+    // （ORG-03・IMP-06）を足した。
     assert_eq!(
         schema.public_views,
-        vec!["photos_v1", "photo_keywords_v1", "photo_collections_v1"]
+        vec![
+            "photos_v1",
+            "photo_keywords_v1",
+            "photo_collections_v1",
+            "photo_stacks_v1",
+            "photo_files_v1"
+        ]
     );
     let photos = schema
         .tables

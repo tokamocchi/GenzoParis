@@ -281,7 +281,9 @@ fn search_results_are_refreshed_in_the_background() {
     let updates: Vec<(u64, u64)> = ev
         .iter()
         .filter_map(|e| match e {
-            Event::SearchUpdated { generation, count } => Some((*generation, *count)),
+            Event::SearchUpdated {
+                generation, count, ..
+            } => Some((*generation, *count)),
             _ => None,
         })
         .collect();

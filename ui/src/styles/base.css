@@ -551,6 +551,12 @@ button:focus-visible {
   width: 18px;
   color: var(--accent);
 }
+.menu-hint {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--fg-3);
+  font-size: 11px;
+}
 .menu-sep {
   height: 1px;
   margin: 4px 0;

@@ -13,7 +13,9 @@ import {
   formatIso,
   gpsDecimal,
   hasVideoInfo,
+  pairLabel,
   primaryFile,
+  shortHash,
   videoRows,
   virtualCopyLabel,
 } from "./metadataLogic";
@@ -152,6 +154,14 @@ describe("ファイル", () => {
     expect(virtualCopyLabel({ is_master: true, variant_name: null })).toBeNull();
     expect(virtualCopyLabel({ is_master: false, variant_name: null })).toBe("仮想コピー");
     expect(virtualCopyLabel({ is_master: false, variant_name: "白黒" })).toBe("仮想コピー: 白黒");
+  });
+
+  it("RAW と同時記録の JPEG の印と、内容のハッシュの短い表示（IMP-06・ORG-03）", () => {
+    expect(pairLabel({ has_sidecar_jpeg: false })).toBeNull();
+    expect(pairLabel({ has_sidecar_jpeg: true })).toContain("RAW + JPEG");
+    expect(shortHash(null)).toBe("未計算");
+    expect(shortHash(undefined)).toBe("未計算");
+    expect(shortHash("0123456789abcdef".repeat(4))).toBe("0123456789ab…");
   });
 });
 

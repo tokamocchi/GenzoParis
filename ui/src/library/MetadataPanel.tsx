@@ -10,6 +10,9 @@
 //   core.metadataSummary。写真によって値が異なる項目は「（複数の値）」）。保存の決まりは MetadataEditor の doc。
 // - キーワード（LIB-09。KeywordEditor）: 1 枚のときは操作の対象の 1 枚、グリッドで複数を選んでいるときは
 //   選択中のすべてに付ける・外す。1 枚のときは、入っているコレクション（LIB-10）も出す。
+// - 仮想コピー・スタック（LIB-12・LIB-13。VersionsSection）: 同じ写真のマスターと仮想コピーの一覧（押すと選ぶ）、
+//   仮想コピーを作る・名前を変える・元の写真にする、入っているスタックの位置と操作（展開・折りたたみ、一番上に
+//   する、一緒に選んだ写真を足す、外す、解除）。
 
 import { useEffect, useRef, useState } from "react";
 
@@ -22,9 +25,20 @@ import { Section } from "../components/Section";
 import { COLOR_LABEL_NAMES, formatAperture, formatBytes, formatCaptureTime, formatFocal, formatShutter } from "../format";
 import { comboLabel } from "../keyboard";
 import { actions, useApp } from "../state/app";
+import {
+  addTargetsToStack,
+  createVirtualCopyOf,
+  makeMaster,
+  removeTargetsFromStack,
+  revealAndSelect,
+  setStackTop,
+  toggleStack,
+  unstackTargets,
+} from "../state/stacks";
 import { KeywordEditor, PhotoCollections } from "./KeywordEditor";
 import "./library.css";
 import { MetadataEditor, MetadataHelp } from "./MetadataEditor";
+import { variantBriefLabel } from "./stackLogic";
 import { batchNote, idsKey, statesFromMetadata, statesFromSummary } from "./metadataEdit";
 import {
   captureNote,
@@ -38,6 +52,7 @@ import {
   formatIso,
   hasVideoInfo,
   primaryFile,
+  shortHash,
   videoRows,
   virtualCopyLabel,
 } from "./metadataLogic";
@@ -324,6 +339,8 @@ function Details(props: { details: VariantDetails; stale: boolean; multi: boolea
         </Section>
       )}
 
+      {!multi && <VersionsSection details={details} disabled={stale} />}
+
       {!multi && (
         <>
           <KeywordEditor key={`kw${s.variant_id}`} targets={[s.variant_id]} disabled={stale} />
@@ -350,6 +367,11 @@ function Details(props: { details: VariantDetails; stale: boolean; multi: boolea
                 <span className={f.status === "missing" ? "status-warn" : f.status === "error" ? "status-error" : ""}>
                   {fileStatusText(f)}
                 </span>
+                {f.full_hash !== undefined && (
+                  <span title={f.full_hash ? `内容のハッシュ（BLAKE3）: ${f.full_hash}` : "内容のハッシュはまだ計算していません（バックグラウンドで計算します）"}>
+                    ・内容 {shortHash(f.full_hash)}
+                  </span>
+                )}
               </div>
             </li>
           ))}
@@ -357,6 +379,127 @@ function Details(props: { details: VariantDetails; stale: boolean; multi: boolea
         <FileActions summary={s} onReload={props.onReload} />
       </Section>
     </>
+  );
+}
+
+/**
+ * 仮想コピー・スタック（LIB-12・LIB-13）: 同じ写真のマスターと仮想コピーの一覧（押すとその写真を選ぶ）と、
+ * 入っているスタックの位置・操作。操作は表示中の 1 枚（この詳細の写真）に対して行う。
+ */
+function VersionsSection({ details, disabled }: { details: VariantDetails; disabled: boolean }) {
+  const s = details.summary;
+  const variants = details.variants ?? [];
+  const stack = details.stack ?? null;
+  const isCopy = !s.is_master;
+  const position = stack ? stack.members.indexOf(s.variant_id) + 1 : 0;
+  // 一緒に選んでいる、このスタックに入っていない写真の数（「選んだ写真を足す」）。
+  const selectedIds = useApp((st) => st.selection.ids);
+  const addable = stack ? selectedIds.filter((id) => !stack.members.includes(id)).length : 0;
+  return (
+    <Section id="lib.meta.versions" title="仮想コピー・スタック">
+      {variants.length > 1 && (
+        <ul className="lib-versions" aria-label="同じ写真のマスターと仮想コピー">
+          {variants.map((v) => (
+            <li key={v.variant_id}>
+              <button
+                type="button"
+                className={`lib-version${v.variant_id === s.variant_id ? " on" : ""}`}
+                disabled={disabled || v.variant_id === s.variant_id}
+                onClick={() => void revealAndSelect(v.variant_id)}
+                title={v.variant_id === s.variant_id ? "表示中の写真" : "この写真を選ぶ（今の絞り込みで表示されていなければ選べません）"}
+              >
+                {variantBriefLabel(v)}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="actions">
+        <button
+          type="button"
+          className="btn small"
+          disabled={disabled || s.kind === "video"}
+          onClick={() => void createVirtualCopyOf(s.variant_id)}
+          title={`元のファイルを複製せずに、別の現像設定を持てる写しを作る（${comboLabel("mod+'")}）`}
+        >
+          仮想コピーを作る
+        </button>
+        {isCopy && (
+          <>
+            <button
+              type="button"
+              className="btn small"
+              disabled={disabled}
+              onClick={() => actions.openDialog({ kind: "virtual_copy_name", variantId: s.variant_id })}
+            >
+              名前を変える…
+            </button>
+            <button
+              type="button"
+              className="btn small"
+              disabled={disabled}
+              onClick={() => void makeMaster(s.variant_id)}
+              title="この仮想コピーを元の写真（マスター）にする（前のマスターは仮想コピーになる。現像設定・評価などはそれぞれのまま）"
+            >
+              元の写真にする
+            </button>
+          </>
+        )}
+      </div>
+      {stack ? (
+        <>
+          <p className="sub">
+            スタック: {stack.members.length.toLocaleString("ja-JP")} 枚中 {position.toLocaleString("ja-JP")} 枚目
+            {position === 1 ? "（一番上）" : ""}・{stack.collapsed ? "折りたたみ中" : "展開中"}
+          </p>
+          <div className="actions">
+            <button
+              type="button"
+              className="btn small"
+              disabled={disabled}
+              onClick={() => void toggleStack(s.variant_id)}
+              title={`グリッド・フィルムストリップでの表示を切り替える（${comboLabel("s")}）`}
+            >
+              {stack.collapsed ? "展開" : "折りたたむ"}
+            </button>
+            <button
+              type="button"
+              className="btn small"
+              disabled={disabled || position === 1}
+              onClick={() => void setStackTop(s.variant_id)}
+              title={`この写真をスタックの一番上にする（${comboLabel("shift+s")}）`}
+            >
+              一番上にする
+            </button>
+            <button
+              type="button"
+              className="btn small"
+              disabled={disabled || addable === 0}
+              onClick={() => void addTargetsToStack()}
+              title="グリッド・フィルムストリップで一緒に選んだ写真を、このスタックの最後に足す（一番上と折りたたみは変えない。ほかのスタックの写真は移す）"
+            >
+              {addable > 0 ? `選んだ ${addable.toLocaleString("ja-JP")} 枚を足す` : "選んだ写真を足す"}
+            </button>
+            <button type="button" className="btn small" disabled={disabled} onClick={() => void removeTargetsFromStack()}>
+              スタックから外す
+            </button>
+            <button
+              type="button"
+              className="btn small"
+              disabled={disabled}
+              onClick={() => void unstackTargets()}
+              title={`スタックを解除する（写真は消えない。${comboLabel("mod+shift+g")}）`}
+            >
+              解除
+            </button>
+          </div>
+        </>
+      ) : (
+        <p className="hint">
+          スタックに入っていません。グリッドで 2 枚以上を選んで {comboLabel("mod+g")} でまとめられます。
+        </p>
+      )}
+    </Section>
   );
 }
 

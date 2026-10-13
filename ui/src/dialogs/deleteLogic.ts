@@ -59,6 +59,8 @@ export interface DeletePlanSummary {
   assetsWithoutPath: number;
   /** ゴミ箱へ移す予定のファイル（場所の分からないファイルを含む写真のファイルを除く）。 */
   trashableFiles: number;
+  /** RAW と組の JPEG（IMP-06。RAW と同じ 1 枚の写真として、一緒に対象になる）の数。 */
+  pairedJpegs: number;
   /** 選んだもの以外も対象になったか（同じ写真のマスター・仮想コピー）。 */
   includesUnselected: boolean;
 }
@@ -76,6 +78,7 @@ export function summarizeDeletePlan(plan: DeletePlan, selectedIds: readonly numb
     filesWithoutPath: plan.files.filter((f) => f.path === null).length,
     assetsWithoutPath: unknownAssets.size,
     trashableFiles: plan.files.filter((f) => !unknownAssets.has(f.asset_id)).length,
+    pairedJpegs: plan.files.filter((f) => f.role === "sidecar_jpeg").length,
     includesUnselected: plan.variants.some((v) => !selected.has(v.variant_id)),
   };
 }
@@ -102,6 +105,13 @@ export function describeDeletePlan(kind: DeleteKind, s: DeletePlanSummary): stri
     case "virtual_copies":
       lines.push(`${formatCount(s.variants)} 件の仮想コピーを削除します。元のファイルは変わりません。`);
       break;
+  }
+  if (s.pairedJpegs > 0 && kind !== "virtual_copies") {
+    lines.push(
+      kind === "trash"
+        ? `RAW と同時記録の JPEG（${formatCount(s.pairedJpegs)} 組）は 1 枚の写真なので、RAW と JPEG の両方のファイルをゴミ箱へ移します（一覧に両方を挙げています）。`
+        : `RAW と同時記録の JPEG（${formatCount(s.pairedJpegs)} 組）は 1 枚の写真なので、両方の登録を除きます（ファイルは残ります）。`,
+    );
   }
   if (s.includesUnselected && kind !== "virtual_copies") {
     lines.push("選んだ写真と同じ元ファイルのマスター・仮想コピーも、まとめて対象になります。");

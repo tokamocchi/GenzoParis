@@ -315,6 +315,7 @@ pub fn run() {
             commands::list_catalog_backups,
             commands::restore_catalog,
             commands::update_app_settings,
+            commands::save_import_preferences,
             commands::locate_tools,
             commands::path_kinds,
             commands::reveal_variant_file,

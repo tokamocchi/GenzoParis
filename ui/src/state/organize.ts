@@ -7,13 +7,16 @@
 //   すべて入っていれば外し、そうでなければ入れる（Lightroom と同じ。入れた数が 0 ならすべて入っていた
 //   とみなして外す）。
 // - 手動のコレクションを表示している間の Delete・Backspace は、カタログから除くのではなく、そのコレクションから
-//   外す（写真は消えない。Lightroom と同じ。決定事項ログ No.82）。
+//   外す（写真は消えない。Lightroom と同じ。決定事項ログ No.82）。それ以外では削除のダイアログを開き、対象が
+//   すべて仮想コピーなら「仮想コピーだけを削除」を既定にする（決定事項ログ No.88）。
 
 import * as core from "../api/core";
 import type { CollectionId, CollectionInfo, KeywordId, VariantId } from "../api/types";
 import { parseKeywordInput } from "../library/keywordLogic";
 import type { DropTarget } from "../library/photoDrag";
+import { defaultDeleteKind } from "../library/stackLogic";
 import { actions, appStore, targetCollectionKey } from "./app";
+import { searchCache } from "./search";
 
 /** ターゲットコレクションを決める（null で外す）。カタログごとに保存する。 */
 export function setTargetCollection(id: CollectionId | null): void {
@@ -105,7 +108,8 @@ export async function shownManualCollection(): Promise<CollectionInfo | null> {
 
 /**
  * Delete・Backspace: 手動のコレクションを表示していれば、操作の対象をそのコレクションから外す。そうでなければ
- * 削除のダイアログ（カタログから除く）を開く。
+ * 削除のダイアログを開く（既定の種類は、対象がすべて仮想コピーなら「仮想コピーだけを削除」、そうでなければ
+ * 「カタログから除去」。library/stackLogic.ts の defaultDeleteKind）。
  */
 export async function deleteKeyAction(): Promise<void> {
   const ids = actions.targets();
@@ -115,7 +119,8 @@ export async function deleteKeyAction(): Promise<void> {
     await removeFromCollection(shown.collection_id, ids, shown.name);
     return;
   }
-  actions.openDialog({ kind: "delete", deleteKind: "remove_from_catalog", variantIds: ids });
+  const deleteKind = defaultDeleteKind(ids, (id) => searchCache.getLoadedById(id));
+  actions.openDialog({ kind: "delete", deleteKind, variantIds: ids });
 }
 
 /** 入力欄の文字列（「場所 > 京都, 家族」）のキーワードを写真に付ける。付けたパスの数を返す（失敗は null）。 */

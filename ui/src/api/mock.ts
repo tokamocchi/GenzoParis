@@ -2,20 +2,30 @@
 
 import type { Bridge, Unlisten } from "./bridge";
 import type {
+  AutoStackReport,
   BeforeInfo,
   CatalogSchema,
   ClearReport,
   CollectionInfo,
+  ContentHashStatus,
+  CoreSettings,
   CrashReportSummary,
+  DuplicateGroupList,
   FrameInfo,
+  ImportPreferences,
+  ImportReport,
   IptcMetadata,
   KeywordInfo,
   KeywordUsage,
   LogFolderInfo,
   LogStatus,
   MetadataSummary,
+  NamePreview,
   SmartRule,
+  StackInfo,
+  VariantDetails,
   VariantKeywords,
+  VariantSummary,
 } from "./types";
 
 export interface MockCall {
@@ -103,9 +113,9 @@ export const MOCK_LOG_FOLDER: LogFolderInfo = {
 
 /** カタログの構造の見本（一部の表・ビューだけ）。 */
 export const MOCK_CATALOG_SCHEMA: CatalogSchema = {
-  schema_version: 8,
+  schema_version: 10,
   application_id: 0x475a4354,
-  public_views: ["photos_v1", "photo_keywords_v1", "photo_collections_v1"],
+  public_views: ["photos_v1", "photo_keywords_v1", "photo_collections_v1", "photo_stacks_v1", "photo_files_v1"],
   tables: [
     {
       name: "asset",
@@ -257,4 +267,242 @@ export const MOCK_KEYWORD_USAGE: KeywordUsage = {
   photos_with_descendants: 23,
   descendants: 3,
   smart_collections: [{ collection_id: 12, name: "★3 以上の場所" }],
+};
+
+// ---------------------------------------------------------------------------
+// v1 の organize-b: スタック（LIB-12）・仮想コピー（LIB-13）の見本
+// ---------------------------------------------------------------------------
+
+/** グリッドのセルの見本（写真 1 枚。stack・is_master などを上書きして使う）。 */
+export function mockSummary(over: Partial<VariantSummary> = {}): VariantSummary {
+  return {
+    variant_id: 1,
+    asset_id: 1,
+    is_master: true,
+    variant_name: null,
+    kind: "photo",
+    file_id: 1,
+    file_name: "DSC00001.ARW",
+    folder_id: 1,
+    file_status: "ok",
+    file_revision: 1,
+    has_sidecar_jpeg: false,
+    rating: 0,
+    flag: 0,
+    color_label: null,
+    capture: {
+      raw: "2024:05:01 12:00:00",
+      offset: "+09:00",
+      tz_source: "exif",
+      tz_assumed: "+09:00",
+      correction_s: 0,
+      utc: "2024-05-01T03:00:00.000Z",
+    },
+    camera: "SONY ILCE-7M4",
+    lens: null,
+    width: 7008,
+    height: 4672,
+    orientation: 1,
+    develop_hash: "0".repeat(64),
+    thumb_rev: null,
+    stack: null,
+    ...over,
+  };
+}
+
+/** スタックの見本（連写 3 枚。一番上は 2。折りたたみ中）。 */
+export const MOCK_STACK: StackInfo = {
+  stack_id: 5,
+  top_variant_id: 2,
+  collapsed: true,
+  members: [2, 1, 3],
+};
+
+/** 折りたたんだスタックの代表のセルの見本。 */
+export const MOCK_STACK_TOP: VariantSummary = mockSummary({
+  variant_id: 2,
+  file_name: "DSC00002.ARW",
+  stack: { stack_id: 5, position: 1, count: 3, collapsed: true },
+});
+
+/** 仮想コピーのセルの見本（マスター 1 と同じスタックの 2 枚目。展開中）。 */
+export const MOCK_VIRTUAL_COPY: VariantSummary = mockSummary({
+  variant_id: 4,
+  is_master: false,
+  variant_name: "白黒",
+  stack: { stack_id: 6, position: 2, count: 2, collapsed: false },
+});
+
+/** 仮想コピーの詳細の見本（同じ写真のマスターと仮想コピー、入っているスタック）。 */
+export const MOCK_VIRTUAL_COPY_DETAILS: VariantDetails = {
+  summary: MOCK_VIRTUAL_COPY,
+  iso: 100,
+  aperture: 2.8,
+  shutter_s: 0.004,
+  focal_mm: 35,
+  gps: null,
+  caption: null,
+  video: null,
+  files: [],
+  variants: [
+    { variant_id: 1, is_master: true, name: null },
+    { variant_id: 4, is_master: false, name: "白黒" },
+  ],
+  stack: { stack_id: 6, top_variant_id: 1, collapsed: false, members: [1, 4] },
+};
+
+/** 自動スタックの見込みの見本（間隔 2 秒）。 */
+export const MOCK_AUTO_STACK_PREVIEW: AutoStackReport = {
+  stacks: 12,
+  photos: 41,
+  considered: 230,
+  skipped_in_stacks: 6,
+  skipped_without_time: 1,
+  dry_run: true,
+};
+
+// ---------------------------------------------------------------------------
+// v1 の identity: 内容による同一性（ORG-03）・重複（IMP-04）・RAW と JPEG のペア（IMP-06）の見本
+// ---------------------------------------------------------------------------
+
+/** カタログの設定の見本（genzo-api の既定の値）。 */
+export const MOCK_CORE_SETTINGS: CoreSettings = {
+  preview_cache_dir: "/home/u/Pictures/GenzoParis/catalog-data/previews",
+  preview_cache_bytes: 20_000_000_000,
+  default_export_color_space: "srgb",
+  default_utc_offset_minutes: 540,
+  import_skip_duplicates: true,
+  import_separate_raw_jpeg: false,
+  hash_in_background: true,
+  hash_network_volumes: false,
+};
+
+/** RAW と同時記録の JPEG を 1 枚にまとめた写真のセルの見本。 */
+export const MOCK_PAIR: VariantSummary = mockSummary({
+  variant_id: 7,
+  asset_id: 7,
+  file_name: "DSC00007.ARW",
+  has_sidecar_jpeg: true,
+});
+
+/** 内容のハッシュの状況の見本（計算の途中。重複の組が 2 つ）。 */
+export const MOCK_CONTENT_HASH_STATUS: ContentHashStatus = {
+  files: 1300,
+  hashed: 1250,
+  pending: 50,
+  duplicate_groups: 2,
+  job_id: null,
+};
+
+/** 内容が同じファイルの組の見本。 */
+export const MOCK_DUPLICATE_GROUPS: DuplicateGroupList = {
+  total: 2,
+  groups: [
+    {
+      full_hash: "a".repeat(64),
+      files: [
+        { file_id: 1, asset_id: 1, variant_id: 1, role: "primary", path: "/p/2024/DSC00001.ARW", size: 25_000_000, status: "ok" },
+        { file_id: 9, asset_id: 9, variant_id: 9, role: "primary", path: "/p/コピー/DSC00001.ARW", size: 25_000_000, status: "ok" },
+      ],
+    },
+    {
+      full_hash: "b".repeat(64),
+      files: [
+        { file_id: 2, asset_id: 2, variant_id: 2, role: "sidecar_jpeg", path: "/p/2024/DSC00002.JPG", size: 4_000_000, status: "ok" },
+        { file_id: 12, asset_id: 12, variant_id: 12, role: "primary", path: "/p/書き出し前/DSC00002.JPG", size: 4_000_000, status: "missing" },
+      ],
+    },
+  ],
+};
+
+/** 取り込みの結果の見本（重複 2 件を取り込まず、RAW と JPEG を 3 組まとめた）。 */
+export const MOCK_IMPORT_REPORT: ImportReport = {
+  root: "/p/SD",
+  files_found: 12,
+  added: 10,
+  updated: 0,
+  unchanged: 0,
+  errors: [],
+  not_registered: [],
+  skipped_links: 0,
+  thumbnails: 7,
+  thumbnail_failures: [],
+  cancelled: false,
+  duplicates: [
+    { path: "/p/SD/DSC00001.ARW", existing_path: "/p/2024/DSC00001.ARW", existing_variant_id: 1, skipped: true },
+    { path: "/p/SD/DSC00002.JPG", existing_path: "/p/2024/DSC00002.JPG", existing_variant_id: 2, skipped: true },
+  ],
+  paired: 3,
+  skip_duplicates: true,
+  separate_raw_jpeg: false,
+};
+
+// ---------------------------------------------------------------------------
+// コピー取り込み（IMP-02）・リネーム規則（IMP-03）・まとめて付けるもの（IMP-05）の見本
+// ---------------------------------------------------------------------------
+
+/** アプリに保存した取り込みの設定の見本（コピー・撮影日別・リネーム・作成者とキーワード）。 */
+export const MOCK_IMPORT_PREFERENCES: ImportPreferences = {
+  copy: true,
+  recursive: true,
+  destination: "/home/u/写真",
+  folder_rule: "year_date",
+  rename: true,
+  rename_rule: { template: "{date}_{text}-{seq}", custom_text: "京都", sequence_start: 1, sequence_digits: 4 },
+  metadata: { keywords: [["場所", "京都"], ["家族"]], fields: { creator: "岡本", copyright: "© 2026 岡本" } },
+};
+
+/** 名前の例の見本（genzo-api の preview_names と同じ見本の写真。上の設定のとき）。 */
+export const MOCK_NAME_PREVIEW: NamePreview = {
+  examples: [
+    { source: "DCIM/100MSDCF/DSC01234.ARW", destination: "2026/2026-10-13/20261013_京都-0001.ARW", captured: "2026-10-13 14:30:52" },
+    { source: "DCIM/100MSDCF/DSC01234.JPG", destination: "2026/2026-10-13/20261013_京都-0001.JPG", captured: "2026-10-13 14:30:52" },
+    { source: "DCIM/100MSDCF/DSC01235.ARW", destination: "2026/2026-10-13/20261013_京都-0002.ARW", captured: "2026-10-13 14:30:53" },
+    { source: "DCIM/DJI_001/DJI_0001.MP4", destination: "2026/2026-10-14/20261014_京都-0003.MP4", captured: "2026-10-14 09:05:00" },
+  ],
+  error: null,
+};
+
+/** コピー取り込みの結果の見本（RAW と JPEG の組 1 つと JPEG 1 枚をコピーし、1 枚は既にあったものを登録）。 */
+export const MOCK_COPY_IMPORT_REPORT: ImportReport = {
+  root: "/media/u/SD",
+  files_found: 3,
+  added: 3,
+  updated: 0,
+  unchanged: 0,
+  errors: [],
+  not_registered: [],
+  skipped_links: 0,
+  thumbnails: 2,
+  thumbnail_failures: [],
+  cancelled: false,
+  duplicates: [],
+  paired: 1,
+  skip_duplicates: true,
+  separate_raw_jpeg: false,
+  tagged: 2,
+  copy: {
+    destination: "/home/u/写真",
+    copied: [
+      {
+        source: "/media/u/SD/DCIM/100MSDCF/DSC01234.ARW",
+        destination: "/home/u/写真/2026/2026-10-13/20261013_京都-0001.ARW",
+        existing: false,
+      },
+      {
+        source: "/media/u/SD/DCIM/100MSDCF/DSC01234.JPG",
+        destination: "/home/u/写真/2026/2026-10-13/20261013_京都-0001.JPG",
+        existing: false,
+      },
+      {
+        source: "/media/u/SD/DCIM/100MSDCF/DSC01235.JPG",
+        destination: "/home/u/写真/2026/2026-10-13/20261013_京都-0002.JPG",
+        existing: true,
+      },
+    ],
+    bytes_copied: 31_457_280,
+    dated_by_file_time: 0,
+    dry_run: false,
+    next_sequence: 3,
+  },
 };

@@ -429,7 +429,7 @@ fn schema_description_lists_tables_views_and_objects() {
     // 索引・トリガー・ビューの SQL（自動の索引は除く）。
     let kinds = |k: &str| d.objects.iter().filter(|o| o.kind == k).count();
     assert!(kinds("index") >= 10);
-    assert_eq!(kinds("trigger"), 3);
+    assert_eq!(kinds("trigger"), 4);
     assert_eq!(kinds("view"), PUBLIC_VIEWS.len());
     assert!(d.objects.iter().all(|o| !o.name.starts_with("sqlite_")));
     let fts = d.objects.iter().find(|o| o.name == "asset_fts").unwrap();

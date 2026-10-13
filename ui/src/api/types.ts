@@ -19,6 +19,7 @@ export type KeywordId = number;
 export type CollectionId = number;
 export type HistoryEntryId = number;
 export type SnapshotId = number;
+export type StackId = number;
 
 /** 評価（0〜5）。 */
 export type Rating = 0 | 1 | 2 | 3 | 4 | 5;
@@ -259,7 +260,8 @@ export type JobKind =
   | "regenerate_previews"
   | "integrity_check"
   | "reresolve_capture_times"
-  | "collect_garbage";
+  | "collect_garbage"
+  | "hash_files";
 export type JobState = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface FileIssue {
@@ -270,6 +272,103 @@ export interface FileIssue {
 export interface VariantIssue {
   variant_id: VariantId;
   reason: string;
+}
+
+/**
+ * 取り込みの設定（IMP-02〜IMP-06。genzo-api の ImportOptions）。skip_duplicates・separate_raw_jpeg を省くと
+ * カタログの設定に従う。copy があればコピー取り込み、なければその場で登録する。
+ */
+export interface ImportOptions {
+  skip_duplicates?: boolean | null;
+  separate_raw_jpeg?: boolean | null;
+  /** コピー取り込み（IMP-02・IMP-03）。 */
+  copy?: CopySettings | null;
+  /** 新しく登録した写真にまとめて付けるキーワード・説明のメタデータ（IMP-05）。 */
+  metadata?: ImportMetadata;
+  /** コピー先の名前を決めるだけで、コピー・登録をしない（確認用）。 */
+  dry_run?: boolean;
+}
+
+/** コピー先のフォルダの規則（genzo-api の FolderRule）。 */
+export type FolderRule =
+  | "year_date"
+  | "year_month_day"
+  | "year_month"
+  | "date"
+  | "date_compact"
+  | "single"
+  | "source";
+
+/** リネームの規則（IMP-03。genzo-api の RenameRule）。 */
+export interface RenameRule {
+  /** テンプレート（{date}-{seq} など。{{・}} は波かっこそのもの）。 */
+  template: string;
+  /** 任意の文字（{text}）。 */
+  custom_text: string;
+  sequence_start: number;
+  sequence_digits: number;
+}
+
+/** コピー取り込みの設定（IMP-02・IMP-03。genzo-api の CopySettings）。 */
+export interface CopySettings {
+  destination: string;
+  folder_rule?: FolderRule;
+  /** null なら元の名前のまま。 */
+  rename?: RenameRule | null;
+}
+
+/** 取り込んだ写真にまとめて付けるもの（IMP-05。genzo-api の ImportMetadata）。 */
+export interface ImportMetadata {
+  /** キーワードの階層のパス（[["場所", "京都"], ["家族"]]）。 */
+  keywords: string[][];
+  /** 説明のメタデータ（空の値は付けない）。 */
+  fields: Partial<Record<MetadataField, string>>;
+}
+
+/** コピーした（する）ファイル。 */
+export interface CopiedFile {
+  source: string;
+  destination: string;
+  /** コピーせず、コピー先に既にあった同じ内容のファイルを登録した。 */
+  existing: boolean;
+}
+
+/** コピー取り込みの結果（genzo-api の CopyReport）。 */
+export interface CopyReport {
+  destination: string;
+  copied: CopiedFile[];
+  bytes_copied: number;
+  /** 撮影日時が分からず、ファイルの更新日時で日付を決めたファイルの数。 */
+  dated_by_file_time: number;
+  dry_run: boolean;
+  /** 次の連番（複数のフォルダを続けて取り込むときの、次のフォルダの開始番号）。 */
+  next_sequence: number;
+}
+
+/** コピー先の名前の例（genzo-api の NamePreview）。 */
+export interface NamePreview {
+  examples: NameExample[];
+  /** 設定の誤り（あれば例は空）。 */
+  error: string | null;
+}
+
+export interface NameExample {
+  /** 見本の元のファイル（取り込むフォルダからの相対パス）。 */
+  source: string;
+  /** コピー先のフォルダからの相対パス。 */
+  destination: string;
+  /** 見本の撮影日時。 */
+  captured: string;
+}
+
+/** 取り込みで、内容が同じファイル（重複）として見つけたもの（IMP-04）。 */
+export interface DuplicateFile {
+  path: string;
+  /** 同じ内容の登録済みのファイル（同じ取り込みで先に登録したものを含む）。 */
+  existing_path: string | null;
+  existing_variant_id: VariantId | null;
+  /** 取り込まなかったか（false なら、設定により別の写真として登録した）。 */
+  skipped: boolean;
 }
 
 export interface ImportReport {
@@ -284,6 +383,64 @@ export interface ImportReport {
   thumbnails: number;
   thumbnail_failures: FileIssue[];
   cancelled: boolean;
+  /** 内容が同じファイルが登録済みだったもの（IMP-04）。古いコアでは無い。 */
+  duplicates?: DuplicateFile[];
+  /** RAW と組にして 1 枚にまとめたファイルの数（IMP-06）。 */
+  paired?: number;
+  skip_duplicates?: boolean;
+  separate_raw_jpeg?: boolean;
+  /** コピー取り込みの結果（コピーしない取り込み・古いコアでは無い。IMP-02）。 */
+  copy?: CopyReport | null;
+  /** キーワード・説明のメタデータを付けた写真の数（IMP-05）。 */
+  tagged?: number;
+}
+
+/** ファイルの内容のハッシュの計算の結果（ORG-03。genzo-api の HashReport）。 */
+export interface HashReport {
+  hashed: number;
+  skipped_network: number;
+  skipped_unavailable: number;
+  changed: number;
+  failed_count: number;
+  failed: FileIssue[];
+  cancelled: boolean;
+}
+
+/** ファイルの内容のハッシュの状況（genzo-api の ContentHashStatus）。 */
+export interface ContentHashStatus {
+  files: number;
+  hashed: number;
+  pending: number;
+  duplicate_groups: number;
+  job_id: number | null;
+}
+
+/** 内容が同じファイルの 1 つ（genzo-api の ContentFile）。 */
+export interface ContentFile {
+  file_id: FileId;
+  asset_id: AssetId;
+  variant_id: VariantId;
+  role: FileRole;
+  path: string | null;
+  size: number;
+  status: FileStatus;
+}
+
+export interface DuplicateGroup {
+  full_hash: string;
+  files: ContentFile[];
+}
+
+export interface DuplicateGroupList {
+  total: number;
+  groups: DuplicateGroup[];
+}
+
+export interface FileIdentity {
+  path: string;
+  size: number;
+  full_hash: string;
+  matches: ContentFile[];
 }
 
 export type ExportOutcome =
@@ -337,7 +494,8 @@ export type JobResult =
       thumbnails_removed: number;
       previews_removed: number;
       temp_files_removed: number;
-    };
+    }
+  | ({ type: "hash_files" } & HashReport);
 
 export interface JobInfo {
   job_id: number;
@@ -382,6 +540,11 @@ export interface SearchFilter {
   collection_id?: CollectionId | null;
   /** 保存していないスマートコレクションの条件（編集中の件数など）。 */
   smart_rule?: SmartRule | null;
+  /**
+   * スタック（LIB-12）を、保存した折りたたみの状態によらず、すべて展開して並べる（結果のまとめ方だけに効く。
+   * 一致する写真・件数は変わらない）。
+   */
+  expand_stacks?: boolean;
 }
 
 export type SortKey = "capture_time" | "file_name" | "rating" | "import_order";
@@ -394,7 +557,47 @@ export interface SearchSort {
 
 export interface SearchResult {
   generation: number;
+  /** 表示する写真の数（折りたたんだスタックは 1 枚に数える）。 */
   count: number;
+  /** 条件に一致したが、折りたたんだスタックの中に隠した写真の数（LIB-12。0 なら省略）。 */
+  hidden?: number;
+}
+
+/** グリッドのセルに出すスタックの印（LIB-12。genzo-api の StackBadge）。 */
+export interface StackBadge {
+  stack_id: StackId;
+  /** スタックの中の位置（1 から。1 が一番上）。 */
+  position: number;
+  /** スタックの写真の数（2 以上）。 */
+  count: number;
+  collapsed: boolean;
+}
+
+/** スタック（LIB-12。genzo-api の StackInfo）。 */
+export interface StackInfo {
+  stack_id: StackId;
+  /** 一番上の写真（members の最初）。 */
+  top_variant_id: VariantId;
+  collapsed: boolean;
+  /** 写真（スタックの中の順。最初が一番上）。 */
+  members: VariantId[];
+}
+
+/** 撮影時刻の間隔による自動スタックの結果（LIB-12。genzo-api の AutoStackReport）。 */
+export interface AutoStackReport {
+  stacks: number;
+  photos: number;
+  considered: number;
+  skipped_in_stacks: number;
+  skipped_without_time: number;
+  dry_run: boolean;
+}
+
+/** 同じ写真のマスターと仮想コピーの 1 件（LIB-13。genzo-api の VariantBrief）。 */
+export interface VariantBrief {
+  variant_id: VariantId;
+  is_master: boolean;
+  name: string | null;
 }
 
 export interface VariantSummary {
@@ -421,6 +624,8 @@ export interface VariantSummary {
   develop_hash: string;
   /** サムネイルの rev（`genzo://thumb/{id}?rev=`）。まだなければ null。 */
   thumb_rev: string | null;
+  /** スタック（LIB-12）に入っていれば、その印。古いコアでは無い。 */
+  stack?: StackBadge | null;
 }
 
 export interface RangeResult {
@@ -434,6 +639,12 @@ export interface IndexOf {
   index: number | null;
 }
 
+/** 表示中の検索結果に出ている写真（shown_variants。問い合わせた順。隠れた写真・絞り込みに合わない写真は含まない）。 */
+export interface ShownVariants {
+  generation: number;
+  variant_ids: VariantId[];
+}
+
 export interface FileInfo {
   file_id: FileId;
   role: FileRole;
@@ -441,6 +652,8 @@ export interface FileInfo {
   size: number;
   status: FileStatus;
   status_reason: string | null;
+  /** ファイル全体の BLAKE3（ORG-03。まだ計算していなければ null。古いコアでは無い）。 */
+  full_hash?: string | null;
 }
 
 export interface VariantDetails {
@@ -456,6 +669,10 @@ export interface VariantDetails {
   metadata?: IptcMetadata;
   video: VideoMetadata | null;
   files: FileInfo[];
+  /** 同じ写真のマスターと仮想コピー（LIB-13。マスターが先。自分を含む）。古いコアでは無い。 */
+  variants?: VariantBrief[];
+  /** 入っているスタック（LIB-12）。古いコアでは無い。 */
+  stack?: StackInfo | null;
 }
 
 /**
@@ -718,6 +935,14 @@ export interface CoreSettings {
   preview_cache_bytes: number;
   default_export_color_space: OutputColorSpace;
   default_utc_offset_minutes: number;
+  /** 取り込みの既定: 重複と思われるものを取り込まない（IMP-04）。 */
+  import_skip_duplicates: boolean;
+  /** 取り込みの既定: RAW と同時記録の JPEG を別々の写真として取り込む（IMP-06）。 */
+  import_separate_raw_jpeg: boolean;
+  /** ファイルの内容のハッシュをバックグラウンドで計算する（ORG-03）。 */
+  hash_in_background: boolean;
+  /** バックグラウンドの計算で、ネットワークのボリュームのファイルも読む。 */
+  hash_network_volumes: boolean;
 }
 
 export interface SettingsUpdate {
@@ -725,6 +950,10 @@ export interface SettingsUpdate {
   preview_cache_bytes?: number | null;
   default_export_color_space?: OutputColorSpace | null;
   default_utc_offset_minutes?: number | null;
+  import_skip_duplicates?: boolean | null;
+  import_separate_raw_jpeg?: boolean | null;
+  hash_in_background?: boolean | null;
+  hash_network_volumes?: boolean | null;
 }
 
 export interface BackupEntry {
@@ -738,6 +967,8 @@ export interface CatalogStats {
   variants: number;
   files: number;
   history_entries: number;
+  /** スタックの数（LIB-12）。古いコアでは無い。 */
+  stacks?: number;
 }
 
 /** カタログの構造（ORG-07。genzo-api の CatalogSchema。文書は docs/catalog_schema.md）。 */
@@ -896,13 +1127,14 @@ export interface SmartRule {
 // ---------------------------------------------------------------------------
 
 export type Command =
-  | { type: "import_folder"; path: string; recursive: boolean }
+  | { type: "import_folder"; path: string; recursive: boolean; options?: ImportOptions }
   | { type: "job"; job_id: number }
   | { type: "wait_job"; job_id: number; timeout_ms: number | null }
   | { type: "cancel_job"; job_id: number }
   | { type: "search"; filter: SearchFilter; sort: SearchSort }
   | { type: "range"; generation: number; start: number; len: number }
   | { type: "index_of"; variant_id: VariantId }
+  | { type: "shown_variants"; variant_ids: VariantId[] }
   | { type: "set_rating"; variant_ids: VariantId[]; rating: Rating }
   | { type: "set_flag"; variant_ids: VariantId[]; flag: Flag }
   | { type: "set_color_label"; variant_ids: VariantId[]; label: ColorLabel | null }
@@ -941,6 +1173,16 @@ export type Command =
   | { type: "add_to_collection"; collection_id: CollectionId; variant_ids: VariantId[] }
   | { type: "remove_from_collection"; collection_id: CollectionId; variant_ids: VariantId[] }
   | { type: "variant_collections"; variant_id: VariantId }
+  | { type: "create_stack"; variant_ids: VariantId[]; top: VariantId | null }
+  | { type: "add_to_stack"; stack_id: StackId; variant_ids: VariantId[] }
+  | { type: "remove_from_stack"; variant_ids: VariantId[] }
+  | { type: "unstack"; variant_ids: VariantId[] }
+  | { type: "set_stack_top"; variant_id: VariantId }
+  | { type: "set_stacks_collapsed"; stack_ids: StackId[] | null; collapsed: boolean }
+  | { type: "variant_stacks"; variant_ids: VariantId[] }
+  | { type: "auto_stack"; filter: SearchFilter; gap_seconds: number; dry_run: boolean }
+  | { type: "rename_virtual_copy"; variant_id: VariantId; name: string }
+  | { type: "set_as_master"; variant_id: VariantId }
   | { type: "thumbnail"; variant_id: VariantId }
   | { type: "preview_path"; variant_id: VariantId }
   | { type: "request_preview"; variant_id: VariantId }
@@ -990,7 +1232,12 @@ export type Command =
   | { type: "startup_report" }
   | { type: "catalog_stats" }
   | { type: "catalog_schema" }
-  | { type: "capabilities" };
+  | { type: "capabilities" }
+  | { type: "compute_content_hashes"; include_network?: boolean }
+  | { type: "content_hash_status" }
+  | { type: "duplicate_groups"; limit?: number }
+  | { type: "identify_file"; path: string }
+  | { type: "import_name_preview"; copy: CopySettings };
 
 /** 応答（genzo-api の Response）。 */
 export type Response =
@@ -1000,6 +1247,7 @@ export type Response =
   | ({ type: "search" } & SearchResult)
   | ({ type: "range" } & RangeResult)
   | ({ type: "index_of" } & IndexOf)
+  | ({ type: "shown_variants" } & ShownVariants)
   | { type: "updated"; count: number }
   | ({ type: "details" } & VariantDetails)
   | ({ type: "metadata" } & MetadataSummary)
@@ -1015,6 +1263,10 @@ export type Response =
   | { type: "collections"; collections: CollectionInfo[] }
   | { type: "collection_created"; collection_id: CollectionId }
   | { type: "variant_collections"; collection_ids: CollectionId[] }
+  | ({ type: "stack" } & StackInfo)
+  | { type: "stacks"; stacks: StackInfo[] }
+  | ({ type: "auto_stack" } & AutoStackReport)
+  | { type: "master_changed"; previous_master: VariantId }
   | { type: "thumbnail"; thumbnail: { variant_id: VariantId; rev: string; jpeg: number[] } | null }
   | { type: "path"; path: string | null }
   | ({ type: "develop" } & DevelopState)
@@ -1041,7 +1293,11 @@ export type Response =
   | ({ type: "startup" } & StartupReport)
   | ({ type: "catalog_stats" } & CatalogStats)
   | ({ type: "catalog_schema" } & CatalogSchema)
-  | ({ type: "capabilities" } & Capabilities);
+  | ({ type: "capabilities" } & Capabilities)
+  | ({ type: "content_hash_status" } & ContentHashStatus)
+  | ({ type: "duplicate_groups" } & DuplicateGroupList)
+  | ({ type: "file_identity" } & FileIdentity)
+  | ({ type: "name_preview" } & NamePreview);
 
 // ---------------------------------------------------------------------------
 // イベント（コア → UI。genzo-api の Event。Tauri のイベント名は "core-event"）
@@ -1058,7 +1314,9 @@ export type CatalogChange =
   | "file_status"
   | "capture_time"
   | "keywords"
-  | "collections";
+  | "collections"
+  | "stacks"
+  | "variants";
 
 export type WarningCode =
   | "unclean_shutdown"
@@ -1076,7 +1334,8 @@ export type WarningCode =
   | "default_time_zone_differs"
   | "cache_rebuilt"
   | "catalog_lock_unavailable"
-  | "render_deps_changed";
+  | "render_deps_changed"
+  | "import_copy_rolled_back";
 
 export type CoreEvent =
   | { type: "job_progress"; job_id: number; kind: JobKind; done: number; total: number }
@@ -1099,7 +1358,7 @@ export type CoreEvent =
     }
   | { type: "before_updated"; variant_id: VariantId; generation: number; width: number; height: number }
   | { type: "thumbnail_updated"; variant_id: VariantId; rev: string }
-  | { type: "search_updated"; generation: number; count: number }
+  | { type: "search_updated"; generation: number; count: number; hidden?: number }
   | {
       type: "warning";
       code: WarningCode;
@@ -1123,6 +1382,19 @@ export interface AppSettings {
   ffmpeg_dir: string | null;
   gpu: GpuMode;
   backup_on_close: boolean;
+  /** 取り込みのダイアログの設定（古いアプリでは無い）。 */
+  import?: ImportPreferences;
+}
+
+/** 取り込みのダイアログの設定（genzo-app の ImportPreferences。アプリに保存し、次に開いたときの初めの値）。 */
+export interface ImportPreferences {
+  copy: boolean;
+  recursive: boolean;
+  destination: string | null;
+  folder_rule: FolderRule;
+  rename: boolean;
+  rename_rule: RenameRule;
+  metadata: ImportMetadata;
 }
 
 export interface ExternalTools {

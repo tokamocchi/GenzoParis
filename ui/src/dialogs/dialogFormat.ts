@@ -69,6 +69,7 @@ export const JOB_KIND_LABEL: Record<JobKind, string> = {
   integrity_check: "カタログの詳細チェック",
   reresolve_capture_times: "撮影日時の推定し直し",
   collect_garbage: "キャッシュの整理",
+  hash_files: "内容のハッシュの計算",
 };
 
 export const JOB_STATE_LABEL: Record<JobState, string> = {

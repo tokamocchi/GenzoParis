@@ -371,3 +371,252 @@ pub fn keywords_and_collections_through_the_app() {
     );
     state.close_catalog(false).unwrap();
 }
+
+/// (b) スタック（LIB-12）・仮想コピー（LIB-13）の JSON のコマンドが、アプリの `core_execute` の経路
+/// （`execute_command`）で通り、検索の応答・イベントに折りたたんだスタックの隠した写真の数が載る。
+pub fn stacks_and_virtual_copies_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("連写");
+    for (i, n) in ["A.jpg", "B.jpg", "C.jpg"].iter().enumerate() {
+        write_image(&photos.join(n), (48, 32), i as u8);
+    }
+    state.open_catalog(&env.catalog("連写.db"), true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let id = |n: &str| by_name(&items, n).variant_id.get();
+    let (a, b, c) = (id("A.jpg"), id("B.jpg"), id("C.jpg"));
+    let mark = env.events.mark();
+    let Response::Stack(stack) = ok(
+        &state,
+        json!({"type": "create_stack", "variant_ids": [a, b], "top": b}),
+    ) else {
+        panic!("スタックの応答ではない");
+    };
+    assert_eq!(stack.top_variant_id, VariantId::new(b));
+    assert!(stack.collapsed);
+    env.events.wait_for(mark, "スタックの変更", |e| {
+        matches!(
+            e,
+            Event::CatalogChanged {
+                change: CatalogChange::Stacks,
+                ..
+            }
+        )
+    });
+    // 折りたたんだスタックは 1 枚に数え、隠した写真の数を返す。
+    let Response::Search(s) = ok(&state, json!({"type": "search"})) else {
+        panic!("検索の応答ではない");
+    };
+    assert_eq!((s.count, s.hidden), (2, 1));
+    let Response::Range(r) = ok(
+        &state,
+        json!({"type": "range", "generation": s.generation, "start": 0, "len": 10}),
+    ) else {
+        panic!("範囲の応答ではない");
+    };
+    let top = r
+        .items
+        .iter()
+        .find(|i| i.variant_id == VariantId::new(b))
+        .unwrap();
+    let badge = top.stack.unwrap();
+    assert_eq!((badge.position, badge.count, badge.collapsed), (1, 2, true));
+    // 展開を保存すると、作り直しの世代でスタックの写真が並ぶ。
+    let mark = env.events.mark();
+    let r = ok(
+        &state,
+        json!({"type": "set_stacks_collapsed", "stack_ids": [stack.stack_id.get()], "collapsed": false}),
+    );
+    assert!(matches!(r, Response::Updated { count: 1 }), "{r:?}");
+    env.events.wait_for(mark, "作り直した検索結果", |e| {
+        matches!(
+            e,
+            Event::SearchUpdated {
+                count: 3,
+                hidden: 0,
+                ..
+            }
+        )
+    });
+    // 仮想コピー: 作る・名前の変更・マスターにする。
+    let Response::VariantCreated { variant_id: copy } = ok(
+        &state,
+        json!({"type": "create_virtual_copy", "variant_id": c, "name": null}),
+    ) else {
+        panic!("仮想コピーの応答ではない");
+    };
+    ok(
+        &state,
+        json!({"type": "rename_virtual_copy", "variant_id": copy.get(), "name": "白黒"}),
+    );
+    let r = ok(
+        &state,
+        json!({"type": "set_as_master", "variant_id": copy.get()}),
+    );
+    assert_eq!(
+        r,
+        Response::MasterChanged {
+            previous_master: VariantId::new(c)
+        }
+    );
+    let Response::Details(d) = ok(&state, json!({"type": "variant_details", "variant_id": c}))
+    else {
+        panic!("詳細の応答ではない");
+    };
+    assert!(!d.summary.is_master);
+    assert_eq!(d.summary.variant_name.as_deref(), Some("白黒"));
+    assert_eq!(d.variants.len(), 2);
+    assert_eq!(d.stack.as_ref().map(|s| s.members.len()), Some(2));
+    crate::support::assert_kind(
+        crate::support::exec(&state, json!({"type": "create_stack", "variant_ids": [a]})),
+        genzo_api::ErrorKind::InvalidInput,
+    );
+    state.close_catalog(false).unwrap();
+}
+
+/// (b) ファイルの内容による同一性（ORG-03・IMP-04）と RAW と JPEG の扱い（IMP-06）: アプリはカタログを開いて
+/// いる間、内容のハッシュをバックグラウンドで計算する（取り込みの後）。取り込みの設定（重複と思われるもの・
+/// RAW と JPEG）の JSON のコマンドが `core_execute` の経路で通り、状況・重複の組を読める。
+pub fn content_identity_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let first = env.photos("一 回目");
+    let second = env.photos("二 回目");
+    write_image(&first.join("海.jpg"), (48, 32), 1);
+    write_image(&first.join("山.jpg"), (48, 32), 2);
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::copy(first.join("海.jpg"), second.join("海 の コピー.jpg")).unwrap();
+    state.open_catalog(&env.catalog("同一性.db"), true).unwrap();
+    let mark = env.events.mark();
+    let report = import(&state, &first);
+    assert_eq!(report.added, 2, "{report:?}");
+    // 取り込みの後に、内容のハッシュの計算がバックグラウンドで動いて終わる。
+    env.events
+        .wait_for(mark, "内容のハッシュの計算の終わり", |e| {
+            matches!(
+                e,
+                Event::JobFinished {
+                    kind: JobKind::HashFiles,
+                    state: JobState::Succeeded,
+                    ..
+                }
+            )
+        });
+    let Response::ContentHashStatus(st) = ok(&state, json!({"type": "content_hash_status"})) else {
+        panic!("状況の応答ではない");
+    };
+    assert_eq!((st.files, st.hashed, st.pending), (2, 2, 0), "{st:?}");
+    // 既定では、同じ内容のファイルを取り込まない。
+    let r = import(&state, &second);
+    assert_eq!((r.added, r.duplicates.len()), (0, 1), "{r:?}");
+    assert!(r.duplicates[0].skipped);
+    // 取り込む設定を指定すると、別の写真として登録する。
+    let Response::JobStarted { job_id } = ok(
+        &state,
+        json!({"type": "import_folder", "path": second, "recursive": true,
+               "options": {"skip_duplicates": false, "separate_raw_jpeg": true}}),
+    ) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    let Some(genzo_api::JobResult::Import(r)) = info.result else {
+        panic!("{info:?}");
+    };
+    assert_eq!(r.added, 1, "{r:?}");
+    assert!(!r.skip_duplicates && r.separate_raw_jpeg);
+    let Response::DuplicateGroups(g) = ok(&state, json!({"type": "duplicate_groups", "limit": 10}))
+    else {
+        panic!("重複の組の応答ではない");
+    };
+    assert_eq!((g.total, g.groups[0].files.len()), (1, 2));
+    // 設定（取り込みの既定・バックグラウンドの計算）は get_settings・update_settings で読み書きできる。
+    let Response::CoreSettings(s) = ok(
+        &state,
+        json!({"type": "update_settings", "update": {"import_skip_duplicates": false, "hash_network_volumes": true}}),
+    ) else {
+        panic!("設定の応答ではない");
+    };
+    assert!(!s.import_skip_duplicates && s.hash_network_volumes && s.hash_in_background);
+    state.close_catalog(false).unwrap();
+}
+
+/// コピー取り込み（IMP-02・IMP-03・IMP-05）を画面と同じ JSON のコマンドで行う: 名前の例、日付別のフォルダへの
+/// コピーとリネーム、まとめて付けるキーワード・作成者。取り込みのダイアログの設定はアプリの設定に保存され、
+/// 開き直しても残る（カタログによらない）。
+pub fn copy_import_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let card = env.photos("SD カード");
+    write_image(
+        &card.join("DCIM").join("100MSDCF").join("DSC 1.jpg"),
+        (48, 32),
+        1,
+    );
+    write_image(
+        &card.join("DCIM").join("100MSDCF").join("DSC 2.jpg"),
+        (48, 32),
+        2,
+    );
+    let dest = env.photos("写真 ライブラリ");
+    std::fs::create_dir_all(&dest).unwrap();
+    state.open_catalog(&env.catalog("コピー.db"), true).unwrap();
+    // 名前の例（カタログ・ファイルは使わない）。
+    let Response::NamePreview(p) = ok(
+        &state,
+        json!({"type": "import_name_preview", "copy": {"destination": dest,
+               "folder_rule": "year_date", "rename": {"template": "{date}-{seq}"}}}),
+    ) else {
+        panic!("名前の例の応答ではない");
+    };
+    assert_eq!(
+        p.examples[0].destination,
+        "2026/2026-10-13/20261013-0001.ARW"
+    );
+    // コピー取り込み（撮影日時のない画像は、ファイルの更新日時で日付を決める）。
+    let Response::JobStarted { job_id } = ok(
+        &state,
+        json!({"type": "import_folder", "path": card, "recursive": true,
+               "options": {"copy": {"destination": dest, "folder_rule": "single",
+                                    "rename": {"template": "旅行-{seq}", "sequence_digits": 2}},
+                           "metadata": {"keywords": [["旅行", "京都"]], "fields": {"creator": "岡本"}}}}),
+    ) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    let Some(genzo_api::JobResult::Import(r)) = info.result else {
+        panic!("{info:?}");
+    };
+    assert_eq!((r.added, r.tagged), (2, 2), "{r:?}");
+    let copy = r.copy.as_deref().unwrap();
+    assert_eq!(copy.copied.len(), 2);
+    assert_eq!(copy.dated_by_file_time, 2);
+    let mut names: Vec<String> = std::fs::read_dir(&dest)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["旅行-01.jpg", "旅行-02.jpg"]);
+    let items = all_items(&state);
+    let Response::Details(d) = ok(
+        &state,
+        json!({"type": "variant_details", "variant_id": by_name(&items, "旅行-01.jpg").variant_id}),
+    ) else {
+        panic!("詳細の応答ではない");
+    };
+    assert_eq!(d.metadata.creator.as_deref(), Some("岡本"));
+    // 取り込みのダイアログの設定をアプリに保存する。
+    let mut prefs = genzo_app::settings::ImportPreferences {
+        copy: true,
+        destination: Some(dest.clone()),
+        folder_rule: genzo_api::FolderRule::Single,
+        rename: true,
+        ..Default::default()
+    };
+    prefs.rename_rule.template = "旅行-{seq}".to_owned();
+    let saved = state.update_settings(|s| s.import = prefs.clone()).unwrap();
+    assert_eq!(saved.import, prefs);
+    state.close_catalog(false).unwrap();
+    let again = env.state();
+    assert_eq!(again.settings().import, prefs);
+}

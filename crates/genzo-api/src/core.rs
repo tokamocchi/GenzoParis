@@ -99,6 +99,31 @@ pub struct CoreHooks {
     /// スレッドで呼ぶ（値は variant）。
     #[doc(hidden)]
     pub on_regenerate_start: Option<Arc<dyn Fn(genzo_model::VariantId) + Send + Sync>>,
+    /// テスト専用: コピー取り込み（IMP-02）が途中の段階に着いたときに、ジョブのスレッドで呼ぶ
+    /// （[`CopyImportStage`]）。`Err` を返すと、その段階の失敗（書き込み・照合の失敗、公開の後の失敗、カタログへの
+    /// 登録の失敗）として扱うので、失敗したときの後始末（このジョブが作ったファイルだけを消す）を確かめられる。
+    #[doc(hidden)]
+    pub on_copy_import: Option<CopyImportHook>,
+}
+
+/// [`CoreHooks::on_copy_import`] の関数。
+#[doc(hidden)]
+pub type CopyImportHook = Arc<dyn Fn(&CopyImportStage) -> Result<(), String> + Send + Sync>;
+
+/// コピー取り込みの途中の段階（テスト専用のフック [`CoreHooks::on_copy_import`] に渡す）。
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyImportStage {
+    /// 一時ファイルに書いて同期した後、内容の照合の前（値は一時ファイル。フックの中で書き換えると照合で
+    /// 失敗する）。
+    Written(std::path::PathBuf),
+    /// 1 つのファイルを公開した直後（値はコピー先）。
+    Published(std::path::PathBuf),
+    /// カタログへの登録の直前（値は登録するファイルの数）。
+    Registering(usize),
+    /// カタログへの登録（コミット）の直後（値は登録したファイルの数）。`Err` は登録の後の処理の失敗（結果の
+    /// 集計・サムネイルの記録の読み取りなど）として扱う。
+    Registered(usize),
 }
 
 /// 現像設定の保存（現像のロックを外して書く保存）の途中の段階（テスト専用のフック
@@ -146,6 +171,7 @@ impl Default for CoreHooks {
             on_region_request: None,
             on_develop_save: None,
             on_regenerate_start: None,
+            on_copy_import: None,
         }
     }
 }
@@ -165,6 +191,11 @@ pub(crate) struct Inner {
     pub workers: Mutex<Option<Arc<WorkerPool>>>,
     pub background: Scheduler,
     pub interactive: Scheduler,
+    /// ファイルの内容のハッシュの計算（ORG-03。`identity` の doc）を実行する 1 本のスレッド。長くかかるので、
+    /// 書き出し・プレビューの作り直しの P3 のスレッドを占めないよう分ける。
+    pub maintenance: Scheduler,
+    /// ファイルの内容のハッシュの計算のジョブの状態（`identity` の doc）。
+    pub hash: Mutex<crate::identity::HashJobState>,
     pub engine: Engine,
     pub gpu: Mutex<GpuState>,
     pub display: Mutex<DisplayState>,
@@ -184,6 +215,8 @@ pub(crate) struct Inner {
     pub on_develop_save: Option<Arc<dyn Fn(DevelopSaveStage) + Send + Sync>>,
     /// [`CoreHooks::on_regenerate_start`]。
     pub on_regenerate_start: Option<Arc<dyn Fn(VariantId) + Send + Sync>>,
+    /// [`CoreHooks::on_copy_import`]。
+    pub on_copy_import: Option<CopyImportHook>,
     pub settings: Mutex<CoreSettings>,
     /// 設定の更新（[`Core::update_settings`]）を 1 つずつにするロック（保存・メモリ上の設定への反映・
     /// キャッシュの上限への反映を、別々のロックで行うので、更新全体を守る。ロックの順序の節）。
@@ -421,6 +454,7 @@ impl Core {
             pool,
             background,
             interactive,
+            maintenance,
             engine,
             display,
         } = parts;
@@ -433,6 +467,8 @@ impl Core {
             workers: Mutex::new(Some(Arc::new(pool))),
             background,
             interactive,
+            maintenance,
+            hash: Mutex::new(crate::identity::HashJobState::default()),
             engine,
             gpu: Mutex::new(GpuState::default()),
             display: Mutex::new(display),
@@ -446,6 +482,7 @@ impl Core {
             on_region_request: hooks.on_region_request,
             on_develop_save: hooks.on_develop_save,
             on_regenerate_start: hooks.on_regenerate_start,
+            on_copy_import: hooks.on_copy_import,
             settings: Mutex::new(settings),
             settings_update: Mutex::new(()),
             reresolve_job: Mutex::new(None),
@@ -504,6 +541,9 @@ impl Core {
         }
         // 前回作り直せなかった L0 / L1（編集の直後に終了したなど）を作り直す。
         crate::previews::regenerate_pending(&inner);
+        // ファイルの内容のハッシュのまだないファイル（版 10 より前から移行したカタログを含む）を、バックグラウンド
+        // で計算する（ORG-03。アプリが許し、設定が有効なときだけ）。
+        crate::identity::request_background_hashing(&inner);
         Ok(Self { inner })
     }
 
@@ -566,17 +606,25 @@ impl Core {
         &self.inner.config.catalog_path
     }
 
-    /// バックグラウンドのジョブ（P3）と現像のプレビュー（P0）がすべて終わるまで待つ（CLI・テスト用）。
+    /// バックグラウンドのジョブ（P3）・ファイルの内容のハッシュの計算・現像のプレビュー（P0）がすべて終わるまで
+    /// 待つ（CLI・テスト用）。
     ///
-    /// ジョブの中で投入されたジョブ（取り込みの後のプレビューの作り直しなど）も待つ。
+    /// ジョブの中で投入されたジョブ（取り込みの後のプレビューの作り直しなど）も待つ。内容のハッシュを
+    /// バックグラウンドで計算する設定（[`CoreConfig::background_hashing`]）では、すべてのファイルを読み終える
+    /// まで待つことになる。
     pub fn wait_idle(&self) {
+        let schedulers = [
+            &self.inner.background,
+            &self.inner.interactive,
+            &self.inner.maintenance,
+        ];
         loop {
-            self.inner.background.wait_idle();
-            self.inner.interactive.wait_idle();
-            if self.inner.background.queued_count() == 0
-                && self.inner.background.running_count() == 0
-                && self.inner.interactive.queued_count() == 0
-                && self.inner.interactive.running_count() == 0
+            for s in schedulers {
+                s.wait_idle();
+            }
+            if schedulers
+                .iter()
+                .all(|s| s.queued_count() == 0 && s.running_count() == 0)
             {
                 break;
             }
@@ -647,6 +695,7 @@ fn close_inner(inner: &Arc<Inner>, mode: CloseMode) -> Result<(), ApiError> {
     inner.jobs.cancel_all();
     inner.background.shutdown_now();
     inner.interactive.shutdown_now();
+    inner.maintenance.shutdown_now();
     // キューから実行されずに外れたジョブも、取り消しとして記録して知らせる。
     inner.jobs.reap_unrun(inner);
     // 検索結果の作り直しのスレッドを止める（読み取り専用の接続を閉じる。カタログを閉じる前に）。
@@ -705,6 +754,7 @@ struct Parts {
     pool: WorkerPool,
     background: Scheduler,
     interactive: Scheduler,
+    maintenance: Scheduler,
     engine: Engine,
     display: DisplayState,
 }
@@ -770,8 +820,11 @@ fn build_parts(
         budget.clone(),
     )
     .map_err(|e| ApiError::Job(e.to_string()))?;
-    let interactive =
-        Scheduler::with_budget(1, "genzo-p0", budget).map_err(|e| ApiError::Job(e.to_string()))?;
+    let interactive = Scheduler::with_budget(1, "genzo-p0", budget.clone())
+        .map_err(|e| ApiError::Job(e.to_string()))?;
+    // ファイルの内容のハッシュの計算（ORG-03）。読み込みの小さなバッファだけを使う（メモリの予算の枠は取らない）。
+    let maintenance = Scheduler::with_budget(1, "genzo-hash", budget)
+        .map_err(|e| ApiError::Job(e.to_string()))?;
     let engine = Engine::new(EngineConfig::default())?;
     let display = DisplayState::assumed_srgb()?;
     Ok(Parts {
@@ -785,6 +838,7 @@ fn build_parts(
         pool,
         background,
         interactive,
+        maintenance,
         engine,
         display,
     })

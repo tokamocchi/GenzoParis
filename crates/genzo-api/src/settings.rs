@@ -1,4 +1,6 @@
-//! 設定（SYS-05）: キャッシュの場所と上限、書き出しの既定の色空間、既定のタイムゾーン。
+//! 設定（SYS-05）: キャッシュの場所と上限、書き出しの既定の色空間、既定のタイムゾーン、取り込みの既定
+//! （重複と思われるもの・RAW と JPEG の扱い。IMP-04・IMP-06）、ファイルの内容のハッシュのバックグラウンドの
+//! 計算（ORG-03）。
 //!
 //! カタログの設定テーブル（`setting`）に保存する。カタログに値がなければ [`CoreConfig`] の初期値、
 //! それもなければ組み込みの既定値を使う。既定のタイムゾーンは、カタログに値がなければ、開いたときに
@@ -27,6 +29,14 @@ pub const KEY_PREVIEW_CACHE_BYTES: &str = "api.preview_cache_bytes";
 pub const KEY_DEFAULT_EXPORT_COLOR_SPACE: &str = "api.default_export_color_space";
 /// 設定テーブルのキー: 既定のタイムゾーンのオフセット（分）。
 pub const KEY_DEFAULT_UTC_OFFSET_MINUTES: &str = "api.default_utc_offset_minutes";
+/// 設定テーブルのキー: 取り込みの既定で、重複と思われるものを取り込まない（`true` / `false`）。
+pub const KEY_IMPORT_SKIP_DUPLICATES: &str = "api.import_skip_duplicates";
+/// 設定テーブルのキー: 取り込みの既定で、RAW と同時記録の JPEG を別々の写真として取り込む（`true` / `false`）。
+pub const KEY_IMPORT_SEPARATE_RAW_JPEG: &str = "api.import_separate_raw_jpeg";
+/// 設定テーブルのキー: ファイルの内容のハッシュをバックグラウンドで計算する（`true` / `false`）。
+pub const KEY_HASH_IN_BACKGROUND: &str = "api.hash_in_background";
+/// 設定テーブルのキー: バックグラウンドの計算で、ネットワークのボリュームのファイルも読む（`true` / `false`）。
+pub const KEY_HASH_NETWORK_VOLUMES: &str = "api.hash_network_volumes";
 
 /// 既定のタイムゾーンのオフセットとして受け付ける範囲（分。UTC−14:00〜UTC+14:00。現存する
 /// タイムゾーンの範囲）。
@@ -86,12 +96,34 @@ pub(crate) fn load(
         },
         None => fallback_offset,
     };
+    let flag = |key: &str, default: bool| -> Result<bool, ApiError> {
+        Ok(match catalog.setting(key)? {
+            Some(v) => parse_flag(&v).unwrap_or_else(|| {
+                bad(key, &v);
+                default
+            }),
+            None => default,
+        })
+    };
     Ok(CoreSettings {
         preview_cache_dir,
         preview_cache_bytes,
         default_export_color_space,
         default_utc_offset_minutes,
+        import_skip_duplicates: flag(KEY_IMPORT_SKIP_DUPLICATES, true)?,
+        import_separate_raw_jpeg: flag(KEY_IMPORT_SEPARATE_RAW_JPEG, false)?,
+        hash_in_background: flag(KEY_HASH_IN_BACKGROUND, true)?,
+        hash_network_volumes: flag(KEY_HASH_NETWORK_VOLUMES, false)?,
     })
+}
+
+/// 設定テーブルの真偽値（`true` / `false`）を読む（ほかの値は `None`）。
+fn parse_flag(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 /// 既定のタイムゾーンがカタログに保存されていなければ、決めた値（[`CoreConfig`] の初期値、なければ OS の
@@ -237,6 +269,19 @@ impl Core {
         if let Some(m) = update.default_utc_offset_minutes {
             entries.push((KEY_DEFAULT_UTC_OFFSET_MINUTES, m.to_string()));
         }
+        for (key, value) in [
+            (KEY_IMPORT_SKIP_DUPLICATES, update.import_skip_duplicates),
+            (
+                KEY_IMPORT_SEPARATE_RAW_JPEG,
+                update.import_separate_raw_jpeg,
+            ),
+            (KEY_HASH_IN_BACKGROUND, update.hash_in_background),
+            (KEY_HASH_NETWORK_VOLUMES, update.hash_network_volumes),
+        ] {
+            if let Some(v) = value {
+                entries.push((key, v.to_string()));
+            }
+        }
         // 既定のオフセットを変えるときは、推定し直しを終える前にアプリが終わっても、次に開いたときに推定し直す
         // 印（spawn_reresolve）を、設定と同じトランザクションで付ける。
         let mark_reresolve = update
@@ -270,6 +315,18 @@ impl Core {
             if let Some(m) = update.default_utc_offset_minutes {
                 s.default_utc_offset_minutes = m;
             }
+            if let Some(v) = update.import_skip_duplicates {
+                s.import_skip_duplicates = v;
+            }
+            if let Some(v) = update.import_separate_raw_jpeg {
+                s.import_separate_raw_jpeg = v;
+            }
+            if let Some(v) = update.hash_in_background {
+                s.hash_in_background = v;
+            }
+            if let Some(v) = update.hash_network_volumes {
+                s.hash_network_volumes = v;
+            }
             s.clone()
         };
         // 撮影日時の推定し直しは、失敗しうるキャッシュの上限の反映より先に投入する。ここまでで、設定は保存と
@@ -279,6 +336,16 @@ impl Core {
         // 動かす）まで直らない。
         if current.default_utc_offset_minutes != previous.default_utc_offset_minutes {
             spawn_reresolve(inner);
+        }
+        // ファイルの内容のハッシュのバックグラウンドの計算（ORG-03）: 止めたら実行中の計算を取り消し、始めた
+        // （ネットワークのボリュームを含めた）ら計算を頼む。
+        if !current.hash_in_background && previous.hash_in_background {
+            crate::identity::cancel_hashing(inner);
+        } else if current.hash_in_background
+            && (!previous.hash_in_background
+                || (current.hash_network_volumes && !previous.hash_network_volumes))
+        {
+            crate::identity::request_background_hashing(inner);
         }
         if let Some(bytes) = update.preview_cache_bytes {
             inner.with_cache(|c| c.previews.set_capacity_bytes(bytes))?;
@@ -381,6 +448,15 @@ pub(crate) fn spawn_reresolve(inner: &Arc<Inner>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flags_are_read_only_from_true_and_false() {
+        assert_eq!(parse_flag("true"), Some(true));
+        assert_eq!(parse_flag("false"), Some(false));
+        for bad in ["", "1", "TRUE", " true"] {
+            assert_eq!(parse_flag(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn offset_mismatch_is_reported_with_both_offsets() {

@@ -66,6 +66,10 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
         DevelopCommand::DeleteCopy { variant } => {
             crate::library::delete(g, out, DeleteKind::VirtualCopies, &[variant], true)
         }
+        DevelopCommand::RenameCopy { variant, name } => {
+            crate::stacks::rename_copy(g, out, variant, &name)
+        }
+        DevelopCommand::MakeMaster { variant } => crate::stacks::make_master(g, out, variant),
         DevelopCommand::Region(a) => region(g, out, &a),
         DevelopCommand::Before(a) => before(g, out, &a),
     }
@@ -373,7 +377,9 @@ fn virtual_copy(
     if out.json {
         out.print_json(&json!({ "variant_id": id, "from": v }));
     } else {
-        out.line(format!("仮想コピーを作りました: variant {id}（元: {v}）"));
+        out.line(format!(
+            "仮想コピーを作りました: variant {id}（元: {v}。元の写真と同じスタックに入れました）"
+        ));
     }
     Ok(Status::Success)
 }

@@ -6,6 +6,7 @@
 import { bridge } from "./bridge";
 import { ApiError, toApiError } from "./errors";
 import type {
+  AutoStackReport,
   BackupEntry,
   BeforeInfo,
   BeforeSource,
@@ -17,6 +18,8 @@ import type {
   CollectionKind,
   ColorLabel,
   Command,
+  ContentHashStatus,
+  CopySettings,
   CoreSettings,
   CropRect,
   DeleteKind,
@@ -25,14 +28,17 @@ import type {
   DevelopSettings,
   DevelopState,
   DisplayInfo,
+  DuplicateGroupList,
   ExportSettings,
   Facets,
   FileCheckReport,
+  FileIdentity,
   Flag,
   FolderInfo,
   FrameInfo,
   HistoryEntryId,
   HistoryItem,
+  ImportOptions,
   IndexOf,
   IptcMetadata,
   JobInfo,
@@ -41,6 +47,7 @@ import type {
   KeywordInfo,
   KeywordUsage,
   MetadataSummary,
+  NamePreview,
   RangeResult,
   Rating,
   RegionInfo,
@@ -52,7 +59,10 @@ import type {
   SearchSort,
   SettingGroups,
   SettingsUpdate,
+  ShownVariants,
   SmartRule,
+  StackId,
+  StackInfo,
   StartupReport,
   VariantDetails,
   VariantId,
@@ -90,8 +100,9 @@ function strip<T extends { type: string }>(r: T): Omit<T, "type"> {
 }
 
 // --- ジョブ ---
-export const importFolder = async (path: string, recursive = true) =>
-  (await execute({ type: "import_folder", path, recursive }, "job_started")).job_id;
+export const importFolder = async (path: string, recursive = true, options?: ImportOptions) =>
+  (await execute(options ? { type: "import_folder", path, recursive, options } : { type: "import_folder", path, recursive }, "job_started"))
+    .job_id;
 export const job = async (job_id: number): Promise<JobInfo> =>
   strip(await execute({ type: "job", job_id }, "job"));
 export const cancelJob = async (job_id: number) => {
@@ -105,6 +116,9 @@ export const range = async (generation: number, start: number, len: number): Pro
   strip(await execute({ type: "range", generation, start, len }, "range"));
 export const indexOf = async (variant_id: VariantId): Promise<IndexOf> =>
   strip(await execute({ type: "index_of", variant_id }, "index_of"));
+/** 写真のうち、表示中の検索結果に出ているもの（選択を表示している写真だけにする。LIB-12）。 */
+export const shownVariants = async (variant_ids: VariantId[]): Promise<ShownVariants> =>
+  strip(await execute({ type: "shown_variants", variant_ids }, "shown_variants"));
 export const setRating = async (variant_ids: VariantId[], rating: Rating) =>
   (await execute({ type: "set_rating", variant_ids, rating }, "updated")).count;
 export const setFlag = async (variant_ids: VariantId[], flag: Flag) =>
@@ -192,6 +206,40 @@ export const removeFromCollection = async (collection_id: CollectionId, variant_
   (await execute({ type: "remove_from_collection", collection_id, variant_ids }, "updated")).count;
 export const variantCollections = async (variant_id: VariantId): Promise<CollectionId[]> =>
   (await execute({ type: "variant_collections", variant_id }, "variant_collections")).collection_ids;
+
+// --- スタック（LIB-12） ---
+/** 写真をまとめて 1 つのスタックにする（既にスタックに入っている写真があれば、そのスタックもまとめる）。 */
+export const createStack = async (variant_ids: VariantId[], top: VariantId | null = null): Promise<StackInfo> =>
+  strip(await execute({ type: "create_stack", variant_ids, top }, "stack"));
+/** スタックに写真を足す（ほかのスタックの写真は移す）。新しく足した数を返す。 */
+export const addToStack = async (stack_id: StackId, variant_ids: VariantId[]) =>
+  (await execute({ type: "add_to_stack", stack_id, variant_ids }, "updated")).count;
+/** 写真をスタックから外す（1 枚以下になったスタックは消える）。外した数を返す。 */
+export const removeFromStack = async (variant_ids: VariantId[]) =>
+  (await execute({ type: "remove_from_stack", variant_ids }, "updated")).count;
+/** 写真が入っているスタックを解除する（写真は消えない）。解除したスタックの数を返す。 */
+export const unstack = async (variant_ids: VariantId[]) =>
+  (await execute({ type: "unstack", variant_ids }, "updated")).count;
+/** 写真をそのスタックの一番上にする。 */
+export const setStackTop = async (variant_id: VariantId): Promise<StackInfo> =>
+  strip(await execute({ type: "set_stack_top", variant_id }, "stack"));
+/** スタックの折りたたみの状態を変える（stack_ids が null ならすべて）。状態の変わったスタックの数を返す。 */
+export const setStacksCollapsed = async (stack_ids: StackId[] | null, collapsed: boolean) =>
+  (await execute({ type: "set_stacks_collapsed", stack_ids, collapsed }, "updated")).count;
+/** 写真が入っているスタック。 */
+export const variantStacks = async (variant_ids: VariantId[]): Promise<StackInfo[]> =>
+  (await execute({ type: "variant_stacks", variant_ids }, "stacks")).stacks;
+/** 撮影時刻の間隔で自動的にスタックを作る（dry_run なら数えるだけ）。 */
+export const autoStack = async (filter: SearchFilter, gap_seconds: number, dry_run: boolean): Promise<AutoStackReport> =>
+  strip(await execute({ type: "auto_stack", filter, gap_seconds, dry_run }, "auto_stack"));
+
+// --- 仮想コピー（LIB-13） ---
+export const renameVirtualCopy = async (variant_id: VariantId, name: string) => {
+  await execute({ type: "rename_virtual_copy", variant_id, name }, "ok");
+};
+/** 仮想コピーをマスターにする（前のマスターは仮想コピーになる）。前のマスターを返す。 */
+export const setAsMaster = async (variant_id: VariantId) =>
+  (await execute({ type: "set_as_master", variant_id }, "master_changed")).previous_master;
 
 // --- サムネイル・プレビュー ---
 export const requestPreview = async (variant_id: VariantId) =>
@@ -303,4 +351,23 @@ export const catalogSchema = async (): Promise<CatalogSchema> =>
   strip(await execute({ type: "catalog_schema" }, "catalog_schema"));
 export const capabilities = async (): Promise<Capabilities> =>
   strip(await execute({ type: "capabilities" }, "capabilities"));
+
+// --- 内容による同一性（ORG-03・IMP-04） ---
+/** 全体のハッシュのないファイルの内容のハッシュを計算する（既に計算中なら、そのジョブ）。 */
+export const computeContentHashes = async (include_network = false) =>
+  (await execute({ type: "compute_content_hashes", include_network }, "job_started")).job_id;
+export const contentHashStatus = async (): Promise<ContentHashStatus> =>
+  strip(await execute({ type: "content_hash_status" }, "content_hash_status"));
+export const duplicateGroups = async (limit = 100): Promise<DuplicateGroupList> =>
+  strip(await execute({ type: "duplicate_groups", limit }, "duplicate_groups"));
+export const identifyFile = async (path: string): Promise<FileIdentity> =>
+  strip(await execute({ type: "identify_file", path }, "file_identity"));
+
+// ---------------------------------------------------------------------------
+// コピー取り込みの名前（IMP-03）
+// ---------------------------------------------------------------------------
+
+/** コピー取り込みの設定の、名前の例（見本の写真のコピー先。設定の誤りは error）。 */
+export const importNamePreview = async (copy: CopySettings): Promise<NamePreview> =>
+  strip(await execute({ type: "import_name_preview", copy }, "name_preview"));
 export type { DisplayInfo };

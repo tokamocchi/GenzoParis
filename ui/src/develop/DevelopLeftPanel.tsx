@@ -14,6 +14,7 @@ import type { DevelopSettings, HistoryEntryId, HistoryItem, VariantId } from "..
 import { comboLabel } from "../keyboard";
 import { actions, appStore, useApp } from "../state/app";
 import { developStore, enqueue, redo, undo, useDevelop } from "../state/develop";
+import { createVirtualCopyOf } from "../state/stacks";
 import { shallowEqual } from "../state/store";
 import { Section } from "../components/Section";
 import { historyAvailability, historyRows, redoAvailable } from "./historyMath";
@@ -103,31 +104,6 @@ function syncToSelection(ids: VariantId[]): void {
   if (targets.length === 0) return;
   actions.setClipboard(c);
   actions.openDialog({ kind: "paste_settings", targets });
-}
-
-async function createVirtualCopy(variantId: VariantId): Promise<void> {
-  const result: { id: VariantId | null } = { id: null };
-  // 送信待ちの設定を送ってから作る（コアは保存待ちの変更を保存してから写す）。
-  await enqueue(async () => {
-    try {
-      result.id = await core.createVirtualCopy(variantId);
-    } catch (e) {
-      actions.reportError(e, "仮想コピーを作れません");
-    }
-  });
-  const newId = result.id;
-  if (newId === null) return;
-  await actions.runSearch();
-  try {
-    const r = await core.indexOf(newId);
-    if (r.index !== null) await actions.selectIndex(r.index);
-    actions.notify(
-      "success",
-      r.index !== null ? "仮想コピーを作りました" : "仮想コピーを作りました（今の絞り込みでは表示されません）",
-    );
-  } catch (e) {
-    actions.reportError(e, "仮想コピーを選べません");
-  }
 }
 
 /**
@@ -270,8 +246,8 @@ export function DevelopLeftPanel() {
         <button
           className="btn small wide"
           disabled={!ready || variantId === null}
-          onClick={() => variantId !== null && void createVirtualCopy(variantId)}
-          title="元のファイルを複製せずに、別の現像設定を持てる写しを作る"
+          onClick={() => variantId !== null && void createVirtualCopyOf(variantId)}
+          title={`元のファイルを複製せずに、別の現像設定を持てる写しを作る（元の写真と同じスタックに入る。${comboLabel("mod+'")}）`}
         >
           仮想コピーを作る
         </button>

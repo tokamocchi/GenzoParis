@@ -14,7 +14,8 @@ use serde_json::json;
 
 use crate::Status;
 use crate::args::{
-    FlagArg, GlobalArgs, ImportArgs, KindArg, LabelArg, SearchArgs, ThumbsCommand, direction,
+    FilterArgs, FlagArg, GlobalArgs, ImportArgs, KindArg, LabelArg, SearchArgs, ThumbsCommand,
+    direction,
 };
 use crate::error::{CliError, CliResult};
 use crate::output::{Output, Table, json_value, key_values, one_line};
@@ -56,7 +57,9 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
             ..Default::default()
         },
     )?;
-    let job = s.core.import_folder(&a.dir, !a.no_recursive)?;
+    let job = s
+        .core
+        .import_folder_with(&a.dir, !a.no_recursive, &a.options())?;
     let info = s.wait_job_ok(job, "取り込み")?;
     let Some(JobResult::Import(report)) = info.result else {
         return Err(CliError::other("取り込みの結果がありません"));
@@ -98,6 +101,74 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
                 one_line(&e.reason)
             ));
         }
+        if let Some(copy) = report.copy.as_deref() {
+            out.line(format!(
+                "  コピー先: {}（{} 件{}。コピーした大きさ {} バイト）",
+                copy.destination.display(),
+                copy.copied.len(),
+                if copy.dry_run {
+                    "の予定。コピー・登録はしていません"
+                } else {
+                    ""
+                },
+                copy.bytes_copied
+            ));
+            for c in &copy.copied {
+                let what = if copy.dry_run {
+                    if c.existing {
+                        "予定（同じ内容が既にあり、それを登録）"
+                    } else {
+                        "予定"
+                    }
+                } else if c.existing {
+                    "既にあった同じ内容のファイルを登録"
+                } else {
+                    "コピー"
+                };
+                out.line(format!(
+                    "  {what}: {} → {}",
+                    c.source.display(),
+                    c.destination.display()
+                ));
+            }
+            if copy.dated_by_file_time > 0 {
+                out.line(format!(
+                    "  撮影日時が分からず、ファイルの更新日時で日付を決めたファイル: {} 件",
+                    copy.dated_by_file_time
+                ));
+            }
+        }
+        if report.tagged > 0 {
+            out.line(format!(
+                "  キーワード・メタデータを付けた写真: {} 枚",
+                report.tagged
+            ));
+        }
+        if report.paired > 0 {
+            out.line(format!(
+                "  RAW と組にした JPEG: {} 件（1 枚の写真にまとめました）",
+                report.paired
+            ));
+        }
+        for d in &report.duplicates {
+            let existing = d
+                .existing_path
+                .as_deref()
+                .map_or_else(|| "場所不明".to_owned(), |p| p.display().to_string());
+            let photo = d
+                .existing_variant_id
+                .map(|v| format!("、写真 {v}"))
+                .unwrap_or_default();
+            out.line(format!(
+                "  {}: {}（同じ内容: {existing}{photo}）",
+                if d.skipped {
+                    "重複のため取り込まなかったファイル"
+                } else {
+                    "重複（別の写真として登録）"
+                },
+                d.path.display()
+            ));
+        }
         if report.skipped_links > 0 {
             out.line(format!(
                 "  たどらなかったリンク: {} 件",
@@ -120,7 +191,7 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
 // ---------------------------------------------------------------------------
 
 /// 検索の条件を作る（日付はカタログの既定のタイムゾーンで解釈する）。
-fn filter_of(s: &Session, a: &SearchArgs) -> CliResult<SearchFilter> {
+pub(crate) fn filter_of(s: &Session, a: &FilterArgs) -> CliResult<SearchFilter> {
     let minutes = s.core.settings().default_utc_offset_minutes;
     let offset = FixedOffset::east_opt(minutes * 60)
         .ok_or_else(|| CliError::other(format!("既定のタイムゾーンが不正です（{minutes} 分）")))?;
@@ -250,6 +321,15 @@ fn name_text(v: &VariantSummary) -> String {
     }
 }
 
+/// スタック（LIB-12）の表示（折りたたみは「3 枚（折りたたみ）」、展開は「2/3」。入っていなければ空）。
+pub(crate) fn stack_text(v: &VariantSummary) -> String {
+    match v.stack {
+        Some(b) if b.collapsed => format!("{} 枚（折りたたみ）", b.count),
+        Some(b) => format!("{}/{}", b.position, b.count),
+        None => String::new(),
+    }
+}
+
 fn status_text(s: FileStatus) -> &'static str {
     match s {
         FileStatus::Ok => "",
@@ -261,7 +341,10 @@ fn status_text(s: FileStatus) -> &'static str {
 /// `search`。
 pub fn search(g: &GlobalArgs, out: Output, a: SearchArgs) -> CliResult<Status> {
     let s = Session::open(g, out, &OpenOptions::default())?;
-    let filter = filter_of(&s, &a)?;
+    let filter = SearchFilter {
+        expand_stacks: a.expand_stacks,
+        ..filter_of(&s, &a.filter)?
+    };
     let sort = SearchSort {
         key: a.sort.key(),
         direction: direction(a.desc),
@@ -285,6 +368,7 @@ pub fn search(g: &GlobalArgs, out: Output, a: SearchArgs) -> CliResult<Status> {
         out.print_json(&json!({
             "generation": result.generation,
             "count": result.count,
+            "hidden_in_stacks": result.hidden,
             "offset": a.offset,
             "limit": a.limit,
             "items": json_value(&items),
@@ -303,6 +387,7 @@ pub fn search(g: &GlobalArgs, out: Output, a: SearchArgs) -> CliResult<Status> {
             "ラベル",
             "撮影日時",
             "カメラ",
+            "スタック",
             "状態",
         ]);
         for v in &items {
@@ -317,6 +402,7 @@ pub fn search(g: &GlobalArgs, out: Output, a: SearchArgs) -> CliResult<Status> {
                     .unwrap_or_default(),
                 capture_text(v),
                 v.camera.clone().unwrap_or_default(),
+                stack_text(v),
                 status_text(v.file_status).to_owned(),
             ]);
         }
@@ -327,6 +413,12 @@ pub fn search(g: &GlobalArgs, out: Output, a: SearchArgs) -> CliResult<Status> {
             items.len(),
             a.offset.min(result.count)
         ));
+        if result.hidden > 0 {
+            out.line(format!(
+                "ほかに、折りたたんだスタックの中に条件に合う写真が {} 枚あります（--expand-stacks で表示）",
+                result.hidden
+            ));
+        }
     }
     Ok(Status::Success)
 }
@@ -394,6 +486,41 @@ pub fn show(g: &GlobalArgs, out: Output, variant: VariantId) -> CliResult<Status
             .map(|(f, v)| (f.label(), v.to_owned())),
     );
     items.push(("現像の履歴", format!("{} 件", history.len())));
+    // 同じ写真のマスターと仮想コピー（LIB-13）・入っているスタック（LIB-12）。
+    if details.variants.len() > 1 {
+        let list: Vec<String> = details
+            .variants
+            .iter()
+            .map(|b| match (&b.name, b.is_master) {
+                (_, true) => format!("{}（マスター）", b.variant_id),
+                (Some(n), false) => format!("{}（{n}）", b.variant_id),
+                (None, false) => format!("{}（仮想コピー）", b.variant_id),
+            })
+            .collect();
+        items.push(("マスター・仮想コピー", list.join("、")));
+    }
+    if let Some(st) = &details.stack {
+        let pos = st
+            .members
+            .iter()
+            .position(|&m| m == v.variant_id)
+            .map_or(0, |i| i + 1);
+        let members: Vec<String> = st.members.iter().map(|m| m.to_string()).collect();
+        items.push((
+            "スタック",
+            format!(
+                "ID {}・{} 枚中 {pos} 枚目・{}（写真: {}）",
+                st.stack_id,
+                st.members.len(),
+                if st.collapsed {
+                    "折りたたみ"
+                } else {
+                    "展開"
+                },
+                members.join(", ")
+            ),
+        ));
+    }
     if let Some(video) = &details.video {
         items.extend(video_items(video));
     }

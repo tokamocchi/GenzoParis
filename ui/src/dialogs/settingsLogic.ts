@@ -74,6 +74,14 @@ export interface CatalogSettingsForm {
   cacheGb: string;
   exportColorSpace: CoreSettings["default_export_color_space"];
   utcOffsetMinutes: number;
+  /** 取り込みの既定: 重複と思われるものを取り込まない（IMP-04）。 */
+  importSkipDuplicates: boolean;
+  /** 取り込みの既定: RAW と同時記録の JPEG を別々の写真として取り込む（IMP-06）。 */
+  importSeparateRawJpeg: boolean;
+  /** 内容のハッシュをバックグラウンドで計算する（ORG-03）。 */
+  hashInBackground: boolean;
+  /** バックグラウンドの計算で、ネットワークのボリュームのファイルも読む。 */
+  hashNetworkVolumes: boolean;
 }
 
 export function catalogSettingsForm(s: CoreSettings): CatalogSettingsForm {
@@ -82,6 +90,11 @@ export function catalogSettingsForm(s: CoreSettings): CatalogSettingsForm {
     cacheGb: bytesToGbText(s.preview_cache_bytes),
     exportColorSpace: s.default_export_color_space,
     utcOffsetMinutes: s.default_utc_offset_minutes,
+    // 古いコア（値がない）では genzo-api の既定。
+    importSkipDuplicates: s.import_skip_duplicates ?? true,
+    importSeparateRawJpeg: s.import_separate_raw_jpeg ?? false,
+    hashInBackground: s.hash_in_background ?? true,
+    hashNetworkVolumes: s.hash_network_volumes ?? false,
   };
 }
 
@@ -112,5 +125,12 @@ export function catalogSettingsUpdate(
     }
     update.default_utc_offset_minutes = form.utcOffsetMinutes;
   }
+  const before = catalogSettingsForm(current);
+  if (form.importSkipDuplicates !== before.importSkipDuplicates) update.import_skip_duplicates = form.importSkipDuplicates;
+  if (form.importSeparateRawJpeg !== before.importSeparateRawJpeg) {
+    update.import_separate_raw_jpeg = form.importSeparateRawJpeg;
+  }
+  if (form.hashInBackground !== before.hashInBackground) update.hash_in_background = form.hashInBackground;
+  if (form.hashNetworkVolumes !== before.hashNetworkVolumes) update.hash_network_volumes = form.hashNetworkVolumes;
   return { update, changed: Object.keys(update).length > 0 };
 }

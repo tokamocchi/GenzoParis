@@ -18,7 +18,7 @@
 use chrono::{DateTime, Utc};
 use genzo_model::{
     AssetId, AssetKind, CaptureTime, CollectionId, ColorLabel, FileId, FileStatus, Flag, FolderId,
-    KeywordId, Orientation, Rating, SmartRule, VariantId,
+    KeywordId, Orientation, Rating, SmartRule, StackId, VariantId,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, params_from_iter};
@@ -26,6 +26,7 @@ use rusqlite::{Connection, params_from_iter};
 use crate::catalog::Catalog;
 use crate::error::{CatalogError, Result};
 use crate::register::capture_from_columns;
+use crate::stack::StackBadge;
 use crate::text::{LIKE_ESCAPE, parse_text_query};
 use crate::util::{i64_to_u32, ids_to_json, parse_enum, utc_to_db_string};
 
@@ -181,6 +182,8 @@ pub struct VariantSummary {
     pub develop_hash: String,
     /// 処理バージョン。
     pub process_version: u32,
+    /// スタック（LIB-12）に入っていれば、その印（位置・写真の数・折りたたみ）。
+    pub stack: Option<StackBadge>,
 }
 
 /// 組み立てた検索の SQL とバインドする値（スマートコレクションの条件の変換（`smart_sql.rs`）も使う）。
@@ -600,11 +603,19 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
                 a.time_correction_s, a.captured_at_utc, a.camera, a.lens, a.width, a.height,
                 a.orientation,
                 pf.id, pf.name, pf.folder_id, pf.status, pf.revision,
-                EXISTS(SELECT 1 FROM file s WHERE s.asset_id = a.id AND s.role = 'sidecar_jpeg')
+                EXISTS(SELECT 1 FROM file s WHERE s.asset_id = a.id AND s.role = 'sidecar_jpeg'),
+                sm.stack_id, st.collapsed,
+                (SELECT count(*) FROM stack_member c WHERE c.stack_id = sm.stack_id),
+                (SELECT count(*) FROM stack_member o
+                  WHERE o.stack_id = sm.stack_id
+                    AND (o.position < sm.position
+                         OR (o.position = sm.position AND o.variant_id < sm.variant_id))) + 1
          FROM json_each(?1) j
          JOIN variant v ON v.id = j.value
          JOIN asset a ON a.id = v.asset_id
          LEFT JOIN file pf ON pf.asset_id = a.id AND pf.role = 'primary'
+         LEFT JOIN stack_member sm ON sm.variant_id = v.id
+         LEFT JOIN stack st ON st.id = sm.stack_id
          ORDER BY j.key",
     )?;
     let mut rows = stmt.query([ids_to_json(ids)])?;
@@ -625,6 +636,15 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
             )));
         };
         let status: String = row.get(24)?;
+        let stack = match row.get::<_, Option<i64>>(27)? {
+            Some(stack_id) => Some(StackBadge {
+                stack_id: StackId::new(stack_id),
+                collapsed: row.get::<_, Option<bool>>(28)?.unwrap_or(true),
+                count: i64_to_u32(row.get(29)?, "スタックの写真の数")?,
+                position: i64_to_u32(row.get(30)?, "スタックの中の位置")?,
+            }),
+            None => None,
+        };
         out.push(VariantSummary {
             variant_id: VariantId::new(variant_id),
             asset_id: AssetId::new(row.get(1)?),
@@ -666,6 +686,7 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
                 })?,
             develop_hash: row.get(7)?,
             process_version: i64_to_u32(row.get(8)?, "process_version")?,
+            stack,
         });
     }
     Ok(out)

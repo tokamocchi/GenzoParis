@@ -1,7 +1,8 @@
 //! アプリの設定（カタログの場所・FFmpeg の場所・GPU の使用など）。
 //!
 //! カタログに保存する設定（キャッシュの場所と上限・既定の色空間・既定のタイムゾーン。genzo-api の
-//! `CoreSettings`）とは別に、カタログを開く前に要るものだけを、OS のアプリの設定のフォルダの
+//! `CoreSettings`）とは別に、カタログを開く前に要るものと、カタログによらない取り込みのダイアログの設定
+//! （コピー先・名前の規則・まとめて付けるメタデータ。[`ImportPreferences`]）を、OS のアプリの設定のフォルダの
 //! `settings.json` に保存する。
 //!
 //! - 書き込みは一時ファイルに書いてから名前を変える（途中で落ちても前の設定が残る）。
@@ -12,7 +13,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use genzo_api::GpuMode;
+use genzo_api::{FolderRule, GpuMode, ImportMetadata, RenameRule};
 use serde::{Deserialize, Serialize};
 
 /// 最近開いたカタログの数の上限。
@@ -38,6 +39,45 @@ pub struct AppSettings {
     pub gpu: GpuMode,
     /// アプリの終了時に、前回からの経過時間によらずカタログをバックアップするか（DATA-04）。
     pub backup_on_close: bool,
+    /// 取り込みのダイアログの設定（次に取り込むときの既定。IMP-02・IMP-03・IMP-05）。
+    pub import: ImportPreferences,
+}
+
+/// 取り込みのダイアログの設定（取り込みを始めたときに保存し、次に開いたときの初めの値にする。カタログに
+/// よらない。コピー先のフォルダはこの PC のものなので、カタログではなくアプリに保存する）。
+///
+/// 重複と思われるもの・RAW と JPEG の扱い（IMP-04・IMP-06）は、これまでどおりカタログの設定に保存する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImportPreferences {
+    /// コピーして取り込む（`false` なら今の場所のまま登録する）。
+    pub copy: bool,
+    /// サブフォルダも含める。
+    pub recursive: bool,
+    /// コピー先のフォルダ。
+    pub destination: Option<PathBuf>,
+    /// フォルダの規則。
+    pub folder_rule: FolderRule,
+    /// 名前を変える（`false` なら元の名前のまま）。
+    pub rename: bool,
+    /// リネームの規則（名前を変えないときも覚えておく）。
+    pub rename_rule: RenameRule,
+    /// 取り込んだ写真にまとめて付けるキーワード・説明のメタデータ。
+    pub metadata: ImportMetadata,
+}
+
+impl Default for ImportPreferences {
+    fn default() -> Self {
+        Self {
+            copy: false,
+            recursive: true,
+            destination: None,
+            folder_rule: FolderRule::default(),
+            rename: false,
+            rename_rule: RenameRule::default(),
+            metadata: ImportMetadata::default(),
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -49,6 +89,7 @@ impl Default for AppSettings {
             ffmpeg_dir: None,
             gpu: GpuMode::Auto,
             backup_on_close: false,
+            import: ImportPreferences::default(),
         }
     }
 }
@@ -152,8 +193,36 @@ mod tests {
         assert_eq!(s.last_catalog, Some(PathBuf::from("/c/3.db")));
         s.ffmpeg_dir = Some(PathBuf::from("/opt/ffmpeg/bin"));
         s.gpu = GpuMode::Off;
+        s.import.copy = true;
+        s.import.destination = Some(PathBuf::from("/写真"));
+        s.import.folder_rule = FolderRule::YearMonthDay;
+        s.import.rename = true;
+        s.import.rename_rule.template = "{date}_{text}-{seq}".to_owned();
+        s.import.metadata.keywords = vec![vec!["場所".to_owned(), "京都".to_owned()]];
+        s.import
+            .metadata
+            .fields
+            .insert(genzo_model::MetadataField::Creator, "岡本".to_owned());
         save(d.path(), &s).unwrap();
         assert_eq!(load(d.path()).settings, s);
+    }
+
+    /// 取り込みの設定のない古い設定のファイル・項目の欠けた設定は、既定の値で読む。
+    #[test]
+    fn import_preferences_default_when_missing() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join(SETTINGS_FILE),
+            r#"{"version": 1, "import": {"copy": true, "folder_rule": "single"}}"#,
+        )
+        .unwrap();
+        let l = load(d.path()).settings;
+        assert!(l.import.copy);
+        assert_eq!(l.import.folder_rule, FolderRule::Single);
+        assert!(l.import.recursive);
+        assert_eq!(l.import.rename_rule, RenameRule::default());
+        fs::write(d.path().join(SETTINGS_FILE), r#"{"version": 1}"#).unwrap();
+        assert_eq!(load(d.path()).settings.import, ImportPreferences::default());
     }
 
     #[test]

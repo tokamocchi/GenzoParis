@@ -91,6 +91,18 @@ const TESTS: &[(&str, fn())] = &[
         library::keywords_and_collections_through_the_app,
     ),
     (
+        "library::stacks_and_virtual_copies_through_the_app",
+        library::stacks_and_virtual_copies_through_the_app,
+    ),
+    (
+        "library::content_identity_through_the_app",
+        library::content_identity_through_the_app,
+    ),
+    (
+        "library::copy_import_through_the_app",
+        library::copy_import_through_the_app,
+    ),
+    (
         "develop::develop_and_region_frames_match_their_headers",
         develop::develop_and_region_frames_match_their_headers,
     ),

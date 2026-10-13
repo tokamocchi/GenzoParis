@@ -50,7 +50,10 @@ export function activeConditionCount(f: SearchFilter): number {
   return n;
 }
 
-/** 条件をすべて解除する（フォルダ・コレクションの選択は残す）。 */
+/**
+ * 条件をすべて解除する（フォルダ・コレクションの選択と、スタックをすべて展開する表示の指定（expand_stacks。
+ * 絞り込みの条件ではない）は残す）。
+ */
 export function clearConditions(f: SearchFilter): SearchFilter {
   const out: SearchFilter = {};
   if (isSet(f.folder_id)) {
@@ -58,6 +61,7 @@ export function clearConditions(f: SearchFilter): SearchFilter {
     out.include_subfolders = f.include_subfolders ?? false;
   }
   if (isSet(f.collection_id)) out.collection_id = f.collection_id;
+  if (f.expand_stacks) out.expand_stacks = true;
   return out;
 }
 
@@ -261,6 +265,13 @@ export function isNumericRangeReversed(f: SearchFilter, r: NumericRange): boolea
 /** 数値の範囲の条件のうち、指定しているものの数（下限・上限をまとめて 1 つ）。 */
 export function numericRangeCount(f: SearchFilter): number {
   return NUMERIC_RANGES.filter((r) => isSet(f[r.min]) || isSet(f[r.max])).length;
+}
+
+/**
+ * 「詳しい条件」の中で指定しているものの数（数値の範囲・マスターだけ・スタックをすべて展開。ボタンの数の表示）。
+ */
+export function moreConditionCount(f: SearchFilter): number {
+  return numericRangeCount(f) + (f.masters_only ? 1 : 0) + (f.expand_stacks ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------

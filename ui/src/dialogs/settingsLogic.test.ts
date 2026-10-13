@@ -15,6 +15,10 @@ const settings: CoreSettings = {
   preview_cache_bytes: 20_000_000_000,
   default_export_color_space: "srgb",
   default_utc_offset_minutes: 540,
+  import_skip_duplicates: true,
+  import_separate_raw_jpeg: false,
+  hash_in_background: true,
+  hash_network_volumes: false,
 };
 
 describe("タイムゾーン", () => {
@@ -73,6 +77,39 @@ describe("カタログの設定の更新", () => {
       update: { preview_cache_dir: "/d/previews", default_export_color_space: "adobe_rgb" },
       changed: true,
     });
+  });
+
+  it("取り込みの既定とバックグラウンドの計算（IMP-04・IMP-06・ORG-03）", () => {
+    const form = catalogSettingsForm(settings);
+    expect(form).toMatchObject({
+      importSkipDuplicates: true,
+      importSeparateRawJpeg: false,
+      hashInBackground: true,
+      hashNetworkVolumes: false,
+    });
+    const r = catalogSettingsUpdate(settings, {
+      ...form,
+      importSkipDuplicates: false,
+      importSeparateRawJpeg: true,
+      hashInBackground: false,
+      hashNetworkVolumes: true,
+    });
+    expect(r).toEqual({
+      update: {
+        import_skip_duplicates: false,
+        import_separate_raw_jpeg: true,
+        hash_in_background: false,
+        hash_network_volumes: true,
+      },
+      changed: true,
+    });
+    // 古いコア（値がない）では既定の値とみなす（変えていなければ送らない）。
+    const old = { ...settings } as Partial<CoreSettings>;
+    delete old.import_skip_duplicates;
+    delete old.hash_in_background;
+    const oldForm = catalogSettingsForm(old as CoreSettings);
+    expect(oldForm.importSkipDuplicates && oldForm.hashInBackground).toBe(true);
+    expect(catalogSettingsUpdate(old as CoreSettings, oldForm)).toEqual({ update: {}, changed: false });
   });
 
   it("表示の丸めでは上限を変えない", () => {

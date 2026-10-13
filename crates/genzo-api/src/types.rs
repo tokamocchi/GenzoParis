@@ -9,7 +9,7 @@ use genzo_model::{
     AssetId, AssetKind, CaptureTime, CollectionId, CollectionKind, ColorLabel, DevelopSettings,
     FileId, FileRole, FileStatus, Flag, FolderId, GpsCoord, HistoryEntryId, IptcMetadata,
     KeywordId, MetadataField, Orientation, OutputColorSpace, Rating, RenderQuality, SmartRule,
-    SnapshotId, VariantId, VideoMetadata, VolumeId,
+    SnapshotId, StackId, VariantId, VideoMetadata, VolumeId,
 };
 use genzo_pipeline::ImageTile;
 use serde::{Deserialize, Serialize, Serializer};
@@ -91,6 +91,9 @@ pub enum JobKind {
     ReresolveCaptureTimes,
     /// キャッシュの回収（存在しない variant のサムネイル、L1 の上限容量。4.1 節「回収」）。
     CollectGarbage,
+    /// ファイルの内容のハッシュ（全体の BLAKE3）の計算（ORG-03。3.11 節。専用の 1 本のスレッドで、
+    /// 現像などの対話の処理の合間に進める）。
+    HashFiles,
 }
 
 /// ジョブの状態。
@@ -159,6 +162,8 @@ pub enum JobResult {
         /// 削除した、生成の途中で終了した一時ファイルの数。
         temp_files_removed: u64,
     },
+    /// ファイルの内容のハッシュの計算。
+    HashFiles(HashReport),
 }
 
 /// ファイルの問題（読めない・登録できないなど）。
@@ -184,6 +189,133 @@ pub struct VariantIssue {
 // ---------------------------------------------------------------------------
 // 取り込み
 // ---------------------------------------------------------------------------
+
+/// 取り込みの設定（IMP-02〜IMP-06）。`skip_duplicates`・`separate_raw_jpeg` の `None` は、カタログの設定
+/// （[`CoreSettings`] の `import_skip_duplicates`・`import_separate_raw_jpeg`）に従う。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImportOptions {
+    /// 重複と思われるもの（内容が同じファイルが別の場所で登録済みのもの。全体のハッシュで確かめる）を
+    /// 取り込まない。
+    pub skip_duplicates: Option<bool>,
+    /// 同じフォルダで拡張子だけが違う RAW と JPEG を、別々の写真として取り込む（`false` なら 1 枚にまとめる）。
+    pub separate_raw_jpeg: Option<bool>,
+    /// コピー取り込み（IMP-02・IMP-03）。`None` なら、今の場所のまま登録する（コピーしない。IMP-01）。
+    pub copy: Option<CopySettings>,
+    /// 取り込んだ（新しく登録した）写真にまとめて付けるキーワード・説明のメタデータ（IMP-05）。
+    pub metadata: ImportMetadata,
+    /// コピー取り込みで、コピー先の名前を決めるだけで、コピー・登録をしない（確認用。結果の
+    /// [`CopyReport::copied`] に予定を入れる）。コピーしない取り込みでは使えない。
+    pub dry_run: bool,
+}
+
+/// コピー取り込みの設定（IMP-02・IMP-03。04 の 3.12 節）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopySettings {
+    /// コピー先のフォルダ（あるフォルダ。中のフォルダは規則に従って作る）。
+    pub destination: PathBuf,
+    /// フォルダの規則（既定は撮影日で `2026/2026-10-13`）。
+    #[serde(default)]
+    pub folder_rule: crate::naming::FolderRule,
+    /// ファイル名の規則（`None` なら元の名前のまま。同じ名前があれば `-1` などを付ける）。
+    #[serde(default)]
+    pub rename: Option<crate::naming::RenameRule>,
+}
+
+/// 取り込んだ写真にまとめて付けるもの（IMP-05）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImportMetadata {
+    /// キーワードの階層のパス（`[["場所", "京都"], ["家族"]]`。なければ作る。LIB-09）。
+    pub keywords: Vec<Vec<String>>,
+    /// 説明のメタデータ（`{"creator": "岡本", "copyright": "© 2026 岡本"}`。空の値は付けない。LIB-15）。
+    pub fields: std::collections::BTreeMap<MetadataField, String>,
+}
+
+impl ImportMetadata {
+    /// 付けるものがないか。
+    pub fn is_empty(&self) -> bool {
+        self.to_tags().is_empty()
+    }
+
+    /// カタログに渡す形。
+    pub(crate) fn to_tags(&self) -> genzo_catalog::ImportTags {
+        genzo_catalog::ImportTags {
+            keyword_paths: self.keywords.clone(),
+            metadata: self.fields.iter().map(|(f, v)| (*f, v.clone())).collect(),
+        }
+    }
+}
+
+/// コピーした（する）ファイル（IMP-02）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopiedFile {
+    /// 元のファイル。
+    #[serde(serialize_with = "lossy_path")]
+    pub source: PathBuf,
+    /// コピー先のファイル。
+    #[serde(serialize_with = "lossy_path")]
+    pub destination: PathBuf,
+    /// コピーせずに、コピー先に既にあった同じ内容のファイル（前の取り込みが途中で終わった場合など）を登録した
+    /// （する）か。
+    #[serde(default)]
+    pub existing: bool,
+}
+
+/// コピー取り込みの結果（IMP-02・IMP-03）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CopyReport {
+    /// コピー先のフォルダ。
+    #[serde(serialize_with = "lossy_path")]
+    pub destination: PathBuf,
+    /// コピーして登録したファイル（予定だけのときはその予定）。元のファイルの名前の順ではなく、撮影日時の順。
+    pub copied: Vec<CopiedFile>,
+    /// コピーしたバイト数（既にあったファイルは含まない）。
+    pub bytes_copied: u64,
+    /// 撮影日時が分からず、ファイルの更新日時でフォルダ・名前の日付を決めたファイルの数。
+    pub dated_by_file_time: u64,
+    /// 名前を決めるだけで、コピー・登録をしなかった（[`ImportOptions::dry_run`]）か。
+    pub dry_run: bool,
+    /// 次の連番（この取り込みで使った最後の番号の次。複数のフォルダを続けて取り込むときに、次のフォルダの
+    /// 開始番号にする。名前を変えないときも数える）。
+    pub next_sequence: u64,
+}
+
+/// コピー先の名前の例（[`crate::Core::import_name_preview`]。IMP-03 の画面の確認用）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NamePreview {
+    /// 見本の写真の名前の例（RAW と JPEG のペア・続けて撮った写真・カメラの分からない動画）。
+    pub examples: Vec<NameExample>,
+    /// 設定の誤り（あれば例は空）。
+    pub error: Option<String>,
+}
+
+/// 名前の例の 1 件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NameExample {
+    /// 見本の元のファイル（取り込むフォルダからの相対パス。'/' 区切り）。
+    pub source: String,
+    /// コピー先（コピー先のフォルダからの相対パス。'/' 区切り）。
+    pub destination: String,
+    /// 見本の撮影日時（現地の時刻）。
+    pub captured: String,
+}
+
+/// 取り込みで、内容が同じファイル（重複）として見つけたもの（IMP-04）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DuplicateFile {
+    /// 取り込もうとしたファイル。
+    #[serde(serialize_with = "lossy_path")]
+    pub path: PathBuf,
+    /// 同じ内容の、登録済みのファイル（同じ取り込みで先に登録したものを含む。場所が分からなければ `None`）。
+    #[serde(serialize_with = "lossy_path")]
+    pub existing_path: Option<PathBuf>,
+    /// そのファイルの写真（マスターの variant。分からなければ `None`）。
+    pub existing_variant_id: Option<VariantId>,
+    /// 取り込まなかったか（`false` なら、設定により別の写真として登録した）。
+    pub skipped: bool,
+}
 
 /// 取り込みの結果（IMP-01・VID-01・PRV-01）。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -212,6 +344,123 @@ pub struct ImportReport {
     pub thumbnail_failures: Vec<FileIssue>,
     /// 取り消されて途中で終わったか（やり直すと続きから処理する）。
     pub cancelled: bool,
+    /// 内容が同じファイルが登録済みだったもの（IMP-04。取り込まなかったもの・設定により登録したもの）。
+    #[serde(default)]
+    pub duplicates: Vec<DuplicateFile>,
+    /// RAW と組にして 1 枚の写真にまとめたファイルの数（IMP-06。新しく登録したもの）。
+    #[serde(default)]
+    pub paired: u64,
+    /// 重複と思われるものを取り込まない設定だったか。
+    #[serde(default)]
+    pub skip_duplicates: bool,
+    /// RAW と JPEG を別々の写真として取り込む設定だったか。
+    #[serde(default)]
+    pub separate_raw_jpeg: bool,
+    /// コピー取り込みの結果（コピーしない取り込みでは `None`。IMP-02）。
+    #[serde(default)]
+    pub copy: Option<Box<CopyReport>>,
+    /// キーワード・説明のメタデータをまとめて付けた写真の数（IMP-05。RAW と JPEG のペアは 1 枚）。
+    #[serde(default)]
+    pub tagged: u64,
+}
+
+impl ImportReport {
+    /// 重複のため取り込まなかったファイルの数。
+    pub fn duplicates_skipped(&self) -> u64 {
+        self.duplicates.iter().filter(|d| d.skipped).count() as u64
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 内容による同一性（ORG-03・IMP-04）
+// ---------------------------------------------------------------------------
+
+/// ファイルの内容のハッシュの計算の結果（[`JobKind::HashFiles`]。ORG-03）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HashReport {
+    /// 全体のハッシュを記録したファイルの数。
+    pub hashed: u64,
+    /// ネットワークのボリューム（SMB・NFS など）にあるため計算しなかったファイルの数（設定で含められる）。
+    pub skipped_network: u64,
+    /// ボリュームが接続されていない（マウント先が分からない・見えない）ため計算しなかったファイルの数。
+    pub skipped_unavailable: u64,
+    /// 登録の後に内容が変わっていた・計算の間に変わったため記録しなかったファイルの数（ファイルの確認で
+    /// 登録し直すと、次の計算の対象になる）。
+    pub changed: u64,
+    /// 読めなかったファイルの数。
+    pub failed_count: u64,
+    /// 読めなかったファイル（最初の [`crate::HASH_FAILURES_KEPT`] 件）。
+    pub failed: Vec<FileIssue>,
+    /// 取り消されて途中で終わったか。
+    pub cancelled: bool,
+}
+
+/// ファイルの内容のハッシュの状況（[`crate::Core::content_hash_status`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ContentHashStatus {
+    /// 登録されているファイルの数（RAW と組の JPEG も 1 つに数える）。
+    pub files: u64,
+    /// 全体のハッシュを記録したファイルの数。
+    pub hashed: u64,
+    /// 計算の対象（全体のハッシュがなく、見つからない状態でない）ファイルの数。
+    pub pending: u64,
+    /// 内容が同じファイルの組の数（全体のハッシュを記録したファイルの中で）。
+    pub duplicate_groups: u64,
+    /// 実行中の計算のジョブ（なければ `None`）。
+    pub job_id: Option<u64>,
+}
+
+/// 内容が同じファイルの 1 つ（[`DuplicateGroup`]・[`FileIdentity`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentFile {
+    /// ファイル。
+    pub file_id: FileId,
+    /// asset。
+    pub asset_id: AssetId,
+    /// 写真（asset のマスターの variant）。
+    pub variant_id: VariantId,
+    /// 役割（RAW と組の JPEG なら `sidecar_jpeg`）。
+    pub role: FileRole,
+    /// 絶対パス（マウント先が分からなければ `None`）。
+    #[serde(serialize_with = "lossy_path")]
+    pub path: Option<PathBuf>,
+    /// 大きさ（バイト）。
+    pub size: u64,
+    /// 状態。
+    pub status: FileStatus,
+}
+
+/// 内容が同じファイルの組（[`crate::Core::duplicate_groups`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DuplicateGroup {
+    /// 全体のハッシュ（BLAKE3 の 16 進数）。
+    pub full_hash: String,
+    /// 同じ内容のファイル（2 つ以上）。
+    pub files: Vec<ContentFile>,
+}
+
+/// 内容が同じファイルの組の一覧。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DuplicateGroupList {
+    /// 組の総数（`groups` は上限までの数）。
+    pub total: u64,
+    /// 組（最初に登録したファイルの順）。
+    pub groups: Vec<DuplicateGroup>,
+}
+
+/// ファイルの内容による識別の結果（[`crate::Core::identify_file`]。ORG-03）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIdentity {
+    /// 調べたファイル。
+    #[serde(serialize_with = "lossy_path")]
+    pub path: PathBuf,
+    /// 大きさ（バイト）。
+    pub size: u64,
+    /// ファイル全体の BLAKE3（16 進数。`b3sum` と同じ値）。
+    pub full_hash: String,
+    /// 同じ内容の登録済みのファイル（場所・名前によらない。全体のハッシュで確かめたもの）。
+    pub matches: Vec<ContentFile>,
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +521,9 @@ pub struct SearchFilter {
     pub collection_id: Option<CollectionId>,
     /// スマートコレクションの条件（保存していないもの。条件の編集中の件数など。LIB-11）。
     pub smart_rule: Option<SmartRule>,
+    /// スタック（LIB-12）を、保存した折りたたみの状態によらず、すべて展開して並べるか（[`crate::Core::search`]
+    /// の結果のまとめ方だけに効く。一致する写真・件数（[`crate::Core::count`]）は変わらない）。
+    pub expand_stacks: bool,
 }
 
 impl SearchFilter {
@@ -379,8 +631,16 @@ impl SearchSort {
 pub struct SearchResult {
     /// 世代（3.7 節）。
     pub generation: u64,
-    /// 件数。
+    /// 件数（表示する写真の数。折りたたんだスタックは 1 枚に数える。3.10 節）。
     pub count: u64,
+    /// 条件に一致したが、折りたたんだスタックの中に隠した写真の数（LIB-12。0 なら JSON に書かない）。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hidden: u64,
+}
+
+/// 0 か（JSON に書かない項目の判定）。
+pub(crate) fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// グリッドのセル 1 つの内容（表示範囲の詳細）。
@@ -431,6 +691,85 @@ pub struct VariantSummary {
     /// サムネイル（L0）のキャッシュキーのハッシュ（`genzo://thumb/{variant_id}?rev={thumb_rev}`）。
     /// まだなければ `None`。
     pub thumb_rev: Option<String>,
+    /// スタック（LIB-12）に入っていれば、その印（位置・写真の数・折りたたみ）。
+    #[serde(default)]
+    pub stack: Option<StackBadge>,
+}
+
+/// グリッドのセルに出すスタックの印（LIB-12。[`VariantSummary::stack`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackBadge {
+    /// スタック。
+    pub stack_id: StackId,
+    /// スタックの中の位置（1 から。1 が一番上）。
+    pub position: u32,
+    /// スタックの写真の数（2 以上）。
+    pub count: u32,
+    /// 折りたたんでいるか。
+    pub collapsed: bool,
+}
+
+impl From<genzo_catalog::StackBadge> for StackBadge {
+    fn from(b: genzo_catalog::StackBadge) -> Self {
+        Self {
+            stack_id: b.stack_id,
+            position: b.position,
+            count: b.count,
+            collapsed: b.collapsed,
+        }
+    }
+}
+
+/// スタック（LIB-12）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackInfo {
+    /// スタック。
+    pub stack_id: StackId,
+    /// 一番上の写真（`members` の最初）。
+    pub top_variant_id: VariantId,
+    /// 折りたたんでいるか。
+    pub collapsed: bool,
+    /// 写真（スタックの中の順。最初が一番上）。
+    pub members: Vec<VariantId>,
+}
+
+impl From<genzo_catalog::StackInfo> for StackInfo {
+    fn from(s: genzo_catalog::StackInfo) -> Self {
+        Self {
+            stack_id: s.id,
+            top_variant_id: s.top_variant_id,
+            collapsed: s.collapsed,
+            members: s.members,
+        }
+    }
+}
+
+/// 撮影時刻の間隔による自動スタックの結果（LIB-12。[`crate::Core::auto_stack`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AutoStackReport {
+    /// 作った（見込みなら作る）スタックの数。
+    pub stacks: u64,
+    /// 作ったスタックに入れた写真の数。
+    pub photos: u64,
+    /// 対象にした写真（条件に一致し、スタックに入っておらず、撮影日時の分かるもの）の数。
+    pub considered: u64,
+    /// すでにスタックに入っていたので対象にしなかった写真の数。
+    pub skipped_in_stacks: u64,
+    /// 撮影日時が分からないので対象にしなかった写真の数。
+    pub skipped_without_time: u64,
+    /// 見込みだけか（何も変えていない）。
+    pub dry_run: bool,
+}
+
+/// 同じ写真（asset）のマスターと仮想コピーの 1 件（LIB-13。[`VariantDetails::variants`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariantBrief {
+    /// variant。
+    pub variant_id: VariantId,
+    /// マスター（元の写真）か。
+    pub is_master: bool,
+    /// 仮想コピーの名前（マスターは `null`）。
+    pub name: Option<String>,
 }
 
 impl VariantSummary {
@@ -461,6 +800,7 @@ impl VariantSummary {
             orientation: s.orientation,
             develop_hash: s.develop_hash,
             thumb_rev,
+            stack: s.stack.map(StackBadge::from),
         }
     }
 }
@@ -525,6 +865,15 @@ pub struct IndexOf {
     pub index: Option<u64>,
 }
 
+/// 表示中の検索結果に出ている写真（[`crate::Core::shown_variants`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShownVariants {
+    /// 世代。
+    pub generation: u64,
+    /// 問い合わせた写真のうち、結果に出ているもの（問い合わせた順。同じ写真は 1 つ）。
+    pub variant_ids: Vec<VariantId>,
+}
+
 /// variant の詳細（メタデータの表示。LIB-14）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VariantDetails {
@@ -550,6 +899,12 @@ pub struct VariantDetails {
     pub video: Option<VideoMetadata>,
     /// ファイル（主となるファイルが先）。
     pub files: Vec<FileInfo>,
+    /// 同じ写真のマスターと仮想コピー（LIB-13。マスターが先、仮想コピーは作った順。自分を含む）。
+    #[serde(default)]
+    pub variants: Vec<VariantBrief>,
+    /// 入っているスタック（LIB-12。入っていなければ `null`）。
+    #[serde(default)]
+    pub stack: Option<StackInfo>,
 }
 
 /// 複数の写真の説明のメタデータのまとめ（LIB-15 の一括編集。[`crate::Core::metadata_summary`]）。
@@ -730,6 +1085,9 @@ pub struct FileInfo {
     pub status: FileStatus,
     /// missing / error の理由。
     pub status_reason: Option<String>,
+    /// ファイル全体の BLAKE3（ORG-03。まだ計算していなければ `None`）。
+    #[serde(default)]
+    pub full_hash: Option<String>,
 }
 
 /// フォルダ（LIB-06 のフォルダツリー）。
@@ -1381,6 +1739,25 @@ pub struct CoreSettings {
     /// 既定のタイムゾーンのオフセット（分。UTC より東が正）。撮影日時にオフセットがない写真・動画の
     /// UTC の推定に使う（3.1 節）。
     pub default_utc_offset_minutes: i32,
+    /// 取り込みの既定: 重複と思われるもの（内容が同じファイルが登録済みのもの）を取り込まない（IMP-04。既定は
+    /// `true`）。
+    #[serde(default = "default_true")]
+    pub import_skip_duplicates: bool,
+    /// 取り込みの既定: RAW と同時記録の JPEG を別々の写真として取り込む（IMP-06。既定は `false` = 1 枚に
+    /// まとめる）。
+    #[serde(default)]
+    pub import_separate_raw_jpeg: bool,
+    /// ファイルの内容のハッシュ（全体）をバックグラウンドで計算する（ORG-03。既定は `true`。アプリが起動の
+    /// 設定で許したときだけ動く。CLI は動かさない）。
+    #[serde(default = "default_true")]
+    pub hash_in_background: bool,
+    /// バックグラウンドの計算で、ネットワークのボリューム（SMB・NFS など）のファイルも読む（既定は `false`）。
+    #[serde(default)]
+    pub hash_network_volumes: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 設定の変更（`None` の項目は変えない）。
@@ -1396,6 +1773,14 @@ pub struct SettingsUpdate {
     /// 既定のタイムゾーンのオフセット（分）。変えると、既定のオフセットで推定していた撮影日時を
     /// バックグラウンドで推定し直す。
     pub default_utc_offset_minutes: Option<i32>,
+    /// 取り込みの既定: 重複と思われるものを取り込まない。
+    pub import_skip_duplicates: Option<bool>,
+    /// 取り込みの既定: RAW と同時記録の JPEG を別々の写真として取り込む。
+    pub import_separate_raw_jpeg: Option<bool>,
+    /// ファイルの内容のハッシュをバックグラウンドで計算する（`false` にすると実行中の計算を取り消す）。
+    pub hash_in_background: Option<bool>,
+    /// バックグラウンドの計算で、ネットワークのボリュームのファイルも読む。
+    pub hash_network_volumes: Option<bool>,
 }
 
 /// バックアップ（DATA-04）。
@@ -1458,6 +1843,9 @@ pub struct CatalogStats {
     pub files: u64,
     /// 現像の履歴の件数。
     pub history_entries: u64,
+    /// スタックの数（LIB-12）。
+    #[serde(default)]
+    pub stacks: u64,
 }
 
 /// カタログの構造（ORG-07。[`crate::Core::catalog_schema`]。CLI の `catalog schema`、画面の「カタログの構造」）。

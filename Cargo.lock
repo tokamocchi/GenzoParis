@@ -1581,6 +1581,7 @@ dependencies = [
  "genzo-worker",
  "image",
  "kamadak-exif",
+ "libc",
  "parking_lot",
  "same-file",
  "serde",

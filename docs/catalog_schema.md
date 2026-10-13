@@ -3,7 +3,7 @@
 GenzoParis のカタログ（SQLite のデータベース）の構造と、外部のツールから SQL で読む方法です（01 の ORG-07、02 の COMPAT-04）。カタログは特別な形式ではなく、普通の SQLite 3 のファイルなので、SQLite の CLI・DB Browser for SQLite・Python などで読めます。
 
 - この文書は、実際のスキーマ（`crates/genzo-catalog/src/sql/` のマイグレーション）と食い違わないことをテストで確かめています（`crates/genzo-catalog/src/tests/schema_doc.rs`。すべての表・ビューとその列・型、索引・トリガーがこの文書に載っているか、スキーマの版が合っているか）。
-- 外部から読むときは、まず **公開ビュー**（3 章。`photos_v1`・`photo_keywords_v1`・`photo_collections_v1`）を使ってください。表の構造は機能の追加で変わりますが、公開ビューの列は変えない約束です。
+- 外部から読むときは、まず **公開ビュー**（3 章。`photos_v1`・`photo_keywords_v1`・`photo_collections_v1`・`photo_stacks_v1`・`photo_files_v1`）を使ってください。表の構造は機能の追加で変わりますが、公開ビューの列は変えない約束です。
 - **カタログには書き込まないでください**（読み取り専用で開く。2 章）。アプリは、ファイルの状態・検索の索引・現像設定のハッシュ・ファイル操作の記録などの整合を保ちながら書き込んでいます。外部から書き換えると、アプリが誤動作したり、写真の情報を失ったりする可能性があります。
 
 ## 1. ファイルと版
@@ -19,7 +19,7 @@ GenzoParis のカタログ（SQLite のデータベース）の構造と、外�
 
 スキーマの版は `PRAGMA user_version`、GenzoParis のファイルであることの印は `PRAGMA application_id` に入っています。
 
-- catalog.db のスキーマの版: **8**（`application_id` は 1197097812 = 16 進数の 0x475A4354 = ASCII の `GZCT`）
+- catalog.db のスキーマの版: **10**（`application_id` は 1197097812 = 16 進数の 0x475A4354 = ASCII の `GZCT`）
 - thumbs.db のスキーマの版: **2**（`application_id` は 1197102152 = 16 進数の 0x475A5448 = ASCII の `GZTH`）
 
 アプリは、古い版のカタログを開くと、自動でバックアップを作ってから新しい版に移行します。新しい版のカタログは、古いアプリでは開けません（壊さないため）。
@@ -34,6 +34,8 @@ GenzoParis のカタログ（SQLite のデータベース）の構造と、外�
 | 6 | 説明のメタデータ（タイトル・作成者・著作権など。`asset_iptc`）と、`photos_v1` の列 `title`・`creator`・`copyright` | `catalog_0006_asset_iptc.sql` |
 | 7 | キーワードの書き出しの印（`keyword.include_on_export`）、コレクションの名前の比較用のキー（`collection.name_key`）と重複の禁止（`collection_unique_name`）、公開ビュー `photo_collections_v1` | `catalog_0007_collections.sql`（`name_key` の値と索引は Rust の処理。6 章） |
 | 8 | フォルダ・キーワード・コレクションの ID を使い回さない（`folder`・`keyword`・`collection` を `AUTOINCREMENT` で作り直す。列・索引は変えない） | `catalog_0008_stable_ids.sql`（連番の初めの値は Rust の処理。6 章） |
+| 9 | スタック（LIB-12）を使い始める（`stack` を `AUTOINCREMENT` で作り直し、折りたたみの状態 `collapsed` を足す。トリガー `stack_member_after_delete`、公開ビュー `photo_stacks_v1`） | `catalog_0009_stacks.sql`（既存の行の位置の付け直しなどは Rust の処理。6 章） |
+| 10 | 内容による同一性（ORG-03・IMP-04・IMP-06）: クイックハッシュ・全体のハッシュの索引（`file_quick_hash`・`file_full_hash`）、公開ビュー `photo_files_v1`。既存のファイルの全体のハッシュは移行では計算しない（アプリがバックグラウンドで計算する） | `catalog_0010_content_identity.sql` |
 
 ## 2. 読み方
 
@@ -44,7 +46,7 @@ SQLite の CLI（`sqlite3`）:
 ```sh
 # 読み取り専用で開く（-readonly）。Windows ではパスを "C:\Users\...\catalog.db" のように書く。
 sqlite3 -readonly ~/Pictures/GenzoParis/catalog.db
-sqlite> PRAGMA user_version;            -- スキーマの版（8）
+sqlite> PRAGMA user_version;            -- スキーマの版（10）
 sqlite> .mode box
 sqlite> SELECT variant_id, file_name, captured_at_local, rating
    ...> FROM photos_v1 WHERE rating >= 4 ORDER BY captured_at_utc;
@@ -104,7 +106,7 @@ volume ─< folder ─< file >─ asset ─< variant ─< history_entry
 - **asset** は写真・動画の実体（1 回の撮影）です。RAW と JPEG のペアは 1 つの asset に 2 つの **file**（`role` が `primary` と `sidecar_jpeg`）として属します。
 - **variant** は画面のグリッドに並ぶ単位で、asset ごとにマスター（`is_master = 1`）が 1 つと、仮想コピー（`is_master = 0`）が 0 個以上あります。評価・フラグ・カラーラベル・現像設定・キーワードは variant に付きます。キャプションと説明のメタデータ（タイトル・作成者・著作権など。`asset_iptc`）は asset に付きます（仮想コピーも同じ値）。
 - 画面・CLI の「写真の ID」は variant の ID（`variant.id`）です。
-- `asset.id`・`variant.id`・`file.id`・`history_entry.id`・`snapshot.id`・`file_op.id` は、削除した後も同じ値を使い回しません（`AUTOINCREMENT`。サムネイル DB などの外部のキャッシュが ID で参照するため）。`folder.id`・`keyword.id`・`collection.id` も、版 8 から使い回しません（スマートコレクションの条件や画面のターゲットコレクションが ID で参照し、削除したものを参照する条件が、後から作ったものに付け替わらないようにするため。版 7 までに削除したものも、条件が参照している ID は使いません）。`volume`・`stack` の ID は使い回すことがあります。
+- `asset.id`・`variant.id`・`file.id`・`history_entry.id`・`snapshot.id`・`file_op.id` は、削除した後も同じ値を使い回しません（`AUTOINCREMENT`。サムネイル DB などの外部のキャッシュが ID で参照するため）。`folder.id`・`keyword.id`・`collection.id` も、版 8 から使い回しません（スマートコレクションの条件や画面のターゲットコレクションが ID で参照し、削除したものを参照する条件が、後から作ったものに付け替わらないようにするため。版 7 までに削除したものも、条件が参照している ID は使いません）。`stack.id` も版 9 から使い回しません（画面・CLI がスタックを ID で指すため）。`volume` の ID は使い回すことがあります。
 - 外部キーは、asset を消すと file・variant・履歴・キーワードの付与などが消える（`ON DELETE CASCADE`）ように定義しています。キーワード・コレクションそのものは残ります。外部キーの確認は接続ごとの設定（`PRAGMA foreign_keys`）で、アプリはすべての接続で有効にしています。
 - 元ファイルの絶対パスは「ボリュームのマウント先（`volume.last_mount_path`）＋ フォルダ（`folder.rel_path`。区切りは `/`）＋ ファイル名（`file.name`）」です。今の版では、パスの先頭（Linux・macOS の `/`、Windows の `C:\` や `\\server\share\`）をボリュームとしています（`volume.uuid` は `path:/`・`path:C:\` の形。外付けドライブの識別（FILE-03）で変わる予定）。
 
@@ -115,7 +117,8 @@ volume ─< folder ─< file >─ asset ─< variant ─< history_entry
 - `asset_text.text_norm` は、ファイル名・キャプションと、説明のメタデータのうち検索の対象の項目（タイトル・見出し・作成者・著作権表示・撮影場所の 4 項目・クレジット・提供元。連絡先・URL・著作権の状態・使用条件・指示は含めない）を NFKC に正規化して小文字にし、改行でつないだ検索用の文字列です。3 文字以上の語は全文検索の索引（`asset_fts`。FTS5 の trigram）で、1〜2 文字の語は `text_norm` への `LIKE` で探します（04 の 3.6 節）。
 - `variant.develop_json`・`history_entry.develop_json`・`snapshot.develop_json` は現像設定の JSON（genzo-model の `DevelopSettings`。04 の 2.5 節）です。**NULL は「その処理バージョン（`process_version`）の既定の設定」**です（未調整の写真の容量を抑えるため）。JSON の項目は処理バージョンとともに増えます。
 - `file_op.payload_json` はファイル操作の対象（`{"entries": [{"file_id", "asset_id", "from": {"folder_id", "name", "absolute_path"}, "to": …}]}`）です。
-- 真偽値は 0 / 1 の整数です（`variant.is_master`・`photos_v1.is_virtual_copy`）。
+- 真偽値は 0 / 1 の整数です（`variant.is_master`・`stack.collapsed`・`photos_v1.is_virtual_copy`・`photo_stacks_v1.is_top`）。
+- **スタック**（LIB-12。版 9 から）: 1 つの variant は高々 1 つのスタックに入ります。スタックの中の順は `stack_member` の `(position, variant_id)` で、一番上の写真（`stack.top_variant_id`）は常に最初です。写真が 1 枚以下になったスタックはトリガー（`stack_member_after_delete`）が消すので、スタックは常に 2 枚以上です。仮想コピーは、作ると元の写真と同じスタックに入ります（04 の 3.10 節）。
 
 ### 2.6 例
 
@@ -145,6 +148,13 @@ FROM photos_v1 AS p
 JOIN photo_collections_v1 AS c ON c.variant_id = p.variant_id
 WHERE c.collection_path LIKE '旅行 > %';
 
+-- スタックごとの写真の数と一番上の写真のファイル名（版 9 から）。
+SELECT s.stack_id, s.stack_size, p.file_name
+FROM photo_stacks_v1 AS s
+JOIN photos_v1 AS p ON p.variant_id = s.variant_id
+WHERE s.is_top = 1
+ORDER BY p.captured_at_utc;
+
 -- 月ごと・カメラごとの枚数（表示のオフセットでの月）。
 SELECT substr(captured_at_local, 1, 7) AS month, camera, count(*) AS photos
 FROM photos_v1
@@ -153,11 +163,19 @@ GROUP BY month, camera ORDER BY month;
 
 -- 見つからない元ファイル（ドライブが外れている・アプリの外で移動・削除した）。
 SELECT variant_id, volume_mount_path, folder_path, file_name FROM photos_v1 WHERE file_status = 'missing';
+
+-- RAW と同時記録の JPEG を 1 枚にまとめた写真の、JPEG のファイル（版 10 から）。
+SELECT master_variant_id, folder_path, file_name FROM photo_files_v1 WHERE role = 'sidecar_jpeg';
+
+-- 内容（ファイル全体の BLAKE3）が同じファイルの組（計算済みのファイルの中で。版 10 から）。
+SELECT full_hash, count(*) AS files, group_concat(folder_path || '/' || file_name, ' | ') AS paths
+FROM photo_files_v1 WHERE full_hash IS NOT NULL
+GROUP BY full_hash HAVING count(*) > 1;
 ```
 
 ## 3. 公開ビュー
 
-外部から読むための安定した入口です（スキーマの版 5 から。版 6 で `photos_v1` に列を足した。版 7 で `photo_collections_v1` を足した）。
+外部から読むための安定した入口です（スキーマの版 5 から。版 6 で `photos_v1` に列を足した。版 7 で `photo_collections_v1`、版 9 で `photo_stacks_v1`、版 10 で `photo_files_v1` を足した）。
 
 - **約束**: 名前の末尾の版（`_v1`）が同じ間は、列の名前・意味・値の形を変えず、列を減らしません。変える必要があれば、別の名前（`_v2`）のビューを足します。列を足すことはあるので、`SELECT *` ではなく列の名前を指定して読んでください。行の並び順は決めていないので、`ORDER BY` を指定してください。
 - ビューは読むためのものです（書き込めません）。
@@ -235,6 +253,36 @@ SELECT variant_id, volume_mount_path, folder_path, file_name FROM photos_v1 WHER
 | `collection` | TEXT | コレクションの名前 |
 | `collection_path` | TEXT | 最上位のコレクションセットからの階層を「 > 」でつないだもの（`旅行 > 京都 2024`）。親子が循環した壊れたコレクションは出ない（階層は 64 段までたどる） |
 
+### `photo_stacks_v1`
+
+スタック（LIB-12）に入っている写真です（版 9 から）。1 行が 1 つの variant です。スタックに入っていない写真の行はありません。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `variant_id` | INTEGER | variant の ID |
+| `stack_id` | INTEGER | スタックの ID |
+| `position` | （式） | スタックの中の順（1 から。1 が一番上） |
+| `is_top` | （式） | 一番上の写真なら 1、そうでなければ 0 |
+| `stack_size` | （式） | スタックの写真の数（2 以上） |
+
+### `photo_files_v1`
+
+元ファイルの一覧です（版 10 から）。1 行が 1 つのファイルです。RAW と同時記録の JPEG を 1 枚の写真として扱っている場合（IMP-06）は、RAW（`role = 'primary'`）と JPEG（`role = 'sidecar_jpeg'`）が別の行で、同じ `asset_id`・`master_variant_id` を持ちます。`photos_v1` の元ファイルの列は主なファイルだけなので、付属の JPEG と内容のハッシュはこちらで読みます。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `file_id` | INTEGER | ファイルの ID |
+| `asset_id` | INTEGER | asset の ID |
+| `master_variant_id` | INTEGER | asset のマスターの variant の ID（`photos_v1` の `variant_id` と結べる） |
+| `role` | TEXT | `primary`（主なファイル）/ `sidecar_jpeg`（RAW と同時記録の JPEG） |
+| `file_name` | TEXT | ファイルの名前 |
+| `folder_path` | TEXT | フォルダ（ボリュームの中の相対パス。区切りは `/`。ボリュームの最上位は空文字列） |
+| `volume_label` | TEXT | ボリュームの表示名 |
+| `volume_mount_path` | TEXT | ボリュームの最後に確認したマウント先（2.4 節） |
+| `file_size` | INTEGER | 大きさ（バイト） |
+| `file_status` | TEXT | 状態（`ok` / `missing`（見つからない）/ `error`（読めない）） |
+| `full_hash` | TEXT | ファイル全体の BLAKE3（16 進数の小文字 64 文字。`b3sum` と同じ値）。まだ計算していなければ NULL（アプリがバックグラウンドで計算する。ORG-03）。同じ値のファイルは同じ内容 |
+
 ## 4. カタログの表（catalog.db）
 
 通常の表は `STRICT`（宣言した型以外の値を入れない）です。列の表の「NULL」は、NULL を入れられるかです（「不可」は `NOT NULL` か主キー）。
@@ -305,7 +353,7 @@ SELECT variant_id, volume_mount_path, folder_path, file_name FROM photos_v1 WHER
 | `size` | INTEGER | 不可 | | 大きさ（バイト。0 以上） |
 | `mtime` | INTEGER | 不可 | | 更新日時（UNIX 時刻からのナノ秒） |
 | `quick_hash` | TEXT | 不可 | | クイックハッシュ（用途の文字列 ＋ ファイルの大きさ ＋ 先頭と末尾の 64 KB の BLAKE3。16 進数。変化の検知用で、`b3sum` の値とは違う） |
-| `full_hash` | TEXT | 可 | | ファイル全体の BLAKE3（16 進数。`b3sum` と同じ値。必要になったときに計算） |
+| `full_hash` | TEXT | 可 | | ファイル全体の BLAKE3（16 進数。`b3sum` と同じ値）。アプリがバックグラウンドで順に計算し、取り込みの重複の確認でも計算する（版 10 から。ORG-03・IMP-04）。内容の変化を検知すると消え（NULL）、記録した後に別の値で上書きしない |
 | `revision` | INTEGER | 不可 | `1` | 内容の変化を検知するたびに 1 増える（1 以上） |
 | `status` | TEXT | 不可 | `'ok'` | `ok` / `missing`（見つからない）/ `error`（読めない）（`CHECK`） |
 | `status_reason` | TEXT | 可 | | `missing`・`error` の理由 |
@@ -403,12 +451,13 @@ variant に付けたキーワード（`WITHOUT ROWID`）。
 
 ### `stack`
 
-スタック（LIB-12。v1 で使う）。
+スタック（LIB-12。版 9 から使う。2.5 節）。写真が 1 枚以下になると消えます（トリガー `stack_member_after_delete`）。
 
 | 列 | 型 | NULL | 既定値 | 意味 |
 |---|---|---|---|---|
-| `id` | INTEGER | 不可 | | 主キー |
-| `top_variant_id` | INTEGER | 可 | | 一番上の variant（→ `variant.id`。消すと NULL） |
+| `id` | INTEGER | 不可 | | 主キー（`AUTOINCREMENT`。版 9 から） |
+| `top_variant_id` | INTEGER | 可 | | 一番上の variant（→ `variant.id`。スタックの中の順の最初。消すとトリガーが次の写真にする） |
+| `collapsed` | INTEGER | 不可 | `1` | 折りたたんでいるか（1 = 折りたたむ。グリッドに 1 枚だけ出す。版 9 から） |
 
 ### `stack_member`
 
@@ -418,7 +467,7 @@ variant に付けたキーワード（`WITHOUT ROWID`）。
 |---|---|---|---|---|
 | `stack_id` | INTEGER | 不可 | | スタック（→ `stack.id`。主キーの 1 番目） |
 | `variant_id` | INTEGER | 不可 | | variant（→ `variant.id`。主キーの 2 番目。`UNIQUE`） |
-| `position` | INTEGER | 不可 | | スタックの中の位置 |
+| `position` | INTEGER | 不可 | | スタックの中の位置（`(position, variant_id)` の順。アプリは 0 から付け直す） |
 
 ### `video_meta`
 
@@ -531,6 +580,10 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 | `api.preview_cache_bytes` | 標準プレビューのキャッシュの上限（バイト。整数の文字列） |
 | `api.default_export_color_space` | 書き出しの既定の色空間（JSON の文字列。`"srgb"` など） |
 | `api.default_utc_offset_minutes` | 既定のタイムゾーンのオフセット（分。整数の文字列。540 = +09:00） |
+| `api.import_skip_duplicates` | 取り込みの既定: 重複と思われるもの（内容が同じファイルが登録済みのもの）を取り込まない（`true` / `false`。なければ `true`。IMP-04） |
+| `api.import_separate_raw_jpeg` | 取り込みの既定: RAW と同時記録の JPEG を別々の写真として取り込む（`true` / `false`。なければ `false`。IMP-06） |
+| `api.hash_in_background` | 内容のハッシュ（`file.full_hash`）をバックグラウンドで計算する（`true` / `false`。なければ `true`。ORG-03） |
+| `api.hash_network_volumes` | バックグラウンドの計算で、ネットワークのボリュームのファイルも読む（`true` / `false`。なければ `false`） |
 
 ### 索引
 
@@ -543,6 +596,8 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 | `file_asset` | `file(asset_id)` | asset のファイル |
 | `file_one_primary` | `file(asset_id) WHERE role = 'primary'`（`UNIQUE`） | asset ごとに主なファイルは 1 つ |
 | `file_name_key` | `file(name_key)` | 名前でファイルを探す（書き出しの原本の照合。版 3） |
+| `file_quick_hash` | `file(quick_hash)` | クイックハッシュが同じファイル（取り込みでの重複の候補。版 10） |
+| `file_full_hash` | `file(full_hash) WHERE full_hash IS NOT NULL` | 内容（全体のハッシュ）でファイルを探す・重複の組をまとめる（版 10） |
 | `variant_one_master` | `variant(asset_id) WHERE is_master = 1`（`UNIQUE`） | asset ごとにマスターは 1 つ |
 | `variant_asset` | `variant(asset_id)` | asset の variant |
 | `variant_rating` | `variant(rating)` | 評価での絞り込み |
@@ -568,6 +623,7 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 | `asset_text_after_insert` | `asset_text` | 追加した文字列を `asset_fts` に入れる |
 | `asset_text_after_delete` | `asset_text` | 消した文字列を `asset_fts` から除く（asset の削除の `ON DELETE CASCADE` でも動く） |
 | `asset_text_after_update` | `asset_text` | 変えた文字列を `asset_fts` に入れ直す |
+| `stack_member_after_delete` | `stack_member` | スタックの写真が抜けたら、一番上の写真が抜けたときは残りの最初の写真を一番上にし、1 枚以下になったスタックを消す（写真の削除の `ON DELETE CASCADE` でも動く。版 9） |
 
 <!-- /schema -->
 
@@ -627,6 +683,7 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 - 変更は番号付きのマイグレーション（`crates/genzo-catalog/src/sql/catalog_NNNN_*.sql` と `schema.rs` の `CATALOG_MIGRATIONS`）で行います。既存のマイグレーションは書き換えず、新しいファイルを足して `CATALOG_SCHEMA_VERSION` を上げ、古い版のカタログからの移行のテストを書きます（04 の 3.4 節）。
 - **この文書も更新します**（1 章の版と版の履歴、表・ビューの節）。文書に載っていない表・列・索引・トリガー、型の違う列、版の食い違いがあると、テスト（`schema_doc.rs`）が失敗します。
 - 公開ビュー: マイグレーションの間は、すべてのビューを外してから各版の SQL を実行し、終わったら同じ定義で作り直します（`schema.rs` の `apply_migrations`）。SQLite の「12 の手順」で表を作り直しても、ビューのことは考えなくて構いません。ビューが参照する列を変える・消すときは、そのマイグレーションで `DROP VIEW IF EXISTS` してから新しい定義で `CREATE VIEW` します（列の名前と意味は保つ。3 章の約束）。作り直せないビューがあると、その版の移行は失敗して戻ります。
-- 新しい機能の表（スタックなど）を外部から読む入口が必要になったら、公開ビュー（`<名前>_v1`）を足し、`PUBLIC_VIEWS` とこの文書に加えます（版 7 でコレクションの `photo_collections_v1` を足した）。
+- 新しい機能の表を外部から読む入口が必要になったら、公開ビュー（`<名前>_v1`）を足し、`PUBLIC_VIEWS` とこの文書に加えます（版 7 でコレクションの `photo_collections_v1`、版 9 でスタックの `photo_stacks_v1` を足した）。
 - SQL だけで書けない手順（NFKC の正規化など）は、マイグレーションの `post`（Rust の関数。SQL の後、同じトランザクションで動く）に書きます。版 7 の `collection.name_key` の値と `collection_unique_name` の索引は `schema.rs` の `migrate_collection_names` が作ります（既存の行に同じ名前があれば、後の行の名前に「 (2)」などを足してから索引を作る）。
 - 版 8 で `folder`・`keyword`・`collection` を `AUTOINCREMENT` で作り直したとき、連番（`sqlite_sequence`）の初めの値は、残っている行の最大の ID と、スマートコレクションの条件（`smart_rule_json`。読めない版のものも含む）が参照する ID の最大のうち大きいほうにしました（`schema.rs` の `migrate_id_sequences`。版 7 までに削除したものを参照する条件が、移行の後に作るものに付け替わらないように）。ID で参照される表を足すときは、最初から `AUTOINCREMENT` にしてください。
+- 版 9 で `stack` を `AUTOINCREMENT` で作り直したとき（列 `collapsed` も足した）、既存の行（版 8 まではアプリが作らないが、外部のツールで作られたものがありうる）は、SQL の後の Rust の処理（`schema.rs` の `migrate_stacks`）で整えました: 写真が 1 枚以下のスタックを消し、残りは一番上の写真（メンバーでなければ位置の最初のもの）を先頭に `(position, variant_id)` の順で位置を 0 から付け直す。マイグレーションの間は外部キーの確認を止めているので `ON DELETE CASCADE` が働かず、スタックを消す前にメンバーの行を消しています。

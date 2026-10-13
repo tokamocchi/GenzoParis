@@ -387,7 +387,7 @@ fn filters_generations_and_marks() {
     let ev = drain(&events);
     assert!(ev.iter().any(|e| matches!(
         e,
-        Event::SearchUpdated { generation, count: 4 } if *generation == cur.generation
+        Event::SearchUpdated { generation, count: 4, .. } if *generation == cur.generation
     )));
     // 古い世代は Stale。選択中の variant は id で位置を求め直せる。
     assert!(matches!(

@@ -415,6 +415,9 @@ impl AppState {
         config.gpu = settings.gpu;
         config.backup_on_close = settings.backup_on_close;
         config.worker_env = tools.worker_env();
+        // ファイルの内容のハッシュ（ORG-03）を、開いている間にバックグラウンドで計算する（カタログの設定で
+        // 止められる。CLI は計算しない）。
+        config.background_hashing = true;
         let core = Arc::new(Core::open(config).map_err(api)?);
         // 色空間を指定してからセッションを公開するまで、色空間のロックを持つ（set_display_target の doc）。
         let display = self.display.lock();

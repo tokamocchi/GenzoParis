@@ -15,7 +15,7 @@ use crate::import::{ProbeTarget, media_kind, probe_request};
 use crate::paths::join_rel;
 use crate::types::{
     CatalogSchema, CatalogStats, FileCheckReport, FileInfo, FileIssue, FolderInfo, MetadataSummary,
-    VariantDetails, VariantSummary,
+    StackInfo, VariantBrief, VariantDetails, VariantSummary,
 };
 
 /// 選別の操作の後: カタログの変更を知らせ、表示中の検索結果を作り直す（変えた variant は残す。3.7 節）。
@@ -134,13 +134,26 @@ impl Core {
     pub fn variant_details(&self, variant_id: VariantId) -> Result<VariantDetails, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
-        let (summary, asset, metadata, files) = inner.with_catalog_api(|c| {
+        let (summary, asset, metadata, files, variants, stack) = inner.with_catalog_api(|c| {
             let s = c
                 .variant_summaries(&[variant_id])?
                 .pop()
                 .ok_or_else(|| ApiError::NotFound(format!("variant {variant_id}")))?;
             let a = c.asset(s.asset_id)?;
             let m = c.asset_metadata(s.asset_id)?;
+            let variants: Vec<VariantBrief> = c
+                .variants_of_asset(s.asset_id)?
+                .into_iter()
+                .map(|v| VariantBrief {
+                    variant_id: v.id,
+                    is_master: v.is_master,
+                    name: v.name,
+                })
+                .collect();
+            let stack = c
+                .stacks_of_variants(&[variant_id])?
+                .pop()
+                .map(StackInfo::from);
             let mut files = Vec::new();
             for f in c.files_of_asset(s.asset_id)? {
                 files.push(FileInfo {
@@ -150,9 +163,10 @@ impl Core {
                     size: f.facts.size,
                     status: f.status,
                     status_reason: f.status_reason,
+                    full_hash: f.full_hash,
                 });
             }
-            Ok((s, a, m, files))
+            Ok((s, a, m, files, variants, stack))
         })?;
         let rev = inner.with_cache(|c| c.thumbs.cache_key(variant_id))?;
         Ok(VariantDetails {
@@ -166,6 +180,8 @@ impl Core {
             metadata,
             video: asset.video,
             files,
+            variants,
+            stack,
         })
     }
 
@@ -181,6 +197,7 @@ impl Core {
                 variants: counts.variants,
                 files: counts.files,
                 history_entries: counts.history_entries,
+                stacks: c.stack_count()?,
             })
         })
     }

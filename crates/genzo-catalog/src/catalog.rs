@@ -124,6 +124,8 @@ pub struct Catalog {
     path: Option<PathBuf>,
     read_only: bool,
     report: OpenReport,
+    /// 読んだスタックの所属（[`Catalog::stack_layout`]。カタログが変わっていなければ使い回す）。
+    pub(crate) stack_cache: crate::stack::StackLayoutCache,
 }
 
 impl std::fmt::Debug for Catalog {
@@ -188,6 +190,7 @@ impl Catalog {
                 schema_version: outcome.to,
                 migration_backup: outcome.backup,
             },
+            stack_cache: Default::default(),
         })
     }
 
@@ -208,6 +211,7 @@ impl Catalog {
                 schema_version: outcome.to,
                 migration_backup: None,
             },
+            stack_cache: Default::default(),
         })
     }
 
@@ -237,6 +241,7 @@ impl Catalog {
                 schema_version: found,
                 migration_backup: None,
             },
+            stack_cache: Default::default(),
         })
     }
 

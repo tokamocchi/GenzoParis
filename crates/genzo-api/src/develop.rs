@@ -1351,7 +1351,9 @@ impl Core {
         Ok(ids.len())
     }
 
-    /// 仮想コピーを作る（LIB-13。元の variant の現在の現像設定をコピーする）。
+    /// 仮想コピーを作る（LIB-13。元の variant の現在の現像設定をコピーする）。作った仮想コピーは元の variant と
+    /// 同じスタック（LIB-12）に入る（genzo-catalog の `Catalog::create_virtual_copy`）ので、カタログの変更の
+    /// 知らせ（[`CatalogChange::VariantAdded`]）には、そのスタックの写真をすべて挙げる（印が変わるため）。
     pub fn create_virtual_copy(
         &self,
         variant_id: VariantId,
@@ -1361,14 +1363,26 @@ impl Core {
         inner.check_open()?;
         // 現像中の写真の保存待ちの変更を含めてコピーする。
         self.flush_develop()?;
-        let new_id = inner.with_catalog(|c| c.create_virtual_copy(variant_id, name))?;
+        let (new_id, stacked) = inner.with_catalog(|c| {
+            let id = c.create_virtual_copy(variant_id, name)?;
+            let members: Vec<VariantId> = c
+                .stacks_of_variants(&[id])?
+                .into_iter()
+                .flat_map(|s| s.members)
+                .collect();
+            Ok((id, members))
+        })?;
         // サムネイルは元の variant のものを写しておき、現像結果から作り直す。
         if let Ok(Some(t)) = inner.with_cache(|c| c.thumbs.get(variant_id)) {
             let _ = inner.with_cache(|c| c.thumbs.put(new_id, &t.cache_key, &t.jpeg));
         }
+        let mut changed = stacked;
+        if !changed.contains(&new_id) {
+            changed.push(new_id);
+        }
         inner.events.emit(Event::CatalogChanged {
             change: CatalogChange::VariantAdded,
-            variant_ids: vec![new_id],
+            variant_ids: changed,
             all: false,
         });
         crate::search::refresh(inner, &[]);

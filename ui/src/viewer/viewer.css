@@ -322,6 +322,18 @@
   color: var(--warn);
   font-weight: 700;
 }
+/* スタックの印（LIB-12。library/library.css の .stack-badge を小さくしたもの）。 */
+.filmstrip-stack {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  font-size: 9px;
+  line-height: 1.4;
+  padding: 0 3px;
+}
+.filmstrip-stack.after-kind {
+  left: 16px;
+}
 .filmstrip-empty {
   position: absolute;
   inset: 0;

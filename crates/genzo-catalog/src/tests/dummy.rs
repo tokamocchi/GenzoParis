@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use super::Fixture;
-use crate::{DummySpec, Filter, Sort, SortDirection, SortKey, populate_dummy};
+use crate::{Catalog, DummySpec, Filter, Sort, SortDirection, SortKey, populate_dummy};
 
 #[test]
 fn dummy_population_works_with_thousands_of_assets() {
@@ -364,6 +364,57 @@ fn poc6_scale_measurement() {
         for line in plan {
             eprintln!("    {label}: {line}");
         }
+    }
+    // スタック（LIB-12）: 連写（同じ撮影日時。`DummySpec::burst_ratio`）を撮影時刻の間隔 1 秒で自動スタックに
+    // し、スタックでまとめた検索（折りたたみ・すべて展開）の時間を、まとめない検索と比べる。
+    let t = Instant::now();
+    let preview = f
+        .cat
+        .auto_stack(&Filter::default(), std::time::Duration::from_secs(1), true)
+        .unwrap();
+    eprintln!(
+        "自動スタックの見込み（間隔 1 秒）: {preview:?}、{:?}",
+        t.elapsed()
+    );
+    let t = Instant::now();
+    let made = f
+        .cat
+        .auto_stack(&Filter::default(), std::time::Duration::from_secs(1), false)
+        .unwrap();
+    eprintln!(
+        "自動スタックを作る: {} 個・{} 枚、{:?}",
+        made.stacks,
+        made.photos,
+        t.elapsed()
+    );
+    // スタックの所属: 読み直す時間（カタログが変わった後の最初の検索）と、覚えたものを使う時間（変わって
+    // いない間の検索）。読み取り専用の接続（検索結果の作り直しと同じ）で計測する。
+    let reader = Catalog::open_read_only(f.catalog_path()).unwrap();
+    let t = Instant::now();
+    let layout = reader.stack_layout().unwrap();
+    eprintln!(
+        "スタックの所属を読む（{} 枚。読み直し）: {:?}",
+        layout.member_count(),
+        t.elapsed()
+    );
+    let t = Instant::now();
+    reader.stack_layout().unwrap();
+    eprintln!("スタックの所属（覚えたものを使う）: {:?}", t.elapsed());
+    for (label, expand) in [("折りたたみ", false), ("すべて展開", true)] {
+        f.cat
+            .search_stacked(&Filter::default(), &Sort::default(), expand)
+            .unwrap();
+        let t = Instant::now();
+        let g = f
+            .cat
+            .search_stacked(&Filter::default(), &Sort::default(), expand)
+            .unwrap();
+        eprintln!(
+            "スタックでまとめた検索（{label}・全件・撮影日時順）: {} 件（隠した写真 {} 枚）、{:?}",
+            g.ids.len(),
+            g.hidden,
+            t.elapsed()
+        );
     }
     let ids = f.cat.search(&Filter::default(), &Sort::default()).unwrap();
     let t = Instant::now();

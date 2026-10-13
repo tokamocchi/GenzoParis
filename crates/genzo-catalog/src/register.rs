@@ -9,8 +9,10 @@
 //!   ファイルを内容が同じまま読み直せた場合も、メタデータを保存し直して [`RegisterStatus::Updated`] を
 //!   返す（`revision` はそのまま）。
 //! - 同じフォルダで拡張子だけが違う RAW と JPEG は、同じ asset にまとめる（JPEG は
-//!   `role = sidecar_jpeg`。IMP-06 の基本の扱い）。JPEG を先に登録していた場合は、RAW を
+//!   `role = sidecar_jpeg`。IMP-06。04 の 3.11 節）。JPEG を先に登録していた場合は、RAW を
 //!   登録したときに JPEG を `sidecar_jpeg` に変えて同じ asset に入れる（評価やキーワードは残る）。
+//!   [`RegisterOptions::pair_raw_jpeg`] を `false` にすると、まとめずに別々の asset にする（新しく登録する
+//!   ファイルだけに効く。登録済みのペアは分けない）。
 //! - 多数のファイルは [`Catalog::register_batch`] で 1 つのトランザクションにまとめる。
 //!   途中で失敗した場合はバッチ全体が取り消されるので、同じバッチをもう一度登録すればよい
 //!   （登録済みのものは [`RegisterStatus::Unchanged`] になる）。
@@ -18,8 +20,8 @@
 use std::path::{Component, Path};
 
 use genzo_model::{
-    AssetId, AssetKind, CaptureTime, FileId, FileRole, FileStatus, FolderId, PhotoMetadata,
-    TzSource, VariantId, VideoMetadata, VolumeId,
+    AssetId, AssetKind, CaptureTime, FileId, FileRole, FileStatus, FolderId, MetadataField,
+    PhotoMetadata, TzSource, VariantId, VideoMetadata, VolumeId,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -27,6 +29,8 @@ use crate::catalog::Catalog;
 use crate::develop::{HISTORY_LABEL_IMPORT, insert_variant, new_variant_develop};
 use crate::error::{CatalogError, Result};
 use crate::hash::{FileFacts, is_hex64};
+use crate::iptc::{normalize_changes, set_asset_metadata_tx};
+use crate::keyword::{add_keywords_tx, check_keyword_path, ensure_keyword_tx};
 use crate::text::{path_key, searchable_text};
 use crate::util::{i64_to_u32, now_utc_string, parse_enum, u64_to_i64};
 
@@ -64,7 +68,7 @@ pub fn pair_class(name: &str) -> PairClass {
 }
 
 /// 名前を「拡張子を除いた部分」と拡張子に分ける（どちらも空でない場合だけ）。
-fn split_stem(name: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_stem(name: &str) -> Option<(&str, &str)> {
     let (stem, ext) = name.rsplit_once('.')?;
     (!stem.is_empty() && !ext.is_empty()).then_some((stem, ext))
 }
@@ -249,6 +253,68 @@ impl RegisterFile {
     }
 }
 
+/// 登録の設定（[`Catalog::register_batch_with`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterOptions {
+    /// 同じフォルダで拡張子だけが違う RAW と JPEG を、同じ asset（1 枚の写真）にまとめるか（IMP-06）。
+    /// `false` なら、新しく登録するファイルを別々の asset にする（登録済みのペアは分けない）。既定は `true`。
+    pub pair_raw_jpeg: bool,
+}
+
+impl Default for RegisterOptions {
+    fn default() -> Self {
+        Self {
+            pair_raw_jpeg: true,
+        }
+    }
+}
+
+/// 取り込みで新しく登録した写真にまとめて付けるもの（IMP-05。[`Catalog::register_batch_tagged`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImportTags {
+    /// キーワードの階層のパス（`[["場所", "京都"], ["家族"]]`。なければ作る）。
+    pub keyword_paths: Vec<Vec<String>>,
+    /// 説明のメタデータ（項目と値。値は genzo-model の `normalize_metadata_value` で整え、空なら付けない）。
+    pub metadata: Vec<(MetadataField, String)>,
+}
+
+impl ImportTags {
+    /// 付けるものがないか。
+    pub fn is_empty(&self) -> bool {
+        self.keyword_paths.is_empty() && self.metadata.iter().all(|(_, v)| v.trim().is_empty())
+    }
+
+    /// 作らずに確かめる（キーワードの名前の規則・メタデータの値。取り込みを始める前に誤りを知らせるため）。
+    pub fn validate(&self) -> Result<()> {
+        for p in &self.keyword_paths {
+            check_keyword_path(p)?;
+        }
+        self.normalized_metadata().map(|_| ())
+    }
+
+    /// 整えたメタデータ（空の値は除く）。
+    fn normalized_metadata(&self) -> Result<Vec<(MetadataField, Option<String>)>> {
+        let changes: Vec<(MetadataField, Option<&str>)> = self
+            .metadata
+            .iter()
+            .map(|(f, v)| (*f, Some(v.as_str())))
+            .collect();
+        Ok(normalize_changes(&changes)?
+            .into_iter()
+            .filter(|(_, v)| v.is_some())
+            .collect())
+    }
+}
+
+/// 取り込みでまとめて付けた結果（[`Catalog::register_batch_tagged`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TagOutcome {
+    /// キーワード・メタデータを付けた写真（asset。RAW と JPEG のペアは 1 つ）の数。
+    pub assets: u64,
+    /// 新しく付けた（写真, キーワード）の組の数。
+    pub keyword_links: u64,
+}
+
 /// 登録の結果の種類。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterStatus {
@@ -376,32 +442,107 @@ impl Catalog {
         Ok(out.pop().expect("1 件の要求には 1 件の結果がある"))
     }
 
-    /// 複数のファイルを 1 つのトランザクションで登録する。結果は要求と同じ順に返す。
+    /// 複数のファイルを 1 つのトランザクションで登録する（既定の設定。RAW と JPEG はまとめる）。結果は要求と
+    /// 同じ順に返す。
     ///
     /// どれか 1 件でも失敗したらバッチ全体を取り消す（DATA-02）。RAW と JPEG のペアを
     /// まとめやすくするため、内部では RAW を先、JPEG を後に処理する。
     pub fn register_batch(&mut self, requests: &[RegisterFile]) -> Result<Vec<RegisterOutcome>> {
-        for r in requests {
-            r.validate()?;
-        }
-        let mut order: Vec<usize> = (0..requests.len()).collect();
-        order.sort_by_key(|&i| match pair_class(&requests[i].name) {
-            PairClass::Raw => 0,
-            PairClass::Other => 1,
-            PairClass::Jpeg => 2,
-        });
-        let now = now_utc_string();
+        self.register_batch_with(requests, &RegisterOptions::default())
+    }
+
+    /// 設定 `options` で、複数のファイルを 1 つのトランザクションで登録する（[`Catalog::register_batch`]）。
+    pub fn register_batch_with(
+        &mut self,
+        requests: &[RegisterFile],
+        options: &RegisterOptions,
+    ) -> Result<Vec<RegisterOutcome>> {
         let tx = self.conn.transaction()?;
-        let mut results: Vec<Option<RegisterOutcome>> = vec![None; requests.len()];
-        for i in order {
-            results[i] = Some(register_one(&tx, &requests[i], &now)?);
+        let out = register_batch_tx(&tx, requests, options)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// 設定 `options` で複数のファイルを登録し、**このバッチで新しく作った写真**（[`RegisterStatus::Added`] で
+    /// `paired` でないファイルの asset）に `tags`（キーワード・説明のメタデータ）を付ける（IMP-05）。すべて 1 つの
+    /// トランザクションで、どれかが失敗したら登録もキーワードの作成も残さない。
+    ///
+    /// キーワードはマスターの variant に付け、メタデータは asset に付ける（RAW と JPEG のペアは 1 つの写真）。
+    /// 内容が変わった・変化のないファイルの写真（取り込み直し）と、登録済みの写真に組として足したファイル
+    /// （登録済みの RAW の隣の新しい JPEG・登録済みの JPEG に足した RAW）の写真には付けない。新しく作った写真が
+    /// なければキーワードも作らない。メタデータは `tags` に値のある項目だけを書き、ほかの項目は変えない。
+    pub fn register_batch_tagged(
+        &mut self,
+        requests: &[RegisterFile],
+        options: &RegisterOptions,
+        tags: &ImportTags,
+    ) -> Result<(Vec<RegisterOutcome>, TagOutcome)> {
+        let metadata = tags.normalized_metadata()?;
+        for p in &tags.keyword_paths {
+            check_keyword_path(p)?;
+        }
+        let tx = self.conn.transaction()?;
+        let out = register_batch_tx(&tx, requests, options)?;
+        // このバッチで作った写真（組にせずに登録したファイルの asset）だけ。組として既存の写真に入れた
+        // ファイル（`paired`）も Added になるが、その写真が前からあれば付けない（登録済みの写真は変えない）。
+        // 同じバッチで作った写真に入れた JPEG は、その写真が既に含まれる。
+        let mut assets: Vec<AssetId> = Vec::new();
+        let mut variants: Vec<VariantId> = Vec::new();
+        for o in out
+            .iter()
+            .filter(|o| o.status == RegisterStatus::Added && !o.paired)
+        {
+            if !assets.contains(&o.asset_id) {
+                assets.push(o.asset_id);
+                variants.push(o.master_variant_id);
+            }
+        }
+        let mut tagged = TagOutcome::default();
+        if !assets.is_empty() && (!tags.keyword_paths.is_empty() || !metadata.is_empty()) {
+            let mut keyword_ids = Vec::new();
+            for path in &tags.keyword_paths {
+                let mut parent = None;
+                for name in path {
+                    parent = Some(ensure_keyword_tx(&tx, parent, name)?);
+                }
+                let id = parent.expect("パスは空でない（check_keyword_path で確かめた）");
+                if !keyword_ids.contains(&id) {
+                    keyword_ids.push(id);
+                }
+            }
+            tagged.keyword_links = add_keywords_tx(&tx, &variants, &keyword_ids)? as u64;
+            set_asset_metadata_tx(&tx, &assets, &metadata)?;
+            tagged.assets = assets.len() as u64;
         }
         tx.commit()?;
-        Ok(results
-            .into_iter()
-            .map(|r| r.expect("すべての要求を処理した"))
-            .collect())
+        Ok((out, tagged))
     }
+}
+
+/// トランザクションの中で、複数のファイルを登録する（RAW を先、JPEG を後に処理する。結果は要求の順）。
+fn register_batch_tx(
+    tx: &Transaction<'_>,
+    requests: &[RegisterFile],
+    options: &RegisterOptions,
+) -> Result<Vec<RegisterOutcome>> {
+    for r in requests {
+        r.validate()?;
+    }
+    let mut order: Vec<usize> = (0..requests.len()).collect();
+    order.sort_by_key(|&i| match pair_class(&requests[i].name) {
+        PairClass::Raw => 0,
+        PairClass::Other => 1,
+        PairClass::Jpeg => 2,
+    });
+    let now = now_utc_string();
+    let mut results: Vec<Option<RegisterOutcome>> = vec![None; requests.len()];
+    for i in order {
+        results[i] = Some(register_one(tx, &requests[i], &now, options)?);
+    }
+    Ok(results
+        .into_iter()
+        .map(|r| r.expect("すべての要求を処理した"))
+        .collect())
 }
 
 fn folder_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Folder> {
@@ -466,7 +607,12 @@ struct ExistingFile {
     status_reason: Option<String>,
 }
 
-fn register_one(tx: &Transaction<'_>, req: &RegisterFile, now: &str) -> Result<RegisterOutcome> {
+fn register_one(
+    tx: &Transaction<'_>,
+    req: &RegisterFile,
+    now: &str,
+    options: &RegisterOptions,
+) -> Result<RegisterOutcome> {
     let name_key = path_key(&req.name);
     let existing = tx
         .prepare_cached(
@@ -511,7 +657,8 @@ fn register_one(tx: &Transaction<'_>, req: &RegisterFile, now: &str) -> Result<R
     let class = pair_class(&req.name);
 
     // JPEG: 同じフォルダに同じ名前の RAW があれば、その asset の sidecar_jpeg にする。
-    if req.kind == AssetKind::Photo
+    if options.pair_raw_jpeg
+        && req.kind == AssetKind::Photo
         && class == PairClass::Jpeg
         && let Some((raw_asset, _)) =
             find_pair_partner(tx, req.folder_id, &name_key, PairClass::Raw)?
@@ -540,7 +687,8 @@ fn register_one(tx: &Transaction<'_>, req: &RegisterFile, now: &str) -> Result<R
     }
 
     // RAW: 同じフォルダに同じ名前の JPEG だけの asset があれば、それに RAW を加えて主とする。
-    if req.kind == AssetKind::Photo
+    if options.pair_raw_jpeg
+        && req.kind == AssetKind::Photo
         && class == PairClass::Raw
         && let Some((jpeg_asset, jpeg_file)) =
             find_pair_partner(tx, req.folder_id, &name_key, PairClass::Jpeg)?

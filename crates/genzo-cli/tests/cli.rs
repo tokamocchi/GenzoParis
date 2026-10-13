@@ -1931,12 +1931,13 @@ mod ctrl_c {
         }
     }
 
-    /// 取り込みの対象の、小さな JPEG を `n` 枚作る。
+    /// 取り込みの対象の、小さな JPEG を `n` 枚作る（すべて内容が違う。同じ内容のファイルは、取り込みが重複
+    /// として登録しないため（IMP-04）。色の種は 256 通りなので、256 枚ごとに幅を変える）。
     fn photos(env: &Env, n: usize) {
         for i in 0..n {
             write_jpeg(
                 &env.photos.join(format!("P{i:03}.jpg")),
-                (32, 24),
+                (32 + (i / 256) as u32, 24),
                 i as u8,
                 None,
                 false,
@@ -2258,7 +2259,13 @@ fn catalog_schema_lists_tables_views_and_sql() {
     let schema = env.json(&["catalog", "schema"]);
     assert_eq!(
         schema["public_views"],
-        serde_json::json!(["photos_v1", "photo_keywords_v1", "photo_collections_v1"])
+        serde_json::json!([
+            "photos_v1",
+            "photo_keywords_v1",
+            "photo_collections_v1",
+            "photo_stacks_v1",
+            "photo_files_v1"
+        ])
     );
     let tables: Vec<&str> = schema["tables"]
         .as_array()
@@ -2676,4 +2683,326 @@ fn keywords_and_collections_organize_photos() {
     assert_eq!(r["deleted"], 5);
     assert_eq!(names(&env.json(&["search"])).len(), 3);
     assert_eq!(hashes(&env.photos), before, "元ファイルは変えない");
+}
+
+/// `stack`（LIB-12）と仮想コピーの `develop virtual-copy / rename-copy / make-master`（LIB-13）: 撮影時刻の間隔に
+/// よる自動スタック（見込みと実行）、折りたたんだスタックの search の並び（隠した写真の数と --expand-stacks）、
+/// 一番上の写真・外す・解除、仮想コピーは元の写真のスタックに入る。元ファイルは変えない。
+#[test]
+fn stacks_and_virtual_copies_from_the_cli() {
+    let env = Env::new();
+    for (i, n) in ["A0.jpg", "A1.jpg", "A2.jpg"].iter().enumerate() {
+        let when = format!("2024-05-01 12:00:0{i}");
+        write_jpeg(&env.photos.join(n), (64, 48), i as u8, Some(&when), false);
+    }
+    write_jpeg(
+        &env.photos.join("B.jpg"),
+        (64, 48),
+        9,
+        Some("2024-05-01 13:00:00"),
+        false,
+    );
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let all = env.json(&["search"]);
+    let a0 = id_of(&all, "A0.jpg").to_string();
+    let a1 = id_of(&all, "A1.jpg").to_string();
+    let a2 = id_of(&all, "A2.jpg").to_string();
+    let b = id_of(&all, "B.jpg").to_string();
+
+    // 自動スタック: 見込み（何も変えない）と実行。
+    let dry = env.json(&["stack", "auto", "--gap", "2", "--dry-run"]);
+    assert_eq!(
+        (dry["stacks"].as_u64(), dry["photos"].as_u64()),
+        (Some(1), Some(3))
+    );
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(env.json(&["search"])["count"], 4);
+    let made = env.json(&["stack", "auto", "--gap", "2"]);
+    assert_eq!(made["stacks"], 1);
+    // 折りたたんだスタックは一番上の写真だけ。隠した写真の数を返す。
+    let r = env.json(&["search"]);
+    assert_eq!(
+        (r["count"].as_u64(), r["hidden_in_stacks"].as_u64()),
+        (Some(2), Some(2))
+    );
+    assert_eq!(names(&r), vec!["A0.jpg", "B.jpg"]);
+    assert_eq!(items(&r)[0]["stack"]["count"], 3);
+    assert_eq!(env.json(&["search", "--expand-stacks"])["count"], 4);
+    let human = env.run(&["search"]);
+    assert!(
+        human.stdout.contains("3 枚（折りたたみ）"),
+        "{}",
+        human.stdout
+    );
+    assert!(human.stdout.contains("--expand-stacks"), "{}", human.stdout);
+    // 表示・一番上・展開。
+    let shown = env.json(&["stack", "show", &a1]);
+    let stack = shown["stacks"][0]["stack_id"].to_string();
+    assert_eq!(shown["stacks"][0]["top_variant_id"].to_string(), a0);
+    let top = env.json(&["stack", "top", &a2]);
+    assert_eq!(top["top_variant_id"].to_string(), a2);
+    assert_eq!(env.json(&["stack", "expand", &stack])["count"], 1);
+    // 並びの順（names は名前の順に並べ替えるので使わない）: スタックは一番上の写真の位置に、スタックの順で。
+    let r = env.json(&["search"]);
+    let order: Vec<&str> = items(&r)
+        .iter()
+        .map(|i| i["file_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, vec!["A2.jpg", "A0.jpg", "A1.jpg", "B.jpg"]);
+    // 外す・足す・解除。
+    assert_eq!(env.json(&["stack", "remove", &a0])["count"], 1);
+    assert_eq!(env.json(&["stack", "add", &stack, &b])["count"], 1);
+    let st = env.json(&["stack", "show", &b]);
+    assert_eq!(st["stacks"][0]["members"].as_array().unwrap().len(), 3);
+    assert_eq!(env.json(&["stack", "unstack", &b])["count"], 1);
+    assert_eq!(
+        env.json(&["stack", "show", &b])["stacks"],
+        serde_json::json!([])
+    );
+    // 作る（2 枚以上。1 枚は使い方の誤り）・すべて折りたたむ。
+    let created = env.json(&["stack", "create", &a0, &a1, "--top", &a1]);
+    assert_eq!(created["top_variant_id"].to_string(), a1);
+    assert_eq!(env.run(&["stack", "create", &a0]).code, 2);
+    env.json(&["stack", "collapse", "--all"]);
+
+    // 仮想コピー: 元の写真のスタックに入る（展開する）・名前の変更・マスターにする。
+    let vc = env.json(&["develop", "virtual-copy", &b, "--name", "白黒"]);
+    let copy = vc["variant_id"].to_string();
+    let st = env.json(&["stack", "show", &copy]);
+    assert_eq!(st["stacks"][0]["members"].as_array().unwrap().len(), 2);
+    assert_eq!(st["stacks"][0]["collapsed"], false);
+    env.json(&["develop", "rename-copy", &copy, "夕景"]);
+    let shown = env.run(&["show", &copy]);
+    assert!(shown.stdout.contains("夕景"), "{}", shown.stdout);
+    assert!(
+        shown.stdout.contains("マスター・仮想コピー"),
+        "{}",
+        shown.stdout
+    );
+    let mm = env.json(&["develop", "make-master", &copy]);
+    assert_eq!(mm["previous_master"].to_string(), b);
+    let r = env.json(&["search", "--masters-only", "--expand-stacks"]);
+    let ids: Vec<i64> = items(&r)
+        .iter()
+        .map(|v| v["variant_id"].as_i64().unwrap())
+        .collect();
+    assert!(ids.contains(&copy.parse().unwrap()) && !ids.contains(&b.parse().unwrap()));
+    // マスターの名前は変えられない（入力の誤り）。
+    let bad = env.run(&["develop", "rename-copy", &copy, "x"]);
+    assert_eq!(bad.code, 1, "{}", bad.stderr);
+    // 元ファイルは変えない。
+    assert_eq!(hashes(&env.photos), before);
+}
+
+/// ファイルの内容による同一性（ORG-03・IMP-04）と RAW と JPEG のペア（IMP-06）: 取り込みの重複の扱い
+/// （既定は取り込まない・--keep-duplicates）・RAW と JPEG を別々に取り込む・`hash compute / status /
+/// duplicates / identify`。元ファイルは変えない。
+#[test]
+fn content_identity_and_raw_jpeg_pairs_from_the_cli() {
+    let env = Env::new();
+    let a = env.photos.join("a");
+    let b = env.photos.join("b");
+    let c = env.photos.join("c");
+    for d in [&a, &b, &c] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    write_jpeg(
+        &a.join("A.jpg"),
+        (64, 48),
+        1,
+        Some("2024-05-01 12:00:00"),
+        false,
+    );
+    // RAW と JPEG のペアの代わりに、同じ名前の DNG（LibRaw がなくても登録できる）と JPEG。
+    std::fs::write(a.join("X.dng"), b"not really a dng").unwrap();
+    write_jpeg(&a.join("X.jpg"), (32, 24), 2, None, false);
+    std::fs::copy(a.join("A.jpg"), b.join("B.jpg")).unwrap();
+    std::fs::write(c.join("Y.dng"), b"another fake dng").unwrap();
+    write_jpeg(&c.join("Y.jpg"), (32, 24), 3, None, false);
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    let r = env.json(&["import", a.to_str().unwrap()]);
+    assert_eq!(
+        (r["added"].as_u64(), r["paired"].as_u64()),
+        (Some(3), Some(1))
+    );
+    assert_eq!(env.json(&["search"])["count"], 2, "X.dng と X.jpg は 1 枚");
+
+    // 同じ内容の B.jpg は、既定では取り込まない（結果に同じ内容のファイルを挙げる）。
+    let r = env.json(&["import", b.to_str().unwrap()]);
+    assert_eq!(r["added"], 0);
+    assert_eq!(r["duplicates"][0]["skipped"], true);
+    assert_eq!(
+        r["duplicates"][0]["existing_path"].as_str().unwrap(),
+        a.join("A.jpg").to_str().unwrap()
+    );
+    let human = env.run(&["import", b.to_str().unwrap()]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.contains("重複のため取り込まなかったファイル"),
+        "{}",
+        human.stdout
+    );
+    // 取り込む指定では、別の写真として登録する。
+    let r = env.json(&["import", b.to_str().unwrap(), "--keep-duplicates"]);
+    assert_eq!(r["added"], 1);
+    assert_eq!(r["duplicates"][0]["skipped"], false);
+    // RAW と JPEG を別々に取り込む指定。
+    let r = env.json(&["import", c.to_str().unwrap(), "--separate-raw-jpeg"]);
+    assert_eq!(
+        (r["added"].as_u64(), r["paired"].as_u64()),
+        (Some(2), Some(0))
+    );
+    assert_eq!(env.json(&["search"])["count"], 5);
+
+    // 内容のハッシュ: 重複の確認で求めた 2 件のほかは、hash compute で計算する。
+    let st = env.json(&["hash", "status"]);
+    assert_eq!(
+        (st["files"].as_u64(), st["hashed"].as_u64()),
+        (Some(6), Some(2))
+    );
+    let done = env.json(&["hash", "compute"]);
+    assert_eq!(done["hashed"], 4);
+    assert_eq!(done["failed_count"], 0);
+    let st = env.json(&["hash", "status"]);
+    assert_eq!(
+        (st["pending"].as_u64(), st["duplicate_groups"].as_u64()),
+        (Some(0), Some(1))
+    );
+    let dups = env.json(&["hash", "duplicates"]);
+    assert_eq!(dups["total"], 1);
+    assert_eq!(dups["groups"][0]["files"].as_array().unwrap().len(), 2);
+    let human = env.run(&["hash", "duplicates"]);
+    assert!(human.stdout.contains("1 組"), "{}", human.stdout);
+    // 場所・名前によらない識別。
+    let elsewhere = env.path("elsewhere.jpg");
+    std::fs::copy(a.join("A.jpg"), &elsewhere).unwrap();
+    let id = env.json(&["hash", "identify", elsewhere.to_str().unwrap()]);
+    assert_eq!(id["matches"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        id["full_hash"].as_str().unwrap(),
+        genzo_catalog::full_hash(&elsewhere).unwrap()
+    );
+    // 反対の指定は使い方の誤り。
+    let bad = env.run(&[
+        "import",
+        b.to_str().unwrap(),
+        "--keep-duplicates",
+        "--skip-duplicates",
+    ]);
+    assert_eq!(bad.code, 2, "{}", bad.stderr);
+    assert_eq!(hashes(&env.photos), before);
+}
+
+/// コピー取り込み（IMP-02）・リネーム規則（IMP-03）・取り込み時のキーワードと説明のメタデータ（IMP-05）:
+/// `import --copy-to --folders --rename --text --seq-start --seq-digits --keyword --meta --dry-run`。
+/// 元のファイルは変えない（DATA-01）。
+#[test]
+fn copy_import_with_rename_and_metadata_from_the_cli() {
+    let env = Env::new();
+    let card = env.path("card");
+    std::fs::create_dir_all(card.join("DCIM")).unwrap();
+    write_jpeg(
+        &card.join("DCIM/A.JPG"),
+        (64, 48),
+        1,
+        Some("2026-10-13 14:30:52"),
+        false,
+    );
+    write_jpeg(
+        &card.join("DCIM/B.JPG"),
+        (64, 48),
+        2,
+        Some("2026-10-14 09:05:00"),
+        false,
+    );
+    let dest = env.photos.join("library");
+    std::fs::create_dir_all(&dest).unwrap();
+    let before = hashes(&card);
+    env.json(&["catalog", "init"]);
+    let card_s = card.to_str().unwrap();
+    let dest_s = dest.to_str().unwrap();
+    let common = [
+        "import",
+        card_s,
+        "--copy-to",
+        dest_s,
+        "--folders",
+        "year-month-day",
+        "--rename",
+        "{date}_{text}-{seq}",
+        "--text",
+        "京都",
+        "--seq-start",
+        "5",
+        "--seq-digits",
+        "2",
+    ];
+    // 名前を決めるだけ（コピー・登録しない）。
+    let mut dry: Vec<&str> = common.to_vec();
+    dry.push("--dry-run");
+    let plan = env.json(&dry);
+    assert_eq!(plan["copy"]["dry_run"], true);
+    let planned: Vec<String> = plan["copy"]["copied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["destination"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        planned,
+        vec![
+            dest.join("2026/10/13/20261013_京都-05.JPG")
+                .to_string_lossy()
+                .into_owned(),
+            dest.join("2026/10/14/20261014_京都-06.JPG")
+                .to_string_lossy()
+                .into_owned(),
+        ]
+    );
+    assert!(std::fs::read_dir(&dest).unwrap().next().is_none());
+    let human = env.run(&dry);
+    assert!(human.stdout.contains("の予定"), "{}", human.stdout);
+    // コピーして取り込み、キーワードと作成者を付ける。
+    let mut run: Vec<&str> = common.to_vec();
+    run.extend([
+        "--keyword",
+        "場所>京都",
+        "--keyword",
+        "家族",
+        "--meta",
+        "creator=山田 太郎",
+    ]);
+    let r = env.json(&run);
+    assert_eq!(r["added"], 2);
+    assert_eq!(r["tagged"], 2);
+    assert_eq!(r["copy"]["next_sequence"], 7);
+    assert!(dest.join("2026/10/13/20261013_京都-05.JPG").is_file());
+    assert!(dest.join("2026/10/14/20261014_京都-06.JPG").is_file());
+    assert_eq!(hashes(&card), before);
+    let found = env.json(&["search", "--keyword", "場所>京都"]);
+    assert_eq!(found["count"], 2);
+    let id = id_of(&found, "20261013_京都-05.JPG");
+    let show = env.json(&["metadata", &id.to_string()]);
+    assert!(show.to_string().contains("山田 太郎"), "{show}");
+    // 同じカードをもう一度: 重複として何もコピーしない（人の読む形）。
+    let again = env.run(&common);
+    assert_eq!(again.code, 0, "{}", again.stderr);
+    assert!(again.stdout.contains("コピー先"), "{}", again.stdout);
+    assert!(again.stdout.contains("重複のため取り込まなかったファイル"));
+    // 使い方の誤り: --rename は --copy-to と一緒に、規則の名前、テンプレートの誤り（コアが断る）。
+    let no_copy = env.run(&["import", card_s, "--rename", "{seq}"]);
+    assert_eq!(no_copy.code, 2, "{}", no_copy.stderr);
+    let bad_rule = env.run(&["import", card_s, "--copy-to", dest_s, "--folders", "weekly"]);
+    assert_eq!(bad_rule.code, 2, "{}", bad_rule.stderr);
+    let bad_template = env.run(&["import", card_s, "--copy-to", dest_s, "--rename", "{oops}"]);
+    assert_ne!(bad_template.code, 0);
+    assert!(
+        bad_template.stderr.contains("oops"),
+        "{}",
+        bad_template.stderr
+    );
+    assert_eq!(hashes(&card), before);
 }

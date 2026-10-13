@@ -58,16 +58,25 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 # 取り込みで、大文字・小文字だけが違う名前のフォルダが同じものかを確かめる（ファイルの識別子で比べる。F08）。
 same-file.workspace = true
+# コピー取り込みの一時ファイルと、上書きしない名前の変更（`persist_noclobber`。IMP-02）。genzo-media の安全な
+# 書き出しと同じ crate・版（workspace の依存で、新しい crate は増えない）。
+tempfile.workspace = true
 
 # Windows: ゴミ箱へ移す前に、ドライブにごみ箱があるかを確かめる（SHQueryRecycleBinW。決定 No.23）。
+# ネットワークのドライブかを確かめる（GetDriveTypeW。ファイルの内容のハッシュのバックグラウンドの計算。
+# ORG-03。Win32_Storage_FileSystem は tempfile が既に同じ版で使っている機能）。
 # Microsoft の Win32 API の宣言だけの crate。版は依存の木に既にあるもの（Cargo.lock）と同じ。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_UI_Shell"] }
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Shell", "Win32_Storage_FileSystem"] }
+
+# Linux・macOS: ボリュームがネットワークのファイルシステムかを確かめる（statfs。ORG-03）。版は依存の木に既に
+# あるもの（genzo-worker・genzo-cli と同じ）。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.190"
 
 [dev-dependencies]
 # 古い版のカタログを作って、コアが開いたときの移行を確かめる（`genzo_catalog::testing`）。
 genzo-catalog = { workspace = true, features = ["test-support"] }
-tempfile.workspace = true
 # 合成の JPEG / PNG / TIFF（テストの入力）と、書き出したファイルの寸法の確認。
 image.workspace = true
 # 書き出したファイルの Exif（GPS の有無）の確認。

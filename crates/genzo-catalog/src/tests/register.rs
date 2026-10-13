@@ -772,3 +772,188 @@ fn registering_real_files_reads_them_read_only() {
     assert_eq!(std::fs::read(&path).unwrap(), data);
     assert_eq!(crate::full_hash(&path).unwrap(), before);
 }
+
+/// 取り込みでまとめて付けるもの（IMP-05）: 新しく登録した写真だけに、キーワード（階層で作る）と説明の
+/// メタデータを付ける。RAW と JPEG のペアは 1 枚に数える。取り込み直し（変化なし）の写真には付けない。
+#[test]
+fn tagged_registration_applies_keywords_and_metadata_to_new_photos_only() {
+    use genzo_model::MetadataField;
+
+    use crate::{ImportTags, RegisterOptions};
+
+    let mut f = Fixture::new();
+    // 先に登録済みの写真（取り込み直しの対象）。
+    let old = f.photo("OLD.ARW", 9, Some("2024:05:01 10:00:00"));
+    let tags = ImportTags {
+        keyword_paths: vec![
+            vec!["場所".to_owned(), "京都".to_owned()],
+            vec!["家族".to_owned()],
+        ],
+        metadata: vec![
+            (MetadataField::Creator, "  岡本  ".to_owned()),
+            (MetadataField::Copyright, "© 2026 岡本".to_owned()),
+            // 空の値は付けない（ほかの項目を消さない）。
+            (MetadataField::City, "   ".to_owned()),
+        ],
+    };
+    let requests = vec![
+        photo_req(f.folder, "DSC00001.ARW", 1, Some("2024:05:01 12:00:00")),
+        photo_req(f.folder, "DSC00001.JPG", 2, Some("2024:05:01 12:00:00")),
+        photo_req(f.folder, "DSC00002.ARW", 3, Some("2024:05:01 12:00:01")),
+        photo_req(f.folder, "OLD.ARW", 9, Some("2024:05:01 10:00:00")),
+    ];
+    let (out, tagged) = f
+        .cat
+        .register_batch_tagged(&requests, &RegisterOptions::default(), &tags)
+        .unwrap();
+    assert_eq!(out[3].status, RegisterStatus::Unchanged);
+    assert_eq!(out[0].asset_id, out[1].asset_id, "ペアは 1 枚");
+    assert_eq!(tagged.assets, 2);
+    assert_eq!(tagged.keyword_links, 4);
+    for o in &out[..3] {
+        let names: Vec<String> = f
+            .cat
+            .keywords_of(o.master_variant_id)
+            .unwrap()
+            .into_iter()
+            .map(|k| k.name)
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.contains(&"京都".to_owned()) && names.contains(&"家族".to_owned()));
+        let m = f.cat.asset_metadata(o.asset_id).unwrap();
+        assert_eq!(m.creator.as_deref(), Some("岡本"));
+        assert_eq!(m.copyright.as_deref(), Some("© 2026 岡本"));
+        assert_eq!(m.city, None);
+    }
+    assert!(f.cat.keywords_of(old.master_variant_id).unwrap().is_empty());
+    assert_eq!(f.cat.asset_metadata(old.asset_id).unwrap().creator, None);
+    // 作成者はテキスト検索の対象（索引も作り直す）。
+    let hits = f
+        .cat
+        .search(
+            &crate::Filter {
+                text: Some("岡本".to_owned()),
+                ..Default::default()
+            },
+            &crate::Sort::default(),
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    // 階層のキーワードは 1 つずつ（親「場所」の下に「京都」）。
+    assert_eq!(f.rows("keyword"), 3);
+
+    // 新しく登録したものがなければ、キーワードを作らない。
+    let tags2 = ImportTags {
+        keyword_paths: vec![vec!["別の".to_owned()]],
+        metadata: vec![],
+    };
+    let (_, tagged) = f
+        .cat
+        .register_batch_tagged(&requests[..1], &RegisterOptions::default(), &tags2)
+        .unwrap();
+    assert_eq!(tagged, crate::TagOutcome::default());
+    assert_eq!(f.rows("keyword"), 3);
+}
+
+/// 登録済みの写真に RAW・JPEG を組として足した（新しいファイルだが、写真は前からある）ときは、その写真に
+/// キーワード・メタデータを付けない（利用者が付け直した値を取り込みで上書きしない。決定事項 No.96）。
+#[test]
+fn tagged_registration_does_not_touch_photos_completed_by_pairing() {
+    use genzo_model::MetadataField;
+
+    use crate::{ImportTags, RegisterOptions};
+
+    let mut f = Fixture::new();
+    // 登録済みの RAW だけの写真と、JPEG だけの写真（どちらも作成者を手で付けた）。
+    let raw = f.photo("DSC00001.ARW", 1, Some("2024:05:01 12:00:00"));
+    let jpeg = f.photo("DSC00002.JPG", 2, Some("2024:05:01 12:00:01"));
+    for asset in [raw.asset_id, jpeg.asset_id] {
+        f.cat
+            .set_asset_metadata(&[asset], &[(MetadataField::Creator, Some("元の作者"))])
+            .unwrap();
+    }
+    let tags = ImportTags {
+        keyword_paths: vec![vec!["場所".to_owned(), "京都".to_owned()]],
+        metadata: vec![(MetadataField::Creator, "取り込み作者".to_owned())],
+    };
+    let requests = vec![
+        // 登録済みの RAW の隣に現れた JPEG・登録済みの JPEG に足された RAW。
+        photo_req(f.folder, "DSC00001.JPG", 3, Some("2024:05:01 12:00:00")),
+        photo_req(f.folder, "DSC00002.ARW", 4, Some("2024:05:01 12:00:01")),
+        // 同じバッチで新しく作る組（RAW が先に処理され、JPEG はその写真に入る）。
+        photo_req(f.folder, "DSC00003.JPG", 5, Some("2024:05:01 12:00:02")),
+        photo_req(f.folder, "DSC00003.ARW", 6, Some("2024:05:01 12:00:02")),
+    ];
+    let (out, tagged) = f
+        .cat
+        .register_batch_tagged(&requests, &RegisterOptions::default(), &tags)
+        .unwrap();
+    assert!(out.iter().all(|o| o.status == RegisterStatus::Added));
+    assert!(out[0].paired && out[1].paired && out[2].paired && !out[3].paired);
+    assert_eq!(out[0].asset_id, raw.asset_id);
+    assert_eq!(out[1].asset_id, jpeg.asset_id);
+    assert_eq!(out[2].asset_id, out[3].asset_id);
+    assert_eq!(tagged.assets, 1, "新しく作った写真だけ");
+    assert_eq!(tagged.keyword_links, 1);
+    for o in [&raw, &jpeg] {
+        assert!(f.cat.keywords_of(o.master_variant_id).unwrap().is_empty());
+        assert_eq!(
+            f.cat.asset_metadata(o.asset_id).unwrap().creator.as_deref(),
+            Some("元の作者")
+        );
+    }
+    assert_eq!(
+        f.cat.keywords_of(out[3].master_variant_id).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        f.cat
+            .asset_metadata(out[3].asset_id)
+            .unwrap()
+            .creator
+            .as_deref(),
+        Some("取り込み作者")
+    );
+}
+
+/// 付けるものに誤り（キーワードの区切りの文字・長すぎる値）があれば、何も登録しない・何も作らない。
+#[test]
+fn tagged_registration_with_invalid_tags_registers_nothing() {
+    use genzo_model::MetadataField;
+
+    use crate::{ImportTags, RegisterOptions};
+
+    let mut f = Fixture::new();
+    let requests = vec![photo_req(f.folder, "DSC00001.ARW", 1, None)];
+    for tags in [
+        ImportTags {
+            keyword_paths: vec![vec!["場所".to_owned(), "京都>東山".to_owned()]],
+            metadata: vec![],
+        },
+        ImportTags {
+            keyword_paths: vec![vec![]],
+            metadata: vec![],
+        },
+        ImportTags {
+            keyword_paths: vec![vec!["家族".to_owned()]],
+            metadata: vec![(MetadataField::Creator, "あ".repeat(2001))],
+        },
+    ] {
+        assert!(tags.validate().is_err(), "{tags:?}");
+        let e = f
+            .cat
+            .register_batch_tagged(&requests, &RegisterOptions::default(), &tags)
+            .unwrap_err();
+        assert!(matches!(e, CatalogError::InvalidInput(_)), "{e:?}");
+        assert_eq!(f.rows("file"), 0);
+        assert_eq!(f.rows("keyword"), 0);
+    }
+    assert!(ImportTags::default().is_empty());
+    assert!(
+        ImportTags {
+            keyword_paths: vec![],
+            metadata: vec![(MetadataField::City, " ".to_owned())],
+        }
+        .is_empty()
+    );
+}

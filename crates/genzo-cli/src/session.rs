@@ -296,6 +296,7 @@ pub fn job_kind_text(kind: JobKind) -> &'static str {
         JobKind::IntegrityCheck => "詳細チェック",
         JobKind::ReresolveCaptureTimes => "撮影日時の推定し直し",
         JobKind::CollectGarbage => "キャッシュの回収",
+        JobKind::HashFiles => "内容のハッシュの計算",
     }
 }
 

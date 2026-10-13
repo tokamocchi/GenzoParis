@@ -8,7 +8,7 @@
 //! - 元のファイルには書かない（01 の LIB-15「カタログ内で編集する」）。
 
 use genzo_model::{AssetId, IptcMetadata, MetadataField, normalize_metadata_value};
-use rusqlite::{OptionalExtension, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 use crate::catalog::Catalog;
 use crate::error::{CatalogError, Result};
@@ -92,81 +92,11 @@ impl Catalog {
         changes: &[(MetadataField, Option<&str>)],
     ) -> Result<usize> {
         // 値を先に整える（不正な値があれば何も書かない）。同じ項目は後のものを使う。
-        let mut normalized: Vec<(MetadataField, Option<String>)> = Vec::new();
-        for &(field, value) in changes {
-            let v = normalize_metadata_value(field, value)
-                .map_err(|e| CatalogError::InvalidInput(e.to_string()))?;
-            normalized.retain(|(f, _)| *f != field);
-            normalized.push((field, v));
-        }
-        let ids = ids_to_json(asset_ids);
+        let normalized = normalize_changes(changes)?;
         let tx = self.conn.transaction()?;
-        let existing: Vec<i64> = {
-            let mut stmt = tx.prepare_cached(
-                "SELECT id FROM asset WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id",
-            )?;
-            stmt.query_map([&ids], |row| row.get(0))?
-                .collect::<rusqlite::Result<_>>()?
-        };
-        if existing.is_empty() || normalized.is_empty() {
-            tx.commit()?;
-            return Ok(existing.len());
-        }
-        let existing_json = ids_to_json(&existing);
-        if let Some((_, caption)) = normalized
-            .iter()
-            .find(|(f, _)| *f == MetadataField::Caption)
-        {
-            tx.prepare_cached(
-                "UPDATE asset SET caption = ?2 WHERE id IN (SELECT value FROM json_each(?1))",
-            )?
-            .execute(rusqlite::params![existing_json, caption])?;
-        }
-        let iptc: Vec<&(MetadataField, Option<String>)> = normalized
-            .iter()
-            .filter(|(f, _)| *f != MetadataField::Caption)
-            .collect();
-        if !iptc.is_empty() {
-            if iptc.iter().any(|(_, v)| v.is_some()) {
-                tx.prepare_cached(
-                    "INSERT OR IGNORE INTO asset_iptc(asset_id)
-                     SELECT value FROM json_each(?1)",
-                )?
-                .execute([&existing_json])?;
-            }
-            // 列の名前は MetadataField の固定の文字列だけ（利用者の入力ではない）。
-            let sets = iptc
-                .iter()
-                .enumerate()
-                .map(|(i, (f, _))| format!("{} = ?{}", f.as_str(), i + 2))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "UPDATE asset_iptc SET {sets} WHERE asset_id IN (SELECT value FROM json_each(?1))"
-            );
-            let mut values: Vec<Option<String>> = vec![Some(existing_json.clone())];
-            values.extend(iptc.iter().map(|(_, v)| v.clone()));
-            tx.execute(&sql, params_from_iter(values))?;
-            // すべての値がなくなった行は消す（値を持つ asset だけが行を持つ）。
-            let all_null = iptc_columns()
-                .map(|f| format!("{} IS NULL", f.as_str()))
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            tx.execute(
-                &format!(
-                    "DELETE FROM asset_iptc
-                     WHERE asset_id IN (SELECT value FROM json_each(?1)) AND {all_null}"
-                ),
-                [&existing_json],
-            )?;
-        }
-        if normalized.iter().any(|(f, _)| f.searchable()) {
-            for &a in &existing {
-                refresh_asset_text(&tx, a)?;
-            }
-        }
+        let n = set_asset_metadata_tx(&tx, asset_ids, &normalized)?;
         tx.commit()?;
-        Ok(existing.len())
+        Ok(n)
     }
 
     /// 複数の asset の説明のメタデータのまとめ（項目ごとに、共通の値か、異なるか）。存在しない asset は
@@ -212,4 +142,93 @@ impl Catalog {
             })
             .map_err(CatalogError::from)
     }
+}
+
+/// 説明のメタデータの変更を整える（[`normalize_metadata_value`]。同じ項目は後のものを使う）。値が不正なら
+/// [`CatalogError::InvalidInput`]。
+pub(crate) fn normalize_changes(
+    changes: &[(MetadataField, Option<&str>)],
+) -> Result<Vec<(MetadataField, Option<String>)>> {
+    let mut normalized: Vec<(MetadataField, Option<String>)> = Vec::new();
+    for &(field, value) in changes {
+        let v = normalize_metadata_value(field, value)
+            .map_err(|e| CatalogError::InvalidInput(e.to_string()))?;
+        normalized.retain(|(f, _)| *f != field);
+        normalized.push((field, v));
+    }
+    Ok(normalized)
+}
+
+/// トランザクションの中で、複数の asset の説明のメタデータを変える（`normalized` は [`normalize_changes`] で
+/// 整えたもの）。変えた（存在する）asset の数を返す（[`Catalog::set_asset_metadata`]・取り込みの一括の付与）。
+pub(crate) fn set_asset_metadata_tx(
+    tx: &Connection,
+    asset_ids: &[AssetId],
+    normalized: &[(MetadataField, Option<String>)],
+) -> Result<usize> {
+    let ids = ids_to_json(asset_ids);
+    let existing: Vec<i64> = {
+        let mut stmt = tx.prepare_cached(
+            "SELECT id FROM asset WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id",
+        )?;
+        stmt.query_map([&ids], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    if existing.is_empty() || normalized.is_empty() {
+        return Ok(existing.len());
+    }
+    let existing_json = ids_to_json(&existing);
+    if let Some((_, caption)) = normalized
+        .iter()
+        .find(|(f, _)| *f == MetadataField::Caption)
+    {
+        tx.prepare_cached(
+            "UPDATE asset SET caption = ?2 WHERE id IN (SELECT value FROM json_each(?1))",
+        )?
+        .execute(rusqlite::params![existing_json, caption])?;
+    }
+    let iptc: Vec<&(MetadataField, Option<String>)> = normalized
+        .iter()
+        .filter(|(f, _)| *f != MetadataField::Caption)
+        .collect();
+    if !iptc.is_empty() {
+        if iptc.iter().any(|(_, v)| v.is_some()) {
+            tx.prepare_cached(
+                "INSERT OR IGNORE INTO asset_iptc(asset_id)
+                 SELECT value FROM json_each(?1)",
+            )?
+            .execute([&existing_json])?;
+        }
+        // 列の名前は MetadataField の固定の文字列だけ（利用者の入力ではない）。
+        let sets = iptc
+            .iter()
+            .enumerate()
+            .map(|(i, (f, _))| format!("{} = ?{}", f.as_str(), i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE asset_iptc SET {sets} WHERE asset_id IN (SELECT value FROM json_each(?1))"
+        );
+        let mut values: Vec<Option<String>> = vec![Some(existing_json.clone())];
+        values.extend(iptc.iter().map(|(_, v)| v.clone()));
+        tx.execute(&sql, params_from_iter(values))?;
+        // すべての値がなくなった行は消す（値を持つ asset だけが行を持つ）。
+        let all_null = iptc_columns()
+            .map(|f| format!("{} IS NULL", f.as_str()))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        tx.execute(
+            &format!(
+                "DELETE FROM asset_iptc
+                 WHERE asset_id IN (SELECT value FROM json_each(?1)) AND {all_null}"
+            ),
+            [&existing_json],
+        )?;
+    }
+    if normalized.iter().any(|(f, _)| f.searchable()) {
+        for &a in &existing {
+            refresh_asset_text(tx, a)?;
+        }
+    }
+    Ok(existing.len())
 }

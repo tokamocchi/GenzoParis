@@ -11,6 +11,11 @@ export function StatusBar() {
   return (
     <footer className="statusbar">
       <span>{search ? `${search.count.toLocaleString()} 件` : "—"}</span>
+      {search && search.hidden > 0 && (
+        <span className="muted" title="条件に合う写真のうち、折りたたんだスタックの中にあるもの（S で展開）">
+          ほかに折りたたんだスタックの中に {search.hidden.toLocaleString()} 枚
+        </span>
+      )}
       {mode === "grid" ? (
         selected > 1 && <span>{selected.toLocaleString()} 件を選択</span>
       ) : (

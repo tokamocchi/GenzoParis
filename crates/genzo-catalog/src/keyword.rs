@@ -38,6 +38,20 @@ pub const MAX_KEYWORD_NAME_CHARS: usize = 200;
 /// （「,」「，」「、」）として読む文字（CLI のパスの「>」「＞」も）。
 pub const KEYWORD_NAME_SEPARATORS: &[char] = &['>', '＞', '|', ',', '，', '、'];
 
+/// キーワードの階層のパス（`["場所", "京都"]`）の名前を、作らずに確かめる（取り込みの前に、付けるキーワードの
+/// 誤りを知らせるため。IMP-05）。各段の規則は作るとき（[`Catalog::ensure_keyword`]）と同じ。空のパスもエラー。
+pub fn check_keyword_path<S: AsRef<str>>(path: &[S]) -> Result<()> {
+    if path.is_empty() {
+        return Err(CatalogError::InvalidInput(
+            "キーワードのパスが空です".to_owned(),
+        ));
+    }
+    for name in path {
+        keyword_name(name.as_ref())?;
+    }
+    Ok(())
+}
+
 /// キーワードの名前を確かめる（空・長すぎ・制御文字・区切りの文字）。前後の空白を除いた名前を返す。
 fn keyword_name(name: &str) -> Result<&str> {
     let name = checked_name(name, "キーワードの名前", MAX_KEYWORD_NAME_CHARS)?;
@@ -628,7 +642,7 @@ fn check_keyword_name_free(
     Ok(())
 }
 
-fn add_keywords_tx(
+pub(crate) fn add_keywords_tx(
     conn: &Connection,
     variant_ids: &[VariantId],
     keyword_ids: &[KeywordId],

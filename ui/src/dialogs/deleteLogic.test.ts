@@ -48,6 +48,7 @@ describe("削除の計画", () => {
       filesWithoutPath: 1,
       assetsWithoutPath: 1,
       trashableFiles: 2,
+      pairedJpegs: 1,
       includesUnselected: true,
     });
     expect(summarizeDeletePlan(plan, [1, 2, 3]).includesUnselected).toBe(false);
@@ -72,6 +73,12 @@ describe("削除の計画", () => {
     const remove = describeDeletePlan("remove_from_catalog", s);
     expect(remove[1]).toBe("元のファイル 3 個は残ります。");
     expect(remove.join("\n")).not.toContain("場所の分からない");
+    // RAW と同時記録の JPEG（IMP-06）は、両方が対象であることを説明する。
+    expect(trash.join("\n")).toContain("RAW と JPEG の両方のファイルをゴミ箱へ移します");
+    expect(remove.join("\n")).toContain("両方の登録を除きます（ファイルは残ります）");
+    const noPair = summarizeDeletePlan({ ...plan, files: plan.files.filter((f) => f.role === "primary") }, [1, 3]);
+    expect(noPair.pairedJpegs).toBe(0);
+    expect(describeDeletePlan("trash", noPair).join("\n")).not.toContain("同時記録");
     expect(describeDeletePlan("virtual_copies", { ...s, variants: 2 })[0]).toBe(
       "2 件の仮想コピーを削除します。元のファイルは変わりません。",
     );

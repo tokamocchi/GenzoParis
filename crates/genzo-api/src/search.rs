@@ -20,6 +20,10 @@
 //! - 「★3 以上」で表示中に評価を 2 に下げた写真は、次に [`Core::search`] で条件を適用し直すまで
 //!   結果に残す（3.7 節。Lightroom と同様）。選別の操作で変えた variant を（カタログに書く前に）覚えて
 //!   おき、選別の条件（評価・フラグ・カラーラベル）を除いた条件で並べた中に残す。
+//! - 結果は、スタック（LIB-12。3.10 節）でまとめてから保持する（genzo-catalog の `StackLayout::group`。
+//!   折りたたんだスタックは代表の 1 枚だけ、展開したスタックはスタックの中の順に 1 か所に並べる。
+//!   [`SearchFilter::expand_stacks`] ならすべて展開）。件数は表示する写真の数で、折りたたんだスタックの中に
+//!   隠した写真の数は [`SearchResult::hidden`]。作り直しでは、選別の操作で残す写真を加えた後にまとめる。
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -28,7 +32,7 @@ use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use genzo_catalog::Catalog;
+use genzo_catalog::{Catalog, StackLayout};
 use genzo_model::VariantId;
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
@@ -36,7 +40,8 @@ use crate::core::{Core, Inner};
 use crate::error::ApiError;
 use crate::events::Event;
 use crate::types::{
-    Facets, IndexOf, RangeResult, SearchFilter, SearchResult, SearchSort, VariantSummary,
+    Facets, IndexOf, RangeResult, SearchFilter, SearchResult, SearchSort, ShownVariants,
+    VariantSummary,
 };
 
 /// 1 回の [`Core::range`] で返す件数の上限（**仮置き**: 2,000。グリッドの表示範囲と先読みに十分で、
@@ -49,6 +54,8 @@ struct Current {
     filter: SearchFilter,
     sort: SearchSort,
     ids: Arc<Vec<VariantId>>,
+    /// 折りたたんだスタックの中に隠した写真の数（LIB-12）。
+    hidden: u64,
     /// 選別の操作で変えた variant（次に条件を適用し直すまで、条件に合わなくても残す）。
     sticky: HashSet<VariantId>,
 }
@@ -221,7 +228,9 @@ fn refresher_loop(shared: &SearchShared, weak: &Weak<Inner>, catalog_path: &Path
         let event = {
             let mut state = shared.lock();
             match result {
-                Ok((strict, relaxed)) => commit(&mut state, &snapshot, strict, relaxed),
+                Ok((strict, relaxed, layout)) => {
+                    commit(&mut state, &snapshot, strict, relaxed, &layout)
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "検索結果の作り直しに失敗しました");
                     None
@@ -244,13 +253,16 @@ fn has_mark_conditions(filter: &SearchFilter) -> bool {
     *filter != filter.without_marks()
 }
 
-/// 作り直しの検索（条件どおりの結果と、必要なら選別の条件を除いた結果）。
+/// 作り直しの検索の結果（条件どおりの結果、必要なら選別の条件を除いた結果、スタックの所属）。
+type QueryResult = (Vec<VariantId>, Option<Vec<VariantId>>, Arc<StackLayout>);
+
+/// 作り直しの検索（条件どおりの結果と、必要なら選別の条件を除いた結果。どちらもスタックでまとめる前）。
 fn query(
     inner: &Inner,
     reader: Option<&Catalog>,
     snap: &Snapshot,
-) -> Result<(Vec<VariantId>, Option<Vec<VariantId>>), ApiError> {
-    let run = |c: &Catalog| -> genzo_catalog::Result<(Vec<VariantId>, Option<Vec<VariantId>>)> {
+) -> Result<QueryResult, ApiError> {
+    let run = |c: &Catalog| -> genzo_catalog::Result<QueryResult> {
         let sort = snap.sort.to_catalog();
         let strict = c.search(&snap.filter.to_catalog(), &sort)?;
         let relaxed = if snap.relaxed {
@@ -258,7 +270,7 @@ fn query(
         } else {
             None
         };
-        Ok((strict, relaxed))
+        Ok((strict, relaxed, c.stack_layout()?))
     };
     match reader {
         Some(c) => Ok(run(c)?),
@@ -266,12 +278,14 @@ fn query(
     }
 }
 
-/// 作り直した結果を入れる。結果が変わったら新しい世代にして、知らせるイベントを返す。
+/// 作り直した結果を入れる（選別の操作で残す写真を加えてから、スタックでまとめる）。結果が変わったら新しい
+/// 世代にして、知らせるイベントを返す。
 fn commit(
     state: &mut SearchState,
     snap: &Snapshot,
     strict: Vec<VariantId>,
     relaxed: Option<Vec<VariantId>>,
+    layout: &StackLayout,
 ) -> Option<Event> {
     // 作り直している間に条件を適用し直した（古い条件の結果）。
     if state.epoch != snap.epoch {
@@ -292,18 +306,26 @@ fn commit(
         state.requested += 1;
         return None;
     };
-    if *cur.ids == ids {
+    // 削除された variant は残す対象から外す（折りたたんだスタックに隠れたものは外さない）。
+    let alive: HashSet<VariantId> = ids.iter().copied().collect();
+    let grouped = layout.group(ids, snap.filter.expand_stacks);
+    if *cur.ids == grouped.ids && cur.hidden == grouped.hidden {
+        cur.sticky.retain(|v| alive.contains(v));
         return None;
     }
     let generation = state.next_generation();
     let cur = state.current.as_mut().expect("上で確かめた");
-    // 削除された variant は残す対象から外す。
-    let alive: HashSet<VariantId> = ids.iter().copied().collect();
     cur.sticky.retain(|v| alive.contains(v));
     cur.generation = generation;
-    let count = ids.len() as u64;
-    cur.ids = Arc::new(ids);
-    Some(Event::SearchUpdated { generation, count })
+    let count = grouped.ids.len() as u64;
+    let hidden = grouped.hidden;
+    cur.ids = Arc::new(grouped.ids);
+    cur.hidden = hidden;
+    Some(Event::SearchUpdated {
+        generation,
+        count,
+        hidden,
+    })
 }
 
 impl Core {
@@ -316,14 +338,22 @@ impl Core {
         let inner = &self.inner;
         inner.check_open()?;
         let mut state = inner.search.lock();
-        let ids = inner.with_catalog(|c| c.search(&filter.to_catalog(), &sort.to_catalog()))?;
+        let grouped = inner.with_catalog(|c| {
+            c.search_stacked(
+                &filter.to_catalog(),
+                &sort.to_catalog(),
+                filter.expand_stacks,
+            )
+        })?;
         let generation = state.next_generation();
-        let count = ids.len() as u64;
+        let count = grouped.ids.len() as u64;
+        let hidden = grouped.hidden;
         state.current = Some(Current {
             generation,
             filter: filter.clone(),
             sort,
-            ids: Arc::new(ids),
+            ids: Arc::new(grouped.ids),
+            hidden,
             sticky: HashSet::new(),
         });
         // 実行中の作り直しの結果は捨て、これまでの要求は済んだことにする（この検索は、要求の元になった
@@ -332,7 +362,11 @@ impl Core {
         state.completed = state.requested;
         drop(state);
         inner.search.changed.notify_all();
-        Ok(SearchResult { generation, count })
+        Ok(SearchResult {
+            generation,
+            count,
+            hidden,
+        })
     }
 
     /// 絞り込みの候補（カタログ全体のカメラ・レンズ・動画のコーデックと、それぞれの asset の数。LIB-07）。
@@ -384,6 +418,7 @@ impl Core {
         Ok(state.current.as_ref().map(|c| SearchResult {
             generation: c.generation,
             count: c.ids.len() as u64,
+            hidden: c.hidden,
         }))
     }
 
@@ -451,12 +486,48 @@ impl Core {
         })
     }
 
+    /// `variant_ids` のうち、表示中の検索結果に出ている写真（問い合わせた順。同じ写真は 1 つ）。折りたたんだ
+    /// スタックに隠れた写真・絞り込みに合わない写真は含まない（画面が選択を表示している写真だけにする。LIB-12・
+    /// 3.10 節）。結果を 1 回たどる（O(結果の数 ＋ 問い合わせの数)）。検索していなければ [`ApiError::NotFound`]。
+    pub fn shown_variants(&self, variant_ids: &[VariantId]) -> Result<ShownVariants, ApiError> {
+        let wanted: HashSet<VariantId> = variant_ids.iter().copied().collect();
+        let state = self.inner.search.lock();
+        let cur = state
+            .current
+            .as_ref()
+            .ok_or_else(|| ApiError::NotFound("検索結果".to_owned()))?;
+        let mut found: HashSet<VariantId> = HashSet::with_capacity(wanted.len());
+        if !wanted.is_empty() {
+            for v in cur.ids.iter() {
+                if wanted.contains(v) {
+                    found.insert(*v);
+                    if found.len() == wanted.len() {
+                        break;
+                    }
+                }
+            }
+        }
+        let generation = cur.generation;
+        drop(state);
+        let mut seen: HashSet<VariantId> = HashSet::with_capacity(found.len());
+        let variant_ids = variant_ids
+            .iter()
+            .copied()
+            .filter(|v| found.contains(v) && seen.insert(*v))
+            .collect();
+        Ok(ShownVariants {
+            generation,
+            variant_ids,
+        })
+    }
+
     /// 表示中の検索結果の世代と件数（検索していなければ `None`）。
     pub fn current_search(&self) -> Option<SearchResult> {
         let state = self.inner.search.lock();
         state.current.as_ref().map(|c| SearchResult {
             generation: c.generation,
             count: c.ids.len() as u64,
+            hidden: c.hidden,
         })
     }
 
@@ -499,6 +570,7 @@ mod tests {
             filter,
             sort: SearchSort::default(),
             ids: Arc::new(ids.iter().map(|&n| v(n)).collect()),
+            hidden: 0,
             sticky: HashSet::new(),
         });
         st.requested = 1;
@@ -530,18 +602,34 @@ mod tests {
     fn changed_results_become_a_new_generation() {
         let mut st = state_with(SearchFilter::default(), &[1, 2]);
         let snap = snapshot(&st, false);
-        let ev = commit(&mut st, &snap, vec![v(1), v(2), v(3)], None);
+        let ev = commit(
+            &mut st,
+            &snap,
+            vec![v(1), v(2), v(3)],
+            None,
+            &StackLayout::default(),
+        );
         assert!(matches!(
             ev,
             Some(Event::SearchUpdated {
                 generation: 2,
-                count: 3
+                count: 3,
+                hidden: 0,
             })
         ));
         assert_eq!(ids(&st), vec![1, 2, 3]);
         // 同じ結果なら世代を変えない。
         let snap = snapshot(&st, false);
-        assert!(commit(&mut st, &snap, vec![v(1), v(2), v(3)], None).is_none());
+        assert!(
+            commit(
+                &mut st,
+                &snap,
+                vec![v(1), v(2), v(3)],
+                None,
+                &StackLayout::default()
+            )
+            .is_none()
+        );
         assert_eq!(st.current_generation(), Some(2));
     }
 
@@ -551,7 +639,7 @@ mod tests {
         let snap = snapshot(&st, false);
         // 作り直している間に条件を適用し直した（Core::search）。
         st.epoch += 1;
-        assert!(commit(&mut st, &snap, vec![v(9)], None).is_none());
+        assert!(commit(&mut st, &snap, vec![v(9)], None, &StackLayout::default()).is_none());
         assert_eq!(ids(&st), vec![1, 2]);
         assert_eq!(st.current_generation(), Some(1));
     }
@@ -568,6 +656,7 @@ mod tests {
             &snap,
             vec![v(1), v(3), v(4)],
             Some(vec![v(1), v(2), v(3), v(4), v(5)]),
+            &StackLayout::default(),
         );
         assert!(ev.is_some());
         assert_eq!(ids(&st), vec![1, 2, 3, 4]);
@@ -578,6 +667,7 @@ mod tests {
             &snap,
             vec![v(1), v(3)],
             Some(vec![v(1), v(3), v(5)]),
+            &StackLayout::default(),
         );
         assert_eq!(ids(&st), vec![1, 3]);
         assert!(st.current.as_ref().unwrap().sticky.is_empty());
@@ -591,10 +681,57 @@ mod tests {
         // 検索の間に 2 の評価を下げた（keep_marked）。条件どおりの結果からは 2 が外れている。
         st.current.as_mut().unwrap().sticky.insert(v(2));
         let before = st.requested;
-        assert!(commit(&mut st, &snap, vec![v(1), v(3)], None).is_none());
+        assert!(
+            commit(
+                &mut st,
+                &snap,
+                vec![v(1), v(3)],
+                None,
+                &StackLayout::default()
+            )
+            .is_none()
+        );
         // 2 を一覧から消さずに、もう一度作り直す。
         assert_eq!(ids(&st), vec![1, 2, 3]);
         assert_eq!(st.requested, before + 1);
+    }
+
+    #[test]
+    fn results_are_grouped_by_stacks_after_marked_variants_are_kept() {
+        // スタック（2・3・4。一番上 3、折りたたみ）。★3 以上を表示中に、一番上の 3 の評価を下げた。
+        let layout = StackLayout::from_stacks(&[genzo_catalog::StackInfo {
+            id: genzo_model::StackId::new(1),
+            top_variant_id: v(3),
+            collapsed: true,
+            members: vec![v(3), v(2), v(4)],
+        }]);
+        let mut st = state_with(three_up(), &[1, 3, 5]);
+        st.current.as_mut().unwrap().sticky.insert(v(3));
+        let snap = snapshot(&st, true);
+        let ev = commit(
+            &mut st,
+            &snap,
+            vec![v(1), v(2), v(4), v(5)],
+            Some(vec![v(1), v(2), v(3), v(4), v(5)]),
+            &layout,
+        );
+        // 残す 3 を加えてからまとめるので、代表は一番上の 3 のまま（2・4 は隠す）。
+        assert_eq!(ids(&st), vec![1, 3, 5]);
+        assert!(matches!(
+            ev,
+            Some(Event::SearchUpdated {
+                count: 3,
+                hidden: 2,
+                ..
+            })
+        ));
+        // すべて展開する条件では、一致した写真をスタックの中の順に並べる。
+        let mut expanded = three_up();
+        expanded.expand_stacks = true;
+        let mut st = state_with(expanded, &[1, 5]);
+        let snap = snapshot(&st, false);
+        commit(&mut st, &snap, vec![v(4), v(1), v(2), v(5)], None, &layout);
+        assert_eq!(ids(&st), vec![2, 4, 1, 5]);
     }
 
     #[test]
@@ -604,7 +741,7 @@ mod tests {
         st.current.as_mut().unwrap().sticky.insert(v(2));
         let snap = snapshot(&st, false);
         // 2 は削除された。
-        commit(&mut st, &snap, vec![v(1)], None);
+        commit(&mut st, &snap, vec![v(1)], None, &StackLayout::default());
         assert_eq!(ids(&st), vec![1]);
     }
 }

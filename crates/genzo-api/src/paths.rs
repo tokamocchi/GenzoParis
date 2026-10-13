@@ -142,6 +142,118 @@ pub(crate) fn join_rel(mount: &Path, rel_dir: &str, name: &str) -> PathBuf {
     p
 }
 
+/// `path` のあるボリュームが、ネットワークのファイルシステム（SMB・NFS など）か（ORG-03。ファイルの内容の
+/// ハッシュのバックグラウンドの計算は、既定ではネットワークのボリュームのファイルを読まない。3.11 節）。
+/// 分からない（調べられない・対応していない OS）ときは `false`（ローカルとみなす）。
+///
+/// - Windows: UNC のパス（`\\server\share`）はネットワーク。ドライブ文字は、ドライブの根で
+///   `GetDriveTypeW` が `DRIVE_REMOTE`（割り当てたネットワークドライブ）を返すもの。
+/// - macOS: `statfs` の `f_flags` に `MNT_LOCAL` がないもの（SMB・AFP・NFS・WebDAV など）。
+/// - Linux: `statfs` の `f_type` が NFS・SMB・CIFS・SMB2・AFS・Ceph・Coda・NCP・9P のもの（値は Linux の
+///   `linux/magic.h`）。FUSE（sshfs など）は、ローカルのドライブ（exFAT・NTFS の FUSE の実装）にも使われる
+///   ため区別しない。
+///
+/// Windows・macOS の判定は実機で未確認（implementation_status の人の判断の表）。
+pub(crate) fn is_network_path(path: &Path) -> bool {
+    network::is_network(path)
+}
+
+#[cfg(windows)]
+mod network {
+    use std::path::{Component, Path, Prefix};
+
+    /// `GetDriveTypeW` の戻り値: ネットワークのドライブ（Win32 の `DRIVE_REMOTE`）。
+    const DRIVE_REMOTE: u32 = 4;
+
+    pub(super) fn is_network(path: &Path) -> bool {
+        let Some(Component::Prefix(prefix)) = path.components().next() else {
+            return false;
+        };
+        match prefix.kind() {
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => {
+                let root: Vec<u16> = format!("{}:\\", char::from(d))
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                // SAFETY: `root` は NUL で終わる UTF-16 の文字列で、呼び出しの間は生きている。
+                let kind = unsafe {
+                    windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr())
+                };
+                kind == DRIVE_REMOTE
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
+mod network {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    /// `statfs` を呼ぶ（失敗したら `None`）。
+    fn statfs(path: &Path) -> Option<libc::statfs> {
+        let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: `statfs` は C の構造体で、すべて 0 のビット列は有効な値。
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `c` は NUL で終わる文字列、`st` は書き込める構造体で、どちらも呼び出しの間は生きている。
+        let r = unsafe { libc::statfs(c.as_ptr(), &mut st) };
+        (r == 0).then_some(st)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(super) fn is_network(path: &Path) -> bool {
+        statfs(path).is_some_and(|st| {
+            // f_type の型は環境で違う（i64・u64・i32）ので、下位 32 ビットで比べる。
+            is_network_magic((st.f_type as u64 & 0xFFFF_FFFF) as u32)
+        })
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub(super) fn is_network(path: &Path) -> bool {
+        statfs(path).is_some_and(|st| st.f_flags & (libc::MNT_LOCAL as u32) == 0)
+    }
+
+    /// Linux のネットワークのファイルシステムの `f_type`（`linux/magic.h` の値）か。
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(super) fn is_network_magic(magic: u32) -> bool {
+        const NETWORK_MAGICS: &[u32] = &[
+            0x6969,      // NFS_SUPER_MAGIC
+            0x517B,      // SMB_SUPER_MAGIC
+            0xFF53_4D42, // CIFS_SUPER_MAGIC
+            0xFE53_4D42, // SMB2_SUPER_MAGIC
+            0x5346_414F, // AFS_SUPER_MAGIC
+            0x00C3_6400, // CEPH_SUPER_MAGIC
+            0x7375_7245, // CODA_SUPER_MAGIC
+            0x564C,      // NCP_SUPER_MAGIC
+            0x0102_1997, // V9FS_MAGIC
+        ];
+        NETWORK_MAGICS.contains(&magic)
+    }
+}
+
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+)))]
+mod network {
+    use std::path::Path;
+
+    pub(super) fn is_network(_path: &Path) -> bool {
+        false
+    }
+}
+
 /// ファイル名に使えない文字（Windows で使えない文字と制御文字）を `_` に置き換える。
 pub(crate) fn sanitize_file_component(name: &str) -> String {
     let cleaned: String = name
@@ -163,6 +275,26 @@ pub(crate) fn sanitize_file_component(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ローカルのフォルダ（一時フォルダ）はネットワークではない。調べられないパスもローカルとみなす。
+    #[test]
+    fn local_folders_are_not_network_volumes() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(!is_network_path(d.path()));
+        assert!(!is_network_path(&d.path().join("ない")));
+    }
+
+    /// Linux のネットワークのファイルシステムの印（`linux/magic.h` の値）。ext4・tmpfs・FUSE は対象外。
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn linux_network_magics() {
+        for m in [0x6969u32, 0x517B, 0xFF53_4D42, 0xFE53_4D42, 0x0102_1997] {
+            assert!(network::is_network_magic(m), "{m:#x}");
+        }
+        for m in [0xEF53u32, 0x0102_1994, 0x6573_5546] {
+            assert!(!network::is_network_magic(m), "{m:#x}");
+        }
+    }
 
     #[test]
     fn lexical_absolute_removes_dots() {

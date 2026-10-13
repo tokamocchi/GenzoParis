@@ -5,6 +5,7 @@ mod collections;
 mod develop;
 mod dummy;
 mod file_ops;
+mod identity;
 mod iptc;
 mod keywords;
 mod public_views;
@@ -12,6 +13,7 @@ mod register;
 mod schema;
 mod schema_doc;
 mod search;
+mod stacks;
 mod text_search;
 mod thumbs;
 

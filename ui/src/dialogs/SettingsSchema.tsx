@@ -32,7 +32,7 @@ export function SettingsSchema(props: { catalogPath: string; schemaVersion: numb
       <p className="hint" style={{ marginTop: 0 }}>
         カタログは普通の SQLite のファイルなので、SQLite のツール（sqlite3・DB Browser for SQLite など）で読めます。
         書き換えると不整合の原因になるので、必ず読み取り専用で開いてください。外部から読むときは、列の名前・意味を変えない約束の
-        公開ビュー（photos_v1・photo_keywords_v1・photo_collections_v1）を使ってください。構造の説明はソースの docs/catalog_schema.md にあります。
+        公開ビュー（photos_v1・photo_keywords_v1・photo_collections_v1・photo_stacks_v1）を使ってください。構造の説明はソースの docs/catalog_schema.md にあります。
         {props.schemaVersion !== null && `今のスキーマの版は ${props.schemaVersion} です。`}
       </p>
       <div className="dlg-path box" title="読み取り専用で開く例">

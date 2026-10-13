@@ -14,6 +14,7 @@ import type {
   DisplayInfo,
   DisplayTarget,
   ExternalTools,
+  ImportPreferences,
   LogFolderInfo,
   RestoreOutcome,
   VariantId,
@@ -40,6 +41,9 @@ export const restoreCatalog = (catalogPath: string, backup: string) =>
   call<RestoreOutcome>("restore_catalog", { catalogPath, backup });
 export const updateAppSettings = (update: AppSettingsUpdate) =>
   call<AppSettings>("update_app_settings", { update });
+/** 取り込みのダイアログの設定を保存する（次に開いたときの初めの値。IMP-02・IMP-03・IMP-05）。 */
+export const saveImportPreferences = (preferences: ImportPreferences) =>
+  call<AppSettings>("save_import_preferences", { preferences });
 export const locateTools = (dir: string | null) => call<ExternalTools>("locate_tools", { dir });
 /** パスの種類（フォルダ・ファイル・ない）。ドロップしたものからフォルダを選ぶのに使う。 */
 export const pathKinds = (paths: string[]) => call<("dir" | "file" | "missing")[]>("path_kinds", { paths });

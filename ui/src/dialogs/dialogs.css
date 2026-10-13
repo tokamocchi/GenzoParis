@@ -158,6 +158,20 @@
 .dlg-list-item.selected {
   background: var(--bg-4);
 }
+/* 縦に並べる項目（内容が同じファイルの組。SettingsIdentity.tsx）。 */
+.dlg-list-item.column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+.dlg-list-item.column .dlg-row {
+  margin: 0;
+}
+/* 1 行の説明（内容のハッシュの状況）。 */
+.dlg-kv-line {
+  margin: 2px 0;
+  font-size: 12px;
+}
 /* キーボードで選べる項目（button。バックアップの一覧）。 */
 button.dlg-list-item {
   width: 100%;
@@ -564,4 +578,43 @@ button.dlg-list-item:focus-visible {
   margin-right: auto;
   color: var(--fg-1);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 取り込み（コピー・名前・付けるもの） */
+
+.import-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.import-preview {
+  margin: 8px 0 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+  font-size: 12px;
+}
+.import-preview-row {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.import-tags {
+  margin: 10px 0 12px;
+}
+.import-tags > summary,
+.import-tag-group > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.import-tag-group {
+  margin: 6px 0 6px 12px;
+}
+.import-tag-group textarea {
+  resize: vertical;
 }

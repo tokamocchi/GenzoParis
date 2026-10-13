@@ -190,13 +190,13 @@ pub struct FileOpRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-const FILE_COLUMNS: &str = "id, asset_id, folder_id, name, role, size, mtime, quick_hash, full_hash, revision, status, status_reason";
+pub(crate) const FILE_COLUMNS: &str = "id, asset_id, folder_id, name, role, size, mtime, quick_hash, full_hash, revision, status, status_reason";
 
 /// [`Catalog::files_named`] の 1 回の問い合わせに入れる名前の数（SQLite の引数の数の上限
 /// （3.32 以降の既定 32766）より十分に小さい数）。
 pub const FILES_NAMED_CHUNK: usize = 500;
 
-fn file_from_row(row: &rusqlite::Row<'_>) -> Result<FileRecord> {
+pub(crate) fn file_from_row(row: &rusqlite::Row<'_>) -> Result<FileRecord> {
     let role: String = row.get(4)?;
     let size: i64 = row.get(5)?;
     let status: String = row.get(10)?;
@@ -287,6 +287,35 @@ impl Catalog {
             Some(row) => Ok(Some(file_from_row(row)?)),
             None => Ok(None),
         }
+    }
+
+    /// フォルダの中の、拡張子を除いた名前（比較キー）が `name` と同じファイルの名前（`name` と同じ名前も
+    /// 含む。比較キーの順）。`name` に拡張子がなければ空。
+    ///
+    /// RAW と JPEG の組（IMP-06）は「同じフォルダ・拡張子を除いた名前が同じ」で決まるため、コピー取り込み
+    /// （IMP-02）が別の写真の RAW と JPEG を同じ名前で並べないように確かめるのに使う。
+    pub fn names_with_same_stem(&self, folder_id: FolderId, name: &str) -> Result<Vec<String>> {
+        let key = path_key(name);
+        let Some((stem, _)) = crate::register::split_stem(&key) else {
+            return Ok(Vec::new());
+        };
+        // 名前の比較キーが「stem.」で始まるもの（'/' は '.' の次の文字で、名前には含まれない）。
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT name, name_key FROM file
+             WHERE folder_id = ?1 AND name_key > ?2 AND name_key < ?3 ORDER BY name_key",
+        )?;
+        let rows = stmt.query_map(
+            params![folder_id.get(), format!("{stem}."), format!("{stem}/")],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (name, key) = r?;
+            if crate::register::split_stem(&key).map(|(s, _)| s) == Some(stem) {
+                out.push(name);
+            }
+        }
+        Ok(out)
     }
 
     /// フォルダの中のファイル（配下のフォルダは含まない。比較キーの順）。

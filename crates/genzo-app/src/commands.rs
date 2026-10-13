@@ -391,6 +391,21 @@ pub async fn update_app_settings(
     .await
 }
 
+/// 取り込みのダイアログの設定を保存する（取り込みを始めたとき。次に開いたときの初めの値にする）。
+#[tauri::command]
+pub async fn save_import_preferences(
+    state: Shared<'_>,
+    preferences: crate::settings::ImportPreferences,
+) -> Result<AppSettings, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        state.update_settings(|s| {
+            s.import = preferences;
+        })
+    })
+    .await
+}
+
 /// 指定したフォルダ（なければ自動）で ffmpeg・ffprobe を探す（設定の画面の確認用）。
 #[tauri::command]
 pub async fn locate_tools(dir: Option<PathBuf>) -> Result<ExternalTools, ErrorInfo> {

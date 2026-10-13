@@ -7,7 +7,8 @@
 // - カメラ・レンズ・動画のコーデックの候補は core.facets()。カタログが変わったら読み直す。読めなければ
 //   候補なしで動く（コーデックの欄は候補があるときだけ出す）。
 // - 長辺の画素数・動画の長さ・フレームレートの範囲（VID-03）は「詳しい条件」の中に置く（入力は全角の数字も
-//   読む。フォーカスを外したとき・Enter・入力から 600 ms 後に反映する）。
+//   読む。フォーカスを外したとき・Enter・入力から 600 ms 後に反映する）。マスターだけ（仮想コピーを除く。LIB-13）と
+//   スタックをすべて展開して表示（LIB-12。保存した折りたたみの状態は変えない）も同じ場所に置く。
 // - キーワードでの絞り込み（LIB-09。左のパネルのキーワードの名前で選ぶ）と、表示中のコレクション
 //   （LIB-10・LIB-11）は、名前の札（×で外す）で示す（OrganizeChips）。
 
@@ -44,11 +45,11 @@ import {
   KIND_OPTIONS,
   LABEL_CHOICES,
   localDateToUtc,
+  moreConditionCount,
   MULTIPLE,
   normalizeText,
   NUMERIC_RANGES,
   type NumericRange,
-  numericRangeCount,
   parseRangeInput,
   RATING_OPTIONS,
   ratingOption,
@@ -404,7 +405,7 @@ function MoreConditions({ filter }: { filter: SearchFilter }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
   const panelId = useId();
-  const count = numericRangeCount(filter);
+  const count = moreConditionCount(filter);
 
   // 外を押したら閉じる。
   useEffect(() => {
@@ -433,7 +434,7 @@ function MoreConditions({ filter }: { filter: SearchFilter }) {
         className={`btn small${count > 0 ? " active" : ""}`}
         aria-expanded={open}
         aria-controls={panelId}
-        title="長辺の画素数・動画の長さ・フレームレートで絞り込む"
+        title="長辺の画素数・動画の長さ・フレームレート・仮想コピーで絞り込む、スタックをすべて展開して表示する"
         onClick={() => setOpen((o) => !o)}
       >
         詳しい条件{count > 0 ? `（${count}）` : ""} ▾
@@ -443,6 +444,22 @@ function MoreConditions({ filter }: { filter: SearchFilter }) {
           {NUMERIC_RANGES.map((r) => (
             <NumericRangeRow key={r.id} range={r} filter={filter} />
           ))}
+          <label className="lib-filter-check">
+            <input
+              type="checkbox"
+              checked={!!filter.masters_only}
+              onChange={(e) => actions.setFilter({ masters_only: e.target.checked })}
+            />
+            マスターだけ（仮想コピーを除く）
+          </label>
+          <label className="lib-filter-check">
+            <input
+              type="checkbox"
+              checked={!!filter.expand_stacks}
+              onChange={(e) => actions.setFilter({ expand_stacks: e.target.checked })}
+            />
+            スタックをすべて展開して表示（折りたたみの状態は変えない）
+          </label>
           <p className="hint">
             下限・上限ともその値を含みます。動画の長さ・フレームレートを指定すると、写真と、その値の分からない動画は
             除きます。長辺の画素数は写真にも動画にも効きます。

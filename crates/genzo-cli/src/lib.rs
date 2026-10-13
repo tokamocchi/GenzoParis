@@ -8,12 +8,16 @@
 //! ```text
 //! export GENZO_CATALOG=~/genzo/catalog.db
 //! genzo catalog init
-//! genzo import ~/Pictures/2024-05-01            # 進捗は標準エラー
+//! genzo import ~/Pictures/2024-05-01            # 進捗は標準エラー（同じ内容のファイルは既定で取り込まない）
+//! genzo hash compute                             # 内容のハッシュ（全体の BLAKE3）を計算して記録する
+//! genzo hash duplicates                          # 内容が同じファイルの組
 //! genzo search --min-rating 3 --sort capture --desc --json
 //! genzo rate 12 13 4
 //! genzo keyword add 12 13 --keyword "場所>京都"
 //! genzo collection create "京都 2024" --add 12 13
 //! genzo search --keyword "場所" --collection 1
+//! genzo stack auto --gap 2 --folder ~/Pictures/2024-05-01 --dry-run
+//! genzo stack create 12 13 14 --top 13
 //! echo '{"exposure_ev": 0.5}' | genzo develop set 12 --json -
 //! genzo export 12 13 --out ~/out --format jpeg --quality 90 --long-edge 2048 --remove-gps
 //! genzo render DSC00001.ARW --out out.tif --settings settings.json   # カタログなし
@@ -61,11 +65,13 @@
 //! | `catalog` | `catalog init / info / check / backup / schema / restore` |
 //! | `library` | `import`・`search`・`show`・`rate / flag / label / caption / metadata`・`thumbs`・`remove`・`trash` |
 //! | `organize` | `keyword list / add / remove / show / create / rename / move / delete / export`・`collection list / create / add / remove / rename / move / delete / rule`（LIB-09〜11）と、`search --keyword / --collection / --rule` の解釈 |
-//! | `develop` | `develop get / set / reset / undo / redo / history / copy / virtual-copy / delete-copy / region` |
+//! | `stacks` | `stack create / add / remove / unstack / top / collapse / expand / show / auto`（LIB-12）と `develop rename-copy / make-master`（LIB-13） |
+//! | `develop` | `develop get / set / reset / undo / redo / history / copy / virtual-copy / delete-copy / rename-copy / make-master / region / before` |
 //! | `export` | `export` と書き出しの設定 |
 //! | `standalone` | カタログなしの `render`・`info`（ワーカーを直接使う） |
 //! | `bench` | `bench preview / export`（genzo-testkit の計測と記録） |
 //! | `logs` | `log info / clear`（ログ・クラッシュレポート。カタログは使わない。SYS-07） |
+//! | `identity` | `hash compute / status / duplicates / identify`（ファイルの内容による同一性。ORG-03・IMP-04） |
 //!
 //! # ログ（SYS-07）
 //!
@@ -104,12 +110,14 @@ mod catalog;
 mod develop;
 mod error;
 mod export;
+mod identity;
 mod interrupt;
 mod library;
 mod logs;
 mod organize;
 pub mod output;
 mod session;
+mod stacks;
 mod standalone;
 
 use std::ffi::OsString;
@@ -310,6 +318,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         } => library::metadata(&g, out, &variants, set, clear),
         Command::Keyword(c) => organize::keyword(&g, out, c),
         Command::Collection(c) => organize::collection(&g, out, c),
+        Command::Stack(c) => stacks::run(&g, out, c),
         Command::Develop(c) => develop::run(&g, out, c),
         Command::Export(a) => export::run(&g, out, a),
         Command::Render(a) => standalone::render(&g, out, a),
@@ -323,6 +332,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         }
         Command::Bench(a) => bench::run(&g, out, a),
         Command::Log(c) => logs::run(&g, out, c),
+        Command::Hash(c) => identity::run(&g, out, c),
     }
 }
 
