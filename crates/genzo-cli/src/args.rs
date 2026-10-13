@@ -247,6 +247,33 @@ pub enum Command {
     /// 結び付け直し。見つからない写真の一覧は `search --missing`
     #[command(subcommand)]
     Missing(MissingCommand),
+    /// 動画の再生（VID-04）: 再生の情報（アプリが配信するファイル・WebView で再生できない動画の再生用のファイル）・
+    /// 再生用のファイルを作る（利用者の ffmpeg で H.264 ＋ AAC の MP4。長辺 1280）・キャッシュの状況と消去
+    #[command(subcommand)]
+    Video(VideoCommand),
+}
+
+/// `video` のサブコマンド（VID-04）。
+#[derive(Debug, Subcommand)]
+pub enum VideoCommand {
+    /// 再生の情報: 元のファイルを読めるか・MIME の型・コーデック・アプリが配信するファイル・再生用のファイルの
+    /// 有無・作るときのエンコーダー（作れなければ理由）
+    Info {
+        /// 動画の variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+    },
+    /// 再生用のファイルを作る（1 本ずつ。進捗は標準エラー。今の内容のものがあれば作らない）。作れなかった動画が
+    /// あれば終了コード 3
+    Proxy {
+        /// 動画の variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// 再生用のファイルのキャッシュの状況（フォルダ・数・合計・上限）
+    Cache,
+    /// 再生用のファイルをすべて消す（作り直せる。元の動画は変わらない）
+    Clear,
 }
 
 /// フォルダの指定（ID か、登録したフォルダのパス）。
@@ -1253,6 +1280,35 @@ pub enum DevelopCommand {
     /// ビフォー / アフターの表示（DEV-31）のビフォーのプレビューを PNG に書く（写真を開いて描く。切り抜きは
     /// 今の設定と同じ）
     Before(BeforeArgs),
+    /// 比較表示（LIB-03）の同期ズームと同じ範囲を、2 枚までの写真について同時に描いて PNG に書く（コア API
+    /// `render_view_region` を試す。範囲の中心は写真ごとの割合、大きさは出力の画素で、どの写真も同じ）
+    Compare(CompareArgs),
+}
+
+/// `develop compare` の引数（LIB-03）。
+#[derive(Debug, Args)]
+pub struct CompareArgs {
+    /// variant の ID（1〜2 枚。写真。動画は描けない）
+    #[arg(required = true, value_parser = parse_variant_id)]
+    pub variants: Vec<VariantId>,
+    /// 範囲の中心の横の位置（出力の画像の幅に対する割合。0〜1）
+    #[arg(long, default_value_t = 0.5)]
+    pub cx: f64,
+    /// 範囲の中心の縦の位置（出力の画像の高さに対する割合。0〜1）
+    #[arg(long, default_value_t = 0.5)]
+    pub cy: f64,
+    /// 範囲の幅（出力の画素。写真より大きければ写真の幅）
+    #[arg(long)]
+    pub width: f64,
+    /// 範囲の高さ（出力の画素。写真より大きければ写真の高さ）
+    #[arg(long)]
+    pub height: f64,
+    /// 表示の倍率（1 = 等倍、0.5 = 縮小、2 = 拡大）
+    #[arg(long, default_value_t = 1.0)]
+    pub scale: f64,
+    /// PNG を書くフォルダ（`compare-<面>-<ID>.png`。なければ作る。既にあるファイルには書かない）
+    #[arg(long, value_name = "DIR")]
+    pub out_dir: PathBuf,
 }
 
 /// `develop region` の引数。

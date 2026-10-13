@@ -108,6 +108,52 @@ export interface VideoMetadata {
 }
 
 // ---------------------------------------------------------------------------
+// 動画の再生（VID-04。genzo-api の playback）
+// ---------------------------------------------------------------------------
+
+/** 動画の再生の情報（genzo-api の VideoPlayback）。 */
+export interface VideoPlayback {
+  variant_id: VariantId;
+  /** 元のファイルを読めるか（見つからない・ドライブが外れているなら false）。 */
+  available: boolean;
+  unavailable_reason: string | null;
+  /** 元のファイルの MIME の型（video/mp4・video/quicktime）。 */
+  content_type: string;
+  size: number | null;
+  video: VideoMetadata | null;
+  /** 今の内容の再生用のファイル（H.264 ＋ AAC の MP4）。なければ null。 */
+  proxy: VideoProxyInfo | null;
+  /** 再生用のファイルを作っているジョブ。 */
+  proxy_job: number | null;
+  /** 再生用のファイルを作れない理由（ffmpeg がないなど。作れるなら null）。 */
+  proxy_unavailable: string | null;
+  /** 再生用のファイルを作るエンコーダー（ffmpeg の名前）。 */
+  proxy_encoder: string | null;
+}
+
+export interface VideoProxyInfo {
+  size: number;
+  long_edge: number;
+}
+
+/** 再生用のファイルの作成の結果（ジョブの結果）。 */
+export interface VideoProxyReport {
+  variant_id: VariantId;
+  size: number;
+  reused: boolean;
+  encoder: string | null;
+}
+
+/** 再生用のファイルのキャッシュの状況。 */
+export interface VideoProxyCacheStatus {
+  dir: string;
+  count: number;
+  total_bytes: number;
+  capacity_bytes: number;
+  removed: number;
+}
+
+// ---------------------------------------------------------------------------
 // 現像設定（genzo-model の DevelopSettings。2.5 節）
 // ---------------------------------------------------------------------------
 
@@ -269,7 +315,8 @@ export type JobKind =
   | "hash_files"
   | "move_files"
   | "check_missing"
-  | "find_relink_candidates";
+  | "find_relink_candidates"
+  | "video_proxy";
 export type JobState = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface FileIssue {
@@ -502,11 +549,14 @@ export type JobResult =
       thumbnails_removed: number;
       previews_removed: number;
       temp_files_removed: number;
+      /** 削除した動画の再生用のファイル（VID-04）の数（古いコアでは省かれる）。 */
+      video_proxies_removed?: number;
     }
   | ({ type: "hash_files" } & HashReport)
   | ({ type: "move_files" } & FileMoveReport)
   | ({ type: "check_missing" } & MissingCheckReport)
-  | ({ type: "relink_candidates" } & RelinkSearch);
+  | ({ type: "relink_candidates" } & RelinkSearch)
+  | ({ type: "video_proxy" } & VideoProxyReport);
 
 export interface JobInfo {
   job_id: number;
@@ -901,6 +951,15 @@ export interface RegionInfo {
   warnings: string[];
   /** ビフォーを描いたものか（DEV-31。render_before_region）。古いコアでは無い。 */
   before?: boolean;
+  /** 比較表示の面（LIB-03。render_view_region で描いたものだけ。0 から）。 */
+  pane?: number | null;
+}
+
+/** 比較表示（LIB-03）の面で使う写真の、出力の画像（C）のフル解像度の大きさ（genzo-api の ViewOutputSize）。 */
+export interface ViewOutputSize {
+  variant_id: VariantId;
+  width: number;
+  height: number;
 }
 
 export interface DisplayInfo {
@@ -962,6 +1021,8 @@ export interface CoreSettings {
   hash_in_background: boolean;
   /** バックグラウンドの計算で、ネットワークのボリュームのファイルも読む。 */
   hash_network_volumes: boolean;
+  /** 動画の再生用のファイル（VID-04）のキャッシュの上限（バイト。古いコアでは省かれる）。 */
+  video_proxy_cache_bytes?: number;
 }
 
 export interface SettingsUpdate {
@@ -973,6 +1034,7 @@ export interface SettingsUpdate {
   import_separate_raw_jpeg?: boolean | null;
   hash_in_background?: boolean | null;
   hash_network_volumes?: boolean | null;
+  video_proxy_cache_bytes?: number | null;
 }
 
 export interface BackupEntry {
@@ -1215,6 +1277,11 @@ export type Command =
   | { type: "cancel_region" }
   | { type: "set_before"; source: BeforeSource | null }
   | { type: "render_before_region"; request: RegionRequest }
+  // 比較表示（LIB-03）の面ごとの表示範囲の描画（genzo-api の view.rs）。
+  | { type: "view_output_size"; pane: number; variant_id: VariantId }
+  | { type: "render_view_region"; pane: number; request: RegionRequest }
+  | { type: "cancel_view_regions" }
+  | { type: "release_view" }
   | { type: "wait_for_frame"; generation: number; timeout_ms: number }
   | { type: "flush_develop" }
   | { type: "close_develop" }
@@ -1257,6 +1324,10 @@ export type Command =
   | { type: "duplicate_groups"; limit?: number }
   | { type: "identify_file"; path: string }
   | { type: "import_name_preview"; copy: CopySettings }
+  | { type: "video_playback"; variant_id: VariantId }
+  | { type: "create_video_proxy"; variant_id: VariantId }
+  | { type: "video_proxy_cache" }
+  | { type: "clear_video_proxies" }
   | { type: "capture_devices" }
   | { type: "capture_device_of"; variant_id: VariantId }
   | { type: "plan_capture_time_edit"; target: CaptureTarget; edit: CaptureTimeEdit }
@@ -1314,6 +1385,7 @@ export type Response =
   | { type: "generation"; generation: number }
   | ({ type: "frame" } & FrameInfo)
   | ({ type: "region" } & RegionInfo)
+  | ({ type: "view_size" } & ViewOutputSize)
   | { type: "before"; before: BeforeInfo | null }
   | { type: "frame_or_none"; frame: FrameInfo | null }
   | { type: "saved"; saved: boolean }
@@ -1338,6 +1410,8 @@ export type Response =
   | ({ type: "duplicate_groups" } & DuplicateGroupList)
   | ({ type: "file_identity" } & FileIdentity)
   | ({ type: "name_preview" } & NamePreview)
+  | ({ type: "video_playback" } & VideoPlayback)
+  | ({ type: "video_proxy_cache" } & VideoProxyCacheStatus)
   | { type: "capture_devices"; devices: CaptureDevice[] }
   | ({ type: "capture_device" } & CaptureDeviceKey)
   | ({ type: "capture_time_plan" } & CaptureTimePlan)

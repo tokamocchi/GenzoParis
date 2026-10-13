@@ -86,6 +86,8 @@ pub struct Session {
     pub data_dir: PathBuf,
     /// 見つけた ffmpeg・ffprobe。
     pub tools: ExternalTools,
+    /// `genzo://` で配信する動画のファイル（少しの間だけ覚える。[`crate::protocol::MediaCache`]）。
+    pub media: crate::protocol::MediaCache,
     /// イベントを送るスレッド（閉じたら止める）。
     events: Forwarder,
 }
@@ -415,6 +417,9 @@ impl AppState {
         config.gpu = settings.gpu;
         config.backup_on_close = settings.backup_on_close;
         config.worker_env = tools.worker_env();
+        // 動画の再生用のファイル（VID-04）は、アプリが探した ffmpeg・ffprobe だけで作る（PATH に頼らない。
+        // 決定事項ログ No.67。見つからなければ、作れない理由を画面に出す）。
+        config.ffmpeg_path_fallback = false;
         // ファイルの内容のハッシュ（ORG-03）を、開いている間にバックグラウンドで計算する（カタログの設定で
         // 止められる。CLI は計算しない）。
         config.background_hashing = true;
@@ -435,6 +440,7 @@ impl AppState {
             catalog_path: path.clone(),
             data_dir,
             tools,
+            media: crate::protocol::MediaCache::default(),
             events,
         });
         *self.session.write() = Some(Arc::clone(&session));

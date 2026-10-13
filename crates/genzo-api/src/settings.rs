@@ -1,6 +1,6 @@
 //! 設定（SYS-05）: キャッシュの場所と上限、書き出しの既定の色空間、既定のタイムゾーン、取り込みの既定
 //! （重複と思われるもの・RAW と JPEG の扱い。IMP-04・IMP-06）、ファイルの内容のハッシュのバックグラウンドの
-//! 計算（ORG-03）。
+//! 計算（ORG-03）、動画の再生用のファイルのキャッシュの上限（VID-04）。
 //!
 //! カタログの設定テーブル（`setting`）に保存する。カタログに値がなければ [`CoreConfig`] の初期値、
 //! それもなければ組み込みの既定値を使う。既定のタイムゾーンは、カタログに値がなければ、開いたときに
@@ -37,6 +37,8 @@ pub const KEY_IMPORT_SEPARATE_RAW_JPEG: &str = "api.import_separate_raw_jpeg";
 pub const KEY_HASH_IN_BACKGROUND: &str = "api.hash_in_background";
 /// 設定テーブルのキー: バックグラウンドの計算で、ネットワークのボリュームのファイルも読む（`true` / `false`）。
 pub const KEY_HASH_NETWORK_VOLUMES: &str = "api.hash_network_volumes";
+/// 設定テーブルのキー: 動画の再生用のファイルのキャッシュの上限（バイト。VID-04）。
+pub const KEY_VIDEO_PROXY_CACHE_BYTES: &str = "api.video_proxy_cache_bytes";
 
 /// 既定のタイムゾーンのオフセットとして受け付ける範囲（分。UTC−14:00〜UTC+14:00。現存する
 /// タイムゾーンの範囲）。
@@ -74,6 +76,16 @@ pub(crate) fn load(
             default_preview_bytes(config)
         }),
         None => default_preview_bytes(config),
+    };
+    let video_proxy_cache_bytes = match catalog.setting(KEY_VIDEO_PROXY_CACHE_BYTES)? {
+        Some(v) => match v.parse::<u64>() {
+            Ok(b) if b >= crate::playback::MIN_VIDEO_PROXY_CACHE_BYTES => b,
+            _ => {
+                bad(KEY_VIDEO_PROXY_CACHE_BYTES, &v);
+                crate::playback::DEFAULT_VIDEO_PROXY_CAPACITY_BYTES
+            }
+        },
+        None => crate::playback::DEFAULT_VIDEO_PROXY_CAPACITY_BYTES,
     };
     let default_export_color_space = match catalog.setting(KEY_DEFAULT_EXPORT_COLOR_SPACE)? {
         Some(v) => serde_json::from_str::<OutputColorSpace>(&v).unwrap_or_else(|_| {
@@ -114,6 +126,7 @@ pub(crate) fn load(
         import_separate_raw_jpeg: flag(KEY_IMPORT_SEPARATE_RAW_JPEG, false)?,
         hash_in_background: flag(KEY_HASH_IN_BACKGROUND, true)?,
         hash_network_volumes: flag(KEY_HASH_NETWORK_VOLUMES, false)?,
+        video_proxy_cache_bytes,
     })
 }
 
@@ -204,7 +217,7 @@ impl Core {
     /// - キャッシュの上限: すぐに有効（超えていれば古いものから削除する。SCL-04）。超えた分の削除が
     ///   失敗したとき（キャッシュの DB のエラー）は、[`ApiError::Cache`] を返すが、更新は保存・反映まで
     ///   済んでいる（上限の値は新しくなり、削除は次の回収でやり直す）。ほかの項目の反映（下の推定し直しの
-    ///   ジョブの投入）は、この失敗の前に済ませる。
+    ///   ジョブの投入）は、この失敗の前に済ませる。動画の再生用のファイルのキャッシュの上限も同じ（すぐに有効）。
     /// - キャッシュの場所: 次に開いたときに有効（今のキャッシュは移さない）。取り込みは、開いている間、
     ///   今開いているキャッシュのフォルダと、設定した新しい場所の両方を飛ばす（`import::excluded_dirs`）。
     /// - 既定のタイムゾーン: 既定のオフセットで推定していた撮影日時を、バックグラウンドのジョブで推定し
@@ -217,6 +230,14 @@ impl Core {
         {
             return Err(ApiError::InvalidArgument(format!(
                 "プレビューのキャッシュの上限は {MIN_PREVIEW_CACHE_BYTES} バイト以上にしてください（{bytes}）"
+            )));
+        }
+        if let Some(bytes) = update.video_proxy_cache_bytes
+            && bytes < crate::playback::MIN_VIDEO_PROXY_CACHE_BYTES
+        {
+            return Err(ApiError::InvalidArgument(format!(
+                "動画の再生用のファイルのキャッシュの上限は {} バイト以上にしてください（{bytes}）",
+                crate::playback::MIN_VIDEO_PROXY_CACHE_BYTES
             )));
         }
         if let Some(m) = update.default_utc_offset_minutes
@@ -260,6 +281,9 @@ impl Core {
         }
         if let Some(bytes) = update.preview_cache_bytes {
             entries.push((KEY_PREVIEW_CACHE_BYTES, bytes.to_string()));
+        }
+        if let Some(bytes) = update.video_proxy_cache_bytes {
+            entries.push((KEY_VIDEO_PROXY_CACHE_BYTES, bytes.to_string()));
         }
         if let Some(space) = update.default_export_color_space {
             let json =
@@ -327,6 +351,9 @@ impl Core {
             if let Some(v) = update.hash_network_volumes {
                 s.hash_network_volumes = v;
             }
+            if let Some(bytes) = update.video_proxy_cache_bytes {
+                s.video_proxy_cache_bytes = bytes;
+            }
             s.clone()
         };
         // 撮影日時の推定し直しは、失敗しうるキャッシュの上限の反映より先に投入する。ここまでで、設定は保存と
@@ -347,8 +374,22 @@ impl Core {
         {
             crate::identity::request_background_hashing(inner);
         }
+        // 再生用のファイルのキャッシュの上限（キャッシュを開けていなければ、値だけを保存する）。
+        let proxy_capacity = update.video_proxy_cache_bytes.and_then(|bytes| {
+            let mut state = inner.proxies.lock();
+            let cache = state.cache.as_mut()?;
+            cache.set_capacity(bytes);
+            Some(
+                cache
+                    .evict_to(bytes, None)
+                    .map_err(|e| ApiError::io(cache.dir(), e)),
+            )
+        });
         if let Some(bytes) = update.preview_cache_bytes {
             inner.with_cache(|c| c.previews.set_capacity_bytes(bytes))?;
+        }
+        if let Some(r) = proxy_capacity {
+            r?;
         }
         Ok(current)
     }

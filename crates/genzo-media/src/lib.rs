@@ -12,7 +12,8 @@
 //! | [`exif_write`]・[`exif_read`] | Exif の書き出し（最小限の TIFF の構造を自前で書く）と読み取り（kamadak-exif） | EXP-04、LIB-14 |
 //! | [`xmp_write`] | 書き出すファイルの XMP（カタログで編集した説明のメタデータ。UTF-8） | LIB-15、EXP-04 |
 //! | [`video`] | ffprobe / ffmpeg（子プロセス）による動画のメタデータとサムネイル | VID-02・VID-03、IQ-09、PoC-7 |
-//! | [`process`] | 子プロセスのタイムアウト付きの実行 | 1.2 節、6.3 節 |
+//! | [`video_proxy`] | 動画の再生用のファイル（WebView で再生できない動画を、利用者の ffmpeg で H.264 ＋ AAC の MP4 に変換する。進捗・取り消し・出力の確認） | VID-04、4.2 節 |
+//! | [`process`] | 子プロセスのタイムアウト付きの実行と、進捗を読みながらの取り消しできる実行 | 1.2 節、6.3 節 |
 //! | [`safe_write`] | 原本を上書きせず、不完全なファイルを残さない書き出し | 6.4 節（レビュー R-06） |
 //!
 //! - 元のファイルは読み取り専用で開く（DATA-01）。書き出しは一時ファイルを経由し、原本と同じ
@@ -20,6 +21,9 @@
 //! - 信頼できない入力のデコード（画像のデコード・ffmpeg の実行）はワーカープロセスで行う
 //!   （04 の 1.1 節・1.2 節、SEC-05）。この crate の関数は、壊れた入力に対してパニックせず
 //!   エラーを返すことと、画素数・確保量・出力の大きさ・時間に上限を設けることを担う。
+//!   例外は動画の再生用のファイルの変換（[`video_proxy`]）で、長くかかる（ワーカーの 1 つを数分ふさがない
+//!   ため）ので、本体が ffmpeg を直接の子プロセスとして動かす。デコードは ffmpeg のプロセスの中で行われ、
+//!   本体のプロセスは進捗の行と ffprobe の JSON しか読まない（決定事項ログ No.117）。
 //!
 //! # 例
 //!
@@ -67,6 +71,7 @@ pub mod resize;
 pub mod safe_write;
 pub mod tiff_io;
 pub mod video;
+pub mod video_proxy;
 pub mod xmp_write;
 
 pub use buffer::{DynRgbImage, MAX_IMAGE_PIXELS, RgbImage, RgbImage8, RgbImage16, Sample};
@@ -90,4 +95,8 @@ pub use safe_write::{
     Destination, ProtectedFiles, WriteOutcome, resolve_destination, write_atomically,
 };
 pub use video::{FfmpegTools, VideoColorHandling, VideoProbe, VideoThumbnail, parse_ffprobe_json};
+pub use video_proxy::{
+    PROXY_FORMAT_VERSION, PROXY_LONG_EDGE, ProxyEncoder, default_proxy_threads, pick_proxy_encoder,
+    verify_proxy,
+};
 pub use xmp_write::xmp_packet;

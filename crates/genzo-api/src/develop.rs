@@ -465,6 +465,19 @@ pub(crate) fn session_source(
         .map(|s| (s.source.clone(), s.render_deps.clone()))
 }
 
+/// 現像中の写真の入力が `id`（ファイルとそのリビジョン）なら、その入力と外部データ（比較表示が、現像中の写真と
+/// 同じファイル（仮想コピー）を展開し直さないため。`view` の doc）。
+pub(crate) fn session_source_of_file(
+    inner: &Inner,
+    id: genzo_pipeline::SourceId,
+) -> Option<(PhotoSource, genzo_model::RenderDeps)> {
+    let state = inner.develop.state.lock();
+    state
+        .as_ref()
+        .filter(|s| s.source.id == id)
+        .map(|s| (s.source.clone(), s.render_deps.clone()))
+}
+
 /// 描画を投入する（「最新の 1 件だけ」）。ビフォーを設定していれば、必要ならビフォーも描き直す
 /// （アフターの後に投入する。`before` の doc）。
 fn submit_render(inner: &Arc<Inner>, s: &mut Session, quality: RenderQuality) {

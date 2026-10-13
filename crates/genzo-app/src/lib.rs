@@ -7,7 +7,7 @@
 //! |---|---|
 //! | [`state`] | 開いているカタログ（コア）、カタログを開く・閉じる・復元する、イベントの転送 |
 //! | [`commands`] | Tauri のコマンド（画面 → アプリ。コアのコマンドの中継と、アプリ固有の操作） |
-//! | [`protocol`] | `genzo://` の URI スキーム（サムネイル・標準プレビューの JPEG） |
+//! | [`protocol`] | `genzo://` の URI スキーム（サムネイル・標準プレビューの JPEG、動画の元のファイルと再生用のファイルを Range の要求に応えて配信する。VID-04） |
 //! | [`frames`] | 現像のプレビュー・表示範囲の画素のバイナリの形 |
 //! | [`settings`] | アプリの設定（カタログの場所・FFmpeg・GPU） |
 //! | [`tools`] | ffmpeg・ffprobe を探す |
@@ -311,6 +311,7 @@ pub fn run() {
             commands::region_frame,
             commands::before_frame,
             commands::before_region_frame,
+            commands::view_region_frame,
             commands::set_display_target,
             commands::list_catalog_backups,
             commands::restore_catalog,

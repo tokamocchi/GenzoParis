@@ -111,12 +111,20 @@ const TESTS: &[(&str, fn())] = &[
         library::files_volumes_and_relink_through_the_app,
     ),
     (
+        "library::videos_are_streamed_only_from_the_catalog",
+        library::videos_are_streamed_only_from_the_catalog,
+    ),
+    (
         "develop::develop_and_region_frames_match_their_headers",
         develop::develop_and_region_frames_match_their_headers,
     ),
     (
         "develop::before_frames_match_their_headers",
         develop::before_frames_match_their_headers,
+    ),
+    (
+        "develop::view_region_frames_match_their_panes",
+        develop::view_region_frames_match_their_panes,
     ),
     (
         "backup::corrupt_catalog_is_restored_from_a_backup",

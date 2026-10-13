@@ -101,6 +101,9 @@ pub enum JobKind {
     CheckMissing,
     /// 再リンクの候補の探索（FILE-04。利用者が選んだフォルダから、見つからないファイルと同じものを探す）。
     FindRelinkCandidates,
+    /// 動画の再生用のファイルの作成（VID-04。WebView で再生できない動画を、利用者の ffmpeg で変換する。専用の
+    /// 1 本のスレッドで、1 度に 1 本だけ）。
+    VideoProxy,
 }
 
 /// ジョブの状態。
@@ -168,6 +171,10 @@ pub enum JobResult {
         previews_removed: u64,
         /// 削除した、生成の途中で終了した一時ファイルの数。
         temp_files_removed: u64,
+        /// 削除した動画の再生用のファイル（VID-04）の数（上限容量を超えた分と、カタログにない・内容が変わった
+        /// ファイルのもの。生成の途中で終了した一時ファイルは `temp_files_removed` に数える）。
+        #[serde(default)]
+        video_proxies_removed: u64,
     },
     /// ファイルの内容のハッシュの計算。
     HashFiles(HashReport),
@@ -177,6 +184,8 @@ pub enum JobResult {
     CheckMissing(MissingCheckReport),
     /// 再リンクの候補の探索。
     RelinkCandidates(RelinkSearch),
+    /// 動画の再生用のファイルの作成。
+    VideoProxy(VideoProxyReport),
 }
 
 /// ファイルの問題（読めない・登録できないなど）。
@@ -1177,6 +1186,90 @@ pub struct RegenerateReport {
 }
 
 // ---------------------------------------------------------------------------
+// 動画の再生（VID-04）
+// ---------------------------------------------------------------------------
+
+/// 動画の再生の情報（[`crate::Core::video_playback`]）。UI は、元のファイルを WebView で再生できるか
+/// （`canPlayType`・再生の失敗）を確かめ、再生できなければ再生用のファイルを使う（なければ作る）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlayback {
+    /// variant。
+    pub variant_id: VariantId,
+    /// 元のファイルを読めるか（見つからない・ドライブが外れているなら `false`）。
+    pub available: bool,
+    /// 読めない理由（`available` が `false` のとき）。
+    pub unavailable_reason: Option<String>,
+    /// 元のファイルの MIME の型（`video/mp4`・`video/quicktime`）。
+    pub content_type: String,
+    /// 元のファイルの大きさ（バイト。読めなければ `None`）。
+    pub size: Option<u64>,
+    /// 動画の情報（ffprobe で読めなかったものは `None`）。
+    pub video: Option<VideoMetadata>,
+    /// 今の内容の再生用のファイル（なければ `None`）。
+    pub proxy: Option<VideoProxyInfo>,
+    /// この動画の再生用のファイルを作っているジョブ（なければ `None`）。
+    pub proxy_job: Option<u64>,
+    /// 再生用のファイルを作れない理由（ffmpeg がない・H.264 のエンコーダーがない。作れるなら `None`）。
+    pub proxy_unavailable: Option<String>,
+    /// 再生用のファイルを作るのに使うエンコーダー（ffmpeg の名前。作れないなら `None`）。
+    pub proxy_encoder: Option<String>,
+}
+
+/// 再生用のファイル（H.264 ＋ AAC の MP4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoProxyInfo {
+    /// 大きさ（バイト）。
+    pub size: u64,
+    /// 長辺の上限（画素。genzo-media の `PROXY_LONG_EDGE`）。
+    pub long_edge: u32,
+}
+
+/// 配信する動画のファイル（[`crate::Core::video_stream`]。アプリの `genzo://` の URI スキームが使う）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoStream {
+    /// variant。
+    pub variant_id: VariantId,
+    /// ファイル（カタログに登録された動画の元のファイルか、キャッシュの再生用のファイル）。
+    #[serde(serialize_with = "lossy_path")]
+    pub path: PathBuf,
+    /// 大きさ（バイト。確かめた時点）。
+    pub size: u64,
+    /// MIME の型。
+    pub content_type: String,
+    /// 再生用のファイルか。
+    pub proxy: bool,
+}
+
+/// 再生用のファイルの作成の結果（[`JobResult::VideoProxy`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoProxyReport {
+    /// variant。
+    pub variant_id: VariantId,
+    /// 再生用のファイルの大きさ（バイト）。
+    pub size: u64,
+    /// すでにあったので作らなかったか。
+    pub reused: bool,
+    /// 使ったエンコーダー（ffmpeg の名前。作らなかったら `None`）。
+    pub encoder: Option<String>,
+}
+
+/// 再生用のファイルのキャッシュの状況（[`crate::Core::video_proxy_cache`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoProxyCacheStatus {
+    /// フォルダ（データのフォルダの `video-proxies`）。
+    #[serde(serialize_with = "lossy_path")]
+    pub dir: PathBuf,
+    /// 再生用のファイルの数。
+    pub count: u64,
+    /// 合計の大きさ（バイト）。
+    pub total_bytes: u64,
+    /// 上限（バイト）。
+    pub capacity_bytes: u64,
+    /// この操作で消した数（[`crate::Core::clear_video_proxies`]。状況を読むだけなら 0）。
+    pub removed: u64,
+}
+
+// ---------------------------------------------------------------------------
 // 現像
 // ---------------------------------------------------------------------------
 
@@ -1440,7 +1533,8 @@ pub enum RegionSpace {
 /// 表示範囲の描画の要求（ルーペの等倍表示 PRV-03・拡大とパン LIB-02。[`crate::Core::render_region`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RegionRequest {
-    /// 現像中の写真（[`crate::Core::open_develop`] で開いたもの）。
+    /// 現像中の写真（[`crate::Core::open_develop`] で開いたもの。比較表示の
+    /// [`crate::Core::render_view_region`] では任意の写真）。
     pub variant_id: VariantId,
     /// 範囲の座標系。
     #[serde(default)]
@@ -1468,8 +1562,9 @@ pub struct RegionInfo {
     /// variant。
     pub variant_id: VariantId,
     /// 描いた現像設定の世代（[`crate::Core::set_settings`] が返した値。古い世代の結果は捨ててよい）。
+    /// 比較表示（[`crate::Core::render_view_region`]）で、現像中でない写真をカタログに保存した設定で描いたときは 0。
     pub generation: u64,
-    /// 要求の通しの番号（新しい要求ほど大きい）。
+    /// 要求の通しの番号（新しい要求ほど大きい。比較表示は面ごとの番号）。
     pub request: u64,
     /// 描いた範囲（C の格子、フル解像度の画素。出力の画像の内側に収めたもの）の左上の x。
     pub x: u32,
@@ -1499,6 +1594,21 @@ pub struct RegionInfo {
     /// DEV-31）。偽なら今の設定（アフター）。
     #[serde(default)]
     pub before: bool,
+    /// 比較表示の面（LIB-03。[`crate::Core::render_view_region`] で描いたものだけ。0 から）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<u32>,
+}
+
+/// 比較表示（LIB-03）の面で使う写真の、出力の画像（C。切り抜いた後）のフル解像度の大きさ
+/// （[`crate::Core::view_output_size`]。等倍表示の準備）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewOutputSize {
+    /// variant。
+    pub variant_id: VariantId,
+    /// 幅（フル解像度の画素）。
+    pub width: u32,
+    /// 高さ。
+    pub height: u32,
 }
 
 /// 表示範囲の描画の結果（ピクセルを含む。[`crate::Core::render_region`]）。
@@ -1781,10 +1891,18 @@ pub struct CoreSettings {
     /// バックグラウンドの計算で、ネットワークのボリューム（SMB・NFS など）のファイルも読む（既定は `false`）。
     #[serde(default)]
     pub hash_network_volumes: bool,
+    /// 動画の再生用のファイル（VID-04）のキャッシュの上限（バイト。既定は
+    /// [`crate::DEFAULT_VIDEO_PROXY_CAPACITY_BYTES`]）。
+    #[serde(default = "default_video_proxy_bytes")]
+    pub video_proxy_cache_bytes: u64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_video_proxy_bytes() -> u64 {
+    crate::playback::DEFAULT_VIDEO_PROXY_CAPACITY_BYTES
 }
 
 /// 設定の変更（`None` の項目は変えない）。
@@ -1808,6 +1926,8 @@ pub struct SettingsUpdate {
     pub hash_in_background: Option<bool>,
     /// バックグラウンドの計算で、ネットワークのボリュームのファイルも読む。
     pub hash_network_volumes: Option<bool>,
+    /// 動画の再生用のファイルのキャッシュの上限（バイト。すぐに有効。超えていれば古いものから消す）。
+    pub video_proxy_cache_bytes: Option<u64>,
 }
 
 /// バックアップ（DATA-04）。

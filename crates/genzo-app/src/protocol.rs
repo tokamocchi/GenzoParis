@@ -1,9 +1,23 @@
-//! カスタム URI スキーム `genzo://`（サムネイルと標準プレビューの JPEG。04 の 1.5 節）。
+//! カスタム URI スキーム `genzo://`（サムネイルと標準プレビューの JPEG、動画の再生。04 の 1.5 節・4.2 節）。
 //!
 //! | URI（macOS・Linux / Windows） | 内容 |
 //! |---|---|
 //! | `genzo://localhost/thumb/{variant_id}?rev={rev}` / `http://genzo.localhost/thumb/...` | サムネイル（L0。長辺 320） |
 //! | `genzo://localhost/preview/{variant_id}?rev={rev}` / `http://genzo.localhost/preview/...` | 標準プレビュー（L1）。なければ作る処理を予約して 404 を返す（作ったら `thumbnail_updated` のイベント） |
+//! | `genzo://localhost/video/{variant_id}` / `http://genzo.localhost/video/...` | 動画の元のファイル（VID-04。Range の要求に応える） |
+//! | `genzo://localhost/video-proxy/{variant_id}` / `http://genzo.localhost/video-proxy/...` | 動画の再生用のファイル（H.264 ＋ AAC の MP4。なければ 404） |
+//!
+//! 動画（[`reply_media`]）:
+//!
+//! - 配信するのは、カタログに登録された動画（種類が動画で、拡張子が `mp4`・`mov`）の元のファイルと、コアの
+//!   キャッシュの再生用のファイルだけ（genzo-api の `Core::video_stream`。URI は variant の ID だけを受け取り、
+//!   パスを受け取らない。任意のファイルは読めない）。元のファイルは読むだけ（DATA-01）。
+//! - `Range: bytes=…` に 206 と `Content-Range` で応える。1 回の応答は [`MAX_MEDIA_CHUNK`] まで（ファイル全体を
+//!   メモリに読まない。WebView は続きを要求し直す）。範囲がなければ（WebView の動画の読み込みは通常範囲を付ける）、
+//!   [`MAX_MEDIA_CHUNK`] 以下のファイルは 200 で全体を、大きいファイルは先頭の 206 を返す。範囲がファイルの外なら
+//!   416。複数の範囲は最初の範囲だけに応える。`HEAD` は大きさだけ。
+//! - 大きいので、WebView にキャッシュさせない（`no-store`）。パスの問い合わせ（カタログのロック）を要求ごとに
+//!   しないよう、セッションごとに数秒だけ覚える（[`MediaCache`]）。
 //!
 //! - サムネイル: `rev`（L0 のキャッシュキーのハッシュ）が今の内容のものなら、その URI の内容は変わらないので、
 //!   ブラウザに長くキャッシュさせる（`immutable`）。現像設定を変えると `rev` が変わり、新しい URI になる。
@@ -22,10 +36,13 @@
 //! - 処理はブロックしうる（カタログ・キャッシュの読み込み）ので、少数のスレッドで処理する（グリッドの
 //!   スクロールで要求が多数来ても、スレッドを作りすぎない）。
 
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, unbounded};
-use genzo_api::VariantId;
+use genzo_api::{VariantId, VideoStream};
+use parking_lot::Mutex;
 
 use crate::state::AppState;
 
@@ -33,6 +50,17 @@ use crate::state::AppState;
 ///
 /// **仮置き**: 4（サムネイルは JPEG のバイト列を返すだけで軽い。標準プレビューの読み込みも 1 MB 程度）。
 pub const PROTOCOL_THREADS: usize = 4;
+
+/// 動画の 1 回の応答の本文の上限（バイト。**仮置き**: 4 MiB。100 Mbps（4K の HEVC の上限の目安）の動画でも
+/// 1 秒あたり 3〜4 回の要求で済み、1 回の読み込みのメモリを抑える大きさ）。
+pub const MAX_MEDIA_CHUNK: u64 = 4 * 1024 * 1024;
+
+/// 配信する動画のファイルを覚えておく時間（**仮置き**: 5 秒。再生中の続きの要求のたびに、カタログのロックを
+/// 取って問い合わせないため。ファイルを動かした直後の要求は、古いパスを開けずに 404 になり、覚えたものを捨てる）。
+pub const MEDIA_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// 覚えておく動画のファイルの数。
+const MEDIA_CACHE_ENTRIES: usize = 8;
 
 /// 応答（Tauri に依存しない形）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +71,8 @@ pub struct Reply {
     pub content_type: &'static str,
     /// Cache-Control。
     pub cache_control: &'static str,
+    /// ほかの見出し（`Content-Range`・`Accept-Ranges`・`Content-Length` など）。
+    pub headers: Vec<(&'static str, String)>,
     /// 本文。
     pub body: Vec<u8>,
 }
@@ -53,6 +83,7 @@ impl Reply {
             status,
             content_type: "text/plain",
             cache_control: "no-store",
+            headers: Vec::new(),
             body: Vec::new(),
         }
     }
@@ -66,8 +97,17 @@ impl Reply {
             } else {
                 "no-cache"
             },
+            headers: Vec::new(),
             body,
         }
+    }
+
+    /// 見出しの値（なければ `None`。名前は大文字・小文字を区別しない）。
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -78,6 +118,10 @@ pub enum Route {
     Thumb(VariantId),
     /// 標準プレビュー（L1）。
     Preview(VariantId),
+    /// 動画の元のファイル。
+    Video(VariantId),
+    /// 動画の再生用のファイル。
+    VideoProxy(VariantId),
 }
 
 /// パス（`/thumb/12`）を解釈する。
@@ -92,7 +136,217 @@ pub fn parse(path: &str) -> Option<Route> {
     match kind {
         "thumb" => Some(Route::Thumb(id)),
         "preview" => Some(Route::Preview(id)),
+        "video" => Some(Route::Video(id)),
+        "video-proxy" => Some(Route::VideoProxy(id)),
         _ => None,
+    }
+}
+
+/// 要求の範囲の解釈（[`parse_range`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteRange {
+    /// 範囲の指定がない（または解釈できないので無視する。RFC 9110 の 14.2 節）。
+    Whole,
+    /// `start` から `end` まで（両端を含む。ファイルの中に収めたもの）。
+    Part {
+        /// 最初のバイト。
+        start: u64,
+        /// 最後のバイト。
+        end: u64,
+    },
+    /// ファイルの外（416）。
+    Unsatisfiable,
+}
+
+/// `Range` の見出し（`bytes=0-`・`bytes=100-199`・`bytes=-500`）を、大きさ `len` のファイルの範囲にする。
+///
+/// 複数の範囲（`bytes=0-1,5-9`）は最初の範囲だけを使う。`bytes` 以外の単位・形の違う値は、範囲がないものとして
+/// 扱う（全体を返してよい）。終わりはファイルの最後に切り詰める。
+pub fn parse_range(header: Option<&str>, len: u64) -> ByteRange {
+    let Some(h) = header else {
+        return ByteRange::Whole;
+    };
+    let Some(spec) = h.trim().strip_prefix("bytes=") else {
+        return ByteRange::Whole;
+    };
+    let first = spec.split(',').next().unwrap_or_default().trim();
+    let Some((a, b)) = first.split_once('-') else {
+        return ByteRange::Whole;
+    };
+    let (a, b) = (a.trim(), b.trim());
+    let num = |s: &str| -> Option<u64> {
+        (!s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()))
+            .then(|| s.parse().ok())
+            .flatten()
+    };
+    match (a.is_empty(), num(a), num(b)) {
+        // 末尾の n バイト。
+        (true, _, Some(n)) => {
+            if n == 0 || len == 0 {
+                ByteRange::Unsatisfiable
+            } else {
+                ByteRange::Part {
+                    start: len.saturating_sub(n),
+                    end: len - 1,
+                }
+            }
+        }
+        (false, Some(start), end) if b.is_empty() || end.is_some() => {
+            if start >= len {
+                return ByteRange::Unsatisfiable;
+            }
+            let end = end.unwrap_or(u64::MAX).min(len - 1);
+            if end < start {
+                ByteRange::Whole
+            } else {
+                ByteRange::Part { start, end }
+            }
+        }
+        _ => ByteRange::Whole,
+    }
+}
+
+/// 配信する動画のファイルを、セッション（開いているカタログ）ごとに少しの間だけ覚える。
+#[derive(Debug, Default)]
+pub struct MediaCache {
+    entries: Mutex<Vec<(VariantId, bool, VideoStream, Instant)>>,
+}
+
+impl MediaCache {
+    /// 覚えているもの（[`MEDIA_CACHE_TTL`] 以内）を返し、なければ `fetch` で求めて覚える。
+    pub fn get_or_fetch(
+        &self,
+        id: VariantId,
+        proxy: bool,
+        fetch: impl FnOnce() -> Result<VideoStream, genzo_api::ApiError>,
+    ) -> Result<VideoStream, genzo_api::ApiError> {
+        let now = Instant::now();
+        {
+            let mut e = self.entries.lock();
+            e.retain(|(_, _, _, at)| now.duration_since(*at) < MEDIA_CACHE_TTL);
+            if let Some((_, _, s, _)) = e.iter().find(|(i, p, _, _)| *i == id && *p == proxy) {
+                return Ok(s.clone());
+            }
+        }
+        // 問い合わせ（カタログのロック）は、このロックの外で行う。
+        let s = fetch()?;
+        let mut e = self.entries.lock();
+        e.retain(|(i, p, _, _)| !(*i == id && *p == proxy));
+        if e.len() >= MEDIA_CACHE_ENTRIES {
+            e.remove(0);
+        }
+        e.push((id, proxy, s.clone(), now));
+        Ok(s)
+    }
+
+    /// 覚えたものを捨てる（開けなかったとき）。
+    pub fn forget(&self, id: VariantId, proxy: bool) {
+        self.entries
+            .lock()
+            .retain(|(i, p, _, _)| !(*i == id && *p == proxy));
+    }
+}
+
+/// 動画の MIME の型（[`Reply::content_type`] の `&'static str` にする。ほかは `application/octet-stream`）。
+fn static_video_type(t: &str) -> &'static str {
+    match t {
+        "video/mp4" => "video/mp4",
+        "video/quicktime" => "video/quicktime",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 動画のファイルを読む（`Range` の見出し `range` の範囲を [`MAX_MEDIA_CHUNK`] まで）。範囲は、開いた時点の
+/// 大きさで解釈する（覚えていた [`VideoStream::size`] は古いことがある）。
+fn read_media(stream: &VideoStream, range: Option<&str>, head: bool) -> std::io::Result<Reply> {
+    let mut file = std::fs::File::open(&stream.path)?;
+    let len = file.metadata()?.len();
+    let range = parse_range(range, len);
+    let content_type = static_video_type(&stream.content_type);
+    let mut headers = vec![("Accept-Ranges", "bytes".to_owned())];
+    let range = match range {
+        // 範囲がなく、小さいファイルは全体を返す。
+        ByteRange::Whole if len <= MAX_MEDIA_CHUNK => {
+            headers.push(("Content-Length", len.to_string()));
+            let mut body = Vec::new();
+            if !head {
+                file.read_to_end(&mut body)?;
+            }
+            return Ok(Reply {
+                status: 200,
+                content_type,
+                cache_control: "no-store",
+                headers,
+                body,
+            });
+        }
+        // 範囲がなく大きいファイルは、先頭を部分の応答で返す（全体をメモリに読まない）。
+        ByteRange::Whole => ByteRange::Part {
+            start: 0,
+            end: len - 1,
+        },
+        r => r,
+    };
+    match range {
+        ByteRange::Part { start, end } => {
+            let end = end.min(start + MAX_MEDIA_CHUNK - 1);
+            let n = end - start + 1;
+            headers.push(("Content-Range", format!("bytes {start}-{end}/{len}")));
+            headers.push(("Content-Length", n.to_string()));
+            let mut body = Vec::new();
+            if !head {
+                file.seek(SeekFrom::Start(start))?;
+                file.take(n).read_to_end(&mut body)?;
+            }
+            Ok(Reply {
+                status: 206,
+                content_type,
+                cache_control: "no-store",
+                headers,
+                body,
+            })
+        }
+        _ => Ok(Reply {
+            status: 416,
+            content_type: "text/plain",
+            cache_control: "no-store",
+            headers: vec![("Content-Range", format!("bytes */{len}"))],
+            body: Vec::new(),
+        }),
+    }
+}
+
+/// 動画の要求に応える（`range` は `Range` の見出し、`head` は `HEAD` の要求か）。
+pub fn reply_media(state: &AppState, route: Route, range: Option<&str>, head: bool) -> Reply {
+    let (id, proxy) = match route {
+        Route::Video(id) => (id, false),
+        Route::VideoProxy(id) => (id, true),
+        _ => return Reply::empty(400),
+    };
+    let Some(session) = state.session() else {
+        return Reply::empty(503);
+    };
+    let stream = match session
+        .media
+        .get_or_fetch(id, proxy, || session.core.video_stream(id, proxy))
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(%e, ?id, proxy, "動画を返せない");
+            return Reply::empty(error_status(&e));
+        }
+    };
+    match read_media(&stream, range, head) {
+        Ok(reply) => reply,
+        Err(e) => {
+            session.media.forget(id, proxy);
+            tracing::debug!(error = %e, path = %stream.path.display(), "動画のファイルを読めない");
+            Reply::empty(if e.kind() == std::io::ErrorKind::NotFound {
+                404
+            } else {
+                500
+            })
+        }
     }
 }
 
@@ -118,6 +372,9 @@ pub fn reply(state: &AppState, path: &str, rev: Option<&str>) -> Reply {
     let Some(route) = parse(path) else {
         return Reply::empty(400);
     };
+    if matches!(route, Route::Video(_) | Route::VideoProxy(_)) {
+        return reply_media(state, route, None, false);
+    }
     let Ok(core) = state.core() else {
         return Reply::empty(503);
     };
@@ -149,6 +406,7 @@ pub fn reply(state: &AppState, path: &str, rev: Option<&str>) -> Reply {
                 Reply::empty(error_status(&e))
             }
         },
+        Route::Video(_) | Route::VideoProxy(_) => unreachable!("上で返した"),
     }
 }
 
@@ -184,13 +442,27 @@ pub fn handle<R: tauri::Runtime>(
     let state: Arc<AppState> = Arc::clone(&ctx.app_handle().state::<Arc<AppState>>());
     let path = request.uri().path().to_owned();
     let rev = query_rev(request.uri().query()).map(str::to_owned);
+    let range = request
+        .headers()
+        .get("range")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let head = request.method() == tauri::http::Method::HEAD;
     submit(Box::new(move || {
-        let r = reply(&state, &path, rev.as_deref());
-        let response = tauri::http::Response::builder()
+        let r = match parse(&path) {
+            Some(route @ (Route::Video(_) | Route::VideoProxy(_))) => {
+                reply_media(&state, route, range.as_deref(), head)
+            }
+            _ => reply(&state, &path, rev.as_deref()),
+        };
+        let mut builder = tauri::http::Response::builder()
             .status(r.status)
             .header("Content-Type", r.content_type)
-            .header("Cache-Control", r.cache_control)
-            .body(r.body);
+            .header("Cache-Control", r.cache_control);
+        for (name, value) in &r.headers {
+            builder = builder.header(*name, value);
+        }
+        let response = builder.body(r.body);
         match response {
             Ok(resp) => responder.respond(resp),
             Err(e) => tracing::error!(error = %e, "URI スキームの応答を作れない"),
@@ -206,12 +478,176 @@ mod tests {
     fn parses_routes() {
         assert_eq!(parse("/thumb/12"), Some(Route::Thumb(VariantId::new(12))));
         assert_eq!(parse("preview/3"), Some(Route::Preview(VariantId::new(3))));
+        assert_eq!(parse("/video/7"), Some(Route::Video(VariantId::new(7))));
+        assert_eq!(
+            parse("/video-proxy/7"),
+            Some(Route::VideoProxy(VariantId::new(7)))
+        );
+        assert_eq!(parse("/video/0"), None);
+        assert_eq!(parse("/video/../../etc/passwd"), None);
+        assert_eq!(parse("/video/%2Fetc%2Fpasswd"), None);
         assert_eq!(parse("/thumb/0"), None);
         assert_eq!(parse("/thumb/-1"), None);
         assert_eq!(parse("/thumb/x"), None);
         assert_eq!(parse("/thumb/1/2"), None);
         assert_eq!(parse("/other/1"), None);
         assert_eq!(parse("/"), None);
+    }
+
+    #[test]
+    fn parses_byte_ranges() {
+        use ByteRange::*;
+        assert_eq!(parse_range(None, 100), Whole);
+        assert_eq!(
+            parse_range(Some("bytes=0-"), 100),
+            Part { start: 0, end: 99 }
+        );
+        assert_eq!(
+            parse_range(Some("bytes=0-1"), 100),
+            Part { start: 0, end: 1 }
+        );
+        assert_eq!(
+            parse_range(Some("bytes=10-19"), 100),
+            Part { start: 10, end: 19 }
+        );
+        assert_eq!(
+            parse_range(Some("bytes=90-500"), 100),
+            Part { start: 90, end: 99 }
+        );
+        assert_eq!(
+            parse_range(Some("bytes=-30"), 100),
+            Part { start: 70, end: 99 }
+        );
+        assert_eq!(
+            parse_range(Some("bytes=-300"), 100),
+            Part { start: 0, end: 99 }
+        );
+        assert_eq!(
+            parse_range(Some(" bytes=5-9, 20-29"), 100),
+            Part { start: 5, end: 9 }
+        );
+        assert_eq!(parse_range(Some("bytes=100-"), 100), Unsatisfiable);
+        assert_eq!(parse_range(Some("bytes=-0"), 100), Unsatisfiable);
+        assert_eq!(parse_range(Some("bytes=0-"), 0), Unsatisfiable);
+        // 形の違う値・ほかの単位・逆順は、範囲がないものとして扱う。
+        for bad in [
+            "items=0-5",
+            "bytes=",
+            "bytes=-",
+            "bytes=a-b",
+            "bytes=5",
+            "bytes=9-3",
+            "bytes=+1-2",
+        ] {
+            assert_eq!(parse_range(Some(bad), 100), Whole, "{bad}");
+        }
+    }
+
+    fn stream_of(path: &std::path::Path) -> VideoStream {
+        VideoStream {
+            variant_id: VariantId::new(1),
+            path: path.to_path_buf(),
+            size: std::fs::metadata(path).unwrap().len(),
+            content_type: "video/quicktime".to_owned(),
+            proxy: false,
+        }
+    }
+
+    #[test]
+    fn media_is_read_in_bounded_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.mov");
+        let len = MAX_MEDIA_CHUNK + 1000;
+        let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&big, &data).unwrap();
+        let s = stream_of(&big);
+        // 範囲の要求: 206 と Content-Range。
+        let r = read_media(&s, Some("bytes=10-19"), false).unwrap();
+        assert_eq!(r.status, 206);
+        assert_eq!(r.content_type, "video/quicktime");
+        assert_eq!(
+            r.header("content-range"),
+            Some(format!("bytes 10-19/{len}").as_str())
+        );
+        assert_eq!(r.header("Content-Length"), Some("10"));
+        assert_eq!(r.header("Accept-Ranges"), Some("bytes"));
+        assert_eq!(r.body, &data[10..20]);
+        assert_eq!(r.cache_control, "no-store");
+        // 終わりのない範囲は、上限まで。
+        let r = read_media(&s, Some("bytes=0-"), false).unwrap();
+        assert_eq!(r.body.len() as u64, MAX_MEDIA_CHUNK);
+        assert_eq!(
+            r.header("Content-Range"),
+            Some(format!("bytes 0-{}/{len}", MAX_MEDIA_CHUNK - 1).as_str())
+        );
+        // 範囲がなく大きいファイルは、先頭の部分の応答。
+        let r = read_media(&s, None, false).unwrap();
+        assert_eq!((r.status, r.body.len() as u64), (206, MAX_MEDIA_CHUNK));
+        // 末尾。
+        let r = read_media(&s, Some("bytes=-5"), false).unwrap();
+        assert_eq!(r.body, &data[data.len() - 5..]);
+        // ファイルの外は 416。HEAD は本文なし。
+        let r = read_media(&s, Some(&format!("bytes={len}-")), false).unwrap();
+        assert_eq!(r.status, 416);
+        assert_eq!(
+            r.header("Content-Range"),
+            Some(format!("bytes */{len}").as_str())
+        );
+        let r = read_media(&s, Some("bytes=0-99"), true).unwrap();
+        assert_eq!((r.status, r.body.len()), (206, 0));
+        assert_eq!(r.header("Content-Length"), Some("100"));
+        // 小さいファイルは、範囲がなければ全体を 200 で。
+        let small = dir.path().join("small.mp4");
+        std::fs::write(&small, b"0123456789").unwrap();
+        let mut s = stream_of(&small);
+        s.content_type = "video/mp4".to_owned();
+        let r = read_media(&s, None, false).unwrap();
+        assert_eq!((r.status, r.content_type), (200, "video/mp4"));
+        assert_eq!(r.body, b"0123456789");
+        // 覚えていた大きさによらず、開いた時点の大きさで答える。
+        s.size = 1000;
+        let r = read_media(&s, Some("bytes=5-99"), false).unwrap();
+        assert_eq!(r.body, b"56789");
+        assert_eq!(r.header("Content-Range"), Some("bytes 5-9/10"));
+        let r = read_media(&s, Some("bytes=50-99"), false).unwrap();
+        assert_eq!(r.status, 416);
+        // ないファイルはエラー（呼び出し側で 404）。
+        std::fs::remove_file(&small).unwrap();
+        assert!(read_media(&s, None, false).is_err());
+    }
+
+    #[test]
+    fn media_cache_remembers_for_a_while_and_can_forget() {
+        let cache = MediaCache::default();
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.mp4");
+        std::fs::write(&f, b"x").unwrap();
+        let mut calls = 0;
+        let fetch = |calls: &mut i32| {
+            *calls += 1;
+            Ok(stream_of(&f))
+        };
+        let id = VariantId::new(1);
+        cache.get_or_fetch(id, false, || fetch(&mut calls)).unwrap();
+        cache.get_or_fetch(id, false, || fetch(&mut calls)).unwrap();
+        assert_eq!(calls, 1);
+        // 再生用のファイルは別に覚える。
+        cache.get_or_fetch(id, true, || fetch(&mut calls)).unwrap();
+        assert_eq!(calls, 2);
+        cache.forget(id, false);
+        cache.get_or_fetch(id, false, || fetch(&mut calls)).unwrap();
+        assert_eq!(calls, 3);
+        // 求められなければ覚えない。
+        let e = cache.get_or_fetch(VariantId::new(2), false, || {
+            Err(genzo_api::ApiError::NotFound("x".into()))
+        });
+        assert!(e.is_err());
+        for i in 3..20 {
+            cache
+                .get_or_fetch(VariantId::new(i), false, || fetch(&mut calls))
+                .unwrap();
+        }
+        assert!(cache.entries.lock().len() <= MEDIA_CACHE_ENTRIES);
     }
 
     #[test]

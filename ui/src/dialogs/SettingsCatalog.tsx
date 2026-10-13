@@ -1,4 +1,5 @@
-// 設定の「カタログ」（SYS-05）: カタログに保存する設定（キャッシュの場所と上限・既定の書き出しの色空間・
+// 設定の「カタログ」（SYS-05）: カタログに保存する設定（キャッシュの場所と上限・動画の再生用のファイルの上限
+// （VID-04）・既定の書き出しの色空間・
 // 既定のタイムゾーン・取り込みの既定（重複と思われるもの・RAW と JPEG。IMP-04・IMP-06）・内容のハッシュの
 // バックグラウンドの計算（ORG-03））、内容による同一性の状況（SettingsIdentity）、カタログの情報、カタログの
 // 構造（ORG-07。SettingsSchema）、カタログの切り替え、キャッシュの整理。
@@ -7,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
-import type { CatalogStats, CoreSettings, ErrorInfo, OutputColorSpace } from "../api/types";
+import type { CatalogStats, CoreSettings, ErrorInfo, OutputColorSpace, VideoProxyCacheStatus } from "../api/types";
 import { actions, useApp } from "../state/app";
 import { setCoreSettings, switchCatalog, waitJobUntilClosed } from "./catalogActions";
 import { type CatalogPick, pickExistingCatalog } from "./catalogPick";
@@ -22,9 +23,52 @@ import {
   type CatalogSettingsForm,
   catalogSettingsForm,
   catalogSettingsUpdate,
+  formatDecimalSize,
   formatUtcOffset,
   utcOffsetOptions,
 } from "./settingsLogic";
+
+/** 動画の再生用のファイルのキャッシュ（VID-04）の使っている量と、すべて消すボタン。 */
+function VideoProxyCacheInfo(props: { version: number }) {
+  const [status, setStatus] = useState<VideoProxyCacheStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    core
+      .videoProxyCache()
+      .then((s) => {
+        if (alive) setStatus(s);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [props.version]);
+  const clear = async () => {
+    setBusy(true);
+    try {
+      const s = await core.clearVideoProxies();
+      setStatus(s);
+      actions.notify("success", `動画の再生用のファイルを ${formatCount(s.removed)} 個消しました（必要になれば作り直します）`);
+    } catch (e) {
+      actions.reportError(e, "動画の再生用のファイルを消せません");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="dlg-row">
+      <span className="muted">
+        {status
+          ? `使っている量: ${formatDecimalSize(status.total_bytes)}（${formatCount(status.count)} 個）`
+          : "使っている量: —"}
+      </span>
+      <button className="btn" onClick={() => void clear()} disabled={busy || status?.count === 0}>
+        すべて消す
+      </button>
+    </div>
+  );
+}
 
 /** キャッシュの整理（ジョブ）を実行して結果を知らせる。 */
 async function collectGarbage(): Promise<void> {
@@ -56,6 +100,8 @@ export function SettingsCatalog() {
   /** カタログの切り替え中（今のカタログを閉じている。保存待ちの保存・終了時のバックアップを含む）。 */
   const [switching, setSwitching] = useState(false);
   const [gcRunning, setGcRunning] = useState(false);
+  /** 動画の再生用のファイルの使っている量を読み直す番号（整理・保存の後に増やす）。 */
+  const [proxyVersion, setProxyVersion] = useState(0);
   const mounted = useRef(true);
   useEffect(() => {
     // StrictMode の開発版では、付け直し（cleanup → もう一度）があるので、ここで立て直す。
@@ -143,6 +189,7 @@ export function SettingsCatalog() {
         notes.push("既定のタイムゾーンで推定していた撮影日時を、バックグラウンドで推定し直します。");
       }
       if (r.update.hash_in_background === false) notes.push("実行中の内容のハッシュの計算を取り消しました。");
+      if (r.update.video_proxy_cache_bytes !== undefined) setProxyVersion((v) => v + 1);
       if (r.update.hash_in_background === true || r.update.hash_network_volumes === true) {
         notes.push("内容のハッシュのないファイルを、バックグラウンドで計算します。");
       }
@@ -166,6 +213,7 @@ export function SettingsCatalog() {
     setGcRunning(true);
     await collectGarbage();
     setGcRunning(false);
+    setProxyVersion((v) => v + 1);
   };
 
   const dir = parentDir(catalog.catalog_path);
@@ -207,8 +255,30 @@ export function SettingsCatalog() {
           <button className="btn" onClick={() => void runGc()} disabled={gcRunning}>
             キャッシュを整理
           </button>
-          <span className="hint">上限を超えた分と、使われなくなったサムネイル・プレビューを削除します（作り直せます）。</span>
+          <span className="hint">上限を超えた分と、使われなくなったサムネイル・プレビュー・動画の再生用のファイルを削除します（作り直せます）。</span>
         </div>
+      </div>
+
+      <div className="dlg-section">
+        <h3>動画の再生用のファイル</h3>
+        <p className="hint">
+          この PC でそのまま再生できない動画（H.265・10 bit など）を、FFmpeg で H.264（長辺 1280）に変換して保存したものです。上限を超えると、最後に再生した日時の古いものから消します（作り直せます）。
+        </p>
+        <div className="field">
+          <label htmlFor="proxy-gb">上限</label>
+          <div className="dlg-row">
+            <input
+              id="proxy-gb"
+              className="dlg-inline-num"
+              type="text"
+              inputMode="decimal"
+              value={form.proxyGb}
+              onChange={(e) => update({ proxyGb: e.target.value })}
+            />
+            <span className="muted">GB（0.5 GB 以上）</span>
+          </div>
+        </div>
+        <VideoProxyCacheInfo version={proxyVersion} />
       </div>
 
       <div className="dlg-section">

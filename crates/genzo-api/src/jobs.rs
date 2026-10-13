@@ -293,6 +293,8 @@ pub(crate) enum JobQueue {
     Background,
     /// ファイルの内容のハッシュの計算の 1 本のスレッド（[`Inner`] の `maintenance`。`identity` の doc）。
     Maintenance,
+    /// 動画の再生用のファイルの作成の 1 本のスレッド（[`Inner`] の `video`。`playback` の doc）。
+    Video,
 }
 
 /// P3 のジョブを投入する（[`Inner`] のバックグラウンドのスケジューラ）。ジョブの ID を返す。
@@ -320,6 +322,7 @@ where
     let scheduler = match queue {
         JobQueue::Background => &inner.background,
         JobQueue::Maintenance => &inner.maintenance,
+        JobQueue::Video => &inner.video,
     };
     let handle = scheduler.submit_with(
         genzo_jobs::JobOptions::new(genzo_jobs::Priority::P3)

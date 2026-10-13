@@ -1,4 +1,4 @@
-// genzo:// の URI（サムネイル・標準プレビュー。genzo-app の protocol.rs）。
+// genzo:// の URI（サムネイル・標準プレビュー・動画。genzo-app の protocol.rs）。
 //
 // Windows（WebView2）は http://genzo.localhost/...、macOS・Linux は genzo://localhost/... の形。
 
@@ -26,4 +26,17 @@ export function thumbUrl(id: VariantId, rev: string | null | undefined): string 
 /** 標準プレビュー（L1）。なければ 404 になり、作り終えたら thumbnail_updated のイベントが来る。 */
 export function previewUrl(id: VariantId, rev: string | null | undefined): string {
   return `${base()}/preview/${id}${rev ? `?rev=${encodeURIComponent(rev)}` : ""}`;
+}
+
+/** 動画の元のファイル（VID-04。Range の要求に応える。カタログに登録された動画だけ）。 */
+export function videoUrl(id: VariantId): string {
+  return `${base()}/video/${id}`;
+}
+
+/**
+ * 動画の再生用のファイル（H.264 ＋ AAC の MP4。なければ 404）。`rev`（作った再生用のファイルの大きさなど）を
+ * 付けると、作り直した後に別の URI になる（WebView に古い読み込みを使わせない）。
+ */
+export function videoProxyUrl(id: VariantId, rev?: string | number | null): string {
+  return `${base()}/video-proxy/${id}${rev !== undefined && rev !== null ? `?rev=${encodeURIComponent(String(rev))}` : ""}`;
 }

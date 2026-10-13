@@ -8,8 +8,8 @@
 //! 決定事項ログ No.36）。失敗は genzo-api の `ErrorInfo`（JSON）で返す。
 //!
 //! Tauri の状態（`State`）を使わない処理の本体（[`execute_command`]・[`develop_frame_bytes`]・
-//! [`region_frame_bytes`]・[`before_frame_bytes`]・[`before_region_frame_bytes`]）は別の関数にして、
-//! 結合テスト（`tests/app`）から [`AppState`] で直接呼ぶ。
+//! [`region_frame_bytes`]・[`before_frame_bytes`]・[`before_region_frame_bytes`]・
+//! [`view_region_frame_bytes`]）は別の関数にして、結合テスト（`tests/app`）から [`AppState`] で直接呼ぶ。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -304,6 +304,23 @@ pub fn before_region_frame_bytes(state: &AppState) -> Result<Vec<u8>, ErrorInfo>
     }
 }
 
+/// 比較表示（LIB-03）の面 `pane` の表示範囲の描画の最新の結果を [`frames`] の形のバイト列にする
+/// （[`view_region_frame`] の本体。まだない・面が範囲の外なら空）。ヘッダーは `RegionInfo`（`pane` が入る）。
+pub fn view_region_frame_bytes(state: &AppState, pane: u32) -> Result<Vec<u8>, ErrorInfo> {
+    let core = state.core()?;
+    match core.view_region_frame(pane) {
+        Some(f) => frames::encode(&f.info, f.info.width, f.info.height, &f.display_rgb8)
+            .ok_or_else(|| {
+                error(
+                    ErrorKind::Internal,
+                    "比較表示の表示範囲の画素の長さが合いません",
+                    None,
+                )
+            }),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// 現像中の写真の最新のプレビュー（[`frames`] の形のバイト列。まだなければ空）。
 #[tauri::command]
 pub async fn develop_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, ErrorInfo> {
@@ -330,6 +347,16 @@ pub async fn before_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, Err
 pub async fn before_region_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, ErrorInfo> {
     let state = Arc::clone(&state);
     blocking(move || before_region_frame_bytes(&state).map(tauri::ipc::Response::new)).await
+}
+
+/// 比較表示（LIB-03）の面 `pane` の表示範囲の描画の最新の結果（[`frames`] の形のバイト列。まだなければ空）。
+#[tauri::command]
+pub async fn view_region_frame(
+    state: Shared<'_>,
+    pane: u32,
+) -> Result<tauri::ipc::Response, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || view_region_frame_bytes(&state, pane).map(tauri::ipc::Response::new)).await
 }
 
 /// 画面の色空間（canvas が Display P3 を使えるか）。
@@ -494,7 +521,8 @@ fn openable_media(path: &Path) -> bool {
         && !path.is_dir()
 }
 
-/// 元ファイルを OS の既定のアプリで開く（動画の再生など。VID-04 は v1 のため OS のアプリを使う）。
+/// 元ファイルを OS の既定のアプリで開く（アプリの中で再生できない動画を OS のプレイヤーで見るなど。アプリの中の再生
+/// （VID-04）は `genzo://video` と画面の `video` 要素。protocol.rs）。
 /// 取り込む対象の拡張子の写真・動画だけを開く（`openable_media`）。
 #[tauri::command]
 pub async fn open_variant_file(

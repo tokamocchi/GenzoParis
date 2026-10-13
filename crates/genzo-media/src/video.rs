@@ -368,7 +368,7 @@ const SD_MAX_HEIGHT: u32 = 576;
 /// mpv などのプレイヤーの慣習と同じく、幅 1280 未満かつ高さ 576 以下を SD とする（シネスコで
 /// 切り抜いた 1280×534 などの HD を SD と誤らないよう、高さだけでは決めない）。寸法が分からなければ
 /// SD とみなさない（BT.709）。
-fn untagged_is_sd(probe: &VideoProbe) -> bool {
+pub(crate) fn untagged_is_sd(probe: &VideoProbe) -> bool {
     probe.color_space.is_none()
         && probe
             .coded_size
@@ -377,7 +377,7 @@ fn untagged_is_sd(probe: &VideoProbe) -> bool {
 
 /// ffmpeg の scale フィルターの `in_color_matrix` に渡す値。記録があれば `auto`（記録どおり）、
 /// なければ SD（[`untagged_is_sd`]）は `bt601`、それ以外は `bt709`。
-fn input_color_matrix(probe: &VideoProbe) -> &'static str {
+pub(crate) fn input_color_matrix(probe: &VideoProbe) -> &'static str {
     if probe.color_space.is_some() {
         "auto"
     } else if untagged_is_sd(probe) {
@@ -388,7 +388,7 @@ fn input_color_matrix(probe: &VideoProbe) -> &'static str {
 }
 
 /// `file:` を付けた入力の指定。
-fn file_url(path: &Path) -> OsString {
+pub(crate) fn file_url(path: &Path) -> OsString {
     let mut s = OsString::from("file:");
     s.push(path.as_os_str());
     s
@@ -437,7 +437,7 @@ impl FfmpegTools {
         })
     }
 
-    fn check_status(program: &OsStr, out: &crate::process::ProcessOutput) -> Result<()> {
+    pub(crate) fn check_status(program: &OsStr, out: &crate::process::ProcessOutput) -> Result<()> {
         if out.status.success() {
             Ok(())
         } else {

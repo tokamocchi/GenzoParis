@@ -32,6 +32,8 @@ import type {
   LogStatus,
   MetadataSummary,
   NamePreview,
+  RegionInfo,
+  RegionRequest,
   SmartRule,
   StackInfo,
   Timeline,
@@ -39,6 +41,9 @@ import type {
   VariantDetails,
   VariantKeywords,
   VariantSummary,
+  VideoPlayback,
+  VideoProxyCacheStatus,
+  ViewOutputSize,
 } from "./types";
 
 export interface MockCall {
@@ -388,6 +393,7 @@ export const MOCK_CORE_SETTINGS: CoreSettings = {
   import_separate_raw_jpeg: false,
   hash_in_background: true,
   hash_network_volumes: false,
+  video_proxy_cache_bytes: 5_000_000_000,
 };
 
 /** RAW と同時記録の JPEG を 1 枚にまとめた写真のセルの見本。 */
@@ -809,3 +815,146 @@ export const MOCK_RELOCATE_PLAN: RelocatePlan = {
   subfolders: 2,
   problem: null,
 };
+
+// ---------------------------------------------------------------------------
+// v1 の compare: 比較表示・選別表示（LIB-03）の見本
+// ---------------------------------------------------------------------------
+
+/** 比較表示の面で使う写真の出力の大きさの見本（view_output_size の応答。id ごとに違う大きさ）。 */
+export function mockViewSize(variantId: number): ViewOutputSize {
+  return { variant_id: variantId, width: 600 + variantId * 10, height: 400 + variantId * 10 };
+}
+
+/** 比較表示の面の表示範囲の情報の見本（render_view_region の応答。要求の範囲をそのまま描いたもの）。 */
+export function mockViewRegion(pane: number, request: number, req: RegionRequest): RegionInfo {
+  const size = mockViewSize(req.variant_id);
+  return {
+    variant_id: req.variant_id,
+    generation: 0,
+    request,
+    x: Math.floor(req.x),
+    y: Math.floor(req.y),
+    region_width: Math.ceil(req.width),
+    region_height: Math.ceil(req.height),
+    full_width: size.width,
+    full_height: size.height,
+    scale: req.scale ?? 1,
+    width: Math.ceil(req.width),
+    height: Math.ceil(req.height),
+    tiles: 1,
+    display_assumed_srgb: true,
+    warnings: [],
+    pane,
+  };
+}
+
+/** 比較表示の面の表示範囲の画素の見本（view_region_frame の応答）。 */
+export function mockViewRegionFrame(info: RegionInfo): ArrayBuffer {
+  return mockFrameBytes(info as unknown as Partial<FrameInfo> & { width: number; height: number });
+}
+
+/** 比較表示のコマンドの応答を足す（面ごとの要求の番号・最後の結果を覚える）。 */
+export function mockCompareCommands(b: MockBridge): void {
+  const last = new Map<number, RegionInfo>();
+  const seq = new Map<number, number>();
+  const base = b.responses.get("core_execute");
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    switch (c.type) {
+      case "view_output_size":
+        return { type: "view_size", ...mockViewSize(c.variant_id as number) };
+      case "render_view_region": {
+        const pane = c.pane as number;
+        const n = (seq.get(pane) ?? 0) + 1;
+        seq.set(pane, n);
+        const info = mockViewRegion(pane, n, c.request as RegionRequest);
+        last.set(pane, info);
+        return { type: "region", ...info };
+      }
+      case "cancel_view_regions":
+        return { type: "ok" };
+      case "release_view":
+        last.clear();
+        return { type: "ok" };
+      default:
+        return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
+    }
+  });
+  b.responses.set("view_region_frame", (args?: Record<string, unknown>) => {
+    const info = last.get(args?.pane as number);
+    return info ? mockViewRegionFrame(info) : new ArrayBuffer(0);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// v1 の video: 動画の再生（VID-04）の見本
+// ---------------------------------------------------------------------------
+
+/** 動画の再生の情報の見本（DJI の 4K・H.265 10 bit の MOV。再生用のファイルはまだなく、作れる）。 */
+export function mockVideoPlayback(over: Partial<VideoPlayback> = {}): VideoPlayback {
+  return {
+    variant_id: 7,
+    available: true,
+    unavailable_reason: null,
+    content_type: "video/quicktime",
+    size: 412_345_678,
+    video: {
+      duration_s: 75.2,
+      fps: 59.94,
+      codec: "hevc",
+      bit_depth: 10,
+      color_transfer: "bt709",
+      color_primaries: "bt709",
+      width: 3840,
+      height: 2160,
+      creation_time: "2024-05-01T09:12:00.000000Z",
+    },
+    proxy: null,
+    proxy_job: null,
+    proxy_unavailable: null,
+    proxy_encoder: "libx264",
+    ...over,
+  };
+}
+
+/** 再生用のファイルのキャッシュの状況の見本。 */
+export const MOCK_VIDEO_PROXY_CACHE: VideoProxyCacheStatus = {
+  dir: "/home/u/Pictures/GenzoParis/catalog-data/video-proxies",
+  count: 3,
+  total_bytes: 123_456_789,
+  capacity_bytes: 5_000_000_000,
+  removed: 0,
+};
+
+/**
+ * 動画の再生のコマンドの応答を足す（video_playback・create_video_proxy・video_proxy_cache・clear_video_proxies）。
+ * `playback` は variant ごとの再生の情報（なければ mockVideoPlayback）。作ったジョブの番号は `jobs` に残す。
+ */
+export function mockVideoCommands(
+  b: MockBridge,
+  playback: (id: number) => VideoPlayback = (id) => mockVideoPlayback({ variant_id: id }),
+): { jobs: { variant_id: number; job_id: number }[] } {
+  const jobs: { variant_id: number; job_id: number }[] = [];
+  let cache = { ...MOCK_VIDEO_PROXY_CACHE };
+  const base = b.responses.get("core_execute");
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    switch (c.type) {
+      case "video_playback":
+        return { type: "video_playback", ...playback(c.variant_id as number) };
+      case "create_video_proxy": {
+        const job_id = 900 + jobs.length;
+        jobs.push({ variant_id: c.variant_id as number, job_id });
+        return { type: "job_started", job_id };
+      }
+      case "video_proxy_cache":
+        return { type: "video_proxy_cache", ...cache };
+      case "clear_video_proxies":
+        cache = { ...cache, removed: cache.count, count: 0, total_bytes: 0 };
+        return { type: "video_proxy_cache", ...cache };
+      default:
+        return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
+    }
+  });
+  return { jobs };
+}

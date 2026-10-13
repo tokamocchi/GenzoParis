@@ -39,9 +39,10 @@ export function decodeFrame<H extends { width: number; height: number }>(
 
 async function fetchFrame<H extends { width: number; height: number }>(
   command: string,
+  args?: Record<string, unknown>,
 ): Promise<Frame<H> | null> {
   try {
-    return decodeFrame<H>(await bridge().invokeBinary(command));
+    return decodeFrame<H>(await bridge().invokeBinary(command, args));
   } catch (e) {
     throw toApiError(e);
   }
@@ -55,6 +56,8 @@ export const fetchRegionFrame = () => fetchFrame<RegionInfo>("region_frame");
 export const fetchBeforeFrame = () => fetchFrame<FrameInfo>("before_frame");
 /** ビフォーの表示範囲の描画の最新の結果（DEV-31）。 */
 export const fetchBeforeRegionFrame = () => fetchFrame<RegionInfo>("before_region_frame");
+/** 比較表示（LIB-03）の面 `pane` の表示範囲の描画の最新の結果。 */
+export const fetchViewRegionFrame = (pane: number) => fetchFrame<RegionInfo>("view_region_frame", { pane });
 
 let p3Support: boolean | null = null;
 

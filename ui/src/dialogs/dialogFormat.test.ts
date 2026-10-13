@@ -4,8 +4,10 @@ import type { ErrorInfo } from "../api/types";
 
 import {
   baseName,
+  describeGarbage,
   describeIntegrity,
   ensureDbExtension,
+  formatJobAmount,
   formatJobProgress,
   formatLocalDateTime,
   groupErrors,
@@ -68,6 +70,25 @@ describe("ジョブ", () => {
     expect(formatJobProgress({ kind: "export", done: 0, total: 0 })).toBe("書き出し…");
     expect(formatJobProgress({ kind: "import", done: 1500, total: 12000 })).toBe("取り込み 1,500/12,000");
     expect(formatJobProgress({ kind: "collect_garbage", done: 5, total: 3 })).toBe("キャッシュの整理 3/3");
+    expect(formatJobProgress({ kind: "video_proxy", done: 0, total: 0 })).toBe("再生用のファイルの作成…");
+    // 動画の再生用のファイルは、進み具合が動画の位置（ミリ秒）なので割合で出す。
+    expect(formatJobProgress({ kind: "video_proxy", done: 12_300, total: 75_200 })).toBe("再生用のファイルの作成 16%");
+    expect(formatJobAmount({ kind: "video_proxy", done: 80_000, total: 75_200 })).toBe("100%");
+    expect(formatJobAmount({ kind: "import", done: 1500, total: 12000 })).toBe("1,500 / 12,000");
+    expect(formatJobAmount({ kind: "import", done: 0, total: 0 })).toBe("");
+  });
+
+  it("キャッシュの整理の結果（動画の再生用のファイルを含む。古いコアでは 0）", () => {
+    const r = {
+      type: "collect_garbage" as const,
+      thumbnails_removed: 2,
+      previews_removed: 1200,
+      temp_files_removed: 0,
+    };
+    expect(describeGarbage(r)).toBe(
+      "キャッシュを整理しました（サムネイル 2 件・プレビュー 1,200 件・動画の再生用のファイル 0 個・一時ファイル 0 個を削除）",
+    );
+    expect(describeGarbage({ ...r, video_proxies_removed: 3 })).toContain("動画の再生用のファイル 3 個");
   });
 
   it("実行中を先に、新しい順", () => {

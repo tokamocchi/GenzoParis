@@ -124,6 +124,7 @@ impl ApiError {
             Self::Cancelled => true,
             Self::Worker(WorkerClientError::Cancelled) => true,
             Self::Pipeline(PipelineError::Cancelled) => true,
+            Self::Media(MediaError::Cancelled) => true,
             Self::Gpu(e) => e.is_cancelled(),
             _ => false,
         }
@@ -363,6 +364,7 @@ fn classify_media(e: &MediaError) -> (ErrorKind, Option<&'static str>) {
         | MediaError::ToolTimeout { .. }
         | MediaError::ToolOutputTooLarge { .. }
         | MediaError::ToolFailed { .. } => (K::Worker, Some(HINT_FFMPEG)),
+        MediaError::Cancelled => (K::Cancelled, None),
         _ => (K::Internal, None),
     }
 }

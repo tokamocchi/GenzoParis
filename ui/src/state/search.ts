@@ -623,5 +623,7 @@ export const thumbRevs = searchCache.thumbRevs;
 
 /** 検索結果のキャッシュの更新で再描画する（戻り値は更新の通し番号）。 */
 export function useSearchVersion(): number {
-  return useSyncExternalStore(searchCache.subscribe, () => searchCache.version);
+  const get = () => searchCache.version;
+  // サーバーでの描画（画面のテストの react-dom/server）にも同じ値を返す。
+  return useSyncExternalStore(searchCache.subscribe, get, get);
 }

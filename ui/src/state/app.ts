@@ -39,8 +39,11 @@ import { describeCheckJob } from "../library/fileOpsLogic";
 import { type CatalogChangeSet, searchCache, thumbRevs } from "./search";
 import { createStore, useStore } from "./store";
 
-/** 表示モード（G: グリッド、E: ルーペ、D: 現像）。 */
-export type Mode = "grid" | "loupe" | "develop";
+/**
+ * 表示モード（G: グリッド、E: ルーペ、C: 比較表示、N: 選別表示、D: 現像）。比較表示・選別表示（LIB-03）は
+ * state/compare.ts の openCompare・openSurvey で始める。
+ */
+export type Mode = "grid" | "loupe" | "compare" | "survey" | "develop";
 
 /** ダイアログ（同時に 1 つ）。 */
 export type DialogState =
@@ -284,6 +287,7 @@ export const JOB_LABEL: Record<JobKind, string> = {
   move_files: "写真の移動",
   check_missing: "見つからない写真の確認",
   find_relink_candidates: "再リンクの候補の探索",
+  video_proxy: "再生用のファイルの作成",
 };
 
 const jobWaiters = new Map<number, ((info: JobInfo) => void)[]>();
@@ -588,6 +592,33 @@ async function selectById(id: VariantId): Promise<void> {
 }
 
 /**
+ * 選択を `ids` にし、表示中の写真を `current` にする（比較表示・選別表示が、作業中の写真・並べる写真を決める。
+ * LIB-03）。`current` は選択に含める。位置は今の世代で求め直す（結果に出ていない写真は選択から外れる。
+ * relocateSelection）。
+ */
+async function selectIds(ids: readonly VariantId[], current: VariantId): Promise<void> {
+  selectSeq++;
+  const list = ids.includes(current) ? [...ids] : [current, ...ids];
+  const items: VariantSummary[] = [];
+  for (const id of list) {
+    const v = searchCache.getLoadedById(id);
+    if (v) items.push(v);
+  }
+  rememberSelected(items);
+  const at = searchCache.findLoaded(current);
+  appStore.set({
+    selection: {
+      ids: list,
+      current,
+      currentIndex: at >= 0 ? at : null,
+      anchorIndex: at >= 0 ? at : null,
+      anchorId: current,
+    },
+  });
+  await relocateSelection();
+}
+
+/**
  * `from` から `to` までの範囲の項目を集める（大きすぎる範囲は `to` の側から 10,000 件まで。`to` は必ず
  * 含める）。
  */
@@ -881,7 +912,8 @@ function enqueueMark(run: () => Promise<void>): Promise<void> {
 
 async function afterMark(): Promise<void> {
   const s = appStore.get();
-  if (s.autoAdvance && s.mode !== "grid") await moveSelection(1);
+  // 比較表示・選別表示では次へ進まない（表示中の写真は作業中の面・枠の写真なので。決定事項ログ No.115・116）。
+  if (s.autoAdvance && (s.mode === "loupe" || s.mode === "develop")) await moveSelection(1);
   else if (s.autoAdvance && s.mode === "grid" && s.selection.ids.length <= 1) await moveSelection(1);
 }
 
@@ -1368,6 +1400,8 @@ export const actions = {
   // 選択
   selectIndex,
   selectById,
+  selectIds,
+  locate,
   moveSelection,
   /** 位置の写真を選んでルーペで開く（グリッドのダブルクリック）。選べなかったら開かない（戻り値は開いたか）。 */
   async openInLoupe(index: number, expect?: VariantId): Promise<boolean> {

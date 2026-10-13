@@ -111,6 +111,10 @@ pub enum GpuMode {
     Off,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_backup_generations() -> usize {
     genzo_catalog::DEFAULT_BACKUP_GENERATIONS
 }
@@ -195,9 +199,16 @@ pub struct CoreConfig {
     /// ワーカーの起動と握手のタイムアウト（`None` なら genzo-worker の既定値。テスト用）。
     #[serde(skip)]
     pub worker_startup_timeout: Option<Duration>,
-    /// ワーカーに追加で渡す環境変数（`GENZO_FFMPEG` など）。
+    /// ワーカーに追加で渡す環境変数（`GENZO_FFMPEG` など）。コアが動画の再生用のファイルを作るとき（VID-04。
+    /// `playback` の doc）も、ここの `GENZO_FFMPEG`・`GENZO_FFPROBE` を使う。
     #[serde(skip)]
     pub worker_env: Vec<(OsString, OsString)>,
+    /// 動画の再生用のファイルを作る ffmpeg・ffprobe が [`CoreConfig::worker_env`] になければ、このプロセスの
+    /// 環境変数（`GENZO_FFMPEG`・`GENZO_FFPROBE`）・PATH の `ffmpeg`・`ffprobe` を使うか（既定は `true`。CLI・テスト）。
+    /// デスクトップアプリは `false` にする（アプリが探した場所（決定事項ログ No.67。設定でフォルダを指定したら、
+    /// そこだけ）のものだけを使い、見つからなければ作れない理由を返す）。
+    #[serde(default = "default_true")]
+    pub ffmpeg_path_fallback: bool,
     /// 現像設定の自動保存の待ち時間（`None` なら [`DEVELOP_SAVE_DELAY`]。テスト用: 長くすると、
     /// 時間によらずに「まとめて 1 件」を確かめられる）。
     #[serde(skip)]
@@ -232,6 +243,7 @@ impl CoreConfig {
             worker_timeouts: None,
             worker_startup_timeout: None,
             worker_env: Vec::new(),
+            ffmpeg_path_fallback: true,
             develop_save_delay: None,
             develop_save_max_delay: None,
         }

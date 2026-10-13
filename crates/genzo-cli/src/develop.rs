@@ -14,6 +14,9 @@
 //!   設定で描く（`render_before_region`。DEV-31）。
 //! - `before` は写真を開いて、ビフォー / アフターの表示のビフォー（DEV-31。genzo-api の `set_before`・
 //!   `render_before`）のプレビューを PNG に書く（`--after` でアフターも同じ寸法で書く）。
+//! - `compare` は、比較表示（LIB-03）の同期ズームと同じ範囲（中心は写真ごとの割合、大きさは出力の画素で
+//!   共通）を、写真ごとに比較表示の面（genzo-api の `view_output_size`・`render_view_region`。現像の
+//!   セッションは開かない）に同時に描いて、PNG に書く。
 //! - JSON の出力: `get` は設定そのもの（そのまま `set --replace` に渡せる）。`set`・`reset`・`undo`・
 //!   `redo` は `{"variant_id", "changed", "settings"}`（Undo / Redo できなければ `changed: false`、
 //!   `settings: null`。終了コードは 0）。
@@ -21,13 +24,14 @@
 use std::io::Read;
 
 use genzo_api::{
-    DeleteKind, DevelopSettings, RegionRequest, RegionSpace, SettingGroups, VariantId,
+    DeleteKind, DevelopSettings, MAX_VIEW_PANES, RegionRequest, RegionSpace, SettingGroups,
+    VariantId, ViewOutputSize,
 };
 use serde_json::{Value, json};
 
 use crate::Status;
 use crate::args::{
-    BeforeArgs, DevelopCommand, GlobalArgs, RegionArgs, RegionSpaceArg, setting_groups,
+    BeforeArgs, CompareArgs, DevelopCommand, GlobalArgs, RegionArgs, RegionSpaceArg, setting_groups,
 };
 use crate::error::{CliError, CliResult};
 use crate::library::{ensure_variants, unique_ids};
@@ -72,6 +76,7 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
         DevelopCommand::MakeMaster { variant } => crate::stacks::make_master(g, out, variant),
         DevelopCommand::Region(a) => region(g, out, &a),
         DevelopCommand::Before(a) => before(g, out, &a),
+        DevelopCommand::Compare(a) => compare(g, out, &a),
     }
 }
 
@@ -449,6 +454,124 @@ fn region(g: &GlobalArgs, out: Output, a: &RegionArgs) -> CliResult<Status> {
     Ok(Status::Success)
 }
 
+/// 比較表示の同期ズームの範囲: 中心は出力の画像の大きさに対する割合（`cx`・`cy`）、大きさは出力の画素で、
+/// 画像の内側に収める（画像より大きければ画像の大きさ）。
+pub fn compare_region(
+    size: &ViewOutputSize,
+    (cx, cy): (f64, f64),
+    (width, height): (f64, f64),
+    scale: f64,
+) -> RegionRequest {
+    let (fw, fh) = (f64::from(size.width), f64::from(size.height));
+    let w = width.min(fw);
+    let h = height.min(fh);
+    let x = (cx.clamp(0.0, 1.0) * fw - w / 2.0).clamp(0.0, (fw - w).max(0.0));
+    let y = (cy.clamp(0.0, 1.0) * fh - h / 2.0).clamp(0.0, (fh - h).max(0.0));
+    RegionRequest {
+        variant_id: size.variant_id,
+        space: RegionSpace::Output,
+        x: x.floor(),
+        y: y.floor(),
+        width: w,
+        height: h,
+        scale,
+    }
+}
+
+/// `develop compare`: 比較表示（LIB-03）の面に、写真ごとに同じ範囲を同時に描いて（genzo-api の
+/// [`genzo_api::Core::render_view_region`]）、PNG に書く。
+fn compare(g: &GlobalArgs, out: Output, a: &CompareArgs) -> CliResult<Status> {
+    if a.variants.len() > MAX_VIEW_PANES as usize {
+        return Err(CliError::Usage(format!(
+            "比較できる写真は {MAX_VIEW_PANES} 枚までです（{} 枚を指定）",
+            a.variants.len()
+        )));
+    }
+    if !(a.width > 0.0 && a.height > 0.0) {
+        return Err(CliError::Usage(
+            "--width と --height は正の値にしてください".to_owned(),
+        ));
+    }
+    let paths: Vec<std::path::PathBuf> = a
+        .variants
+        .iter()
+        .enumerate()
+        .map(|(pane, v)| a.out_dir.join(format!("compare-{pane}-{v}.png")))
+        .collect();
+    if let Some(p) = paths.iter().find(|p| p.exists()) {
+        return Err(CliError::Usage(format!(
+            "{} は既にあります（上書きしません）",
+            p.display()
+        )));
+    }
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    ensure_variants(&s, &a.variants)?;
+    let core = &s.core;
+    // 面ごとに出力の大きさを求め、同じ範囲（割合の中心と画素の大きさ）を同時に描く。
+    let rendered = std::thread::scope(|scope| {
+        let handles: Vec<_> = a
+            .variants
+            .iter()
+            .enumerate()
+            .map(|(pane, v)| {
+                let pane = pane as u32;
+                let v = *v;
+                scope.spawn(move || {
+                    let size = core.view_output_size(pane, v)?;
+                    let req = compare_region(&size, (a.cx, a.cy), (a.width, a.height), a.scale);
+                    core.render_view_region(pane, &req)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("描画のスレッドが異常終了しました"))
+            .collect::<Vec<_>>()
+    });
+    s.core.release_view()?;
+    s.close()?;
+    let mut frames = Vec::with_capacity(rendered.len());
+    for r in rendered {
+        frames.push(r?);
+    }
+    std::fs::create_dir_all(&a.out_dir).map_err(|e| CliError::io(&a.out_dir, e))?;
+    let mut written = Vec::new();
+    for (frame, path) in frames.iter().zip(&paths) {
+        let info = &frame.info;
+        let image = genzo_media::RgbImage8::from_raw(
+            info.width,
+            info.height,
+            frame.display_rgb8.as_ref().clone(),
+        )
+        .map_err(|e| CliError::other(e.to_string()))?;
+        let png = genzo_media::png_io::encode_png(&image, None, None)
+            .map_err(|e| CliError::other(e.to_string()))?;
+        write_new_file(path, &png)?;
+        written.push(json!({ "pane": info.pane, "path": path, "region": info }));
+    }
+    if out.json {
+        out.print_json(&json!({ "panes": written }));
+    } else {
+        for (frame, path) in frames.iter().zip(&paths) {
+            let info = &frame.info;
+            out.line(format!(
+                "面 {}: variant {} の範囲 x={} y={} {}×{}（画像全体 {}×{}、倍率 {}）を {} に書き出しました",
+                info.pane.unwrap_or_default(),
+                info.variant_id,
+                info.x,
+                info.y,
+                info.region_width,
+                info.region_height,
+                info.full_width,
+                info.full_height,
+                info.scale,
+                path.display()
+            ));
+        }
+    }
+    Ok(Status::Success)
+}
+
 /// `develop before`: 写真を開いて、ビフォーのプレビュー（と `--after` ならアフターのプレビュー）を PNG に
 /// 書く（DEV-31）。
 fn before(g: &GlobalArgs, out: Output, a: &BeforeArgs) -> CliResult<Status> {
@@ -550,6 +673,26 @@ fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> CliResult<()> {
 mod tests {
     use super::*;
     use genzo_model::WhiteBalance;
+
+    #[test]
+    fn compare_regions_share_the_relative_center_and_pixel_size() {
+        let size = |w, h| ViewOutputSize {
+            variant_id: VariantId::new(1),
+            width: w,
+            height: h,
+        };
+        // 中央の 100 × 50。
+        let r = compare_region(&size(400, 300), (0.5, 0.5), (100.0, 50.0), 1.0);
+        assert_eq!((r.x, r.y, r.width, r.height), (150.0, 125.0, 100.0, 50.0));
+        // 別の大きさの写真でも中心は同じ割合、大きさは同じ画素。
+        let r = compare_region(&size(800, 600), (0.5, 0.5), (100.0, 50.0), 1.0);
+        assert_eq!((r.x, r.y, r.width, r.height), (350.0, 275.0, 100.0, 50.0));
+        // 端は画像の内側に収め、画像より大きい範囲は画像の大きさにする。
+        let r = compare_region(&size(400, 300), (1.0, 0.0), (100.0, 50.0), 2.0);
+        assert_eq!((r.x, r.y, r.scale), (300.0, 0.0, 2.0));
+        let r = compare_region(&size(80, 60), (0.3, 0.9), (100.0, 100.0), 1.0);
+        assert_eq!((r.x, r.y, r.width, r.height), (0.0, 0.0, 80.0, 60.0));
+    }
 
     #[test]
     fn partial_json_is_merged_into_the_current_settings() {

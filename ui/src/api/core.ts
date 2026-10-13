@@ -76,6 +76,9 @@ import type {
   VariantDetails,
   VariantId,
   VariantKeywords,
+  ViewOutputSize,
+  VideoPlayback,
+  VideoProxyCacheStatus,
   VolumeInfo,
   FileMovePlan,
   FileMoveReport,
@@ -286,6 +289,20 @@ export const renderBeforeRegion = async (request: RegionRequest): Promise<Region
 export const cancelRegion = async () => {
   await execute({ type: "cancel_region" }, "ok");
 };
+// --- 比較表示（LIB-03。genzo-api の view.rs。面ごとに任意の写真を描く） ---
+/** 比較表示の面 `pane` で使う写真の、出力の画像のフル解像度の大きさ（等倍表示の準備）。 */
+export const viewOutputSize = async (pane: number, variant_id: VariantId): Promise<ViewOutputSize> =>
+  strip(await execute({ type: "view_output_size", pane, variant_id }, "view_size"));
+/** 比較表示の面 `pane` に表示範囲を描く（画素は view_region_frame）。 */
+export const renderViewRegion = async (pane: number, request: RegionRequest): Promise<RegionInfo> =>
+  strip(await execute({ type: "render_view_region", pane, request }, "region"));
+export const cancelViewRegions = async () => {
+  await execute({ type: "cancel_view_regions" }, "ok");
+};
+/** 比較表示をやめる（描画を取り消し、コアが展開した写真と結果を捨てる）。 */
+export const releaseView = async () => {
+  await execute({ type: "release_view" }, "ok");
+};
 export const flushDevelop = async () => (await execute({ type: "flush_develop" }, "saved")).saved;
 export const closeDevelop = async () => {
   await execute({ type: "close_develop" }, "ok");
@@ -464,4 +481,18 @@ export const planRelocateFolder = async (folder_id: FolderId, path: string): Pro
 /** フォルダの場所を指定し直す。 */
 export const relocateFolder = async (folder_id: FolderId, path: string): Promise<RelocatePlan> =>
   strip(await execute({ type: "relocate_folder", folder_id, path }, "relocate_plan"));
+
+// --- 動画の再生（VID-04） ---
+/** 動画の再生の情報（元のファイルを読めるか・再生用のファイル・作れない理由）。 */
+export const videoPlayback = async (variant_id: VariantId): Promise<VideoPlayback> =>
+  strip(await execute({ type: "video_playback", variant_id }, "video_playback"));
+/** 再生用のファイルを作る（ジョブ。同じ動画を作っている途中なら、そのジョブ）。 */
+export const createVideoProxy = async (variant_id: VariantId): Promise<number> =>
+  (await execute({ type: "create_video_proxy", variant_id }, "job_started")).job_id;
+/** 再生用のファイルのキャッシュの状況。 */
+export const videoProxyCache = async (): Promise<VideoProxyCacheStatus> =>
+  strip(await execute({ type: "video_proxy_cache" }, "video_proxy_cache"));
+/** 再生用のファイルをすべて消す。 */
+export const clearVideoProxies = async (): Promise<VideoProxyCacheStatus> =>
+  strip(await execute({ type: "clear_video_proxies" }, "video_proxy_cache"));
 export type { DisplayInfo };

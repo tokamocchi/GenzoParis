@@ -50,8 +50,28 @@ export function bytesToGbText(bytes: number): string {
   return String(Number(gb.toFixed(2)));
 }
 
-/** GB の入力を読む（全角の数字も受け付ける）。範囲外・数でなければ理由を返す。 */
-export function parseCacheGb(text: string): { bytes: number } | { error: string } {
+/** 動画の再生用のファイルのキャッシュの上限の最小値（バイト。genzo-api の MIN_VIDEO_PROXY_CACHE_BYTES。仮置きの値）。 */
+export const MIN_VIDEO_PROXY_CACHE_BYTES = 500_000_000;
+/** 動画の再生用のファイルのキャッシュの上限の既定値（バイト。genzo-api の DEFAULT_VIDEO_PROXY_CAPACITY_BYTES）。 */
+export const DEFAULT_VIDEO_PROXY_CACHE_BYTES = 5_000_000_000;
+
+/** 大きさの表示（10 進の単位。上限の GB と同じく 1 GB = 10 億バイト。"12.3 MB"・"1.25 GB"）。 */
+export function formatDecimalSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1000) return `${bytes} バイト`;
+  const units: [number, string][] = [
+    [BYTES_PER_GB, "GB"],
+    [1_000_000, "MB"],
+    [1_000, "KB"],
+  ];
+  for (const [unit, label] of units) {
+    if (bytes >= unit) return `${Number((bytes / unit).toFixed(2))} ${label}`;
+  }
+  return `${bytes} バイト`;
+}
+
+/** GB の入力を読む（全角の数字も受け付ける）。範囲外（`minBytes` 未満など）・数でなければ理由を返す。 */
+export function parseCacheGb(text: string, minBytes: number = MIN_PREVIEW_CACHE_BYTES): { bytes: number } | { error: string } {
   const t = text
     .trim()
     .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
@@ -59,10 +79,10 @@ export function parseCacheGb(text: string): { bytes: number } | { error: string 
     .replace(/[,，]/g, "");
   if (!/^\d+(\.\d+)?$/.test(t)) return { error: "数で指定してください（GB）" };
   const gb = Number(t);
-  const min = MIN_PREVIEW_CACHE_BYTES / BYTES_PER_GB;
+  const min = minBytes / BYTES_PER_GB;
   const bytes = Math.round(gb * BYTES_PER_GB);
-  if (!Number.isFinite(gb) || bytes < MIN_PREVIEW_CACHE_BYTES) {
-    return { error: `${min} GB（${formatCount(MIN_PREVIEW_CACHE_BYTES)} バイト）以上にしてください` };
+  if (!Number.isFinite(gb) || bytes < minBytes) {
+    return { error: `${min} GB（${formatCount(minBytes)} バイト）以上にしてください` };
   }
   if (gb > MAX_PREVIEW_CACHE_GB) return { error: `${formatCount(MAX_PREVIEW_CACHE_GB)} GB 以下にしてください` };
   return { bytes };
@@ -72,6 +92,8 @@ export function parseCacheGb(text: string): { bytes: number } | { error: string 
 export interface CatalogSettingsForm {
   cacheDir: string;
   cacheGb: string;
+  /** 動画の再生用のファイルのキャッシュの上限（GB。VID-04）。 */
+  proxyGb: string;
   exportColorSpace: CoreSettings["default_export_color_space"];
   utcOffsetMinutes: number;
   /** 取り込みの既定: 重複と思われるものを取り込まない（IMP-04）。 */
@@ -88,6 +110,7 @@ export function catalogSettingsForm(s: CoreSettings): CatalogSettingsForm {
   return {
     cacheDir: s.preview_cache_dir,
     cacheGb: bytesToGbText(s.preview_cache_bytes),
+    proxyGb: bytesToGbText(s.video_proxy_cache_bytes ?? DEFAULT_VIDEO_PROXY_CACHE_BYTES),
     exportColorSpace: s.default_export_color_space,
     utcOffsetMinutes: s.default_utc_offset_minutes,
     // 古いコア（値がない）では genzo-api の既定。
@@ -115,6 +138,12 @@ export function catalogSettingsUpdate(
   // 入力欄の表示（小数第 2 位）に丸めた値と同じなら、変えていない（丸めで上限が変わらないように）。
   if (form.cacheGb.trim() !== bytesToGbText(current.preview_cache_bytes) && parsed.bytes !== current.preview_cache_bytes) {
     update.preview_cache_bytes = parsed.bytes;
+  }
+  const proxyCurrent = current.video_proxy_cache_bytes ?? DEFAULT_VIDEO_PROXY_CACHE_BYTES;
+  const proxy = parseCacheGb(form.proxyGb, MIN_VIDEO_PROXY_CACHE_BYTES);
+  if ("error" in proxy) return { error: `動画の再生用のファイルの上限: ${proxy.error}` };
+  if (form.proxyGb.trim() !== bytesToGbText(proxyCurrent) && proxy.bytes !== proxyCurrent) {
+    update.video_proxy_cache_bytes = proxy.bytes;
   }
   if (form.exportColorSpace !== current.default_export_color_space) {
     update.default_export_color_space = form.exportColorSpace;

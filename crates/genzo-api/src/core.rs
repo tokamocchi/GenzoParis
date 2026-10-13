@@ -219,12 +219,21 @@ pub(crate) struct Inner {
     pub maintenance: Scheduler,
     /// ファイルの内容のハッシュの計算のジョブの状態（`identity` の doc）。
     pub hash: Mutex<crate::identity::HashJobState>,
+    /// 動画の再生用のファイルの作成（VID-04。`playback` の doc）を実行する 1 本のスレッド。数十秒〜数分かかるので、
+    /// P3 のスレッドを占めないよう分ける。
+    pub video: Scheduler,
+    /// 動画の再生用のファイルのキャッシュと、作っている途中のもの（`playback` の doc）。
+    pub proxies: Mutex<crate::playback::ProxyState>,
+    /// 再生用のファイルを作れるか（ffmpeg とエンコーダー。初めて要るときに 1 度だけ確かめる）。
+    pub proxy_support: std::sync::OnceLock<crate::playback::ProxySupport>,
     pub engine: Engine,
     pub gpu: Mutex<GpuState>,
     pub display: Mutex<DisplayState>,
     /// 検索の状態と、作り直しのスレッドとの受け渡し（`search` の doc）。
     pub search: Arc<SearchShared>,
     pub develop: Arc<DevelopShared>,
+    /// 比較表示（LIB-03）の表示範囲の描画と、展開した入力（`view` の doc）。
+    pub view: crate::view::ViewShared,
     pub jobs: JobRegistry,
     pub plans: Mutex<PlanStore>,
     pub trash: Arc<dyn TrashBackend>,
@@ -490,9 +499,11 @@ impl Core {
             background,
             interactive,
             maintenance,
+            video,
             engine,
             display,
         } = parts;
+        let proxies = crate::playback::ProxyState::open(&config.data_dir, &settings);
 
         let inner = Arc::new(Inner {
             config,
@@ -504,11 +515,15 @@ impl Core {
             interactive,
             maintenance,
             hash: Mutex::new(crate::identity::HashJobState::default()),
+            video,
+            proxies: Mutex::new(proxies),
+            proxy_support: std::sync::OnceLock::new(),
             engine,
             gpu: Mutex::new(GpuState::default()),
             display: Mutex::new(display),
             search: Arc::new(SearchShared::default()),
             develop: Arc::new(DevelopShared::default()),
+            view: crate::view::ViewShared::default(),
             jobs: JobRegistry::default(),
             plans: Mutex::new(PlanStore::default()),
             trash: hooks.trash,
@@ -734,11 +749,13 @@ fn close_inner(inner: &Arc<Inner>, mode: CloseMode) -> Result<(), ApiError> {
     if let Some(h) = inner.saver.lock().take() {
         let _ = h.join();
     }
-    // 2. ジョブを取り消して、終わるのを待つ。
+    // 2. ジョブを取り消して、終わるのを待つ（比較表示の描画・展開も取り消し、展開した入力を捨てる）。
     inner.jobs.cancel_all();
+    inner.view.release();
     inner.background.shutdown_now();
     inner.interactive.shutdown_now();
     inner.maintenance.shutdown_now();
+    inner.video.shutdown_now();
     // キューから実行されずに外れたジョブも、取り消しとして記録して知らせる。
     inner.jobs.reap_unrun(inner);
     // 検索結果の作り直しのスレッドを止める（読み取り専用の接続を閉じる。カタログを閉じる前に）。
@@ -799,6 +816,7 @@ struct Parts {
     background: Scheduler,
     interactive: Scheduler,
     maintenance: Scheduler,
+    video: Scheduler,
     engine: Engine,
     display: DisplayState,
 }
@@ -889,7 +907,10 @@ fn build_parts(
     let interactive = Scheduler::with_budget(1, "genzo-p0", budget.clone())
         .map_err(|e| ApiError::Job(e.to_string()))?;
     // ファイルの内容のハッシュの計算（ORG-03）。読み込みの小さなバッファだけを使う（メモリの予算の枠は取らない）。
-    let maintenance = Scheduler::with_budget(1, "genzo-hash", budget)
+    let maintenance = Scheduler::with_budget(1, "genzo-hash", budget.clone())
+        .map_err(|e| ApiError::Job(e.to_string()))?;
+    // 動画の再生用のファイルの作成（VID-04）。変換は ffmpeg の子プロセスが行う（本体のメモリの予算の枠は取らない）。
+    let video = Scheduler::with_budget(1, "genzo-video", budget)
         .map_err(|e| ApiError::Job(e.to_string()))?;
     let engine = Engine::new(EngineConfig::default())?;
     let display = DisplayState::assumed_srgb()?;
@@ -906,6 +927,7 @@ fn build_parts(
         background,
         interactive,
         maintenance,
+        video,
         engine,
         display,
     })

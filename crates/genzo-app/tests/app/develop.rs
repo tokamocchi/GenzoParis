@@ -1,6 +1,6 @@
 //! (c) 現像: OpenDevelop → SetSettings → WaitForFrame → 画素のバイト列（frames の形）のヘッダーの寸法と
 //! 画素の長さが合う。画面の色空間（Display P3 / sRGB）の切り替え。ビフォー / アフター（DEV-31）の
-//! ビフォーの画素のバイト列。
+//! ビフォーの画素のバイト列。比較表示（LIB-03）の面ごとの表示範囲の画素のバイト列。
 
 use genzo_api::{DevelopSettings, FrameInfo, RegionInfo, Response, VariantId};
 use genzo_app::commands;
@@ -223,5 +223,68 @@ pub fn before_frames_match_their_headers() {
     });
     assert_ne!(p3, srgb);
     ok(&state, json!({"type": "close_develop"}));
+    state.close_catalog(false).unwrap();
+}
+
+/// 比較表示（LIB-03）: 現像のセッションを開かずに、2 つの面に別の写真の表示範囲を描き、面ごとのバイト列
+/// （view_region_frame。ヘッダーの pane が面）を取る。比較表示をやめると空になる。
+pub fn view_region_frames_match_their_panes() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("比較");
+    write_image(&photos.join("左.jpg"), (160, 120), 3);
+    write_image(&photos.join("右.jpg"), (120, 90), 9);
+    let path = env.catalog("比較.db");
+    state.open_catalog(&path, true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let left = crate::support::by_name(&items, "左.jpg").variant_id;
+    let right = crate::support::by_name(&items, "右.jpg").variant_id;
+    assert!(
+        commands::view_region_frame_bytes(&state, 0)
+            .unwrap()
+            .is_empty()
+    );
+    match ok(
+        &state,
+        json!({"type": "view_output_size", "pane": 1, "variant_id": right}),
+    ) {
+        Response::ViewSize(s) => assert_eq!((s.width, s.height), (120, 90)),
+        other => panic!("{other:?}"),
+    }
+    for (pane, id, w, h) in [(0u32, left, 40.0, 30.0), (1, right, 24.0, 18.0)] {
+        let info = match ok(
+            &state,
+            json!({"type": "render_view_region", "pane": pane, "request": {
+                "variant_id": id, "x": 4.0, "y": 2.0, "width": w, "height": h
+            }}),
+        ) {
+            Response::Region(r) => r,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(info.pane, Some(pane));
+        let (header, _) = decode::<RegionInfo>(
+            &commands::view_region_frame_bytes(&state, pane).unwrap(),
+            |h| (h.width, h.height),
+        );
+        assert_eq!(header, *info);
+        assert_eq!(header.variant_id, id);
+    }
+    assert!(
+        commands::view_region_frame_bytes(&state, genzo_api::MAX_VIEW_PANES)
+            .unwrap()
+            .is_empty(),
+        "範囲の外の面は空"
+    );
+    match ok(&state, json!({"type": "develop_state"})) {
+        Response::DevelopOrNone { state: None } => {}
+        other => panic!("現像のセッションは開かない: {other:?}"),
+    }
+    ok(&state, json!({"type": "release_view"}));
+    assert!(
+        commands::view_region_frame_bytes(&state, 0)
+            .unwrap()
+            .is_empty()
+    );
     state.close_catalog(false).unwrap();
 }

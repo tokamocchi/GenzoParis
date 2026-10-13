@@ -1082,6 +1082,61 @@ fn develop_region_writes_the_rendered_region_as_png() {
     assert_eq!(hashes(&env.photos), before, "元ファイルは変わらない");
 }
 
+/// `develop compare`（LIB-03）: 2 枚の写真の同じ割合の中心・同じ画素の大きさの範囲を、比較表示の面に描いて
+/// PNG に書く（現像のセッションは開かない）。3 枚以上・既にあるファイルは使い方の誤り。
+#[test]
+fn develop_compare_renders_the_same_region_of_two_photos() {
+    let env = Env::new();
+    write_plain(&env.photos.join("A.png"), (120, 80));
+    write_plain(&env.photos.join("B.png"), (60, 40));
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let all = env.json(&["search"]);
+    let a = id_of(&all, "A.png").to_string();
+    let b = id_of(&all, "B.png").to_string();
+    let dir = env.path("比較");
+    let args = |extra: &[&str]| {
+        let mut v = vec![
+            "develop",
+            "compare",
+            "--cx",
+            "0.5",
+            "--cy",
+            "0.5",
+            "--width",
+            "30",
+            "--height",
+            "20",
+            "--out-dir",
+            dir.to_str().unwrap(),
+        ];
+        v.extend_from_slice(extra);
+        v.into_iter().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let owned = args(&[&a, &b]);
+    let r = env.json(&owned.iter().map(String::as_str).collect::<Vec<_>>());
+    let panes = r["panes"].as_array().unwrap();
+    assert_eq!(panes.len(), 2, "{r}");
+    // 中心は写真ごとの割合（120 × 80 の中央と 60 × 40 の中央）、大きさは同じ画素。
+    assert_eq!(panes[0]["region"]["x"], 45, "{r}");
+    assert_eq!(panes[0]["region"]["y"], 30, "{r}");
+    assert_eq!(panes[1]["region"]["x"], 15, "{r}");
+    assert_eq!(panes[1]["region"]["y"], 10, "{r}");
+    assert_eq!(panes[1]["pane"], 1, "{r}");
+    for (pane, id) in [(0, &a), (1, &b)] {
+        let img = image::open(dir.join(format!("compare-{pane}-{id}.png"))).unwrap();
+        assert_eq!((img.width(), img.height()), (30, 20));
+    }
+    // 既にあるファイルには書かない。3 枚以上は比べない。
+    let again = env.run(&owned.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(again.code, 2, "{}", again.stderr);
+    let three = args(&[&a, &b, &a]);
+    let r = env.run(&three.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(hashes(&env.photos), before, "元ファイルは変わらない");
+}
+
 /// エラーは終了コード 1。`--json` では標準出力に `{"error": ...}`。
 #[test]
 fn errors_exit_with_1() {
@@ -3351,4 +3406,81 @@ fn files_folders_and_missing_photos_from_the_cli() {
     now.push(genzo_testkit::record::sha256_file_hex(env.path("旅-01.jpg")).unwrap());
     now.sort();
     assert_eq!(now, contents);
+}
+
+/// `video info / proxy / cache / clear`（VID-04）: 再生の情報と配信するファイル、再生用のファイルの作成（あれば
+/// 作らない）、写真は作れず終了コード 3、キャッシュの状況と消去。元の動画は変わらない。ffmpeg がなければ飛ばす。
+#[test]
+fn video_commands_report_playback_and_make_proxies() {
+    let env = Env::new();
+    if !make_video(&env.photos.join("V.mov")) {
+        return;
+    }
+    write_jpeg(&env.photos.join("P.jpg"), (64, 48), 1, None, false);
+    let before = hashes(&env.photos);
+    let photos = env.photos.to_string_lossy().into_owned();
+    env.json(&["catalog", "init"]);
+    env.json(&["import", &photos]);
+    let found = env.json(&["search"]);
+    let v = id_of(&found, "V.mov").to_string();
+    let p = id_of(&found, "P.jpg").to_string();
+
+    let info = env.json(&["video", "info", &v]);
+    assert_eq!(info["playback"]["available"], true, "{info}");
+    assert_eq!(info["playback"]["content_type"], "video/quicktime");
+    assert!(info["playback"]["proxy"].is_null());
+    assert!(
+        info["stream"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("V.mov")),
+        "{info}"
+    );
+    assert!(info["proxy_stream"].is_null());
+    if !info["playback"]["proxy_unavailable"].is_null() {
+        eprintln!("再生用のファイルを作れないため、ここまで: {info}");
+        return;
+    }
+    let human = env.run(&["video", "info", &v]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.contains("配信する元のファイル"),
+        "{}",
+        human.stdout
+    );
+
+    // 作る（2 回目は作らずに今のものを使う）。写真は作れない（終了コード 3）。
+    let made = env.json(&["video", "proxy", &v]);
+    assert_eq!(made["proxies"][0]["ok"], true, "{made}");
+    assert_eq!(made["proxies"][0]["report"]["reused"], false);
+    let again = env.json(&["video", "proxy", &v]);
+    assert_eq!(again["proxies"][0]["report"]["reused"], true, "{again}");
+    let mixed = env.run(&["video", "proxy", &v, &p, "--json"]);
+    assert_eq!(mixed.code, 3, "{}\n{}", mixed.stdout, mixed.stderr);
+    let mixed = mixed.json();
+    assert_eq!(mixed["proxies"][0]["ok"], true);
+    assert_eq!(mixed["proxies"][1]["ok"], false);
+
+    let info = env.json(&["video", "info", &v]);
+    assert!(
+        info["playback"]["proxy"]["size"].as_u64().unwrap() > 0,
+        "{info}"
+    );
+    assert!(
+        info["proxy_stream"]
+            .as_str()
+            .is_some_and(|s| s.ends_with(".mp4")),
+        "{info}"
+    );
+    let cache = env.json(&["video", "cache"]);
+    assert_eq!(cache["count"], 1, "{cache}");
+    let cleared = env.json(&["video", "clear"]);
+    assert_eq!(
+        (cleared["removed"].as_u64(), cleared["count"].as_u64()),
+        (Some(1), Some(0))
+    );
+    // 写真の再生の情報はエラー（不正な値）。
+    let r = env.run(&["video", "info", &p, "--json"]);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(r.json()["error"]["kind"], "invalid_input");
+    assert_eq!(hashes(&env.photos), before);
 }

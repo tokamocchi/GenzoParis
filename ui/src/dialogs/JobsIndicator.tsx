@@ -14,6 +14,7 @@ import {
   JOB_KIND_LABEL,
   JOB_STATE_LABEL,
   formatCount,
+  formatJobAmount,
   formatJobProgress,
   formatLocalDateTime,
   sortJobs,
@@ -49,7 +50,7 @@ function JobRow(props: { job: JobView }) {
       </div>
       {running && <Progress done={job.done} total={job.total} />}
       <div className="message">
-        {job.total > 0 ? `${formatCount(Math.min(job.done, job.total))} / ${formatCount(job.total)}` : running ? "準備中…" : ""}
+        {job.total > 0 ? formatJobAmount(job) : running ? "準備中…" : ""}
         {job.message ? `\n${job.message}` : ""}
       </div>
     </div>

@@ -355,3 +355,331 @@ fn timeout_is_enforced() {
         Err(MediaError::ToolTimeout { .. })
     ));
 }
+
+/// 再生用のファイル（VID-04）を作る準備: エンコーダーを選ぶ（なければスキップ）。
+fn proxy_encoder(t: &FfmpegTools) -> Option<genzo_media::ProxyEncoder> {
+    let names = t.encoders().ok()?;
+    let e = genzo_media::pick_proxy_encoder(&names);
+    if e.is_none() {
+        eprintln!("H.264 のエンコーダーがないため、再生用のファイルのテストをスキップする");
+    }
+    e
+}
+
+/// 再生用のファイル: 大きな動画（MPEG-4 Part 2・音声付き。WebView で再生できない形式の代わり）を、長辺 1280 の
+/// H.264 ＋ AAC の MP4 にする。元の動画は変わらない。
+#[test]
+fn proxy_is_h264_aac_within_the_long_edge() {
+    let Some(t) = tools() else { return };
+    let Some(encoder) = proxy_encoder(&t) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Some(video) = make_video(
+        &t,
+        &dir.path().join("big.mov"),
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2:size=1920x1080:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "mpeg4",
+            "-c:a",
+            "pcm_s16le",
+            "-shortest",
+        ],
+    ) else {
+        return;
+    };
+    let original = std::fs::read(&video).unwrap();
+    let probe = t.probe(&video).unwrap();
+    let out = dir.path().join(".proxy.tmp");
+    let mut seen = Vec::new();
+    t.transcode_proxy(&video, &probe, &out, encoder, 2, &|| false, &mut |s| {
+        seen.push(s)
+    })
+    .unwrap();
+    let p = t.probe(&out).unwrap();
+    assert_eq!(p.metadata.codec.as_deref(), Some("h264"));
+    assert_eq!(
+        (p.metadata.width, p.metadata.height),
+        (Some(1280), Some(720))
+    );
+    assert_eq!(p.metadata.bit_depth, Some(8));
+    assert_eq!(p.color_space.as_deref(), Some("bt709"), "{p:?}");
+    genzo_media::verify_proxy(&p, probe.metadata.duration_s).unwrap();
+    // 進捗を知らせた（変換した位置は 0 秒以上で、増えていく）。
+    assert!(!seen.is_empty());
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
+    // 音声も入っている（AAC）。
+    let streams = Command::new(&t.ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&streams.stdout);
+    assert!(names.lines().any(|l| l.trim() == "aac"), "{names}");
+    assert_eq!(std::fs::read(&video).unwrap(), original);
+}
+
+/// 再生用のファイル: 回転の記録のある縦の動画は、表示上の向きで作る（小さい動画は拡大しない）。
+#[test]
+fn proxy_of_a_rotated_small_video_keeps_its_size() {
+    let Some(t) = tools() else { return };
+    let Some(encoder) = proxy_encoder(&t) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Some(src) = make_video(
+        &t,
+        &dir.path().join("src.mp4"),
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=320x240:rate=10",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "mpeg4",
+        ],
+    ) else {
+        return;
+    };
+    let src_str = src.to_str().unwrap().to_owned();
+    let Some(rotated) = make_video(
+        &t,
+        &dir.path().join("rotated.mp4"),
+        &["-display_rotation:v:0", "90", "-i", &src_str, "-c", "copy"],
+    ) else {
+        return;
+    };
+    let probe = t.probe(&rotated).unwrap();
+    let out = dir.path().join("proxy.bin");
+    t.transcode_proxy(&rotated, &probe, &out, encoder, 1, &|| false, &mut |_| {})
+        .unwrap();
+    let p = t.probe(&out).unwrap();
+    assert_eq!(
+        (p.metadata.width, p.metadata.height),
+        (Some(240), Some(320))
+    );
+    assert_eq!(p.rotation_deg, 0, "{p:?}");
+    // 記録のない SD の動画は BT.601 とみなして記録する（サムネイルと同じ解釈）。
+    assert_eq!(p.color_space.as_deref(), Some("smpte170m"), "{p:?}");
+}
+
+/// 再生用のファイル: 取り消すと ffmpeg を止め、書きかけのファイルを残さない。壊れた入力はエラー。
+#[test]
+fn proxy_cancel_and_broken_input() {
+    let Some(t) = tools() else { return };
+    let Some(encoder) = proxy_encoder(&t) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Some(video) = make_video(
+        &t,
+        &dir.path().join("long.mp4"),
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=60:size=640x360:rate=30",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "10",
+        ],
+    ) else {
+        return;
+    };
+    let probe = t.probe(&video).unwrap();
+    let out = dir.path().join(".cancel.tmp");
+    let start = std::time::Instant::now();
+    let r = t.transcode_proxy(
+        &video,
+        &probe,
+        &out,
+        encoder,
+        1,
+        &|| start.elapsed() > Duration::from_millis(200),
+        &mut |_| {},
+    );
+    assert!(matches!(r, Err(MediaError::Cancelled)), "{r:?}");
+    assert!(!out.exists());
+
+    let bad = dir.path().join("broken.mp4");
+    std::fs::write(&bad, b"this is not a video at all").unwrap();
+    let out = dir.path().join(".bad.tmp");
+    let r = t.transcode_proxy(&bad, &probe, &out, encoder, 1, &|| false, &mut |_| {});
+    assert!(matches!(r, Err(MediaError::ToolFailed { .. })), "{r:?}");
+    assert!(!out.exists());
+}
+
+/// 動画の最初のフレームを、記録された色の範囲のとおりに RGB へ戻したときの最小・最大の値（WebView が表示する値の
+/// 代わり）。
+fn decoded_rgb_extremes(t: &FfmpegTools, path: &Path) -> (u8, u8) {
+    let out = Command::new(&t.ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(!out.stdout.is_empty());
+    let min = *out.stdout.iter().min().unwrap();
+    let max = *out.stdout.iter().max().unwrap();
+    (min, max)
+}
+
+/// 再現（検証 R1）: 全域（フルレンジ。`yuvj420p`・`color_range=pc`）の動画の再生用のファイルで、黒が浮き白が
+/// 下がっていた（縮小のフィルターが値を制限の範囲へ変換するのに、出力には全域と記録していた）。黒は黒・白は白の
+/// まま（RGB に戻して 0 と 255 の近く）にする。制限の範囲（`tv`）の動画も同じく黒・白が保たれる。
+#[test]
+fn proxy_keeps_black_and_white_of_full_and_limited_range_videos() {
+    let Some(t) = tools() else { return };
+    let Some(encoder) = proxy_encoder(&t) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let black_white =
+        "color=c=black:s=64x64:d=1:r=10[b];color=c=white:s=64x64:d=1:r=10[w];[b][w]hstack";
+    let Some(full) = make_video(
+        &t,
+        &dir.path().join("full.mp4"),
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            black_white,
+            "-vf",
+            "format=yuvj420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-color_range",
+            "pc",
+        ],
+    ) else {
+        return;
+    };
+    let Some(limited) = make_video(
+        &t,
+        &dir.path().join("limited.mp4"),
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            black_white,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "2",
+        ],
+    ) else {
+        return;
+    };
+    for (name, video) in [("full", &full), ("limited", &limited)] {
+        let probe = t.probe(video).unwrap();
+        if name == "full" {
+            // 前提: ffprobe が全域と読む動画であること。
+            assert_eq!(probe.color_range.as_deref(), Some("pc"), "{probe:?}");
+        }
+        let (lo, hi) = decoded_rgb_extremes(&t, video);
+        assert!(lo <= 3 && hi >= 252, "{name}: 元の動画 {lo}〜{hi}");
+        let out = dir.path().join(format!(".{name}.tmp"));
+        t.transcode_proxy(video, &probe, &out, encoder, 1, &|| false, &mut |_| {})
+            .unwrap();
+        let p = t.probe(&out).unwrap();
+        let (lo, hi) = decoded_rgb_extremes(&t, &out);
+        assert!(
+            lo <= 3 && hi >= 252,
+            "{name}: 再生用のファイル {lo}〜{hi}（{:?}・{:?}）",
+            p.pix_fmt,
+            p.color_range
+        );
+        // 出力は制限の範囲で記録する（WebView・OS のデコーダーで扱いが最も揃っている）。
+        assert_eq!(p.color_range.as_deref(), Some("tv"), "{name}: {p:?}");
+    }
+}
+
+/// 再現（検証 R1）: 画素が正方形でない（SAR が 1:1 でない）動画の再生用のファイルの縦横比が変わっていた
+/// （保存上の寸法で縮小してから SAR を 1:1 にしていた）。表示上の縦横比のまま、正方形の画素で作る。
+#[test]
+fn proxy_of_non_square_pixels_keeps_the_display_aspect_ratio() {
+    let Some(t) = tools() else { return };
+    let Some(encoder) = proxy_encoder(&t) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // 360×270 で SAR 4:3 → 表示上は 480×270（16:9）。
+    let Some(video) = make_video(
+        &t,
+        &dir.path().join("anamorphic.mp4"),
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=360x270:rate=10,setsar=4/3",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "mpeg4",
+        ],
+    ) else {
+        return;
+    };
+    let probe = t.probe(&video).unwrap();
+    let out = dir.path().join(".anamorphic.tmp");
+    t.transcode_proxy(&video, &probe, &out, encoder, 1, &|| false, &mut |_| {})
+        .unwrap();
+    let p = t.probe(&out).unwrap();
+    assert_eq!(
+        (p.metadata.width, p.metadata.height),
+        (Some(480), Some(270)),
+        "{p:?}"
+    );
+    let sar = Command::new(&t.ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=sample_aspect_ratio",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let sar = String::from_utf8_lossy(&sar.stdout).trim().to_owned();
+    assert!(sar == "1:1" || sar == "N/A" || sar == "0:1", "{sar}");
+}

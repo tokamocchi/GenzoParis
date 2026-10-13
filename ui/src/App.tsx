@@ -3,10 +3,10 @@
 // レイアウト:
 //
 // | 上 | TopBar（カタログ・表示モード・取り込み・書き出し・ジョブ・設定） |
-// | 左 | グリッド・ルーペ: LibraryLeftPanel（フォルダ・絞り込み） / 現像: DevelopLeftPanel（履歴） |
-// | 中 | グリッド: FilterBar ＋ Grid / ルーペ: Loupe / 現像: DevelopView |
-// | 右 | グリッド・ルーペ: MetadataPanel / 現像: DevelopPanel |
-// | 下 | ルーペ・現像: Filmstrip、StatusBar |
+// | 左 | グリッド・ルーペ・比較・選別: LibraryLeftPanel（フォルダ・絞り込み） / 現像: DevelopLeftPanel（履歴） |
+// | 中 | グリッド: FilterBar ＋ Grid / ルーペ: Loupe / 比較: CompareView / 選別: SurveyView / 現像: DevelopView |
+// | 右 | グリッド・ルーペ・比較・選別: MetadataPanel / 現像: DevelopPanel |
+// | 下 | ルーペ・比較・選別・現像: Filmstrip、StatusBar |
 
 import { useEffect, useState } from "react";
 
@@ -32,12 +32,15 @@ import { LibraryLeftPanel } from "./library/LibraryLeftPanel";
 import { MetadataPanel } from "./library/MetadataPanel";
 import { PhotoDragGhost } from "./library/PhotoDragGhost";
 import { actions, appStore, useApp } from "./state/app";
+import { openCompare, openSurvey } from "./state/compare";
 import { developStore, installDevelopEvents, redo, undo } from "./state/develop";
 import { openRenameFiles } from "./state/files";
 import { deleteKeyAction, focusKeywordInput, toggleTargetCollection } from "./state/organize";
 import { createVirtualCopyOf, groupIntoStack, setStackTop, toggleStack, unstackTargets } from "./state/stacks";
+import { CompareView } from "./viewer/CompareView";
 import { Filmstrip } from "./viewer/Filmstrip";
 import { Loupe } from "./viewer/Loupe";
+import { SurveyView } from "./viewer/SurveyView";
 
 /** 画面のエラー（例外・処理されなかった Promise の失敗）をアプリのログに残す（SYS-07。Tauri の中だけ）。 */
 function installUiErrorReporting(): void {
@@ -83,13 +86,19 @@ async function boot(setFatal: (m: string) => void): Promise<void> {
   }
 }
 
-/** 全体のショートカット（グリッドの矢印キーは Grid が受け持つ）。 */
+/**
+ * 全体のショートカット（グリッドの矢印キーは Grid、比較表示・選別表示の矢印キーは CompareView・SurveyView が
+ * 受け持つ）。
+ */
 function useGlobalHotkeys(enabled: boolean) {
   const mode = useApp((s) => s.mode);
   useHotkeys(
     {
       g: () => actions.setMode("grid"),
       e: () => actions.setMode("loupe"),
+      // 比較表示・選別表示（LIB-03。state/compare.ts。← → などは CompareView・SurveyView が受け持つ）。
+      c: () => void openCompare(),
+      n: () => openSurvey(),
       d: () => actions.setMode("develop"),
       Escape: () => {
         if (appStore.get().mode !== "grid") actions.setMode("grid");
@@ -109,7 +118,7 @@ function useGlobalHotkeys(enabled: boolean) {
       "7": () => actions.toggleColorLabel("yellow"),
       "8": () => actions.toggleColorLabel("green"),
       "9": () => actions.toggleColorLabel("blue"),
-      ...(mode !== "grid"
+      ...(mode === "loupe" || mode === "develop"
         ? {
             ArrowLeft: () => actions.moveSelection(-1),
             ArrowRight: () => actions.moveSelection(1),
@@ -204,6 +213,8 @@ function Workspace() {
             </>
           )}
           {mode === "loupe" && <Loupe />}
+          {mode === "compare" && <CompareView />}
+          {mode === "survey" && <SurveyView />}
           {mode === "develop" && <DevelopView />}
         </section>
         <aside className="right">{mode === "develop" ? <DevelopPanel /> : <MetadataPanel />}</aside>

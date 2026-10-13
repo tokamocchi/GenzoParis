@@ -110,6 +110,7 @@ cargo run -p genzo-cli -- log clear                 # ログ・クラッシュ�
 cargo run -p genzo-cli -- metadata 12 13 --set title=清水寺 --set creator="山田 太郎" --clear city   # 説明のメタデータを一括で変える（LIB-15）
 cargo run -p genzo-cli -- metadata 12 13            # 項目ごとの値（写真によって異なれば「複数の値」）
 cargo run -p genzo-cli -- develop before 12 --out before.png --after after.png   # ビフォー / アフターのプレビュー（DEV-31）
+cargo run -p genzo-cli -- develop compare 12 13 --cx 0.5 --cy 0.5 --width 800 --height 600 --out-dir ./比較   # 比較表示の同期ズームと同じ範囲を 2 枚で描く（LIB-03）
 cargo run -p genzo-cli -- keyword add 12 13 -k "場所>京都" -k 家族   # キーワードを付ける（なければ作る。LIB-09）
 cargo run -p genzo-cli -- keyword list              # キーワードの一覧（階層のパス・直接付いている数・書き出すか）
 cargo run -p genzo-cli -- search --keyword 場所      # 親のキーワードで絞り込む（下の階層を含む）
@@ -145,6 +146,9 @@ cargo run -p genzo-cli -- search --missing          # 見つからない写真�
 cargo run -p genzo-cli -- missing relink --in /media/me/外付け --dry-run   # 見つからない写真の候補を探す（--dry-run を外すと結び付け直す）
 cargo run -p genzo-cli -- folder relocate 7 /media/me/外付け/2024 --dry-run   # OS の側で移したフォルダの場所を指定し直す予定
 cargo run -p genzo-cli -- folder remove 9           # 写真が登録されていない（見つからないまま残った）フォルダをカタログから除く
+cargo run -p genzo-cli -- video info 21             # 動画の再生の情報（アプリが配信するファイル・再生用のファイル。VID-04）
+cargo run -p genzo-cli -- video proxy 21 22         # 再生用のファイル（H.264 ＋ AAC の MP4。長辺 1280）を作る（ffmpeg が要る）
+cargo run -p genzo-cli -- video cache               # 再生用のファイルのキャッシュの状況（video clear ですべて消す）
 ```
 
 - `--json` のときは、失敗（使い方の誤りを含む）も標準出力に `{"error": {"kind": ...}}` の JSON で出します。
@@ -168,7 +172,9 @@ cargo run -p genzo-cli -- folder remove 9           # 写真が登録されて�
 - `folder`（FILE-02・FILE-04）: `list`（ID・状態（つながっていない・見つからない）・見つからない写真の数）・`create <場所> <名前>`・`rename <フォルダ> <名前>`・`move <フォルダ> <移動先>`（ディスクの上でフォルダごと。同じドライブの中だけ）・`relocate <フォルダ> <新しい場所> [--dry-run]`（OS の側で移した・名前を変えたフォルダを結び付け直す。カタログの中だけを変え、ファイルは動かさない）・`remove <フォルダ>`（写真が登録されていないフォルダを配下ごとカタログから除く。見つからないまま残ったフォルダ・再リンクで空になったフォルダの片付け。ディスクのフォルダには触れない。写真があれば終了コード 1）。配下のフォルダが、名前の書き方（大文字・小文字・正規化）だけが違う別のフォルダにある場合は、`rename`・`move` をしません。フォルダは ID か、登録したフォルダのパスで指定します（数字だけの名前のフォルダは `./2024` のように書く）。名前は取り込みのリネームと同じく、どの OS でも使える名前だけです（使えない文字・Windows の予約名・先頭の「.」・末尾の「.」と空白はエラー）。同じ名前のものがあれば変えません（決定事項ログ No.108・109・113）。
 - `file`（FILE-02）: `move <ID>... --to <フォルダ> [--dry-run]`・`rename <ID>... (--name <名前> | --template <テンプレート> [--text] [--seq-start] [--seq-digits]) [--dry-run]`（テンプレートの項目は `import --rename` と同じ。連番は指定した順）。RAW と同時記録の JPEG は一緒に動かし、名前もそろえます。**上書きしません**（移動先に同じ名前のファイルがあれば、その写真は飛ばして終了コード 3）。コアは操作の前に意図をカタログに記録し（file_op）、同じドライブの中は名前の変更（大文字・小文字だけの変更も一時的な名前を経由して）、別のドライブへはコピーして内容（BLAKE3）を照合してから登録し、元のファイルをゴミ箱へ移します（ゴミ箱へ移せなければ元の場所に残し、終了コード 3）。途中で失敗した写真は元に戻し、途中で終了したときは次に開いたときに実際のファイルと突き合わせて確定します（決定事項ログ No.108・110）。
 - `missing`（FILE-04）: `check [--folder <フォルダ>]`（登録したファイルがあるかを確かめ、見つからない印を付ける・外す。つながっていないドライブは飛ばす。アプリはカタログを開いたときと、つないだドライブを見つけたとき（ウィンドウに戻ったときにつながりを確かめ直す）にも確かめる）・`relink --in <DIR> [<ID>...] [--no-recursive] [--accept-changed] [--dry-run]`（見つからない写真の候補を、名前・大きさ・撮影日時・内容のハッシュで探し、確からしい候補（内容が同じ・大きさと先頭と末尾が同じ）が 1 つだけのものを結び付け直す。名前と撮影日時だけが同じ（内容が変わっている）候補は `--accept-changed` のとき、それしかなければ結び付けて読み直す）・`link <ファイルの ID> <パス> [--accept-changed]`。`search --missing` で見つからない写真だけを出します（決定事項ログ No.111・112）。
+- `video`（VID-04）: `info <ID>`（元のファイルを読めるか・MIME の型・コーデック・アプリが `genzo://video` で配信するファイル・今の内容の再生用のファイルの有無・作るときのエンコーダー（作れなければ理由））・`proxy <ID>...`（再生用のファイルを 1 本ずつ作って待つ。今の内容のものがあれば作らない。作れなかった動画があれば終了コード 3）・`cache`（フォルダ・数・合計・上限）・`clear`（すべて消す。作り直せる）。再生用のファイルは、WebView（OS の動画の機能）で再生できない動画のために、利用者の ffmpeg（`GENZO_FFMPEG`・`GENZO_FFPROBE`、なければ PATH）で H.264（8 bit・4:2:0。長辺 1280）＋ AAC の MP4 に変換したもので、データのフォルダの `video-proxies/` に置きます。上限（既定 5 GB。アプリの設定の「カタログ」で変えられる）を超えると、最後に使ったものが古い順に消えます。元の動画は読むだけです（決定事項ログ No.117・118）。
 - `develop before <ID> --out <FILE>`（DEV-31）: ビフォー / アフターの表示のビフォーのプレビューを PNG に書きます。`--source` は `initial`（取り込んだ直後の設定。既定）・`current`（今の設定）・`history:<履歴の ID>`・`snapshot:<ID>`。切り抜き・角度は今の設定と同じです。`--after <FILE>` でアフターも同じ寸法で書きます（決定事項ログ No.79。既にあるファイルには書きません）。
+- `develop compare <ID> [<ID>] --width <W> --height <H> [--cx <0〜1>] [--cy <0〜1>] [--scale <倍率>] --out-dir <DIR>`（LIB-03）: 比較表示の同期ズームと同じ範囲（中心は写真ごとの出力の画像の大きさに対する割合、大きさは出力の画素でどの写真も同じ）を、2 枚までの写真について比較表示の面（`Core::render_view_region`。現像のセッションは開かない）に同時に描き、`compare-<面>-<ID>.png` に書きます（既にあるファイルには書きません。決定事項ログ No.114）。
 - Windows: 現像設定の JSON は、引数に直接書かずにファイル（`--json settings.json`）で渡すことをおすすめします（PowerShell・cmd.exe では引用符の扱いが違うため）。ファイルは UTF-8（BOM 付きも可）か BOM 付きの UTF-16 で読めます。PowerShell で `--json` の出力を受け取るときに日本語が化ける場合は、`[Console]::OutputEncoding = [Text.Encoding]::UTF8` を先に実行してください（出力は UTF-8）。
 - `bench` は release ビルドで実行してください（debug ビルドの時間は記録に「debug」と残り、参考値になります）。
 - ログ（SYS-07。外部へは送信しません）: CLI は標準エラー（`--log`・`GENZO_LOG`）に加えて、ログのフォルダの `cli.log` に info の水準で書き、パニックのときはクラッシュレポートを `crash/` に残します。ログのフォルダは `--log-dir`・環境変数 `GENZO_LOG_DIR`、なければアプリと同じ場所（Windows は `%LOCALAPPDATA%\io.github.tokamocchi.genzoparis\logs`、macOS は `~/Library/Logs/io.github.tokamocchi.genzoparis`、Linux は `~/.local/share/io.github.tokamocchi.genzoparis/logs`）です。ファイルに書かないときは `--no-log-file`（環境変数 `GENZO_LOG_FILE=off`）を付けてください。ログには写真のファイル名・フォルダの場所が含まれます。実行したコマンドは、サブコマンドの名前と引数の数だけを書きます（`--set` のメタデータの値・パスなどの引数の値は書きません）。

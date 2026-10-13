@@ -32,7 +32,8 @@ use crate::types::{
     ImportOptions, IndexOf, JobInfo, KeywordHit, KeywordInfo, KeywordUsage, MetadataSummary,
     NamePreview, PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest, SearchFilter,
     SearchResult, SearchSort, SettingGroups, SettingsUpdate, ShownVariants, StackInfo,
-    StartupReport, ThumbnailData, Timeline, VariantDetails, VariantKeywords,
+    StartupReport, ThumbnailData, Timeline, VariantDetails, VariantKeywords, VideoPlayback,
+    VideoProxyCacheStatus, ViewOutputSize,
 };
 use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, RelinkReport, RelinkRequest, RelocatePlan,
@@ -456,6 +457,28 @@ pub enum Command {
         /// 要求。
         request: RegionRequest,
     },
+    /// 比較表示（LIB-03）の面 `pane` で使う写真の、出力の画像のフル解像度の大きさ（等倍表示の準備。
+    /// [`crate::Core::view_output_size`]）。→ [`Response::ViewSize`]
+    ViewOutputSize {
+        /// 面（0 から [`crate::MAX_VIEW_PANES`] 未満）。
+        pane: u32,
+        /// 写真。
+        variant_id: VariantId,
+    },
+    /// 比較表示の面 `pane` に、写真の表示範囲を描く（現像中でない写真も描ける。面ごとに P0 の最新の 1 件だけ。
+    /// [`crate::Core::render_view_region`]）。画素は [`crate::Core::view_region_frame`] で取る。
+    /// → [`Response::Region`]
+    RenderViewRegion {
+        /// 面（0 から [`crate::MAX_VIEW_PANES`] 未満）。
+        pane: u32,
+        /// 要求（`variant_id` は描く写真）。
+        request: RegionRequest,
+    },
+    /// 比較表示のすべての面の描画を取り消す。→ [`Response::Ok`]
+    CancelViewRegions,
+    /// 比較表示をやめる（描画を取り消し、展開した入力と結果を捨てる。[`crate::Core::release_view`]）。
+    /// → [`Response::Ok`]
+    ReleaseView,
     /// 世代 `generation` 以降のプレビューを待つ。→ [`Response::FrameOrNone`]
     WaitForFrame {
         /// 世代。
@@ -629,6 +652,24 @@ pub enum Command {
         /// コピーの設定（コピー先のフォルダは使わない）。
         copy: CopySettings,
     },
+
+    // --- 動画の再生（VID-04） ---
+    /// 動画の再生の情報（元のファイルを読めるか・再生用のファイル・作れない理由。
+    /// [`crate::Core::video_playback`]）。→ [`Response::VideoPlayback`]
+    VideoPlayback {
+        /// 動画。
+        variant_id: VariantId,
+    },
+    /// 再生用のファイルを作る（専用のスレッドのジョブ。同じ動画を作っている途中なら、そのジョブ。
+    /// [`crate::Core::create_video_proxy`]）。→ [`Response::JobStarted`]
+    CreateVideoProxy {
+        /// 動画。
+        variant_id: VariantId,
+    },
+    /// 再生用のファイルのキャッシュの状況。→ [`Response::VideoProxyCache`]
+    VideoProxyCache,
+    /// 再生用のファイルをすべて消す（作り直せる）。→ [`Response::VideoProxyCache`]
+    ClearVideoProxies,
 
     // --- 撮影日時の一括修正（LIB-16）・タイムライン（ORG-01） ---
     /// 機材の一覧（[`crate::Core::capture_devices`]）。→ [`Response::CaptureDevices`]
@@ -892,8 +933,11 @@ pub enum Response {
     },
     /// プレビューの情報。
     Frame(Box<FrameInfo>),
-    /// 表示範囲の描画の情報（画素は [`crate::Core::region_frame`]）。
+    /// 表示範囲の描画の情報（画素は [`crate::Core::region_frame`]。比較表示の面は
+    /// [`crate::Core::view_region_frame`]）。
     Region(Box<RegionInfo>),
+    /// 比較表示の面で使う写真の、出力の画像の大きさ。
+    ViewSize(ViewOutputSize),
     /// ビフォーの状態（やめたら `null`）。
     Before {
         /// 状態。
@@ -969,6 +1013,10 @@ pub enum Response {
     FileIdentity(FileIdentity),
     /// コピー先の名前の例。
     NamePreview(NamePreview),
+    /// 動画の再生の情報（VID-04）。
+    VideoPlayback(VideoPlayback),
+    /// 再生用のファイルのキャッシュの状況。
+    VideoProxyCache(VideoProxyCacheStatus),
     /// 機材の一覧（LIB-16）。
     CaptureDevices {
         /// 機材。
@@ -1258,6 +1306,20 @@ impl Core {
                     .wait_for_before(generation, ms(timeout_ms))?
                     .map(Box::new),
             },
+            C::ViewOutputSize { pane, variant_id } => {
+                R::ViewSize(self.view_output_size(pane, variant_id)?)
+            }
+            C::RenderViewRegion { pane, request } => {
+                R::Region(Box::new(self.render_view_region(pane, &request)?.info))
+            }
+            C::CancelViewRegions => {
+                self.cancel_view_regions()?;
+                R::Ok
+            }
+            C::ReleaseView => {
+                self.release_view()?;
+                R::Ok
+            }
             C::RenderBeforeRegion { request } => {
                 R::Region(Box::new(self.render_before_region(&request)?.info))
             }
@@ -1360,6 +1422,12 @@ impl Core {
             C::DuplicateGroups { limit } => R::DuplicateGroups(self.duplicate_groups(limit)?),
             C::IdentifyFile { path } => R::FileIdentity(self.identify_file(&path)?),
             C::ImportNamePreview { copy } => R::NamePreview(self.import_name_preview(&copy)),
+            C::VideoPlayback { variant_id } => R::VideoPlayback(self.video_playback(variant_id)?),
+            C::CreateVideoProxy { variant_id } => R::JobStarted {
+                job_id: self.create_video_proxy(variant_id)?,
+            },
+            C::VideoProxyCache => R::VideoProxyCache(self.video_proxy_cache()?),
+            C::ClearVideoProxies => R::VideoProxyCache(self.clear_video_proxies()?),
             C::CaptureDevices => R::CaptureDevices {
                 devices: self.capture_devices()?,
             },
@@ -1945,6 +2013,32 @@ mod tests {
                 uncropped: Some(false),
             },
             Command::SetDevelopView { uncropped: true },
+            Command::ViewOutputSize {
+                pane: 1,
+                variant_id: VariantId::new(4),
+            },
+            Command::RenderViewRegion {
+                pane: 0,
+                request: RegionRequest {
+                    variant_id: VariantId::new(4),
+                    space: crate::RegionSpace::Output,
+                    x: 10.0,
+                    y: 20.0,
+                    width: 300.0,
+                    height: 200.0,
+                    scale: 1.0,
+                },
+            },
+            Command::CancelViewRegions,
+            Command::ReleaseView,
+            Command::VideoPlayback {
+                variant_id: VariantId::new(9),
+            },
+            Command::CreateVideoProxy {
+                variant_id: VariantId::new(9),
+            },
+            Command::VideoProxyCache,
+            Command::ClearVideoProxies,
             Command::CreateStack {
                 variant_ids: vec![VariantId::new(1), VariantId::new(2)],
                 top: Some(VariantId::new(2)),

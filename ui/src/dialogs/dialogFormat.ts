@@ -73,6 +73,7 @@ export const JOB_KIND_LABEL: Record<JobKind, string> = {
   move_files: "写真の移動",
   check_missing: "見つからない写真の確認",
   find_relink_candidates: "再リンクの候補の探索",
+  video_proxy: "再生用のファイルの作成",
 };
 
 export const JOB_STATE_LABEL: Record<JobState, string> = {
@@ -86,7 +87,19 @@ export const JOB_STATE_LABEL: Record<JobState, string> = {
 export function formatJobProgress(job: { kind: JobKind; done: number; total: number }): string {
   const name = JOB_KIND_LABEL[job.kind];
   if (job.total <= 0) return `${name}…`;
+  if (job.kind === "video_proxy") return `${name} ${formatJobAmount(job)}`;
   return `${name} ${formatCount(Math.min(job.done, job.total))}/${formatCount(job.total)}`;
+}
+
+/**
+ * 進み具合の量（"120 / 500"。動画の再生用のファイルの作成は、進み具合が動画の位置（ミリ秒）なので "16%"）。
+ * 分からなければ ""。
+ */
+export function formatJobAmount(job: { kind: JobKind; done: number; total: number }): string {
+  if (job.total <= 0) return "";
+  const done = Math.min(job.done, job.total);
+  if (job.kind === "video_proxy") return `${Math.floor((done / job.total) * 100)}%`;
+  return `${formatCount(done)} / ${formatCount(job.total)}`;
 }
 
 /** ジョブの一覧の並び（実行中を先に、それぞれ新しい順）。 */
@@ -120,7 +133,9 @@ export function describeIntegrity(r: IntegrityReport): { ok: boolean; lines: str
 export function describeGarbage(r: Extract<JobResult, { type: "collect_garbage" }>): string {
   return `キャッシュを整理しました（サムネイル ${formatCount(r.thumbnails_removed)} 件・プレビュー ${formatCount(
     r.previews_removed,
-  )} 件・一時ファイル ${formatCount(r.temp_files_removed)} 個を削除）`;
+  )} 件・動画の再生用のファイル ${formatCount(r.video_proxies_removed ?? 0)} 個・一時ファイル ${formatCount(
+    r.temp_files_removed,
+  )} 個を削除）`;
 }
 
 /** 通知の内容（actions.notify に渡す）。 */

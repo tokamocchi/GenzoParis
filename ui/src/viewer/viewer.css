@@ -218,6 +218,253 @@
   flex: 1;
 }
 
+/* 動画の再生（VID-04。VideoPlayer.tsx） */
+.loupe-video-el,
+.loupe-video-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.loupe-video-el {
+  cursor: pointer;
+}
+.loupe-video-el + .loupe-video-mark {
+  pointer-events: none;
+}
+.loupe-video-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+}
+.loupe-video-controls .video-play {
+  min-width: 34px;
+}
+.video-speed {
+  min-width: 34px;
+  color: var(--fg-1);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.video-time {
+  color: var(--fg-1);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.video-seek {
+  flex: 1;
+  min-width: 80px;
+  accent-color: var(--fg-1);
+  cursor: pointer;
+}
+.video-volume {
+  width: 90px;
+  accent-color: var(--fg-1);
+  cursor: pointer;
+}
+.loupe-center-note.video-notice {
+  background: rgb(0 0 0 / 0.55);
+  padding: 0 24px;
+  color: var(--fg-0);
+}
+.loupe-center-note.video-notice .hint {
+  max-width: 560px;
+}
+.video-proxy-progress {
+  width: 280px;
+  max-width: 80%;
+}
+
+/* ---------------------------------------------------------------------------
+ * 比較表示・選別表示（LIB-03。CompareView.tsx・SurveyView.tsx）
+ * ------------------------------------------------------------------------ */
+
+.compare,
+.survey {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-0);
+}
+.compare-panes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  /* compareLogic.ts の COMPARE_GAP_PX と同じ値。 */
+  gap: 4px;
+}
+.compare-pane {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid transparent;
+}
+/* 作業中の面（評価などの対象）。 */
+.compare-pane.active {
+  border-color: var(--select);
+}
+.compare-label {
+  position: absolute;
+  z-index: 2;
+  top: 6px;
+  left: 6px;
+  max-width: calc(100% - 12px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  background: rgb(0 0 0 / 0.62);
+  color: var(--fg-0);
+  font-size: 12px;
+  pointer-events: none;
+}
+.compare-side {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.compare-pane.active .compare-side {
+  color: var(--select);
+}
+.compare-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-1);
+}
+.compare-file-note {
+  position: absolute;
+  z-index: 2;
+  right: 6px;
+  top: 6px;
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  background: rgb(0 0 0 / 0.62);
+  color: var(--warn);
+  font-size: 12px;
+  pointer-events: none;
+}
+.compare-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.compare-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.compare-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--line);
+}
+.compare-message {
+  color: var(--fg-1);
+}
+
+.survey-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.survey-cell {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.survey-cell:hover {
+  background: var(--bg-1);
+}
+/* 作業中の写真。 */
+.survey-cell.active {
+  border-color: var(--select);
+  background: var(--bg-1);
+}
+.survey-photo {
+  position: relative;
+  flex: none;
+}
+.survey-caption {
+  /* compareLogic.ts の SURVEY_CAPTION_PX と同じ高さ。 */
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--fg-1);
+  min-width: 0;
+}
+.survey-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: auto;
+}
+.survey-remove {
+  position: absolute;
+  z-index: 2;
+  right: 4px;
+  bottom: 26px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: rgb(0 0 0 / 0.62);
+  color: var(--fg-0);
+  font-size: 14px;
+  line-height: 22px;
+  padding: 0;
+  cursor: pointer;
+  visibility: hidden;
+}
+.survey-cell:hover .survey-remove,
+.survey-cell.active .survey-remove,
+.survey-remove:focus-visible {
+  visibility: visible;
+}
+.survey-missing {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: rgb(0 0 0 / 0.6);
+  color: var(--warn);
+  font-weight: 700;
+  font-size: 11px;
+  pointer-events: none;
+}
+.loupe-video-mark.small {
+  width: 32px;
+  height: 32px;
+  font-size: 13px;
+  padding-left: 2px;
+}
+
 /* ---------------------------------------------------------------------------
  * フィルムストリップ
  * ------------------------------------------------------------------------ */

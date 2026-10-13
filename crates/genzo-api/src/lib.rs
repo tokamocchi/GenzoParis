@@ -58,9 +58,11 @@
 //! | `organize` | 階層キーワード（[`Core::keyword_tree`]・[`Core::add_keywords`]）・コレクションとスマートコレクション（[`Core::collections`]・[`Core::add_to_collection`]・[`Core::set_smart_rule`]）。絞り込みは [`SearchFilter::collection_id`]・[`SearchFilter::keywords`] | LIB-09〜11、3.9 節 |
 //! | `stacks` | スタック（[`Core::create_stack`]・[`Core::set_stacks_collapsed`]・[`Core::auto_stack`]。検索結果のまとめ方は `search`）と仮想コピーの名前・マスターの入れ替え（[`Core::rename_virtual_copy`]・[`Core::set_as_master`]） | LIB-12・13、3.10 節 |
 //! | `previews` | サムネイル（[`Core::thumbnail`]）・L1（[`Core::preview_path`]）と、現像結果からの作り直し | 4 章・4.1 節、PRV-01・02・04 |
+//! | `playback` | 動画の再生（[`Core::video_playback`]・配信するファイル [`Core::video_stream`]）と、WebView で再生できない動画の再生用のファイル（[`Core::create_video_proxy`]。利用者の ffmpeg で H.264 ＋ AAC の MP4 にする。上限容量の LRU のキャッシュ） | VID-04、4.2 節 |
 //! | `develop` | 現像のセッション（[`Core::open_develop`]・[`Core::set_settings`]・Undo / Redo・一括適用・仮想コピー）、WB のスポイト（[`Core::white_balance_at`]）、切り抜きの編集の支え（[`Core::set_develop_view`]・[`Core::constrain_crop`]） | DEV-00〜08・15・26・27・30、6.2 節 |
 //! | `render` | GPU → CPU の切り替え、画面のプロファイル（[`Core::set_display_profile`]） | 2.4 節・6.3 節、IQ-05 |
 //! | `region` | 表示範囲の描画（[`Core::render_region`]。ルーペの等倍表示・拡大とパン。P0 の最新の 1 件だけ、取り消しあり） | PRV-03・LIB-02、2.7 節・6.1 節 |
+//! | `view` | 比較表示の表示範囲の描画（[`Core::render_view_region`]・[`Core::view_output_size`]。面ごとに任意の写真を描く。展開した入力を上限まで持ち、[`Core::release_view`] で捨てる） | LIB-03、1.5 節・6.1 節 |
 //! | `export` | 書き出し（[`Core::export`]） | EXP-01・04、2.4 節・6.4 節 |
 //! | `capture_time` | 撮影日時の一括修正（[`Core::capture_devices`]・[`Core::plan_capture_time_edit`]・[`Core::edit_capture_times`]・[`Core::undo_capture_time_edit`]。ずらす・基準の写真に合わせる・タイムゾーンの指定。カタログの中だけで、元のファイルには書かない） | LIB-16、3.13 節 |
 //! | `timeline` | 写真と動画の統合タイムライン（[`Core::timeline`]。表示中の検索結果を撮影日と、撮影の間隔によるイベントでまとめる） | ORG-01、3.13 節 |
@@ -108,8 +110,8 @@
 //!
 //! # まだないもの（implementation_status の進捗表 No.12）
 //!
-//! - 表示範囲の描画（[`Core::render_region`]）の GPU 版（今は CPU 版だけ）と、ビューポートへの直接の描画
-//!   （04 の 1.5 節。UI の方式と合わせて決める）。
+//! - 表示範囲の描画（[`Core::render_region`]・比較表示の面の [`Core::render_view_region`]）の GPU 版（今は CPU 版
+//!   だけ）と、ビューポートへの直接の描画（04 の 1.5 節。UI の方式と合わせて決める）。
 //! - 切り抜く前の全体の表示（[`Core::set_develop_view`]）の GPU 版（今は、その間のプレビューを CPU 版で
 //!   描く。genzo-gpu の `render_preview` が [`genzo_pipeline::PreviewRequest::uncropped`] を見ないため）。
 
@@ -136,6 +138,7 @@ pub mod maintenance;
 pub mod naming;
 mod organize;
 mod paths;
+mod playback;
 mod previews;
 mod region;
 mod relink;
@@ -145,6 +148,7 @@ mod settings;
 mod stacks;
 mod timeline;
 pub mod types;
+mod view;
 mod volumes;
 
 pub use capture_time::{CAPTURE_TIME_EXAMPLES, CAPTURE_ZONE_RANGE_MINUTES};
@@ -163,6 +167,10 @@ pub use import::{IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS, media_kind}
 pub use maintenance::{RestorePlan, apply_restore, prepare_restore};
 pub use naming::{FolderRule, RenameRule};
 pub use organize::MAX_KEYWORD_HITS;
+pub use playback::{
+    DEFAULT_VIDEO_PROXY_CAPACITY_BYTES, MIN_VIDEO_PROXY_CACHE_BYTES, VIDEO_PROXY_DIR,
+    video_content_type,
+};
 pub use previews::{L0_FORMAT_VERSION, L1_FORMAT_VERSION};
 pub use region::{MAX_REGION_OUTPUT_PIXELS, MAX_REGION_SCALE, MAX_REGION_SOURCE_PIXELS};
 pub use relink::{MAX_RELINK_CANDIDATES, MAX_RELINK_TARGETS};
@@ -170,12 +178,13 @@ pub use search::MAX_RANGE_LEN;
 pub use settings::{
     KEY_DEFAULT_EXPORT_COLOR_SPACE, KEY_DEFAULT_UTC_OFFSET_MINUTES, KEY_HASH_IN_BACKGROUND,
     KEY_HASH_NETWORK_VOLUMES, KEY_IMPORT_SEPARATE_RAW_JPEG, KEY_IMPORT_SKIP_DUPLICATES,
-    KEY_PREVIEW_CACHE_BYTES, KEY_PREVIEW_CACHE_DIR, MIN_PREVIEW_CACHE_BYTES,
-    UTC_OFFSET_RANGE_MINUTES,
+    KEY_PREVIEW_CACHE_BYTES, KEY_PREVIEW_CACHE_DIR, KEY_VIDEO_PROXY_CACHE_BYTES,
+    MIN_PREVIEW_CACHE_BYTES, UTC_OFFSET_RANGE_MINUTES,
 };
 pub use stacks::MAX_AUTO_STACK_GAP_SECONDS;
 pub use timeline::{MAX_TIMELINE_GAP_SECONDS, MAX_TIMELINE_GROUPS};
 pub use types::*;
+pub use view::{MAX_VIEW_PANES, MAX_VIEW_SOURCES};
 pub use volumes::{OsVolumes, VolumeIdentity, VolumeProbe};
 
 // 型付きのメソッドの引数・応答で使う、依存先の crate の型（UI がまとめて使えるように）。

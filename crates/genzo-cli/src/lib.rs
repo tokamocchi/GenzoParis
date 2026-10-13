@@ -24,6 +24,7 @@
 //! genzo file move 12 13 --to ~/Pictures/選別済み --dry-run   # 移す予定（移せない写真・コピーの量）
 //! genzo file rename 12 13 --template "{date}-{seq}"
 //! genzo missing check && genzo missing relink --in /media/me/外付け --dry-run
+//! genzo video info 21 && genzo video proxy 21      # 動画の再生の情報と、再生用のファイル（H.264）を作る
 //! echo '{"exposure_ev": 0.5}' | genzo develop set 12 --json -
 //! genzo export 12 13 --out ~/out --format jpeg --quality 90 --long-edge 2048 --remove-gps
 //! genzo render DSC00001.ARW --out out.tif --settings settings.json   # カタログなし
@@ -73,7 +74,7 @@
 //! | `library` | `import`・`search`・`show`・`rate / flag / label / caption / metadata`・`thumbs`・`remove`・`trash` |
 //! | `organize` | `keyword list / add / remove / show / create / rename / move / delete / export`・`collection list / create / add / remove / rename / move / delete / rule`（LIB-09〜11）と、`search --keyword / --collection / --rule` の解釈 |
 //! | `stacks` | `stack create / add / remove / unstack / top / collapse / expand / show / auto`（LIB-12）と `develop rename-copy / make-master`（LIB-13） |
-//! | `develop` | `develop get / set / reset / undo / redo / history / copy / virtual-copy / delete-copy / rename-copy / make-master / region / before` |
+//! | `develop` | `develop get / set / reset / undo / redo / history / copy / virtual-copy / delete-copy / rename-copy / make-master / region / before / compare` |
 //! | `export` | `export` と書き出しの設定 |
 //! | `standalone` | カタログなしの `render`・`info`（ワーカーを直接使う） |
 //! | `bench` | `bench preview / export`（genzo-testkit の計測と記録） |
@@ -81,6 +82,7 @@
 //! | `identity` | `hash compute / status / duplicates / identify`（ファイルの内容による同一性。ORG-03・IMP-04） |
 //! | `time` | `time devices / shift / sync / zone / clear-zone / reset / history / undo`（撮影日時の一括修正。LIB-16）と `timeline`（写真と動画のタイムライン。ORG-01） |
 //! | `files` | `volume list`（FILE-03）・`folder list / create / rename / move / relocate`・`file move / rename`（FILE-02）・`missing check / relink / link`（FILE-04） |
+//! | `video` | `video info / proxy / cache / clear`（動画の再生の情報と再生用のファイル。VID-04） |
 //!
 //! # ログ（SYS-07）
 //!
@@ -130,6 +132,7 @@ mod session;
 mod stacks;
 mod standalone;
 mod time;
+mod video;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -350,6 +353,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         Command::Folder(c) => files::folder(&g, out, c),
         Command::File(c) => files::file(&g, out, c),
         Command::Missing(c) => files::missing(&g, out, c),
+        Command::Video(c) => video::run(&g, out, c),
     }
 }
 

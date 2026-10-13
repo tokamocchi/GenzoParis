@@ -1,7 +1,10 @@
 // ショートカットの一覧（UX-02）の内容。登録は App.tsx（全体。キーワード・コレクションの B・Ctrl / ⌘ + K・N、スタック・仮想コピーの
 // Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + ' を含む）・library/Grid.tsx（グリッドの移動・Enter・タイムラインの T）・
-// viewer/Loupe.tsx（I・Z・等倍表示の Esc）・develop/DevelopView.tsx（W・R・Z・J・I・\・Y・
-// Shift ＋ Y と、切り抜き・スポイト・等倍表示の間の Esc・Enter）が持つ。ここは表示用の写しなので、キーを変えたらここも直す。
+// viewer/Loupe.tsx（I・Z・等倍表示の Esc）・viewer/CompareView.tsx（比較表示の ←・→・↑・↓・Z・等倍表示の Esc）・
+// viewer/SurveyView.tsx（選別表示の ←・→・/）・viewer/VideoPlayer.tsx（動画のスペース・J・K・L・,・.・M・Home・End）・
+// develop/DevelopView.tsx（W・R・Z・J・I・\・Y・
+// Shift ＋ Y と、切り抜き・スポイト・等倍表示の間の Esc・Enter）が持つ。比較表示（C）・選別表示（N）を始めるキーは
+// App.tsx。ここは表示用の写しなので、キーを変えたらここも直す。
 
 export interface ShortcutItem {
   /** keyboard.ts の書き方（"mod+shift+c" など）。表示は comboLabel で作る。 */
@@ -21,6 +24,8 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["g"], label: "グリッド" },
       { keys: ["t"], label: "タイムライン表示の切り替え（グリッド。撮影日・イベントの見出しを入れて撮影日時の順に並べる）" },
       { keys: ["e"], label: "ルーペ" },
+      { keys: ["c"], label: "比較表示（選択と候補の 2 枚を並べる）" },
+      { keys: ["n"], label: "選別表示（選んだ写真を並べる）" },
       { keys: ["d"], label: "現像" },
       { keys: ["Escape"], label: "グリッドに戻る（等倍表示・切り抜き・スポイトの間は、それを終える）" },
       { keys: ["ArrowLeft", "ArrowRight"], label: "前・次の写真（ルーペ・現像）" },
@@ -29,9 +34,32 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     ],
   },
   {
+    title: "動画（ルーペ）",
+    items: [
+      { keys: ["Space"], label: "再生・一時停止" },
+      { keys: ["l"], label: "前へ再生（押すたびに 1・2・4・8 倍）" },
+      { keys: ["j"], label: "後ろへ再生（押すたびに 1・2・4・8 倍）" },
+      { keys: ["k"], label: "止める" },
+      { keys: [",", "."], label: "1 コマ戻る・進む" },
+      { keys: ["m"], label: "消音の切り替え" },
+      { keys: ["Home", "End"], label: "先頭・最後へ" },
+    ],
+  },
+  {
+    title: "比較表示・選別表示",
+    items: [
+      { keys: ["ArrowLeft", "ArrowRight"], label: "比較: 候補を前・次の写真にする ／ 選別: 作業中の写真を移す" },
+      { keys: ["ArrowUp"], label: "比較: 候補を選択にして、次の写真を候補にする" },
+      { keys: ["ArrowDown"], label: "比較: 選択と候補を入れ替える" },
+      { keys: ["z"], label: "比較: 等倍表示（2 枚のズーム・パンは同期。下の帯で同期を外せる）" },
+      { keys: ["/"], label: "選別: 作業中の写真を表示から外す（写真は消えない）" },
+      { keys: ["Escape"], label: "等倍表示を終える ／ グリッドに戻る" },
+    ],
+  },
+  {
     title: "選別",
     items: [
-      { keys: ["0", "1", "2", "3", "4", "5"], label: "評価（★0〜5）" },
+      { keys: ["0", "1", "2", "3", "4", "5"], label: "評価（★0〜5。比較表示・選別表示では作業中の写真に付ける）" },
       { keys: ["p"], label: "採用" },
       { keys: ["x"], label: "不採用" },
       { keys: ["u"], label: "フラグを外す" },

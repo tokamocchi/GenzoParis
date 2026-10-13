@@ -824,3 +824,112 @@ pub fn files_volumes_and_relink_through_the_app() {
     assert_eq!(count, 1);
     assert!(photos.join("空").is_dir());
 }
+
+/// 動画の再生（VID-04）: `genzo://video/{id}` は、カタログに登録された動画の元のファイルを Range の要求に応えて
+/// 返す（写真・ない ID は 404。パスは受け取らない）。再生用のファイルは作るまで 404 で、作った後は H.264 の MP4。
+/// ffmpeg がなければ飛ばす。
+pub fn videos_are_streamed_only_from_the_catalog() {
+    let tools = genzo_app::tools::locate(None);
+    let Some(ffmpeg) = tools.ffmpeg.clone().filter(|_| tools.ffprobe.is_some()) else {
+        eprintln!("ffmpeg / ffprobe がないため、動画の部分を飛ばす");
+        return;
+    };
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("動画 の フォルダ");
+    std::fs::create_dir_all(&photos).unwrap();
+    let video_path = photos.join("旅 の 動画.mov");
+    let made = std::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
+        .args(["-f", "lavfi", "-i", "testsrc=duration=1:size=96x64:rate=10"])
+        .args(["-pix_fmt", "yuv420p", "-c:v", "mpeg4"])
+        .arg(&video_path)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !made {
+        eprintln!("テスト用の動画を作れないため、飛ばす");
+        return;
+    }
+    write_image(&photos.join("写真.jpg"), (64, 48), 3);
+    let original = std::fs::read(&video_path).unwrap();
+    state.open_catalog(&env.catalog("動画.db"), true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let video = by_name(&items, "旅 の 動画.mov").variant_id.get();
+    let photo = by_name(&items, "写真.jpg").variant_id.get();
+
+    // 範囲の要求に 206 で、元のファイルの内容を返す。
+    let route = |path: &str| protocol::parse(path).unwrap();
+    let r = protocol::reply_media(
+        &state,
+        route(&format!("/video/{video}")),
+        Some("bytes=0-1"),
+        false,
+    );
+    assert_eq!(r.status, 206, "{:?}", r.headers);
+    assert_eq!(r.content_type, "video/quicktime");
+    assert_eq!(r.body, &original[..2]);
+    assert_eq!(
+        r.header("Content-Range"),
+        Some(format!("bytes 0-1/{}", original.len()).as_str())
+    );
+    // 範囲がなければ（小さいファイルなので）全体を 200 で。
+    let r = protocol::reply(&state, &format!("/video/{video}"), None);
+    assert_eq!((r.status, r.body.as_slice()), (200, original.as_slice()));
+    // 写真・ない ID・形の違う URI は返さない。
+    assert_eq!(
+        protocol::reply(&state, &format!("/video/{photo}"), None).status,
+        404
+    );
+    assert_eq!(protocol::reply(&state, "/video/999999", None).status, 404);
+    assert_eq!(
+        protocol::reply(&state, "/video/..%2F..%2Fetc%2Fpasswd", None).status,
+        400
+    );
+    // 再生用のファイルは、作るまで 404。
+    assert_eq!(
+        protocol::reply(&state, &format!("/video-proxy/{video}"), None).status,
+        404
+    );
+
+    // 再生の情報（core_execute の JSON）。
+    let info = match ok(
+        &state,
+        json!({"type": "video_playback", "variant_id": video}),
+    ) {
+        Response::VideoPlayback(p) => p,
+        other => panic!("{other:?}"),
+    };
+    assert!(info.available, "{info:?}");
+    assert_eq!(info.content_type, "video/quicktime");
+    if let Some(reason) = &info.proxy_unavailable {
+        eprintln!("再生用のファイルを作れないため、ここまで: {reason}");
+        return;
+    }
+    let job = match ok(
+        &state,
+        json!({"type": "create_video_proxy", "variant_id": video}),
+    ) {
+        Response::JobStarted { job_id } => job_id,
+        other => panic!("{other:?}"),
+    };
+    let done = crate::support::wait_job(&state, job);
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    let r = protocol::reply_media(
+        &state,
+        route(&format!("/video-proxy/{video}")),
+        Some("bytes=0-"),
+        false,
+    );
+    assert_eq!((r.status, r.content_type), (206, "video/mp4"));
+    // MP4 の先頭の箱（ftyp）。
+    assert_eq!(&r.body[4..8], b"ftyp");
+    assert_eq!(std::fs::read(&video_path).unwrap(), original);
+    state.close_catalog(false).unwrap();
+    // 閉じた後は 503。
+    assert_eq!(
+        protocol::reply(&state, &format!("/video/{video}"), None).status,
+        503
+    );
+}

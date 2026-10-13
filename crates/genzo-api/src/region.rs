@@ -34,9 +34,11 @@
 
 use std::sync::Arc;
 
-use genzo_jobs::{CancellationToken, JobError, JobOptions, Priority, SupersedePolicy};
+use genzo_jobs::{CancellationToken, JobError, JobOptions, Priority, SlotKey, SupersedePolicy};
+use genzo_model::DevelopSettings;
 use genzo_pipeline::finish::output::{Dither, quantize_u8};
-use genzo_pipeline::{FullResolutionJob, ImageTile, Roi, downscale_area};
+use genzo_pipeline::{FullResolutionJob, ImageTile, PhotoSource, Roi, downscale_area};
+use parking_lot::Mutex;
 
 use crate::core::{Core, Inner, RegionRequestStage};
 use crate::error::ApiError;
@@ -121,100 +123,34 @@ impl Core {
             RegionTarget::Before => before_settings.ok_or_else(crate::before::no_before)?,
         };
         let before = target == RegionTarget::Before;
-        // テスト用の口（`CoreHooks::on_region_request`）はアフターの要求だけで呼ぶ。
-        let hook = inner.on_region_request.as_ref().filter(|_| !before);
-        let region_state = if before {
-            &inner.develop.region_before
-        } else {
-            &inner.develop.region
-        };
-        let slot = if before {
-            BEFORE_REGION_SLOT
-        } else {
-            REGION_SLOT
-        };
-        let req = *request;
-        // 要求の番号の割り当て・スケジューラへの投入・取り消しトークンの公開を、1 つの区間（`region` の
-        // ロックを持ったまま）にする。別々にすると、先に番号を取った古い要求が、止まっている間に追い越した
-        // 新しい要求の後で投入して、新しい要求（実行中・待ち）を取り消す（最後に描くのが古い範囲になる）。
-        // `pending` の公開も、投入の順と食い違わない。ほかのロックは、スケジューラの内部のロックだけ（順序は
-        // `region` → スケジューラ。スケジューラは、持っている間にここへ戻らない）。
-        let (seq, handle) = {
-            let mut st = match region_state.try_lock() {
-                Some(guard) => guard,
-                None => {
-                    // テスト用の口（`CoreHooks::on_region_request`）。待つ前に、ロックを持たずに呼ぶ。
-                    if let Some(hook) = hook {
-                        hook(RegionRequestStage::Waiting);
-                    }
-                    region_state.lock()
-                }
-            };
-            st.last_request += 1;
-            let seq = st.last_request;
-            // テスト用の口。区間の中（ロックを持ったまま）で呼ぶ。
-            if let Some(hook) = hook {
-                hook(RegionRequestStage::Numbered(seq));
+        let slot = RegionSlot {
+            state: if before {
+                &inner.develop.region_before
+            } else {
+                &inner.develop.region
+            },
+            key: if before {
+                BEFORE_REGION_SLOT
+            } else {
+                REGION_SLOT
             }
-            let weak = Arc::downgrade(inner);
-            let handle = inner.interactive.submit_latest_with(
-                slot,
-                JobOptions::new(Priority::P0)
-                    .label("表示範囲の描画")
-                    .supersede_policy(SupersedePolicy::CancelRunning),
-                move |ctx| {
-                    let Some(inner) = weak.upgrade() else {
-                        return Err(JobError::Cancelled);
-                    };
-                    // テスト用の口（スケジューラのスレッドで呼ぶ。`region` のロックは持たない）。
-                    if let Some(hook) = inner.on_region_request.as_ref().filter(|_| !before) {
-                        hook(RegionRequestStage::Running(seq));
-                    }
-                    let token = ctx.token().clone();
-                    let control = move || token.is_cancelled();
-                    // 切り抜く前の全体の表示（Core::set_develop_view）なら、出力（C の格子）は G の外接矩形の
-                    // 全体（現像のプレビューと同じ。FrameInfo::output_width と同じ格子）。
-                    let job = match inner
-                        .engine
-                        .full_resolution_with(&source, &settings, uncropped)
-                    {
-                        Ok(j) => j,
-                        Err(e) => return Ok(Err(ApiError::from(e))),
-                    };
-                    Ok(render(
-                        &inner, &job, &req, generation, seq, before, &control,
-                    ))
-                },
-            );
-            if let Some(hook) = hook {
-                hook(RegionRequestStage::Submitted(seq));
-            }
-            st.pending = Some((seq, handle.token().clone()));
-            (seq, handle)
+            .into(),
+            label: "表示範囲の描画",
+            mark: RegionMark { before, pane: None },
+            // テスト用の口（`CoreHooks::on_region_request`）はアフターの要求だけで呼ぶ。
+            hooks: !before,
         };
-        let outcome = handle.wait();
-        let frame = {
-            let mut st = region_state.lock();
-            if st.pending.as_ref().is_some_and(|(s, _)| *s == seq) {
-                st.pending = None;
-            }
-            let frame = match outcome {
-                Ok(Ok(frame)) => frame,
-                Ok(Err(e)) if e.is_cancelled() => return Err(ApiError::Cancelled),
-                Ok(Err(e)) => return Err(e),
-                Err(e) if e.is_cancellation() => return Err(ApiError::Cancelled),
-                Err(e) => return Err(e.into()),
-            };
-            if st
-                .last
-                .as_ref()
-                .is_none_or(|l| l.info.request < frame.info.request)
-            {
-                st.last = Some(frame.clone());
-            }
-            frame
-        };
-        Ok(frame)
+        render_latest(
+            inner,
+            &slot,
+            request,
+            RegionInput {
+                source,
+                settings,
+                generation,
+                uncropped,
+            },
+        )
     }
 
     /// 実行中・待っている表示範囲の描画を取り消す（ビフォーの表示範囲の描画も。その
@@ -227,8 +163,8 @@ impl Core {
             &self.inner.develop.region,
             &self.inner.develop.region_before,
         ] {
-            let pending = state.lock().pending.take();
-            if let Some((_, token)) = pending {
+            let pending = state.lock().take_pending();
+            if let Some(token) = pending {
                 token.cancel();
                 cancelled = true;
             }
@@ -238,17 +174,165 @@ impl Core {
 
     /// 最後に描けた表示範囲（なければ `None`）。
     pub fn region_frame(&self) -> Option<RegionFrame> {
-        self.inner.develop.region.lock().last.clone()
+        self.inner.develop.region.lock().last().cloned()
     }
 
     /// 最後に描けたビフォーの表示範囲（[`Core::render_before_region`]。なければ `None`）。
     pub fn before_region_frame(&self) -> Option<RegionFrame> {
-        self.inner.develop.region_before.lock().last.clone()
+        self.inner.develop.region_before.lock().last().cloned()
     }
 }
 
+/// 描く入力（現像のセッション・比較表示の入力の写し。[`render_latest`]）。
+pub(crate) struct RegionInput {
+    /// 入力。
+    pub source: PhotoSource,
+    /// 描く設定（外部データは実際に使う値にしたもの）。
+    pub settings: DevelopSettings,
+    /// 設定の世代（[`RegionInfo::generation`]）。
+    pub generation: u64,
+    /// 切り抜く前の全体の表示か（[`Core::set_develop_view`]）。
+    pub uncropped: bool,
+}
+
+/// 結果の印（[`RegionInfo::before`]・[`RegionInfo::pane`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RegionMark {
+    /// ビフォーの設定で描いたか。
+    pub before: bool,
+    /// 比較表示の面（LIB-03。`view` の doc）。
+    pub pane: Option<u32>,
+}
+
+/// 「最新の 1 件だけ」の枠（状態・スケジューラの枠・ジョブの名前・結果の印）。
+pub(crate) struct RegionSlot<'a> {
+    /// 状態（要求の番号・取り消し・最後の結果）。
+    pub state: &'a Mutex<RegionState>,
+    /// スケジューラの「最新の 1 件だけ」の枠。
+    pub key: SlotKey,
+    /// ジョブの名前。
+    pub label: &'static str,
+    /// 結果の印。
+    pub mark: RegionMark,
+    /// テスト用の口（`CoreHooks::on_region_request`）を呼ぶか（現像中の写真のアフターの要求だけ）。
+    pub hooks: bool,
+}
+
+impl RegionState {
+    /// 実行中・待っている要求の取り消しトークンを外す（[`Core::cancel_region`] などが取り消す）。
+    pub(crate) fn take_pending(&mut self) -> Option<CancellationToken> {
+        self.pending.take().map(|(_, token)| token)
+    }
+
+    /// 最後に描けた結果。
+    pub(crate) fn last(&self) -> Option<&RegionFrame> {
+        self.last.as_ref()
+    }
+
+    /// 最後に描けた結果を捨てる（要求の番号は戻さない）。
+    pub(crate) fn clear_last(&mut self) {
+        self.last = None;
+    }
+}
+
+/// 表示範囲を、枠 `slot` の「最新の 1 件だけ」で描き、終わるまで待つ（`region` の doc）。新しい要求か取り消しで
+/// 取り消されたら [`ApiError::Cancelled`]。
+pub(crate) fn render_latest(
+    inner: &Arc<Inner>,
+    slot: &RegionSlot<'_>,
+    request: &RegionRequest,
+    input: RegionInput,
+) -> Result<RegionFrame, ApiError> {
+    let hook = inner.on_region_request.as_ref().filter(|_| slot.hooks);
+    let use_hooks = slot.hooks;
+    let mark = slot.mark;
+    let req = *request;
+    let RegionInput {
+        source,
+        settings,
+        generation,
+        uncropped,
+    } = input;
+    // 要求の番号の割り当て・スケジューラへの投入・取り消しトークンの公開を、1 つの区間（`region` の
+    // ロックを持ったまま）にする。別々にすると、先に番号を取った古い要求が、止まっている間に追い越した
+    // 新しい要求の後で投入して、新しい要求（実行中・待ち）を取り消す（最後に描くのが古い範囲になる）。
+    // `pending` の公開も、投入の順と食い違わない。ほかのロックは、スケジューラの内部のロックだけ（順序は
+    // `region` → スケジューラ。スケジューラは、持っている間にここへ戻らない）。
+    let (seq, handle) = {
+        let mut st = match slot.state.try_lock() {
+            Some(guard) => guard,
+            None => {
+                // テスト用の口（`CoreHooks::on_region_request`）。待つ前に、ロックを持たずに呼ぶ。
+                if let Some(hook) = hook {
+                    hook(RegionRequestStage::Waiting);
+                }
+                slot.state.lock()
+            }
+        };
+        st.last_request += 1;
+        let seq = st.last_request;
+        // テスト用の口。区間の中（ロックを持ったまま）で呼ぶ。
+        if let Some(hook) = hook {
+            hook(RegionRequestStage::Numbered(seq));
+        }
+        let weak = Arc::downgrade(inner);
+        let handle = inner.interactive.submit_latest_with(
+            slot.key.clone(),
+            JobOptions::new(Priority::P0)
+                .label(slot.label)
+                .supersede_policy(SupersedePolicy::CancelRunning),
+            move |ctx| {
+                let Some(inner) = weak.upgrade() else {
+                    return Err(JobError::Cancelled);
+                };
+                // テスト用の口（スケジューラのスレッドで呼ぶ。`region` のロックは持たない）。
+                if let Some(hook) = inner.on_region_request.as_ref().filter(|_| use_hooks) {
+                    hook(RegionRequestStage::Running(seq));
+                }
+                let token = ctx.token().clone();
+                let control = move || token.is_cancelled();
+                // 切り抜く前の全体の表示（Core::set_develop_view）なら、出力（C の格子）は G の外接矩形の
+                // 全体（現像のプレビューと同じ。FrameInfo::output_width と同じ格子）。
+                let job = match inner
+                    .engine
+                    .full_resolution_with(&source, &settings, uncropped)
+                {
+                    Ok(j) => j,
+                    Err(e) => return Ok(Err(ApiError::from(e))),
+                };
+                Ok(render(&inner, &job, &req, generation, seq, mark, &control))
+            },
+        );
+        if let Some(hook) = hook {
+            hook(RegionRequestStage::Submitted(seq));
+        }
+        st.pending = Some((seq, handle.token().clone()));
+        (seq, handle)
+    };
+    let outcome = handle.wait();
+    let mut st = slot.state.lock();
+    if st.pending.as_ref().is_some_and(|(s, _)| *s == seq) {
+        st.pending = None;
+    }
+    let frame = match outcome {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(e)) if e.is_cancelled() => return Err(ApiError::Cancelled),
+        Ok(Err(e)) => return Err(e),
+        Err(e) if e.is_cancellation() => return Err(ApiError::Cancelled),
+        Err(e) => return Err(e.into()),
+    };
+    if st
+        .last
+        .as_ref()
+        .is_none_or(|l| l.info.request < frame.info.request)
+    {
+        st.last = Some(frame.clone());
+    }
+    Ok(frame)
+}
+
 /// 要求の値を確かめる（範囲の幅・高さは正、値は有限、倍率は 0 より大きく [`MAX_REGION_SCALE`] 以下）。
-fn validate(r: &RegionRequest) -> Result<(), ApiError> {
+pub(crate) fn validate(r: &RegionRequest) -> Result<(), ApiError> {
     let finite = [r.x, r.y, r.width, r.height, r.scale]
         .iter()
         .all(|v| v.is_finite());
@@ -323,7 +407,7 @@ fn render(
     r: &RegionRequest,
     generation: u64,
     request: u64,
-    before: bool,
+    mark: RegionMark,
     control: &(dyn Fn() -> bool + Sync),
 ) -> Result<RegionFrame, ApiError> {
     let roi = region_roi(job, r)?;
@@ -377,7 +461,8 @@ fn render(
             tiles,
             display_assumed_srgb: assumed_srgb,
             warnings,
-            before,
+            before: mark.before,
+            pane: mark.pane,
         },
         display_rgb8: Arc::new(rgb8),
     })
