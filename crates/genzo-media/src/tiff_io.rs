@@ -4,6 +4,8 @@
 //!   （ICC.1 の付録 B「Embedding ICC profiles」の TIFF の節、TIFF/EP。節の番号は原典で確認すること）。
 //! - Exif は、カメラ・Software・Orientation を 0th IFD に、撮影情報を Exif IFD（ポインタ 0x8769）に、
 //!   GPS を GPS IFD（ポインタ 0x8825）に書く（JPEG・PNG と同じ内容。[`crate::exif_write`]）。
+//! - 説明のメタデータ（LIB-15）の XMP は、0th IFD のタグ 700（XMLPacket、型 BYTE）に入れる（XMP の
+//!   仕様書の第 3 部。[`crate::xmp_write`]）。
 //! - 圧縮は [`TIFF_COMPRESSION`]（Deflate ＋ 水平差分の予測。仮置き）。
 //! - バイト順は tiff crate に従い、この環境のバイト順（x86-64・Apple Silicon ではリトルエンディアン）。
 
@@ -61,6 +63,7 @@ pub(crate) fn encode_tiff16_to<W: Write + Seek>(
     img: &RgbImage16,
     icc: Option<&[u8]>,
     exif: Option<&ExifIfds>,
+    xmp: Option<&[u8]>,
     w: &mut W,
 ) -> Result<()> {
     let (compression, predictor) = TIFF_COMPRESSION;
@@ -108,6 +111,15 @@ pub(crate) fn encode_tiff16_to<W: Write + Seek>(
             d.extend([(Tag::from_u16_exhaustive(TIFF_TAG_ICC_PROFILE), entry)]);
             dir.extend_from(&d);
         }
+        if let Some(xmp) = xmp {
+            let entry = dir.write_entry_bytes(Type::BYTE, xmp).map_err(tiff_err)?;
+            let mut d = Directory::empty();
+            d.extend([(
+                Tag::from_u16_exhaustive(crate::xmp_write::TIFF_TAG_XMP),
+                entry,
+            )]);
+            dir.extend_from(&d);
+        }
     }
     image.write_data(img.as_raw()).map_err(tiff_err)
 }
@@ -120,7 +132,7 @@ pub(crate) fn encode_tiff16(
     exif: Option<&ExifIfds>,
 ) -> Result<Vec<u8>> {
     let mut cur = std::io::Cursor::new(Vec::new());
-    encode_tiff16_to(img, icc, exif, &mut cur)?;
+    encode_tiff16_to(img, icc, exif, None, &mut cur)?;
     Ok(cur.into_inner())
 }
 

@@ -1,11 +1,11 @@
-//! 選別（LIB-04）・キャプション・メタデータの表示（LIB-14）・フォルダ（LIB-06）・ファイルの状態の確認
-//! （04 の 3.3 節）。
+//! 選別（LIB-04）・キャプションと説明のメタデータの編集（LIB-15）・メタデータの表示（LIB-14）・
+//! フォルダ（LIB-06）・ファイルの状態の確認（04 の 3.3 節）。
 
 use std::path::Path;
 use std::sync::Arc;
 
 use genzo_catalog::{FileFacts, FileRecord};
-use genzo_model::{ColorLabel, FileStatus, Flag, Rating, VariantId};
+use genzo_model::{ColorLabel, FileStatus, Flag, MetadataField, Rating, VariantId};
 use genzo_worker::Lane;
 
 use crate::core::{Core, Inner};
@@ -14,7 +14,8 @@ use crate::events::{CatalogChange, Event};
 use crate::import::{ProbeTarget, media_kind, probe_request};
 use crate::paths::join_rel;
 use crate::types::{
-    CatalogStats, FileCheckReport, FileInfo, FileIssue, FolderInfo, VariantDetails, VariantSummary,
+    CatalogSchema, CatalogStats, FileCheckReport, FileInfo, FileIssue, FolderInfo, MetadataSummary,
+    VariantDetails, VariantSummary,
 };
 
 /// 選別の操作の後: カタログの変更を知らせ、表示中の検索結果を作り直す（変えた variant は残す。3.7 節）。
@@ -88,16 +89,58 @@ impl Core {
         Ok(n)
     }
 
+    /// 説明のメタデータ（タイトル・キャプション・作成者・著作権など。LIB-15）を一括で変える（asset に付ける。
+    /// 1 つのトランザクション）。
+    ///
+    /// `changes` は（項目、値）の並びで、並べた項目だけを変える（`None`・空白だけなら削除）。値は
+    /// genzo-model の `normalize_metadata_value` で整える（前後の空白・制御文字を除く。上限 2,000 文字）。
+    /// 変えた asset の数を返す（同じ asset の仮想コピーは 1 つに数える）。値が不正なら種類
+    /// `invalid_input` のエラー（[`ApiError::Catalog`]）で、何も変えない。テキスト検索の索引も更新する
+    /// （3.6 節）。
+    /// 元のファイルには書かない。
+    pub fn set_metadata(
+        &self,
+        variant_ids: &[VariantId],
+        changes: &[(MetadataField, Option<String>)],
+    ) -> Result<usize, ApiError> {
+        self.inner.check_open()?;
+        let changes: Vec<(MetadataField, Option<&str>)> =
+            changes.iter().map(|(f, v)| (*f, v.as_deref())).collect();
+        let n = self.inner.with_catalog(|c| {
+            let assets = c.assets_of_variants(variant_ids)?;
+            c.set_asset_metadata(&assets, &changes)
+        })?;
+        self.inner.events.emit(Event::CatalogChanged {
+            change: CatalogChange::Metadata,
+            variant_ids: variant_ids.to_vec(),
+            all: false,
+        });
+        // テキスト検索の条件に合わなくなったものは残さない（キャプションと同じ）。
+        crate::search::refresh(&self.inner, &[]);
+        Ok(n)
+    }
+
+    /// 複数の写真の説明のメタデータのまとめ（項目ごとに、共通の値か、写真によって異なるか。LIB-15 の
+    /// 一括編集の画面用）。
+    pub fn metadata_summary(&self, variant_ids: &[VariantId]) -> Result<MetadataSummary, ApiError> {
+        self.inner.check_open()?;
+        self.inner.with_catalog(|c| {
+            let assets = c.assets_of_variants(variant_ids)?;
+            Ok(MetadataSummary::from(c.metadata_summary(&assets)?))
+        })
+    }
+
     /// variant の詳細（メタデータの表示。LIB-14）。
     pub fn variant_details(&self, variant_id: VariantId) -> Result<VariantDetails, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
-        let (summary, asset, files) = inner.with_catalog_api(|c| {
+        let (summary, asset, metadata, files) = inner.with_catalog_api(|c| {
             let s = c
                 .variant_summaries(&[variant_id])?
                 .pop()
                 .ok_or_else(|| ApiError::NotFound(format!("variant {variant_id}")))?;
             let a = c.asset(s.asset_id)?;
+            let m = c.asset_metadata(s.asset_id)?;
             let mut files = Vec::new();
             for f in c.files_of_asset(s.asset_id)? {
                 files.push(FileInfo {
@@ -109,7 +152,7 @@ impl Core {
                     status_reason: f.status_reason,
                 });
             }
-            Ok((s, a, files))
+            Ok((s, a, m, files))
         })?;
         let rev = inner.with_cache(|c| c.thumbs.cache_key(variant_id))?;
         Ok(VariantDetails {
@@ -120,6 +163,7 @@ impl Core {
             focal_mm: asset.focal_mm,
             gps: asset.gps,
             caption: asset.caption,
+            metadata,
             video: asset.video,
             files,
         })
@@ -139,6 +183,14 @@ impl Core {
                 history_entries: counts.history_entries,
             })
         })
+    }
+
+    /// カタログの構造（表・列・索引・ビュー・トリガーと公開ビュー。ORG-07。読むだけ）。文書は
+    /// docs/catalog_schema.md。
+    pub fn catalog_schema(&self) -> Result<CatalogSchema, ApiError> {
+        self.inner.check_open()?;
+        self.inner
+            .with_catalog(|c| Ok(CatalogSchema::from(c.describe_schema()?)))
     }
 
     /// 登録されているフォルダ（LIB-06。ボリュームごと、相対パスの順）。

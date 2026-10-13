@@ -7,8 +7,14 @@ import { bridge } from "./bridge";
 import { ApiError, toApiError } from "./errors";
 import type {
   BackupEntry,
+  BeforeInfo,
+  BeforeSource,
+  CatalogSchema,
   CatalogStats,
   Capabilities,
+  CollectionId,
+  CollectionInfo,
+  CollectionKind,
   ColorLabel,
   Command,
   CoreSettings,
@@ -28,7 +34,13 @@ import type {
   HistoryEntryId,
   HistoryItem,
   IndexOf,
+  IptcMetadata,
   JobInfo,
+  KeywordHit,
+  KeywordId,
+  KeywordInfo,
+  KeywordUsage,
+  MetadataSummary,
   RangeResult,
   Rating,
   RegionInfo,
@@ -40,9 +52,11 @@ import type {
   SearchSort,
   SettingGroups,
   SettingsUpdate,
+  SmartRule,
   StartupReport,
   VariantDetails,
   VariantId,
+  VariantKeywords,
 } from "./types";
 
 type ResponseOf<T extends Response["type"]> = Extract<Response, { type: T }>;
@@ -99,6 +113,12 @@ export const setColorLabel = async (variant_ids: VariantId[], label: ColorLabel 
   (await execute({ type: "set_color_label", variant_ids, label }, "updated")).count;
 export const setCaption = async (variant_ids: VariantId[], caption: string | null) =>
   (await execute({ type: "set_caption", variant_ids, caption }, "updated")).count;
+/** 説明のメタデータ（LIB-15）を一括で変える（並べた項目だけ。null・空で削除）。変えた元の写真の数を返す。 */
+export const setMetadata = async (variant_ids: VariantId[], changes: IptcMetadata) =>
+  (await execute({ type: "set_metadata", variant_ids, changes }, "updated")).count;
+/** 複数の写真の説明のメタデータのまとめ（項目ごとに共通の値か「複数の値」か）。 */
+export const metadataSummary = async (variant_ids: VariantId[]): Promise<MetadataSummary> =>
+  strip(await execute({ type: "metadata_summary", variant_ids }, "metadata"));
 export const variantDetails = async (variant_id: VariantId): Promise<VariantDetails> =>
   strip(await execute({ type: "variant_details", variant_id }, "details"));
 export const folders = async (): Promise<FolderInfo[]> =>
@@ -106,6 +126,72 @@ export const folders = async (): Promise<FolderInfo[]> =>
 export const facets = async (): Promise<Facets> => strip(await execute({ type: "facets" }, "facets"));
 export const checkFiles = async (variant_ids: VariantId[]): Promise<FileCheckReport> =>
   strip(await execute({ type: "check_files", variant_ids }, "file_check"));
+
+/** 条件に合う写真の数（表示中の検索結果は変えない。スマートコレクションの条件の編集中の件数など）。 */
+export const count = async (filter: SearchFilter) => (await execute({ type: "count", filter }, "count")).count;
+
+// --- キーワード（LIB-09） ---
+export const keywordTree = async (): Promise<KeywordInfo[]> =>
+  (await execute({ type: "keyword_tree" }, "keywords")).keywords;
+/** 名前でキーワードを探す（部分一致。前方一致のものが先。入力欄の補完）。 */
+export const findKeywords = async (query: string, limit = 20): Promise<KeywordHit[]> =>
+  (await execute({ type: "find_keywords", query, limit }, "keyword_hits")).hits;
+/** parent の下に階層のパスでキーワードを確保する（あれば使い、なければ作る）。 */
+export const createKeyword = async (parent_id: KeywordId | null, path: string[]) =>
+  (await execute({ type: "create_keyword", parent_id, path }, "keyword_created")).keyword_id;
+export const renameKeyword = async (keyword_id: KeywordId, name: string) => {
+  await execute({ type: "rename_keyword", keyword_id, name }, "ok");
+};
+export const moveKeyword = async (keyword_id: KeywordId, parent_id: KeywordId | null) => {
+  await execute({ type: "move_keyword", keyword_id, parent_id }, "ok");
+};
+/** キーワードを削除する（子のキーワードと付与も）。削除したキーワードの数を返す。 */
+export const deleteKeyword = async (keyword_id: KeywordId) =>
+  (await execute({ type: "delete_keyword", keyword_id }, "updated")).count;
+export const setKeywordExport = async (keyword_id: KeywordId, include: boolean) => {
+  await execute({ type: "set_keyword_export", keyword_id, include }, "ok");
+};
+export const keywordUsage = async (keyword_id: KeywordId): Promise<KeywordUsage> =>
+  strip(await execute({ type: "keyword_usage", keyword_id }, "keyword_usage"));
+/** 写真にキーワードを付ける（既存のもの・階層のパスで作るもの）。新しく付けた組の数を返す。 */
+export const addKeywords = async (variant_ids: VariantId[], keyword_ids: KeywordId[], paths: string[][] = []) =>
+  (await execute({ type: "add_keywords", variant_ids, keyword_ids, paths }, "updated")).count;
+export const removeKeywords = async (variant_ids: VariantId[], keyword_ids: KeywordId[]) =>
+  (await execute({ type: "remove_keywords", variant_ids, keyword_ids }, "updated")).count;
+/** 写真に付いているキーワードと、それぞれが付いている写真の数。 */
+export const variantKeywords = async (variant_ids: VariantId[]): Promise<VariantKeywords> =>
+  strip(await execute({ type: "variant_keywords", variant_ids }, "variant_keywords"));
+
+// --- コレクション（LIB-10・LIB-11） ---
+export const collections = async (with_counts = false): Promise<CollectionInfo[]> =>
+  (await execute({ type: "collections", with_counts }, "collections")).collections;
+export const createCollection = async (
+  parent_id: CollectionId | null,
+  name: string,
+  kind: CollectionKind,
+  rule: SmartRule | null = null,
+  variant_ids: VariantId[] = [],
+) =>
+  (await execute({ type: "create_collection", parent_id, name, kind, rule, variant_ids }, "collection_created"))
+    .collection_id;
+export const renameCollection = async (collection_id: CollectionId, name: string) => {
+  await execute({ type: "rename_collection", collection_id, name }, "ok");
+};
+export const moveCollection = async (collection_id: CollectionId, parent_id: CollectionId | null) => {
+  await execute({ type: "move_collection", collection_id, parent_id }, "ok");
+};
+/** コレクションを削除する（セットなら中のものも。写真は消えない）。削除した数を返す。 */
+export const deleteCollection = async (collection_id: CollectionId) =>
+  (await execute({ type: "delete_collection", collection_id }, "updated")).count;
+export const setSmartRule = async (collection_id: CollectionId, rule: SmartRule) => {
+  await execute({ type: "set_smart_rule", collection_id, rule }, "ok");
+};
+export const addToCollection = async (collection_id: CollectionId, variant_ids: VariantId[]) =>
+  (await execute({ type: "add_to_collection", collection_id, variant_ids }, "updated")).count;
+export const removeFromCollection = async (collection_id: CollectionId, variant_ids: VariantId[]) =>
+  (await execute({ type: "remove_from_collection", collection_id, variant_ids }, "updated")).count;
+export const variantCollections = async (variant_id: VariantId): Promise<CollectionId[]> =>
+  (await execute({ type: "variant_collections", variant_id }, "variant_collections")).collection_ids;
 
 // --- サムネイル・プレビュー ---
 export const requestPreview = async (variant_id: VariantId) =>
@@ -126,6 +212,12 @@ export const renderDevelop = async (): Promise<FrameInfo> =>
   strip(await execute({ type: "render_develop" }, "frame"));
 export const renderRegion = async (request: RegionRequest): Promise<RegionInfo> =>
   strip(await execute({ type: "render_region", request }, "region"));
+/** ビフォー / アフターの表示のビフォーを設定する（DEV-31。null でやめる）。 */
+export const setBefore = async (source: BeforeSource | null): Promise<BeforeInfo | null> =>
+  (await execute({ type: "set_before", source }, "before")).before;
+/** ビフォーの表示範囲を描く（画素は before_region_frame）。 */
+export const renderBeforeRegion = async (request: RegionRequest): Promise<RegionInfo> =>
+  strip(await execute({ type: "render_before_region", request }, "region"));
 export const cancelRegion = async () => {
   await execute({ type: "cancel_region" }, "ok");
 };
@@ -206,6 +298,9 @@ export const startupReport = async (): Promise<StartupReport> =>
   strip(await execute({ type: "startup_report" }, "startup"));
 export const catalogStats = async (): Promise<CatalogStats> =>
   strip(await execute({ type: "catalog_stats" }, "catalog_stats"));
+/** カタログの構造（表・列・索引・ビュー・トリガー。ORG-07）。 */
+export const catalogSchema = async (): Promise<CatalogSchema> =>
+  strip(await execute({ type: "catalog_schema" }, "catalog_schema"));
 export const capabilities = async (): Promise<Capabilities> =>
   strip(await execute({ type: "capabilities" }, "capabilities"));
 export type { DisplayInfo };

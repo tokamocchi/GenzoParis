@@ -75,6 +75,7 @@ fn export_formats_sizes_gps_and_original_protection() {
         size: ExportSize::LongEdge(64),
         remove_gps: true,
         on_conflict: ConflictPolicy::Sequence,
+        remove_keywords: false,
     };
     let r = export(&core, &[v1, v2], &s, &out);
     assert_eq!((r.written, r.skipped, r.failed), (2, 0, 0), "{r:?}");
@@ -94,6 +95,7 @@ fn export_formats_sizes_gps_and_original_protection() {
         size: ExportSize::Original,
         remove_gps: false,
         on_conflict: ConflictPolicy::Sequence,
+        remove_keywords: false,
     };
     let r = export(&core, &[v1], &s2, &out);
     let tif = written_path(&r, 0);
@@ -111,6 +113,7 @@ fn export_formats_sizes_gps_and_original_protection() {
         size: ExportSize::LongEdge(100),
         remove_gps: true,
         on_conflict: ConflictPolicy::Sequence,
+        remove_keywords: false,
     };
     let r = export(&core, &[v1], &s3, &out);
     let png = written_path(&r, 0);

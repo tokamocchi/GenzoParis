@@ -12,6 +12,10 @@
 // - 角度（DEV-15）: 縦横比を固定していれば、角度と一緒に枠も合わせ直す（出力の縦横比を保つ）。
 // - これらのコマンドはコアに追加中のため、失敗しても画面が壊れないようにする（切り抜きの編集を始められ
 //   なければ知らせて元に戻る。制限できなければ、制限しない枠で保存する（コアが描画で同じ制限をかける））。
+// - ビフォー / アフターの表示（DEV-31。\ でビフォーだけ・Y で左右に並べる・Shift ＋ Y で分割）: 表示の
+//   形だけをここで持つ（ビフォーの設定と画素は state/develop.ts）。写真を変えても形は保つ。スポイト・切り抜きの
+//   編集を始めたら、ビフォー / アフターの表示をやめる（アフターの画像を操作する道具のため）。逆に、
+//   ビフォー / アフターの表示を始めたら、道具を終える。
 
 import * as core from "../api/core";
 import type { AspectRatio, CropRect, VariantId } from "../api/types";
@@ -34,6 +38,9 @@ import { clamp01 } from "./zoomMath";
 
 export type DevelopTool = "none" | "wb" | "crop";
 
+/** ビフォー / アフターの表示の形（off: アフターだけ、before: ビフォーだけ、side_by_side: 左右、split: 分割）。 */
+export type CompareMode = "off" | "before" | "side_by_side" | "split";
+
 /** 編集中の切り抜きの枠（保存前）。 */
 export interface CropDraft {
   variantId: VariantId;
@@ -54,6 +61,8 @@ export interface DevelopViewState {
   zoom: { centerX: number; centerY: number } | null;
   /** 切り抜きの編集中の枠。 */
   crop: CropDraft | null;
+  /** ビフォー / アフターの表示の形（DEV-31）。 */
+  compare: CompareMode;
 }
 
 export const viewStore = createStore<DevelopViewState>({
@@ -61,6 +70,7 @@ export const viewStore = createStore<DevelopViewState>({
   showClipping: false,
   zoom: null,
   crop: null,
+  compare: "off",
 });
 
 export function useDevelopView<T>(selector: (s: DevelopViewState) => T, equal?: (a: T, b: T) => boolean): T {
@@ -83,6 +93,30 @@ export function setZoom(center: { centerX: number; centerY: number } | null): vo
 }
 
 // ---------------------------------------------------------------------------
+// ビフォー / アフター（DEV-31）
+// ---------------------------------------------------------------------------
+
+/** ビフォー / アフターの表示の形を変える（off 以外にするときは、スポイト・切り抜きの編集を終える）。 */
+export function setCompareMode(mode: CompareMode): void {
+  const s = viewStore.get();
+  if (mode !== "off") {
+    if (s.crop) void cancelCrop();
+    if (s.tool === "wb") viewStore.set({ tool: "none" });
+  }
+  viewStore.set({ compare: mode });
+}
+
+/** キーで形を切り替える（同じ形なら off に戻す。\・Y・Shift ＋ Y）。 */
+export function toggleCompareMode(mode: Exclude<CompareMode, "off">): void {
+  setCompareMode(nextCompareMode(viewStore.get().compare, mode));
+}
+
+/** 切り替えの次の形（同じ形なら off）。 */
+export function nextCompareMode(current: CompareMode, pressed: Exclude<CompareMode, "off">): CompareMode {
+  return current === pressed ? "off" : pressed;
+}
+
+// ---------------------------------------------------------------------------
 // スポイト
 // ---------------------------------------------------------------------------
 
@@ -100,7 +134,7 @@ export function toggleWbTool(): void {
     actions.notify("info", "RAW 以外の写真ではホワイトバランスを変えられません");
     return;
   }
-  viewStore.set({ tool: "wb" });
+  viewStore.set({ tool: "wb", compare: "off" });
 }
 
 /** スポイトをやめる（Esc）。 */
@@ -170,6 +204,7 @@ export async function startCrop(): Promise<void> {
   viewStore.set({
     tool: "crop",
     zoom: null,
+    compare: "off",
     crop: { variantId: d.variantId, crop: { ...g.crop }, aspect, saved: { crop: g.crop, aspect } },
   });
   const error = await setUncropped(true);

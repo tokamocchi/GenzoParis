@@ -34,6 +34,13 @@
 //!
 //! 再起動はその場で行う（対話用のワーカーを常に待機させておくため。1.2 節）。再起動に失敗した
 //! 場合は、次の依頼のときにもう一度起動を試みる。
+//!
+//! 記録（SYS-07）: タイムアウト・異常終了・不正な応答・不正なバッファ・起動の失敗は、本体の tracing の
+//! ログに書く（異常終了は error の水準で、ジョブの種類・ファイル・終了状態・標準エラー出力の末尾を付ける）。
+//! ワーカーの標準エラー出力（LibRaw の警告・パニックの内容とバックトレースなど）は、行ごとに info の水準で
+//! 本体のログに転送する（target は `genzo_worker::stderr`。1 つのワーカーのプロセスで
+//! [`STDERR_LOG_LINES`] 行まで）。本体（アプリ・CLI）は、このログをログのフォルダのファイルに残す
+//! （genzo-api の `logging`）。
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -139,6 +146,12 @@ impl Default for InitialShmBytes {
 
 /// 標準エラー出力のうち残す末尾のバイト数（異常終了の説明に付ける）。
 pub const STDERR_TAIL_BYTES: usize = 8 * 1024;
+
+/// ワーカーの標準エラー出力のうち、本体のログに転送する行の数の上限（ワーカーのプロセスごと。**仮置き**。
+/// 壊れたファイルで警告が続いても、ログを埋めないため。異常終了の記録には、これとは別に末尾を付ける）。
+pub const STDERR_LOG_LINES: usize = 200;
+/// 本体のログに転送する 1 行の長さの上限（バイト。超えた分は切る）。
+const STDERR_LOG_LINE_BYTES: usize = 1024;
 
 /// 異常終了したワーカーの終了を待つ時間（出力が閉じた後）。
 const CRASH_REAP_GRACE: Duration = Duration::from_secs(2);
@@ -795,25 +808,115 @@ fn read_stdout(stdout: impl Read, tx: Sender<ReaderEvent>) {
     }
 }
 
-/// 標準エラー出力を最後まで読み、末尾だけ残す。
-fn read_stderr(mut stderr: impl Read, tail: Arc<Mutex<Vec<u8>>>, done: Sender<()>) {
+/// 標準エラー出力を最後まで読み、末尾だけ残す。行ごとに本体のログにも転送する（[`StderrForwarder`]）。
+fn read_stderr(
+    mut stderr: impl Read,
+    tail: Arc<Mutex<Vec<u8>>>,
+    done: Sender<()>,
+    mut forward: StderrForwarder,
+) {
     let mut buf = [0u8; 4096];
     loop {
         match stderr.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let mut t = tail
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                t.extend_from_slice(&buf[..n]);
-                if t.len() > STDERR_TAIL_BYTES {
-                    let cut = t.len() - STDERR_TAIL_BYTES;
-                    t.drain(..cut);
+                {
+                    let mut t = tail
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    t.extend_from_slice(&buf[..n]);
+                    if t.len() > STDERR_TAIL_BYTES {
+                        let cut = t.len() - STDERR_TAIL_BYTES;
+                        t.drain(..cut);
+                    }
                 }
+                forward.feed(&buf[..n]);
             }
         }
     }
+    forward.finish();
     let _ = done.send(());
+}
+
+/// ワーカーの標準エラー出力を、行ごとに本体の tracing のログ（info。target は `genzo_worker::stderr`）に
+/// 転送する。1 つのワーカーのプロセスで [`STDERR_LOG_LINES`] 行まで（超えたら 1 回だけ知らせて、以降は
+/// 転送しない）。空の行は転送しない。
+struct StderrForwarder {
+    label: String,
+    pid: u32,
+    pending: Vec<u8>,
+    lines: usize,
+    /// 転送した行（テスト用。`None` なら記録しない）。
+    #[cfg(test)]
+    sent: Option<Vec<String>>,
+}
+
+impl StderrForwarder {
+    fn new(label: &str, pid: u32) -> Self {
+        Self {
+            label: label.to_owned(),
+            pid,
+            pending: Vec::new(),
+            lines: 0,
+            #[cfg(test)]
+            sent: None,
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) {
+        self.pending.extend_from_slice(chunk);
+        while let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=pos).collect();
+            self.emit(&line[..line.len() - 1]);
+        }
+        // 改行のない長い出力は、ためすぎないうちに 1 行として出す。
+        if self.pending.len() > STDERR_LOG_LINE_BYTES * 4 {
+            let line = std::mem::take(&mut self.pending);
+            self.emit(&line);
+        }
+    }
+
+    fn finish(&mut self) {
+        if !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            self.emit(&line);
+        }
+    }
+
+    fn emit(&mut self, line: &[u8]) {
+        let text = String::from_utf8_lossy(line);
+        let mut text = text.trim_end_matches('\r').to_owned();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.lines += 1;
+        if self.lines > STDERR_LOG_LINES + 1 {
+            return;
+        }
+        if self.lines == STDERR_LOG_LINES + 1 {
+            text = format!(
+                "（このワーカーの標準エラー出力は {STDERR_LOG_LINES} 行を超えたので、以降はログに残しません。\
+                 異常終了の記録には末尾を付けます）"
+            );
+        } else if text.len() > STDERR_LOG_LINE_BYTES {
+            let mut cut = STDERR_LOG_LINE_BYTES;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+            text.push('…');
+        }
+        tracing::info!(
+            target: "genzo_worker::stderr",
+            worker = %self.label,
+            pid = self.pid,
+            "{text}"
+        );
+        #[cfg(test)]
+        if let Some(sent) = self.sent.as_mut() {
+            sent.push(text);
+        }
+    }
 }
 
 /// 1 つのワーカープロセスとのやり取りを管理する。
@@ -994,9 +1097,10 @@ impl WorkerClient {
             .name(format!("genzo-worker-{}-stdout", self.label))
             .spawn(move || read_stdout(stdout, tx))
             .map_err(|e| spawn_err(format!("読み取りのスレッドを作れない: {e}")))?;
+        let forward = StderrForwarder::new(&self.label, proc.pid);
         thread::Builder::new()
             .name(format!("genzo-worker-{}-stderr", self.label))
-            .spawn(move || read_stderr(stderr, tail, done_tx))
+            .spawn(move || read_stderr(stderr, tail, done_tx, forward))
             .map_err(|e| spawn_err(format!("読み取りのスレッドを作れない: {e}")))?;
 
         let request = Request {
@@ -1043,7 +1147,10 @@ impl WorkerClient {
     /// 起動していなければ起動する。
     fn ensure_running(&mut self) -> Result<(), WorkerClientError> {
         if self.process.is_none() {
-            self.process = Some(self.start()?);
+            let started = self.start().inspect_err(|e| {
+                tracing::warn!(worker = %self.label, error = %e, "ワーカーを起動できません");
+            })?;
+            self.process = Some(started);
         }
         Ok(())
     }
@@ -1054,7 +1161,17 @@ impl WorkerClient {
             p.kill();
         }
         self.stats.restarts += 1;
-        self.process = self.start().ok();
+        self.process = match self.start() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(
+                    worker = %self.label,
+                    error = %e,
+                    "ワーカーを起動し直せません（次の依頼のときにもう一度試みます）"
+                );
+                None
+            }
+        };
     }
 
     /// ワーカーを再起動する（強制終了してから起動する）。
@@ -1078,6 +1195,8 @@ impl WorkerClient {
         }
         self.ensure_running()?;
         let kind = job.kind();
+        // 記録に使う（依頼を送ると job は手放す）。
+        let path = job.path().map(Path::to_path_buf);
         let timeout = self.config.timeouts.for_kind(kind);
         let id = self.next_id;
         self.next_id += 1;
@@ -1096,6 +1215,13 @@ impl WorkerClient {
             }
             Exchange::Timeout => {
                 self.stats.timeouts += 1;
+                tracing::warn!(
+                    worker = %self.label,
+                    job = ?kind,
+                    path = ?path,
+                    timeout = ?timeout,
+                    "ワーカーの応答がタイムアウトしたため、強制終了して起動し直します"
+                );
                 self.recycle();
                 Err(WorkerClientError::Timeout { kind, timeout })
             }
@@ -1114,8 +1240,17 @@ impl WorkerClient {
                 drop(p);
                 self.recycle();
                 let status = status.map_or_else(|| "不明".to_owned(), |s| s.to_string());
+                let detail = format!("{detail}。終了状態: {status}");
+                tracing::error!(
+                    worker = %self.label,
+                    job = ?kind,
+                    path = ?path,
+                    detail = %detail,
+                    stderr_tail = %stderr_tail,
+                    "ワーカーが異常終了しました（起動し直しました）"
+                );
                 Err(WorkerClientError::Crashed {
-                    detail: format!("{detail}。終了状態: {status}"),
+                    detail,
                     stderr_tail,
                 })
             }
@@ -1125,6 +1260,7 @@ impl WorkerClient {
 
     fn protocol_error<T>(&mut self, msg: String) -> Result<T, WorkerClientError> {
         self.stats.protocol_errors += 1;
+        tracing::warn!(worker = %self.label, error = %msg, "ワーカーの応答が不正なため、起動し直します");
         self.recycle();
         Err(WorkerClientError::Protocol(msg))
     }
@@ -1241,6 +1377,11 @@ impl WorkerClient {
     /// 検証に失敗したバッファ: 破棄し、ワーカーを再起動する。
     fn invalid_buffer<T>(&mut self, e: BufferError) -> Result<T, WorkerClientError> {
         self.stats.invalid_buffers += 1;
+        tracing::warn!(
+            worker = %self.label,
+            error = %e,
+            "ワーカーが返したバッファが不正なため、破棄して起動し直します"
+        );
         self.recycle();
         Err(WorkerClientError::InvalidBuffer(e))
     }
@@ -1574,6 +1715,52 @@ impl WorkerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn forwarder() -> StderrForwarder {
+        let mut f = StderrForwarder::new("batch-0", 42);
+        f.sent = Some(Vec::new());
+        f
+    }
+
+    #[test]
+    fn stderr_is_forwarded_line_by_line() {
+        let mut f = forwarder();
+        // 行の途中で読み取りが分かれても、行ごとに転送する。空の行・CR は転送しない。
+        f.feed(b"DSC00001.ARW: data corr");
+        f.feed(b"upted at 1234\r\n\n  \nthread 'main' panicked");
+        assert_eq!(
+            f.sent.as_deref().unwrap(),
+            ["DSC00001.ARW: data corrupted at 1234"]
+        );
+        // 最後の改行のない行は、読み終えたときに転送する。
+        f.finish();
+        assert_eq!(
+            f.sent.as_deref().unwrap(),
+            [
+                "DSC00001.ARW: data corrupted at 1234",
+                "thread 'main' panicked"
+            ]
+        );
+    }
+
+    #[test]
+    fn stderr_forwarding_is_limited_per_process() {
+        let mut f = forwarder();
+        for i in 0..STDERR_LOG_LINES + 10 {
+            f.feed(format!("警告 {i}\n").as_bytes());
+        }
+        let sent = f.sent.as_deref().unwrap();
+        assert_eq!(sent.len(), STDERR_LOG_LINES + 1);
+        assert_eq!(sent[0], "警告 0");
+        assert!(sent[STDERR_LOG_LINES].contains("以降はログに残しません"));
+        // 長い行は切る（文字の境目で）。改行のない長い出力もためすぎない。
+        let mut f = forwarder();
+        f.feed(&"あ".repeat(2000).into_bytes());
+        let sent = f.sent.as_deref().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].len() <= STDERR_LOG_LINE_BYTES + '…'.len_utf8());
+        assert!(sent[0].ends_with('…'));
+    }
 
     #[test]
     fn timeouts_by_kind() {

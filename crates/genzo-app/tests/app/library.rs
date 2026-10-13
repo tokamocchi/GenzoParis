@@ -275,3 +275,99 @@ pub fn previews_are_not_cached_long_when_settings_go_back() {
     ok(&state, json!({"type": "close_develop"}));
     state.close_catalog(false).unwrap();
 }
+
+/// (b) キーワード・コレクション・スマートコレクション（LIB-09〜11）の JSON のコマンドが、アプリの
+/// `core_execute` の経路（`execute_command`）で通り、カタログの変更のイベントが送り先に届く。
+pub fn keywords_and_collections_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("整理");
+    write_image(&photos.join("A.jpg"), (48, 32), 1);
+    write_image(&photos.join("B.jpg"), (48, 32), 2);
+    state.open_catalog(&env.catalog("整理.db"), true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let a = by_name(&items, "A.jpg").variant_id.get();
+    let b = by_name(&items, "B.jpg").variant_id.get();
+    let mark = env.events.mark();
+    let r = ok(
+        &state,
+        json!({"type": "add_keywords", "variant_ids": [a, b], "paths": [["場所", "京都"]]}),
+    );
+    assert!(matches!(r, Response::Updated { count: 2 }), "{r:?}");
+    env.events.wait_for(mark, "キーワードの変更", |e| {
+        matches!(
+            e,
+            Event::CatalogChanged {
+                change: CatalogChange::Keywords,
+                ..
+            }
+        )
+    });
+    let Response::Keywords { keywords } = ok(&state, json!({"type": "keyword_tree"})) else {
+        panic!("キーワードの一覧ではない");
+    };
+    let place = keywords
+        .iter()
+        .find(|k| k.name == "場所")
+        .unwrap()
+        .keyword_id;
+    let Response::CollectionCreated { collection_id } = ok(
+        &state,
+        json!({"type": "create_collection", "name": "お気に入り", "kind": "manual", "variant_ids": [a]}),
+    ) else {
+        panic!("コレクションを作った応答ではない");
+    };
+    let rule = json!({"version": 1, "match": "all", "rules": [
+        {"type": "keyword", "op": "has", "keyword_id": place},
+        {"type": "collection", "op": "not_in", "collection_id": collection_id}
+    ]});
+    let Response::CollectionCreated {
+        collection_id: smart,
+    } = ok(
+        &state,
+        json!({"type": "create_collection", "name": "まだ選んでいない京都", "kind": "smart", "rule": rule}),
+    )
+    else {
+        panic!("スマートコレクションを作った応答ではない");
+    };
+    // スマートコレクションで検索すると、B だけ（A はコレクションに入っている）。
+    let Response::Search(s) = ok(
+        &state,
+        json!({"type": "search", "filter": {"collection_id": smart}}),
+    ) else {
+        panic!("検索の応答ではない");
+    };
+    assert_eq!(s.count, 1);
+    let Response::Count { count } = ok(
+        &state,
+        json!({"type": "count", "filter": {"keywords": [place]}}),
+    ) else {
+        panic!("数の応答ではない");
+    };
+    assert_eq!(count, 2);
+    let Response::Collections { collections } =
+        ok(&state, json!({"type": "collections", "with_counts": true}))
+    else {
+        panic!("コレクションの一覧ではない");
+    };
+    assert_eq!(collections.len(), 2);
+    assert!(
+        collections.iter().all(|c| c.count == Some(1)),
+        "{collections:?}"
+    );
+    // 名前の重なりは conflict。
+    let err = crate::support::exec(
+        &state,
+        json!({"type": "create_collection", "name": "ＯＫＩＮＩＩＲＩ", "kind": "set"}),
+    );
+    assert!(err.is_ok(), "別の名前なら作れる");
+    crate::support::assert_kind(
+        crate::support::exec(
+            &state,
+            json!({"type": "create_collection", "name": "お気に入り", "kind": "set"}),
+        ),
+        genzo_api::ErrorKind::Conflict,
+    );
+    state.close_catalog(false).unwrap();
+}

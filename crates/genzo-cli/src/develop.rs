@@ -10,7 +10,10 @@
 //!   （genzo-model は知らない項目を無視するため、ここで確かめる）。
 //! - 設定の値の範囲は genzo-model の検証（`DevelopSettings::validate`）で確かめる。
 //! - `region` は写真を開いて（展開して）、表示範囲を描き（genzo-api の `render_region`。ルーペの等倍表示・
-//!   拡大とパンのコア API を試すため。implementation_status の No.52）、PNG に書く。
+//!   拡大とパンのコア API を試すため。implementation_status の No.52）、PNG に書く。`--before` でビフォーの
+//!   設定で描く（`render_before_region`。DEV-31）。
+//! - `before` は写真を開いて、ビフォー / アフターの表示のビフォー（DEV-31。genzo-api の `set_before`・
+//!   `render_before`）のプレビューを PNG に書く（`--after` でアフターも同じ寸法で書く）。
 //! - JSON の出力: `get` は設定そのもの（そのまま `set --replace` に渡せる）。`set`・`reset`・`undo`・
 //!   `redo` は `{"variant_id", "changed", "settings"}`（Undo / Redo できなければ `changed: false`、
 //!   `settings: null`。終了コードは 0）。
@@ -23,7 +26,9 @@ use genzo_api::{
 use serde_json::{Value, json};
 
 use crate::Status;
-use crate::args::{DevelopCommand, GlobalArgs, RegionArgs, RegionSpaceArg, setting_groups};
+use crate::args::{
+    BeforeArgs, DevelopCommand, GlobalArgs, RegionArgs, RegionSpaceArg, setting_groups,
+};
 use crate::error::{CliError, CliResult};
 use crate::library::{ensure_variants, unique_ids};
 use crate::output::{Output, Table, json_value};
@@ -62,6 +67,7 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
             crate::library::delete(g, out, DeleteKind::VirtualCopies, &[variant], true)
         }
         DevelopCommand::Region(a) => region(g, out, &a),
+        DevelopCommand::Before(a) => before(g, out, &a),
     }
 }
 
@@ -397,7 +403,13 @@ fn region(g: &GlobalArgs, out: Output, a: &RegionArgs) -> CliResult<Status> {
         height: a.height,
         scale: a.scale,
     };
-    let frame = s.core.render_region(&request);
+    let frame = match &a.before {
+        Some(source) => s
+            .core
+            .set_before(Some(source.clone()))
+            .and_then(|_| s.core.render_before_region(&request)),
+        None => s.core.render_region(&request),
+    };
     s.core.close_develop()?;
     s.close()?;
     let frame = frame?;
@@ -427,6 +439,87 @@ fn region(g: &GlobalArgs, out: Output, a: &RegionArgs) -> CliResult<Status> {
             info.full_width,
             info.full_height
         ));
+    }
+    Ok(Status::Success)
+}
+
+/// `develop before`: 写真を開いて、ビフォーのプレビュー（と `--after` ならアフターのプレビュー）を PNG に
+/// 書く（DEV-31）。
+fn before(g: &GlobalArgs, out: Output, a: &BeforeArgs) -> CliResult<Status> {
+    for p in std::iter::once(&a.out).chain(a.after.as_ref()) {
+        if p.exists() {
+            return Err(CliError::Usage(format!(
+                "{} は既にあります（上書きしません）",
+                p.display()
+            )));
+        }
+    }
+    if a.after.as_ref() == Some(&a.out) {
+        return Err(CliError::Usage(
+            "--out と --after に同じファイルを指定しています".to_owned(),
+        ));
+    }
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    ensure_variants(&s, &[a.variant])?;
+    s.core.open_develop(a.variant)?;
+    let rendered = (|| -> Result<_, genzo_api::ApiError> {
+        let info = s
+            .core
+            .set_before(Some(a.source.clone()))?
+            .ok_or_else(|| genzo_api::ApiError::Internal("ビフォーがない".to_owned()))?;
+        s.core.render_before()?;
+        let before = s
+            .core
+            .before_frame()
+            .ok_or_else(|| genzo_api::ApiError::Internal("ビフォーが描けていない".to_owned()))?;
+        let after = match &a.after {
+            Some(_) => {
+                s.core.render_develop()?;
+                s.core.develop_frame().map(|f| (f.info, f.display_rgb8))
+            }
+            None => None,
+        };
+        Ok((info, before, after))
+    })();
+    s.core.close_develop()?;
+    s.close()?;
+    let (info, before, after) = rendered?;
+    let png = |w: u32, h: u32, rgb: &[u8]| -> CliResult<Vec<u8>> {
+        let image = genzo_media::RgbImage8::from_raw(w, h, rgb.to_vec())
+            .map_err(|e| CliError::other(e.to_string()))?;
+        genzo_media::png_io::encode_png(&image, None, None)
+            .map_err(|e| CliError::other(e.to_string()))
+    };
+    write_new_file(
+        &a.out,
+        &png(before.info.width, before.info.height, &before.display_rgb8)?,
+    )?;
+    if let (Some(path), Some((ainfo, rgb))) = (&a.after, &after) {
+        write_new_file(path, &png(ainfo.width, ainfo.height, rgb)?)?;
+    }
+    if out.json {
+        out.print_json(&json!({
+            "path": a.out,
+            "before": info,
+            "frame": before.info,
+            "after": after.as_ref().map(|(i, _)| json!({ "path": a.after, "frame": i })),
+        }));
+    } else {
+        out.line(format!(
+            "ビフォー（{}）を書き出しました: {}（{}×{}）",
+            info.label,
+            a.out.display(),
+            before.info.width,
+            before.info.height
+        ));
+        if let (Some(path), Some((ainfo, _))) = (&a.after, &after) {
+            out.line(format!(
+                "アフターを書き出しました: {}（{}×{}）",
+                path.display(),
+                ainfo.width,
+                ainfo.height
+            ));
+        }
     }
     Ok(Status::Success)
 }

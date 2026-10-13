@@ -5,10 +5,12 @@ import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { MOCK_CRASH_REPORT, MOCK_LOG_STATUS } from "../api/mock";
 import type { AppStatus, CatalogStatus, DevelopSettings, ErrorInfo } from "../api/types";
 import { appStore } from "../state/app";
 import { CatalogErrorScreen } from "./CatalogErrorScreen";
 import { CloseFailedDialog } from "./CloseFailedDialog";
+import { CrashReportsDialog } from "./CrashReportsDialog";
 import { DeleteDialog } from "./DeleteDialog";
 import { Dialogs } from "./Dialogs";
 import { ExportDialog } from "./ExportDialog";
@@ -18,6 +20,7 @@ import { JobsIndicator } from "./JobsIndicator";
 import { PasteSettingsDialog } from "./PasteSettingsDialog";
 import { clearResults, recordResult } from "./resultLog";
 import { SettingsDialog } from "./SettingsDialog";
+import { SettingsSchema } from "./SettingsSchema";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { oneDriveNotice, WelcomeScreen } from "./WelcomeScreen";
 
@@ -37,6 +40,8 @@ const status: AppStatus = {
   default_catalog_in_onedrive: false,
   catalog: null,
   tools: { ffmpeg: null, ffprobe: null },
+  logs: MOCK_LOG_STATUS,
+  crash_reports: [],
 };
 
 const catalog: CatalogStatus = {
@@ -162,11 +167,52 @@ describe("ダイアログ", () => {
     expect(html).toContain("前回は正常に終了しませんでした");
   });
 
+  it("設定の一般: ログ・クラッシュレポート（SYS-07）", () => {
+    const html = render(createElement(SettingsDialog, { tab: "general" }));
+    expect(html).toContain("ログ・クラッシュレポート");
+    expect(html).toContain("外部へは送信しません");
+    expect(html).toContain(MOCK_LOG_STATUS.dir);
+    expect(html).toContain("ログのフォルダを開く");
+    expect(html).toContain("ログを消す");
+    // ログのフォルダが分からない・ファイルに書かない・初期化の問題。
+    appStore.set({
+      status: { ...status, logs: { dir: null, file: null, file_enabled: false, problems: ["ログのファイルを作れません"] } },
+    });
+    const off = render(createElement(SettingsDialog, { tab: "general" }));
+    expect(off).toContain("ログのフォルダが分かりません");
+    expect(off).toContain("GENZO_LOG_FILE=off");
+    expect(off).toContain("ログのファイルを作れません");
+  });
+
+  it("設定のカタログ: カタログの構造（ORG-07）", () => {
+    const html = render(createElement(SettingsDialog, { tab: "catalog" }));
+    expect(html).toContain("カタログの構造（SQL で直接読む）");
+    expect(html).toContain("photos_v1");
+    expect(html).toContain("読み取り専用");
+    expect(html).toContain(`sqlite3 -readonly &quot;${catalog.catalog_path}&quot;`);
+    expect(html).toContain("今のスキーマの版は 3 です");
+    expect(render(createElement(SettingsSchema, { catalogPath: "/c.db", schemaVersion: null }))).toContain("構造を表示");
+  });
+
+  it("前回の異常終了の知らせ", () => {
+    const html = render(createElement(CrashReportsDialog, { reports: [MOCK_CRASH_REPORT] }));
+    expect(html).toContain("前回、GenzoParis が異常終了しました");
+    expect(html).toContain("index out of bounds");
+    expect(html).toContain("外部へは送信しません");
+    expect(html).toContain("ログのフォルダを開く");
+    const many = render(createElement(CrashReportsDialog, { reports: Array(7).fill(MOCK_CRASH_REPORT) }));
+    expect(many).toContain("7 回、異常終了しました");
+    expect(many).toContain("ほか 2 件");
+    appStore.set({ dialog: { kind: "crash_reports", reports: [MOCK_CRASH_REPORT] } });
+    expect(render(createElement(Dialogs))).toContain("前回、GenzoParis が異常終了しました");
+  });
+
   it("ショートカット", () => {
     const html = render(createElement(ShortcutsDialog));
     expect(html).toContain("ショートカット");
     expect(html).toContain("ルーペで開く");
-    expect(html).toContain("写真の情報の表示・非表示（ルーペ）");
+    expect(html).toContain("撮影情報の表示の切り替え（情報 1 → 情報 2 → なし。ルーペ・現像。項目は設定の「表示」）");
+    expect(html).toContain("ビフォー / アフター: 左右に並べる");
     expect(html).toContain("選択を表示中の 1 枚だけにする");
   });
 

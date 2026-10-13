@@ -17,28 +17,39 @@
 //! - 検索: [`Filter`]、[`Sort`]、[`Catalog::search`]、[`Catalog::variant_summaries`]、絞り込みの候補
 //!   （[`Catalog::facets`]）
 //! - 選別: [`Catalog::set_rating`]、[`Catalog::set_flag`]、[`Catalog::set_color_label`]
+//! - 階層キーワード（LIB-09）: [`Catalog::keyword_tree`]、[`Catalog::add_keywords`]、
+//!   [`Catalog::export_keywords`]
+//! - コレクション（LIB-10）・スマートコレクション（LIB-11）: [`Catalog::collections`]、
+//!   [`Catalog::create_collection`]、[`Catalog::add_to_collection`]、[`Filter::collection`]
+//! - 説明のメタデータ（LIB-15。タイトル・キャプション・作成者・著作権など）: [`Catalog::asset_metadata`]、
+//!   [`Catalog::set_asset_metadata`]（一括編集）、[`Catalog::metadata_summary`]
 //! - 現像設定・履歴: [`Catalog::save_develop`]、[`Catalog::apply_develop_to_many`]、
 //!   [`Catalog::save_develop_batch`]、[`Catalog::undo_develop`]、[`Catalog::redo_develop`]
 //! - 削除・ファイル操作: [`Catalog::remove_assets`]、[`Catalog::delete_virtual_copies`]、
 //!   [`Catalog::trash_plan`]、[`Catalog::plan_trash`]
 //! - 書き出しの原本の照合（6.4 節）: [`Catalog::files_in_folder`]、[`Catalog::files_named`]
 //! - バックアップ: [`Catalog::create_backup`]、[`restore_backup`]、[`Catalog::check_integrity`]
+//! - 構造（ORG-07）: [`Catalog::describe_schema`]、公開ビュー（[`PUBLIC_VIEWS`]）。文書は
+//!   docs/catalog_schema.md（実際のスキーマと食い違わないことをテストで確かめる）
 //! - キャッシュ: [`ThumbStore`]（L0）、[`PreviewCache`]（L1）
 //! - ハッシュ: [`FileFacts::read`]、[`quick_hash`]、[`full_hash`]
 
 mod backup;
 mod catalog;
+mod collection;
 mod develop;
 pub mod dummy;
 mod error;
 mod files;
 mod hash;
+mod iptc;
 mod keyword;
 mod library;
 mod preview_cache;
 mod register;
 mod schema;
 mod search;
+mod smart_sql;
 pub mod text;
 mod thumbs;
 mod util;
@@ -60,6 +71,7 @@ pub use catalog::{
     Catalog, ConnectionSettings, OpenOptions, OpenReport, PreviousShutdown,
     STATE_CAPTURE_TIME_RERESOLVE,
 };
+pub use collection::{Collection, MAX_COLLECTION_DEPTH, MAX_COLLECTION_NAME_CHARS};
 pub use develop::{
     DevelopState, HISTORY_LABEL_IMPORT, HISTORY_LABEL_VIRTUAL_COPY, HistoryEntry, Snapshot,
     VariantInfo,
@@ -73,7 +85,11 @@ pub use files::{
 pub use hash::{
     FileFacts, QUICK_HASH_CHUNK, full_hash, full_hash_reader, quick_hash, quick_hash_reader,
 };
-pub use keyword::{Keyword, KeywordMatch};
+pub use iptc::{MetadataFieldSummary, MetadataSummary};
+pub use keyword::{
+    KEYWORD_NAME_SEPARATORS, Keyword, KeywordMatch, KeywordNode, KeywordUsage, MAX_KEYWORD_DEPTH,
+    MAX_KEYWORD_NAME_CHARS,
+};
 pub use library::{AssetRecord, CatalogCounts};
 pub use preview_cache::{
     DEFAULT_PREVIEW_CAPACITY_BYTES, EvictionReport, PREVIEW_TEMP_FILE_MIN_AGE, PreviewCache,
@@ -85,7 +101,9 @@ pub use register::{
 };
 pub use schema::{
     BUSY_TIMEOUT, CACHE_SIZE_KIB, CATALOG_APPLICATION_ID, CATALOG_SCHEMA_VERSION,
-    THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, UTC_ONLY_SCHEMA_VERSION,
+    COLLECTIONS_SCHEMA_VERSION, ColumnInfo, IPTC_SCHEMA_VERSION, PUBLIC_VIEWS,
+    PUBLIC_VIEWS_SCHEMA_VERSION, STABLE_IDS_SCHEMA_VERSION, SchemaDescription, SchemaObject,
+    THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, TableInfo, UTC_ONLY_SCHEMA_VERSION,
 };
 pub use search::{Facets, Filter, FolderFilter, Sort, SortDirection, SortKey, VariantSummary};
 pub use thumbs::{ThumbStore, Thumbnail};

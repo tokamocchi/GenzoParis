@@ -211,6 +211,22 @@ export function ExportDialog(props: { variantIds: VariantId[] }) {
           </span>
         </label>
       </div>
+      <div className="field">
+        <label />
+        <label className="dlg-check" style={{ margin: 0 }}>
+          <input
+            type="checkbox"
+            checked={form.removeKeywords}
+            onChange={(e) => update({ removeKeywords: e.target.checked })}
+          />
+          <span>
+            キーワードを書き出さない
+            <span className="desc">
+              オフなら、付けたキーワードと上の階層を XMP（dc:subject）に書きます。キーワードごとに「書き出すファイルに含める」を外したものは書きません
+            </span>
+          </span>
+        </label>
+      </div>
 
       <div className="field">
         <label htmlFor="export-conflict">同じ名前があるとき</label>

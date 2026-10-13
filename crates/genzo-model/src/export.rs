@@ -127,6 +127,9 @@ pub struct ExportSettings {
     pub remove_gps: bool,
     /// 既存のファイルとの衝突の扱い。
     pub on_conflict: ConflictPolicy,
+    /// キーワード（LIB-09。XMP の `dc:subject`）を書かない（既定は書く。キーワードごとの「書き出しに
+    /// 含める」の印は、書くときに見る。決定事項ログ No.81）。
+    pub remove_keywords: bool,
 }
 
 /// 書き出しの設定の検証エラー。
@@ -172,6 +175,7 @@ mod tests {
         assert_eq!(s.size, ExportSize::Original);
         assert!(!s.remove_gps);
         assert_eq!(s.on_conflict, ConflictPolicy::Sequence);
+        assert!(!s.remove_keywords, "キーワードは既定で書く");
         s.validate().unwrap();
     }
 
@@ -183,17 +187,20 @@ mod tests {
             size: ExportSize::LongEdge(2048),
             remove_gps: true,
             on_conflict: ConflictPolicy::Skip,
+            remove_keywords: true,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(
             json,
-            r#"{"format":"png16","color_space":"display_p3","size":{"long_edge":2048},"remove_gps":true,"on_conflict":"skip"}"#
+            r#"{"format":"png16","color_space":"display_p3","size":{"long_edge":2048},"remove_gps":true,"on_conflict":"skip","remove_keywords":true}"#
         );
         assert_eq!(serde_json::from_str::<ExportSettings>(&json).unwrap(), s);
         let partial: ExportSettings =
             serde_json::from_str(r#"{"format":{"jpeg":{"quality":75}}}"#).unwrap();
         assert_eq!(partial.format, ExportFormat::Jpeg { quality: 75 });
         assert_eq!(partial.on_conflict, ConflictPolicy::Sequence);
+        // remove_keywords のない古い形の JSON は、キーワードを書く設定として読む。
+        assert!(!partial.remove_keywords);
     }
 
     #[test]

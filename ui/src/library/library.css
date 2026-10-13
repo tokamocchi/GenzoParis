@@ -499,6 +499,49 @@
   min-height: 64px;
   resize: vertical;
 }
+
+/* 説明のメタデータ（LIB-15） */
+.lib-iptc {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lib-iptc-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: center;
+  gap: 2px 8px;
+  font-size: 12px;
+}
+.lib-iptc-row.multiline {
+  align-items: start;
+}
+.lib-iptc-row > .label {
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.lib-iptc-row > .label .saving {
+  display: block;
+  color: var(--fg-2);
+  font-size: 11px;
+}
+.lib-iptc-row > input,
+.lib-iptc-row > select,
+.lib-iptc-row > textarea {
+  min-width: 0;
+  width: 100%;
+}
+.lib-iptc-row > textarea.lib-caption {
+  min-height: 40px;
+}
+.lib-iptc-row > .error-text {
+  grid-column: 2;
+  font-size: 11px;
+}
+.lib-meta-note {
+  margin: 6px 10px;
+  font-size: 11px;
+}
 .lib-files {
   list-style: none;
   margin: 0;
@@ -529,4 +572,197 @@
 }
 .lib-meta .status-error {
   color: var(--danger);
+}
+.lib-meta-batch.stale {
+  opacity: 0.55;
+}
+
+/* ------------------------------------------------------------------ キーワード・コレクション（LIB-09〜11） */
+
+.lib-organize-filter {
+  width: 100%;
+  margin-bottom: 4px;
+}
+.lib-organize-row {
+  gap: 2px;
+}
+.lib-organize-row.drop-over {
+  background: var(--bg-4);
+  outline: 1px solid var(--accent);
+}
+.lib-organize-row.drop-no {
+  outline: 1px dashed var(--warn);
+}
+.lib-organize-name {
+  flex: 1 1 auto;
+}
+.lib-organize-note {
+  color: var(--fg-3);
+}
+.lib-organize-icon {
+  flex: none;
+  width: 16px;
+  color: var(--fg-2);
+  font-size: 11px;
+  text-align: center;
+}
+.lib-organize-count {
+  flex: none;
+  min-width: 2em;
+  color: var(--fg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.lib-organize-count.warn {
+  color: var(--warn);
+}
+.lib-organize-target {
+  flex: none;
+  color: var(--accent);
+  font-size: 12px;
+}
+.lib-organize-row .menu-button {
+  flex: none;
+  visibility: hidden;
+  padding: 0 4px;
+}
+.lib-organize-row:hover .menu-button,
+.lib-organize-row .menu-button:focus-visible,
+.lib-organize-row .menu-button[aria-expanded="true"] {
+  visibility: visible;
+}
+.lib-tag-box {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0 4px 0 0;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--fg-0);
+  font-size: 11px;
+  line-height: 14px;
+  cursor: pointer;
+}
+.lib-tag-box.all {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.lib-tag-box.some {
+  color: var(--fg-2);
+}
+.lib-tag-box:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 右のパネルのキーワードの欄（KeywordEditor） */
+.lib-keyword-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+.lib-keyword-chips li {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-2);
+}
+.lib-keyword-chips li.partial {
+  border-style: dashed;
+  color: var(--fg-2);
+}
+.lib-keyword-chips .name {
+  padding: 1px 4px 1px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lib-keyword-chips .name.link {
+  cursor: pointer;
+}
+.lib-keyword-chips .name.link:hover {
+  text-decoration: underline;
+}
+.lib-keyword-chips .note {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.lib-keyword-chips .remove {
+  padding: 0 6px 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.lib-keyword-chips .remove:hover:not(:disabled) {
+  color: var(--fg-0);
+}
+.lib-keyword-input {
+  position: relative;
+}
+.lib-keyword-input input {
+  width: 100%;
+}
+.lib-keyword-hits {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin: 2px 0 0;
+  padding: 2px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  list-style: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+.lib-keyword-hits li {
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lib-keyword-hits li:hover,
+.lib-keyword-hits li.active {
+  background: var(--bg-3);
+}
+
+/* 絞り込みの札（FilterBar の OrganizeChips） */
+.lib-organize-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.lib-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 240px;
+  padding: 1px 2px 1px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  color: var(--fg-0);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lib-chip button {
+  border: none;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.lib-chip button:hover {
+  color: var(--fg-0);
 }

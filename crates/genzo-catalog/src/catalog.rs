@@ -273,6 +273,11 @@ impl Catalog {
         schema::user_version(&self.conn)
     }
 
+    /// カタログの構造（表・列・索引・ビュー・トリガー。ORG-07）。読むだけ。
+    pub fn describe_schema(&self) -> Result<schema::SchemaDescription> {
+        schema::describe_schema(&self.conn)
+    }
+
     /// 接続の設定を読む（テスト・診断用）。
     pub fn connection_settings(&self) -> Result<ConnectionSettings> {
         connection_settings(&self.conn)

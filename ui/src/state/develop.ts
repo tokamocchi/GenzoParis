@@ -9,12 +9,26 @@
 // 同時に送ると順序が入れ替わりうる（古い値が最新になってしまう）。そこで送信を 1 本の列にし、送信中に
 // 来た値は「最新の 1 つ」だけを残して、前の送信が終わってから送る。ドラッグの終了（end_drag）・
 // Undo / Redo も同じ列に入れて、順序を保つ。
+//
+// # ビフォー / アフター（DEV-31）
+//
+// ビフォーはコアの現像のセッションが持つ（set_before）。設定も同じ列で送り（写真を開いた後・設定の送信の後に
+// 届くように）、描けたら before_updated で知らせが来るので、before_frame で画素を取る。写真を開き直すと
+// コアのビフォーはやめた状態に戻るので、画面（DevelopView）は写真ごとに設定し直す。
 
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
 import { onCoreEvent } from "../api/events";
-import { type Frame, fetchDevelopFrame } from "../api/frames";
-import type { DevelopSettings, DevelopState, ErrorInfo, FrameInfo, VariantId } from "../api/types";
+import { type Frame, fetchBeforeFrame, fetchDevelopFrame } from "../api/frames";
+import type {
+  BeforeInfo,
+  BeforeSource,
+  DevelopSettings,
+  DevelopState,
+  ErrorInfo,
+  FrameInfo,
+  VariantId,
+} from "../api/types";
 import { createStore, useStore } from "./store";
 
 export interface DevelopStoreState {
@@ -30,6 +44,10 @@ export interface DevelopStoreState {
   frame: Frame<FrameInfo> | null;
   /** 履歴を読み直す合図。 */
   historyVersion: number;
+  /** ビフォー / アフターの表示のビフォー（DEV-31。設定していなければ null）。 */
+  before: BeforeInfo | null;
+  /** ビフォーの最新のプレビュー。 */
+  beforeFrame: Frame<FrameInfo> | null;
 }
 
 export const developStore = createStore<DevelopStoreState>({
@@ -40,6 +58,8 @@ export const developStore = createStore<DevelopStoreState>({
   error: null,
   frame: null,
   historyVersion: 0,
+  before: null,
+  beforeFrame: null,
 });
 
 export function useDevelop<T>(selector: (s: DevelopStoreState) => T, equal?: (a: T, b: T) => boolean): T {
@@ -66,6 +86,8 @@ export function openDevelopFor(variantId: VariantId): Promise<DevelopState | nul
     opening: true,
     error: null,
     frame: null,
+    before: null,
+    beforeFrame: null,
   });
   // 前の写真の送信待ちの値（送信中に来た最新の値）は、捨てずに列の後ろへ移して前の写真に送る（列が空いて
   // から開くので、別の写真には届かない）。
@@ -76,7 +98,7 @@ export function openDevelopFor(variantId: VariantId): Promise<DevelopState | nul
     try {
       const state = await core.openDevelop(variantId);
       if (seq !== openSeq) return null;
-      developStore.set({ state, settings: state.settings, opening: false });
+      developStore.set({ state, settings: state.settings, opening: false, before: state.before ?? null });
       void refreshFrame();
       return state;
     } catch (e) {
@@ -100,7 +122,16 @@ export async function closeDevelopSession(): Promise<void> {
   // 送信待ちの最新の値は、閉じる前に送る（コアは閉じるときに保存する）。
   flushPending();
   await queueIdle();
-  developStore.set({ variantId: null, state: null, settings: null, opening: false, error: null, frame: null });
+  developStore.set({
+    variantId: null,
+    state: null,
+    settings: null,
+    opening: false,
+    error: null,
+    frame: null,
+    before: null,
+    beforeFrame: null,
+  });
   try {
     await core.closeDevelop();
   } catch (e) {
@@ -176,7 +207,7 @@ async function runOp(op: Op): Promise<void> {
       break;
     case "end_drag": {
       const state = await core.endDrag();
-      developStore.set((s) => ({ state, historyVersion: s.historyVersion + 1 }));
+      developStore.set((s) => ({ state, before: beforeOf(state, s), historyVersion: s.historyVersion + 1 }));
       break;
     }
     case "call":
@@ -243,6 +274,7 @@ export function undo(): Promise<void> {
     developStore.set((s) => ({
       settings: settings ?? s.settings,
       state: state ?? s.state,
+      before: beforeOf(state, s),
       historyVersion: s.historyVersion + 1,
     }));
   });
@@ -258,6 +290,7 @@ export function redo(): Promise<void> {
     developStore.set((s) => ({
       settings: settings ?? s.settings,
       state: state ?? s.state,
+      before: beforeOf(state, s),
       historyVersion: s.historyVersion + 1,
     }));
   });
@@ -274,6 +307,7 @@ export function reloadState(): Promise<void> {
     developStore.set((s) => ({
       state,
       settings: busy ? s.settings : state.settings,
+      before: beforeOf(state, s),
       historyVersion: s.historyVersion + 1,
     }));
   });
@@ -311,6 +345,76 @@ export async function refreshFrame(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// ビフォー / アフター（DEV-31）
+// ---------------------------------------------------------------------------
+
+/**
+ * コアの状態のビフォー（開いている写真の状態のときだけ。古いコアで無ければ今の値のまま）。切り抜き・角度を
+ * Undo などで変えると、コアはビフォーを描き直して世代を進める。
+ */
+function beforeOf(state: DevelopState | null, s: DevelopStoreState): BeforeInfo | null {
+  if (!state || state.variant_id !== s.variantId || state.before === undefined) return s.before;
+  return state.before;
+}
+
+/**
+ * ビフォーを設定する（null でやめる。設定の送信の列の後ろで）。開いている写真が変わっていたら何もしない。
+ * 失敗したら知らせずに例外を返す（呼び出し側が知らせる）。
+ */
+export function setBeforeSource(source: BeforeSource | null): Promise<void> {
+  return enqueue(async () => {
+    const id = developStore.get().variantId;
+    if (id === null || !developStore.get().state) return;
+    const info = await core.setBefore(source);
+    if (developStore.get().variantId !== id) return;
+    developStore.set((s) => ({
+      before: info,
+      // やめたら画素も捨てる。出どころを変えたら、新しいビフォーが届くまで前の画素を出しておく（描画中の印は
+      // 世代の違いで出す。beforePending）。
+      beforeFrame: info ? s.beforeFrame : null,
+    }));
+    if (info) void refreshBeforeFrame();
+  });
+}
+
+/** 新しいビフォーを描いている途中か（設定したビフォーの世代の画素がまだ届いていない）。 */
+export function beforePending(s: Pick<DevelopStoreState, "before" | "beforeFrame" | "variantId">): boolean {
+  if (!s.before) return false;
+  const f = s.beforeFrame;
+  return !f || f.header.variant_id !== s.variantId || f.header.generation < s.before.generation;
+}
+
+let fetchingBefore = false;
+let fetchBeforeAgain = false;
+
+/** ビフォーの最新のプレビューを取りにいく（取得中に更新が来たら、終わってからもう一度）。 */
+export async function refreshBeforeFrame(): Promise<void> {
+  if (fetchingBefore) {
+    fetchBeforeAgain = true;
+    return;
+  }
+  fetchingBefore = true;
+  try {
+    do {
+      fetchBeforeAgain = false;
+      const frame = await fetchBeforeFrame();
+      const s = developStore.get();
+      if (frame && s.before && frame.header.variant_id === s.variantId) {
+        const cur = s.beforeFrame;
+        if (!cur || cur.header.variant_id !== s.variantId || frame.header.generation >= cur.header.generation) {
+          developStore.set({ beforeFrame: frame });
+        }
+      }
+    } while (fetchBeforeAgain);
+  } catch (e) {
+    const err = toApiError(e);
+    if (err.kind !== "cancelled" && err.kind !== "closed") console.error("ビフォーを取得できません", err.info);
+  } finally {
+    fetchingBefore = false;
+  }
+}
+
 let installed = false;
 
 /** プレビューの更新・カタログの変更のイベントを受け取る（起動時に 1 回）。 */
@@ -320,6 +424,9 @@ export function installDevelopEvents(): void {
   onCoreEvent((e) => {
     if (e.type === "preview_updated" && e.variant_id === developStore.get().variantId) {
       void refreshFrame();
+    }
+    if (e.type === "before_updated" && e.variant_id === developStore.get().variantId && developStore.get().before) {
+      void refreshBeforeFrame();
     }
     if (
       e.type === "catalog_changed" &&

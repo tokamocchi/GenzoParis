@@ -4,6 +4,7 @@
 //!
 //! | IFD | タグ | 値 |
 //! |---|---|---|
+//! | 0th | ImageDescription (0x010E)・Artist (0x013B)・Copyright (0x8298) | キャプション・作成者・著作権表示（LIB-15。**ASCII で表せる値だけ**） |
 //! | 0th | Make (0x010F)・Model (0x0110) | カメラ |
 //! | 0th | Orientation (0x0112) | **常に 1**（現像で向きを画素に反映済みのため） |
 //! | 0th | XResolution・YResolution・ResolutionUnit | [`EXPORT_RESOLUTION_PPI`] ppi |
@@ -16,11 +17,16 @@
 //! | GPS | GPSVersionID・緯度・経度 | **`remove_gps = false` のときだけ** 書く |
 //!
 //! ASCII のタグは、7bit の印字可能な文字以外を `?` に置き換え、[`EXIF_MAX_ASCII_CHARS`] 文字で切る
-//! （Exif の ASCII 型は 7bit の文字だけを許すため）。
+//! （Exif の ASCII 型は 7bit の文字だけを許すため）。ただし利用者が書いた説明のメタデータ（キャプション・
+//! 作成者・著作権表示）は、置き換えると別の文字列になってしまうので、7bit の印字可能な文字と改行だけで
+//! できているときだけ書き（切らない）、それ以外（日本語など）は書かない（XMP には書く。
+//! [`crate::xmp_write`]。決定事項ログ No.78）。
 
 use chrono::{FixedOffset, NaiveDateTime, Timelike};
 use genzo_model::capture_time::{format_offset, parse_datetime, parse_offset};
-use genzo_model::{CaptureTime, GpsCoord, OutputColorSpace, PhotoMetadata, TzSource};
+use genzo_model::{
+    CaptureTime, GpsCoord, IptcMetadata, MetadataField, OutputColorSpace, PhotoMetadata, TzSource,
+};
 
 use crate::error::{MediaError, Result};
 
@@ -48,6 +54,7 @@ const GPS_VERSION: [u8; 4] = [2, 3, 0, 0];
 
 /// タグの番号。
 pub(crate) mod tag {
+    pub const IMAGE_DESCRIPTION: u16 = 0x010E;
     pub const MAKE: u16 = 0x010F;
     pub const MODEL: u16 = 0x0110;
     pub const ORIENTATION: u16 = 0x0112;
@@ -55,6 +62,8 @@ pub(crate) mod tag {
     pub const Y_RESOLUTION: u16 = 0x011B;
     pub const RESOLUTION_UNIT: u16 = 0x0128;
     pub const SOFTWARE: u16 = 0x0131;
+    pub const ARTIST: u16 = 0x013B;
+    pub const COPYRIGHT: u16 = 0x8298;
     pub const EXIF_IFD: u16 = 0x8769;
     pub const GPS_IFD: u16 = 0x8825;
 
@@ -106,6 +115,13 @@ pub struct ExifData {
     pub focal_length_mm: Option<f64>,
     /// GPS の座標。
     pub gps: Option<GpsCoord>,
+    /// カタログの中で編集した説明のメタデータ（LIB-15。タイトル・キャプション・作成者・著作権など）。
+    /// Exif には ASCII で表せるキャプション・作成者・著作権表示だけを書き、すべての項目は XMP に書く
+    /// （[`crate::xmp_write`]。書き出しの関数が XMP も入れる）。
+    pub descriptive: IptcMetadata,
+    /// 書き出すキーワード（LIB-09。XMP の `dc:subject` に書く。Exif には書かない）。カタログの
+    /// `Catalog::export_keywords` の値（付いているキーワードと親のうち、書き出しに含めるもの）。
+    pub keywords: Vec<String>,
 }
 
 impl ExifData {
@@ -140,7 +156,21 @@ impl ExifData {
             iso: meta.iso,
             focal_length_mm: meta.focal_mm.map(f64::from),
             gps: meta.gps,
+            descriptive: IptcMetadata::default(),
+            keywords: Vec::new(),
         }
+    }
+
+    /// カタログの説明のメタデータ（LIB-15）を入れる。
+    pub fn with_descriptive(mut self, meta: IptcMetadata) -> Self {
+        self.descriptive = meta;
+        self
+    }
+
+    /// 書き出すキーワード（LIB-09。XMP の `dc:subject`）を入れる。
+    pub fn with_keywords(mut self, keywords: Vec<String>) -> Self {
+        self.keywords = keywords;
+        self
     }
 
     /// カタログの撮影日時（時計のずれ・タイムゾーンの補正後。LIB-16）で、撮影日時を置き換える。
@@ -169,6 +199,12 @@ impl ExifData {
     /// GPS の情報を除く（EXP-04・SEC-03）。
     pub fn without_gps(mut self) -> Self {
         self.gps = None;
+        self
+    }
+
+    /// キーワードを除く（書き出しの設定の `remove_keywords`。LIB-09）。
+    pub fn without_keywords(mut self) -> Self {
+        self.keywords.clear();
         self
     }
 }
@@ -302,6 +338,15 @@ pub(crate) fn sanitize_ascii(s: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// 利用者が書いた説明のメタデータを Exif の ASCII にする（前後の空白を除いた値が 7bit の印字可能な
+/// 文字と改行だけでできていれば、そのまま。それ以外の文字を含めば書かない（`None`）。置き換えや切り詰めは
+/// しない）。
+pub(crate) fn exact_ascii(s: &str) -> Option<String> {
+    let t = s.trim();
+    let ok = !t.is_empty() && t.chars().all(|c| (' '..='~').contains(&c) || c == '\n');
+    ok.then(|| t.to_owned())
+}
+
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         (a, b) = (b, a % b);
@@ -376,6 +421,19 @@ pub(crate) fn build_ifds(data: &ExifData, info: &ExifImageInfo) -> ExifIfds {
         tag: tag::ORIENTATION,
         value: Value::Short(vec![1]),
     });
+    // 説明のメタデータ（LIB-15。ASCII で表せる値だけ。exact_ascii）。
+    for (field, t) in [
+        (MetadataField::Caption, tag::IMAGE_DESCRIPTION),
+        (MetadataField::Creator, tag::ARTIST),
+        (MetadataField::Copyright, tag::COPYRIGHT),
+    ] {
+        if let Some(v) = data.descriptive.get(field).and_then(exact_ascii) {
+            ifd0.push(Entry {
+                tag: t,
+                value: Value::Ascii(v),
+            });
+        }
+    }
     for t in [tag::X_RESOLUTION, tag::Y_RESOLUTION] {
         ifd0.push(Entry {
             tag: t,
@@ -671,6 +729,38 @@ mod tests {
             exif::Value::Rational(v) => v.iter().map(|r| (r.num, r.denom)).collect(),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn descriptive_metadata_is_written_only_when_it_is_ascii() {
+        let data = ExifData::from_photo_metadata(&sample_meta()).with_descriptive(IptcMetadata {
+            caption: Some("Sunset over\nKyoto".to_owned()),
+            creator: Some("Taro Yamada".to_owned()),
+            copyright: Some("(C) 2024 山田太郎".to_owned()),
+            title: Some("Kiyomizu".to_owned()),
+            ..IptcMetadata::default()
+        });
+        for order in [ByteOrder::Big, ByteOrder::Little] {
+            let e = parse(encode_exif_tiff(&build_ifds(&data, &info()), order).unwrap());
+            assert_eq!(
+                ascii(&e, exif::Tag::ImageDescription).as_deref(),
+                Some("Sunset over\nKyoto")
+            );
+            assert_eq!(ascii(&e, exif::Tag::Artist).as_deref(), Some("Taro Yamada"));
+            // 日本語を含む値は、? に置き換えずに書かない（XMP に書く）。
+            assert!(
+                e.get_field(exif::Tag::Copyright, exif::In::PRIMARY)
+                    .is_none()
+            );
+        }
+        assert_eq!(exact_ascii("  abc  ").as_deref(), Some("abc"));
+        assert_eq!(exact_ascii("é"), None);
+        assert_eq!(exact_ascii("a\u{1}b"), None);
+        assert_eq!(exact_ascii("   "), None);
+        // 説明のメタデータがなければタグを書かない。
+        let plain = ExifData::from_photo_metadata(&sample_meta());
+        let e = parse(encode_exif_tiff(&build_ifds(&plain, &info()), ByteOrder::Big).unwrap());
+        assert!(e.get_field(exif::Tag::Artist, exif::In::PRIMARY).is_none());
     }
 
     #[test]

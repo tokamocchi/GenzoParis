@@ -9,6 +9,7 @@ use genzo_api::{
     ApiError, AssetKind, DeleteKind, DeletePlan, DeleteReport, FileStatus, Flag, JobResult, Rating,
     SearchFilter, SearchSort, VariantId, VariantSummary,
 };
+use genzo_model::MetadataField;
 use serde_json::json;
 
 use crate::Status;
@@ -128,6 +129,21 @@ fn filter_of(s: &Session, a: &SearchArgs) -> CliResult<SearchFilter> {
         Some(p) => Some(find_folder(s, p)?),
         None => None,
     };
+    // キーワード（パスか id:N。下の階層を含む）・保存していないスマートコレクションの条件（LIB-09・LIB-11）。
+    let keywords = if a.keyword.is_empty() {
+        Vec::new()
+    } else {
+        let list = s.core.keyword_tree()?;
+        a.keyword
+            .iter()
+            .map(|k| crate::organize::resolve_keyword(&list, k))
+            .collect::<CliResult<Vec<_>>>()?
+    };
+    let smart_rule = a
+        .rule
+        .as_deref()
+        .map(crate::organize::read_rule)
+        .transpose()?;
     Ok(SearchFilter {
         rating_min: a.min_rating.and_then(Rating::new),
         rating_max: a.max_rating.and_then(Rating::new),
@@ -158,6 +174,9 @@ fn filter_of(s: &Session, a: &SearchArgs) -> CliResult<SearchFilter> {
         folder_id,
         include_subfolders: !a.no_subfolders,
         masters_only: a.masters_only,
+        keywords,
+        collection_id: a.collection,
+        smart_rule,
         ..Default::default()
     })
 }
@@ -365,8 +384,16 @@ pub fn show(g: &GlobalArgs, out: Output, variant: VariantId) -> CliResult<Status
             opt(details.gps.map(|g| format!("{:.6}, {:.6}", g.lat, g.lon))),
         ),
         ("キャプション", opt(details.caption.clone())),
-        ("現像の履歴", format!("{} 件", history.len())),
     ];
+    // 説明のメタデータ（LIB-15。値のある項目だけ。キャプションは上）。
+    items.extend(
+        details
+            .metadata
+            .entries()
+            .filter(|(f, _)| *f != MetadataField::Caption)
+            .map(|(f, v)| (f.label(), v.to_owned())),
+    );
+    items.push(("現像の履歴", format!("{} 件", history.len())));
     if let Some(video) = &details.video {
         items.extend(video_items(video));
     }
@@ -469,6 +496,62 @@ pub fn caption(g: &GlobalArgs, out: Output, v: VariantId, text: &str) -> CliResu
     let n = s.core.set_caption(&[v], caption)?;
     s.close()?;
     print_updated(out, n);
+    Ok(Status::Success)
+}
+
+/// `metadata`（説明のメタデータ。LIB-15）: `--set`・`--clear` があれば一括で変え、なければ項目ごとの値を
+/// 表示する（写真によって異なれば「複数の値」）。
+pub fn metadata(
+    g: &GlobalArgs,
+    out: Output,
+    ids: &[VariantId],
+    set: Vec<(MetadataField, String)>,
+    clear: Vec<MetadataField>,
+) -> CliResult<Status> {
+    let ids = unique_ids(ids);
+    if let Some(f) = clear.iter().find(|f| set.iter().any(|(s, _)| s == *f)) {
+        return Err(CliError::Usage(format!(
+            "同じ項目（{f}）に --set と --clear を指定しています"
+        )));
+    }
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    ensure_variants(&s, &ids)?;
+    if set.is_empty() && clear.is_empty() {
+        let summary = s.core.metadata_summary(&ids);
+        s.close()?;
+        let summary = summary?;
+        if out.json {
+            out.print_json(&json!(summary));
+        } else {
+            let items: Vec<(&str, String)> = summary
+                .fields
+                .iter()
+                .map(|f| {
+                    let v = if f.mixed {
+                        "（複数の値）".to_owned()
+                    } else {
+                        f.value.clone().unwrap_or_else(|| "—".to_owned())
+                    };
+                    (f.field.label(), v)
+                })
+                .collect();
+            out.line(format!(
+                "{} 枚（元の写真 {} 件）",
+                ids.len(),
+                summary.assets
+            ));
+            out.line(key_values(&items).trim_end());
+        }
+        return Ok(Status::Success);
+    }
+    let changes: Vec<(MetadataField, Option<String>)> = set
+        .into_iter()
+        .map(|(f, v)| (f, Some(v)))
+        .chain(clear.into_iter().map(|f| (f, None)))
+        .collect();
+    let n = s.core.set_metadata(&ids, &changes);
+    s.close()?;
+    print_updated(out, n?);
     Ok(Status::Success)
 }
 

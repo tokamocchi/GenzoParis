@@ -1,5 +1,6 @@
 // 設定の「カタログ」（SYS-05）: カタログに保存する設定（キャッシュの場所と上限・既定の書き出しの色空間・
-// 既定のタイムゾーン）、カタログの情報、カタログの切り替え、キャッシュの整理。
+// 既定のタイムゾーン）、カタログの情報、カタログの構造（ORG-07。SettingsSchema）、カタログの切り替え、
+// キャッシュの整理。
 
 import { useEffect, useRef, useState } from "react";
 
@@ -14,6 +15,7 @@ import { COLOR_SPACE_OPTIONS } from "./exportLogic";
 import { chooseFolder } from "./native";
 import { useNewCatalogPicker } from "./NewCatalogPicker";
 import { Busy, ErrorBox, PathBox } from "./parts";
+import { SettingsSchema } from "./SettingsSchema";
 import {
   type CatalogSettingsForm,
   catalogSettingsForm,
@@ -298,6 +300,8 @@ export function SettingsCatalog() {
           </dd>
         </dl>
       </div>
+
+      <SettingsSchema catalogPath={catalog.catalog_path} schemaVersion={stats?.schema_version ?? null} />
 
       <div className="dlg-section">
         <h3>カタログの切り替え</h3>

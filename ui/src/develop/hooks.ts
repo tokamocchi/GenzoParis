@@ -65,11 +65,22 @@ export function useLoadedSummary<T extends string | number | boolean | null>(
   id: VariantId | null,
   pick: (s: VariantSummary) => T,
 ): T | undefined {
-  return useSyncExternalStore(searchCache.subscribe, () => {
+  const get = () => {
     if (id === null) return undefined;
     const s = loadedSummary(id);
     return s ? pick(s) : undefined;
-  });
+  };
+  // サーバーでの描画（画面のテストの react-dom/server）にも同じ値を返す。
+  return useSyncExternalStore(searchCache.subscribe, get, get);
+}
+
+/**
+ * 検索結果のキャッシュに読み込み済みの、写真の概要（撮影情報の表示用。LIB-17）。キャッシュの更新（version）
+ * までは同じオブジェクトを返すので、ページが届くたびに描き直しすぎない。
+ */
+export function useLoadedSummaryObject(id: VariantId | null): VariantSummary | undefined {
+  const get = () => (id === null ? undefined : loadedSummary(id));
+  return useSyncExternalStore(searchCache.subscribe, get, get);
 }
 
 /**

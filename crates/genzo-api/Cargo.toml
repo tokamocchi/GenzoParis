@@ -53,6 +53,9 @@ crossbeam-channel.workspace = true
 parking_lot.workspace = true
 # GPU から CPU への切り替えなどの記録。
 tracing.workspace = true
+# ログのファイル・標準エラーへの出力（`logging`。SYS-07。アプリと CLI が使う。workspace の依存で、新しい
+# crate は増えない）。
+tracing-subscriber.workspace = true
 # 取り込みで、大文字・小文字だけが違う名前のフォルダが同じものかを確かめる（ファイルの識別子で比べる。F08）。
 same-file.workspace = true
 

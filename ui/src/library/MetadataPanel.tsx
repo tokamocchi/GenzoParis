@@ -5,22 +5,27 @@
 //   止める（前の写真の値で、新しい対象を変えないように）。
 // - 評価・フラグ・ラベルは actions.setRating などで付ける（グリッドでは選択中のすべて、ルーペでは表示中の
 //   1 枚。actions.targets）。グリッドで複数を選んでいるときは「N 件を選択」と、まとめて付ける操作を出す。
-// - キャプションは操作の対象の 1 枚に付ける。フォーカスを外したとき・Ctrl / ⌘ ＋ Enter で保存する
-//   （IME の変換を確定する Enter では保存しない）。空なら削除（null）。
+// - 説明のメタデータ（LIB-15。タイトル・キャプション・作成者・著作権・撮影場所など。MetadataEditor）:
+//   1 枚のときは操作の対象の 1 枚に、グリッドで複数を選んでいるときは選択中のすべてに書く（まとめは
+//   core.metadataSummary。写真によって値が異なる項目は「（複数の値）」）。保存の決まりは MetadataEditor の doc。
+// - キーワード（LIB-09。KeywordEditor）: 1 枚のときは操作の対象の 1 枚、グリッドで複数を選んでいるときは
+//   選択中のすべてに付ける・外す。1 枚のときは、入っているコレクション（LIB-10）も出す。
 
 import { useEffect, useRef, useState } from "react";
 
 import * as appApi from "../api/app";
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
-import type { ColorLabel, Flag, VariantDetails, VariantId, VariantSummary } from "../api/types";
+import type { ColorLabel, Flag, MetadataSummary, VariantDetails, VariantId, VariantSummary } from "../api/types";
 import { FlagMark, LabelDot, Stars } from "../components/Marks";
 import { Section } from "../components/Section";
 import { COLOR_LABEL_NAMES, formatAperture, formatBytes, formatCaptureTime, formatFocal, formatShutter } from "../format";
 import { comboLabel } from "../keyboard";
 import { actions, useApp } from "../state/app";
-import { registerFlush } from "../state/flush";
+import { KeywordEditor, PhotoCollections } from "./KeywordEditor";
 import "./library.css";
+import { MetadataEditor, MetadataHelp } from "./MetadataEditor";
+import { batchNote, idsKey, statesFromMetadata, statesFromSummary } from "./metadataEdit";
 import {
   captureNote,
   dirName,
@@ -76,6 +81,8 @@ export function MetadataPanel() {
   return (
     <div className="lib-meta">
       {multi && <BatchMarks count={selectedCount} />}
+      {multi && <BatchKeywords />}
+      {multi && <BatchMetadata version={detailsVersion} />}
       {current !== null && error && !details && (
         <div className="lib-meta-head">
           <p className="error-text">情報を読めません: {error}</p>
@@ -317,9 +324,19 @@ function Details(props: { details: VariantDetails; stale: boolean; multi: boolea
         </Section>
       )}
 
-      <Section id="lib.meta.caption" title={multi ? "キャプション（操作の対象の 1 枚）" : "キャプション"}>
-        <CaptionEditor key={s.variant_id} id={s.variant_id} caption={details.caption} disabled={stale} />
-      </Section>
+      {!multi && (
+        <>
+          <KeywordEditor key={`kw${s.variant_id}`} targets={[s.variant_id]} disabled={stale} />
+          <PhotoCollections variantId={s.variant_id} />
+          <MetadataEditor
+            key={s.variant_id}
+            targets={[s.variant_id]}
+            states={statesFromMetadata(details.metadata, details.caption)}
+            disabled={stale}
+          />
+          <MetadataHelp />
+        </>
+      )}
 
       <Section id="lib.meta.files" title="ファイル">
         <ul className="lib-files">
@@ -396,102 +413,59 @@ function FileActions({ summary: s, onReload }: { summary: VariantSummary; onRelo
 }
 
 // ---------------------------------------------------------------------------
-// キャプション
+// 説明のメタデータの一括編集（グリッドで複数を選んでいるとき）
 // ---------------------------------------------------------------------------
 
-function CaptionEditor(props: { id: VariantId; caption: string | null; disabled: boolean }) {
-  const [draft, setDraft] = useState(props.caption ?? "");
-  const [saving, setSaving] = useState(false);
-  const dirty = useRef(false);
-  const composing = useRef(false);
-  const latest = useRef({ id: props.id, draft, caption: props.caption });
-  latest.current = { id: props.id, draft, caption: props.caption };
-  /** 保存の列（保存が重なっても、後に保存した値が最後に書かれるように順に送る）。 */
-  const chain = useRef<Promise<void>>(Promise.resolve());
-  /** 最後の保存の失敗（成功したら null）。閉じる前の書き込みで、失敗を伝えるため。 */
-  const failure = useRef<unknown>(null);
-
-  // 保存した値（読み直した詳細）が届いたら、編集していなければ合わせる。
+/** 選択中のすべての写真の説明のメタデータ（まとめを読み、入力した項目だけをすべてに書く）。 */
+function BatchMetadata({ version }: { version: number }) {
+  const ids = useApp((s) => s.selection.ids);
+  const key = idsKey(ids);
+  const [state, setState] = useState<{ key: string; summary: MetadataSummary } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const seq = useRef(0);
   useEffect(() => {
-    if (!dirty.current) setDraft(props.caption ?? "");
-  }, [props.caption]);
-
-  /** 編集中の内容を保存の列に入れる（戻り値は、それまでの保存がすべて済んだら解決する）。 */
-  const commit = (): Promise<void> => {
-    if (dirty.current) {
-      dirty.current = false;
-      const { id, draft: text } = latest.current;
-      const value = text.trim() === "" ? null : text;
-      // 編集したら、表示している保存済みの値と同じでも保存する（その前の保存が列の途中なら、表示している値は
-      // 古いので、比べて省くと、先の保存の値が残ってしまう）。
-      chain.current = chain.current.then(async () => {
-        setSaving(true);
-        try {
-          await core.setCaption([id], value);
-          failure.current = null;
-        } catch (e) {
-          dirty.current = true;
-          failure.current = e;
-          actions.reportError(e, "キャプションを保存できません");
-        } finally {
-          setSaving(false);
-        }
-      });
-    }
-    return chain.current;
-  };
-
-  // 別の写真に移ったとき（この欄が消えるとき）も、編集中の内容を保存する。カタログを閉じる・終了する前にも
-  // 保存を待つ（欄にフォーカスがあるまま ⌘Q などで終了すると、フォーカスが外れず保存されないため）。
-  const commitRef = useRef(commit);
-  commitRef.current = commit;
-  useEffect(() => {
-    // 閉じる前の書き込み: 保存を済ませ、保存できていなければ失敗を伝える（閉じるのをやめさせる）。
-    const unregister = registerFlush(async () => {
-      await commitRef.current();
-      if (dirty.current && failure.current !== null) throw failure.current;
-    });
-    return () => {
-      unregister();
-      void commitRef.current();
-    };
-  }, []);
-
+    const my = ++seq.current;
+    setError(null);
+    const t = setTimeout(() => {
+      core
+        .metadataSummary(ids)
+        .then((summary) => {
+          if (seq.current === my) setState({ key, summary });
+        })
+        .catch((e: unknown) => {
+          if (seq.current !== my) return;
+          const err = toApiError(e);
+          if (err.kind === "cancelled" || err.kind === "stale") return;
+          setError(err.info.message);
+        });
+    }, DETAILS_DELAY_MS);
+    return () => clearTimeout(t);
+    // ids は key で比べる（選択のたびに配列が作り直されても、同じ並びなら読み直さない）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, version]);
+  if (error && !state) return <p className="error-text lib-meta-note">メタデータを読めません: {error}</p>;
+  if (!state) return null;
+  const stale = state.key !== key;
   return (
-    <>
-      <textarea
-        className="lib-caption"
-        value={draft}
-        disabled={props.disabled}
-        placeholder="キャプション（テキスト検索の対象になります）"
-        aria-label="キャプション"
-        onChange={(e) => {
-          dirty.current = true;
-          setDraft(e.target.value);
-        }}
-        onCompositionStart={() => {
-          composing.current = true;
-        }}
-        onCompositionEnd={() => {
-          composing.current = false;
-        }}
-        onBlur={() => void commit()}
-        onKeyDown={(e) => {
-          if (composing.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
-          if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault();
-            void commit();
-          } else if (e.key === "Escape") {
-            // 編集を取り消す。
-            dirty.current = false;
-            setDraft(props.caption ?? "");
-            e.currentTarget.blur();
-          }
-        }}
+    <div className={stale ? "lib-meta-batch stale" : "lib-meta-batch"}>
+      <MetadataEditor
+        key={key}
+        targets={ids}
+        states={statesFromSummary(state.summary)}
+        disabled={stale}
+        note={batchNote(ids.length, state.summary.assets)}
       />
-      <div className="hint">
-        {saving ? "保存中…" : `フォーカスを外すか ${comboLabel("mod+Enter")} で保存。空にすると削除します。`}
-      </div>
-    </>
+      <MetadataHelp />
+    </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// キーワード（グリッドで複数を選んでいるとき）
+// ---------------------------------------------------------------------------
+
+/** 選択中のすべての写真のキーワード（付ける・外すは選択中のすべてに）。 */
+function BatchKeywords() {
+  const ids = useApp((s) => s.selection.ids);
+  return <KeywordEditor key={`kw-batch`} targets={ids} />;
 }

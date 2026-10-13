@@ -35,6 +35,8 @@ export interface ExportForm {
   sizeMode: SizeMode;
   longEdge: string;
   removeGps: boolean;
+  /** キーワード（LIB-09。XMP の dc:subject）を書かない（既定はオフ = 書く）。 */
+  removeKeywords: boolean;
   onConflict: ConflictPolicy;
   destDir: string;
 }
@@ -71,6 +73,7 @@ export function defaultExportForm(colorSpace: OutputColorSpace): ExportForm {
     sizeMode: "original",
     longEdge: String(DEFAULT_LONG_EDGE),
     removeGps: true,
+    removeKeywords: false,
     onConflict: "sequence",
     destDir: "",
   };
@@ -126,6 +129,7 @@ export function toExportSettings(f: ExportForm): ExportSettings | null {
     size: f.sizeMode === "original" ? "original" : { long_edge: parseIntInput(f.longEdge) as number },
     remove_gps: f.removeGps,
     on_conflict: f.onConflict,
+    remove_keywords: f.removeKeywords,
   };
 }
 
@@ -170,6 +174,7 @@ export function restoreExportForm(saved: unknown, coreDefault: OutputColorSpace)
     sizeMode: pick(f.sizeMode, ["original", "long_edge"], base.sizeMode),
     longEdge: str(f.longEdge, base.longEdge),
     removeGps: typeof f.removeGps === "boolean" ? f.removeGps : base.removeGps,
+    removeKeywords: typeof f.removeKeywords === "boolean" ? f.removeKeywords : base.removeKeywords,
     onConflict: pick(f.onConflict, CONFLICTS, base.onConflict),
     destDir: str(f.destDir, base.destDir),
   };

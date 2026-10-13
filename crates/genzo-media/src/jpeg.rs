@@ -3,7 +3,9 @@
 //! 画素の符号化は image crate のエンコーダーで行い、できた JPEG の SOI の直後に、
 //!
 //! 1. APP1 の Exif（`"Exif\0\0"` ＋ TIFF の構造。[`crate::exif_write`]）
-//! 2. APP2 の ICC プロファイル（`"ICC_PROFILE\0"` ＋ 通し番号 ＋ 総数 ＋ 最大 65,519 バイトの断片。
+//! 2. APP1 の XMP（`"http://ns.adobe.com/xap/1.0/\0"` ＋ パケット。[`crate::xmp_write`]。説明のメタデータ
+//!    （LIB-15）があるときだけ。[`insert_jpeg_xmp`]）
+//! 3. APP2 の ICC プロファイル（`"ICC_PROFILE\0"` ＋ 通し番号 ＋ 総数 ＋ 最大 65,519 バイトの断片。
 //!    ICC.1（ICC の仕様書）の付録 B「Embedding ICC profiles」の JFIF の節。節の番号は版によって
 //!    違いうるので、引用するときは原典で確認すること）
 //!
@@ -31,6 +33,10 @@ pub const ICC_MAX_CHUNKS: usize = 255;
 
 /// APP1 の Exif に入る TIFF の構造の最大のバイト数（65,535 − 長さの欄 2 − `"Exif\0\0"` 6）。
 pub const EXIF_MAX_BYTES: usize = 65_535 - 2 - 6;
+
+/// APP1 の XMP に入るパケットの最大のバイト数（65,535 − 長さの欄 2 − 識別子 29）。これより大きい
+/// パケット（拡張 XMP が要る大きさ）は入れない（[`insert_jpeg_xmp`]）。
+pub const XMP_MAX_BYTES: usize = 65_535 - 2 - crate::xmp_write::XMP_JPEG_SIGNATURE.len();
 
 const ICC_SIGNATURE: &[u8; 12] = b"ICC_PROFILE\0";
 const EXIF_SIGNATURE: &[u8; 6] = b"Exif\0\0";
@@ -219,6 +225,46 @@ pub fn insert_jpeg_metadata(
     Ok(out)
 }
 
+/// JPEG に XMP のパケット（UTF-8）を入れ直す。
+///
+/// 既存の XMP（APP1 の `"http://ns.adobe.com/xap/1.0/\0"`）のセグメントを取り除き、Exif の APP1 の直後
+/// （Exif がなければ SOI の直後）に置く。パケットが [`XMP_MAX_BYTES`] より大きければ
+/// [`MediaError::TooLarge`]（拡張 XMP は書かない）。
+pub fn insert_jpeg_xmp(jpeg: &[u8], xmp: &[u8]) -> Result<Vec<u8>> {
+    use crate::xmp_write::XMP_JPEG_SIGNATURE;
+    if xmp.len() > XMP_MAX_BYTES {
+        return Err(MediaError::TooLarge {
+            what: "JPEG に埋め込む XMP（説明のメタデータとキーワード。キャプションなどを短くするか、キーワードを減らすか、書き出しの設定でキーワードを書き出さないようにしてください）",
+            actual: xmp.len() as u64,
+            max: XMP_MAX_BYTES as u64,
+        });
+    }
+    let parsed = parse_header(jpeg)?;
+    let mut data = Vec::with_capacity(XMP_JPEG_SIGNATURE.len() + xmp.len());
+    data.extend_from_slice(XMP_JPEG_SIGNATURE);
+    data.extend_from_slice(xmp);
+    let mut out = Vec::with_capacity(jpeg.len() + data.len() + 4);
+    out.extend_from_slice(&[0xFF, SOI]);
+    let is_exif = |seg: &JpegSegment| seg.marker == APP1 && seg.data.starts_with(EXIF_SIGNATURE);
+    let mut placed = false;
+    if !parsed.segments.first().is_some_and(is_exif) {
+        push_segment(&mut out, APP1, &data);
+        placed = true;
+    }
+    for seg in &parsed.segments {
+        if seg.marker == APP1 && seg.data.starts_with(XMP_JPEG_SIGNATURE) {
+            continue;
+        }
+        push_segment(&mut out, seg.marker, &seg.data);
+        if !placed && is_exif(seg) {
+            push_segment(&mut out, APP1, &data);
+            placed = true;
+        }
+    }
+    out.extend_from_slice(&jpeg[parsed.scan_start..]);
+    Ok(out)
+}
+
 /// 8bit の RGB 画像を JPEG にする（品質 1〜100）。Exif と ICC プロファイルを入れる。
 pub fn encode_jpeg(
     img: &RgbImage8,
@@ -248,6 +294,49 @@ pub fn encode_jpeg(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn xmp_is_placed_after_exif_and_replaced() {
+        use crate::xmp_write::XMP_JPEG_SIGNATURE;
+        let exif = b"MM\0\x2a\0\0\0\x08\0\0\0\0\0\0".to_vec();
+        let with_exif = insert_jpeg_metadata(&tiny_jpeg(), Some(&[1, 2, 3]), Some(&exif)).unwrap();
+        let out = insert_jpeg_xmp(&with_exif, b"<x:xmpmeta/>").unwrap();
+        let segs = jpeg_header_segments(&out).unwrap();
+        assert!(segs[0].data.starts_with(EXIF_SIGNATURE), "先頭は Exif");
+        assert_eq!(segs[1].marker, APP1);
+        assert_eq!(
+            &segs[1].data[..XMP_JPEG_SIGNATURE.len()],
+            XMP_JPEG_SIGNATURE
+        );
+        assert_eq!(&segs[1].data[XMP_JPEG_SIGNATURE.len()..], b"<x:xmpmeta/>");
+        assert!(segs[2].data.starts_with(ICC_SIGNATURE), "ICC はその後");
+        // 入れ直すと、前の XMP は残らない。
+        let again = insert_jpeg_xmp(&out, b"<new/>").unwrap();
+        let xmps: Vec<_> = jpeg_header_segments(&again)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.marker == APP1 && s.data.starts_with(XMP_JPEG_SIGNATURE))
+            .collect();
+        assert_eq!(xmps.len(), 1);
+        assert!(xmps[0].data.ends_with(b"<new/>"));
+        // 画像として読める。
+        let img = image::load_from_memory(&again).unwrap();
+        assert_eq!((img.width(), img.height()), (16, 8));
+        // Exif がなければ SOI の直後。
+        let plain = insert_jpeg_xmp(&tiny_jpeg(), b"<a/>").unwrap();
+        assert!(
+            jpeg_header_segments(&plain).unwrap()[0]
+                .data
+                .starts_with(XMP_JPEG_SIGNATURE)
+        );
+        // 大きすぎるパケットは入れない。
+        let huge = vec![b'a'; XMP_MAX_BYTES + 1];
+        assert!(matches!(
+            insert_jpeg_xmp(&tiny_jpeg(), &huge),
+            Err(MediaError::TooLarge { .. })
+        ));
+        insert_jpeg_xmp(&tiny_jpeg(), &huge[..XMP_MAX_BYTES]).unwrap();
+    }
+
     use super::*;
 
     fn tiny_jpeg() -> Vec<u8> {

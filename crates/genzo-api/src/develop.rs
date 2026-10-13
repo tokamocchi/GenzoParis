@@ -24,6 +24,7 @@
 //!   （LIB-13。[`Core::create_virtual_copy`]）。
 //! - 切り抜きの編集の支え（DEV-15）: 切り抜く前の全体の表示（[`Core::set_develop_view`]）と、描画が実際に
 //!   使う切り抜き（[`Core::constrain_crop`]）。WB のスポイト（DEV-03。[`Core::white_balance_at`]）。
+//! - ビフォー / アフターの表示のビフォー（DEV-31。[`Core::set_before`]）はセッションに持つ（`before` の doc）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,15 +64,15 @@ pub const HISTORY_LABEL_GENERIC: &str = "現像設定の変更";
 
 /// 現像のセッション。
 pub(crate) struct Session {
-    variant_id: VariantId,
+    pub(crate) variant_id: VariantId,
     file_revision: u32,
-    source: PhotoSource,
+    pub(crate) source: PhotoSource,
     source_info: SourceInfo,
     /// 実際に使う外部データ（RAW のカメラ行列・デコーダ。`deps` の doc）。設定の `render_deps` は常にこの値
     /// にする（利用者の設定では変えない）。
-    render_deps: genzo_model::RenderDeps,
+    pub(crate) render_deps: genzo_model::RenderDeps,
     /// 現在の設定（最新の要求）。
-    settings: DevelopSettings,
+    pub(crate) settings: DevelopSettings,
     /// 最後に保存した設定。
     saved: DevelopSettings,
     /// `saved` の写しの番号（[`DevelopShared::next_save_seq`]。古い写しの保存の結果で上書きしない）。
@@ -79,7 +80,7 @@ pub(crate) struct Session {
     /// 設定の世代（変えるたびに増える。コアの中で通しの番号で、開き直しても 1 に戻らない）。
     generation: u64,
     /// このセッションを開いたときの世代（これより前の世代の描画は、前のセッションのもの）。
-    first_generation: u64,
+    pub(crate) first_generation: u64,
     /// 最後の変更の時刻（自動保存の起点）。
     last_change: Instant,
     /// 最初の未保存の変更の時刻（自動保存の最大の待ち時間の起点。保存したら `None`）。
@@ -93,9 +94,11 @@ pub(crate) struct Session {
     /// 最後に要求した描画の品質。
     requested_quality: RenderQuality,
     /// 切り抜く前の全体の表示か（[`Core::set_develop_view`]。写真を開き直すと `false`）。
-    uncropped: bool,
+    pub(crate) uncropped: bool,
     /// 最新の描画の結果。
     frame: Option<Arc<DevelopFrame>>,
+    /// ビフォー / アフターの表示のビフォー（DEV-31。[`Core::set_before`]。写真を開き直すと `None`）。
+    pub(crate) before: Option<crate::before::BeforeState>,
 }
 
 impl Session {
@@ -130,6 +133,8 @@ pub(crate) struct DevelopShared {
     save_seq: AtomicU64,
     /// 表示範囲の描画（[`Core::render_region`]。`region` の doc）。
     pub region: Mutex<crate::region::RegionState>,
+    /// ビフォーの表示範囲の描画（[`Core::render_before_region`]。DEV-31）。
+    pub region_before: Mutex<crate::region::RegionState>,
 }
 
 /// state のロックを外して書く保存（[`save_unlocked`]）の追い越しの記録（[`DevelopShared::save_record`]）。
@@ -223,7 +228,7 @@ impl DevelopShared {
     /// セッションで遅れて終わった描画（大きい世代）が新しいセッションのプレビューになり、その後の
     /// 新しい描画が「古い」として捨てられる（6.2 節・4.1 節）。UI がイベントの世代で新旧を比べるときも
     /// 取り違えない。
-    fn next_generation(&self) -> u64 {
+    pub(crate) fn next_generation(&self) -> u64 {
         self.last_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 
@@ -460,7 +465,8 @@ pub(crate) fn session_source(
         .map(|s| (s.source.clone(), s.render_deps.clone()))
 }
 
-/// 描画を投入する（「最新の 1 件だけ」）。
+/// 描画を投入する（「最新の 1 件だけ」）。ビフォーを設定していれば、必要ならビフォーも描き直す
+/// （アフターの後に投入する。`before` の doc）。
 fn submit_render(inner: &Arc<Inner>, s: &mut Session, quality: RenderQuality) {
     s.requested_quality = quality;
     let job = RenderJob {
@@ -470,6 +476,7 @@ fn submit_render(inner: &Arc<Inner>, s: &mut Session, quality: RenderQuality) {
         generation: s.generation,
         quality,
         uncropped: s.uncropped,
+        histogram: true,
     };
     let weak = Arc::downgrade(inner);
     let _ = inner.interactive.submit_latest_with(
@@ -494,29 +501,34 @@ fn submit_render(inner: &Arc<Inner>, s: &mut Session, quality: RenderQuality) {
             Ok(())
         },
     );
+    crate::before::maybe_submit(inner, s);
 }
 
 /// 描画の要求（セッションの状態の写し）。
-struct RenderJob {
-    variant_id: VariantId,
-    source: PhotoSource,
-    settings: DevelopSettings,
-    generation: u64,
-    quality: RenderQuality,
+pub(crate) struct RenderJob {
+    pub(crate) variant_id: VariantId,
+    pub(crate) source: PhotoSource,
+    pub(crate) settings: DevelopSettings,
+    pub(crate) generation: u64,
+    pub(crate) quality: RenderQuality,
     /// 切り抜く前の全体を描くか（[`Core::set_develop_view`]）。
-    uncropped: bool,
+    pub(crate) uncropped: bool,
+    /// ヒストグラム（17c）を求めるか（ビフォーの描画では求めない）。
+    pub(crate) histogram: bool,
 }
 
 /// プレビューを描く（17a・17c まで）。
 ///
 /// 切り抜く前の全体の表示（[`Core::set_develop_view`]）では、設定の切り抜きを使わず G の外接矩形の全体を
 /// 描く（回転で画像の外になった四隅は黒で塗り、ヒストグラムに数えない。[`FrameInfo::uncropped`]）。
-fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFrame, ApiError> {
+pub(crate) fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFrame, ApiError> {
     let (target, assumed_srgb) = display_target(inner);
-    let request = PreviewRequest::new(job.quality, inner.engine.config().preview_long_edge)
+    let mut request = PreviewRequest::new(job.quality, inner.engine.config().preview_long_edge)
         .with_output(target)
-        .with_histogram()
         .with_uncropped(job.uncropped);
+    if job.histogram {
+        request = request.with_histogram();
+    }
     let r = inner.render_preview(&job.source, &job.settings, &request, Some(job.variant_id))?;
     // 表示範囲の描画（render_region）と同じ格子の、フル解像度の出力の寸法。
     let (output_width, output_height) =
@@ -592,10 +604,13 @@ fn publish_frame(inner: &Inner, frame: DevelopFrame) {
     inner.develop.cv.notify_all();
 }
 
-/// 画面のプロファイルを変えたときなど、現在の設定で描き直す。
+/// 画面のプロファイルを変えたときなど、現在の設定で描き直す（ビフォーも描き直す）。
 pub(crate) fn rerender(inner: &Arc<Inner>) {
     let mut state = inner.develop.state.lock();
     if let Some(s) = state.as_mut() {
+        if let Some(b) = s.before.as_mut() {
+            b.force_redraw();
+        }
         redraw(inner, s);
     }
 }
@@ -625,6 +640,9 @@ pub(crate) struct SessionSnapshot {
     /// まだ描けていなければ `None`）。表示を切り替えた直後は、新しい表示のプレビューが届くまで
     /// [`uncropped`](Self::uncropped) と違う。
     pub frame_uncropped: Option<bool>,
+    /// ビフォーで実際に描く設定（DEV-31。`before` の `effective_settings`。ビフォーを設定していなければ
+    /// `None`）。
+    pub before_settings: Option<DevelopSettings>,
 }
 
 /// 表示範囲の描画・WB のスポイトなどに使う、現像中の写真の状態の写し。`variant_id` の写真を開いて
@@ -644,6 +662,10 @@ pub(crate) fn session_snapshot(
         generation: s.generation,
         uncropped: s.uncropped,
         frame_uncropped: s.frame.as_ref().map(|f| f.info.uncropped),
+        before_settings: s
+            .before
+            .as_ref()
+            .map(|b| crate::before::effective_settings(b.base(), &s.settings, &s.render_deps)),
     })
 }
 
@@ -826,6 +848,7 @@ fn state_of(s: &Session, can_undo: bool, can_redo: bool) -> DevelopState {
         dirty: s.dirty(),
         dragging: s.dragging,
         source: s.source_info.clone(),
+        before: crate::before::info_of(s),
     }
 }
 
@@ -932,6 +955,7 @@ impl Core {
             requested_quality: RenderQuality::Final,
             uncropped: false,
             frame: None,
+            before: None,
         };
         submit_render(inner, &mut session, RenderQuality::Final);
         let out = state_of(&session, dstate.can_undo, dstate.can_redo);
@@ -1087,6 +1111,7 @@ impl Core {
                 generation: s.generation,
                 quality: RenderQuality::Final,
                 uncropped: s.uncropped,
+                histogram: true,
             }
         };
         let frame = render_frame(inner, &job)?;
@@ -1552,6 +1577,7 @@ mod tests {
             requested_quality: RenderQuality::Final,
             uncropped: false,
             frame: None,
+            before: None,
         };
         let (delay, max) = (Duration::from_secs(1), Duration::from_secs(3));
         let ms = Duration::from_millis;

@@ -123,6 +123,14 @@
   align-items: center;
   gap: 6px;
 }
+.loupe-info-caption {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 
 .loupe-notice {
   top: 10px;

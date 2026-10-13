@@ -68,6 +68,18 @@ pub enum Event {
         /// 処理した側。
         backend: RenderBackend,
     },
+    /// 現像中の写真のビフォー（DEV-31。[`crate::Core::set_before`]）のプレビューが更新された（ピクセルは
+    /// [`crate::Core::before_frame`] で取る）。
+    BeforeUpdated {
+        /// variant。
+        variant_id: VariantId,
+        /// ビフォーの描画の世代（[`crate::BeforeInfo::generation`]）。
+        generation: u64,
+        /// 幅。
+        width: u32,
+        /// 高さ。
+        height: u32,
+    },
     /// サムネイル（L0）・標準プレビュー（L1）が更新された（`genzo://thumb/{variant_id}?rev={rev}`）。
     ThumbnailUpdated {
         /// variant。
@@ -108,6 +120,8 @@ pub enum CatalogChange {
     Marks,
     /// キャプション。
     Caption,
+    /// 説明のメタデータ（タイトル・作成者・著作権など。キャプションを含む。LIB-15）。
+    Metadata,
     /// 現像設定（保存・Undo / Redo・一括適用）。
     Develop,
     /// variant の追加（仮想コピー）。
@@ -118,6 +132,12 @@ pub enum CatalogChange {
     FileStatus,
     /// 撮影日時（既定のタイムゾーンの変更など）。
     CaptureTime,
+    /// キーワード（写真への付与・外す、キーワードの作成・名前の変更・移動・削除・書き出しの印。LIB-09）。
+    /// キーワードそのものの変更では `variant_ids` は空。
+    Keywords,
+    /// コレクション（メンバーの追加・削除、コレクションの作成・名前の変更・移動・削除・条件の変更。
+    /// LIB-10・LIB-11）。コレクションそのものの変更では `variant_ids` は空。
+    Collections,
 }
 
 /// 警告の種類。

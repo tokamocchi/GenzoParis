@@ -87,8 +87,16 @@ const TESTS: &[(&str, fn())] = &[
         library::previews_are_not_cached_long_when_settings_go_back,
     ),
     (
+        "library::keywords_and_collections_through_the_app",
+        library::keywords_and_collections_through_the_app,
+    ),
+    (
         "develop::develop_and_region_frames_match_their_headers",
         develop::develop_and_region_frames_match_their_headers,
+    ),
+    (
+        "develop::before_frames_match_their_headers",
+        develop::before_frames_match_their_headers,
     ),
     (
         "backup::corrupt_catalog_is_restored_from_a_backup",

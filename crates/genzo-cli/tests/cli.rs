@@ -46,7 +46,14 @@ impl Run {
     }
 }
 
-/// `genzo` を実行する（環境変数のカタログ・データのフォルダ・ログの指定は引き継がない）。
+/// テストの `genzo` のログのフォルダ（ファイルには書かないので作られない。パニックしたときだけ、クラッシュ
+/// レポートがここにできる。利用者のログのフォルダには書かない）。
+fn test_log_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("genzo-cli-test-logs-{}", std::process::id()))
+}
+
+/// `genzo` を実行する（環境変数のカタログ・データのフォルダ・ログの指定は引き継がない）。ログのファイルには
+/// 書かない（`GENZO_LOG_FILE=off`。ログを確かめるテストは `env` で上書きする）。
 fn genzo_with(args: &[&str], env: &[(&str, &Path)], stdin: Option<&str>) -> Run {
     let mut cmd = Command::new(GENZO);
     cmd.args(args)
@@ -54,6 +61,8 @@ fn genzo_with(args: &[&str], env: &[(&str, &Path)], stdin: Option<&str>) -> Run 
         .env_remove("GENZO_DATA_DIR")
         .env_remove("GENZO_LOG")
         .env_remove("GENZO_BENCH_DIR")
+        .env("GENZO_LOG_DIR", test_log_dir())
+        .env("GENZO_LOG_FILE", "off")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if stdin.is_some() {
@@ -78,11 +87,62 @@ fn genzo_with(args: &[&str], env: &[(&str, &Path)], stdin: Option<&str>) -> Run 
             .unwrap();
     }
     let out = child.wait_with_output().unwrap();
-    Run {
+    let run = Run {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    };
+    if libraw_missing_in_binary(genzo_raw::LIBRAW_ENABLED, &run) {
+        panic!(
+            "{BINARY_MISMATCH_HINT}（テストの build は LibRaw が有効なのに、genzo が「LibRaw が無効」と\
+             答えた）\n引数: {args:?}\nstdout: {}\nstderr: {}",
+            run.stdout, run.stderr
+        );
     }
+    run
+}
+
+/// LibRaw が無効な build の genzo-raw が返すエラーの文言の先頭（genzo-raw の decode.rs の `LIBRAW_DISABLED`）。
+const LIBRAW_DISABLED_MARK: &str = "この build では LibRaw が無効です";
+
+/// テストの build と [`GENZO`] の実行ファイルで、LibRaw の有無が食い違うときの説明。
+const BINARY_MISMATCH_HINT: &str = "テストの build と genzo の実行ファイル（CARGO_BIN_EXE_genzo）で、\
+     LibRaw の有無が食い違っている可能性がある。target/ を共有する別の cargo（機能フラグ libraw の違う \
+     build）が target/debug/genzo を上書きすると起きる（コードの不具合ではない）。その build が終わってから\
+     再実行する";
+
+/// テストの build では LibRaw が有効なのに、`genzo`（ワーカーを含む）が「LibRaw が無効」と答えたか。
+///
+/// cargo は同じ機能フラグでテストと実行ファイルを作るので、通常は起きない。`target/` を共有する別の cargo が
+/// 実行ファイルを上書きしたときに、原因の分かりにくい失敗（取り込みのエラー・終了コードの食い違い）になる
+/// ので、ここで原因を示して止める。
+fn libraw_missing_in_binary(test_build_has_libraw: bool, run: &Run) -> bool {
+    test_build_has_libraw
+        && (run.stdout.contains(LIBRAW_DISABLED_MARK) || run.stderr.contains(LIBRAW_DISABLED_MARK))
+}
+
+#[test]
+fn libraw_mismatch_between_the_test_and_the_binary_is_detected() {
+    let disabled = Run {
+        code: 1,
+        stdout: format!("{{\"reason\":\"対応していない RAW です: {LIBRAW_DISABLED_MARK}（…）\"}}"),
+        stderr: String::new(),
+    };
+    let ok = Run {
+        code: 0,
+        stdout: "{}".to_owned(),
+        stderr: String::new(),
+    };
+    assert!(libraw_missing_in_binary(true, &disabled));
+    // テストの build も LibRaw が無効なら、食い違いではない（DNG の部分は飛ばす）。
+    assert!(!libraw_missing_in_binary(false, &disabled));
+    assert!(!libraw_missing_in_binary(true, &ok));
+    let stderr_only = Run {
+        code: 1,
+        stdout: String::new(),
+        stderr: format!("エラー: {LIBRAW_DISABLED_MARK}"),
+    };
+    assert!(libraw_missing_in_binary(true, &stderr_only));
 }
 
 /// テストの環境（一時フォルダ・写真のフォルダ・カタログ）。
@@ -1299,7 +1359,12 @@ fn bench_records_results_and_compares_with_the_previous_run() {
     } else {
         "in_memory"
     };
-    assert_eq!(reports[0]["result"]["notes"]["input"], expected_input);
+    // 食い違ったら、実行ファイルの上書き（BINARY_MISMATCH_HINT）も疑う（ワーカーの ping で入力を選ぶので、
+    // LibRaw の文言は出力に出ない）。
+    assert_eq!(
+        reports[0]["result"]["notes"]["input"], expected_input,
+        "{BINARY_MISMATCH_HINT}"
+    );
     // 2 回目は前回と比べる（悪化したかどうかは時間で変わるので、終了コードとの対応だけを確かめる）。
     let r = run(&args("preview", "30"));
     let v = r.json();
@@ -2072,4 +2137,543 @@ mod ctrl_c {
             "カタログは作らない（開く前に終わった）"
         );
     }
+}
+
+/// ログ（SYS-07）: `cli.log` に書き、`log info` で場所と中身を表示し、`log clear` で消す。`--no-log-file` では
+/// ファイルに書かない。ほかのファイルは消さない。
+#[test]
+fn logs_are_written_listed_and_cleared() {
+    let env = Env::new();
+    let logs = env.path("logs");
+    let logs_s = logs.to_str().unwrap().to_owned();
+    let file_on = [("GENZO_LOG_FILE", Path::new("info"))];
+    let catalog = env.catalog.to_string_lossy().into_owned();
+    let init = genzo_with(
+        &[
+            "catalog",
+            "init",
+            "--catalog",
+            &catalog,
+            "--log-dir",
+            &logs_s,
+            "--gpu",
+            "off",
+        ],
+        &file_on,
+        None,
+    );
+    assert_eq!(init.code, 0, "{}", init.stderr);
+    let log = std::fs::read_to_string(logs.join("cli.log")).unwrap();
+    assert!(log.contains("起動しました"), "{log}");
+    assert!(log.contains("コマンドを実行します"), "{log}");
+    // サブコマンドの名前と引数の数だけを書き、引数の値（パス・メタデータの値など）は書かない。
+    assert!(log.contains("command=catalog init"), "{log}");
+    assert!(log.contains("args=8"), "{log}");
+    assert!(!log.contains("--log-dir"), "{log}");
+
+    // クラッシュレポート（ほかのプロセスのもの）と、利用者のファイル。
+    std::fs::create_dir_all(logs.join("crash")).unwrap();
+    std::fs::write(
+        logs.join("crash")
+            .join("crash-20261001T000000000Z-app-1.txt"),
+        "内容: テストのパニック\n",
+    )
+    .unwrap();
+    std::fs::write(logs.join("memo.txt"), "利用者のファイル").unwrap();
+
+    let info = genzo_with(
+        &["log", "info", "--json", "--log-dir", &logs_s],
+        &file_on,
+        None,
+    );
+    assert_eq!(info.code, 0, "{}", info.stderr);
+    let info = info.json();
+    assert_eq!(info["dir"], logs_s.as_str());
+    assert_eq!(info["file_enabled"], true);
+    assert!(info["current_file"].as_str().unwrap().ends_with("cli.log"));
+    let names: Vec<&str> = info["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["cli.log"]);
+    assert_eq!(info["crash_reports"][0]["message"], "テストのパニック");
+    // 人が読む表示。
+    let human = genzo_with(&["log", "info", "--log-dir", &logs_s], &file_on, None);
+    assert!(
+        human.stdout.contains("外部へは送信しません"),
+        "{}",
+        human.stdout
+    );
+    assert!(human.stdout.contains("crash-20261001T000000000Z-app-1.txt"));
+
+    let cleared = genzo_with(
+        &["log", "clear", "--json", "--log-dir", &logs_s],
+        &file_on,
+        None,
+    );
+    assert_eq!(cleared.code, 0, "{}", cleared.stderr);
+    let cleared = cleared.json();
+    // 書いている途中の cli.log は空にし、クラッシュレポートは消す。
+    assert_eq!(cleared["cleared"]["truncated"], 1);
+    assert_eq!(cleared["cleared"]["removed"], 1);
+    assert!(
+        !logs
+            .join("crash")
+            .join("crash-20261001T000000000Z-app-1.txt")
+            .exists()
+    );
+    assert!(logs.join("memo.txt").exists(), "利用者のファイルは消さない");
+    let log = std::fs::read_to_string(logs.join("cli.log")).unwrap();
+    assert!(!log.contains("catalog init"), "{log}");
+
+    // --no-log-file ではファイルに書かない。
+    let quiet_dir = env.path("logs-off");
+    let off = genzo_with(
+        &[
+            "log",
+            "info",
+            "--json",
+            "--no-log-file",
+            "--log-dir",
+            quiet_dir.to_str().unwrap(),
+        ],
+        &file_on,
+        None,
+    );
+    assert_eq!(off.code, 0, "{}", off.stderr);
+    let off = off.json();
+    assert_eq!(off["file_enabled"], false);
+    assert_eq!(off["exists"], false);
+    assert!(off["current_file"].is_null());
+    assert!(!quiet_dir.join("cli.log").exists());
+}
+
+/// カタログの構造（ORG-07）: 表・列・公開ビューと、作る SQL。
+#[test]
+fn catalog_schema_lists_tables_views_and_sql() {
+    let env = Env::new();
+    env.json(&["catalog", "init"]);
+    let schema = env.json(&["catalog", "schema"]);
+    assert_eq!(
+        schema["public_views"],
+        serde_json::json!(["photos_v1", "photo_keywords_v1", "photo_collections_v1"])
+    );
+    let tables: Vec<&str> = schema["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for t in ["asset", "variant", "file", "photos_v1", "asset_fts"] {
+        assert!(tables.contains(&t), "{t}: {tables:?}");
+    }
+    assert!(schema["schema_version"].as_u64().unwrap() >= 5);
+    let human = env.run(&["catalog", "schema"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.contains("photos_v1（公開ビュー）"),
+        "{}",
+        human.stdout
+    );
+    assert!(human.stdout.contains("読み取り専用"), "{}", human.stdout);
+    let sql = env.run(&["catalog", "schema", "--sql"]);
+    assert_eq!(sql.code, 0, "{}", sql.stderr);
+    assert!(sql.stdout.contains("CREATE TABLE asset"), "{}", sql.stdout);
+    assert!(
+        sql.stdout.contains("CREATE VIEW photos_v1"),
+        "{}",
+        sql.stdout
+    );
+}
+
+/// `metadata`（LIB-15）: --set・--clear で一括で変え、引数なしで項目ごとの値（複数の値）を表示する。
+/// `show` にも出る。テキスト検索の対象になる。元ファイルは変えない。
+#[test]
+fn metadata_sets_clears_and_summarizes() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 1, None, false);
+    write_jpeg(&env.photos.join("B.jpg"), (64, 48), 2, None, false);
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let all = env.json(&["search"]);
+    let a = id_of(&all, "A.jpg").to_string();
+    let b = id_of(&all, "B.jpg").to_string();
+
+    let r = env.json(&[
+        "metadata",
+        &a,
+        &b,
+        "--set",
+        "creator=山田 太郎",
+        "--set",
+        "copyright-status=copyrighted",
+        "--set",
+        "title=清水寺",
+    ]);
+    assert_eq!(r["updated"], 2);
+    env.json(&["metadata", &b, "--clear", "title", "--set", "city=京都市"]);
+    let s = env.json(&["metadata", &a, &b]);
+    assert_eq!(s["assets"], 2);
+    let field = |name: &str| -> Value {
+        s["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["field"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(field("creator")["value"], "山田 太郎");
+    assert_eq!(field("copyright_status")["value"], "copyrighted");
+    assert_eq!(field("title")["mixed"], true);
+    // 人が読む形（複数の値・表示名）。
+    let human = env.run(&["metadata", &a, &b]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(human.stdout.contains("（複数の値）"), "{}", human.stdout);
+    assert!(human.stdout.contains("作成者"), "{}", human.stdout);
+    // show（JSON と表）。
+    let shown = env.json(&["show", &a]);
+    assert_eq!(shown["details"]["metadata"]["title"], "清水寺");
+    let shown_b = env.run(&["show", &b]);
+    assert!(
+        shown_b.stdout.contains("撮影場所の市区町村"),
+        "{}",
+        shown_b.stdout
+    );
+    // テキスト検索。
+    assert_eq!(
+        names(&env.json(&["search", "--text", "清水寺"])),
+        vec!["A.jpg"]
+    );
+    // 使い方の誤り（知らない項目・同じ項目に --set と --clear・形の誤り）は 2。
+    for bad in [
+        vec!["metadata", a.as_str(), "--set", "nope=x"],
+        vec![
+            "metadata",
+            a.as_str(),
+            "--set",
+            "title=x",
+            "--clear",
+            "title",
+        ],
+        vec!["metadata", a.as_str(), "--set", "title"],
+    ] {
+        let r = env.run(&bad);
+        assert_eq!(r.code, 2, "{bad:?}: {}", r.stderr);
+    }
+    // 値が不正（著作権の状態）なら 1 で、何も変えない。
+    let r = env.run(&["metadata", &a, "--set", "copyright_status=maybe", "--json"]);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(r.json()["error"]["kind"], "invalid_input");
+    assert_eq!(hashes(&env.photos), before, "元ファイルは変えない");
+}
+
+/// `develop before`（DEV-31）: ビフォー（取り込んだ直後の設定。切り抜きは今の設定と同じ）とアフターのプレビューを
+/// 同じ寸法で PNG に書く。`develop region --before` はビフォーの設定で表示範囲を描く。
+#[test]
+fn develop_before_writes_the_before_and_after_previews() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (120, 80), 3, None, false);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.jpg").to_string();
+    env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"exposure_ev": 2.0, "geometry": {"crop": {"left": 0.5, "top": 0.0, "right": 1.0, "bottom": 1.0}}}"#),
+    );
+    let bpath = env.path("before.png");
+    let apath = env.path("after.png");
+    let r = env.json(&[
+        "develop",
+        "before",
+        &a,
+        "--out",
+        bpath.to_str().unwrap(),
+        "--after",
+        apath.to_str().unwrap(),
+    ]);
+    assert_eq!(r["before"]["label"], "読み込み", "{r}");
+    assert_eq!(r["before"]["source"]["kind"], "initial");
+    let b = image::open(&bpath).unwrap().to_rgb8();
+    let af = image::open(&apath).unwrap().to_rgb8();
+    assert_eq!(b.dimensions(), af.dimensions(), "切り抜きは同じ");
+    assert_eq!(b.width(), 60, "右半分に切り抜いた幅");
+    let mean = |img: &image::RgbImage| {
+        img.as_raw().iter().map(|&x| u64::from(x)).sum::<u64>() as f64 / img.as_raw().len() as f64
+    };
+    assert!(mean(&b) + 10.0 < mean(&af), "ビフォーは露光量 +2 の前");
+    // 今の設定の写しならアフターと同じ。
+    let cpath = env.path("current.png");
+    env.json(&[
+        "develop",
+        "before",
+        &a,
+        "--source",
+        "current",
+        "--out",
+        cpath.to_str().unwrap(),
+    ]);
+    assert_eq!(image::open(&cpath).unwrap().to_rgb8(), af);
+    // 表示範囲（ビフォー）。
+    let rpath = env.path("region-before.png");
+    let r = env.json(&[
+        "develop",
+        "region",
+        &a,
+        "--x",
+        "0",
+        "--y",
+        "0",
+        "--width",
+        "20",
+        "--height",
+        "20",
+        "--before",
+        "initial",
+        "--out",
+        rpath.to_str().unwrap(),
+    ]);
+    assert_eq!(r["region"]["before"], true, "{r}");
+    assert_eq!(r["region"]["full_width"], 60);
+    // 使い方の誤り（既にあるファイル・出どころの形）。
+    let again = env.run(&["develop", "before", &a, "--out", bpath.to_str().unwrap()]);
+    assert_eq!(again.code, 2, "{}", again.stderr);
+    let bad = env.run(&[
+        "develop",
+        "before",
+        &a,
+        "--source",
+        "yesterday",
+        "--out",
+        "x.png",
+    ]);
+    assert_eq!(bad.code, 2, "{}", bad.stderr);
+    // この写真の履歴にない項目は 1（not_found）。
+    let missing = env.run(&[
+        "develop",
+        "before",
+        &a,
+        "--source",
+        "history:99999",
+        "--out",
+        env.path("m.png").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(missing.code, 1, "{}", missing.stdout);
+    assert_eq!(missing.json()["error"]["kind"], "not_found");
+}
+
+/// `keyword`・`collection`・`search --keyword / --collection / --rule`（LIB-09〜11）: 付ける・一覧・親で絞り込む・
+/// コレクションに入れる・スマートコレクション・書き出しの XMP・使い方の誤り。元ファイルは変えない。
+#[test]
+fn keywords_and_collections_organize_photos() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 1, None, false);
+    write_jpeg(&env.photos.join("B.jpg"), (64, 48), 2, None, false);
+    write_jpeg(&env.photos.join("C.jpg"), (64, 48), 3, None, false);
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let all = env.json(&["search"]);
+    let a = id_of(&all, "A.jpg").to_string();
+    let b = id_of(&all, "B.jpg").to_string();
+    let c = id_of(&all, "C.jpg").to_string();
+
+    // キーワード: 付ける（なければ作る）・一覧・親で絞り込む（下の階層を含む）。
+    let r = env.json(&[
+        "keyword",
+        "add",
+        &a,
+        &b,
+        "-k",
+        "場所 > 京都 > 祇園",
+        "-k",
+        "家族",
+    ]);
+    assert_eq!(r["updated"], 4);
+    env.json(&["keyword", "add", &c, "--keyword", "場所>東京"]);
+    let list = env.json(&["keyword", "list"]);
+    let kws = list["keywords"].as_array().unwrap();
+    assert_eq!(kws.len(), 5);
+    let gion = kws.iter().find(|k| k["name"] == "祇園").unwrap();
+    assert_eq!(gion["path"], serde_json::json!(["場所", "京都", "祇園"]));
+    assert_eq!(gion["photo_count"], 2);
+    assert_eq!(
+        names(&env.json(&["search", "--keyword", "場所"])),
+        vec!["A.jpg", "B.jpg", "C.jpg"]
+    );
+    assert_eq!(
+        names(&env.json(&["search", "--keyword", "場所>京都", "--keyword", "家族"])),
+        vec!["A.jpg", "B.jpg"]
+    );
+    let id_kw = format!("id:{}", gion["keyword_id"]);
+    assert_eq!(names(&env.json(&["search", "--keyword", &id_kw])).len(), 2);
+    let shown = env.json(&["keyword", "show", &a, &c]);
+    assert_eq!(shown["variants"], 2);
+    let human = env.run(&["keyword", "list"]);
+    assert!(
+        human.stdout.contains("場所 > 京都 > 祇園"),
+        "{}",
+        human.stdout
+    );
+    // 名前の変更・移動・書き出しの印・外す。
+    env.json(&["keyword", "rename", "場所>東京", "Tokyo"]);
+    env.json(&["keyword", "move", "家族", "--to", "場所"]);
+    env.json(&["keyword", "export", "場所>家族", "--off"]);
+    let r = env.json(&["keyword", "remove", &b, "-k", "場所>家族"]);
+    assert_eq!(r["updated"], 1);
+
+    // コレクション: セットの中に作って写真を入れる・絞り込む・外す。
+    let set =
+        env.json(&["collection", "create", "旅行", "--kind", "set"])["collection_id"].to_string();
+    let col = env.json(&[
+        "collection",
+        "create",
+        "京都 2024",
+        "--in",
+        &set,
+        "--add",
+        &a,
+        &b,
+    ])["collection_id"]
+        .to_string();
+    assert_eq!(
+        names(&env.json(&["search", "--collection", &col])),
+        vec!["A.jpg", "B.jpg"]
+    );
+    env.json(&["collection", "remove", &col, &b]);
+    assert_eq!(
+        names(&env.json(&["search", "--collection", &set])),
+        vec!["A.jpg"]
+    );
+    env.json(&["collection", "add", &col, &c]);
+
+    // スマートコレクション: 条件のファイル（BOM 付き）。★3 以上 かつ キーワード「場所」。
+    env.json(&["rate", &c, "4"]);
+    let place_id = kws.iter().find(|k| k["name"] == "場所").unwrap()["keyword_id"].clone();
+    let rule = env.path("rule.json");
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(
+        serde_json::json!({
+            "version": 1, "match": "all",
+            "rules": [
+                {"type": "rating", "op": "gte", "value": 3},
+                {"type": "keyword", "op": "has", "keyword_id": place_id}
+            ]
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    std::fs::write(&rule, bytes).unwrap();
+    let rule_path = rule.to_str().unwrap();
+    assert_eq!(
+        names(&env.json(&["search", "--rule", rule_path])),
+        vec!["C.jpg"]
+    );
+    let smart =
+        env.json(&["collection", "create", "よい場所", "--rule", rule_path])["collection_id"]
+            .to_string();
+    assert_eq!(
+        names(&env.json(&["search", "--collection", &smart])),
+        vec!["C.jpg"]
+    );
+    // 評価を変えると結果が変わる（自動で更新される）。
+    env.json(&["rate", &a, "5"]);
+    assert_eq!(
+        names(&env.json(&["search", "--collection", &smart])),
+        vec!["A.jpg", "C.jpg"]
+    );
+    let shown_rule = env.json(&["collection", "rule", &smart]);
+    assert_eq!(shown_rule["rules"][0]["type"], "rating");
+    let list = env.json(&["collection", "list"]);
+    let smart_row = list["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| {
+            c["collection_id"]
+                .as_i64()
+                .map(|n| n.to_string())
+                .as_deref()
+                == Some(smart.as_str())
+        })
+        .unwrap()
+        .clone();
+    assert_eq!(smart_row["count"], 2);
+    let human = env.run(&["collection", "list"]);
+    assert!(
+        human.stdout.contains("旅行 > 京都 2024"),
+        "{}",
+        human.stdout
+    );
+
+    // 書き出しの XMP にキーワードが入る（書き出さないキーワードは入らない。--remove-keywords で入らない）。
+    let out1 = env.path("out1");
+    let e = env.json(&["export", &a, "--out", out1.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&std::fs::read(written_path(&e)).unwrap()).into_owned();
+    assert!(
+        text.contains("<rdf:li>祇園</rdf:li>") && text.contains("<rdf:li>場所</rdf:li>"),
+        "XMP"
+    );
+    assert!(
+        !text.contains("<rdf:li>家族</rdf:li>"),
+        "書き出さないキーワード"
+    );
+    let out2 = env.path("out2");
+    let e = env.json(&[
+        "export",
+        &a,
+        "--out",
+        out2.to_str().unwrap(),
+        "--remove-keywords",
+    ]);
+    let text = String::from_utf8_lossy(&std::fs::read(written_path(&e)).unwrap()).into_owned();
+    assert!(!text.contains("dc:subject"));
+
+    // 使い方の誤り（ないキーワード・空のパス・--add をセットに）は 2、コアのエラー（循環）は 1。
+    for bad in [
+        vec!["search", "--keyword", "大阪"],
+        vec!["keyword", "remove", a.as_str(), "-k", "id:999"],
+        vec!["keyword", "add", a.as_str(), "-k", " > "],
+        vec![
+            "collection",
+            "create",
+            "x",
+            "--kind",
+            "set",
+            "--add",
+            a.as_str(),
+        ],
+        vec!["collection", "add", "abc", a.as_str()],
+    ] {
+        let r = env.run(&bad);
+        assert_eq!(r.code, 2, "{bad:?}: {} {}", r.stdout, r.stderr);
+    }
+    let cyclic = env.path("cyclic.json");
+    std::fs::write(
+        &cyclic,
+        format!(r#"{{"version":1,"match":"all","rules":[{{"type":"collection","op":"in","collection_id":{smart}}}]}}"#),
+    )
+    .unwrap();
+    let r = env.run(&[
+        "collection",
+        "rule",
+        &smart,
+        "--set",
+        cyclic.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(r.json()["error"]["kind"], "invalid_input");
+
+    // 削除（写真は消えない）。
+    let r = env.json(&["collection", "delete", &set]);
+    assert_eq!(r["deleted"], 2);
+    let r = env.json(&["keyword", "delete", "場所"]);
+    assert_eq!(r["deleted"], 5);
+    assert_eq!(names(&env.json(&["search"])).len(), 3);
+    assert_eq!(hashes(&env.photos), before, "元ファイルは変えない");
 }

@@ -43,6 +43,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog_file::{self, Assessment};
+use crate::logs::AppLogs;
 use crate::settings::{self, AppSettings};
 use crate::tools::{self, ExternalTools};
 
@@ -169,6 +170,8 @@ pub struct AppState {
     events: EventSink,
     /// ワーカーの起動方法（テストで差し替える。`None` なら既定の別の実行ファイル）。
     worker: Option<WorkerLaunch>,
+    /// ログとクラッシュレポート（SYS-07）。
+    logs: AppLogs,
 }
 
 /// エラーの情報を作る。
@@ -218,7 +221,19 @@ impl AppState {
             display: Mutex::new(DisplayTarget::default()),
             events,
             worker: None,
+            logs: AppLogs::new(genzo_api::logging::status().unwrap_or_default()),
         }
+    }
+
+    /// ログの状態を指定する（テスト用。既定は genzo-api の `logging::status`）。
+    pub fn with_logs(mut self, logs: AppLogs) -> Self {
+        self.logs = logs;
+        self
+    }
+
+    /// ログとクラッシュレポート。
+    pub fn logs(&self) -> &AppLogs {
+        &self.logs
     }
 
     /// ワーカーの起動方法を指定する（テスト用）。
@@ -419,6 +434,7 @@ impl AppState {
         });
         *self.session.write() = Some(Arc::clone(&session));
         drop(display);
+        tracing::info!(catalog = %path.display(), create, "カタログを開きました");
         if let Err(e) = self.update_settings(|s| s.remember_catalog(&path)) {
             tracing::warn!(?e, "最近開いたカタログを記録できない");
         }
@@ -469,6 +485,7 @@ impl AppState {
         match session.core.close() {
             Ok(()) => {
                 session.events.stop();
+                tracing::info!(catalog = %session.catalog_path.display(), "カタログを閉じました");
                 Ok(())
             }
             Err(e) if !session.core.is_closed() => {

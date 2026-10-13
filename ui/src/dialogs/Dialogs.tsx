@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import * as appApi from "../api/app";
 import { actions, appStore, useApp } from "../state/app";
 import { CloseFailedDialog } from "./CloseFailedDialog";
+import { CrashReportsDialog } from "./CrashReportsDialog";
 import { DeleteDialog } from "./DeleteDialog";
 import "./dialogs.css";
 import { ExportDialog } from "./ExportDialog";
@@ -13,9 +14,17 @@ import { ImportDialog } from "./ImportDialog";
 import { offerImportFolders } from "./importDrop";
 import { splitDroppedPaths } from "./importLogic";
 import { listenDragDrop } from "./native";
+import {
+  AddToCollectionDialog,
+  CollectionDeleteDialog,
+  CollectionDialog,
+  KeywordDeleteDialog,
+  KeywordDialog,
+} from "./OrganizeDialogs";
 import { PasteSettingsDialog } from "./PasteSettingsDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
+import { SmartCollectionDialog } from "./SmartCollectionDialog";
 
 /** ドロップを受け付けるか（カタログを開いていて、ほかのダイアログを開いていない）。 */
 function canAcceptDrop(): boolean {
@@ -102,6 +111,35 @@ export function Dialogs() {
     case "close_failed":
       // 理由が変わったら出し直す（再試行の結果など）。
       body = <CloseFailedDialog key={JSON.stringify(dialog.failure)} failure={dialog.failure} quitting={dialog.quitting} />;
+      break;
+    case "crash_reports":
+      body = <CrashReportsDialog reports={dialog.reports} />;
+      break;
+    case "keyword":
+      body = <KeywordDialog mode={dialog.mode} keywordId={dialog.keywordId} parentId={dialog.parentId} />;
+      break;
+    case "keyword_delete":
+      body = <KeywordDeleteDialog keywordId={dialog.keywordId} />;
+      break;
+    case "collection":
+      body = (
+        <CollectionDialog
+          mode={dialog.mode}
+          collectionKind={dialog.collectionKind}
+          collectionId={dialog.collectionId}
+          parentId={dialog.parentId}
+          variantIds={dialog.variantIds}
+        />
+      );
+      break;
+    case "collection_delete":
+      body = <CollectionDeleteDialog collectionId={dialog.collectionId} />;
+      break;
+    case "smart_collection":
+      body = <SmartCollectionDialog collectionId={dialog.collectionId} parentId={dialog.parentId} />;
+      break;
+    case "add_to_collection":
+      body = <AddToCollectionDialog variantIds={dialog.variantIds} />;
       break;
     case undefined:
       break;

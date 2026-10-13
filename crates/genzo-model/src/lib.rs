@@ -5,6 +5,8 @@
 //! - カタログの ID と列挙値（3.1 節の ER 図）: [`ids`]、[`catalog`]
 //! - 撮影日時の扱い（3.1 節。レビュー R-18）: [`CaptureTime`]
 //! - 写真・動画のメタデータ: [`PhotoMetadata`]、[`VideoMetadata`]
+//! - カタログの中で編集する説明のメタデータ（LIB-15。IPTC Core の主要な項目）: [`IptcMetadata`]
+//! - スマートコレクションの条件（LIB-11。版付きの JSON）: [`SmartRule`]
 //! - 書き出しの設定（EXP-01・EXP-04、6.4 節）: [`ExportSettings`]
 //! - キャッシュキー（4.1 節）: [`CacheKey`]
 //! - ファイルの同期（fsync）の OS ごとの違い（6.4 節。指摘 F19）: [`fs_sync`]。書き出し
@@ -19,8 +21,10 @@ pub mod develop;
 pub mod export;
 pub mod fs_sync;
 pub mod ids;
+pub mod iptc;
 pub mod metadata;
 pub mod phase;
+pub mod smart;
 
 pub use cache_key::{CacheColorSpace, CacheFormat, CacheKey, CacheKind, RenderQuality};
 pub use capture_time::{CaptureTime, CaptureTimeError, UTC_ONLY_OFFSET};
@@ -41,8 +45,17 @@ pub use ids::{
     AssetId, CollectionId, FileId, FileOpId, FolderId, HistoryEntryId, KeywordId, SnapshotId,
     StackId, VariantId, VolumeId,
 };
+pub use iptc::{
+    CopyrightStatus, IptcMetadata, MAX_METADATA_CHARS, MetadataField, MetadataValueError,
+    normalize_metadata_value,
+};
 pub use metadata::{CaptureInfo, GpsCoord, Orientation, PhotoMetadata, VideoMetadata};
 pub use phase::Phase;
+pub use smart::{
+    ContainsOp, DateOp, EqualityOp, KeywordOp, MAX_SMART_CONDITIONS, MAX_SMART_DAYS,
+    MAX_SMART_DEPTH, MAX_SMART_TEXT_CHARS, MatchMode, MemberOp, NumberOp, SMART_RULE_VERSION,
+    SmartCondition, SmartRule, SmartRuleError, TextOp,
+};
 
 /// 現像設定のスキーマ（項目の形）の現在のバージョン（04 の 2.5 節）。
 ///

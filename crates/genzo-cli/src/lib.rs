@@ -11,6 +11,9 @@
 //! genzo import ~/Pictures/2024-05-01            # 進捗は標準エラー
 //! genzo search --min-rating 3 --sort capture --desc --json
 //! genzo rate 12 13 4
+//! genzo keyword add 12 13 --keyword "場所>京都"
+//! genzo collection create "京都 2024" --add 12 13
+//! genzo search --keyword "場所" --collection 1
 //! echo '{"exposure_ev": 0.5}' | genzo develop set 12 --json -
 //! genzo export 12 13 --out ~/out --format jpeg --quality 90 --long-edge 2048 --remove-gps
 //! genzo render DSC00001.ARW --out out.tif --settings settings.json   # カタログなし
@@ -55,12 +58,21 @@
 //! | [`args`] | clap の定義、値の解釈（評価・日付・寸法など）、`develop set --json <FILE>` の書き換え |
 //! | `session` | カタログを使うコマンドの共通の処理（コアを開く・ジョブの進捗・閉じる・Ctrl+C での取り消し） |
 //! | `interrupt` | Ctrl+C の受け取り（1 回目は取り消して閉じる、2 回目はすぐに終了） |
-//! | `catalog` | `catalog init / info / check / backup / restore` |
-//! | `library` | `import`・`search`・`show`・`rate / flag / label / caption`・`thumbs`・`remove`・`trash` |
+//! | `catalog` | `catalog init / info / check / backup / schema / restore` |
+//! | `library` | `import`・`search`・`show`・`rate / flag / label / caption / metadata`・`thumbs`・`remove`・`trash` |
+//! | `organize` | `keyword list / add / remove / show / create / rename / move / delete / export`・`collection list / create / add / remove / rename / move / delete / rule`（LIB-09〜11）と、`search --keyword / --collection / --rule` の解釈 |
 //! | `develop` | `develop get / set / reset / undo / redo / history / copy / virtual-copy / delete-copy / region` |
 //! | `export` | `export` と書き出しの設定 |
 //! | `standalone` | カタログなしの `render`・`info`（ワーカーを直接使う） |
 //! | `bench` | `bench preview / export`（genzo-testkit の計測と記録） |
+//! | `logs` | `log info / clear`（ログ・クラッシュレポート。カタログは使わない。SYS-07） |
+//!
+//! # ログ（SYS-07）
+//!
+//! 標準エラーへのログ（`--log`・`GENZO_LOG`）に加えて、ログのフォルダ（`--log-dir`・`GENZO_LOG_DIR`、なければ
+//! アプリと同じ場所）の `cli.log` に info の水準で書き、パニックのときはクラッシュレポートを `crash/` に
+//! 保存する（genzo-api の `logging`。外部へは送信しない）。ファイルに書かないときは `--no-log-file`
+//! （`GENZO_LOG_FILE=off`）。ワーカー（`genzo __worker`）はファイルに書かず、本体が標準エラー出力をログに残す。
 //!
 //! # ワーカー
 //!
@@ -94,6 +106,8 @@ mod error;
 mod export;
 mod interrupt;
 mod library;
+mod logs;
+mod organize;
 pub mod output;
 mod session;
 mod standalone;
@@ -168,7 +182,9 @@ pub fn main_entry() -> ExitCode {
     }
     let args = args::rewrite_develop_set(args);
     let json_requested = args::json_requested(&args);
-    let cli = match <args::Cli as clap::Parser>::try_parse_from(args) {
+    let arg_count = args.len().saturating_sub(1);
+    let parsed = parse_cli(args.iter().cloned());
+    let (cli, command_path) = match parsed {
         Ok(c) => c,
         Err(e) => {
             // --help・--version は標準出力で成功、それ以外は使い方の誤り（clap の終了コードは 2）。
@@ -186,6 +202,13 @@ pub fn main_entry() -> ExitCode {
         }
     };
     init_logging(&cli.global);
+    // 引数の値（パス・キャプション・連絡先・ID の並びなど）は記録しない。サブコマンドの名前と引数の数だけ
+    // （SYS-07。決定事項ログ No.75）。
+    tracing::info!(
+        command = %command_path,
+        args = arg_count,
+        "コマンドを実行します"
+    );
     interrupt::install();
     let out = Output {
         json: cli.global.json,
@@ -210,21 +233,56 @@ pub fn main_entry() -> ExitCode {
 }
 
 /// tracing のログを標準エラーに出す（`--log`、環境変数 `GENZO_LOG`、既定は [`DEFAULT_LOG`]）。
+///
+/// あわせて、ログのフォルダ（`--log-dir`、環境変数 `GENZO_LOG_DIR`、なければアプリと同じ場所）の `cli.log` に
+/// info の水準で書き（`--no-log-file` か `GENZO_LOG_FILE=off` で書かない）、パニックのときはクラッシュ
+/// レポートを保存する（genzo-api の `logging`。SYS-07。外部へは送信しない）。
 fn init_logging(g: &GlobalArgs) {
-    let spec = g
+    let mut spec = g
         .log
         .clone()
         .or_else(|| std::env::var(ENV_LOG).ok().filter(|v| !v.trim().is_empty()))
         .unwrap_or_else(|| DEFAULT_LOG.to_owned());
-    let filter = tracing_subscriber::EnvFilter::try_new(&spec).unwrap_or_else(|e| {
+    if let Err(e) = tracing_subscriber::EnvFilter::try_new(&spec) {
         eprintln!("警告: ログの指定 {spec:?} を解釈できないため warn にします: {e}");
-        tracing_subscriber::EnvFilter::new(DEFAULT_LOG)
+        spec = DEFAULT_LOG.to_owned();
+    }
+    genzo_api::logging::init(genzo_api::logging::LogConfig {
+        program: genzo_api::logging::Program::Cli,
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        dir: log_dir(g),
+        file_filter: g.no_log_file.then(|| "off".to_owned()),
+        stderr_filter: spec,
+        stderr_target: false,
     });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .try_init();
+}
+
+/// 引数を解釈し、サブコマンドの名前の並び（「keyword add」など。ログに書く）とともに返す。
+fn parse_cli(argv: impl IntoIterator<Item = OsString>) -> Result<(args::Cli, String), clap::Error> {
+    use clap::{CommandFactory, FromArgMatches};
+    let matches = args::Cli::command().try_get_matches_from(argv)?;
+    let cli = args::Cli::from_arg_matches(&matches)?;
+    Ok((cli, subcommand_path(&matches)))
+}
+
+/// 解釈した引数のサブコマンドの名前の並び（入れ子は空白でつなぐ。引数の値は含めない）。
+fn subcommand_path(matches: &clap::ArgMatches) -> String {
+    let mut names = Vec::new();
+    let mut cur = matches;
+    while let Some((name, sub)) = cur.subcommand() {
+        names.push(name.to_owned());
+        cur = sub;
+    }
+    names.join(" ")
+}
+
+/// ログのフォルダ（`--log-dir`（相対パスは今のフォルダから）、なければ genzo-api の
+/// `logging::default_log_dir`）。
+pub(crate) fn log_dir(g: &GlobalArgs) -> Option<std::path::PathBuf> {
+    g.log_dir
+        .as_ref()
+        .map(|d| std::path::absolute(d).unwrap_or_else(|_| d.clone()))
+        .or_else(genzo_api::logging::default_log_dir)
 }
 
 /// 解釈した引数でコマンドを実行する。
@@ -245,6 +303,13 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         Command::Flag { variants, flag } => library::mark(&g, out, &variants, Mark::Flag(flag)),
         Command::Label { variants, label } => library::mark(&g, out, &variants, Mark::Label(label)),
         Command::Caption { variant, text } => library::caption(&g, out, variant, &text),
+        Command::Metadata {
+            variants,
+            set,
+            clear,
+        } => library::metadata(&g, out, &variants, set, clear),
+        Command::Keyword(c) => organize::keyword(&g, out, c),
+        Command::Collection(c) => organize::collection(&g, out, c),
         Command::Develop(c) => develop::run(&g, out, c),
         Command::Export(a) => export::run(&g, out, a),
         Command::Render(a) => standalone::render(&g, out, a),
@@ -257,6 +322,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
             library::delete(&g, out, DeleteKind::Trash, &variants, yes)
         }
         Command::Bench(a) => bench::run(&g, out, a),
+        Command::Log(c) => logs::run(&g, out, c),
     }
 }
 
@@ -281,5 +347,59 @@ mod tests {
             (0, 1, 2, 3, 130)
         );
         assert!(args::EXIT_CODES_HELP.contains("130"));
+    }
+
+    /// ログに書くのはサブコマンドの名前だけで、引数の値（キャプション・連絡先・パスなど）は含めない
+    /// （検証の指摘: 以前は全引数を cli.log に書いていた）。
+    #[test]
+    fn logged_command_path_has_no_argument_values() {
+        let parse = |argv: &[&str]| parse_cli(argv.iter().map(OsString::from)).unwrap().1;
+        assert_eq!(
+            parse(&[
+                "genzo",
+                "--catalog",
+                "/home/u/秘密/catalog.db",
+                "metadata",
+                "1",
+                "--set",
+                "creator_email=taro@example.com",
+            ]),
+            "metadata"
+        );
+        assert_eq!(
+            parse(&[
+                "genzo",
+                "keyword",
+                "add",
+                "1",
+                "2",
+                "--keyword",
+                "場所>京都"
+            ]),
+            "keyword add"
+        );
+        assert_eq!(parse(&["genzo", "log", "info"]), "log info");
+        // 解釈の誤りは clap のエラー（使い方の誤り）のまま。
+        assert!(parse_cli(["genzo", "--no-such-option"].map(OsString::from)).is_err());
+    }
+
+    /// `--log-dir` の相対パスは、今のフォルダからの絶対パスにする（環境変数 GENZO_LOG_DIR と同じ。表示する
+    /// 場所と書く場所を同じにする）。
+    #[test]
+    fn log_dir_option_is_made_absolute() {
+        let cli = <args::Cli as clap::Parser>::try_parse_from([
+            "genzo",
+            "log",
+            "info",
+            "--log-dir",
+            "rel/logs",
+        ])
+        .unwrap();
+        let dir = log_dir(&cli.global).unwrap();
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert_eq!(
+            dir,
+            std::env::current_dir().unwrap().join("rel").join("logs")
+        );
     }
 }

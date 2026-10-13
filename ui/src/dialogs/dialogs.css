@@ -479,3 +479,89 @@ button.dlg-list-item:focus-visible {
   font-size: 16px;
   color: var(--fg-0);
 }
+/* カタログの構造の SQL（設定の「カタログ」。ORG-07）。 */
+.dlg-pre {
+  max-height: 260px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre;
+  user-select: text;
+}
+
+/* 設定の「表示」: ルーペ上の撮影情報の項目（LIB-17） */
+.info-items {
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 12px;
+}
+.info-items th,
+.info-items td {
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.info-items th:not(:first-child),
+.info-items td:not(:first-child) {
+  text-align: center;
+}
+
+/* スマートコレクションの条件の編集（SmartCollectionDialog） */
+.smart-editor {
+  max-height: 52vh;
+  overflow: auto;
+  margin: 8px 0;
+}
+.smart-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.smart-group.nested {
+  margin: 4px 0 2px 16px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--bg-0);
+  border-radius: var(--radius);
+}
+.smart-group-head,
+.smart-row-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.smart-group-head .spacer,
+.smart-row-line .spacer {
+  flex: 1;
+}
+.smart-row {
+  padding: 2px 0;
+}
+.smart-row input[type="text"] {
+  min-width: 180px;
+}
+.smart-number {
+  width: 80px;
+}
+.smart-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.smart-problems {
+  margin: 6px 0;
+  padding-left: 18px;
+  color: var(--warn);
+}
+.smart-count {
+  margin-right: auto;
+  color: var(--fg-1);
+  font-variant-numeric: tabular-nums;
+}

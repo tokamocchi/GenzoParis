@@ -15,7 +15,17 @@
 //   真ん中に置く。絞り込み・並べ替えを変えたら先頭に戻し、操作の対象が残っていればそこを見せる。
 
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { memo, type MouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  type MouseEvent,
+  type PointerEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import type { SearchFilter, VariantId, VariantSummary } from "../api/types";
 import { thumbUrl } from "../api/uri";
@@ -23,6 +33,7 @@ import { FlagMark, LabelDot, Stars } from "../components/Marks";
 import { formatCaptureTime } from "../format";
 import { useHotkeys } from "../keyboard";
 import { actions, appStore, type Selection, useApp } from "../state/app";
+import { dropPhotos } from "../state/organize";
 import { searchCache, thumbRevs, useSearchVersion } from "../state/search";
 import { activeConditionCount, clearConditions } from "./filterLogic";
 import {
@@ -43,6 +54,7 @@ import {
 } from "./gridMath";
 import "./library.css";
 import { extensionMark, fileStatusTitle, virtualCopyLabel } from "./metadataLogic";
+import { consumeDragClick, dragIds, watchPhotoDrag } from "./photoDrag";
 import { loadNumber, save } from "./prefs";
 import { ScrollMapper } from "./scrollMapper";
 
@@ -308,12 +320,31 @@ export function Grid() {
     return { index: Number(el.dataset.index), expect: id === undefined ? undefined : Number(id) };
   };
   const onClick = (e: MouseEvent) => {
+    // 写真をドラッグした後のクリック（ボタンを離したとき）は、選択を変えない。
+    if (consumeDragClick()) return;
     const c = cellOf(e);
     if (c === null) return;
     const toggle = !e.shiftKey && (e.metaKey || e.ctrlKey);
     clicked.current = { index: c.index, toggle, at: performance.now() };
     const { index, opts } = cellClickSelection(c.index, c.expect, e, clampRange);
     void actions.selectIndex(index, opts);
+  };
+  // 写真をつかんで動かすと、左のパネルのコレクション・キーワードに落とせる（library/photoDrag.ts）。
+  const onPointerDown = (e: PointerEvent) => {
+    if (e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+    const c = cellOf(e);
+    if (c === null || c.expect === undefined) return;
+    const grabbed = c.expect;
+    watchPhotoDrag(
+      { x: e.clientX, y: e.clientY },
+      () => {
+        const sel = appStore.get().selection;
+        // 選んでいない写真をつかんだら、その 1 枚を選んでから運ぶ。
+        if (!sel.ids.includes(grabbed)) void actions.selectIndex(c.index, { expect: grabbed });
+        return dragIds(sel.ids, grabbed);
+      },
+      (ids, target) => void dropPhotos(ids, target),
+    );
   };
   const onDoubleClick = (e: MouseEvent) => {
     const c = cellOf(e);
@@ -350,6 +381,7 @@ export function Grid() {
         aria-label="サムネイルの一覧"
         onClick={onClick}
         onDoubleClick={onDoubleClick}
+        onPointerDown={onPointerDown}
       >
         <div className="lib-grid-spacer" style={{ height: layout.scrollHeight }}>
           <div ref={layerRef} className="lib-grid-layer">
@@ -533,6 +565,7 @@ function Badges({ item, wide }: { item: VariantSummary; wide: boolean }) {
 function EmptyState({ filter }: { filter: SearchFilter }) {
   const conditions = activeConditionCount(filter);
   const hasFolder = filter.folder_id !== null && filter.folder_id !== undefined;
+  const hasCollection = filter.collection_id !== null && filter.collection_id !== undefined;
   let body;
   if (conditions > 0) {
     body = (
@@ -542,6 +575,21 @@ function EmptyState({ filter }: { filter: SearchFilter }) {
         <div className="actions">
           <button className="btn" onClick={() => actions.replaceFilter(clearConditions(filter))}>
             条件を解除
+          </button>
+        </div>
+      </>
+    );
+  } else if (hasCollection) {
+    body = (
+      <>
+        <h2>このコレクションには写真がありません</h2>
+        <p>
+          グリッドの写真を左のパネルのコレクションにドラッグするか、写真を選んで B（ターゲットコレクション）で入れられます。
+          スマートコレクションは、条件に合う写真が自動で入ります。
+        </p>
+        <div className="actions">
+          <button className="btn" onClick={() => actions.showAll()}>
+            すべての写真を表示
           </button>
         </div>
       </>

@@ -1,5 +1,8 @@
-// ライブラリの左のパネル: カタログの件数・「すべての写真」・フォルダツリー（LIB-06）。
+// ライブラリの左のパネル: カタログの件数・「すべての写真」・フォルダツリー（LIB-06）・コレクション
+// （LIB-10・LIB-11。CollectionPanel）・キーワード（LIB-09。KeywordPanel）。
 //
+// - どこを見るか（ソース）は、すべての写真・フォルダ・コレクションのどれか 1 つ（actions.showFolder・
+//   showCollection・showAll。ほかの絞り込みの条件は残す）。
 // - フォルダは core.folders()（取り込み・削除の後（foldersVersion）に読み直す）。parent_id で木にし、
 //   ボリュームごとの根から並べる（folderTree.ts）。
 // - フォルダを選ぶと、そのフォルダで絞り込む（actions.setFilter の folder_id・include_subfolders）。
@@ -13,7 +16,9 @@ import * as core from "../api/core";
 import type { CatalogStats, FolderId, FolderInfo } from "../api/types";
 import { Section } from "../components/Section";
 import { actions, useApp } from "../state/app";
+import { CollectionPanel } from "./CollectionPanel";
 import { ancestorKeys, buildFolderTree, type FolderNode, visibleFolderRows } from "./folderTree";
+import { KeywordPanel } from "./KeywordPanel";
 import "./library.css";
 import { catalogKey, loadBoolean, loadJson, save } from "./prefs";
 
@@ -51,6 +56,7 @@ function collectKeys(nodes: FolderNode[], out: Set<string>): Set<string> {
 
 export function LibraryLeftPanel() {
   const folderId = useApp((s) => s.filter.folder_id ?? null);
+  const collectionId = useApp((s) => s.filter.collection_id ?? null);
   const includeSubfolders = useApp((s) => s.filter.include_subfolders ?? false);
   const foldersVersion = useApp((s) => s.foldersVersion);
   const detailsVersion = useApp((s) => s.detailsVersion);
@@ -142,7 +148,7 @@ export function LibraryLeftPanel() {
     if (openKey) save(openKey, next);
   };
 
-  const selectFolder = (id: FolderId) => actions.setFilter({ folder_id: id, include_subfolders: subPref });
+  const selectFolder = (id: FolderId) => actions.showFolder(id, subPref);
 
   // フォルダを選んでいる間は、その条件を表示する（グリッドの「サブフォルダを含める」でも変わる）。
   const subChecked = folderId !== null ? includeSubfolders : subPref;
@@ -156,17 +162,17 @@ export function LibraryLeftPanel() {
     <div className="lib-left">
       <Section id="lib.catalog" title="カタログ">
         <div
-          className={`lib-nav-row${folderId === null ? " on" : ""}`}
+          className={`lib-nav-row${folderId === null && collectionId === null ? " on" : ""}`}
           role="button"
           tabIndex={0}
-          onClick={() => actions.setFilter({ folder_id: null })}
+          onClick={() => actions.showAll()}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
-              actions.setFilter({ folder_id: null });
+              actions.showAll();
             }
           }}
-          title="フォルダで絞り込まない（ほかの条件は残す）"
+          title="フォルダ・コレクションで絞り込まない（ほかの条件は残す）"
         >
           <span>すべての写真</span>
           <span className="count" title="カタログの写真と動画の数（仮想コピーを含む）">
@@ -232,6 +238,9 @@ export function LibraryLeftPanel() {
           </button>
         </div>
       </Section>
+
+      <CollectionPanel />
+      <KeywordPanel />
     </div>
   );
 }

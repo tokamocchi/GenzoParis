@@ -27,7 +27,7 @@ const nonEmpty = (v: unknown[] | null | undefined) => Array.isArray(v) && v.leng
 const isSet = (v: unknown) => v !== null && v !== undefined;
 
 /**
- * 有効な条件の数（フォルダは「どこを見るか」なので数えない）。撮影日の範囲は開始・終了をまとめて 1 つ、
+ * 有効な条件の数（フォルダ・コレクションは「どこを見るか」なので数えない）。撮影日の範囲は開始・終了をまとめて 1 つ、
  * 評価の下限・上限もまとめて 1 つに数える。
  */
 export function activeConditionCount(f: SearchFilter): number {
@@ -50,13 +50,14 @@ export function activeConditionCount(f: SearchFilter): number {
   return n;
 }
 
-/** 条件をすべて解除する（フォルダの選択は残す）。 */
+/** 条件をすべて解除する（フォルダ・コレクションの選択は残す）。 */
 export function clearConditions(f: SearchFilter): SearchFilter {
   const out: SearchFilter = {};
   if (isSet(f.folder_id)) {
     out.folder_id = f.folder_id;
     out.include_subfolders = f.include_subfolders ?? false;
   }
+  if (isSet(f.collection_id)) out.collection_id = f.collection_id;
   return out;
 }
 

@@ -299,7 +299,9 @@ fn classify_catalog(e: &CatalogError) -> (ErrorKind, Option<&'static str>) {
             (K::InvalidInput, None)
         }
         CatalogError::Develop(_) => (K::InvalidInput, None),
-        CatalogError::Conflict(_) | CatalogError::AlreadyExists(_) => (K::Conflict, None),
+        CatalogError::Conflict(_)
+        | CatalogError::NameConflict(_)
+        | CatalogError::AlreadyExists(_) => (K::Conflict, None),
         CatalogError::IntegrityCheckFailed(_)
         | CatalogError::Corrupt(_)
         | CatalogError::NotOurDatabase(_) => (K::CatalogCorrupt, Some(HINT_RESTORE)),

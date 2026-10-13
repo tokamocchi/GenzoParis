@@ -1,12 +1,16 @@
 //! カタログの結合テスト（内部の接続にも触れるため、crate の中に置く）。
 
 mod backup;
+mod collections;
 mod develop;
 mod dummy;
 mod file_ops;
+mod iptc;
 mod keywords;
+mod public_views;
 mod register;
 mod schema;
+mod schema_doc;
 mod search;
 mod text_search;
 mod thumbs;

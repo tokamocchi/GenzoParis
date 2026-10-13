@@ -22,6 +22,7 @@ Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカ�
 | [docs/poc/README.md](docs/poc/README.md) | PoC の記録（計測と記録のルール、PoC-1〜7 の記録欄） |
 | [docs/m5_acceptance.md](docs/m5_acceptance.md) | M5（MVP）の受け入れの確認の手順（Windows / macOS の実機で人が行う） |
 | [docs/packaging.md](docs/packaging.md) | 配布物（インストーラー）の作り方・入れ方・注意 |
+| [docs/catalog_schema.md](docs/catalog_schema.md) | カタログ（SQLite）のスキーマと、外部のツールから SQL で読む方法（公開ビュー。ORG-07） |
 
 ## 開発
 
@@ -103,14 +104,32 @@ echo '{"exposure_ev": 0.5}' | cargo run -p genzo-cli -- develop set 12 --json -
 cargo run -p genzo-cli -- export 12 --out ./out --long-edge 2048 --remove-gps
 cargo run -p genzo-cli --features libraw -- render DSC00001.ARW --out out.tif   # カタログなしで 1 枚（RAW は LibRaw が必要）
 cargo run --release -p genzo-cli -- bench preview --synthetic 7008x4672 --out bench-results
+cargo run -p genzo-cli -- catalog schema            # カタログの構造（--sql で作る SQL、--json で表と列。ORG-07）
+cargo run -p genzo-cli -- log info                  # ログ・クラッシュレポートの場所と中身（SYS-07）
+cargo run -p genzo-cli -- log clear                 # ログ・クラッシュレポートを消す
+cargo run -p genzo-cli -- metadata 12 13 --set title=清水寺 --set creator="山田 太郎" --clear city   # 説明のメタデータを一括で変える（LIB-15）
+cargo run -p genzo-cli -- metadata 12 13            # 項目ごとの値（写真によって異なれば「複数の値」）
+cargo run -p genzo-cli -- develop before 12 --out before.png --after after.png   # ビフォー / アフターのプレビュー（DEV-31）
+cargo run -p genzo-cli -- keyword add 12 13 -k "場所>京都" -k 家族   # キーワードを付ける（なければ作る。LIB-09）
+cargo run -p genzo-cli -- keyword list              # キーワードの一覧（階層のパス・直接付いている数・書き出すか）
+cargo run -p genzo-cli -- search --keyword 場所      # 親のキーワードで絞り込む（下の階層を含む）
+cargo run -p genzo-cli -- collection create "京都 2024" --add 12 13   # コレクションを作って写真を入れる（LIB-10）
+cargo run -p genzo-cli -- collection create "よい写真" --rule rule.json   # スマートコレクション（LIB-11）
+cargo run -p genzo-cli -- search --collection 1     # コレクションで絞り込む（スマートは条件、セットは中のいずれか）
 ```
 
 - `--json` のときは、失敗（使い方の誤りを含む）も標準出力に `{"error": {"kind": ...}}` の JSON で出します。
 - `import` は、取り込みの後に現像結果からサムネイル・プレビューを作り直しません（埋め込みの JPEG のまま。現像設定を変えたときに作ります）。作り直すときは `--previews` を付けてください（決定事項ログ No.49）。
 - `--gpu auto`（既定）でも、ソフトウェアの GPU（Mesa の llvmpipe・Windows の WARP など）は使わず CPU 版で処理します。使うときは環境変数 `GENZO_GPU_ALLOW_SOFTWARE=1` を付けてください（決定事項ログ No.46）。
-- `develop region <ID>` で、表示範囲の描画（ルーペの等倍表示・拡大の入口。`Core::render_region`）を試せます（決定事項ログ No.58。既にあるファイルには書きません）。
+- `develop region <ID>` で、表示範囲の描画（ルーペの等倍表示・拡大の入口。`Core::render_region`）を試せます（決定事項ログ No.58。既にあるファイルには書きません）。`--before <SOURCE>` を付けると、ビフォー / アフターのビフォーの設定で描きます（`Core::render_before_region`）。
+- `metadata <ID>...`（LIB-15）: タイトル・キャプション・作成者と連絡先・著作権・撮影場所などの説明のメタデータを、カタログの中だけで変えます（元のファイルには書きません。書き出したファイルには XMP と、ASCII で表せる値は Exif にも入ります）。`--set 項目=値`（空の値で削除）・`--clear 項目` を複数指定でき、複数の写真には一括で書きます。項目の名前は `genzo metadata --help` の末尾にあります（`creator_email` は `creator-email` とも書けます）。`--set`・`--clear` がなければ、項目ごとの値を表示します。`show` にも値のある項目が出ます（決定事項ログ No.78）。
+- `keyword`（LIB-09）: `list`・`add <ID>... -k <パス>`（なければ作る）・`remove <ID>... -k <キーワード>`・`show <ID>...`・`create <パス>`・`rename <キーワード> <名前>`・`move <キーワード> [--to <キーワード>]`・`delete <キーワード>`（下の階層と付与も消す。写真は消さない）・`export <キーワード> --on|--off`（書き出すファイルの XMP の `dc:subject` に書くか）。キーワードは「場所>京都」のような階層のパス（名前は全角・半角、大文字・小文字を区別しない）か `id:12` の形の ID で指定します（名前が数字だけのキーワードと取り違えないため）。`search --keyword <キーワード>`（複数指定ですべてを持つ）は下の階層を含めて探します。キーワードの名前は 200 文字までで、区切りに使う「>」「＞」「|」「,」「，」「、」と改行などの制御文字は使えません（決定事項ログ No.85）。書き出しでキーワードを書かないときは `export --remove-keywords`（決定事項ログ No.81）。
+- `collection`（LIB-10・LIB-11）: `list`（スマートコレクション・セットの数も数える）・`create <名前> [--in <セットの ID>] [--kind manual|smart|set] [--rule <FILE>] [--add <ID>...]`・`add <コレクション> <ID>...`・`remove <コレクション> <ID>...`（写真は消さない）・`rename`・`move <コレクション> [--to <セットの ID>]`・`delete`（セットなら中のものも。削除するものを条件で使っているスマートコレクションがあれば警告する）・`rule <コレクション> [--set <FILE>]`（条件の表示・変更）。名前は 200 文字までです。コレクションは ID で指定します。`search --collection <ID>` で絞り込み、`search --rule <FILE>` で保存していない条件で探せます。条件の JSON の形は [docs/04_architecture.md](docs/04_architecture.md) の 3.9 節と [docs/catalog_schema.md](docs/catalog_schema.md) の 2.5 節（例: `{"version": 1, "match": "all", "rules": [{"type": "rating", "op": "gte", "value": 3}, {"type": "keyword", "op": "has", "keyword_id": 1}]}`）。条件が自分自身を参照する（循環する）と保存しません（終了コード 1。決定事項ログ No.82・83）。
+- `develop before <ID> --out <FILE>`（DEV-31）: ビフォー / アフターの表示のビフォーのプレビューを PNG に書きます。`--source` は `initial`（取り込んだ直後の設定。既定）・`current`（今の設定）・`history:<履歴の ID>`・`snapshot:<ID>`。切り抜き・角度は今の設定と同じです。`--after <FILE>` でアフターも同じ寸法で書きます（決定事項ログ No.79。既にあるファイルには書きません）。
 - Windows: 現像設定の JSON は、引数に直接書かずにファイル（`--json settings.json`）で渡すことをおすすめします（PowerShell・cmd.exe では引用符の扱いが違うため）。ファイルは UTF-8（BOM 付きも可）か BOM 付きの UTF-16 で読めます。PowerShell で `--json` の出力を受け取るときに日本語が化ける場合は、`[Console]::OutputEncoding = [Text.Encoding]::UTF8` を先に実行してください（出力は UTF-8）。
 - `bench` は release ビルドで実行してください（debug ビルドの時間は記録に「debug」と残り、参考値になります）。
+- ログ（SYS-07。外部へは送信しません）: CLI は標準エラー（`--log`・`GENZO_LOG`）に加えて、ログのフォルダの `cli.log` に info の水準で書き、パニックのときはクラッシュレポートを `crash/` に残します。ログのフォルダは `--log-dir`・環境変数 `GENZO_LOG_DIR`、なければアプリと同じ場所（Windows は `%LOCALAPPDATA%\io.github.tokamocchi.genzoparis\logs`、macOS は `~/Library/Logs/io.github.tokamocchi.genzoparis`、Linux は `~/.local/share/io.github.tokamocchi.genzoparis/logs`）です。ファイルに書かないときは `--no-log-file`（環境変数 `GENZO_LOG_FILE=off`）を付けてください。ログには写真のファイル名・フォルダの場所が含まれます。実行したコマンドは、サブコマンドの名前と引数の数だけを書きます（`--set` のメタデータの値・パスなどの引数の値は書きません）。
+- カタログを外部のツールから読むときは、読み取り専用で開き（`sqlite3 -readonly catalog.db`）、公開ビュー（`photos_v1`・`photo_keywords_v1`・`photo_collections_v1`）を使ってください（[docs/catalog_schema.md](docs/catalog_schema.md)）。
 
 ### 依存ライブラリのライセンスと脆弱性の確認
 

@@ -11,9 +11,12 @@ import type {
   AssetKind,
   CatalogStatus,
   CloseFailure,
+  CollectionId,
+  CollectionKind,
   ColorLabel,
   CoreEvent,
   CoreSettings,
+  CrashReportSummary,
   DeleteKind,
   DevelopSettings,
   ErrorInfo,
@@ -21,6 +24,7 @@ import type {
   JobInfo,
   JobKind,
   JobState,
+  KeywordId,
   Rating,
   SearchFilter,
   SearchSort,
@@ -39,9 +43,26 @@ export type DialogState =
   | { kind: "export"; variantIds: VariantId[] }
   | { kind: "delete"; deleteKind: DeleteKind; variantIds: VariantId[] }
   | { kind: "paste_settings"; targets: VariantId[] }
-  | { kind: "settings"; tab?: "general" | "catalog" | "backup" }
+  | { kind: "settings"; tab?: "general" | "view" | "catalog" | "backup" }
   | { kind: "shortcuts" }
-  | { kind: "close_failed"; failure: CloseFailure; quitting: boolean };
+  | { kind: "close_failed"; failure: CloseFailure; quitting: boolean }
+  | { kind: "crash_reports"; reports: CrashReportSummary[] }
+  // キーワード（LIB-09）: 作る（parentId の下）・名前の変更・移動・削除の確認。
+  | { kind: "keyword"; mode: "create" | "rename" | "move"; keywordId?: KeywordId; parentId?: KeywordId | null }
+  | { kind: "keyword_delete"; keywordId: KeywordId }
+  // コレクション（LIB-10・LIB-11）: 作る（種類・親のセット・入れる写真）・名前の変更・移動・削除の確認・
+  // スマートコレクションの条件の編集（collectionId がなければ新しく作る）・写真を入れる先を選ぶ。
+  | {
+      kind: "collection";
+      mode: "create" | "rename" | "move";
+      collectionKind?: CollectionKind;
+      collectionId?: CollectionId;
+      parentId?: CollectionId | null;
+      variantIds?: VariantId[];
+    }
+  | { kind: "collection_delete"; collectionId: CollectionId }
+  | { kind: "smart_collection"; collectionId?: CollectionId; parentId?: CollectionId | null }
+  | { kind: "add_to_collection"; variantIds: VariantId[] };
 
 export interface Toast {
   id: number;
@@ -109,9 +130,36 @@ export interface AppState {
   foldersVersion: number;
   /** variant の詳細を読み直す合図（評価・キャプション・現像設定の変更）。 */
   detailsVersion: number;
+  /** キーワード・コレクションの一覧と、写真のキーワードを読み直す合図（LIB-09〜11。それらの変更・削除の後に増える）。 */
+  organizeVersion: number;
+  /**
+   * ターゲットコレクション（B キーで選んだ写真を入れる・外す手動のコレクション。LIB-10）。カタログごとに
+   * ブラウザに保存する（state/organize.ts）。
+   */
+  targetCollection: CollectionId | null;
 }
 
 export const DEFAULT_SORT: SearchSort = { key: "capture_time", direction: "ascending" };
+
+/** ターゲットコレクションを保存する鍵（カタログごと。コレクションの ID はカタログの中だけで意味を持つ）。 */
+export function targetCollectionKey(catalogPath: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < catalogPath.length; i++) {
+    h ^= catalogPath.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `genzo.library.targetCollection.${(h >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function loadTargetCollection(catalogPath: string): CollectionId | null {
+  try {
+    const v = localStorage.getItem(targetCollectionKey(catalogPath));
+    const n = v === null ? NaN : Number(v);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
 
 const AUTO_ADVANCE_KEY = "genzo.autoAdvance";
 
@@ -154,6 +202,8 @@ export const appStore = createStore<AppState>({
   clipboard: null,
   foldersVersion: 0,
   detailsVersion: 0,
+  organizeVersion: 0,
+  targetCollection: null,
 });
 
 // サムネイルの新しい rev は、まとめて（1 フレームに 1 回）知らせる。ルーペの `s.thumbRevs[id]` の購読も
@@ -837,6 +887,12 @@ function handleEvent(e: CoreEvent): void {
         detailsVersion: s.detailsVersion + 1,
         foldersVersion:
           e.change === "imported" || e.change === "removed" ? s.foldersVersion + 1 : s.foldersVersion,
+        // キーワード・コレクションの一覧（件数を含む）は、それらの変更と、写真の削除・評価などの変更
+        // （スマートコレクションの件数）で読み直す。
+        organizeVersion:
+          e.change === "keywords" || e.change === "collections" || e.change === "removed" || e.change === "marks"
+            ? s.organizeVersion + 1
+            : s.organizeVersion,
       }));
       break;
     case "thumbnail_updated":
@@ -953,7 +1009,11 @@ async function catalogOpened(status: CatalogStatus): Promise<void> {
   });
   modeSeq++;
   writtenColorLabels.clear();
-  appStore.set((s) => ({ foldersVersion: s.foldersVersion + 1 }));
+  appStore.set((s) => ({
+    foldersVersion: s.foldersVersion + 1,
+    organizeVersion: s.organizeVersion + 1,
+    targetCollection: loadTargetCollection(status.catalog_path),
+  }));
   for (const w of status.warnings) handleEvent(w);
   await runSearch();
 }
@@ -980,6 +1040,7 @@ function catalogClosed(): void {
     dialog: null,
     clipboard: null,
     jobs: {},
+    targetCollection: null,
   });
   modeSeq++;
   writtenColorLabels.clear();
@@ -1157,6 +1218,19 @@ export const actions = {
   replaceFilter(filter: SearchFilter) {
     appStore.set({ filter });
     void runSearch();
+  },
+  /**
+   * どこを見るか（フォルダ・コレクション・すべての写真）を切り替える。フォルダとコレクションはどちらか
+   * 1 つ（Lightroom の「ソース」と同じ）で、ほかの絞り込みの条件は残す。
+   */
+  showFolder(folderId: number, includeSubfolders: boolean) {
+    actions.setFilter({ folder_id: folderId, include_subfolders: includeSubfolders, collection_id: null });
+  },
+  showCollection(collectionId: CollectionId) {
+    actions.setFilter({ collection_id: collectionId, folder_id: null });
+  },
+  showAll() {
+    actions.setFilter({ folder_id: null, collection_id: null });
   },
   setSort(sort: SearchSort) {
     appStore.set({ sort });

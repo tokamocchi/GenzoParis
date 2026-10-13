@@ -10,11 +10,13 @@
 //! カスタム URI スキーム（`genzo://thumb/{variant_id}?rev={rev}`）の処理で [`Core::thumbnail`] を直接
 //! 呼ぶこと。現像のプレビューのピクセルも、[`Core::develop_frame`] で受け取ってビューポートに直接描く。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use genzo_model::{
-    ColorLabel, CropRect, DevelopSettings, ExportSettings, Flag, HistoryEntryId, Rating, VariantId,
+    CollectionId, CollectionKind, ColorLabel, CropRect, DevelopSettings, ExportSettings, Flag,
+    HistoryEntryId, KeywordId, MetadataField, Rating, SmartRule, VariantId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,11 +24,12 @@ use crate::core::Core;
 use crate::error::ApiError;
 use crate::maintenance::RestorePlan;
 use crate::types::{
-    BackupEntry, Capabilities, CatalogStats, CoreSettings, DeleteKind, DeletePlan, DeleteReport,
-    DevelopState, DisplayInfo, Facets, FileCheckReport, FolderInfo, FrameInfo, HistoryItem,
-    IndexOf, JobInfo, PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest, SearchFilter,
-    SearchResult, SearchSort, SettingGroups, SettingsUpdate, StartupReport, ThumbnailData,
-    VariantDetails,
+    BackupEntry, BeforeInfo, BeforeSource, Capabilities, CatalogSchema, CatalogStats,
+    CollectionInfo, CoreSettings, DeleteKind, DeletePlan, DeleteReport, DevelopState, DisplayInfo,
+    Facets, FileCheckReport, FolderInfo, FrameInfo, HistoryItem, IndexOf, JobInfo, KeywordHit,
+    KeywordInfo, KeywordUsage, MetadataSummary, PickedWhiteBalance, RangeResult, RegionInfo,
+    RegionRequest, SearchFilter, SearchResult, SearchSort, SettingGroups, SettingsUpdate,
+    StartupReport, ThumbnailData, VariantDetails, VariantKeywords,
 };
 
 /// コマンド（UI → コア）。
@@ -115,6 +118,20 @@ pub enum Command {
         /// キャプション（`null` で削除）。
         caption: Option<String>,
     },
+    /// 説明のメタデータ（タイトル・キャプション・作成者・著作権など。LIB-15）を一括で変える
+    /// （[`crate::Core::set_metadata`]）。→ [`Response::Updated`]（変えた asset の数）
+    SetMetadata {
+        /// variant。
+        variant_ids: Vec<VariantId>,
+        /// 変える項目と値（`{"title": "清水寺", "creator": null}`。`null`・空の文字列で削除。並べない項目は
+        /// 変えない）。
+        changes: BTreeMap<MetadataField, Option<String>>,
+    },
+    /// 複数の写真の説明のメタデータのまとめ（[`crate::Core::metadata_summary`]）。→ [`Response::Metadata`]
+    MetadataSummary {
+        /// variant。
+        variant_ids: Vec<VariantId>,
+    },
     /// variant の詳細。→ [`Response::Details`]
     VariantDetails {
         /// variant。
@@ -126,6 +143,158 @@ pub enum Command {
     CheckFiles {
         /// variant。
         variant_ids: Vec<VariantId>,
+    },
+    /// 条件に合う写真の数（表示中の検索結果は変えない。スマートコレクションの条件の編集中の件数など）。
+    /// → [`Response::Count`]
+    Count {
+        /// 条件。
+        #[serde(default)]
+        filter: Box<SearchFilter>,
+    },
+
+    // --- キーワード（LIB-09） ---
+    /// すべてのキーワードと、直接付いている写真の数。→ [`Response::Keywords`]
+    KeywordTree,
+    /// 名前でキーワードを探す（部分一致。入力欄の補完）。→ [`Response::KeywordHits`]
+    FindKeywords {
+        /// 検索語。
+        query: String,
+        /// 件数の上限（省略時は 20。[`crate::MAX_KEYWORD_HITS`] まで）。
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// 階層のパスでキーワードを確保する（なければ作る）。→ [`Response::KeywordCreated`]
+    CreateKeyword {
+        /// 親（`null` で最上位）。
+        #[serde(default)]
+        parent_id: Option<KeywordId>,
+        /// 親の下からのパス（`["京都", "祇園"]`）。
+        path: Vec<String>,
+    },
+    /// キーワードの名前を変える。→ [`Response::Ok`]
+    RenameKeyword {
+        /// キーワード。
+        keyword_id: KeywordId,
+        /// 新しい名前。
+        name: String,
+    },
+    /// キーワードを別の親の下へ移す。→ [`Response::Ok`]
+    MoveKeyword {
+        /// キーワード。
+        keyword_id: KeywordId,
+        /// 新しい親（`null` で最上位）。
+        #[serde(default)]
+        parent_id: Option<KeywordId>,
+    },
+    /// キーワードを削除する（子のキーワードと付与も）。→ [`Response::Updated`]（削除したキーワードの数）
+    DeleteKeyword {
+        /// キーワード。
+        keyword_id: KeywordId,
+    },
+    /// 書き出すファイルのメタデータにキーワードを書くかを変える。→ [`Response::Ok`]
+    SetKeywordExport {
+        /// キーワード。
+        keyword_id: KeywordId,
+        /// 書くか。
+        include: bool,
+    },
+    /// キーワードの使われ方（削除の確認）。→ [`Response::KeywordUsage`]
+    KeywordUsage {
+        /// キーワード。
+        keyword_id: KeywordId,
+    },
+    /// 写真にキーワードを付ける。→ [`Response::Updated`]（新しく付けた組の数）
+    AddKeywords {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+        /// 既存のキーワード。
+        #[serde(default)]
+        keyword_ids: Vec<KeywordId>,
+        /// 階層のパス（なければ作る。`[["場所", "京都"]]`）。
+        #[serde(default)]
+        paths: Vec<Vec<String>>,
+    },
+    /// 写真からキーワードを外す。→ [`Response::Updated`]（外した組の数）
+    RemoveKeywords {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+        /// キーワード。
+        keyword_ids: Vec<KeywordId>,
+    },
+    /// 写真に付いているキーワードと、それぞれが付いている写真の数。→ [`Response::VariantKeywords`]
+    VariantKeywords {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+    },
+
+    // --- コレクション（LIB-10・LIB-11） ---
+    /// すべてのコレクション。→ [`Response::Collections`]
+    Collections {
+        /// スマートコレクション・セットの写真の数も数えるか。
+        #[serde(default)]
+        with_counts: bool,
+    },
+    /// コレクションを作る。→ [`Response::CollectionCreated`]
+    CreateCollection {
+        /// 親のコレクションセット（`null` で最上位）。
+        #[serde(default)]
+        parent_id: Option<CollectionId>,
+        /// 名前。
+        name: String,
+        /// 種類（`manual`・`smart`・`set`）。
+        kind: CollectionKind,
+        /// スマートコレクションの条件。
+        #[serde(default)]
+        rule: Option<SmartRule>,
+        /// 手動のコレクションに入れる写真。
+        #[serde(default)]
+        variant_ids: Vec<VariantId>,
+    },
+    /// コレクションの名前を変える。→ [`Response::Ok`]
+    RenameCollection {
+        /// コレクション。
+        collection_id: CollectionId,
+        /// 新しい名前。
+        name: String,
+    },
+    /// コレクションを別のコレクションセットへ移す。→ [`Response::Ok`]
+    MoveCollection {
+        /// コレクション。
+        collection_id: CollectionId,
+        /// 新しい親（`null` で最上位）。
+        #[serde(default)]
+        parent_id: Option<CollectionId>,
+    },
+    /// コレクションを削除する（セットなら中のものも。写真は消えない）。→ [`Response::Updated`]（削除した数）
+    DeleteCollection {
+        /// コレクション。
+        collection_id: CollectionId,
+    },
+    /// スマートコレクションの条件を変える。→ [`Response::Ok`]
+    SetSmartRule {
+        /// コレクション。
+        collection_id: CollectionId,
+        /// 条件。
+        rule: SmartRule,
+    },
+    /// 手動のコレクションに写真を入れる。→ [`Response::Updated`]（新しく入れた数）
+    AddToCollection {
+        /// コレクション。
+        collection_id: CollectionId,
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+    },
+    /// 手動のコレクションから写真を外す。→ [`Response::Updated`]（外した数）
+    RemoveFromCollection {
+        /// コレクション。
+        collection_id: CollectionId,
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+    },
+    /// 写真が入っている手動のコレクション。→ [`Response::VariantCollections`]
+    VariantCollections {
+        /// 写真。
+        variant_id: VariantId,
     },
 
     // --- サムネイル・プレビュー ---
@@ -177,8 +346,29 @@ pub enum Command {
         /// 要求。
         request: RegionRequest,
     },
-    /// 実行中の表示範囲の描画を取り消す。→ [`Response::Ok`]
+    /// 実行中の表示範囲の描画を取り消す（ビフォーの表示範囲も）。→ [`Response::Ok`]
     CancelRegion,
+    /// ビフォー / アフターの表示（DEV-31）のビフォーを設定する（`null` でやめる。
+    /// [`crate::Core::set_before`]）。→ [`Response::Before`]
+    SetBefore {
+        /// 出どころ（`{"kind": "initial"}` など。`null` でやめる）。
+        source: Option<BeforeSource>,
+    },
+    /// 今のビフォーの設定で同期で描く（CLI・テスト用）。→ [`Response::Frame`]
+    RenderBefore,
+    /// 世代 `generation` 以降のビフォーのプレビューを待つ。→ [`Response::FrameOrNone`]
+    WaitForBefore {
+        /// 世代。
+        generation: u64,
+        /// 待つ時間の上限（ミリ秒）。
+        timeout_ms: u64,
+    },
+    /// ビフォーの表示範囲を描く（[`crate::Core::render_before_region`]）。画素は
+    /// [`crate::Core::before_region_frame`] で取る。→ [`Response::Region`]
+    RenderBeforeRegion {
+        /// 要求。
+        request: RegionRequest,
+    },
     /// 世代 `generation` 以降のプレビューを待つ。→ [`Response::FrameOrNone`]
     WaitForFrame {
         /// 世代。
@@ -320,6 +510,8 @@ pub enum Command {
     StartupReport,
     /// カタログの件数とスキーマの版。→ [`Response::CatalogStats`]
     CatalogStats,
+    /// カタログの構造（表・列・索引・ビュー・トリガー。ORG-07）。→ [`Response::CatalogSchema`]
+    CatalogSchema,
     /// 機能の有無。→ [`Response::Capabilities`]
     Capabilities,
 }
@@ -352,6 +544,8 @@ pub enum Response {
     },
     /// variant の詳細。
     Details(Box<VariantDetails>),
+    /// 説明のメタデータのまとめ。
+    Metadata(MetadataSummary),
     /// フォルダの一覧。
     Folders {
         /// フォルダ。
@@ -359,6 +553,45 @@ pub enum Response {
     },
     /// ファイルの状態の確認の結果。
     FileCheck(FileCheckReport),
+    /// 写真の数。
+    Count {
+        /// 数。
+        count: u64,
+    },
+    /// キーワードの一覧。
+    Keywords {
+        /// キーワード（名前の順）。
+        keywords: Vec<KeywordInfo>,
+    },
+    /// 名前で探したキーワード。
+    KeywordHits {
+        /// キーワード（前方一致のものが先）。
+        hits: Vec<KeywordHit>,
+    },
+    /// 確保したキーワード。
+    KeywordCreated {
+        /// キーワード。
+        keyword_id: KeywordId,
+    },
+    /// キーワードの使われ方。
+    KeywordUsage(KeywordUsage),
+    /// 写真に付いているキーワード。
+    VariantKeywords(VariantKeywords),
+    /// コレクションの一覧。
+    Collections {
+        /// コレクション（名前の順）。
+        collections: Vec<CollectionInfo>,
+    },
+    /// 作ったコレクション。
+    CollectionCreated {
+        /// コレクション。
+        collection_id: CollectionId,
+    },
+    /// 写真が入っている手動のコレクション。
+    VariantCollections {
+        /// コレクション（名前の順）。
+        collection_ids: Vec<CollectionId>,
+    },
     /// サムネイル（なければ `null`）。
     Thumbnail {
         /// サムネイル。
@@ -385,6 +618,11 @@ pub enum Response {
     Frame(Box<FrameInfo>),
     /// 表示範囲の描画の情報（画素は [`crate::Core::region_frame`]）。
     Region(Box<RegionInfo>),
+    /// ビフォーの状態（やめたら `null`）。
+    Before {
+        /// 状態。
+        before: Option<BeforeInfo>,
+    },
     /// プレビューの情報（まだなければ `null`）。
     FrameOrNone {
         /// 情報。
@@ -443,6 +681,8 @@ pub enum Response {
     Startup(StartupReport),
     /// カタログの件数とスキーマの版。
     CatalogStats(CatalogStats),
+    /// カタログの構造。
+    CatalogSchema(CatalogSchema),
     /// 機能の有無。
     Capabilities(Capabilities),
 }
@@ -492,6 +732,16 @@ impl Core {
             } => R::Updated {
                 count: self.set_caption(&variant_ids, caption.as_deref())? as u64,
             },
+            C::SetMetadata {
+                variant_ids,
+                changes,
+            } => {
+                let changes: Vec<(MetadataField, Option<String>)> = changes.into_iter().collect();
+                R::Updated {
+                    count: self.set_metadata(&variant_ids, &changes)? as u64,
+                }
+            }
+            C::MetadataSummary { variant_ids } => R::Metadata(self.metadata_summary(&variant_ids)?),
             C::VariantDetails { variant_id } => {
                 R::Details(Box::new(self.variant_details(variant_id)?))
             }
@@ -499,6 +749,113 @@ impl Core {
                 folders: self.folders()?,
             },
             C::CheckFiles { variant_ids } => R::FileCheck(self.check_files(&variant_ids)?),
+            C::Count { filter } => R::Count {
+                count: self.count(&filter)?,
+            },
+            C::KeywordTree => R::Keywords {
+                keywords: self.keyword_tree()?,
+            },
+            C::FindKeywords { query, limit } => R::KeywordHits {
+                hits: self.find_keywords(&query, limit.unwrap_or(20))?,
+            },
+            C::CreateKeyword { parent_id, path } => R::KeywordCreated {
+                keyword_id: self.create_keyword(parent_id, &path)?,
+            },
+            C::RenameKeyword { keyword_id, name } => {
+                self.rename_keyword(keyword_id, &name)?;
+                R::Ok
+            }
+            C::MoveKeyword {
+                keyword_id,
+                parent_id,
+            } => {
+                self.move_keyword(keyword_id, parent_id)?;
+                R::Ok
+            }
+            C::DeleteKeyword { keyword_id } => R::Updated {
+                count: self.delete_keyword(keyword_id)? as u64,
+            },
+            C::SetKeywordExport {
+                keyword_id,
+                include,
+            } => {
+                self.set_keyword_export(keyword_id, include)?;
+                R::Ok
+            }
+            C::KeywordUsage { keyword_id } => R::KeywordUsage(self.keyword_usage(keyword_id)?),
+            C::AddKeywords {
+                variant_ids,
+                keyword_ids,
+                paths,
+            } => R::Updated {
+                count: self.add_keywords(&variant_ids, &keyword_ids, &paths)? as u64,
+            },
+            C::RemoveKeywords {
+                variant_ids,
+                keyword_ids,
+            } => R::Updated {
+                count: self.remove_keywords(&variant_ids, &keyword_ids)? as u64,
+            },
+            C::VariantKeywords { variant_ids } => {
+                R::VariantKeywords(self.variant_keywords(&variant_ids)?)
+            }
+            C::Collections { with_counts } => R::Collections {
+                collections: self.collections(with_counts)?,
+            },
+            C::CreateCollection {
+                parent_id,
+                name,
+                kind,
+                rule,
+                variant_ids,
+            } => R::CollectionCreated {
+                collection_id: self.create_collection(
+                    parent_id,
+                    &name,
+                    kind,
+                    rule.as_ref(),
+                    &variant_ids,
+                )?,
+            },
+            C::RenameCollection {
+                collection_id,
+                name,
+            } => {
+                self.rename_collection(collection_id, &name)?;
+                R::Ok
+            }
+            C::MoveCollection {
+                collection_id,
+                parent_id,
+            } => {
+                self.move_collection(collection_id, parent_id)?;
+                R::Ok
+            }
+            C::DeleteCollection { collection_id } => R::Updated {
+                count: self.delete_collection(collection_id)? as u64,
+            },
+            C::SetSmartRule {
+                collection_id,
+                rule,
+            } => {
+                self.set_smart_rule(collection_id, &rule)?;
+                R::Ok
+            }
+            C::AddToCollection {
+                collection_id,
+                variant_ids,
+            } => R::Updated {
+                count: self.add_to_collection(collection_id, &variant_ids)? as u64,
+            },
+            C::RemoveFromCollection {
+                collection_id,
+                variant_ids,
+            } => R::Updated {
+                count: self.remove_from_collection(collection_id, &variant_ids)? as u64,
+            },
+            C::VariantCollections { variant_id } => R::VariantCollections {
+                collection_ids: self.variant_collections(variant_id)?,
+            },
             C::Thumbnail { variant_id } => R::Thumbnail {
                 thumbnail: self.thumbnail(variant_id)?,
             },
@@ -524,6 +881,21 @@ impl Core {
             C::CancelRegion => {
                 self.cancel_region()?;
                 R::Ok
+            }
+            C::SetBefore { source } => R::Before {
+                before: self.set_before(source)?,
+            },
+            C::RenderBefore => R::Frame(Box::new(self.render_before()?)),
+            C::WaitForBefore {
+                generation,
+                timeout_ms,
+            } => R::FrameOrNone {
+                frame: self
+                    .wait_for_before(generation, ms(timeout_ms))?
+                    .map(Box::new),
+            },
+            C::RenderBeforeRegion { request } => {
+                R::Region(Box::new(self.render_before_region(&request)?.info))
             }
             C::WaitForFrame {
                 generation,
@@ -615,6 +987,7 @@ impl Core {
             )?),
             C::StartupReport => R::Startup(self.startup_report()),
             C::CatalogStats => R::CatalogStats(self.catalog_stats()?),
+            C::CatalogSchema => R::CatalogSchema(self.catalog_schema()?),
             C::Capabilities => R::Capabilities(self.capabilities()?),
         })
     }
@@ -850,6 +1223,7 @@ mod tests {
             Command::Folders,
             Command::Capabilities,
             Command::CatalogStats,
+            Command::CatalogSchema,
             Command::Facets,
             Command::WhiteBalanceAt {
                 variant_id: VariantId::new(1),

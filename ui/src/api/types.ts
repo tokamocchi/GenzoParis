@@ -16,7 +16,9 @@ export type FileId = number;
 export type FolderId = number;
 export type VolumeId = number;
 export type KeywordId = number;
+export type CollectionId = number;
 export type HistoryEntryId = number;
+export type SnapshotId = number;
 
 /** 評価（0〜5）。 */
 export type Rating = 0 | 1 | 2 | 3 | 4 | 5;
@@ -243,6 +245,8 @@ export interface ExportSettings {
   size: ExportSize;
   remove_gps: boolean;
   on_conflict: ConflictPolicy;
+  /** キーワード（XMP の dc:subject）を書かない（LIB-09。省略時は書く）。 */
+  remove_keywords?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +378,10 @@ export interface SearchFilter {
   keywords?: KeywordId[];
   file_statuses?: FileStatus[] | null;
   masters_only?: boolean;
+  /** コレクション（LIB-10・LIB-11。手動はメンバー、スマートは条件、セットは中のいずれか）。 */
+  collection_id?: CollectionId | null;
+  /** 保存していないスマートコレクションの条件（編集中の件数など）。 */
+  smart_rule?: SmartRule | null;
 }
 
 export type SortKey = "capture_time" | "file_name" | "rating" | "import_order";
@@ -442,9 +450,64 @@ export interface VariantDetails {
   shutter_s: number | null;
   focal_mm: number | null;
   gps: GpsCoord | null;
+  /** キャプション（metadata.caption と同じ）。 */
   caption: string | null;
+  /** カタログの中で編集した説明のメタデータ（LIB-15。asset に付き、仮想コピーも同じ値）。古いコアでは無い。 */
+  metadata?: IptcMetadata;
   video: VideoMetadata | null;
   files: FileInfo[];
+}
+
+/**
+ * 説明のメタデータの項目（LIB-15。IPTC Core の主要な項目。genzo-model の MetadataField。JSON のキーと
+ * カタログの列の名前）。並びは genzo-model の MetadataField::ALL と同じ。
+ */
+export type MetadataField =
+  | "title"
+  | "headline"
+  | "caption"
+  | "creator"
+  | "creator_job_title"
+  | "creator_address"
+  | "creator_city"
+  | "creator_region"
+  | "creator_postal_code"
+  | "creator_country"
+  | "creator_phone"
+  | "creator_email"
+  | "creator_url"
+  | "copyright"
+  | "copyright_status"
+  | "usage_terms"
+  | "copyright_url"
+  | "sublocation"
+  | "city"
+  | "province_state"
+  | "country"
+  | "country_code"
+  | "credit"
+  | "source"
+  | "instructions";
+
+/** 説明のメタデータ（genzo-model の IptcMetadata。値がなければ null か、キーがない）。 */
+export type IptcMetadata = Partial<Record<MetadataField, string | null>>;
+
+/** 著作権の状態（copyright_status の値。null は不明）。 */
+export type CopyrightStatus = "copyrighted" | "public_domain";
+
+/** 複数の写真の説明のメタデータのまとめ（genzo-api の MetadataSummary）。 */
+export interface MetadataSummary {
+  /** 対象の元の写真（asset）の数。 */
+  assets: number;
+  fields: MetadataFieldState[];
+}
+
+export interface MetadataFieldState {
+  field: MetadataField;
+  /** すべての写真で同じ値ならその値（値が異なれば null）。 */
+  value: string | null;
+  /** 写真によって値が異なるか（「複数の値」）。 */
+  mixed: boolean;
 }
 
 export interface FolderInfo {
@@ -503,6 +566,25 @@ export interface DevelopState {
   dirty: boolean;
   dragging: boolean;
   source: SourceInfo;
+  /** ビフォー / アフターの表示のビフォー（DEV-31。設定していなければ null。古いコアでは無い）。 */
+  before?: BeforeInfo | null;
+}
+
+/** ビフォーの設定の出どころ（DEV-31。genzo-api の BeforeSource）。切り抜き・角度は常にアフターと同じ。 */
+export type BeforeSource =
+  | { kind: "initial" }
+  | { kind: "history"; entry_id: HistoryEntryId }
+  | { kind: "snapshot"; snapshot_id: SnapshotId }
+  | { kind: "current" };
+
+export interface BeforeInfo {
+  variant_id: VariantId;
+  source: BeforeSource;
+  /** 表示名（「読み込み」「履歴: 露光量 +0.30」など）。 */
+  label: string;
+  process_version: number;
+  /** 最後に要求したビフォーの描画の世代。 */
+  generation: number;
 }
 
 export interface HistoryItem {
@@ -581,6 +663,8 @@ export interface RegionInfo {
   tiles: number;
   display_assumed_srgb: boolean;
   warnings: string[];
+  /** ビフォーを描いたものか（DEV-31。render_before_region）。古いコアでは無い。 */
+  before?: boolean;
 }
 
 export interface DisplayInfo {
@@ -656,6 +740,39 @@ export interface CatalogStats {
   history_entries: number;
 }
 
+/** カタログの構造（ORG-07。genzo-api の CatalogSchema。文書は docs/catalog_schema.md）。 */
+export interface CatalogSchema {
+  schema_version: number;
+  application_id: number;
+  /** 公開ビュー（列の名前・意味を変えない約束のビュー）。 */
+  public_views: string[];
+  tables: SchemaTable[];
+  objects: SchemaObject[];
+}
+
+export interface SchemaTable {
+  name: string;
+  /** table・virtual（FTS5）・view。 */
+  kind: string;
+  columns: SchemaColumn[];
+}
+
+export interface SchemaColumn {
+  name: string;
+  decl_type: string;
+  not_null: boolean;
+  default_value: string | null;
+  primary_key: number;
+}
+
+export interface SchemaObject {
+  /** table・view・index・trigger。 */
+  kind: string;
+  name: string;
+  table: string;
+  sql: string;
+}
+
 export type PreviousShutdown = "first_open" | "clean" | "unclean";
 
 export interface StartupReport {
@@ -680,6 +797,101 @@ export interface RestorePlan {
 }
 
 // ---------------------------------------------------------------------------
+// キーワード・コレクション・スマートコレクション（LIB-09〜11。genzo-api の types.rs・genzo-model の smart.rs）
+// ---------------------------------------------------------------------------
+
+/** キーワードの一覧の 1 件（parent_id で木にする）。 */
+export interface KeywordInfo {
+  keyword_id: KeywordId;
+  parent_id: KeywordId | null;
+  name: string;
+  /** 書き出すファイルのメタデータ（XMP の dc:subject）に書くか。 */
+  include_on_export: boolean;
+  /** 直接付いている写真の数（子の分は数えない）。 */
+  photo_count: number;
+}
+
+/** 名前で探したキーワード（補完）。 */
+export interface KeywordHit {
+  keyword_id: KeywordId;
+  name: string;
+  /** 最上位から自分までの名前。 */
+  path: string[];
+}
+
+/** 選択中の写真に付いているキーワード。 */
+export interface VariantKeyword {
+  keyword_id: KeywordId;
+  name: string;
+  path: string[];
+  /** このキーワードが付いている写真の数（variants より少なければ一部の写真だけ）。 */
+  count: number;
+}
+
+export interface VariantKeywords {
+  variants: number;
+  keywords: VariantKeyword[];
+}
+
+export interface CollectionRef {
+  collection_id: CollectionId;
+  name: string;
+}
+
+/** キーワードの使われ方（削除の確認）。 */
+export interface KeywordUsage {
+  photos: number;
+  photos_with_descendants: number;
+  descendants: number;
+  smart_collections: CollectionRef[];
+}
+
+export type CollectionKind = "manual" | "smart" | "set";
+
+/** コレクションの一覧の 1 件（parent_id で木にする）。 */
+export interface CollectionInfo {
+  collection_id: CollectionId;
+  parent_id: CollectionId | null;
+  name: string;
+  kind: CollectionKind;
+  rule: SmartRule | null;
+  rule_error: string | null;
+  /** 写真の数（手動は常に。スマート・セットは with_counts のときだけ。null は数えていない）。 */
+  count: number | null;
+}
+
+export type MatchMode = "all" | "any";
+export type NumberOp = "eq" | "ne" | "gte" | "lte";
+export type EqualityOp = "is" | "is_not";
+export type KeywordOp = "has" | "not_has" | "any" | "none";
+export type DateOp = "range" | "in_last_days" | "unknown";
+export type TextOp = "is" | "is_not" | "contains" | "unknown";
+export type ContainsOp = "contains" | "not_contains";
+export type MemberOp = "in" | "not_in";
+
+/** スマートコレクションの条件の 1 つ（type で種類を表す。group で入れ子）。 */
+export type SmartCondition =
+  | { type: "group"; match: MatchMode; rules: SmartCondition[] }
+  | { type: "rating"; op: NumberOp; value: Rating }
+  | { type: "flag"; op: EqualityOp; value: Flag }
+  | { type: "color_label"; op: EqualityOp; value: ColorLabel | null }
+  | { type: "keyword"; op: KeywordOp; keyword_id?: KeywordId }
+  | { type: "capture_time"; op: DateOp; from?: string; until?: string; days?: number }
+  | { type: "camera"; op: TextOp; value: string }
+  | { type: "lens"; op: TextOp; value: string }
+  | { type: "kind"; value: AssetKind }
+  | { type: "text"; op: ContainsOp; value: string }
+  | { type: "folder"; op: MemberOp; folder_id: FolderId; include_subfolders: boolean }
+  | { type: "collection"; op: MemberOp; collection_id: CollectionId };
+
+/** スマートコレクションの条件（最上位。版付きの JSON）。 */
+export interface SmartRule {
+  version: number;
+  match: MatchMode;
+  rules: SmartCondition[];
+}
+
+// ---------------------------------------------------------------------------
 // コマンド（UI → コア。genzo-api の Command）
 // ---------------------------------------------------------------------------
 
@@ -695,10 +907,40 @@ export type Command =
   | { type: "set_flag"; variant_ids: VariantId[]; flag: Flag }
   | { type: "set_color_label"; variant_ids: VariantId[]; label: ColorLabel | null }
   | { type: "set_caption"; variant_ids: VariantId[]; caption: string | null }
+  | { type: "set_metadata"; variant_ids: VariantId[]; changes: IptcMetadata }
+  | { type: "metadata_summary"; variant_ids: VariantId[] }
   | { type: "variant_details"; variant_id: VariantId }
   | { type: "folders" }
   | { type: "facets" }
   | { type: "check_files"; variant_ids: VariantId[] }
+  | { type: "count"; filter: SearchFilter }
+  | { type: "keyword_tree" }
+  | { type: "find_keywords"; query: string; limit?: number | null }
+  | { type: "create_keyword"; parent_id: KeywordId | null; path: string[] }
+  | { type: "rename_keyword"; keyword_id: KeywordId; name: string }
+  | { type: "move_keyword"; keyword_id: KeywordId; parent_id: KeywordId | null }
+  | { type: "delete_keyword"; keyword_id: KeywordId }
+  | { type: "set_keyword_export"; keyword_id: KeywordId; include: boolean }
+  | { type: "keyword_usage"; keyword_id: KeywordId }
+  | { type: "add_keywords"; variant_ids: VariantId[]; keyword_ids: KeywordId[]; paths: string[][] }
+  | { type: "remove_keywords"; variant_ids: VariantId[]; keyword_ids: KeywordId[] }
+  | { type: "variant_keywords"; variant_ids: VariantId[] }
+  | { type: "collections"; with_counts: boolean }
+  | {
+      type: "create_collection";
+      parent_id: CollectionId | null;
+      name: string;
+      kind: CollectionKind;
+      rule: SmartRule | null;
+      variant_ids: VariantId[];
+    }
+  | { type: "rename_collection"; collection_id: CollectionId; name: string }
+  | { type: "move_collection"; collection_id: CollectionId; parent_id: CollectionId | null }
+  | { type: "delete_collection"; collection_id: CollectionId }
+  | { type: "set_smart_rule"; collection_id: CollectionId; rule: SmartRule }
+  | { type: "add_to_collection"; collection_id: CollectionId; variant_ids: VariantId[] }
+  | { type: "remove_from_collection"; collection_id: CollectionId; variant_ids: VariantId[] }
+  | { type: "variant_collections"; variant_id: VariantId }
   | { type: "thumbnail"; variant_id: VariantId }
   | { type: "preview_path"; variant_id: VariantId }
   | { type: "request_preview"; variant_id: VariantId }
@@ -710,6 +952,8 @@ export type Command =
   | { type: "render_develop" }
   | { type: "render_region"; request: RegionRequest }
   | { type: "cancel_region" }
+  | { type: "set_before"; source: BeforeSource | null }
+  | { type: "render_before_region"; request: RegionRequest }
   | { type: "wait_for_frame"; generation: number; timeout_ms: number }
   | { type: "flush_develop" }
   | { type: "close_develop" }
@@ -745,6 +989,7 @@ export type Command =
   | { type: "prepare_restore"; backup: string }
   | { type: "startup_report" }
   | { type: "catalog_stats" }
+  | { type: "catalog_schema" }
   | { type: "capabilities" };
 
 /** 応答（genzo-api の Response）。 */
@@ -757,9 +1002,19 @@ export type Response =
   | ({ type: "index_of" } & IndexOf)
   | { type: "updated"; count: number }
   | ({ type: "details" } & VariantDetails)
+  | ({ type: "metadata" } & MetadataSummary)
   | { type: "folders"; folders: FolderInfo[] }
   | ({ type: "facets" } & Facets)
   | ({ type: "file_check" } & FileCheckReport)
+  | { type: "count"; count: number }
+  | { type: "keywords"; keywords: KeywordInfo[] }
+  | { type: "keyword_hits"; hits: KeywordHit[] }
+  | { type: "keyword_created"; keyword_id: KeywordId }
+  | ({ type: "keyword_usage" } & KeywordUsage)
+  | ({ type: "variant_keywords" } & VariantKeywords)
+  | { type: "collections"; collections: CollectionInfo[] }
+  | { type: "collection_created"; collection_id: CollectionId }
+  | { type: "variant_collections"; collection_ids: CollectionId[] }
   | { type: "thumbnail"; thumbnail: { variant_id: VariantId; rev: string; jpeg: number[] } | null }
   | { type: "path"; path: string | null }
   | ({ type: "develop" } & DevelopState)
@@ -767,6 +1022,7 @@ export type Response =
   | { type: "generation"; generation: number }
   | ({ type: "frame" } & FrameInfo)
   | ({ type: "region" } & RegionInfo)
+  | { type: "before"; before: BeforeInfo | null }
   | { type: "frame_or_none"; frame: FrameInfo | null }
   | { type: "saved"; saved: boolean }
   | { type: "settings"; settings: DevelopSettings }
@@ -784,6 +1040,7 @@ export type Response =
   | ({ type: "restore" } & RestorePlan)
   | ({ type: "startup" } & StartupReport)
   | ({ type: "catalog_stats" } & CatalogStats)
+  | ({ type: "catalog_schema" } & CatalogSchema)
   | ({ type: "capabilities" } & Capabilities);
 
 // ---------------------------------------------------------------------------
@@ -794,11 +1051,14 @@ export type CatalogChange =
   | "imported"
   | "marks"
   | "caption"
+  | "metadata"
   | "develop"
   | "variant_added"
   | "removed"
   | "file_status"
-  | "capture_time";
+  | "capture_time"
+  | "keywords"
+  | "collections";
 
 export type WarningCode =
   | "unclean_shutdown"
@@ -837,6 +1097,7 @@ export type CoreEvent =
       height: number;
       backend: RenderBackend;
     }
+  | { type: "before_updated"; variant_id: VariantId; generation: number; width: number; height: number }
   | { type: "thumbnail_updated"; variant_id: VariantId; rev: string }
   | { type: "search_updated"; generation: number; count: number }
   | {
@@ -893,6 +1154,57 @@ export interface AppStatus {
   default_catalog_in_onedrive: boolean;
   catalog: CatalogStatus | null;
   tools: ExternalTools;
+  /** ログ（SYS-07）。 */
+  logs: LogStatus;
+  /** 前回までのアプリのクラッシュレポートのうち、まだ知らせていないもの（新しい順。起動して最初の 1 回だけ）。 */
+  crash_reports: CrashReportSummary[];
+}
+
+// ---------------------------------------------------------------------------
+// ログ・クラッシュレポート（SYS-07。genzo-api の logging。外部へは送信しない）
+// ---------------------------------------------------------------------------
+
+export interface LogStatus {
+  /** ログのフォルダ（分からなければ null）。 */
+  dir: string | null;
+  /** 今書いているログのファイル。 */
+  file: string | null;
+  /** ファイルに書く設定か。 */
+  file_enabled: boolean;
+  /** 初期化での問題。 */
+  problems: string[];
+}
+
+export interface CrashReportSummary {
+  path: string;
+  file_name: string;
+  /** 起きた日時（UTC。読めなければ null）。 */
+  created_at: string | null;
+  /** app・cli。 */
+  program: string;
+  /** パニックの内容（1 行目）。 */
+  message: string | null;
+}
+
+export interface LogFileInfo {
+  name: string;
+  bytes: number;
+  modified: string | null;
+}
+
+export interface LogFolderInfo {
+  dir: string;
+  exists: boolean;
+  files: LogFileInfo[];
+  crash_reports: CrashReportSummary[];
+  total_bytes: number;
+  current_file: string | null;
+}
+
+export interface ClearReport {
+  removed: number;
+  truncated: number;
+  failed: string[];
 }
 
 export interface CloseFailure {

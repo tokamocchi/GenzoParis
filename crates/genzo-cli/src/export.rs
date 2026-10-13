@@ -32,6 +32,7 @@ pub fn export_settings(
             .map_or(ExportSize::Original, ExportSize::LongEdge),
         remove_gps: opts.remove_gps,
         on_conflict: opts.on_conflict.into(),
+        remove_keywords: opts.remove_keywords,
     };
     settings
         .validate()
@@ -177,6 +178,7 @@ mod tests {
             color_space: None,
             long_edge: None,
             remove_gps: false,
+            remove_keywords: false,
             on_conflict: ConflictArg::Sequence,
         }
     }
@@ -189,6 +191,7 @@ mod tests {
             quality: Some(70),
             long_edge: Some(800),
             remove_gps: true,
+            remove_keywords: true,
             on_conflict: ConflictArg::Skip,
             ..opts()
         };
@@ -196,6 +199,7 @@ mod tests {
         assert_eq!(s.format, ExportFormat::Jpeg { quality: 70 });
         assert_eq!(s.size, ExportSize::LongEdge(800));
         assert!(s.remove_gps);
+        assert!(s.remove_keywords);
         assert_eq!(s.on_conflict, ConflictPolicy::Skip);
         assert_eq!(s.color_space, OutputColorSpace::AdobeRgb);
         let e = export_settings(&o, FormatArg::Png16, OutputColorSpace::Srgb).unwrap_err();

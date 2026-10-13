@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use genzo_model::{
-    AssetId, AssetKind, CaptureTime, ColorLabel, DevelopSettings, FileId, FileRole, FileStatus,
-    Flag, FolderId, GpsCoord, HistoryEntryId, KeywordId, Orientation, OutputColorSpace, Rating,
-    RenderQuality, VariantId, VideoMetadata, VolumeId,
+    AssetId, AssetKind, CaptureTime, CollectionId, CollectionKind, ColorLabel, DevelopSettings,
+    FileId, FileRole, FileStatus, Flag, FolderId, GpsCoord, HistoryEntryId, IptcMetadata,
+    KeywordId, MetadataField, Orientation, OutputColorSpace, Rating, RenderQuality, SmartRule,
+    SnapshotId, VariantId, VideoMetadata, VolumeId,
 };
 use genzo_pipeline::ImageTile;
 use serde::{Deserialize, Serialize, Serializer};
@@ -266,6 +267,11 @@ pub struct SearchFilter {
     pub file_statuses: Option<Vec<FileStatus>>,
     /// マスターだけにする（仮想コピーを除く）。
     pub masters_only: bool,
+    /// コレクション（LIB-10・LIB-11。手動のコレクションはメンバー、スマートコレクションは条件に一致する
+    /// もの、コレクションセットは中のコレクションのいずれかに一致するもの）。
+    pub collection_id: Option<CollectionId>,
+    /// スマートコレクションの条件（保存していないもの。条件の編集中の件数など。LIB-11）。
+    pub smart_rule: Option<SmartRule>,
 }
 
 impl SearchFilter {
@@ -296,6 +302,8 @@ impl SearchFilter {
             keywords: self.keywords.clone(),
             file_statuses: self.file_statuses.clone(),
             masters_only: self.masters_only,
+            collection: self.collection_id,
+            smart_rule: self.smart_rule.clone(),
         }
     }
 
@@ -532,12 +540,178 @@ pub struct VariantDetails {
     pub focal_mm: Option<f64>,
     /// GPS の座標。
     pub gps: Option<GpsCoord>,
-    /// キャプション。
+    /// キャプション（[`VariantDetails::metadata`] の `caption` と同じ。MVP からの項目）。
     pub caption: Option<String>,
+    /// カタログの中で編集した説明のメタデータ（LIB-15。タイトル・キャプション・作成者・著作権など。asset に
+    /// 付き、仮想コピーも同じ値）。
+    #[serde(default)]
+    pub metadata: IptcMetadata,
     /// 動画の情報。
     pub video: Option<VideoMetadata>,
     /// ファイル（主となるファイルが先）。
     pub files: Vec<FileInfo>,
+}
+
+/// 複数の写真の説明のメタデータのまとめ（LIB-15 の一括編集。[`crate::Core::metadata_summary`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MetadataSummary {
+    /// 対象の asset の数（同じ asset の仮想コピーは 1 つに数える。存在しないものは数えない）。
+    pub assets: u64,
+    /// 項目ごとのまとめ（genzo-model の `MetadataField::ALL` の順）。
+    pub fields: Vec<MetadataFieldState>,
+}
+
+/// 1 つの項目のまとめ（[`MetadataSummary`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataFieldState {
+    /// 項目。
+    pub field: MetadataField,
+    /// すべての写真で同じ値ならその値（すべてなしなら `null`。値が異なれば `null`）。
+    pub value: Option<String>,
+    /// 写真によって値が異なるか（値のあるものとないものが混ざる場合を含む。画面は「複数の値」と出す）。
+    pub mixed: bool,
+}
+
+impl From<genzo_catalog::MetadataSummary> for MetadataSummary {
+    fn from(s: genzo_catalog::MetadataSummary) -> Self {
+        Self {
+            assets: s.assets,
+            fields: s
+                .fields
+                .into_iter()
+                .map(|f| MetadataFieldState {
+                    field: f.field,
+                    value: f.value,
+                    mixed: f.mixed,
+                })
+                .collect(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// キーワード・コレクション（LIB-09〜11）
+// ---------------------------------------------------------------------------
+
+/// キーワードの一覧の 1 件（[`crate::Core::keyword_tree`]。画面は `parent_id` で木にする）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeywordInfo {
+    /// キーワード。
+    pub keyword_id: KeywordId,
+    /// 親（最上位は `null`）。
+    pub parent_id: Option<KeywordId>,
+    /// 名前。
+    pub name: String,
+    /// 書き出すファイルのメタデータ（XMP の `dc:subject`）に書くか。
+    pub include_on_export: bool,
+    /// このキーワードが直接付いている写真（variant）の数（子のキーワードの分は数えない）。
+    pub photo_count: u64,
+}
+
+impl From<genzo_catalog::KeywordNode> for KeywordInfo {
+    fn from(k: genzo_catalog::KeywordNode) -> Self {
+        Self {
+            keyword_id: k.id,
+            parent_id: k.parent_id,
+            name: k.name,
+            include_on_export: k.include_on_export,
+            photo_count: k.photo_count,
+        }
+    }
+}
+
+/// 名前で探したキーワード（[`crate::Core::find_keywords`]。入力欄の補完）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeywordHit {
+    /// キーワード。
+    pub keyword_id: KeywordId,
+    /// 名前。
+    pub name: String,
+    /// 最上位から自分までの名前（`["場所", "京都"]`）。
+    pub path: Vec<String>,
+}
+
+/// 選択中の写真に付いているキーワード（[`crate::Core::variant_keywords`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariantKeyword {
+    /// キーワード。
+    pub keyword_id: KeywordId,
+    /// 名前。
+    pub name: String,
+    /// 最上位から自分までの名前。
+    pub path: Vec<String>,
+    /// このキーワードが付いている写真の数（[`VariantKeywords::variants`] より少なければ一部の写真だけ）。
+    pub count: u64,
+}
+
+/// 選択中の写真のキーワードのまとめ（[`crate::Core::variant_keywords`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VariantKeywords {
+    /// 対象の写真の数（重複を除く）。
+    pub variants: u64,
+    /// キーワード（名前の順）。
+    pub keywords: Vec<VariantKeyword>,
+}
+
+/// コレクションへの参照（ID と名前）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionRef {
+    /// コレクション。
+    pub collection_id: CollectionId,
+    /// 名前。
+    pub name: String,
+}
+
+/// キーワードの使われ方（削除の確認。[`crate::Core::keyword_usage`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct KeywordUsage {
+    /// このキーワードが直接付いている写真の数。
+    pub photos: u64,
+    /// このキーワードか子孫のキーワードが付いている写真の数（削除で付与が消える写真の数）。
+    pub photos_with_descendants: u64,
+    /// 子孫のキーワードの数（削除で一緒に消える数）。
+    pub descendants: u64,
+    /// このキーワードか子孫を条件に使っているスマートコレクション（削除するとその条件はどの写真にも
+    /// 一致しなくなる）。
+    pub smart_collections: Vec<CollectionRef>,
+}
+
+impl From<genzo_catalog::KeywordUsage> for KeywordUsage {
+    fn from(u: genzo_catalog::KeywordUsage) -> Self {
+        Self {
+            photos: u.photos,
+            photos_with_descendants: u.photos_with_descendants,
+            descendants: u.descendants,
+            smart_collections: u
+                .smart_collections
+                .into_iter()
+                .map(|(collection_id, name)| CollectionRef {
+                    collection_id,
+                    name,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// コレクションの一覧の 1 件（[`crate::Core::collections`]。画面は `parent_id` で木にする）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionInfo {
+    /// コレクション。
+    pub collection_id: CollectionId,
+    /// 親のコレクションセット（最上位は `null`）。
+    pub parent_id: Option<CollectionId>,
+    /// 名前。
+    pub name: String,
+    /// 種類（`manual`・`smart`・`set`）。
+    pub kind: CollectionKind,
+    /// スマートコレクションの条件（読めた場合）。
+    pub rule: Option<SmartRule>,
+    /// スマートコレクションの条件を読めなかった理由（アプリより新しい版など。その間はどの写真にも一致しない）。
+    pub rule_error: Option<String>,
+    /// 写真の数（手動のコレクションはメンバーの数。スマートコレクション・セットは検索で数えた数。数えなかった・
+    /// 数えられなかったときは `null`）。
+    pub count: Option<u64>,
 }
 
 /// ファイルの情報。
@@ -689,6 +863,59 @@ pub struct DevelopState {
     pub dragging: bool,
     /// 入力。
     pub source: SourceInfo,
+    /// ビフォー / アフターの表示のビフォー（DEV-31。[`crate::Core::set_before`]。設定していなければ
+    /// `None`。写真を開き直すと `None` に戻る）。
+    #[serde(default)]
+    pub before: Option<BeforeInfo>,
+}
+
+/// ビフォー / アフターの表示（DEV-31）のビフォーの設定の出どころ（[`crate::Core::set_before`]）。
+///
+/// どの出どころでも、切り抜き・角度補正（`geometry`）は今の設定（アフター）のものを使う（位置を合わせて
+/// 比べ、拡大・パンを同期するため。決定事項ログ No.79）。後のパッケージ（スナップショット・履歴。DEV-28）は
+/// `History`・`Snapshot` を画面から選べるようにする。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BeforeSource {
+    /// variant を作ったときの設定（履歴の最初の 1 件。マスターは「読み込み」= 取り込んだ直後の既定の設定、
+    /// 仮想コピーは「仮想コピーの作成」のときの設定）。既定。
+    Initial,
+    /// 履歴の 1 件（[`HistoryItem::id`]）の設定。
+    History {
+        /// 履歴の項目。
+        entry_id: HistoryEntryId,
+    },
+    /// スナップショット（DEV-28）の設定。
+    Snapshot {
+        /// スナップショット。
+        snapshot_id: SnapshotId,
+    },
+    /// 呼んだ時点の今の設定（アフター）の写し（Lightroom の「アフターの設定をビフォーにコピー」）。
+    Current,
+}
+
+/// ビフォーの状態（[`crate::Core::set_before`]。ピクセルは [`crate::Core::before_frame`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeforeInfo {
+    /// variant。
+    pub variant_id: VariantId,
+    /// 出どころ。
+    pub source: BeforeSource,
+    /// 表示名（「読み込み」「履歴: 露光量 +0.30」「スナップショット: 白黒」など）。
+    pub label: String,
+    /// ビフォーの設定の処理バージョン（今の設定と違うことがある）。
+    pub process_version: u32,
+    /// 最後に要求したビフォーの描画の世代（[`crate::Event::BeforeUpdated`] の世代と比べる）。
+    pub generation: u64,
+}
+
+/// ビフォーのプレビュー（ピクセルを含む。[`crate::Core::before_frame`]。DEV-31）。
+#[derive(Debug, Clone)]
+pub struct BeforeFrame {
+    /// 情報（ヒストグラムは求めない（空）。寸法・出力の寸法の意味は現像のプレビューと同じ）。
+    pub info: FrameInfo,
+    /// ステージ 17a の出力を 8bit にしたもの（R, G, B の並び、行優先）。
+    pub display_rgb8: Arc<Vec<u8>>,
 }
 
 /// 履歴の 1 件（DEV-27）。
@@ -883,6 +1110,10 @@ pub struct RegionInfo {
     pub display_assumed_srgb: bool,
     /// 現像の警告。
     pub warnings: Vec<String>,
+    /// ビフォー（[`crate::Core::set_before`] の設定）を描いたものか（[`crate::Core::render_before_region`]。
+    /// DEV-31）。偽なら今の設定（アフター）。
+    #[serde(default)]
+    pub before: bool,
 }
 
 /// 表示範囲の描画の結果（ピクセルを含む。[`crate::Core::render_region`]）。
@@ -1227,6 +1458,105 @@ pub struct CatalogStats {
     pub files: u64,
     /// 現像の履歴の件数。
     pub history_entries: u64,
+}
+
+/// カタログの構造（ORG-07。[`crate::Core::catalog_schema`]。CLI の `catalog schema`、画面の「カタログの構造」）。
+///
+/// 文書は docs/catalog_schema.md。外部から SQL で読むときは、公開ビュー（[`CatalogSchema::public_views`]）を
+/// すすめる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSchema {
+    /// スキーマの版（`PRAGMA user_version`）。
+    pub schema_version: u32,
+    /// `PRAGMA application_id`（GenzoParis のカタログの印。ASCII の `GZCT`）。
+    pub application_id: i32,
+    /// 公開ビューの名前（列の名前・意味を変えない約束のビュー）。
+    pub public_views: Vec<String>,
+    /// 表・ビュー（名前の順。SQLite の内部の表と FTS5 の中身の表は除く）。
+    pub tables: Vec<SchemaTable>,
+    /// 表・ビュー・索引・トリガーと、それを作った SQL（種類・名前の順）。
+    pub objects: Vec<SchemaObject>,
+}
+
+/// カタログの表・ビュー（[`CatalogSchema::tables`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaTable {
+    /// 名前。
+    pub name: String,
+    /// 種類（`table`・`virtual`（FTS5）・`view`）。
+    pub kind: String,
+    /// 列（定義の順）。
+    pub columns: Vec<SchemaColumn>,
+}
+
+/// 表・ビューの列。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaColumn {
+    /// 名前。
+    pub name: String,
+    /// 宣言した型（ビューの式の列などでは空）。
+    pub decl_type: String,
+    /// `NOT NULL` か。
+    pub not_null: bool,
+    /// 既定値（SQL の式）。
+    pub default_value: Option<String>,
+    /// 主キーの何番目の列か（主キーでなければ 0）。
+    pub primary_key: u32,
+}
+
+/// 表・ビュー・索引・トリガー（[`CatalogSchema::objects`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaObject {
+    /// 種類（`table`・`view`・`index`・`trigger`）。
+    pub kind: String,
+    /// 名前。
+    pub name: String,
+    /// 対象の表。
+    pub table: String,
+    /// 作った SQL。
+    pub sql: String,
+}
+
+impl From<genzo_catalog::SchemaDescription> for CatalogSchema {
+    fn from(d: genzo_catalog::SchemaDescription) -> Self {
+        Self {
+            schema_version: d.schema_version,
+            application_id: d.application_id,
+            public_views: genzo_catalog::PUBLIC_VIEWS
+                .iter()
+                .map(|v| (*v).to_owned())
+                .collect(),
+            tables: d
+                .tables
+                .into_iter()
+                .map(|t| SchemaTable {
+                    name: t.name,
+                    kind: t.kind,
+                    columns: t
+                        .columns
+                        .into_iter()
+                        .map(|c| SchemaColumn {
+                            name: c.name,
+                            decl_type: c.decl_type,
+                            not_null: c.not_null,
+                            default_value: c.default_value,
+                            primary_key: c.primary_key,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            objects: d
+                .objects
+                .into_iter()
+                .map(|o| SchemaObject {
+                    kind: o.kind,
+                    name: o.name,
+                    table: o.table,
+                    sql: o.sql,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// 前回の終了の状態。

@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 
 import * as appApi from "./api/app";
+import { inTauri } from "./api/bridge";
 import { onCloseFailed, onQuitRequested, startCoreEvents } from "./api/events";
 import { displayTarget } from "./api/frames";
 import { StatusBar } from "./components/StatusBar";
@@ -22,19 +23,37 @@ import { DevelopView } from "./develop/DevelopView";
 import { CatalogErrorScreen } from "./dialogs/CatalogErrorScreen";
 import { quitOnRequest } from "./dialogs/catalogActions";
 import { Dialogs } from "./dialogs/Dialogs";
+import { uiErrorText } from "./dialogs/logsLogic";
 import { WelcomeScreen } from "./dialogs/WelcomeScreen";
 import { useHotkeys } from "./keyboard";
 import { FilterBar } from "./library/FilterBar";
 import { Grid } from "./library/Grid";
 import { LibraryLeftPanel } from "./library/LibraryLeftPanel";
 import { MetadataPanel } from "./library/MetadataPanel";
+import { PhotoDragGhost } from "./library/PhotoDragGhost";
 import { actions, appStore, useApp } from "./state/app";
 import { developStore, installDevelopEvents, redo, undo } from "./state/develop";
+import { deleteKeyAction, focusKeywordInput, toggleTargetCollection } from "./state/organize";
 import { Filmstrip } from "./viewer/Filmstrip";
 import { Loupe } from "./viewer/Loupe";
 
+/** 画面のエラー（例外・処理されなかった Promise の失敗）をアプリのログに残す（SYS-07。Tauri の中だけ）。 */
+function installUiErrorReporting(): void {
+  if (!inTauri()) return;
+  window.addEventListener("error", (e) => {
+    const t = uiErrorText(e.error ?? e.message);
+    const where = e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : null;
+    appApi.reportUiError(t.message, [where, t.detail].filter(Boolean).join("\n") || null);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const t = uiErrorText(e.reason);
+    appApi.reportUiError(`処理されなかった失敗: ${t.message}`, t.detail);
+  });
+}
+
 /** 起動: イベントの受け取り、画面の色空間、前回のカタログを開く。 */
 async function boot(setFatal: (m: string) => void): Promise<void> {
+  installUiErrorReporting();
   actions.installEventHandlers();
   installDevelopEvents();
   try {
@@ -45,10 +64,17 @@ async function boot(setFatal: (m: string) => void): Promise<void> {
     const status = await appApi.appStatus();
     actions.setStatus(status);
     if (status.notice) actions.notify("warning", status.notice);
-    if (status.catalog) {
-      await actions.catalogOpened(status.catalog);
-    } else if (status.settings.last_catalog) {
-      await actions.openCatalog(status.settings.last_catalog, false);
+    try {
+      if (status.catalog) {
+        await actions.catalogOpened(status.catalog);
+      } else if (status.settings.last_catalog) {
+        await actions.openCatalog(status.settings.last_catalog, false);
+      }
+    } finally {
+      // 前回までの異常終了の知らせ（SYS-07）。カタログを開くとダイアログを閉じるので、開いた後に出す。
+      if (status.crash_reports.length > 0) {
+        actions.openDialog({ kind: "crash_reports", reports: status.crash_reports });
+      }
     }
   } catch (e) {
     setFatal(actions.describeError(e));
@@ -96,13 +122,24 @@ function useGlobalHotkeys(enabled: boolean) {
       },
       "mod+,": () => actions.openDialog({ kind: "settings" }),
       "shift+?": () => actions.openDialog({ kind: "shortcuts" }),
-      Delete: () => {
-        const ids = actions.targets();
-        if (ids.length > 0) actions.openDialog({ kind: "delete", deleteKind: "remove_from_catalog", variantIds: ids });
+      // 手動のコレクションを表示している間は、そのコレクションから外す（写真は消えない。state/organize.ts）。
+      Delete: () => void deleteKeyAction(),
+      Backspace: () => void deleteKeyAction(),
+      // キーワード・コレクション（LIB-09・LIB-10）
+      b: () => void toggleTargetCollection(),
+      "mod+k": () => {
+        // 右のパネルのキーワードの欄（グリッド・ルーペ）。現像の画面にはないので、グリッドに戻らない。
+        if (appStore.get().mode !== "develop") focusKeywordInput();
       },
-      Backspace: () => {
-        const ids = actions.targets();
-        if (ids.length > 0) actions.openDialog({ kind: "delete", deleteKind: "remove_from_catalog", variantIds: ids });
+      "mod+n": () => {
+        if (appStore.get().mode === "develop") return;
+        actions.openDialog({
+          kind: "collection",
+          mode: "create",
+          collectionKind: "manual",
+          parentId: null,
+          variantIds: actions.targets(),
+        });
       },
       // 現像設定のコピー・貼り付け（DEV-30）と Undo / Redo（DEV-27）
       "mod+shift+c": async () => {
@@ -159,6 +196,7 @@ function Workspace() {
       </div>
       {mode !== "grid" ? <Filmstrip /> : <div />}
       <StatusBar />
+      <PhotoDragGhost />
     </div>
   );
 }

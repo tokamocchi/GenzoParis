@@ -51,6 +51,10 @@ async function fetchFrame<H extends { width: number; height: number }>(
 export const fetchDevelopFrame = () => fetchFrame<FrameInfo>("develop_frame");
 /** 表示範囲の描画の最新の結果。 */
 export const fetchRegionFrame = () => fetchFrame<RegionInfo>("region_frame");
+/** ビフォー / アフターの表示のビフォーの最新のプレビュー（DEV-31）。 */
+export const fetchBeforeFrame = () => fetchFrame<FrameInfo>("before_frame");
+/** ビフォーの表示範囲の描画の最新の結果（DEV-31）。 */
+export const fetchBeforeRegionFrame = () => fetchFrame<RegionInfo>("before_region_frame");
 
 let p3Support: boolean | null = null;
 

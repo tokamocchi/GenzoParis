@@ -1,5 +1,6 @@
 //! (c) 現像: OpenDevelop → SetSettings → WaitForFrame → 画素のバイト列（frames の形）のヘッダーの寸法と
-//! 画素の長さが合う。画面の色空間（Display P3 / sRGB）の切り替え。
+//! 画素の長さが合う。画面の色空間（Display P3 / sRGB）の切り替え。ビフォー / アフター（DEV-31）の
+//! ビフォーの画素のバイト列。
 
 use genzo_api::{DevelopSettings, FrameInfo, RegionInfo, Response, VariantId};
 use genzo_app::commands;
@@ -142,5 +143,85 @@ pub fn develop_and_region_frames_match_their_headers() {
     );
     let status = state.open_catalog(&path, false).unwrap();
     assert_eq!(status.display.description.as_deref(), Some(DISPLAY_P3));
+    state.close_catalog(false).unwrap();
+}
+
+/// ビフォー / アフター（DEV-31）: set_before → wait_for_before → before_frame のバイト列（ヘッダーは FrameInfo）。
+/// ビフォーの表示範囲（before_region_frame。ヘッダーの before が真）。画面の色空間を変えるとビフォーも描き直す。
+pub fn before_frames_match_their_headers() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("ビフォー");
+    write_image(&photos.join("朝.jpg"), (160, 120), 7);
+    let path = env.catalog("ビフォー.db");
+    state.open_catalog(&path, true).unwrap();
+    import(&state, &photos);
+    let id = all_items(&state)[0].variant_id;
+    ok(&state, json!({"type": "open_develop", "variant_id": id}));
+    assert!(
+        commands::before_frame_bytes(&state).unwrap().is_empty(),
+        "設定していなければ空"
+    );
+    let mut settings = DevelopSettings {
+        exposure_ev: 1.0,
+        ..Default::default()
+    };
+    settings.geometry.crop.left = 0.5;
+    let g = set_settings(&state, &settings);
+    let after = wait_frame(&state, g);
+    let info = match ok(
+        &state,
+        json!({"type": "set_before", "source": {"kind": "initial"}}),
+    ) {
+        Response::Before { before: Some(b) } => b,
+        other => panic!("{other:?}"),
+    };
+    let timeout_ms = WAIT_LIMIT.as_millis() as u64;
+    let wait_before = |generation: u64| match ok(
+        &state,
+        json!({"type": "wait_for_before", "generation": generation, "timeout_ms": timeout_ms}),
+    ) {
+        Response::FrameOrNone { frame: Some(f) } if f.generation >= generation => *f,
+        other => panic!("ビフォーが描けない: {other:?}"),
+    };
+    let bf = wait_before(info.generation);
+    let (header, srgb) = decode::<FrameInfo>(&commands::before_frame_bytes(&state).unwrap(), |h| {
+        (h.width, h.height)
+    });
+    assert_eq!(header.variant_id, id);
+    assert_eq!((header.width, header.height), (after.width, after.height));
+    assert_eq!(header.generation, bf.generation);
+
+    // 表示範囲。
+    let region = match ok(
+        &state,
+        json!({"type": "render_before_region", "request": {
+            "variant_id": id, "x": 0.0, "y": 0.0, "width": 40.0, "height": 30.0
+        }}),
+    ) {
+        Response::Region(r) => r,
+        other => panic!("{other:?}"),
+    };
+    assert!(region.before);
+    let (rh, _) =
+        decode::<RegionInfo>(&commands::before_region_frame_bytes(&state).unwrap(), |h| {
+            (h.width, h.height)
+        });
+    assert_eq!(rh, *region);
+
+    // 画面の色空間を変えると、ビフォーも描き直す。
+    state.set_display_target(DisplayTarget::DisplayP3).unwrap();
+    let st = match ok(&state, json!({"type": "develop_state"})) {
+        Response::DevelopOrNone { state: Some(s) } => s,
+        other => panic!("{other:?}"),
+    };
+    let g2 = st.before.expect("ビフォーは続く").generation;
+    assert!(g2 > info.generation);
+    wait_before(g2);
+    let (_, p3) = decode::<FrameInfo>(&commands::before_frame_bytes(&state).unwrap(), |h| {
+        (h.width, h.height)
+    });
+    assert_ne!(p3, srgb);
+    ok(&state, json!({"type": "close_develop"}));
     state.close_catalog(false).unwrap();
 }

@@ -10,6 +10,7 @@
 //! | [`export`] | 書き出し（JPEG / TIFF 16bit / PNG 8・16bit、ICC と Exif の埋め込み、GPS の削除） | EXP-01・EXP-04、IQ-06、SEC-03、2.4 節 |
 //! | [`jpeg`]・[`png_io`]・[`tiff_io`] | 各形式のエンコードとメタデータの埋め込み | EXP-01、IQ-06 |
 //! | [`exif_write`]・[`exif_read`] | Exif の書き出し（最小限の TIFF の構造を自前で書く）と読み取り（kamadak-exif） | EXP-04、LIB-14 |
+//! | [`xmp_write`] | 書き出すファイルの XMP（カタログで編集した説明のメタデータ。UTF-8） | LIB-15、EXP-04 |
 //! | [`video`] | ffprobe / ffmpeg（子プロセス）による動画のメタデータとサムネイル | VID-02・VID-03、IQ-09、PoC-7 |
 //! | [`process`] | 子プロセスのタイムアウト付きの実行 | 1.2 節、6.3 節 |
 //! | [`safe_write`] | 原本を上書きせず、不完全なファイルを残さない書き出し | 6.4 節（レビュー R-06） |
@@ -65,6 +66,7 @@ pub mod resize;
 pub mod safe_write;
 pub mod tiff_io;
 pub mod video;
+pub mod xmp_write;
 
 pub use buffer::{DynRgbImage, MAX_IMAGE_PIXELS, RgbImage, RgbImage8, RgbImage16, Sample};
 pub use cache::{
@@ -86,3 +88,4 @@ pub use safe_write::{
     Destination, ProtectedFiles, WriteOutcome, resolve_destination, write_atomically,
 };
 pub use video::{FfmpegTools, VideoColorHandling, VideoProbe, VideoThumbnail, parse_ffprobe_json};
+pub use xmp_write::xmp_packet;

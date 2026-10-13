@@ -38,6 +38,64 @@
   position: absolute;
   display: block;
 }
+
+/* ビフォー / アフター（DEV-31）の面。面の外にはみ出した画像は見せない。 */
+.dv-pane {
+  position: absolute;
+  overflow: hidden;
+}
+.dv-pane-label {
+  position: absolute;
+  top: 8px;
+  transform: translateX(-50%);
+  max-width: 45%;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  background: rgba(20, 20, 20, 0.72);
+  color: var(--fg-1);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 2;
+}
+.dv-split-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--fg-1);
+  opacity: 0.7;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* 中央の下のツールバー（ビフォー / アフター・撮影情報） */
+.dv-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-1);
+  font-size: 12px;
+}
+.dv-bar-label {
+  color: var(--fg-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+.dv-seg {
+  display: inline-flex;
+  gap: 2px;
+}
+.dv-bar-grow {
+  flex: 1;
+}
 .dv-image {
   /* 縮小は滑らかに（等倍以上は画素の境界をそのまま見せたいが、等倍表示は 1:1 で描くので縮小だけ）。 */
   image-rendering: auto;

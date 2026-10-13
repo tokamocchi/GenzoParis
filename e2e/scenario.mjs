@@ -98,6 +98,10 @@ try {
     const st = await invoke(wd, "app_status");
     assert(st.catalog && st.catalog.catalog_path.endsWith("catalog.db"), "既定の catalog.db を開いた");
     assert(st.catalog.capabilities?.raw_decoder, `RAW のデコーダがある（${JSON.stringify(st.catalog.worker_error)}）`);
+    // ログをアプリのデータのフォルダのファイルに残している（SYS-07。使い捨ての HOME の下）。
+    assert(st.logs?.file?.endsWith("app.log"), `ログのファイルがある（${JSON.stringify(st.logs)}）`);
+    const logs = await invoke(wd, "log_folder_info");
+    assert(logs.files.some((f) => f.name === "app.log" && f.bytes > 0), "app.log に書いている");
   });
 
   await run("2. フォルダを取り込み、グリッドに並ぶ（IMP-01・VID-01・LIB-01）", async () => {

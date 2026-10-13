@@ -22,7 +22,8 @@
 //   拡大した L1 を出しておく。
 // - Z・Esc・クリック（ドラッグでない）で全体表示に戻る。写真が変わったら全体表示に戻る（写真ごとに
 //   PhotoView を作り直す）。開いた写真は閉じない（現像の画面に切り替えたときに、そのまま使える）。
-// - I で情報（ファイル名・撮影日時・評価）の表示を切り替える。
+// - I で撮影情報（LIB-17。情報 1 → 情報 2 → なし。項目は設定の「表示」で選ぶ）の表示を切り替える
+//   （InfoOverlay。現像の画面と同じ表示）。
 //
 // # 動画
 //
@@ -37,14 +38,15 @@ import { toApiError } from "../api/errors";
 import { type Frame, drawFrame } from "../api/frames";
 import type { RegionInfo, VariantDetails, VariantId, VariantSummary } from "../api/types";
 import { previewUrl, thumbUrl } from "../api/uri";
-import { FlagMark, LabelDot, Stars } from "../components/Marks";
-import { formatCaptureTime, formatDuration } from "../format";
+import { formatDuration } from "../format";
 import { isTyping, useHotkeys } from "../keyboard";
 import { actions, appStore, useApp } from "../state/app";
 import { useDevelop } from "../state/develop";
 import { cancelRegionRender, regionFor, renderRegion } from "../state/region";
 import { searchCache, useSearchVersion } from "../state/search";
 import { useCoreEvent, useViewRect } from "./hooks";
+import { InfoOverlay } from "./InfoOverlay";
+import { cycleInfoMode } from "./infoItems";
 import { resolveOutputSize } from "./outputSize";
 import { l1Status, prefetchL1, prefetchState } from "./prefetch";
 import {
@@ -82,24 +84,6 @@ const MESSAGE_MS = 5000;
 /** 動画の詳細を読みに行くまでの待ち（ミリ秒。写真送りの間に読みに行かない。仮置き）。 */
 const DETAILS_DELAY_MS = 100;
 
-const SHOW_INFO_KEY = "genzo.loupe.showInfo";
-
-function loadShowInfo(): boolean {
-  try {
-    return localStorage.getItem(SHOW_INFO_KEY) !== "0";
-  } catch {
-    return true;
-  }
-}
-
-function saveShowInfo(v: boolean): void {
-  try {
-    localStorage.setItem(SHOW_INFO_KEY, v ? "1" : "0");
-  } catch {
-    // 保存できなくても、このセッションでは切り替える。
-  }
-}
-
 // ---------------------------------------------------------------------------
 // ルーペ
 // ---------------------------------------------------------------------------
@@ -127,7 +111,6 @@ export function Loupe() {
   const detailsVersion = useApp((s) => s.detailsVersion);
   const revOverride = useApp((s) => (current !== null ? s.thumbRevs[current] : undefined));
   useSearchVersion();
-  const [showInfo, setShowInfo] = useState(loadShowInfo);
 
   // 写真送りの間隔（表示する写真が変わったときだけ、描画の中で更新する。StrictMode の 2 回目の描画では
   // 同じ写真なので変わらない）。
@@ -158,8 +141,7 @@ export function Loupe() {
   useHotkeys(
     {
       i: () => {
-        saveShowInfo(!showInfo);
-        setShowInfo(!showInfo);
+        cycleInfoMode();
       },
     },
     hotkeysEnabled,
@@ -198,7 +180,13 @@ export function Loupe() {
           onL1Settled={setSettledSeq}
         />
       )}
-      {showInfo && <InfoOverlay summary={summary} index={currentIndex} count={count} />}
+      <InfoOverlay
+        summary={summary}
+        details={details}
+        index={currentIndex}
+        count={count}
+        version={detailsVersion}
+      />
       <FileNotice summary={summary} />
     </div>
   );
@@ -922,31 +910,6 @@ function VideoView(props: { summary: VariantSummary; details: VariantDetails | n
 // ---------------------------------------------------------------------------
 // 情報の表示
 // ---------------------------------------------------------------------------
-
-function InfoOverlay(props: { summary: VariantSummary; index: number | null; count: number }) {
-  const { summary } = props;
-  return (
-    <div className="loupe-info">
-      <div className="loupe-info-name">
-        {summary.file_name}
-        {!summary.is_master && (
-          <span className="muted">（仮想コピー{summary.variant_name ? `: ${summary.variant_name}` : ""}）</span>
-        )}
-      </div>
-      <div>{formatCaptureTime(summary.capture)}</div>
-      <div className="loupe-info-marks">
-        <Stars rating={summary.rating} />
-        <FlagMark flag={summary.flag} />
-        <LabelDot label={summary.color_label} />
-      </div>
-      {props.index !== null && (
-        <div className="muted">
-          {(props.index + 1).toLocaleString()} / {props.count.toLocaleString()}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function FileNotice(props: { summary: VariantSummary }) {
   const { summary } = props;

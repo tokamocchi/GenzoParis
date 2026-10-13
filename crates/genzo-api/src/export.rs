@@ -5,7 +5,11 @@
 //! 2. 本体で現像する（GPU 版を既定とし、GPU の側の失敗なら CPU 版。2.4 節）。寸法の指定は
 //!    「フル解像度で処理してから縮小」（genzo-pipeline の書き出し）。
 //! 3. genzo-media でエンコードする（出力の色空間の ICC を埋め込み、Exif を書く。`remove_gps` なら GPS を
-//!    書かない。SEC-03）。
+//!    書かない。SEC-03）。カタログで編集した説明のメタデータ（LIB-15。タイトル・キャプション・作成者と連絡先・
+//!    著作権・撮影場所など）は XMP に書き、ASCII で表せるキャプション・作成者・著作権表示は Exif の
+//!    ImageDescription・Artist・Copyright にも書く（genzo-media の `xmp_write`・`exif_write`）。写真に付けた
+//!    キーワード（LIB-09）は、親のキーワードを含めて XMP の `dc:subject` に書く（キーワードごとの「書き出しに
+//!    含める」の印と、設定の `remove_keywords` に従う。genzo-catalog の `Catalog::export_keywords`）。
 //! 4. 安全に書き出す（6.4 節）: **原本の保護**（書き出し先が、カタログに登録されたファイル、または今回の
 //!    入力と同じファイルなら中止する。genzo-media の `ProtectedFiles` で、パスとファイルの同一性で照合する）、
 //!    一時ファイルに書いてから名前を変更する、衝突の扱い（連番・上書き・スキップ）。
@@ -158,11 +162,15 @@ fn export_one(
     written: &mut HashSet<String>,
 ) -> Result<ExportOutcome, ApiError> {
     let inner = ctx.inner;
-    let (file, develop, capture) = inner.with_catalog_api(|c| {
+    let (file, develop, capture, descriptive, keywords) = inner.with_catalog_api(|c| {
         let f = variant_file(c, variant_id)?;
         let d = c.develop_settings(variant_id)?;
         let t = c.capture_time(f.asset_id)?;
-        Ok((f, d, t))
+        let m = c.asset_metadata(f.asset_id)?;
+        // 書き出すキーワード（付いているものと親のうち、書き出しに含めるもの。LIB-09）。設定で書かない
+        // ときも読む（genzo-media が設定に従って除く）。
+        let k = c.export_keywords(variant_id)?;
+        Ok((f, d, t, m, k))
     })?;
     if file.kind == AssetKind::Video {
         return Ok(ExportOutcome::Skipped {
@@ -193,8 +201,13 @@ fn export_one(
         ExportPixels::Rgb8(v) => DynRgbImage::Rgb8(RgbImage8::from_raw(w, h, v)?),
         ExportPixels::Rgb16(v) => DynRgbImage::Rgb16(RgbImage16::from_raw(w, h, v)?),
     };
-    // Exif（撮影情報と、利用者が補正した撮影日時）。GPS は export_image が設定に従って除く。
-    let exif = ExifData::from_photo_metadata(&loaded.metadata).with_capture_time(&capture);
+    // Exif（撮影情報と、利用者が補正した撮影日時）と、カタログで編集した説明のメタデータ（LIB-15。XMP と、
+    // ASCII で表せる値は Exif にも）、キーワード（LIB-09。XMP の dc:subject）。GPS・キーワードは
+    // export_image が設定（remove_gps・remove_keywords）に従って除く。
+    let exif = ExifData::from_photo_metadata(&loaded.metadata)
+        .with_capture_time(&capture)
+        .with_descriptive(descriptive)
+        .with_keywords(keywords);
     let desired_name = output_name(
         &file.name,
         (!file.is_master)

@@ -8,11 +8,22 @@
 //   候補なしで動く（コーデックの欄は候補があるときだけ出す）。
 // - 長辺の画素数・動画の長さ・フレームレートの範囲（VID-03）は「詳しい条件」の中に置く（入力は全角の数字も
 //   読む。フォーカスを外したとき・Enter・入力から 600 ms 後に反映する）。
+// - キーワードでの絞り込み（LIB-09。左のパネルのキーワードの名前で選ぶ）と、表示中のコレクション
+//   （LIB-10・LIB-11）は、名前の札（×で外す）で示す（OrganizeChips）。
 
 import { useEffect, useId, useRef, useState } from "react";
 
 import * as core from "../api/core";
-import type { AssetKind, Facets, FacetValue, SearchFilter, SearchSort, SortKey } from "../api/types";
+import type {
+  AssetKind,
+  CollectionInfo,
+  Facets,
+  FacetValue,
+  KeywordInfo,
+  SearchFilter,
+  SearchSort,
+  SortKey,
+} from "../api/types";
 import { COLOR_LABEL_NAMES } from "../format";
 import { actions, appStore, useApp } from "../state/app";
 import {
@@ -48,6 +59,8 @@ import {
   toggleLabel,
   utcToLocalDate,
 } from "./filterLogic";
+import { COLLECTION_KIND_LABEL, collectionPathText } from "./collectionLogic";
+import { keywordPath, keywordPathText } from "./keywordLogic";
 import "./library.css";
 
 /** テキストの入力から検索までの時間（ms）。 */
@@ -169,6 +182,8 @@ export function FilterBar() {
 
       <DateRange filter={filter} offset={offset} />
 
+      <OrganizeChips filter={filter} />
+
       <span className="spacer" />
 
       <SortControl sort={sort} />
@@ -183,11 +198,63 @@ export function FilterBar() {
         className="btn small"
         disabled={active === 0}
         onClick={() => actions.replaceFilter(clearConditions(filter))}
-        title="絞り込みの条件をすべて解除する（フォルダの選択は残す）"
+        title="絞り込みの条件をすべて解除する（フォルダ・コレクションの選択は残す）"
       >
         条件を解除
       </button>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// キーワード・コレクション（LIB-09〜11）
+// ---------------------------------------------------------------------------
+
+/** 絞り込みのキーワードと表示中のコレクションの札（名前は一覧を読んで出す。× で外す）。 */
+function OrganizeChips({ filter }: { filter: SearchFilter }) {
+  const organizeVersion = useApp((s) => s.organizeVersion);
+  const kws = filter.keywords ?? [];
+  const col = filter.collection_id ?? null;
+  const [names, setNames] = useState<{ keywords: KeywordInfo[]; collections: CollectionInfo[] } | null>(null);
+  const need = kws.length > 0 || col !== null;
+  useEffect(() => {
+    if (!need) return;
+    let alive = true;
+    Promise.all([core.keywordTree(), core.collections(false)])
+      .then(([keywords, collections]) => alive && setNames({ keywords, collections }))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [need, organizeVersion]);
+  if (!need) return null;
+  const c = col !== null ? names?.collections.find((x) => x.collection_id === col) : undefined;
+  return (
+    <span className="lib-organize-chips">
+      {col !== null && (
+        <span className="lib-chip" title={c ? `${COLLECTION_KIND_LABEL[c.kind]}: ${collectionPathText(names?.collections ?? [], col)}` : undefined}>
+          {c ? c.name : `コレクション ${col}`}
+          <button type="button" aria-label="コレクションの表示をやめる" title="すべての写真を表示" onClick={() => actions.showAll()}>
+            ×
+          </button>
+        </span>
+      )}
+      {kws.map((k) => {
+        const path = names ? keywordPathText(keywordPath(names.keywords, k)) : "";
+        return (
+          <span key={k} className="lib-chip" title={`キーワード: ${path}（下の階層を含む）`}>
+            キーワード: {path || k}
+            <button
+              type="button"
+              aria-label="このキーワードでの絞り込みをやめる"
+              onClick={() => actions.setFilter({ keywords: kws.filter((x) => x !== k) })}
+            >
+              ×
+            </button>
+          </span>
+        );
+      })}
+    </span>
   );
 }
 

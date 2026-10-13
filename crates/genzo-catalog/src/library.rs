@@ -1,12 +1,13 @@
-//! 選別とメタデータの更新（LIB-04、LIB-14、LIB-15、LIB-16）と、asset の詳細の読み取り。
+//! 選別とメタデータの更新（LIB-04、LIB-14、LIB-15、LIB-16）と、asset の詳細の読み取り（説明の
+//! メタデータの一括編集は `iptc`）。
 //!
 //! 評価・フラグ・カラーラベルは variant に付ける（04 の 3.1 節。仮想コピーごとに違う評価を
 //! 付けられる）。キャプションと撮影日時は asset に付ける。一括の変更は 1 つのトランザクションで行う。
 
 use chrono::{DateTime, Utc};
 use genzo_model::{
-    AssetId, AssetKind, CaptureTime, ColorLabel, Flag, GpsCoord, Orientation, Rating, VariantId,
-    VideoMetadata,
+    AssetId, AssetKind, CaptureTime, ColorLabel, Flag, GpsCoord, MetadataField, Orientation,
+    Rating, VariantId, VideoMetadata, normalize_metadata_value,
 };
 use rusqlite::{OptionalExtension, params};
 
@@ -93,8 +94,13 @@ impl Catalog {
     }
 
     /// キャプションを変更する（`None` または空白だけで削除）。テキスト検索の索引も更新する。
+    ///
+    /// 値は genzo-model の [`normalize_metadata_value`] で整える（前後の空白・制御文字を除く。上限
+    /// [`genzo_model::MAX_METADATA_CHARS`] 文字を超えれば [`CatalogError::InvalidInput`]）。ほかの説明の
+    /// メタデータとまとめて変えるときは [`Catalog::set_asset_metadata`]（LIB-15）。
     pub fn set_caption(&mut self, asset_id: AssetId, caption: Option<&str>) -> Result<()> {
-        let caption = caption.map(str::trim).filter(|s| !s.is_empty());
+        let caption = normalize_metadata_value(MetadataField::Caption, caption)
+            .map_err(|e| CatalogError::InvalidInput(e.to_string()))?;
         let tx = self.conn.transaction()?;
         let n = tx.execute(
             "UPDATE asset SET caption = ?2 WHERE id = ?1",

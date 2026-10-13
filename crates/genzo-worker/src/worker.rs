@@ -86,6 +86,39 @@ pub fn main_entry() -> ExitCode {
     run_worker(Vec::new(), std::env::args_os().skip(1).collect())
 }
 
+/// パニックのときに標準エラーに出すバックトレースの大きさの上限（バイト）。本体は標準エラー出力の末尾
+/// （[`crate::client::STDERR_TAIL_BYTES`]）を異常終了の記録に付けるので、パニックの内容（先に出す）が
+/// 末尾に残る大きさにする。
+const PANIC_BACKTRACE_BYTES: usize = 6 * 1024;
+
+/// パニックのとき、標準のフック（内容を標準エラーに出す）の後に、バックトレースを標準エラーに出す
+/// （SYS-07。本体がワーカーの標準エラー出力をログに残す。genzo-worker の `client`）。環境変数
+/// `RUST_BACKTRACE` が指定されていれば、標準のフックが出すので出さない。
+fn install_panic_backtrace() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        if std::env::var_os("RUST_BACKTRACE").is_some_and(|v| v != "0") {
+            return;
+        }
+        eprintln!("genzo-worker のバックトレース:\n{}", panic_backtrace_text());
+    }));
+}
+
+/// 今のスレッドのバックトレース（[`PANIC_BACKTRACE_BYTES`] までに切る）。
+fn panic_backtrace_text() -> String {
+    let mut text = std::backtrace::Backtrace::force_capture().to_string();
+    if text.len() > PANIC_BACKTRACE_BYTES {
+        let mut cut = PANIC_BACKTRACE_BYTES;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n…（以降は省略）");
+    }
+    text
+}
+
 /// この実行ファイルをワーカーとして起動し直すときに、先頭に付ける引数（[`run_worker`] で設定する）。
 static RELAUNCH_PREFIX: std::sync::OnceLock<Vec<OsString>> = std::sync::OnceLock::new();
 
@@ -103,6 +136,7 @@ static RELAUNCH_PREFIX: std::sync::OnceLock<Vec<OsString>> = std::sync::OnceLock
 pub fn run_worker(relaunch_prefix: Vec<OsString>, args: Vec<OsString>) -> ExitCode {
     // 1 つのプロセスでワーカーを実行するのは 1 回だけなので、最初の値を使う。
     let _ = RELAUNCH_PREFIX.set(relaunch_prefix);
+    install_panic_backtrace();
     let mut memory_limit = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -1228,6 +1262,13 @@ mod tests {
     use super::*;
     use crate::shm::{SHM_HEADER_LEN, ShmArena};
     use genzo_media::jpeg::encode_jpeg;
+
+    #[test]
+    fn panic_backtrace_is_bounded() {
+        let text = panic_backtrace_text();
+        assert!(!text.is_empty());
+        assert!(text.len() <= PANIC_BACKTRACE_BYTES + "\n…（以降は省略）".len());
+    }
 
     fn run(options: &WorkerOptions, requests: &[Request]) -> Vec<Response> {
         let mut input = Vec::new();

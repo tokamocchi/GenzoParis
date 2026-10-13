@@ -8,8 +8,13 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use genzo_api::{ColorLabel, Flag, GpuMode, SettingGroups, SortDirection, SortKey, VariantId};
-use genzo_model::{ConflictPolicy, ExportFormat, OutputColorSpace};
+use genzo_api::{
+    BeforeSource, CollectionId, ColorLabel, Flag, GpuMode, SettingGroups, SortDirection, SortKey,
+    VariantId,
+};
+use genzo_model::{
+    ConflictPolicy, ExportFormat, HistoryEntryId, MetadataField, OutputColorSpace, SnapshotId,
+};
 
 /// GenzoParis の検証用 CLI（ORG-05。04 の 1.4 節）。
 ///
@@ -63,6 +68,14 @@ pub struct GlobalArgs {
     /// GENZO_LOG、それもなければ warn
     #[arg(long, global = true, value_name = "LEVEL")]
     pub log: Option<String>,
+    /// ログのファイル（cli.log）とクラッシュレポートを置くフォルダ。省略時は環境変数 GENZO_LOG_DIR、
+    /// それもなければアプリと同じログのフォルダ（genzo log info で表示）。外部へは送信しない
+    #[arg(long, global = true, value_name = "DIR")]
+    pub log_dir: Option<PathBuf>,
+    /// ログをファイルに残さない（標準エラーには出す。クラッシュレポートは残す）。環境変数
+    /// GENZO_LOG_FILE=off と同じ
+    #[arg(long, global = true)]
+    pub no_log_file: bool,
     /// 結果を JSON で出す（機械が読む用）
     #[arg(long, global = true)]
     pub json: bool,
@@ -141,6 +154,29 @@ pub enum Command {
         /// キャプション
         text: String,
     },
+    /// 説明のメタデータ（タイトル・作成者・著作権・撮影場所など。LIB-15）を表示・変更する（カタログの中だけ。
+    /// 元ファイルには書かない）。--set・--clear がなければ、項目ごとの値（写真によって異なれば「複数の値」）を
+    /// 表示する
+    #[command(after_help = METADATA_FIELDS_HELP)]
+    Metadata {
+        /// variant の ID（複数可。複数なら一括で変える。仮想コピーは元の写真と同じ値）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// 項目に値を入れる（項目=値。例: --set title=清水寺 --set creator="山田 太郎"。複数可）
+        #[arg(long = "set", value_name = "FIELD=VALUE", value_parser = parse_metadata_assignment)]
+        set: Vec<(MetadataField, String)>,
+        /// 項目の値を消す（複数可）
+        #[arg(long = "clear", value_name = "FIELD", value_parser = parse_metadata_field)]
+        clear: Vec<MetadataField>,
+    },
+    /// 階層キーワード（LIB-09）の一覧・付ける・外す・作る・名前の変更・移動・削除・書き出しの印。
+    /// キーワードは「場所>京都」のような階層のパス（「 > 」の前後の空白は無視）か、`id:12` の形の ID で指定する
+    #[command(subcommand)]
+    Keyword(KeywordCommand),
+    /// コレクション（LIB-10）・スマートコレクション（LIB-11）・コレクションセットの一覧・作る・写真を入れる・
+    /// 外す・名前の変更・移動・削除・条件。コレクションは ID で指定する（`collection list` で見られる）
+    #[command(subcommand)]
+    Collection(CollectionCommand),
     /// 現像設定の表示・変更・履歴・コピー・仮想コピー
     #[command(subcommand)]
     Develop(DevelopCommand),
@@ -174,6 +210,190 @@ pub enum Command {
     },
     /// 計測（05 の 1.8 節のルール。結果は JSON に記録し、前回と比べる）
     Bench(BenchArgs),
+    /// ログ・クラッシュレポートの場所と中身の表示・消去（カタログは使わない。SYS-07）
+    #[command(subcommand)]
+    Log(LogCommand),
+}
+
+/// `keyword` のサブコマンド。
+#[derive(Debug, Subcommand)]
+pub enum KeywordCommand {
+    /// すべてのキーワード（階層のパス・ID・直接付いている写真の数・書き出すファイルに含めるか）
+    List,
+    /// 写真にキーワードを付ける（なければ作る）
+    Add {
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// キーワードの階層のパス（例: --keyword "場所>京都" --keyword 家族。複数可）
+        #[arg(long = "keyword", short = 'k', required = true, value_name = "PATH")]
+        keywords: Vec<String>,
+    },
+    /// 写真からキーワードを外す（下の階層のキーワードは外さない）
+    Remove {
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// キーワード（パスか id:N。複数可）
+        #[arg(long = "keyword", short = 'k', required = true, value_name = "KEYWORD")]
+        keywords: Vec<String>,
+    },
+    /// 写真に付いているキーワード（複数なら、それぞれが付いている写真の数）
+    Show {
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// キーワードを作る（階層のパスごと。あれば何もしない）
+    Create {
+        /// 階層のパス（例: "場所>京都"）
+        path: String,
+    },
+    /// キーワードの名前を変える（同じ階層に同じ名前があればエラー）
+    Rename {
+        /// キーワード（パスか id:N）
+        keyword: String,
+        /// 新しい名前
+        name: String,
+    },
+    /// キーワードを別の親の下へ移す（自分・下の階層の下へは移せない）
+    Move {
+        /// キーワード（パスか id:N）
+        keyword: String,
+        /// 新しい親（パスか id:N。省略すると最上位）
+        #[arg(long, value_name = "KEYWORD")]
+        to: Option<String>,
+    },
+    /// キーワードを削除する（下の階層のキーワードと、写真への付与も。写真は削除しない）
+    Delete {
+        /// キーワード（パスか id:N）
+        keyword: String,
+    },
+    /// 書き出すファイルのメタデータ（XMP の dc:subject）にキーワードを書くかを変える
+    Export {
+        /// キーワード（パスか id:N）
+        keyword: String,
+        /// 書く（--off と一緒には使えない）
+        #[arg(long, conflicts_with = "off", required_unless_present = "off")]
+        on: bool,
+        /// 書かない
+        #[arg(long)]
+        off: bool,
+    },
+}
+
+/// `collection` のサブコマンド。
+#[derive(Debug, Subcommand)]
+pub enum CollectionCommand {
+    /// すべてのコレクション（ID・種類・階層のパス・写真の数。スマートコレクションとセットも数える）
+    List,
+    /// コレクションを作る（--rule でスマートコレクション、--kind set でコレクションセット）
+    Create {
+        /// 名前
+        name: String,
+        /// 入れる先のコレクションセットの ID（省略すると最上位）
+        #[arg(long = "in", value_name = "SET_ID", value_parser = parse_collection_id)]
+        parent: Option<CollectionId>,
+        /// 種類（--rule を指定すると smart）
+        #[arg(long, value_enum)]
+        kind: Option<CollectionKindArg>,
+        /// スマートコレクションの条件の JSON のファイル（- で標準入力。形は docs/04_architecture.md の
+        /// 3.9 節・docs/catalog_schema.md の 2.5 節）
+        #[arg(long, value_name = "FILE")]
+        rule: Option<String>,
+        /// 手動のコレクションに入れる variant の ID（複数可）
+        #[arg(long = "add", value_name = "ID", num_args = 1.., value_parser = parse_variant_id)]
+        add: Vec<VariantId>,
+    },
+    /// 手動のコレクションに写真を入れる
+    Add {
+        /// コレクションの ID
+        #[arg(value_parser = parse_collection_id)]
+        collection: CollectionId,
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// 手動のコレクションから写真を外す（写真は削除しない）
+    Remove {
+        /// コレクションの ID
+        #[arg(value_parser = parse_collection_id)]
+        collection: CollectionId,
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// コレクションの名前を変える
+    Rename {
+        /// コレクションの ID
+        #[arg(value_parser = parse_collection_id)]
+        collection: CollectionId,
+        /// 新しい名前
+        name: String,
+    },
+    /// コレクションを別のコレクションセットへ移す
+    Move {
+        /// コレクションの ID
+        #[arg(value_parser = parse_collection_id)]
+        collection: CollectionId,
+        /// 移す先のコレクションセットの ID（省略すると最上位）
+        #[arg(long, value_name = "SET_ID", value_parser = parse_collection_id)]
+        to: Option<CollectionId>,
+    },
+    /// コレクションを削除する（セットなら中のコレクションも。写真は削除しない）
+    Delete {
+        /// コレクションの ID
+        #[arg(value_parser = parse_collection_id)]
+        collection: CollectionId,
+    },
+    /// スマートコレクションの条件を表示する（--set で変える）
+    Rule {
+        /// コレクションの ID
+        #[arg(value_parser = parse_collection_id)]
+        collection: CollectionId,
+        /// 新しい条件の JSON のファイル（- で標準入力）
+        #[arg(long = "set", value_name = "FILE")]
+        set: Option<String>,
+    },
+}
+
+/// コレクションの種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CollectionKindArg {
+    /// 手動のコレクション（写真を入れる）
+    Manual,
+    /// スマートコレクション（条件で決まる。--rule が要る）
+    Smart,
+    /// コレクションセット（コレクションを入れる）
+    Set,
+}
+
+impl From<CollectionKindArg> for genzo_api::CollectionKind {
+    fn from(k: CollectionKindArg) -> Self {
+        match k {
+            CollectionKindArg::Manual => Self::Manual,
+            CollectionKindArg::Smart => Self::Smart,
+            CollectionKindArg::Set => Self::Set,
+        }
+    }
+}
+
+/// コレクションの ID（1 以上の整数）。
+pub fn parse_collection_id(s: &str) -> Result<CollectionId, String> {
+    match s.trim().parse::<i64>() {
+        Ok(n) if n > 0 => Ok(CollectionId::new(n)),
+        _ => Err(format!("コレクションの ID は 1 以上の整数です: {s}")),
+    }
+}
+
+/// `log` のサブコマンド。
+#[derive(Debug, Subcommand)]
+pub enum LogCommand {
+    /// ログのフォルダ・ファイル・クラッシュレポートを表示する
+    Info,
+    /// ログのフォルダのログとクラッシュレポートを消す（GenzoParis の名前の形のファイルだけ。一部を
+    /// 消せなければ終了コード 3）
+    Clear,
 }
 
 /// `catalog` のサブコマンド。
@@ -194,6 +414,12 @@ pub enum CatalogCommand {
         /// 置き場（省略時はデータのフォルダの backups）
         #[arg(long, value_name = "DIR")]
         to: Option<PathBuf>,
+    },
+    /// カタログの構造（表・列・索引・公開ビュー。ORG-07。文書は docs/catalog_schema.md）
+    Schema {
+        /// 表・索引・ビュー・トリガーを作る SQL をそのまま出す
+        #[arg(long)]
+        sql: bool,
     },
     /// バックアップを検証して、カタログとして復元する（--to に既にあるファイルは退避して残す）
     Restore {
@@ -287,6 +513,15 @@ pub struct SearchArgs {
     /// マスターだけ（仮想コピーを除く）
     #[arg(long)]
     pub masters_only: bool,
+    /// キーワード（パスか id:N。下の階層を含む。複数指定ですべてを持つ）
+    #[arg(long, value_name = "KEYWORD")]
+    pub keyword: Vec<String>,
+    /// コレクションの ID（手動はメンバー、スマートは条件、セットは中のいずれか）
+    #[arg(long, value_name = "ID", value_parser = parse_collection_id)]
+    pub collection: Option<CollectionId>,
+    /// スマートコレクションの条件の JSON のファイル（- で標準入力。保存していない条件で探す）
+    #[arg(long, value_name = "FILE")]
+    pub rule: Option<String>,
     /// 並べ替え
     #[arg(long, value_enum, default_value_t = SortArg::Capture)]
     pub sort: SortArg,
@@ -391,6 +626,9 @@ pub enum DevelopCommand {
     /// 表示範囲を描いて PNG（8bit、sRGB）に書く（ルーペの等倍表示・拡大とパンのコア API
     /// `render_region` を試す。範囲は出力の画像の内側に収める）
     Region(RegionArgs),
+    /// ビフォー / アフターの表示（DEV-31）のビフォーのプレビューを PNG に書く（写真を開いて描く。切り抜きは
+    /// 今の設定と同じ）
+    Before(BeforeArgs),
 }
 
 /// `develop region` の引数。
@@ -418,9 +656,54 @@ pub struct RegionArgs {
     /// 表示の倍率（1 = 等倍、0.5 = 縮小、2 = 拡大）
     #[arg(long, default_value_t = 1.0)]
     pub scale: f64,
+    /// ビフォー / アフターの表示のビフォー（DEV-31）の設定で描く（initial = 取り込んだ直後の設定（既定）、
+    /// current = 今の設定、history:<ID> = 履歴の項目、snapshot:<ID> = スナップショット。切り抜きは今の設定と同じ）
+    #[arg(long, value_name = "SOURCE", value_parser = parse_before_source)]
+    pub before: Option<BeforeSource>,
     /// 書き出す PNG のファイル（既にあれば使い方の誤り。上書きしない）
     #[arg(long, value_name = "FILE")]
     pub out: PathBuf,
+}
+
+/// ビフォーの出どころを解釈する（`initial`・`current`・`history:<ID>`・`snapshot:<ID>`）。
+pub fn parse_before_source(s: &str) -> Result<BeforeSource, String> {
+    let t = s.trim();
+    let id = |v: &str| -> Result<i64, String> {
+        match v.trim().parse::<i64>() {
+            Ok(n) if n >= 1 => Ok(n),
+            _ => Err(format!("ID は 1 以上の整数です（{s}）")),
+        }
+    };
+    match t.split_once(':') {
+        None if t == "initial" => Ok(BeforeSource::Initial),
+        None if t == "current" => Ok(BeforeSource::Current),
+        Some(("history", v)) => Ok(BeforeSource::History {
+            entry_id: HistoryEntryId::new(id(v)?),
+        }),
+        Some(("snapshot", v)) => Ok(BeforeSource::Snapshot {
+            snapshot_id: SnapshotId::new(id(v)?),
+        }),
+        _ => Err(format!(
+            "ビフォーは initial・current・history:<ID>・snapshot:<ID> のどれかです（{s}）"
+        )),
+    }
+}
+
+/// `develop before` の引数（DEV-31）。
+#[derive(Debug, Args)]
+pub struct BeforeArgs {
+    /// variant の ID（写真。動画は描けない）
+    #[arg(value_parser = parse_variant_id)]
+    pub variant: VariantId,
+    /// ビフォーの出どころ（initial = 取り込んだ直後の設定、current = 今の設定、history:<ID>、snapshot:<ID>）
+    #[arg(long, value_name = "SOURCE", default_value = "initial", value_parser = parse_before_source)]
+    pub source: BeforeSource,
+    /// ビフォーのプレビューを書き出す PNG のファイル（既にあれば使い方の誤り。上書きしない）
+    #[arg(long, value_name = "FILE")]
+    pub out: PathBuf,
+    /// アフター（今の設定）のプレビューも書き出す PNG のファイル（同じ寸法。省略可）
+    #[arg(long, value_name = "FILE")]
+    pub after: Option<PathBuf>,
 }
 
 /// 表示範囲の座標系（genzo-api の `RegionSpace`）。
@@ -461,6 +744,10 @@ pub struct ExportOpts {
     /// GPS の情報を書き出さない（EXP-04・SEC-03）
     #[arg(long)]
     pub remove_gps: bool,
+    /// キーワード（XMP の dc:subject。LIB-09）を書き出さない（既定は、付けたキーワードと上の階層のうち
+    /// 「書き出すファイルに含める」ものを書く）
+    #[arg(long)]
+    pub remove_keywords: bool,
     /// 同じ名前のファイルがあるとき（連番を付ける / 上書きする / 飛ばす）
     #[arg(long, value_enum, default_value_t = ConflictArg::Sequence)]
     pub on_conflict: ConflictArg,
@@ -809,6 +1096,29 @@ pub fn parse_variant_id(s: &str) -> Result<VariantId, String> {
     }
 }
 
+/// `metadata` の項目の一覧（`--help` の末尾）。
+pub const METADATA_FIELDS_HELP: &str = "項目（FIELD）: title（タイトル）・headline（見出し）・caption（キャプション）・\
+creator（作成者）・creator_job_title・creator_address・creator_city・creator_region・creator_postal_code・\
+creator_country・creator_phone・creator_email・creator_url（作成者の連絡先）・copyright（著作権表示）・\
+copyright_status（copyrighted / public_domain / unknown）・usage_terms（使用条件）・copyright_url・\
+sublocation・city・province_state・country・country_code（撮影場所）・credit・source・instructions。\
+- は _ と同じに扱います（creator-email など）。";
+
+/// 説明のメタデータの項目の名前を解釈する（`creator_email`・`creator-email`）。
+pub fn parse_metadata_field(s: &str) -> Result<MetadataField, String> {
+    MetadataField::from_name(&s.trim().replace('-', "_")).ok_or_else(|| {
+        format!("説明のメタデータの項目ではありません（{s}。項目の一覧は genzo metadata --help）")
+    })
+}
+
+/// `項目=値` を解釈する（値は空でもよい。空なら削除）。
+pub fn parse_metadata_assignment(s: &str) -> Result<(MetadataField, String), String> {
+    let (field, value) = s
+        .split_once('=')
+        .ok_or_else(|| format!("項目=値 の形で指定します（例: title=清水寺。{s}）"))?;
+    Ok((parse_metadata_field(field)?, value.to_owned()))
+}
+
 /// 寸法（`WxH`）を解釈する（合成の RAW。LibRaw で読める 32 画素以上、genzo-raw の画素数の上限以下）。
 pub fn parse_size(s: &str) -> Result<(u32, u32), String> {
     let err = || format!("寸法は WxH の形で指定します（例: 7008x4672。{s}）");
@@ -915,6 +1225,73 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         parse_from(os(args))
+    }
+
+    #[test]
+    fn metadata_fields_and_assignments_are_parsed() {
+        assert_eq!(parse_metadata_field("title"), Ok(MetadataField::Title));
+        assert_eq!(
+            parse_metadata_field("creator-email"),
+            Ok(MetadataField::CreatorEmail)
+        );
+        assert!(parse_metadata_field("nope").is_err());
+        assert_eq!(
+            parse_metadata_assignment("caption=朝=夕"),
+            Ok((MetadataField::Caption, "朝=夕".to_owned()))
+        );
+        assert_eq!(
+            parse_metadata_assignment("city="),
+            Ok((MetadataField::City, String::new()))
+        );
+        assert!(parse_metadata_assignment("title").is_err());
+        // --help の項目の一覧に、すべての項目がある。
+        for f in MetadataField::ALL {
+            assert!(METADATA_FIELDS_HELP.contains(f.as_str()), "{f}");
+        }
+        let cli = parse(&[
+            "genzo",
+            "metadata",
+            "1",
+            "2",
+            "--set",
+            "title=清水寺",
+            "--clear",
+            "city",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Metadata {
+                variants,
+                set,
+                clear,
+            } => {
+                assert_eq!(variants.len(), 2);
+                assert_eq!(set, vec![(MetadataField::Title, "清水寺".to_owned())]);
+                assert_eq!(clear, vec![MetadataField::City]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn before_sources_are_parsed() {
+        assert_eq!(parse_before_source("initial"), Ok(BeforeSource::Initial));
+        assert_eq!(parse_before_source(" current "), Ok(BeforeSource::Current));
+        assert_eq!(
+            parse_before_source("history:12"),
+            Ok(BeforeSource::History {
+                entry_id: HistoryEntryId::new(12)
+            })
+        );
+        assert_eq!(
+            parse_before_source("snapshot:3"),
+            Ok(BeforeSource::Snapshot {
+                snapshot_id: SnapshotId::new(3)
+            })
+        );
+        for bad in ["history:0", "history:x", "snapshot", "yesterday", ""] {
+            assert!(parse_before_source(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

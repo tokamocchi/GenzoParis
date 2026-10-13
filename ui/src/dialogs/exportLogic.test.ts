@@ -21,12 +21,12 @@ const err = (kind: ErrorInfo["kind"], message: string): ErrorInfo => ({
 });
 
 describe("書き出しの入力", () => {
-  it("既定は JPEG 品質 90・元の大きさ・GPS を削除・連番", () => {
+  it("既定は JPEG 品質 90・元の大きさ・GPS を削除・連番・キーワードを書く", () => {
     const f = { ...defaultExportForm("display_p3"), destDir: "/out" };
     expect(validateExportForm(f)).toEqual({});
     // genzo-model の export.rs の JSON の形と同じ。
     expect(JSON.stringify(toExportSettings(f))).toBe(
-      '{"format":{"jpeg":{"quality":90}},"color_space":"display_p3","size":"original","remove_gps":true,"on_conflict":"sequence"}',
+      '{"format":{"jpeg":{"quality":90}},"color_space":"display_p3","size":"original","remove_gps":true,"on_conflict":"sequence","remove_keywords":false}',
     );
   });
 
@@ -37,11 +37,12 @@ describe("書き出しの入力", () => {
       sizeMode: "long_edge" as const,
       longEdge: "2048",
       removeGps: false,
+      removeKeywords: true,
       onConflict: "skip" as const,
       destDir: "/out",
     };
     expect(JSON.stringify(toExportSettings(f))).toBe(
-      '{"format":"png16","color_space":"srgb","size":{"long_edge":2048},"remove_gps":false,"on_conflict":"skip"}',
+      '{"format":"png16","color_space":"srgb","size":{"long_edge":2048},"remove_gps":false,"on_conflict":"skip","remove_keywords":true}',
     );
     expect(toExportSettings({ ...f, format: "tiff16" })?.format).toBe("tiff16");
     expect(toExportSettings({ ...f, format: "png8" })?.format).toBe("png8");
@@ -107,6 +108,8 @@ describe("前回の設定", () => {
     );
     expect(r.format).toBe("jpeg");
     expect(r.removeGps).toBe(true);
+    // 保存した値にない項目（キーワードを書き出さない。v1 の organize-a で足した）は既定値。
+    expect(r.removeKeywords).toBe(false);
     expect(r.onConflict).toBe("sequence");
     expect(r.quality).toBe("90");
   });

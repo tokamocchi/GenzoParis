@@ -987,7 +987,9 @@ impl AssetColumns {
     }
 }
 
-/// asset のテキスト検索の対象（ファイル名とキャプション）を作り直す（3.6 節）。
+/// asset のテキスト検索の対象（ファイル名・キャプションと、説明のメタデータのうち検索の対象の項目
+/// （タイトル・作成者・撮影場所など。genzo-model の `MetadataField::searchable`。LIB-15））を作り直す
+/// （3.6 節）。
 ///
 /// 内容が変わらなければ書き込まない（FTS の索引を無駄に更新しないため）。
 pub(crate) fn refresh_asset_text(conn: &rusqlite::Connection, asset_id: i64) -> Result<()> {
@@ -1000,7 +1002,43 @@ pub(crate) fn refresh_asset_text(conn: &rusqlite::Connection, asset_id: i64) -> 
     let caption: Option<String> = conn
         .prepare_cached("SELECT caption FROM asset WHERE id = ?1")?
         .query_row([asset_id], |row| row.get(0))?;
-    let text = searchable_text(names.iter().map(String::as_str).chain(caption.as_deref()));
+    // 検索の対象の説明のメタデータ（キャプション以外。MetadataField::ALL の順）。
+    let fields: Vec<genzo_model::MetadataField> = crate::iptc::iptc_columns()
+        .filter(|f| f.searchable())
+        .collect();
+    let sql = format!(
+        "SELECT {} FROM asset_iptc WHERE asset_id = ?1",
+        fields
+            .iter()
+            .map(|f| f.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let iptc: Vec<Option<String>> = match conn.prepare_cached(&sql) {
+        Ok(mut stmt) => stmt
+            .query_row([asset_id], |row| {
+                (0..fields.len())
+                    .map(|i| row.get::<_, Option<String>>(i))
+                    .collect()
+            })
+            .optional()?
+            .unwrap_or_default(),
+        // 版 6 より前のスキーマ（移行の前の版で開いた試験用のカタログ。`testing::open_at_version`）には
+        // 表がない。アプリが開くカタログは、開くときに最新の版へ移行している。
+        Err(rusqlite::Error::SqliteFailure(_, Some(m)))
+            if m.contains("no such table: asset_iptc") =>
+        {
+            Vec::new()
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let text = searchable_text(
+        names
+            .iter()
+            .map(String::as_str)
+            .chain(caption.as_deref())
+            .chain(iptc.iter().filter_map(|v| v.as_deref())),
+    );
     conn.prepare_cached(
         "INSERT INTO asset_text(asset_id, text_norm) VALUES (?1, ?2)
          ON CONFLICT(asset_id) DO UPDATE SET text_norm = excluded.text_norm

@@ -1589,6 +1589,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "tracing-subscriber",
  "trash",
  "windows-sys 0.61.2",
 ]
@@ -1615,7 +1616,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1793,6 +1793,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
