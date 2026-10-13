@@ -2,7 +2,7 @@
 
 Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカタログ管理を行う、Windows / macOS 向けのデスクトップアプリです。
 
-現在は MVP（ロードマップの M5）の実装を終え、**人による実機での受け入れの確認の前** の段階です。コアの crate（現像エンジン・カタログ・ワーカー・コア API）、検証用の CLI（`genzo`）、デスクトップアプリ（`genzo-app`。Tauri 2 ＋ React / TypeScript。取り込み・選別・絞り込み・現像・書き出し・バックアップと復元）を実装しました。動作は Linux（Xvfb と WebKitWebDriver）の E2E のシナリオで確かめていますが、**Windows / macOS の実機での確認、配布物（インストーラー）の作成、PoC の計測はこれから** です（手順は [docs/m5_acceptance.md](docs/m5_acceptance.md)・[docs/packaging.md](docs/packaging.md)）。進捗と、人の判断・確認が必要な事項は [docs/implementation_status.md](docs/implementation_status.md) にあります。
+現在は MVP（ロードマップの M5）の実装を終え、**人による実機での受け入れの確認の前** の段階です。コアの crate（現像エンジン・カタログ・ワーカー・コア API）、検証用の CLI（`genzo`）、デスクトップアプリ（`genzo-app`。Tauri 2 ＋ React / TypeScript。取り込み・選別・絞り込み・現像・書き出し・バックアップと復元）を実装しました。動作は Linux（Xvfb と WebKitWebDriver）の E2E のシナリオで確かめています。配布物（Windows のインストーラー、macOS 26 以降向けの .dmg）は GitHub Actions で作り、ワーカーが同梱の LibRaw で起動することまで確かめました（2026-10-12）。**Windows / macOS の実機での確認と PoC の計測はこれから** です（手順は [docs/m5_acceptance.md](docs/m5_acceptance.md)・[docs/packaging.md](docs/packaging.md)）。進捗と、人の判断・確認が必要な事項は [docs/implementation_status.md](docs/implementation_status.md) にあります。
 
 ## 設計資料
 

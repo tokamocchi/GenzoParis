@@ -14,9 +14,12 @@
 # 再頒布用のフォルダから。決定事項ログ No.73）。
 # 確認に通らなかった配布物は、配る用の artifact には置かない（調べるために「-unverified」の名前で置く）。
 #
-# **未確認**: このワークフローは GitHub Actions でまだ実行していない（2026-10-12 に作成。Linux の .deb で同じ
-# スクリプトが通ることだけ確かめた）。Windows の vcpkg の LibRaw、macOS の dylib の書き換え・署名・.dmg の作成、
-# NSIS の無人インストール（/S）は、最初の実行で確かめる。
+# 実行の記録: 2026-10-12 に main（c0681eb）で 2 回実行した。1 回目（run 38263152398）は Windows が通り、macOS は
+# 同梱する dylib が macOS 26.0 向け（minos 26.0）のため止まった。2 回目（run 38276847388。allow_newer_macos_libs に
+# 印を付けた。配る相手の Mac はすべて macOS 26 以降。決定事項ログ No.74）で、両 OS の配布物ができ、確認の手順が
+# 通った。Windows・macOS の実機での確認はまだ（docs/m5_acceptance.md）。
+# シェルの変数のすぐ後に全角の文字を書くときは `${名前}` で囲む（macOS のランナーの bash は、全角の文字の先頭の
+# バイトまで変数名として読むことがある。scripts/workflows.test.mjs）。
 
 name: Release
 
@@ -103,7 +106,7 @@ jobs:
           echo "タグ: $tag / tauri.conf.json: $conf / Cargo（genzo-app genzo-worker）: $crates"
           for v in $conf $crates; do
             if [ "$v" != "$tag" ]; then
-              echo "::error::タグの版（$tag）と、tauri.conf.json・Cargo の版（$conf / $crates）が違う。版を直してからタグを付け直す"
+              echo "::error::タグの版（${tag}）と、tauri.conf.json・Cargo の版（${conf} / ${crates}）が違う。版を直してからタグを付け直す"
               exit 1
             fi
           done
@@ -153,7 +156,7 @@ jobs:
 
       # 確認: 配布物の中のワーカーが、同梱の LibRaw で起動できるか（DLL・dylib が見つからなければ起動しない）。
       # 成果物を置く前に行い、通らなければ配る用の artifact に置かない。
-      # **未確認**: 両 OS とも、Actions で一度も実行していない。
+      # 2026-10-12 の実行（run 38276847388）で、両 OS とも通った（上の「実行の記録」）。
       - name: 確認（Windows。無人インストールしてワーカーを起動する）
         if: runner.os == 'Windows'
         shell: pwsh
@@ -184,7 +187,7 @@ jobs:
           $code = $LASTEXITCODE
           Write-Output $out
           # DLL が見つからないときは、終了コードが -1073741515（0xC0000135）になる。
-          if ($code -ne 0) { throw "genzo-worker.exe が起動しない（終了コード $code）" }
+          if ($code -ne 0) { throw "genzo-worker.exe が起動しない（終了コード $($code)）" }
           if (-not (@($out) -match '^genzo-worker \d')) { throw "genzo-worker.exe の版が出ない" }
       # shell: bash を指定する（-o pipefail も付く。指定しないと bash -e だけで動く）。
       - name: 確認（macOS。署名とワーカーの起動）
@@ -204,9 +207,9 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           # .app の最小の版が、同梱した dylib に合っているか（上げ忘れると、古い macOS で RAW を開けない）。
           min_actual=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")
-          echo "LSMinimumSystemVersion: $min_actual（期待: $EXPECTED_MIN_MACOS）"
+          echo "LSMinimumSystemVersion: ${min_actual}（期待: ${EXPECTED_MIN_MACOS}）"
           if [ "$min_actual" != "$EXPECTED_MIN_MACOS" ]; then
-            echo "::error::.app の最小の版（$min_actual）が、同梱するものに合わせた版（$EXPECTED_MIN_MACOS）と違う"; exit 1
+            echo "::error::.app の最小の版（${min_actual}）が、同梱するものに合わせた版（${EXPECTED_MIN_MACOS}）と違う"; exit 1
           fi
           shopt -s nullglob
           dmgs=(target/release/bundle/dmg/*.dmg)
@@ -218,7 +221,7 @@ jobs:
           DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/genzo-worker" --version >"$logs/worker-stdout.log" 2>"$logs/worker-dyld.log" || rc=$?
           cat "$logs/worker-stdout.log" "$logs/worker-dyld.log"
           fail=0
-          if [ "$rc" -ne 0 ]; then echo "::error::ワーカーが起動しない（終了コード $rc）"; fail=1; fi
+          if [ "$rc" -ne 0 ]; then echo "::error::ワーカーが起動しない（終了コード ${rc}）"; fail=1; fi
           if grep -q "Library not loaded" "$logs/worker-dyld.log"; then
             echo "::error::ワーカーの依存の dylib が見つからない（Library not loaded）"; fail=1
           fi
