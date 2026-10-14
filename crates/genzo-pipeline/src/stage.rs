@@ -183,6 +183,14 @@ pub struct StageContext<'a> {
     /// 写真ごとの乱数の種（ステージ 16 の粒子の模様。[`crate::finish::effects`]）。エンジンが写真の識別
     /// （[`crate::SourceId::photo_seed`]）から入れる。既定は 0。プレビュー・等倍・書き出しで同じ値にすること。
     pub photo_seed: u32,
+    /// 設定のカメラプロファイル・ルックを引いたもの（DEV-17。[`crate::profile`]）。段階 C のルックテーブル・ルックの
+    /// ステージがパラメータを求めるときに使う（パラメータに解析したものを持つので、実行のときには使わない）。
+    /// 既定は `None`（引いていない。プロファイル・ルックのステージは飛ばす）。
+    pub profiles: Option<&'a crate::profile::ProfileResources>,
+    /// ローカル補正（マスク。DEV-18）の局所の値の面（[`crate::local::LocalField`]）。段階 C の実行
+    /// （[`crate::finish::FinishPlan::run_stages`]）がステージ 9 の後に作って付け、ステージ 10〜14 が画素ごとに引く。
+    /// 既定は `None`（パラメータに局所の値の面の割り当てがあるステージは、ないとエラー）。
+    pub local: Option<&'a crate::local::LocalField>,
 }
 
 impl<'a> StageContext<'a> {
@@ -198,7 +206,21 @@ impl<'a> StageContext<'a> {
             input_kind: InputKind::SceneReferred,
             uncropped: false,
             photo_seed: 0,
+            profiles: None,
+            local: None,
         }
+    }
+
+    /// 局所の値の面（[`StageContext::local`]）を付けたもの。
+    pub fn with_local(mut self, field: &'a crate::local::LocalField) -> Self {
+        self.local = Some(field);
+        self
+    }
+
+    /// 引いたカメラプロファイル・ルック（[`StageContext::profiles`]）を付けたもの。
+    pub fn with_profiles(mut self, profiles: &'a crate::profile::ProfileResources) -> Self {
+        self.profiles = Some(profiles);
+        self
     }
 
     /// 写真ごとの乱数の種（[`StageContext::photo_seed`]）を変えたもの。

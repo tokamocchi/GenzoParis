@@ -33,12 +33,14 @@ pub use catalog::{
     FolderStatus, ParseEnumError, Rating, TzSource,
 };
 pub use develop::{
-    AspectRatio, BlackWhite, ColorGrading, ColorMixer, ColorParams, CropRect, CurvePoint, DataRef,
-    DetailParams, DevelopError, DevelopSettings, EffectsParams, FieldIssue, Geometry, GradingWheel,
-    Grain, HighlightMethod, HighlightRecovery, HslAdjustment, HueBand, HueBands, IssueKind,
-    LensCorrection, LocalAdjustment, LocalDelta, MaskShape, NoiseReduction, ParametricCurve,
-    PostCropVignette, PresenceParams, RenderDeps, Sharpening, ToneCurve, ToneParams,
-    ValidationError, WbPreset, WhiteBalance,
+    AspectRatio, BlackWhite, BrushStroke, ColorGrading, ColorMixer, ColorParams, ColorSample,
+    CropRect, CurvePoint, DataRef, DetailParams, DevelopError, DevelopSettings, EffectsParams,
+    FieldIssue, Geometry, GradingWheel, Grain, HighlightMethod, HighlightRecovery, HslAdjustment,
+    HueBand, HueBands, IssueKind, LensCorrection, LocalAdjustment, LocalDelta, MAX_BRUSH_STROKES,
+    MAX_COLOR_SAMPLES, MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_PROFILE_ID_CHARS,
+    MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS, MaskComponent, MaskMode, MaskShape, NoiseReduction,
+    ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings, RenderDeps, Sharpening,
+    ToneCurve, ToneParams, ValidationError, WbPreset, WhiteBalance, is_valid_profile_id,
 };
 pub use export::{
     ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize, OutputColorSpace,

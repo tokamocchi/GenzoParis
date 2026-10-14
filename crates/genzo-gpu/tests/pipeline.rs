@@ -990,3 +990,210 @@ fn display_profiles_with_unknown_matrices_run_on_the_cpu() {
         Some(&("output.display", StageBackend::Gpu))
     );
 }
+
+#[test]
+fn camera_profile_and_look_match_the_cpu_version() {
+    // カメラプロファイル（DCP。ステージ 8 の色相彩度のマップ・段階 C のルックテーブル）と独自のルック（3D LUT）（DEV-17）を
+    // 含むプレビュー（簡易処理の A1 は GPU 版のステージ 8・最終品質は CPU 版の A1）と書き出し。
+    use std::sync::Arc;
+
+    use genzo_color::{CubeLut, DcpProfile, HsvTable, Lut3d, Mat3};
+    use genzo_pipeline::MemoryProfiles;
+    let g = gpu_or_skip!();
+    let m = typical_camera().map(|r| r.map(f64::from));
+    // 表は、実際のプロファイルと同じく彩度 0 の点が色相によらない形にする（彩度 0 の近くでは色相が定まらないので、
+    // 色相で明度の倍率が変わる表は、CPU 版と GPU 版のわずかな差で明るさが大きく変わりうる）。
+    let mut hsm = Vec::new();
+    for h in 0..8 {
+        for s in 0..3 {
+            hsm.push([(h as f32 - 4.0) * s as f32, 1.0 + 0.05 * s as f32, 1.0]);
+        }
+    }
+    let hsm = HsvTable::new([8, 3, 1], false, hsm).unwrap();
+    let mut look = Vec::new();
+    for v in 0..3 {
+        for h in 0..6 {
+            for s in 0..3 {
+                look.push([
+                    3.0 * s as f32,
+                    1.0 - 0.1 * s as f32 + 0.01 * (h * s) as f32,
+                    1.0 - 0.05 * v as f32,
+                ]);
+            }
+        }
+    }
+    let look = HsvTable::new([6, 3, 3], true, look).unwrap();
+    let dcp = DcpProfile {
+        calibration_illuminants: [Some(21), None],
+        color_matrices: [Some(Mat3::from_rows(m)), None],
+        hue_sat_maps: [Some(hsm), None],
+        look_table: Some(look),
+        ..Default::default()
+    };
+    let lut = Lut3d::from_fn(9, |v| [v[1], v[2], v[0]]).unwrap();
+    let cube = CubeLut::new(None, 9, lut.data().to_vec(), [0.0; 3], [1.0; 3]).unwrap();
+    let mut lib = MemoryProfiles::new();
+    lib.insert_camera("dcp", dcp, &"aa".repeat(32));
+    lib.insert_look("cube", cube, &"bb".repeat(32));
+    let engine = engine(80, 48).with_profile_resolver(Arc::new(lib));
+    let raw = raw_source(raw_from(&camera_scene(140, 96), CfaPattern::RGGB, true));
+    let working = working_source(scene_b2(150, 100), Orientation::Normal);
+    let mut s = rotated_strong();
+    s.profile.camera = Some("dcp".into());
+    s.profile.look = Some("cube".into());
+    s.profile.look_amount = 65.0;
+    for (source, quality) in [
+        (&raw, RenderQuality::Final),
+        (&raw, RenderQuality::Draft),
+        (&working, RenderQuality::Final),
+    ] {
+        let p = compare_preview(
+            g,
+            &engine,
+            source,
+            &s,
+            quality,
+            80,
+            OutputTarget::Export(OutputColorSpace::Srgb),
+        );
+        assert!(p.active_stages.contains(&"finish.look"));
+        assert_eq!(
+            p.active_stages.contains(&"finish.profile_look_table"),
+            std::ptr::eq(source, &raw)
+        );
+        if std::ptr::eq(source, &raw) && quality == RenderQuality::Draft {
+            assert!(
+                p.a1_on_gpu,
+                "簡易処理の A1 は GPU 版（ステージ 8 の色相彩度のマップを含む）"
+            );
+        }
+    }
+    let export = ExportSettings::default();
+    let c = engine
+        .export(&raw, &s, &export, &ExportOptions::default(), &NeverCancel)
+        .unwrap();
+    let e = g
+        .export(
+            &engine,
+            &raw,
+            &s,
+            &export,
+            &ExportOptions::default(),
+            &NeverCancel,
+        )
+        .unwrap();
+    let diff = export_diff_8bit(&c.pixels, &e.pixels);
+    eprintln!("プロファイル・ルック: 書き出しの 8bit 換算の差の最大 {diff:.3}");
+    assert!(diff <= FINAL_OUTPUT_MAX_DIFF_8BIT, "{diff}");
+}
+
+#[test]
+fn masks_match_the_cpu_version() {
+    // ローカル補正（マスク。DEV-18・DEV-19）を含むプレビュー（RAW・RAW 以外、最終品質・簡易処理）と書き出し（タイルの
+    // 余白・局所の値の面をタイルごとに GPU で作る）。局所の値を使うステージは GPU 版で処理する。
+    use genzo_model::{
+        BrushStroke, LocalAdjustment, LocalDelta, MaskComponent, MaskMode, MaskShape,
+    };
+    let g = gpu_or_skip!();
+    let engine = engine(80, 48);
+    let sources = [
+        working_source(scene_b2(150, 100), Orientation::Normal),
+        raw_source(raw_from(&camera_scene(140, 96), CfaPattern::RGGB, true)),
+    ];
+    let mut s = rotated_strong();
+    s.process_version = 2;
+    let mut radial = LocalAdjustment {
+        delta: LocalDelta {
+            temperature: 30.0,
+            exposure_ev: 0.6,
+            highlights: -40.0,
+            texture: 40.0,
+            clarity: 30.0,
+            dehaze: 25.0,
+            saturation: -30.0,
+            sharpness: 50.0,
+            ..Default::default()
+        },
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Radial {
+            cx: 0.4,
+            cy: 0.3,
+            rx: 0.25,
+            ry: 0.15,
+            angle_deg: -15.0,
+            feather: 60.0,
+        }))
+    };
+    radial.components.push(MaskComponent {
+        mode: MaskMode::Intersect,
+        invert: false,
+        shape: MaskShape::LuminanceRange {
+            min: 10.0,
+            max: 90.0,
+            smoothness: 50.0,
+        },
+    });
+    let brush = LocalAdjustment {
+        delta: LocalDelta {
+            exposure_ev: -0.5,
+            contrast: 30.0,
+            sharpness: -80.0,
+            ..Default::default()
+        },
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Brush {
+            strokes: vec![BrushStroke {
+                size: 0.08,
+                feather: 50.0,
+                flow: 80.0,
+                points: vec![[0.6, 0.1], [0.8, 0.4]],
+                ..Default::default()
+            }],
+        }))
+    };
+    s.masks = vec![radial, brush];
+    for source in &sources {
+        for quality in [RenderQuality::Final, RenderQuality::Draft] {
+            let p = compare_preview(
+                g,
+                &engine,
+                source,
+                &s,
+                quality,
+                80,
+                OutputTarget::Export(OutputColorSpace::Srgb),
+            );
+            let local_stages = [
+                "finish.exposure",
+                "finish.contrast",
+                "finish.tone",
+                "finish.texture",
+                "finish.color",
+                "finish.sharpen",
+            ];
+            assert!(
+                p.backends
+                    .iter()
+                    .filter(|(id, _)| local_stages.contains(id))
+                    .all(|(_, b)| *b == StageBackend::Gpu),
+                "{:?}",
+                p.backends
+            );
+        }
+        let export = ExportSettings::default();
+        let c = engine
+            .export(source, &s, &export, &ExportOptions::default(), &NeverCancel)
+            .unwrap();
+        let e = g
+            .export(
+                &engine,
+                source,
+                &s,
+                &export,
+                &ExportOptions::default(),
+                &NeverCancel,
+            )
+            .unwrap();
+        let diff = export_diff_8bit(&c.pixels, &e.pixels);
+        eprintln!("マスク: 書き出しの 8bit 換算の差の最大 {diff:.3}");
+        assert!(diff <= FINAL_OUTPUT_MAX_DIFF_8BIT, "{diff}");
+    }
+}

@@ -20,6 +20,8 @@
 //! | [`icc`] | ICC プロファイルの作成・読み込み、lcms2 の浮動小数点の変換 | 2.6 節、IQ-06 |
 //! | [`lut`] | 3D LUT（lcms2 で作成、四面体補間で適用） | 2.6 節 17a・2.3 節・5 章 |
 //! | [`display`] | モニターのプロファイル（取得できなければ sRGB とみなす）と画面への出力の準備 | 5 章、IQ-05 |
+//! | [`dcp`] | カメラプロファイル（DCP）の読み込み、行列・色相彩度のマップの光源による補間、HSV の表の適用（DEV-17） | 2.1 節のステージ 8・2.6 節 |
+//! | [`cube`] | 3D LUT のファイル（.cube）の読み込み（DEV-17 の独自のルック） | 2.1 節のステージ 16 |
 //!
 //! # 例
 //!
@@ -55,6 +57,8 @@
 //! ```
 
 pub mod camera;
+pub mod cube;
+pub mod dcp;
 pub mod display;
 pub mod error;
 pub mod gamut;
@@ -71,6 +75,8 @@ pub mod white_balance;
 mod test_util;
 
 pub use camera::camera_to_working_matrix;
+pub use cube::CubeLut;
+pub use dcp::{DcpProfile, DcpRendering, HsvTable};
 pub use display::{
     DisplayGamut, DisplayLutSource, DisplayProfile, DisplayProfileFallbackReason,
     DisplayProfileSource,

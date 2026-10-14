@@ -31,6 +31,14 @@
 //!   `1 − (H + S)·0.173 / W > 0`、`1 − (Wt + Bt)·0.173 / W > 0` となるよう定数を選んでいる
 //!   （平らな部分で明暗が逆転しない）。
 //! - 負の値（色域外）は符号を保ったまま倍率がかかる。`Y ≤ 2^−16` の画素は下限の明るさで計算する。
+//!
+//! # ローカル補正（処理バージョン 2。DEV-18。[`crate::local`]）
+//!
+//! 画素の局所の値（ハイライト・シャドウ・白・黒 `dh, ds, dw, db`、露光量 `de`、コントラスト `dc`）を全体の値に足した
+//! パラメータ（[`ToneStageParams::with_local`]）で上の式を計算する: `h' = clamp(h + dh / 100, −2, 2)`（`s`・`w`・`b` も
+//! 同じ）、`EV' = clamp(EV + de, ±LOCAL_EXPOSURE_LIMIT)`、コントラストは [`ContrastParams::with_local`]。局所の明るさ
+//! `B` にもマスクの露光量・コントラストが入る（露光量を局所に変えた部分の詳細 `D` を保つ）。全体の 4 つが 0 で
+//! マスクだけで有効なときは、4 つの局所の値が 0 の画素を変えない。
 
 use genzo_model::{DevelopSettings, Phase};
 
@@ -42,6 +50,10 @@ use crate::error::Result;
 use crate::guide::{GuideLookup, checked_guide};
 use crate::image::{ImageTile, Roi};
 use crate::interp::sample_bilinear_gray;
+use crate::local::{
+    LOCAL_EXPOSURE_LIMIT, LocalParam, LocalSlots, LocalValues, add_unit, any_nonzero,
+    checked_field, local_slots,
+};
 use crate::sanitize::safe_log2;
 use crate::stage::{Stage, StageContext, StageParams};
 use crate::version::ProcessVersion;
@@ -93,11 +105,57 @@ pub struct ToneStageParams {
     pub ev: f32,
     /// コントラスト（ガイドにも同じ傾きの変更をかける）。
     pub contrast: ContrastParams,
+    /// 全体のコントラストのスライダーの値 / 100（ローカル補正のコントラストを足すため）。
+    pub contrast_unit: f32,
     /// C の画素 → ガイドの座標。
     pub lookup: GuideLookup,
+    /// ローカル補正の局所の値の面の割り当て（局所の明るさの項目（露光量・コントラスト・4 つ）のどれかの面があるとき
+    /// だけ）。
+    pub local: Option<LocalSlots>,
+    /// 全体の 4 つが 0 で、ローカル補正だけで有効か（4 つの局所の値が 0 の画素は変えない）。
+    pub local_only: bool,
 }
 
 impl ToneStageParams {
+    /// 局所の値 `v` を足したパラメータ（モジュールの doc の「ローカル補正」。値が 0 の項目は全体の値のまま）。
+    #[inline]
+    pub fn with_local(&self, v: &LocalValues) -> Self {
+        let de = v[LocalParam::Exposure.index()];
+        Self {
+            highlights: add_unit(
+                self.highlights,
+                v[LocalParam::Highlights.index()],
+                -2.0,
+                2.0,
+            ),
+            shadows: add_unit(self.shadows, v[LocalParam::Shadows.index()], -2.0, 2.0),
+            whites: add_unit(self.whites, v[LocalParam::Whites.index()], -2.0, 2.0),
+            blacks: add_unit(self.blacks, v[LocalParam::Blacks.index()], -2.0, 2.0),
+            ev: if de == 0.0 {
+                self.ev
+            } else {
+                (self.ev + de).clamp(-LOCAL_EXPOSURE_LIMIT, LOCAL_EXPOSURE_LIMIT)
+            },
+            contrast: self
+                .contrast
+                .with_local(self.contrast_unit, v[LocalParam::Contrast.index()]),
+            ..*self
+        }
+    }
+
+    /// 局所の値 `v` を当てた 1 画素（`guide_value` はガイドを引いた値。モジュールの doc の「ローカル補正」）。
+    #[inline]
+    pub fn apply_local(&self, c: [f32; 3], guide_value: f32, v: &LocalValues) -> [f32; 3] {
+        if self.local_only && !any_nonzero(v, &LocalParam::TONE_STAGE) {
+            return c;
+        }
+        if any_nonzero(v, &LocalParam::LOCAL_BASE) {
+            self.with_local(v).apply(c, guide_value)
+        } else {
+            self.apply(c, guide_value)
+        }
+    }
+
     /// 局所の明るさ `base`（log2）と画素の明るさ `l`（log2）から、明るさの変化（段）を求める
     /// （モジュールの doc の `L2 − L`）。
     #[inline]
@@ -165,10 +223,12 @@ impl Stage for ToneStage {
         }
         let s = settings.normalized();
         let t = s.tone;
-        if [t.highlights, t.shadows, t.whites, t.blacks]
+        let global_neutral = [t.highlights, t.shadows, t.whites, t.blacks]
             .iter()
-            .all(|&v| v == 0.0)
-        {
+            .all(|&v| v == 0.0);
+        let slots = local_slots(&s, ctx);
+        let local_tone = slots.is_some_and(|l| l.uses_any(&LocalParam::TONE_STAGE));
+        if global_neutral && !local_tone {
             return Ok(None);
         }
         let guide = checked_guide(ctx, Self::ID)?;
@@ -181,7 +241,10 @@ impl Stage for ToneStage {
             blacks: t.blacks / 100.0,
             ev: s.exposure_ev,
             contrast: ContrastParams::from_slider(s.contrast),
+            contrast_unit: s.contrast / 100.0,
             lookup: GuideLookup::new(&plan, guide.image.width(), guide.image.height()),
+            local: slots.filter(|l| l.uses_any(&LocalParam::LOCAL_BASE)),
+            local_only: global_neutral,
         })))
     }
     fn input_roi(&self, output_roi: Roi, _: &StageParams, _: &StageContext<'_>) -> Roi {
@@ -199,10 +262,16 @@ impl Stage for ToneStage {
             ProcessVersion::V1 | ProcessVersion::V2 => {}
         }
         let guide = &checked_guide(ctx, Self::ID)?.image;
-        map_pixels(input, output, |x, y, c| {
-            let (u, v) = p.lookup.coords(x, y);
-            p.apply(c, sample_bilinear_gray(guide, u, v))
-        })
+        match checked_field(ctx, Self::ID, p.local, output.roi)? {
+            None => map_pixels(input, output, |x, y, c| {
+                let (u, v) = p.lookup.coords(x, y);
+                p.apply(c, sample_bilinear_gray(guide, u, v))
+            }),
+            Some(f) => map_pixels(input, output, |x, y, c| {
+                let (u, v) = p.lookup.coords(x, y);
+                p.apply_local(c, sample_bilinear_gray(guide, u, v), &f.values(x, y))
+            }),
+        }
     }
 }
 
@@ -218,10 +287,13 @@ mod tests {
             blacks: b,
             ev: 0.0,
             contrast: ContrastParams::from_slider(0.0),
+            contrast_unit: 0.0,
             lookup: GuideLookup {
                 origin: (0, 0),
                 scale: (1.0, 1.0),
             },
+            local: None,
+            local_only: false,
         }
     }
 

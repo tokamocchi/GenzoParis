@@ -1,8 +1,9 @@
 //! (c) 現像: OpenDevelop → SetSettings → WaitForFrame → 画素のバイト列（frames の形）のヘッダーの寸法と
 //! 画素の長さが合う。画面の色空間（Display P3 / sRGB）の切り替え。ビフォー / アフター（DEV-31）の
-//! ビフォーの画素のバイト列。比較表示（LIB-03）の面ごとの表示範囲の画素のバイト列。
+//! ビフォーの画素のバイト列。比較表示（LIB-03）の面ごとの表示範囲の画素のバイト列。マスク（DEV-18・DEV-19）の
+//! 重ねて表示のバイト列と色のスポイト。
 
-use genzo_api::{DevelopSettings, FrameInfo, RegionInfo, Response, VariantId};
+use genzo_api::{DevelopSettings, FrameInfo, MaskOverlayInfo, RegionInfo, Response, VariantId};
 use genzo_app::commands;
 use genzo_app::state::{AppState, DisplayTarget};
 use serde::de::DeserializeOwned;
@@ -286,5 +287,77 @@ pub fn view_region_frames_match_their_panes() {
             .unwrap()
             .is_empty()
     );
+    state.close_catalog(false).unwrap();
+}
+
+/// マスク（DEV-18・DEV-19）: プレビューの FrameInfo に G 座標の範囲が入る。マスクの重ねて表示のバイト列
+/// （mask_overlay_frame。ヘッダーは MaskOverlayInfo、重みを R・G・B に同じ値で入れる）は、プレビューと同じ寸法で、
+/// 円形のマスクの中が 255・外が 0。色のスポイト（mask_color_at）は点の G 座標を返す。
+pub fn mask_overlay_frames_match_their_headers() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("マスク");
+    write_image(&photos.join("空.jpg"), (160, 120), 7);
+    let path = env.catalog("マスク.db");
+    state.open_catalog(&path, true).unwrap();
+    import(&state, &photos);
+    let id = all_items(&state)[0].variant_id;
+    let dev = match ok(&state, json!({"type": "open_develop", "variant_id": id})) {
+        Response::Develop(d) => d,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(dev.settings.process_version, 2);
+    // 160 × 120 の画像の G 座標は (0, 0)〜(1, 0.75)。半径 0.2 の円を左上に置く。
+    let mut value = serde_json::to_value(&dev.settings).unwrap();
+    value["masks"] = json!([{
+        "enabled": true,
+        "name": "左上",
+        "components": [{"mode": "add", "invert": false, "shape": {"radial": {
+            "cx": 0.25, "cy": 0.25, "rx": 0.2, "ry": 0.2, "angle_deg": 0.0, "feather": 0.0
+        }}}],
+        "delta": {"exposure_ev": 0.5}
+    }]);
+    let settings: DevelopSettings = serde_json::from_value(value).unwrap();
+    let frame = wait_frame(&state, set_settings(&state, &settings));
+    let g = frame.g_bounds.expect("G 座標の範囲");
+    assert!(
+        (g[2] - 1.0).abs() < 1e-9 && (g[3] - 0.75).abs() < 1e-9,
+        "{g:?}"
+    );
+    let (header, pixels) = decode::<MaskOverlayInfo>(
+        &commands::mask_overlay_frame_bytes(&state, id, 0, None).unwrap(),
+        |h| (h.width, h.height),
+    );
+    assert_eq!(header.variant_id, id);
+    assert_eq!(header.index, 0);
+    assert_eq!((header.width, header.height), (frame.width, frame.height));
+    assert!(
+        pixels.chunks_exact(4).all(|p| p[0] == p[1] && p[1] == p[2]),
+        "重みを R・G・B に同じ値で入れる"
+    );
+    let at = |fx: f64, fy: f64| {
+        let x = (fx * f64::from(header.width)) as usize;
+        let y = (fy * f64::from(header.height)) as usize;
+        pixels[(y * header.width as usize + x) * 4]
+    };
+    assert_eq!(at(0.25, 0.33), 255, "円の中心");
+    assert_eq!(at(0.9, 0.9), 0, "円の外");
+    assert!(
+        commands::mask_overlay_frame_bytes(&state, id, 1, None).is_err(),
+        "範囲の外のマスク"
+    );
+    match ok(
+        &state,
+        json!({"type": "mask_color_at", "variant_id": id, "x": 0.5, "y": 0.5}),
+    ) {
+        Response::MaskColor(p) => {
+            assert!(
+                (p.x - 0.5).abs() < 0.01 && (p.y - 0.375).abs() < 0.01,
+                "{p:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    ok(&state, json!({"type": "close_develop"}));
     state.close_catalog(false).unwrap();
 }

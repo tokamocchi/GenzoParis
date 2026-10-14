@@ -7,12 +7,15 @@
 //   ハイライト・全体の色相環、ブレンド・バランス。処理バージョン 2 から）・ディテール（シャープ（処理バージョン 2 から）・
 //   ノイズ軽減の輝度・カラー（処理バージョン 2 から。RAW だけ））・切り抜きと角度・レンズ補正（プロファイル・色収差の
 //   除去・手動の歪曲 / 周辺減光 / 色収差。処理バージョン 2 から）・効果（切り抜き後の周辺光量補正・粒子。処理
-//   バージョン 2 から）・すべてリセット・警告と元の画像の情報（処理バージョンの更新）。
+//   バージョン 2 から）・プロファイル（カメラプロファイル（DCP。RAW だけ）・ルック（3D LUT）と適用量。取り込み・管理の
+//   ダイアログ。処理バージョン 2 から。DEV-17）・マスク（ローカル補正。ブラシ・線形 / 円形グラデーション・色域・輝度範囲
+//   の部品と調整。処理バージョン 2 から。DEV-18・DEV-19。MaskPanel.tsx）・すべてリセット・警告と元の画像の情報
+//   （処理バージョンの更新）。
 // - 値は developStore.settings（送信前を含む最新の値）から読み、変更は applySettings で送る（ドラッグ中は
 //   dragging: true、離したら endDrag。state/develop.ts の送信の列）。
 // - 写真を開いている間・開けなかったときは、操作を無効にする。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type {
   CurvePoint,
@@ -30,8 +33,9 @@ import { HUE_BANDS, RANGES, WB_PRESETS } from "../api/types";
 import { Section } from "../components/Section";
 import { Slider } from "../components/Slider";
 import { comboLabel } from "../keyboard";
-import { useApp } from "../state/app";
+import { actions, useApp } from "../state/app";
 import { applySettings, developStore, endDrag, upgradeProcessVersion, useDevelop } from "../state/develop";
+import { importProfileFiles, refreshProfiles, useProfiles } from "../state/profiles";
 import {
   GRADING_RANGES,
   type GradingRange,
@@ -71,6 +75,17 @@ import {
   withVignette,
 } from "./detailLogic";
 import { Histogram } from "./Histogram";
+import { MaskSection } from "./MaskPanel";
+import {
+  cameraChoices,
+  defaultProfile,
+  fullProfile,
+  lookChoices,
+  profileControls,
+  profileIsDefault,
+  selectsOtherCamera,
+  withProfile,
+} from "./profileLogic";
 import { useGeometryInfo, useLoadedSummary } from "./hooks";
 import {
   formatAngle,
@@ -108,6 +123,7 @@ import {
   chooseAspect,
   commitAngle,
   commitCrop,
+  selectMask,
   startCrop,
   toggleWbTool,
   useDevelopView,
@@ -1247,6 +1263,143 @@ function EffectsSection(props: { settings: DevelopSettings; disabled: boolean })
 }
 
 // ---------------------------------------------------------------------------
+// カメラプロファイル・ルック（DEV-17）
+// ---------------------------------------------------------------------------
+
+/** 選択肢の値（null は空文字列）。 */
+const choiceValue = (id: string | null) => id ?? "";
+
+function ProfileSection(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const source = useDevelop((s) => s.state?.source ?? null);
+  const variantId = useDevelop((s) => s.variantId);
+  const entries = useProfiles((s) => s.entries);
+  const busy = useProfiles((s) => s.busy);
+  const camera = source?.camera ?? null;
+  const p = fullProfile(settings.profile);
+  const c = profileControls(settings, source, disabled);
+  const list = entries ?? [];
+  const [showAll, setShowAll] = useState(false);
+  // 写真（機種）が変わったら一覧を読み直す（その機種用かが変わる）。
+  useEffect(() => {
+    void refreshProfiles(camera);
+  }, [variantId, camera]);
+  const otherSelected = selectsOtherCamera(list, p.camera);
+  const cams = cameraChoices(list, p.camera, showAll || otherSelected);
+  const looks = lookChoices(list, p.look);
+  const pct = (v: number) => `${Math.round(v)}`;
+  const hasOthers = list.some((e) => e.kind === "camera" && e.matches_camera !== true);
+  return (
+    <Section id="develop.profile" title="プロファイル" defaultOpen={false}>
+      {c.needsUpgrade && !disabled && (
+        <UpgradeNote what="カメラプロファイル・ルック" processVersion={settings.process_version} />
+      )}
+      <div className="dp-sub">カメラプロファイル</div>
+      <div className="dp-row">
+        <select
+          value={choiceValue(p.camera)}
+          disabled={!c.camera}
+          aria-label="カメラプロファイル"
+          title="RAW の色の解釈（カメラの色 → 作業色空間）。取り込んだ DCP から選びます"
+          onChange={(e) => {
+            const id = e.target.value === "" ? null : e.target.value;
+            update((s) => (fullProfile(s.profile).camera === id ? null : withProfile(s, { camera: id })), false);
+          }}
+        >
+          {cams.map((o) => (
+            <option key={choiceValue(o.id)} value={choiceValue(o.id)} disabled={o.disabled}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {hasOthers && (
+        <label className={`dp-check${!c.camera ? " disabled" : ""}`} title="色が合わないことがあります">
+          <input
+            type="checkbox"
+            checked={showAll || otherSelected}
+            disabled={!c.camera || otherSelected}
+            onChange={(e) => setShowAll(e.target.checked)}
+          />
+          ほかの機種用も表示
+        </label>
+      )}
+      {c.notRaw && !c.needsUpgrade && (
+        <div className="dp-note">RAW 以外の写真では、カメラプロファイルは使われません（ルックは使えます）。</div>
+      )}
+      {!c.notRaw && source && camera === null && (
+        <div className="dp-note">この写真の機種が分からないため、「ほかの機種用も表示」で選んでください。</div>
+      )}
+      <div className="dp-sub">ルック</div>
+      <div className="dp-row">
+        <select
+          value={choiceValue(p.look)}
+          disabled={!c.look}
+          aria-label="ルック"
+          title="仕上げの色（3D LUT）。トーン・色の調整の後に当てます"
+          onChange={(e) => {
+            const id = e.target.value === "" ? null : e.target.value;
+            update((s) => (fullProfile(s.profile).look === id ? null : withProfile(s, { look: id })), false);
+          }}
+        >
+          {looks.map((o) => (
+            <option key={choiceValue(o.id)} value={choiceValue(o.id)} disabled={o.disabled}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <Slider
+        label="適用量"
+        value={p.look_amount}
+        min={RANGES.amount.min}
+        max={RANGES.amount.max}
+        step={1}
+        defaultValue={100}
+        format={pct}
+        parse={parseNumber}
+        disabled={!c.lookAmount}
+        onChange={(v, dragging) =>
+          update((s) => {
+            const cur = fullProfile(s.profile);
+            if (sameShown(pct, v, cur.look_amount)) return null;
+            return withProfile(s, { look_amount: Math.round(v) });
+          }, dragging)
+        }
+        onCommit={endDrag}
+        title="ルックの強さ（0 でルックなしと同じ、100 で LUT どおり）"
+      />
+      <div className="dp-row">
+        <button
+          className="btn small"
+          disabled={busy}
+          onClick={() => void importProfileFiles(false)}
+          title="カメラプロファイル（.dcp）・ルック（.cube）のファイルを取り込む（元のファイルは変えません）"
+        >
+          取り込む…
+        </button>
+        <button
+          className="btn small"
+          onClick={() => actions.openDialog({ kind: "profiles" })}
+          title="取り込んだものの一覧・詳細・除く"
+        >
+          管理…
+        </button>
+        <span className="grow" />
+        <button
+          className="btn small"
+          disabled={disabled || c.needsUpgrade || profileIsDefault(settings.profile)}
+          onClick={() => update((s) => ({ ...s, profile: defaultProfile() }), false)}
+          title="標準の色・ルックなしに戻す"
+        >
+          リセット
+        </button>
+      </div>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // トーンカーブ
 // ---------------------------------------------------------------------------
 
@@ -1625,6 +1778,8 @@ function InfoSection() {
           <dd>{source.is_raw ? "RAW" : "RAW 以外"}</dd>
           <dt>デコーダ</dt>
           <dd>{source.decoder ?? "—"}</dd>
+          <dt>機種</dt>
+          <dd>{source.camera ?? "—"}</dd>
           <dt>元の大きさ</dt>
           <dd>
             {source.width} × {source.height}（向きを反映する前）
@@ -1694,12 +1849,18 @@ export function DevelopPanel() {
           {openError && !opening ? `開けません: ${openError.message}` : "写真を開いています…"}
         </div>
       )}
+      <ProfileSection settings={shown} disabled={disabled} />
       <BasicSection settings={shown} disabled={disabled} />
       <CurveSection settings={shown} disabled={disabled} />
       <MixerSection settings={shown} disabled={disabled} />
       <GradingSection settings={shown} disabled={disabled} />
       <DetailSection settings={shown} disabled={disabled} />
       <CropSection settings={shown} disabled={disabled} />
+      <MaskSection
+        settings={shown}
+        disabled={disabled}
+        upgradeNote={<UpgradeNote what="ローカル補正（マスク）" processVersion={shown.process_version} />}
+      />
       <LensSection settings={shown} disabled={disabled} />
       <EffectsSection settings={shown} disabled={disabled} />
       <div className="dp-actions">
@@ -1710,8 +1871,9 @@ export function DevelopPanel() {
             // 編集中の枠を後で保存して、リセットした切り抜きを上書きしないように、先に編集を取り消す。
             if (viewStore.get().crop) void cancelCrop();
             update((s) => resetAll(s), false);
+            selectMask(null);
           }}
-          title="切り抜き・レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・カラーミキサー・カラーグレーディング・白黒を含むすべての調整を元に戻す（部分補正は保つ）"
+          title="切り抜き・レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・カラーミキサー・カラーグレーディング・白黒・カメラプロファイル・ルック・マスクを含むすべての調整を元に戻す（履歴から取り消せます）"
         >
           すべてリセット
         </button>

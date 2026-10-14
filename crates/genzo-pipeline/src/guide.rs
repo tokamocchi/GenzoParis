@@ -127,7 +127,8 @@ pub struct GuideSpec {
     pub lens: genzo_model::LensCorrection,
     /// アルゴリズムのパラメータ。
     pub params: GuideParams,
-    /// かすみの推定（[`crate::haze`]）も作るか（処理バージョン 2 で、かすみの除去が 0 でないとき）。
+    /// かすみの推定（[`crate::haze`]）も作るか（処理バージョン 2 で、全体かローカル補正（マスク）のかすみの除去が 0 でない
+    /// とき）。
     pub haze: bool,
 }
 
@@ -148,7 +149,12 @@ impl GuideSpec {
             params: GuideParams::for_version(process_version),
             haze: match process_version {
                 ProcessVersion::V1 => false,
-                ProcessVersion::V2 => s.presence.dehaze != 0.0,
+                // 全体のかすみの除去か、ローカル補正（マスク）のかすみの除去（DEV-18）。
+                ProcessVersion::V2 => {
+                    s.presence.dehaze != 0.0
+                        || crate::local::LocalSlots::for_settings(&s, process_version)
+                            .is_some_and(|l| l.uses(crate::local::LocalParam::Dehaze))
+                }
             },
         })
     }

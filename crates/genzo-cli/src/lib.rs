@@ -25,10 +25,17 @@
 //! genzo file rename 12 13 --template "{date}-{seq}"
 //! genzo missing check && genzo missing relink --in /media/me/外付け --dry-run
 //! genzo video info 21 && genzo video proxy 21      # 動画の再生の情報と、再生用のファイル（H.264）を作る
+//! genzo profile import "$HOME/DCP/ILCE-7M4 標準.dcp" film.cube   # カメラプロファイル・ルックを取り込む（DEV-17）
+//! genzo develop set 12 --profile "ILCE-7M4 標準" --look film --look-amount 60
+//! genzo develop mask add 12 --radial 0.5,0.4,0.2,0.15 --exposure 0.5 --name 顔   # ローカル補正（DEV-18・DEV-19）
+//! genzo develop mask add-part 12 1 --luminance 20,80          # マスク 1 に輝度範囲を交差させる
+//! genzo develop mask list 12 && genzo develop mask overlay 12 1 --out mask1.png
 //! echo '{"exposure_ev": 0.5}' | genzo develop set 12 --json -
 //! genzo export 12 13 --out ~/out --format jpeg --quality 90 --long-edge 2048 --remove-gps
 //! genzo render DSC00001.ARW --out out.tif --settings settings.json   # カタログなし
+//! genzo render DSC00001.ARW --out out.jpg --dcp camera.dcp --cube film.cube   # ファイルのプロファイル・ルック
 //! genzo bench preview --synthetic 7008x4672 --out bench-results
+//! genzo bench preview --synthetic 7008x4672 --sample-masks --cube film.cube   # マスク・ルックがあるときの計測
 //! ```
 //!
 //! # 出力と終了コード
@@ -75,9 +82,11 @@
 //! | `organize` | `keyword list / add / remove / show / create / rename / move / delete / export`・`collection list / create / add / remove / rename / move / delete / rule`（LIB-09〜11）と、`search --keyword / --collection / --rule` の解釈 |
 //! | `stacks` | `stack create / add / remove / unstack / top / collapse / expand / show / auto`（LIB-12）と `develop rename-copy / make-master`（LIB-13） |
 //! | `develop` | `develop get / set / upgrade / source / reset / undo / redo / history / copy / virtual-copy / delete-copy / rename-copy / make-master / region / before / compare`（`set` のレンズ補正のオプション・`upgrade`・`source` は DEV-14・DATA-09） |
+//! | `masks` | `develop mask list / add / add-part / remove-part / set / remove / overlay / pick-color`（ローカル補正のマスク・部品・調整、重ねて表示の PNG、色域のスポイト。DEV-18・DEV-19） |
+//! | `profile` | `profile import / list / show / remove / inspect`（カメラプロファイル（DCP）・ルック（3D LUT の .cube）。DEV-17） |
 //! | `export` | `export` と書き出しの設定 |
 //! | `standalone` | カタログなしの `render`・`info`（ワーカーを直接使う） |
-//! | `bench` | `bench preview / export`（genzo-testkit の計測と記録） |
+//! | `bench` | `bench preview / export`（genzo-testkit の計測と記録。計測の設定に `develop set` と同じオプション・`--dcp`・`--cube`・`--masks`・`--sample-masks` を当てられる） |
 //! | `logs` | `log info / clear`（ログ・クラッシュレポート。カタログは使わない。SYS-07） |
 //! | `identity` | `hash compute / status / duplicates / identify`（ファイルの内容による同一性。ORG-03・IMP-04） |
 //! | `time` | `time devices / shift / sync / zone / clear-zone / reset / history / undo`（撮影日時の一括修正。LIB-16）と `timeline`（写真と動画のタイムライン。ORG-01） |
@@ -126,8 +135,10 @@ mod identity;
 mod interrupt;
 mod library;
 mod logs;
+mod masks;
 mod organize;
 pub mod output;
+mod profile;
 mod session;
 mod stacks;
 mod standalone;
@@ -152,7 +163,8 @@ pub const EXIT_ERROR: u8 = 1;
 /// 終了コード: 使い方の誤り（引数の誤り・カタログの指定がない）。
 pub const EXIT_USAGE: u8 = 2;
 /// 終了コード: 結果は出したが、一部が失敗した・問題が見つかった（書き出し・削除・サムネイルの作り直しの
-/// 一部の失敗、取り込みで登録できなかったファイル、`catalog check` で見つかった問題、`bench` での悪化。
+/// 一部の失敗、取り込みで登録できなかったファイル、`catalog check` で見つかった問題、`bench` での悪化、
+/// `profile import` で取り込めなかったファイル。
 /// implementation_status の No.30）。
 pub const EXIT_PARTIAL: u8 = 3;
 /// 終了コード: Ctrl+C で中断した（Unix の慣習の 128 + SIGINT。`interrupt` の doc）。
@@ -334,6 +346,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         Command::Collection(c) => organize::collection(&g, out, c),
         Command::Stack(c) => stacks::run(&g, out, c),
         Command::Develop(c) => develop::run(&g, out, c),
+        Command::Profile(c) => profile::run(&g, out, c),
         Command::Export(a) => export::run(&g, out, a),
         Command::Render(a) => standalone::render(&g, out, a),
         Command::Info { file } => standalone::info(out, &file),

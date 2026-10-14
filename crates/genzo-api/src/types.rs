@@ -1309,6 +1309,11 @@ pub struct SourceInfo {
     /// 使えません」と、もともとない場合と区別して出す。読めた・なかった・RAW 以外は `None`。
     #[serde(default)]
     pub lens_correction_note: Option<String>,
+    /// 機種（メーカーと機種の名前。genzo-model の `PhotoMetadata::camera_name`。RAW だけ）。カメラプロファイル（DCP）の
+    /// UniqueCameraModel と比べて、この機種用のプロファイルを選ぶ（DEV-17。[`ProfileEntry::matches_camera`]）。
+    /// 分からない・RAW 以外は `None`。
+    #[serde(default)]
+    pub camera: Option<String>,
 }
 
 /// 埋め込みのレンズ補正の情報の要約（[`SourceInfo::lens_correction`]。画面のレンズ補正のパネルの表示用）。
@@ -1357,6 +1362,44 @@ pub struct PickedWhiteBalance {
     pub temperature_k: f32,
     /// 色かぶり補正（tint。設定できる範囲 ±150 に丸めた値）。
     pub tint: f32,
+}
+
+/// 色域の範囲（DEV-19）のスポイトの結果（[`crate::Core::mask_color_at`]）。genzo-model の `ColorSample` にそのまま
+/// 使える（適用はしない。UI が `set_settings` する）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PickedMaskColor {
+    /// 点の G 座標の x（04 の 2.7 節。切り抜く前の全体の外接矩形の長辺を 1 とする）。
+    pub x: f32,
+    /// 点の G 座標の y。
+    pub y: f32,
+    /// 点のまわりの平均の色の OKLab（ステージ 9 の出力。露光量の前のシーンリニアの値から）。
+    pub lab: [f32; 3],
+}
+
+/// マスクの重ねて表示（O キー。DEV-18）の画像の情報（[`crate::Core::mask_overlay`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaskOverlayInfo {
+    /// variant。
+    pub variant_id: VariantId,
+    /// 求めたときの設定の世代。
+    pub generation: u64,
+    /// マスクの番号（設定の `masks` の位置）。
+    pub index: usize,
+    /// 幅（同じ表示のプレビュー（[`FrameInfo`]）と同じ格子）。
+    pub width: u32,
+    /// 高さ。
+    pub height: u32,
+    /// 切り抜く前の全体の表示の画像か（[`FrameInfo::uncropped`]）。
+    pub uncropped: bool,
+}
+
+/// マスクの重ねて表示の画像（重み 0〜1 を 0〜255 にしたもの。行優先）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskOverlayFrame {
+    /// 情報。
+    pub info: MaskOverlayInfo,
+    /// 重み（幅 × 高さ。0〜255）。
+    pub weights: Vec<u8>,
 }
 
 /// 現像のセッションの状態（[`crate::Core::open_develop`] など）。
@@ -1546,6 +1589,11 @@ pub struct FrameInfo {
     /// 出力の画像のフル解像度の高さ（`output_width` と同じ）。
     #[serde(default)]
     pub output_height: u32,
+    /// この画像の縁の G 座標（左・上・右・下。04 の 2.7 節の G 座標（切り抜く前の全体の外接矩形の長辺を 1 とする）。
+    /// ローカル補正（マスク。DEV-18）の位置を画像の上に描くための対応: 画像の幅に対する割合 `fx` の G 座標の x は
+    /// `左 + fx · (右 − 左)`（y も同じ）。古いコアの応答では欠ける。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g_bounds: Option<[f64; 4]>,
 }
 
 /// 現像のプレビュー（ピクセルを含む。[`crate::Core::develop_frame`]）。
@@ -1663,6 +1711,78 @@ pub struct RegionFrame {
     pub display_rgb8: Arc<Vec<u8>>,
 }
 
+// ---------------------------------------------------------------------------
+// カメラプロファイル・ルック（DEV-17。`profiles` の doc）
+// ---------------------------------------------------------------------------
+
+/// ライブラリの項目の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileKind {
+    /// カメラプロファイル（DCP。現像設定の `profile.camera`）。
+    Camera,
+    /// ルック（3D LUT の .cube。現像設定の `profile.look`）。
+    Look,
+}
+
+/// 取り込んだカメラプロファイル・ルック（[`crate::Core::list_profiles`]）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileEntry {
+    /// 種類。
+    pub kind: ProfileKind,
+    /// ID（現像設定に保存する値。元のファイルの名前から拡張子を除いたもの）。
+    pub id: String,
+    /// 表示の名前（DCP の ProfileName・.cube の TITLE。なければ ID）。
+    pub name: String,
+    /// DCP の機種（UniqueCameraModel）。ルック・記録のない DCP は `None`。
+    pub camera_model: Option<String>,
+    /// 一覧を求めたときに渡した機種用か（カメラプロファイルだけ。機種を渡さなかった・ルックは `None`）。
+    pub matches_camera: Option<bool>,
+    /// 使えるか（写しがない・内容が一覧と違う・解析できないなら `false`）。
+    pub usable: bool,
+    /// 中身の説明（光源・マップの大きさ・LUT の大きさなど）。
+    pub description: String,
+    /// 使わない情報（DCP のトーンカーブ・露出のずれなど）の説明。
+    pub notes: Vec<String>,
+    /// 著作権の表示（DCP の ProfileCopyright。そのまま表示する）。
+    pub copyright: Option<String>,
+    /// 埋め込みの方針（DCP の ProfileEmbedPolicy の説明）。
+    pub embed_policy: Option<String>,
+    /// 取り込んだ元のファイルの名前。
+    pub original_name: String,
+    /// 内容の SHA-256（小文字の 16 進数 64 文字。`render_deps` に記録する値）。
+    pub sha256: String,
+    /// 大きさ（バイト）。
+    pub size: u64,
+    /// 取り込んだ日時（UTC。RFC 3339）。
+    pub imported_at: String,
+}
+
+/// 取り込めなかったファイル。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileImportFailure {
+    /// ファイル。
+    pub path: PathBuf,
+    /// 理由。
+    pub message: String,
+}
+
+/// 取り込みの結果（[`crate::Core::import_profiles`]）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileImportReport {
+    /// 新しく取り込んだもの。
+    pub imported: Vec<ProfileEntry>,
+    /// 同じ ID のものを置き換えたもの（使っている写真は、次に開いたときに「内容が違う」と知らせる）。
+    pub replaced: Vec<ProfileEntry>,
+    /// 同じ ID・同じ内容のものがあり、消えた・壊れた写しを書き直したもの（使えるようになった）。
+    #[serde(default)]
+    pub repaired: Vec<ProfileEntry>,
+    /// 同じ ID・同じ内容のものがあったので何もしなかったもの。
+    pub unchanged: Vec<ProfileEntry>,
+    /// 取り込めなかったもの。
+    pub failed: Vec<ProfileImportFailure>,
+}
+
 /// 設定の貼り付けで写す項目（DEV-30。DEV-29 の「一部の項目だけを適用」にも使う）。既定はすべて。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
@@ -1685,6 +1805,8 @@ pub struct SettingGroups {
     pub detail: bool,
     /// 効果（切り抜き後の周辺光量補正・粒子。DEV-24）。
     pub effects: bool,
+    /// カメラプロファイル・ルック・ルックの適用量（DEV-17）。
+    pub profile: bool,
     /// ローカル補正。
     pub masks: bool,
 }
@@ -1707,6 +1829,7 @@ impl SettingGroups {
         lens: true,
         detail: true,
         effects: true,
+        profile: true,
         masks: true,
     };
 
@@ -1756,6 +1879,9 @@ impl SettingGroups {
         }
         if self.effects {
             out.effects = source.effects;
+        }
+        if self.profile {
+            out.profile = source.profile.clone();
         }
         if self.masks {
             out.masks = source.masks.clone();
@@ -1830,9 +1956,10 @@ pub enum ExportOutcome {
         /// 表示用の説明）。
         #[serde(default)]
         warnings: Vec<String>,
-        /// 実際に使った外部データ（RAW のカメラ行列・デコーダ。04 の 2.5 節。RAW 以外は `None`）。
+        /// 実際に使った外部データ（RAW のカメラ行列・デコーダ、カメラプロファイル・ルックのファイル。04 の 2.5 節。
+        /// RAW 以外でプロファイル・ルックも使っていなければ `None`。ほかの結果より大きいので箱に入れる）。
         #[serde(default)]
-        render_deps: Option<genzo_model::RenderDeps>,
+        render_deps: Option<Box<genzo_model::RenderDeps>>,
     },
     /// 書き出さなかった（衝突時の「スキップ」・動画など）。
     Skipped {
@@ -2763,6 +2890,7 @@ mod setting_groups_tests {
             lens: false,
             detail: false,
             effects: false,
+            profile: false,
             masks: false,
         };
         let out = tone_only.merge(&source, &target);
@@ -2798,6 +2926,7 @@ mod setting_groups_tests {
             lens: false,
             detail: false,
             effects: false,
+            profile: false,
             masks: false,
         };
         let presence = SettingGroups {
@@ -2816,7 +2945,25 @@ mod setting_groups_tests {
         assert!(effects.presence.is_neutral());
         // 古い画面（項目のない JSON）からの指定は、足した項目も写す（既定はすべて）。
         let old: SettingGroups = serde_json::from_str(r#"{"white_balance": false}"#).unwrap();
-        assert!(old.presence && old.effects && !old.white_balance);
+        assert!(old.presence && old.effects && old.profile && !old.white_balance);
+        // カメラプロファイル・ルック（DEV-17）。
+        let mut source = source.clone();
+        source.profile.camera = Some("Sony 標準".into());
+        source.profile.look = Some("film".into());
+        source.profile.look_amount = 30.0;
+        let profile = SettingGroups {
+            profile: true,
+            ..none
+        }
+        .merge(&source, &target);
+        assert_eq!(profile.profile, source.profile);
+        assert!(profile.presence.is_neutral());
+        let others = SettingGroups {
+            profile: false,
+            ..SettingGroups::ALL
+        }
+        .merge(&source, &target);
+        assert_eq!(others.profile, target.profile);
     }
 
     /// すべての項目を写しても、一部の項目を写しても、処理バージョンと外部データは貼り付け先のまま（DATA-09。

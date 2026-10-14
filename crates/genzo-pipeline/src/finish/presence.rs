@@ -36,6 +36,15 @@
 //!   新しい負の値（色域外）は作らない（もとから負のチャンネルは保つ）。
 //! - タイルの余白: ガウスの半径（`ceil(3σ)` 画素。[`super::frequency::GaussKernel`]）。かすみの除去だけなら画素ごと。
 //! - 処理バージョン 1 では何もしない（値があれば [`super::unimplemented_settings`] で知らせる）。
+//!
+//! # ローカル補正（処理バージョン 2。DEV-18。[`crate::local`]）
+//!
+//! 画素の局所の値（テクスチャ `dt`・明瞭度 `dc`・かすみの除去 `dd`）を全体の値に足す:
+//! `kt' = clamp(テクスチャ / 100 + dt / 100, −2, 2) × TEXTURE_GAIN`（明瞭度も同じ）、`k' = clamp(かすみの除去 / 100 +
+//! dd / 100, −1, 1)`。局所の明るさ `T`（明瞭度・大気の光 `A'` の明るさ合わせ）には、マスクの露光量・コントラスト・
+//! ハイライトなど（ステージ 10・11 の局所の値。[`ToneStageParams::with_local`]）も入る。局所の値が 0 の画素は
+//! マスクのない描画と同じ。マスクだけで有効なとき（全体の 3 つが 0）は、局所の値が 0 の画素の `Δ` とかすみの除去は
+//! 0 なので変わらない。
 
 use genzo_model::{DevelopSettings, Phase};
 
@@ -52,6 +61,9 @@ use crate::error::{PipelineError, Result};
 use crate::guide::{GuideLookup, checked_guide};
 use crate::image::{ImageTile, Roi};
 use crate::interp::sample_bilinear_gray;
+use crate::local::{
+    LocalParam, LocalSlots, LocalValues, add_unit, any_nonzero, checked_field, local_slots,
+};
 use crate::sanitize::safe_log2;
 use crate::stage::{Stage, StageContext, StageParams};
 use crate::version::ProcessVersion;
@@ -87,18 +99,117 @@ pub struct PresenceStageParams {
     pub clarity: f32,
     /// かすみの除去（k。スライダー / 100）。
     pub dehaze: f32,
-    /// テクスチャ・明瞭度の分解のぼかし（どちらも 0 なら `None`）。
+    /// テクスチャ・明瞭度の分解のぼかし（全体の値もローカル補正も 0 なら `None`）。
     pub kernel: Option<GaussKernel>,
     /// 局所の明るさを求めるためのステージ 10・11 の項目と、C の画素 → ガイドの座標（明瞭度・かすみの除去が
     /// 0 なら使わない）。
     pub tone: ToneStageParams,
     /// 明瞭度かかすみの除去でガイドを使うか。
     pub uses_guide: bool,
-    /// ステージ 12 の入力の明るさに合わせた大気の光 A'（かすみの除去が 0 なら 0）。
+    /// かすみの除去（全体かローカル補正）でかすみの推定を使うか。
+    pub uses_haze: bool,
+    /// ステージ 12 の入力の明るさに合わせた大気の光 A'（かすみの除去を使わない（全体もローカル補正も 0）なら 0）。
+    pub airlight: [f32; 3],
+    /// テクスチャ・明瞭度・かすみの除去のスライダーの値 / 100（ローカル補正の値を足すため）。
+    pub units: [f32; 3],
+    /// かすみの推定の大気の光 A（明るさを合わせる前。ローカル補正で画素ごとに A' を求めるため。使わなければ 0）。
+    pub haze_airlight: [f32; 3],
+    /// ローカル補正の局所の値の面の割り当て（ステージ 12 の項目か局所の明るさの項目の面があるときだけ）。
+    pub local: Option<LocalSlots>,
+}
+
+/// ステージ 12 の 1 画素の計算に使う値（全体の値、または局所の値を足したもの。[`PresenceStageParams::pixel`]・
+/// [`PresenceStageParams::pixel_with_local`]）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PresencePixel {
+    /// テクスチャの強さ。
+    pub texture: f32,
+    /// 明瞭度の強さ。
+    pub clarity: f32,
+    /// かすみの除去。
+    pub dehaze: f32,
+    /// ぼかした面を使うか（テクスチャ・明瞭度の分解のぼかしがあるか）。
+    pub blur: bool,
+    /// 局所の明るさを求めるためのステージ 10・11 の項目。
+    pub tone: ToneStageParams,
+    /// 大気の光 A'。
     pub airlight: [f32; 3],
 }
 
 impl PresenceStageParams {
+    /// 全体の値の 1 画素の計算の値。
+    #[inline]
+    pub fn pixel(&self) -> PresencePixel {
+        PresencePixel {
+            texture: self.texture,
+            clarity: self.clarity,
+            dehaze: self.dehaze,
+            blur: self.kernel.is_some(),
+            tone: self.tone,
+            airlight: self.airlight,
+        }
+    }
+
+    /// 局所の値 `v` を足した 1 画素の計算の値（モジュールの doc の「ローカル補正」。値が 0 の項目は全体の値のまま）。
+    #[inline]
+    pub fn pixel_with_local(&self, v: &LocalValues) -> PresencePixel {
+        let mut px = self.pixel();
+        let base_changed = any_nonzero(v, &LocalParam::LOCAL_BASE);
+        if base_changed {
+            px.tone = self.tone.with_local(v);
+        }
+        let dt = v[LocalParam::Texture.index()];
+        if dt != 0.0 {
+            px.texture = add_unit(self.units[0], dt, -2.0, 2.0) * TEXTURE_GAIN;
+        }
+        let dc = v[LocalParam::Clarity.index()];
+        if dc != 0.0 {
+            px.clarity = add_unit(self.units[1], dc, -2.0, 2.0) * CLARITY_GAIN;
+        }
+        let dd = v[LocalParam::Dehaze.index()];
+        if dd != 0.0 {
+            px.dehaze = add_unit(self.units[2], dd, -1.0, 1.0);
+        }
+        if base_changed && px.dehaze != 0.0 {
+            px.airlight = matched_airlight(&px, self.haze_airlight);
+        }
+        px
+    }
+
+    /// ガイドの値 `g`（露光量の前）から、ステージ 10・11 の後の平らな部分の明るさ（log2。[`PresencePixel::local_base`]）。
+    #[inline]
+    pub fn local_base(&self, g: f32) -> f32 {
+        self.pixel().local_base(g)
+    }
+
+    /// テクスチャ・明瞭度の輝度の対数の変化（段。[`PresencePixel::delta`]）。
+    #[inline]
+    pub fn delta(&self, p: f32, ps: f32, g: f32) -> f32 {
+        self.pixel().delta(p, ps, g)
+    }
+
+    /// かすみの除去（[`PresencePixel::dehaze_pixel`]）。
+    #[inline]
+    pub fn dehaze_pixel(&self, c: [f32; 3], d: f32) -> [f32; 3] {
+        self.pixel().dehaze_pixel(c, d)
+    }
+
+    /// 1 画素に適用する（[`PresencePixel::apply`]）。
+    #[inline]
+    pub fn apply(&self, c: [f32; 3], ps: f32, g: f32, d: f32) -> [f32; 3] {
+        self.pixel().apply(c, ps, g, d)
+    }
+}
+
+/// 大気の光 `a`（明るさを合わせる前）を、`px` のステージ 10・11 の明るさに合わせたもの（モジュールの doc の `A'`）。
+#[inline]
+pub fn matched_airlight(px: &PresencePixel, a: [f32; 3]) -> [f32; 3] {
+    let la = safe_log2(luminance(a));
+    let gain = (px.local_base(la) - la).exp2();
+    a.map(|v| v * gain)
+}
+
+impl PresencePixel {
     /// ガイドの値 `g`（露光量の前）から、ステージ 10・11 の後の平らな部分の明るさ（log2）を求める
     /// （モジュールの doc の `T`）。
     #[inline]
@@ -146,7 +257,7 @@ impl PresenceStageParams {
     #[inline]
     pub fn apply(&self, c: [f32; 3], ps: f32, g: f32, d: f32) -> [f32; 3] {
         let mut out = c;
-        if self.kernel.is_some() {
+        if self.blur {
             let delta = self.delta(luma_log(c), ps, g);
             if delta != 0.0 {
                 out = apply_luma_log_delta(c, delta);
@@ -197,10 +308,17 @@ impl Stage for TextureStage {
         }
         let s = settings.normalized();
         let p = s.presence;
-        if p.is_neutral() {
+        let slots = local_slots(&s, ctx);
+        let uses = |q: LocalParam| slots.is_some_and(|l| l.uses(q));
+        if p.is_neutral() && !slots.is_some_and(|l| l.uses_any(&LocalParam::PRESENCE_STAGE)) {
             return Ok(None);
         }
-        let uses_guide = p.clarity != 0.0 || p.dehaze != 0.0;
+        let blur = p.texture != 0.0
+            || p.clarity != 0.0
+            || uses(LocalParam::Texture)
+            || uses(LocalParam::Clarity);
+        let haze = p.dehaze != 0.0 || uses(LocalParam::Dehaze);
+        let uses_guide = p.clarity != 0.0 || uses(LocalParam::Clarity) || haze;
         let mut tone = ToneStageParams {
             highlights: s.tone.highlights / 100.0,
             shadows: s.tone.shadows / 100.0,
@@ -208,20 +326,28 @@ impl Stage for TextureStage {
             blacks: s.tone.blacks / 100.0,
             ev: s.exposure_ev,
             contrast: ContrastParams::from_slider(s.contrast),
+            contrast_unit: s.contrast / 100.0,
             lookup: GuideLookup {
                 origin: (0, 0),
                 scale: (1.0, 1.0),
             },
+            local: None,
+            local_only: false,
         };
         let mut params = PresenceStageParams {
             texture: p.texture / 100.0 * TEXTURE_GAIN,
             clarity: p.clarity / 100.0 * CLARITY_GAIN,
             dehaze: p.dehaze / 100.0,
-            kernel: (p.texture != 0.0 || p.clarity != 0.0)
-                .then(|| GaussKernel::new(ctx.length_px(TEXTURE_SIGMA_FRACTION))),
+            kernel: blur.then(|| GaussKernel::new(ctx.length_px(TEXTURE_SIGMA_FRACTION))),
             tone,
             uses_guide,
+            uses_haze: haze,
             airlight: [0.0; 3],
+            units: [p.texture / 100.0, p.clarity / 100.0, p.dehaze / 100.0],
+            haze_airlight: [0.0; 3],
+            local: slots.filter(|l| {
+                l.uses_any(&LocalParam::PRESENCE_STAGE) || l.uses_any(&LocalParam::LOCAL_BASE)
+            }),
         };
         if uses_guide {
             let guide = checked_guide(ctx, Self::ID)?;
@@ -229,15 +355,13 @@ impl Stage for TextureStage {
             let plan = GeometryPlan::from_settings(&s, ctx)?;
             tone.lookup = GuideLookup::new(&plan, guide.image.width(), guide.image.height());
             params.tone = tone;
-            if p.dehaze != 0.0 {
-                let haze = guide.haze.as_ref().ok_or(PipelineError::GuideMismatch {
+            if haze {
+                let estimate = guide.haze.as_ref().ok_or(PipelineError::GuideMismatch {
                     stage: Self::ID,
                     reason: "ガイドにかすみの推定がない（かすみの除去のある設定で段階 B を作り直す）",
                 })?;
-                let a = haze.airlight;
-                let la = safe_log2(luminance(a));
-                let gain = (params.local_base(la) - la).exp2();
-                params.airlight = a.map(|v| v * gain);
+                params.haze_airlight = estimate.airlight;
+                params.airlight = matched_airlight(&params.pixel(), estimate.airlight);
             }
         }
         Ok(Some(StageParams::new(params)))
@@ -277,7 +401,7 @@ impl Stage for TextureStage {
             None
         };
         let dark = match guide {
-            Some(g) if p.dehaze != 0.0 => Some(
+            Some(g) if p.uses_haze => Some(
                 &g.haze
                     .as_ref()
                     .ok_or(PipelineError::GuideMismatch {
@@ -289,6 +413,8 @@ impl Stage for TextureStage {
             _ => None,
         };
         let w = out.width as usize;
+        let field = checked_field(ctx, Self::ID, p.local, out)?;
+        let global = p.pixel();
         map_pixels(input, output, |x, y, c| {
             let ps = match &blurred {
                 Some(b) => b[(y - i64::from(out.y)) as usize * w + (x - i64::from(out.x)) as usize],
@@ -304,7 +430,20 @@ impl Stage for TextureStage {
                 }
                 None => (0.0, 0.0),
             };
-            p.apply(c, ps, g, d)
+            let px = match field {
+                Some(f) => {
+                    let v = f.values(x, y);
+                    if any_nonzero(&v, &LocalParam::PRESENCE_STAGE)
+                        || any_nonzero(&v, &LocalParam::LOCAL_BASE)
+                    {
+                        p.pixel_with_local(&v)
+                    } else {
+                        global
+                    }
+                }
+                None => global,
+            };
+            px.apply(c, ps, g, d)
         })
     }
 }
@@ -326,13 +465,20 @@ mod tests {
                 blacks: 0.0,
                 ev: 0.0,
                 contrast: ContrastParams::from_slider(0.0),
+                contrast_unit: 0.0,
                 lookup: GuideLookup {
                     origin: (0, 0),
                     scale: (1.0, 1.0),
                 },
+                local: None,
+                local_only: false,
             },
             uses_guide: clarity != 0.0 || dehaze != 0.0,
+            uses_haze: dehaze != 0.0,
             airlight: [0.8, 0.82, 0.85],
+            units: [texture, clarity, dehaze],
+            haze_airlight: [0.8, 0.82, 0.85],
+            local: None,
         }
     }
 

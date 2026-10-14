@@ -221,9 +221,7 @@ impl ExportRun<'_> {
     fn render<'r>(&'r self, p: Prepared, with_output: bool) -> Result<Chain<'r>> {
         let ctx = self.ctx();
         let mut chain = Chain::from_cpu(self.r, p.input);
-        for ((stage, params), roi) in self.job.plan().stages().iter().zip(&p.rois[1..]) {
-            chain.step(*stage, &ctx, params, *roi)?;
-        }
+        chain.run_plan(self.job.plan(), &ctx, &p.rois)?;
         if with_output {
             chain.step(self.output_stage, &ctx, &self.output_params, p.tile)?;
         }

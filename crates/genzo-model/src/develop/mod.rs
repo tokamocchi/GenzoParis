@@ -5,19 +5,25 @@
 //! カタログには [`DevelopSettings::to_json`] の JSON を 1 列に保存する（`variant.develop_json`）。
 
 mod hash;
+mod masks;
 pub mod migrate;
 mod params;
 mod validate;
 
 use serde::{Deserialize, Serialize};
 
+pub use masks::{
+    BrushStroke, ColorSample, LocalAdjustment, LocalDelta, MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES,
+    MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS,
+    MaskComponent, MaskMode, MaskShape,
+};
 pub use params::{
     AspectRatio, BlackWhite, ColorGrading, ColorMixer, ColorParams, CropRect, CurvePoint, DataRef,
     DetailParams, EffectsParams, Geometry, GradingWheel, Grain, HighlightMethod, HighlightRecovery,
-    HslAdjustment, HueBand, HueBands, LensCorrection, LocalAdjustment, LocalDelta, MAX_ASPECT_TERM,
-    MAX_CURVE_POINTS, MAX_MASKS, MIN_CROP_SIZE, MaskShape, NoiseReduction, ParametricCurve,
-    PostCropVignette, PresenceParams, RenderDeps, Sharpening, ToneCurve, ToneParams, ValueRange,
-    WbPreset, WhiteBalance, ranges,
+    HslAdjustment, HueBand, HueBands, LensCorrection, MAX_ASPECT_TERM, MAX_CURVE_POINTS,
+    MAX_PROFILE_ID_CHARS, MIN_CROP_SIZE, NoiseReduction, ParametricCurve, PostCropVignette,
+    PresenceParams, ProfileSettings, RenderDeps, Sharpening, ToneCurve, ToneParams, ValueRange,
+    WbPreset, WhiteBalance, is_valid_profile_id, ranges,
 };
 pub use validate::{FieldIssue, IssueKind, ValidationError};
 
@@ -38,6 +44,8 @@ pub struct DevelopSettings {
     pub schema_version: u32,
     /// 処理アルゴリズムのバージョン。値が同じなら、アプリを更新しても結果は変わらない（IQ-08）。
     pub process_version: u32,
+    /// カメラプロファイル・ルック（DEV-17。v1。既定は標準でルックなし）。
+    pub profile: ProfileSettings,
     /// ホワイトバランス（DEV-03）。
     pub white_balance: WhiteBalance,
     /// ハイライト復元（DEV-06。v1。既定は復元しない（白で切りそろえる））。
@@ -74,6 +82,7 @@ impl Default for DevelopSettings {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             process_version: CURRENT_PROCESS_VERSION,
+            profile: ProfileSettings::default(),
             white_balance: WhiteBalance::default(),
             highlight_recovery: HighlightRecovery::default(),
             exposure_ev: 0.0,
@@ -181,6 +190,7 @@ impl DevelopSettings {
     pub fn is_neutral(&self) -> bool {
         let s = self.normalized();
         s.white_balance == WhiteBalance::AsShot
+            && s.profile.is_neutral()
             && s.highlight_recovery.is_disabled()
             && s.exposure_ev == 0.0
             && s.contrast == 0.0
@@ -670,6 +680,76 @@ mod tests {
     }
 
     #[test]
+    fn profile_defaults_json_and_validation() {
+        // 既定は標準のプロファイル・ルックなし・適用量 100（何もしない）。
+        let s = DevelopSettings::default();
+        assert_eq!(s.profile, ProfileSettings::default());
+        assert_eq!(s.profile.look_amount, 100.0);
+        assert!(s.profile.is_neutral() && s.is_neutral());
+        // 項目のない JSON（効果のパッケージまでのスキーマの版 2）は既定値で補う。
+        let s = DevelopSettings::from_json(
+            r#"{"schema_version": 2, "profile": {"camera": "Sony ILCE-7M4 テスト", "look": "film"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.profile.camera.as_deref(), Some("Sony ILCE-7M4 テスト"));
+        assert_eq!(s.profile.look.as_deref(), Some("film"));
+        assert_eq!(s.profile.look_amount, 100.0);
+        assert!(!s.is_neutral());
+        let back = DevelopSettings::from_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!(back, s);
+        // render_deps のプロファイル・ルックは書いて読み直せる（ないときは書かない）。
+        let mut d = DevelopSettings::default();
+        d.render_deps.profile = Some(DataRef::new("dcp:a", "AB".repeat(32)));
+        d.render_deps.look = Some(DataRef::new("cube:b", ""));
+        let n = d.normalized();
+        assert_eq!(
+            n.render_deps.profile.as_ref().unwrap().sha256,
+            "ab".repeat(32)
+        );
+        let back = DevelopSettings::from_json(&n.to_json().unwrap()).unwrap();
+        assert_eq!(back.render_deps, n.render_deps);
+        let json = serde_json::to_value(DevelopSettings::default()).unwrap();
+        assert!(json["render_deps"].get("profile").is_none());
+        assert!(json["render_deps"].get("look").is_none());
+        // 適用量 0 のルックは効かない。
+        let mut z = DevelopSettings::default();
+        z.profile.look = Some("film".into());
+        z.profile.look_amount = 0.0;
+        assert!(!z.profile.look_is_active() && z.is_neutral());
+        // 不正な ID・範囲外の適用量は検証で見つけ、丸めると指定なし・範囲の端になる。
+        let mut bad = DevelopSettings::default();
+        bad.profile.camera = Some(String::new());
+        bad.profile.look = Some(" 前後に空白 ".into());
+        bad.profile.look_amount = 150.0;
+        let err = bad.validate().unwrap_err();
+        for f in ["profile.camera", "profile.look", "profile.look_amount"] {
+            assert!(err.has_field(f), "{f}: {err}");
+        }
+        let n = bad.normalized();
+        assert_eq!(n.profile.camera, None);
+        assert_eq!(n.profile.look, None);
+        assert_eq!(n.profile.look_amount, 100.0);
+        n.validate().unwrap();
+        let mut long = DevelopSettings::default();
+        long.profile.camera = Some("あ".repeat(MAX_PROFILE_ID_CHARS + 1));
+        assert!(long.validate().is_err());
+        long.profile.camera = Some("あ".repeat(MAX_PROFILE_ID_CHARS));
+        long.validate().unwrap();
+        assert!(!is_valid_profile_id("a\u{1}b"));
+        let mut nan = DevelopSettings::default();
+        nan.profile.look_amount = f32::NAN;
+        assert_eq!(nan.normalized().profile.look_amount, 100.0);
+        let mut bad_hash = DevelopSettings::default();
+        bad_hash.render_deps.look = Some(DataRef::new("cube:x", "xyz"));
+        assert!(
+            bad_hash
+                .validate()
+                .unwrap_err()
+                .has_field("render_deps.look.sha256")
+        );
+    }
+
+    #[test]
     fn version_errors() {
         assert!(matches!(
             DevelopSettings::from_json(r#"{"exposure_ev": 1.0}"#),
@@ -752,17 +832,16 @@ mod tests {
 
         let mut mask = DevelopSettings::default();
         mask.masks.push(LocalAdjustment {
-            enabled: true,
-            mask: MaskShape::Linear {
-                x0: 0.0,
-                y0: 0.0,
-                x1: 0.0,
-                y1: 1.0,
-            },
             delta: LocalDelta {
                 exposure_ev: 0.3,
                 ..Default::default()
             },
+            ..LocalAdjustment::new(MaskComponent::add(MaskShape::Linear {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 0.0,
+                y1: 1.0,
+            }))
         });
         assert!(!mask.is_neutral());
         mask.masks[0].enabled = false;

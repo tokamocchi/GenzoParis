@@ -16,7 +16,7 @@
 //! | 段階 | 含める項目 |
 //! |---|---|
 //! | A0 | process_version、RAW デコーダ（`render_deps.raw_decoder`） |
-//! | A1 | process_version、render_deps 全体（カメラプロファイル・レンズデータ・デコーダ）、WB、ハイライト復元（ステージ 4）、ノイズ軽減（ステージ 6。ディテール・コントラストを含む）、レンズ補正のうちステージ 7 の項目（`lens.profile_enabled`・`lens.vignetting_scale`・`lens.remove_chromatic_aberration`・手動の周辺減光（`lens.vignetting_amount`・`lens.vignetting_midpoint`）・手動の色収差（`lens.ca_red_cyan`・`lens.ca_blue_yellow`）） |
+//! | A1 | process_version、render_deps のうちルック以外（カメラ行列・カメラプロファイル（DCP）・レンズデータ・デコーダ）、カメラプロファイルの選択（`profile.camera`。ステージ 8）、WB、ハイライト復元（ステージ 4）、ノイズ軽減（ステージ 6。ディテール・コントラストを含む）、レンズ補正のうちステージ 7 の項目（`lens.profile_enabled`・`lens.vignetting_scale`・`lens.remove_chromatic_aberration`・手動の周辺減光（`lens.vignetting_amount`・`lens.vignetting_midpoint`）・手動の色収差（`lens.ca_red_cyan`・`lens.ca_blue_yellow`）） |
 //! | B | A1 の項目 ＋ 角度補正（回転）＋ 歪曲補正の適用量（`lens.distortion_scale`）と手動の歪曲（`lens.distortion`） |
 //! | C | すべて（= [`DevelopSettings::develop_hash`]） |
 //!
@@ -31,12 +31,21 @@
 //!   段階 C だけに含まれる。明瞭度・かすみの除去が使う全体の情報（段階 B のガイドと、かすみの推定）は、項目の値に
 //!   よらず A1 の画像と回転・歪曲補正だけで決まる（値は段階 C で使う）ので、B に含めない。
 //! - ガイドのアルゴリズムのパラメータは process_version で固定されるため、設定には持たない。
+//! - ローカル補正（マスク。DEV-18・DEV-19）はステージ 10〜14 を画素ごとに重み付けするので C だけ。かすみの除去の差分の
+//!   あるマスクがあると段階 B でかすみの推定を作るが、それはガイドのキャッシュのキー（genzo-pipeline の `GuideSpec`）の
+//!   「かすみの推定を作るか」で区別する（設定の B のハッシュには入れない。全体のかすみの除去と同じ）。
+//! - カメラプロファイル（DCP。DEV-17）はステージ 8 なので A1 に含める（選択の ID と、ファイルの内容の参照
+//!   `render_deps.profile`）。ルック（`profile.look`・`look_amount`・`render_deps.look`）とプロファイルのルックテーブルの
+//!   位置（段階 C）は C だけ。キャッシュキーの外部データのハッシュも、段階 A1・B ではルックを除く
+//!   （[`RenderDeps::hash_for_phase`]）。ルックのない設定の A1 の入力の JSON は、この項目を足す前と同じ。
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::DevelopSettings;
-use super::params::{HighlightRecovery, LensCorrection, NoiseReduction, RenderDeps, WhiteBalance};
+use super::params::{
+    DataRef, HighlightRecovery, LensCorrection, NoiseReduction, RenderDeps, WhiteBalance,
+};
 use crate::Phase;
 
 /// 部分ハッシュの入力の前に付ける、段階ごとの区別のための文字列。
@@ -91,10 +100,35 @@ impl LensA1Input {
     }
 }
 
+/// 外部データのうち、段階 A1・B に影響するもの（ルックを除く。項目の順は [`RenderDeps`] と同じで、ルックがなければ
+/// `RenderDeps` の JSON と同じ）。
+#[derive(Serialize)]
+struct RenderDepsA1<'a> {
+    camera_profile: &'a DataRef,
+    lens_profile: &'a Option<DataRef>,
+    raw_decoder: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<&'a DataRef>,
+}
+
+impl<'a> RenderDepsA1<'a> {
+    fn new(d: &'a RenderDeps) -> Self {
+        Self {
+            camera_profile: &d.camera_profile,
+            lens_profile: &d.lens_profile,
+            raw_decoder: &d.raw_decoder,
+            profile: d.profile.as_ref(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct A1Input<'a> {
     process_version: u32,
-    render_deps: &'a RenderDeps,
+    render_deps: RenderDepsA1<'a>,
+    /// カメラプロファイル（DCP）の選択（ステージ 8。標準なら JSON に書かない）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camera_profile: Option<&'a str>,
     white_balance: &'a WhiteBalance,
     highlight_recovery: &'a HighlightRecovery,
     lens: LensA1Input,
@@ -114,7 +148,8 @@ struct BInput<'a> {
 fn a1_input(s: &DevelopSettings) -> A1Input<'_> {
     A1Input {
         process_version: s.process_version,
-        render_deps: &s.render_deps,
+        render_deps: RenderDepsA1::new(&s.render_deps),
+        camera_profile: s.profile.camera.as_deref(),
         white_balance: &s.white_balance,
         highlight_recovery: &s.highlight_recovery,
         lens: LensA1Input::new(&s.lens),
@@ -172,6 +207,25 @@ impl RenderDeps {
         let mut deps = self.clone();
         deps.normalize();
         sha256(&[DOMAIN_RENDER_DEPS, &to_json_bytes(&deps)])
+    }
+
+    /// 段階 `phase` までの結果に影響する外部データの参照のハッシュ。ルック（[`RenderDeps::look`]。段階 C）は C だけに
+    /// 含める（A0・A1・B ではルックを除いた [`hash`](Self::hash)。ルックがなければすべての段階で `hash` と同じ）。
+    pub fn hash_for_phase(&self, phase: Phase) -> [u8; 32] {
+        match phase {
+            Phase::C => self.hash(),
+            Phase::A0 | Phase::A1 | Phase::B => {
+                if self.look.is_none() {
+                    self.hash()
+                } else {
+                    RenderDeps {
+                        look: None,
+                        ..self.clone()
+                    }
+                    .hash()
+                }
+            }
+        }
     }
 }
 
@@ -261,6 +315,25 @@ mod tests {
             f(&mut b);
             assert_eq!(changed_phases(&a, &b), [Phase::C]);
         }
+    }
+
+    #[test]
+    fn masks_change_only_phase_c() {
+        // ローカル補正（DEV-18・DEV-19）はステージ 10〜14 の重み付けなので段階 C。かすみの除去の差分があっても、
+        // ガイドのキャッシュのキーには「かすみの推定を作るか」だけが入る（genzo-pipeline の GuideSpec）。
+        use crate::{BrushStroke, LocalAdjustment, MaskComponent, MaskShape};
+        let a = base();
+        let mut b = base();
+        let mut m = LocalAdjustment::new(MaskComponent::add(MaskShape::Brush {
+            strokes: vec![BrushStroke {
+                points: vec![[0.2, 0.3], [0.4, 0.3]],
+                ..Default::default()
+            }],
+        }));
+        m.delta.exposure_ev = 0.7;
+        m.delta.dehaze = 25.0;
+        b.masks.push(m);
+        assert_eq!(changed_phases(&a, &b), [Phase::C]);
     }
 
     #[test]
@@ -403,6 +476,7 @@ mod tests {
         let keys = [
             "\"schema_version\"",
             "\"process_version\"",
+            "\"profile\"",
             "\"white_balance\"",
             "\"highlight_recovery\"",
             "\"exposure_ev\"",
@@ -431,7 +505,8 @@ mod tests {
         assert_eq!(
             json,
             concat!(
-                r#"{"schema_version":2,"process_version":2,"white_balance":"as_shot","#,
+                r#"{"schema_version":2,"process_version":2,"#,
+                r#""profile":{"camera":null,"look":null,"look_amount":100.0},"white_balance":"as_shot","#,
                 r#""highlight_recovery":{"method":"clip","amount":100.0},"#,
                 r#""exposure_ev":0.0,"contrast":0.0,"#,
                 r#""tone":{"highlights":0.0,"shadows":0.0,"whites":0.0,"blacks":0.0},"#,
@@ -494,6 +569,52 @@ mod tests {
         for p in Phase::ALL {
             assert_eq!(a.hash_for_phase(p), b.hash_for_phase(p), "{p}");
         }
+    }
+
+    #[test]
+    fn camera_profile_changes_a1_b_c_and_look_only_c() {
+        // カメラプロファイル（DCP）はステージ 8（段階 A1）。ルックは段階 C だけ（DEV-17）。
+        let a = base();
+        let mut b = base();
+        b.profile.camera = Some("Sony ILCE-7M4 テスト".into());
+        assert_eq!(changed_phases(&a, &b), [Phase::A1, Phase::B, Phase::C]);
+        let mut c = base();
+        c.render_deps.profile = Some(DataRef::new("dcp:x", "ab".repeat(32)));
+        assert_eq!(changed_phases(&a, &c), [Phase::A1, Phase::B, Phase::C]);
+        for f in [
+            |s: &mut DevelopSettings| s.profile.look = Some("film".into()),
+            |s: &mut DevelopSettings| s.profile.look_amount = 40.0,
+            |s: &mut DevelopSettings| {
+                s.render_deps.look = Some(DataRef::new("cube:film", "cd".repeat(32)))
+            },
+        ] {
+            let mut d = base();
+            f(&mut d);
+            assert_eq!(changed_phases(&a, &d), [Phase::C]);
+        }
+        // 外部データのハッシュも、ルックは段階 C だけ。
+        let mut e = base();
+        e.render_deps.look = Some(DataRef::new("cube:film", "cd".repeat(32)));
+        for p in [Phase::A0, Phase::A1, Phase::B] {
+            assert_eq!(
+                e.render_deps.hash_for_phase(p),
+                a.render_deps.hash_for_phase(p),
+                "{p}"
+            );
+        }
+        assert_ne!(
+            e.render_deps.hash_for_phase(Phase::C),
+            a.render_deps.hash_for_phase(Phase::C)
+        );
+        assert_eq!(
+            a.render_deps.hash_for_phase(Phase::A1),
+            a.render_deps.hash()
+        );
+        // ルックとプロファイルのない設定の外部データの JSON は、項目を足す前と同じ（新しい項目を書かない）。
+        assert_eq!(
+            serde_json::to_string(&a.render_deps).unwrap(),
+            r#"{"camera_profile":{"id":"sony-ilce-7m4","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"lens_profile":null,"raw_decoder":"libraw-0.21.2"}"#
+        );
     }
 
     #[test]

@@ -80,7 +80,7 @@ describe("取り込み", () => {
 });
 
 describe("一括適用", () => {
-  it("既定は切り抜きと角度だけオフ（レンズ補正は写す）。画面に出さない項目は true", () => {
+  it("既定はマスクと、切り抜きと角度がオフ（レンズ補正は写す）", () => {
     expect(toSettingGroups(DEFAULT_PASTE_SELECTION)).toEqual({
       white_balance: true,
       basic_tone: true,
@@ -91,8 +91,11 @@ describe("一括適用", () => {
       lens: true,
       detail: true,
       effects: true,
-      masks: true,
+      profile: true,
+      masks: false,
     });
+    // マスク（DEV-18）を選べば写す。
+    expect(toSettingGroups({ ...DEFAULT_PASTE_SELECTION, masks: true }).masks).toBe(true);
     // ディテール（ノイズ軽減）を外せば写さない。
     expect(toSettingGroups({ ...DEFAULT_PASTE_SELECTION, detail: false }).detail).toBe(false);
   });
@@ -108,9 +111,15 @@ describe("一括適用", () => {
     // レンズ補正・ディテールを選べるようになる前に保存した選択（lens・detail が無い）では、前と同じく写す。
     expect(restorePasteSelection({ geometry: true }).lens).toBe(true);
     expect(restorePasteSelection({ geometry: true }).detail).toBe(true);
+    // プロファイル・ルック（DEV-17）を選べるようになる前に保存した選択でも写す。
+    expect(restorePasteSelection({ geometry: true }).profile).toBe(true);
+    expect(toSettingGroups({ ...DEFAULT_PASTE_SELECTION, profile: false }).profile).toBe(false);
     // 外観（テクスチャ・明瞭度・かすみの除去）・効果を選べるようになる前に保存した選択でも写す。
     expect(restorePasteSelection({ geometry: true }).presence).toBe(true);
     expect(restorePasteSelection({ geometry: true, effects: false }).effects).toBe(false);
+    // マスクを選べるようになる前に保存した選択では写さない（既定）。選んで保存したものは戻す。
+    expect(restorePasteSelection({ geometry: true }).masks).toBe(false);
+    expect(restorePasteSelection({ masks: true }).masks).toBe(true);
     expect(restorePasteSelection("x")).toEqual(DEFAULT_PASTE_SELECTION);
     expect(restorePasteSelection({ white_balance: "no" })).toEqual(DEFAULT_PASTE_SELECTION);
   });
@@ -125,8 +134,12 @@ describe("一括適用", () => {
       detail: false,
       lens: false,
       effects: false,
+      profile: false,
+      masks: false,
     };
     expect(anySelected({ ...none, geometry: false })).toBe(false);
+    expect(anySelected({ ...none, masks: true, geometry: false })).toBe(true);
+    expect(anySelected({ ...none, profile: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, lens: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, detail: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, effects: true, geometry: false })).toBe(true);

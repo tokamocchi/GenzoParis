@@ -45,6 +45,8 @@
 //!   数）。`copy` は `{"from", "updated", "upgraded", "needs_upgrade"}`。`source` は `{"variant_id", "source",
 //!   "process_version", "latest_process_version"}`（埋め込みのレンズ補正の情報が壊れていて使えなかった理由は
 //!   `source.lens_correction_note`）。
+//! - `mask` はローカル補正（マスク。DEV-18・DEV-19）の一覧・追加・変更・削除・重ねて表示の PNG・色のスポイト
+//!   （`crate::masks`）。
 
 use std::io::Read;
 
@@ -57,7 +59,7 @@ use serde_json::{Value, json};
 use crate::Status;
 use crate::args::{
     BeforeArgs, ColorArgs, CompareArgs, DetailArgs, DevelopCommand, GlobalArgs, LensArgs,
-    RegionArgs, RegionSpaceArg, SensorArgs, setting_groups,
+    ProfileArgs, RegionArgs, RegionSpaceArg, SensorArgs, setting_groups,
 };
 use crate::error::{CliError, CliResult};
 use crate::library::{ensure_variants, unique_ids};
@@ -79,16 +81,24 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
             sensor,
             color,
             detail,
+            profile,
         } => {
             let patch = match settings {
                 Some(source) => read_json_input(&source)?,
-                None if lens.any() || sensor.any() || color.any() || detail.any() => json!({}),
+                None if lens.any()
+                    || sensor.any()
+                    || color.any()
+                    || detail.any()
+                    || profile.any() =>
+                {
+                    json!({})
+                }
                 None => {
                     return Err(CliError::Usage(
                         "現像設定の JSON を --json <FILE>（または --settings <FILE>。- で標準入力）か、レンズ補正・\
                          ハイライト復元・ノイズ軽減・色・ディテール・効果のオプション（--lens-profile・\
                          --highlight-recovery・--nr-luminance・--black-white・--hsl-hue・--grading-shadows・\
-                         --clarity・--sharpen-amount・--grain-amount など）で指定してください"
+                         --clarity・--sharpen-amount・--grain-amount・--profile・--look など）で指定してください"
                             .to_owned(),
                     ));
                 }
@@ -104,6 +114,7 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
                     sensor: &sensor,
                     color: &color,
                     detail: &detail,
+                    profile: &profile,
                 },
             )
         }
@@ -141,6 +152,7 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
         DevelopCommand::Region(a) => region(g, out, &a),
         DevelopCommand::Before(a) => before(g, out, &a),
         DevelopCommand::Compare(a) => compare(g, out, &a),
+        DevelopCommand::Mask(c) => crate::masks::run(g, out, c),
     }
 }
 
@@ -323,7 +335,12 @@ fn get(g: &GlobalArgs, out: Output, v: VariantId) -> CliResult<Status> {
 }
 
 /// 設定を保存する（変わっていなければ何もしない）。保存したら `true`。
-fn save(s: &Session, v: VariantId, new: &DevelopSettings, label: Option<&str>) -> CliResult<bool> {
+pub(crate) fn save(
+    s: &Session,
+    v: VariantId,
+    new: &DevelopSettings,
+    label: Option<&str>,
+) -> CliResult<bool> {
     let current = s.core.develop_settings(v)?;
     if &current == new {
         return Ok(false);
@@ -348,12 +365,18 @@ pub struct OptionArgs<'a> {
     pub color: &'a ColorArgs,
     /// テクスチャ・明瞭度・かすみの除去・シャープ・効果（DEV-11・DEV-12・DEV-24）。
     pub detail: &'a DetailArgs,
+    /// カメラプロファイル・ルック（DEV-17）。
+    pub profile: &'a ProfileArgs,
 }
 
 impl OptionArgs<'_> {
     /// どれかを指定したか。
     pub fn any(&self) -> bool {
-        self.lens.any() || self.sensor.any() || self.color.any() || self.detail.any()
+        self.lens.any()
+            || self.sensor.any()
+            || self.color.any()
+            || self.detail.any()
+            || self.profile.any()
     }
 }
 
@@ -370,6 +393,7 @@ pub fn settings_with_options(
         options.sensor.apply(&mut new);
         options.color.apply(&mut new.color);
         options.detail.apply(&mut new);
+        options.profile.apply(&mut new.profile);
         new.validate().map_err(genzo_model::DevelopError::from)?;
     }
     Ok(new)
@@ -400,6 +424,52 @@ pub fn sensor_ignored(settings: &DevelopSettings) -> bool {
             || !settings.detail.noise_reduction.is_disabled())
 }
 
+/// カメラプロファイル・ルック（DEV-17）の指定についての注意: 処理バージョン 1 では使われない・取り込んでいない ID・
+/// 読めない写し（`profiles` は取り込んだものの一覧）。
+pub fn profile_warnings(
+    profiles: &[genzo_api::ProfileEntry],
+    settings: &DevelopSettings,
+) -> Vec<String> {
+    let p = &settings.profile;
+    let mut out = Vec::new();
+    if settings.process_version < genzo_pipeline::ProcessVersion::V2.get()
+        && (p.camera.is_some() || p.look_is_active())
+    {
+        out.push(format!(
+            "この写真の処理バージョン（{}）では、カメラプロファイル・ルックは使われません（genzo develop upgrade で更新できます）",
+            settings.process_version
+        ));
+    }
+    let find = |kind: genzo_api::ProfileKind, id: &str| {
+        profiles.iter().find(|e| e.kind == kind && e.id == id)
+    };
+    let check = |kind: genzo_api::ProfileKind, label: &str, id: Option<&String>| {
+        let id = id?;
+        match find(kind, id) {
+            None => Some(format!(
+                "{label}「{id}」は取り込まれていません（genzo profile list で一覧を確かめ、genzo profile import で取り込んでください。描画では使われません）"
+            )),
+            Some(e) if !e.usable => Some(format!(
+                "{label}「{id}」の取り込んだファイルが読めません（取り込み直してください。描画では使われません）"
+            )),
+            Some(_) => None,
+        }
+    };
+    out.extend(check(
+        genzo_api::ProfileKind::Camera,
+        "カメラプロファイル",
+        p.camera.as_ref(),
+    ));
+    if p.look_is_active() {
+        out.extend(check(
+            genzo_api::ProfileKind::Look,
+            "ルック",
+            p.look.as_ref(),
+        ));
+    }
+    out
+}
+
 /// 処理バージョンが古く、レンズ補正が使われない設定か（DEV-14。処理バージョン 2 から使われる）。
 pub fn lens_ignored(settings: &DevelopSettings) -> bool {
     settings.process_version < genzo_pipeline::ProcessVersion::V2.get()
@@ -419,6 +489,7 @@ fn set(
     let new = settings_with_options(&current, patch, replace, options)?;
     let changed = save(&s, v, &new, None)?;
     let saved = s.core.develop_settings(v)?;
+    let profiles = s.core.list_profiles(None)?;
     s.close()?;
     if !changed && !out.json {
         out.progress("設定は変わっていません（履歴に記録しませんでした）");
@@ -453,6 +524,11 @@ fn set(
             "この写真の処理バージョン（{}）では、白黒・カラーミキサー・カラーグレーディングは使われません（genzo develop upgrade {v} で更新できます）",
             saved.process_version
         ));
+    }
+    if saved.profile != current.profile {
+        for w in profile_warnings(&profiles, &saved) {
+            out.warn(format!("{w}（variant {v}）"));
+        }
     }
     print_settings(out, v, &saved, changed);
     Ok(Status::Success)
@@ -526,6 +602,10 @@ fn source(g: &GlobalArgs, out: Output, v: VariantId) -> CliResult<Status> {
     t.row(vec![
         "デコーダ".to_owned(),
         src.decoder.clone().unwrap_or_else(|| "-".to_owned()),
+    ]);
+    t.row(vec![
+        "機種".to_owned(),
+        src.camera.clone().unwrap_or_else(|| "-".to_owned()),
     ]);
     t.row(vec![
         "撮影時の WB".to_owned(),
@@ -649,7 +729,7 @@ fn copy(
     s.close()?;
     if r.needs_upgrade > 0 {
         out.warn(format!(
-            "{} 件は処理バージョンが古いため、写した項目の一部（レンズ補正・ハイライト復元・ノイズ軽減・色の調整・明瞭度・シャープ・効果など）は使われません\
+            "{} 件は処理バージョンが古いため、写した項目の一部（レンズ補正・ハイライト復元・ノイズ軽減・カメラプロファイル・色の調整・明瞭度・シャープ・効果・マスクなど）は使われません\
              （--upgrade-process-version を付けてコピーするか、genzo develop upgrade で更新できます）",
             r.needs_upgrade
         ));
@@ -959,7 +1039,7 @@ fn before(g: &GlobalArgs, out: Output, a: &BeforeArgs) -> CliResult<Status> {
 }
 
 /// 新しいファイルに書く（既にあれば書かない。途中で失敗したら書きかけのファイルを消す）。
-fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> CliResult<()> {
+pub(crate) fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> CliResult<()> {
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
         .write(true)
@@ -995,6 +1075,7 @@ mod tests {
                 sensor,
                 color: &ColorArgs::default(),
                 detail: &DetailArgs::default(),
+                profile: &ProfileArgs::default(),
             },
         )
     }
@@ -1261,6 +1342,7 @@ mod tests {
                 sensor: &SensorArgs::default(),
                 color: &color,
                 detail: &DetailArgs::default(),
+                profile: &ProfileArgs::default(),
             },
         )
         .unwrap();
@@ -1294,6 +1376,7 @@ mod tests {
                     sensor: &SensorArgs::default(),
                     color: &bad,
                     detail: &DetailArgs::default(),
+                    profile: &ProfileArgs::default(),
                 },
             )
             .is_err()
@@ -1337,6 +1420,7 @@ mod tests {
                 sensor: &SensorArgs::default(),
                 color: &ColorArgs::default(),
                 detail: &detail,
+                profile: &ProfileArgs::default(),
             },
         )
         .unwrap();
@@ -1365,6 +1449,7 @@ mod tests {
                     sensor: &SensorArgs::default(),
                     color: &ColorArgs::default(),
                     detail: &bad,
+                    profile: &ProfileArgs::default(),
                 },
             )
             .is_err()

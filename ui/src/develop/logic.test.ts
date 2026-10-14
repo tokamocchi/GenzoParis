@@ -179,7 +179,7 @@ describe("WB の選択とリセット", () => {
     expect(wbMode({ custom: { temperature_k: 4000, tint: 0 } })).toBe("custom");
     expect(wbMode({ preset: "flash" })).toBe("flash");
   });
-  it("すべてリセット: 版・外部データ・部分補正は保ち、レンズ補正・ディテール・効果は既定に戻す（項目のない古い設定でも）", () => {
+  it("すべてリセット: 版・外部データは保ち、マスク（部分補正）は除き、レンズ補正・ディテール・効果は既定に戻す（項目のない古い設定でも）", () => {
     const s = {
       schema_version: 3,
       process_version: 2,
@@ -238,7 +238,8 @@ describe("WB の選択とリセット", () => {
     expect(r.schema_version).toBe(3);
     expect(r.process_version).toBe(2);
     expect(r.render_deps).toBe(s.render_deps);
-    expect(r.masks).toBe(s.masks);
+    // マスクは現像のパネルで見えるので、除く（DEV-18）。
+    expect(r.masks).toEqual([]);
     expect(r.lens).toEqual(defaultLens());
     // ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果は既定に戻す。
     expect(r.highlight_recovery).toEqual(defaultHighlightRecovery());

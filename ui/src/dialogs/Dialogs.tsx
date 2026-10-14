@@ -32,6 +32,7 @@ import {
   KeywordDialog,
 } from "./OrganizeDialogs";
 import { PasteSettingsDialog, UpgradeProcessDialog } from "./PasteSettingsDialog";
+import { ProfileBrowserDialog } from "./ProfileBrowserDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { SmartCollectionDialog } from "./SmartCollectionDialog";
@@ -184,6 +185,9 @@ export function Dialogs() {
       break;
     case "remove_folder":
       body = <RemoveFolderDialog folderId={dialog.folderId} />;
+      break;
+    case "profiles":
+      body = <ProfileBrowserDialog />;
       break;
     case undefined:
       break;

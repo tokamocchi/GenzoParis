@@ -72,13 +72,14 @@ impl BeforeState {
 /// ビフォーで実際に描く設定: 出どころの設定の切り抜き・角度補正を今の設定（アフター）のものにし、外部データを
 /// 今使っている値にする（`before` の doc）。
 pub(crate) fn effective_settings(
+    engine: &genzo_pipeline::Engine,
     base: &DevelopSettings,
     after: &DevelopSettings,
     deps: &RenderDeps,
 ) -> DevelopSettings {
     let mut s = base.clone();
     s.geometry = after.geometry;
-    crate::deps::with_render_deps(&s, deps)
+    crate::deps::with_render_deps(engine, &s, deps)
 }
 
 /// セッションのビフォーの状態（設定していなければ `None`）。
@@ -99,7 +100,7 @@ pub(crate) fn maybe_submit(inner: &Arc<Inner>, s: &mut Session) {
         return;
     }
     let settings = match s.before.as_ref() {
-        Some(b) => effective_settings(&b.base, &s.settings, &s.render_deps),
+        Some(b) => effective_settings(&inner.engine, &b.base, &s.settings, &s.render_deps),
         None => return,
     };
     let hash = settings.develop_hash();
@@ -258,7 +259,8 @@ impl Core {
         // ロックの順序は state → カタログ（保存と同じ）。
         let (base, label) =
             inner.with_catalog_api(|c| resolve(c, s.variant_id, &source, &s.settings))?;
-        let hash = effective_settings(&base, &s.settings, &s.render_deps).develop_hash();
+        let hash =
+            effective_settings(&inner.engine, &base, &s.settings, &s.render_deps).develop_hash();
         // 実際に描く設定が同じなら、描いたもの（と投入した描画）をそのまま使う。
         let (requested, generation, frame) = match s.before.take() {
             Some(old) if old.requested == Some(hash) => (old.requested, old.generation, old.frame),
@@ -294,7 +296,7 @@ impl Core {
             let mut state = inner.develop.state.lock();
             let s = state.as_mut().ok_or(ApiError::NoDevelopSession)?;
             let settings = match s.before.as_ref() {
-                Some(b) => effective_settings(&b.base, &s.settings, &s.render_deps),
+                Some(b) => effective_settings(&inner.engine, &b.base, &s.settings, &s.render_deps),
                 None => return Err(no_before()),
             };
             let generation = inner.develop.next_generation();
@@ -367,6 +369,7 @@ mod tests {
 
     #[test]
     fn effective_settings_take_the_after_geometry_and_deps() {
+        let engine = genzo_pipeline::Engine::new(genzo_pipeline::EngineConfig::default()).unwrap();
         let mut base = DevelopSettings {
             exposure_ev: -1.0,
             ..DevelopSettings::default()
@@ -387,7 +390,7 @@ mod tests {
             raw_decoder: "libraw-test".to_owned(),
             ..RenderDeps::default()
         };
-        let e = effective_settings(&base, &after, &deps);
+        let e = effective_settings(&engine, &base, &after, &deps);
         assert_eq!(e.exposure_ev, -1.0, "現像の項目はビフォーのもの");
         assert_eq!(e.geometry, after.geometry, "切り抜き・角度はアフターのもの");
         assert_eq!(e.render_deps.raw_decoder, "libraw-test");
@@ -396,13 +399,13 @@ mod tests {
         let mut after2 = after.clone();
         after2.exposure_ev = 0.3;
         assert_eq!(
-            effective_settings(&base, &after2, &deps).develop_hash(),
+            effective_settings(&engine, &base, &after2, &deps).develop_hash(),
             e.develop_hash()
         );
         let mut after3 = after.clone();
         after3.geometry.angle_deg = 1.0;
         assert_ne!(
-            effective_settings(&base, &after3, &deps).develop_hash(),
+            effective_settings(&engine, &base, &after3, &deps).develop_hash(),
             e.develop_hash()
         );
     }

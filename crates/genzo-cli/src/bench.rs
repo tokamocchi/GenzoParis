@@ -14,6 +14,7 @@
 //! | `cli_preview_wb_drag_draft` | WB のドラッグ（段階 A1 の簡易処理 → C）(1) | 応答時間・ウォーム | 1/15 秒（PERF-01b の 15fps） |
 //! | `cli_preview_wb_release_final` | WB を離した後の最終品質の描画（A1 の最終品質 → ガイド → C）(2) | 応答時間・コールドとウォーム | 0.5 秒（PERF-01b） |
 //! | `cli_export_jpeg` | 書き出しの時間の内訳: `decode`（ワーカーでの展開と転送）・`render`（現像）・`encode`・`write` (3) | 一括処理・コールド | 3 秒（PERF-10） |
+//! | `cli_preview_brush_stroke` | ブラシで 1 本描いて離したとき（ブラシの部品にストロークを 1 本足して段階 C の最終品質。設定にブラシの部品があるときだけ） | 応答時間・ウォーム | 33ms（PERF-01。仮に同じ目標で比べる） |
 //!
 //! - プレビューは長辺 [`PREVIEW_LONG_EDGE`]（2560。1.8 節「プレビューは 2560 × 1707 で固定」）。入力の長辺が
 //!   それより短いと、プレビューは入力の寸法になり（拡大しない）1.8 節の解像度にならないので、警告を出し、
@@ -30,6 +31,14 @@
 //!   混ざった結果を記録しないため）。書き出しは genzo-gpu の [`genzo_gpu::export_with_fallback`]（失敗したら
 //!   CPU 版。処理した側は `notes.backend`）。GPU の API（Vulkan・Metal・DX12 など）は `notes.gpu_backend`
 //!   （API が違う結果どうしは比べない）、GPU の名前とドライバーは環境の情報に記録する。
+//! - 計測の設定（[`bench_settings`]）には、`develop set` と同じオプション（ハイライト復元・ノイズ軽減・色・外観・
+//!   シャープ・効果）、`--dcp`・`--cube`・`--look-amount`（DEV-17。取り込まずにファイルを使う。`render` と同じ）、
+//!   `--masks FILE`（現像設定の `masks` と同じ形の JSON）または `--sample-masks`（[`sample_masks`]。DEV-18・DEV-19）を
+//!   当てられる。設定は記録に入る（設定の違う結果どうしは比べない）。コールドの回は、ブラシのラスターの使い回し
+//!   （genzo-pipeline の `local::brush`）も捨てる。
+//! - `cli_preview_brush_stroke` は、設定の最初のブラシの部品に、毎回 1 本（画像の幅をなぞる、大きさ
+//!   [`SAMPLE_BRUSH_SIZE`] の 161 点。画面と同じく点は大きさの 1/8 の間隔）を足して描く（足したストロークだけを
+//!   塗り足す、ブラシで描いたときの経路）。足したストロークが [`MAX_ADDED_STROKES`] 本になったら元に戻す。
 //! - 終了コード 3（悪化）にするのは、**今回の回数が 1.8 節の規則を満たす** 計測が前回より悪化した場合
 //!   だけ（[`regression_fails`]）。`--runs` で回数を減らした試しの計測は、比べた結果を出すが終了コードには
 //!   しない（少ない回数の 95 パーセンタイルは最大値とほぼ同じで、ばらつきで悪化と判定されやすいため）。
@@ -42,7 +51,8 @@ use std::time::{Duration, Instant};
 use genzo_gpu::{ExportBackend, GpuPreviewOptions, GpuRenderer};
 use genzo_media::{DynRgbImage, ExifData, ProtectedFiles, RgbImage8, RgbImage16};
 use genzo_model::{
-    ConflictPolicy, CurvePoint, DevelopSettings, ExportSettings, RenderQuality, WhiteBalance,
+    BrushStroke, ConflictPolicy, CurvePoint, DevelopSettings, ExportSettings, LocalAdjustment,
+    LocalDelta, MaskComponent, MaskMode, MaskShape, RenderQuality, WhiteBalance,
 };
 use genzo_pipeline::{
     Engine, EngineConfig, ExportOptions, ExportPixels, NeverCancel, OutputTarget, PhotoSource,
@@ -57,10 +67,12 @@ use serde_json::json;
 
 use crate::Status;
 use crate::args::{BenchArgs, BenchTarget, ColorArgs, DetailArgs, GlobalArgs, SensorArgs};
+use crate::develop::read_json_input;
 use crate::error::{CliError, CliResult};
 use crate::output::{Output, json_value};
 use crate::standalone::{
     InputKind, STANDALONE_SOURCE_ID, Worker, ensure_file, gpu_renderer, input_kind, load,
+    profile_files,
 };
 
 /// プレビューの長辺（05 の 1.8 節「プレビューは 2560 × 1707 で固定」。02 の PERF-01）。
@@ -84,6 +96,130 @@ pub const EXPORT_TARGET: Duration = Duration::from_secs(3);
 /// ドラッグを模す WB の色温度の範囲（K）と刻み（**仮置き**: 4000〜7000 K を 150 K ずつ。毎回 A1 の
 /// キャッシュに当たらない値にするため。値そのものに意味はない）。
 const WB_SWEEP: (f32, f32, f32) = (4000.0, 7000.0, 150.0);
+
+/// 見本のブラシの大きさ（半径。G 座標。画面の既定と同じ）。
+pub const SAMPLE_BRUSH_SIZE: f32 = 0.05;
+
+/// `cli_preview_brush_stroke` で足すストロークの数の上限（超えたら足したものを除いて元に戻す。設定の上限を超えない
+/// ため）。
+pub const MAX_ADDED_STROKES: usize = 200;
+
+/// 画像の幅（G 座標の 0〜1）を高さ `y` から `passes` 回なぞる（2 回目・4 回目… は右から左。なぞるごとに `step` だけ
+/// 下へずらす）ストローク（大きさ [`SAMPLE_BRUSH_SIZE`]。点は大きさの 1/8 の間隔。1 回で 161 点）。
+pub fn sample_stroke(y: f32, passes: usize, step: f32) -> BrushStroke {
+    let spacing = SAMPLE_BRUSH_SIZE / 8.0;
+    let n = (1.0 / spacing).round() as usize;
+    let mut points = Vec::with_capacity(passes * (n + 1));
+    for k in 0..passes {
+        let yk = y + step * k as f32;
+        for i in 0..=n {
+            let x = i as f32 * spacing;
+            points.push([if k % 2 == 0 { x } else { 1.0 - x }, yk]);
+        }
+    }
+    BrushStroke {
+        size: SAMPLE_BRUSH_SIZE,
+        points,
+        ..BrushStroke::default()
+    }
+}
+
+/// `--sample-masks` の見本のマスク（ローカル補正の計測。DEV-18・DEV-19）: 線形グラデーション（上から）・円形
+/// グラデーション（中央。ぼかし 50）・ブラシ（[`sample_stroke`] で画像の幅を 6 回なぞって塗りつぶす 1 本。966 点）に
+/// 輝度範囲（20〜90）を交差させたもの。調整は色温度・露光量・コントラスト・ハイライト・明瞭度・彩度・シャープ
+/// （ステージ 10〜14 のすべてで局所の値の面を使う）。
+pub fn sample_masks() -> Vec<LocalAdjustment> {
+    let delta = |f: &dyn Fn(&mut LocalDelta)| {
+        let mut d = LocalDelta::default();
+        f(&mut d);
+        d
+    };
+    let linear = LocalAdjustment {
+        delta: delta(&|d| {
+            d.exposure_ev = -0.7;
+            d.temperature = -15.0;
+            d.dehaze = 20.0;
+        }),
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Linear {
+            x0: 0.5,
+            y0: 0.05,
+            x1: 0.5,
+            y1: 0.35,
+        }))
+    };
+    let radial = LocalAdjustment {
+        delta: delta(&|d| {
+            d.exposure_ev = 0.4;
+            d.clarity = 25.0;
+            d.saturation = 15.0;
+        }),
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Radial {
+            cx: 0.5,
+            cy: 0.33,
+            rx: 0.25,
+            ry: 0.18,
+            angle_deg: 0.0,
+            feather: 50.0,
+        }))
+    };
+    let mut brush = LocalAdjustment {
+        delta: delta(&|d| {
+            d.contrast = 20.0;
+            d.highlights = -30.0;
+            d.sharpness = 30.0;
+        }),
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Brush {
+            strokes: vec![sample_stroke(0.05, 6, 0.1)],
+        }))
+    };
+    brush.components.push(MaskComponent {
+        mode: MaskMode::Intersect,
+        invert: false,
+        shape: MaskShape::LuminanceRange {
+            min: 20.0,
+            max: 90.0,
+            smoothness: 50.0,
+        },
+    });
+    vec![linear, radial, brush]
+}
+
+/// `--masks` の JSON（マスクの配列、または `masks` を持つ現像設定）からマスクを読む。
+fn read_masks(source: &str) -> CliResult<Vec<LocalAdjustment>> {
+    let v = read_json_input(source)?;
+    let list = match v {
+        serde_json::Value::Array(_) => v,
+        serde_json::Value::Object(mut o) => o.remove("masks").ok_or_else(|| {
+            CliError::Usage(
+                "--masks の JSON には、マスクの配列か masks を持つ現像設定を指定してください"
+                    .to_owned(),
+            )
+        })?,
+        _ => {
+            return Err(CliError::Usage(
+                "--masks の JSON には、マスクの配列か masks を持つ現像設定を指定してください"
+                    .to_owned(),
+            ));
+        }
+    };
+    serde_json::from_value(list)
+        .map_err(|e| CliError::Usage(format!("--masks のマスクを読めません: {e}")))
+}
+
+/// 計測の設定に、`--dcp`・`--cube`・`--look-amount`・`--masks`・`--sample-masks` を当てる（検証する）。カメラ
+/// プロファイル・ルックのファイルがあれば、エンジンに渡すものを返す。
+fn apply_profile_and_masks(
+    a: &BenchArgs,
+    settings: &mut DevelopSettings,
+) -> CliResult<Option<Arc<genzo_pipeline::MemoryProfiles>>> {
+    if a.sample_masks {
+        settings.masks = sample_masks();
+    } else if let Some(src) = &a.masks {
+        settings.masks = read_masks(src)?;
+    }
+    let profiles = profile_files(a.dcp.as_ref(), a.cube.as_ref(), a.look_amount, settings)?;
+    Ok(profiles.map(Arc::new))
+}
 
 /// 計測で使う現像設定（いろいろなステージが有効になる設定。genzo-pipeline の計測と同じ考え方）。
 pub fn bench_settings() -> DevelopSettings {
@@ -289,6 +425,8 @@ struct Ctx {
     gpu: Option<GpuRenderer>,
     /// 計測で使う現像設定（[`bench_settings_with`]。オプションの指定を当てて検証したもの）。
     settings: DevelopSettings,
+    /// `--dcp`・`--cube` のカメラプロファイル・ルック（エンジンに渡す）。
+    profiles: Option<Arc<genzo_pipeline::MemoryProfiles>>,
 }
 
 impl Ctx {
@@ -296,6 +434,34 @@ impl Ctx {
     fn settings(&self) -> DevelopSettings {
         self.settings.clone()
     }
+
+    /// 計測で使うエンジン（カメラプロファイル・ルックのファイルがあれば引けるようにする）。
+    fn engine(&self) -> CliResult<Engine> {
+        let engine = Engine::new(EngineConfig::default())?;
+        Ok(match &self.profiles {
+            Some(p) => engine.with_profile_resolver(p.clone()),
+            None => engine,
+        })
+    }
+}
+
+/// 設定の最初のブラシの部品（マスクと部品の番号）。
+fn first_brush(s: &DevelopSettings) -> Option<(usize, usize)> {
+    s.masks.iter().enumerate().find_map(|(i, m)| {
+        m.components
+            .iter()
+            .position(|c| matches!(c.shape, MaskShape::Brush { .. }))
+            .map(|j| (i, j))
+    })
+}
+
+/// エンジン・GPU 版・ブラシのラスターの使い回しを捨てる（コールドの回）。
+fn clear_all(engine: &Engine, gpu: Option<&GpuRenderer>) {
+    engine.clear_caches();
+    if let Some(g) = gpu {
+        g.clear_caches();
+    }
+    genzo_pipeline::local::brush::clear_cache();
 }
 
 /// 計測で使う現像設定: [`bench_settings`] に、`develop set` と同じオプション（ハイライト復元・ノイズ軽減・白黒・
@@ -363,14 +529,9 @@ fn next_wb(k: &mut f32) -> WhiteBalance {
 }
 
 fn bench_preview(ctx: &Ctx, source: &PhotoSource) -> CliResult<Vec<BenchResult>> {
-    let engine = Engine::new(EngineConfig::default())?;
+    let engine = ctx.engine()?;
     let gpu = ctx.gpu.as_ref();
-    let clear = || {
-        engine.clear_caches();
-        if let Some(g) = gpu {
-            g.clear_caches();
-        }
-    };
+    let clear = || clear_all(&engine, gpu);
     let mut results = Vec::new();
     let mut err: Option<CliError> = None;
 
@@ -435,6 +596,40 @@ fn bench_preview(ctx: &Ctx, source: &PhotoSource) -> CliResult<Vec<BenchResult>>
             );
         })?;
     results.push(r);
+
+    // ブラシで 1 本描いて離したとき（設定にブラシの部品があるときだけ）。足したストロークだけを塗り足す。
+    if let Some((i, j)) = first_brush(&ctx.settings) {
+        let mut s = ctx.settings();
+        render_preview(&engine, gpu, source, &s, RenderQuality::Final)?;
+        let original = match &s.masks[i].components[j].shape {
+            MaskShape::Brush { strokes } => strokes.len(),
+            _ => 0,
+        };
+        let mut added = 0usize;
+        let r = preview_bench("cli_preview_brush_stroke")
+            .target(STAGE_C_TARGET)
+            .develop_settings(&s)
+            .note(
+                "stroke_points",
+                sample_stroke(0.0, 1, 0.0).points.len().to_string(),
+            )
+            .run_warm(|| {
+                if let MaskShape::Brush { strokes } = &mut s.masks[i].components[j].shape {
+                    if added >= MAX_ADDED_STROKES {
+                        strokes.truncate(original);
+                        added = 0;
+                    }
+                    let y = 0.05 + 0.6 * (added % 13) as f32 / 12.0;
+                    strokes.push(sample_stroke(y, 1, 0.0));
+                    added += 1;
+                }
+                keep_err(
+                    &mut err,
+                    render_preview(&engine, gpu, source, &s, RenderQuality::Final),
+                );
+            })?;
+        results.push(r);
+    }
     match err {
         Some(e) => Err(e),
         None => Ok(results),
@@ -506,7 +701,7 @@ fn source_metadata(source: &PhotoSource) -> genzo_model::PhotoMetadata {
 }
 
 fn bench_export(ctx: &Ctx, input: &BenchInput, worker: &mut Worker) -> CliResult<Vec<BenchResult>> {
-    let engine = Engine::new(EngineConfig::default())?;
+    let engine = ctx.engine()?;
     let gpu = ctx.gpu.as_ref();
     let settings = ctx.settings();
     let export = ExportSettings {
@@ -525,12 +720,7 @@ fn bench_export(ctx: &Ctx, input: &BenchInput, worker: &mut Worker) -> CliResult
         .develop_settings(&settings)
         .note("format", "jpeg_q90_srgb")
         .run_cold_phased(
-            || {
-                engine.clear_caches();
-                if let Some(g) = gpu {
-                    g.clear_caches();
-                }
-            },
+            || clear_all(&engine, gpu),
             |t| match export_once(
                 t,
                 input,
@@ -561,7 +751,8 @@ fn bench_export(ctx: &Ctx, input: &BenchInput, worker: &mut Worker) -> CliResult
 /// `bench`。
 pub fn run(g: &GlobalArgs, out: Output, a: BenchArgs) -> CliResult<Status> {
     // 設定の誤りは、ワーカーを起こして入力を展開する前に知らせる。
-    let settings = bench_settings_with(&a.sensor, &a.color, &a.detail)?;
+    let mut settings = bench_settings_with(&a.sensor, &a.color, &a.detail)?;
+    let profiles = apply_profile_and_masks(&a, &mut settings)?;
     let mut worker = Worker::spawn()?;
     let input = BenchInput::prepare(&a, &mut worker)?;
     out.progress("入力を展開しています…");
@@ -603,6 +794,7 @@ pub fn run(g: &GlobalArgs, out: Output, a: BenchArgs) -> CliResult<Status> {
         is_raw: matches!(source.image, SourceImage::Raw(_)),
         gpu,
         settings,
+        profiles,
     };
     out.progress(format!(
         "計測しています（{}、{} × {}、{}）…",
@@ -722,6 +914,87 @@ mod tests {
             ..DetailArgs::default()
         };
         assert!(bench_settings_with(&SensorArgs::default(), &ColorArgs::default(), &bad).is_err());
+    }
+
+    /// `--sample-masks`・`--masks`・`--dcp`・`--cube` を計測の設定に当てる。
+    #[test]
+    fn bench_settings_take_masks_and_profiles() {
+        use clap::Parser;
+        let parse = |args: &[&str]| match crate::args::Cli::try_parse_from(args).unwrap().command {
+            crate::args::Command::Bench(a) => a,
+            _ => panic!(),
+        };
+        // 見本のマスク: 3 つ（ブラシは画像の幅を 6 回なぞる 966 点）。検証を通る。
+        let a = parse(&["genzo", "bench", "preview", "--sample-masks"]);
+        let mut s = bench_settings();
+        assert!(apply_profile_and_masks(&a, &mut s).unwrap().is_none());
+        assert_eq!(s.masks.len(), 3);
+        assert_eq!(first_brush(&s), Some((2, 0)));
+        let MaskShape::Brush { strokes } = &s.masks[2].components[0].shape else {
+            panic!()
+        };
+        assert_eq!(strokes[0].points.len(), 6 * 161);
+        assert_eq!(sample_stroke(0.3, 1, 0.0).points.len(), 161);
+        s.validate().unwrap();
+        // --masks: マスクの配列、または masks を持つ現像設定（develop get の出力）。
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("masks.json");
+        let settings = DevelopSettings {
+            masks: sample_masks()[..1].to_vec(),
+            ..DevelopSettings::default()
+        };
+        std::fs::write(&file, serde_json::to_vec(&settings).unwrap()).unwrap();
+        let a = parse(&[
+            "genzo",
+            "bench",
+            "preview",
+            "--masks",
+            file.to_str().unwrap(),
+        ]);
+        let mut s = bench_settings();
+        apply_profile_and_masks(&a, &mut s).unwrap();
+        assert_eq!(s.masks, settings.masks);
+        assert_eq!(first_brush(&s), None);
+        std::fs::write(&file, serde_json::to_vec(&settings.masks).unwrap()).unwrap();
+        let mut s = bench_settings();
+        apply_profile_and_masks(&a, &mut s).unwrap();
+        assert_eq!(s.masks.len(), 1);
+        std::fs::write(&file, b"42").unwrap();
+        assert!(apply_profile_and_masks(&a, &mut bench_settings()).is_err());
+        assert!(
+            crate::args::Cli::try_parse_from([
+                "genzo",
+                "bench",
+                "preview",
+                "--masks",
+                "x.json",
+                "--sample-masks"
+            ])
+            .is_err()
+        );
+        // --cube（取り込まずに使う）: 設定の profile.look がファイルの ID を指し、エンジンに渡すものができる。
+        let cube = dir.path().join("film.cube");
+        std::fs::write(
+            &cube,
+            "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
+        )
+        .unwrap();
+        let a = parse(&[
+            "genzo",
+            "bench",
+            "export",
+            "--cube",
+            cube.to_str().unwrap(),
+            "--look-amount",
+            "40",
+        ]);
+        let mut s = bench_settings();
+        assert!(apply_profile_and_masks(&a, &mut s).unwrap().is_some());
+        assert_eq!(s.profile.look.as_deref(), Some("film"));
+        assert_eq!(s.profile.look_amount, 40.0);
+        // 種類の違うファイルは使い方の誤り。
+        let a = parse(&["genzo", "bench", "export", "--dcp", cube.to_str().unwrap()]);
+        assert!(apply_profile_and_masks(&a, &mut bench_settings()).is_err());
     }
 
     #[test]

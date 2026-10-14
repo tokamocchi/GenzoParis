@@ -62,7 +62,54 @@ fn process_version_when_missing(schema_version: u32) -> u32 {
 /// JSON の値を現在のスキーマへ移行する。
 pub(crate) fn migrate_to_current(mut value: Value) -> Result<Value, DevelopError> {
     read_changed_defaults_in_v2(&mut value);
+    read_provisional_masks_in_v2(&mut value);
     migrate_with(value, CURRENT_SCHEMA_VERSION, MIGRATIONS)
+}
+
+/// スキーマの版 2 のうちに形を変えたマスクの読み替え（masks のパッケージ。DEV-18。決定事項ログ No.150）。
+///
+/// それより前の版のマスク（`masks[i]`）は仮の形で、形を 1 つだけ `mask` に持ち、円形の反転は形の中の `invert`
+/// だった（`{"enabled": true, "mask": {"radial": {..., "invert": true}}, "delta": {...}}`）。画面にはなく、処理
+/// バージョン 2 でも適用しなかった。これを、加える部品 1 つの今の形（`{"components": [{"mode": "add", "invert":
+/// true, "shape": {"radial": {...}}}]}`）に読み替える。差分の項目（`delta`）は今の形にもあるので、そのまま残す。
+/// `components` があるマスク（今の形）と、型の誤り（オブジェクトでない）は書き換えない（型への読み込みでエラーに
+/// する）。スキーマの版 1・2 の JSON に、マイグレーションの表の前に当てる。
+fn read_provisional_masks_in_v2(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let schema = obj.get("schema_version").and_then(Value::as_u64);
+    if !matches!(schema, Some(1..=2)) {
+        return;
+    }
+    let Some(masks) = obj.get_mut("masks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for m in masks {
+        let Some(m) = m.as_object_mut() else {
+            continue;
+        };
+        if m.contains_key("components") {
+            continue;
+        }
+        let Some(mut shape) = m.remove("mask") else {
+            continue;
+        };
+        let invert = shape
+            .as_object_mut()
+            .and_then(|s| s.get_mut("radial"))
+            .and_then(Value::as_object_mut)
+            .and_then(|r| r.remove("invert"))
+            .unwrap_or(Value::Bool(false));
+        let mut component = serde_json::Map::new();
+        component.insert("mode".to_owned(), Value::from("add"));
+        component.insert("invert".to_owned(), invert);
+        component.insert("shape".to_owned(), shape);
+        m.insert(
+            "components".to_owned(),
+            Value::Array(vec![Value::Object(component)]),
+        );
+    }
 }
 
 /// スキーマの版 2 のうちに既定値を変えた項目の読み替え。v1 の機能のパッケージの間（配布の前）は、スキーマの版を
@@ -299,6 +346,49 @@ mod tests {
             let v = migrate_to_current(broken.clone()).unwrap();
             assert_eq!(v["detail"], broken["detail"]);
         }
+    }
+
+    /// masks のパッケージより前の仮の形のマスク（形が 1 つの `mask`・円形の反転が形の中）は、加える部品 1 つの今の
+    /// 形に読み替える。今の形のマスクは書き換えない。
+    #[test]
+    fn provisional_masks_are_read_as_one_component() {
+        let old = json!({
+            "schema_version": 2,
+            "process_version": 2,
+            "masks": [
+                {"enabled": true,
+                 "mask": {"radial": {"cx": 0.5, "cy": 0.4, "rx": 0.2, "ry": 0.1, "angle_deg": 10.0,
+                                     "feather": 30.0, "invert": true}},
+                 "delta": {"exposure_ev": 0.5, "saturation": -20.0}},
+                {"mask": {"linear": {"x0": 0.0, "y0": 0.0, "x1": 0.0, "y1": 1.0}}},
+                {"components": [{"mode": "subtract", "shape": {"linear": {"x0": 0, "y0": 0, "x1": 1, "y1": 0}}}]},
+                7
+            ]
+        });
+        let v = migrate_to_current(old).unwrap();
+        let m = &v["masks"];
+        assert!(m[0].get("mask").is_none());
+        assert_eq!(
+            m[0]["components"],
+            json!([{"mode": "add", "invert": true, "shape": {"radial": {
+                "cx": 0.5, "cy": 0.4, "rx": 0.2, "ry": 0.1, "angle_deg": 10.0, "feather": 30.0}}}])
+        );
+        assert_eq!(m[0]["delta"]["exposure_ev"], json!(0.5));
+        assert_eq!(m[1]["components"][0]["invert"], json!(false));
+        assert_eq!(m[2]["components"][0]["mode"], json!("subtract"));
+        // 型の誤りはそのまま残す。
+        assert_eq!(m[3], json!(7));
+        // 読み替えた設定を型に読める（壊れた要素を除いて）。
+        let mut v = v;
+        v["masks"].as_array_mut().unwrap().pop();
+        let s: crate::DevelopSettings = serde_json::from_value(v).unwrap();
+        assert_eq!(s.masks.len(), 3);
+        assert!(s.masks[0].components[0].invert);
+        assert_eq!(s.masks[0].delta.saturation, -20.0);
+        assert!(matches!(
+            s.masks[1].components[0].shape,
+            crate::MaskShape::Linear { y1, .. } if y1 == 1.0
+        ));
     }
 
     #[test]

@@ -9,7 +9,8 @@
 //!
 //! Tauri の状態（`State`）を使わない処理の本体（[`execute_command`]・[`develop_frame_bytes`]・
 //! [`region_frame_bytes`]・[`before_frame_bytes`]・[`before_region_frame_bytes`]・
-//! [`view_region_frame_bytes`]）は別の関数にして、結合テスト（`tests/app`）から [`AppState`] で直接呼ぶ。
+//! [`view_region_frame_bytes`]・[`mask_overlay_frame_bytes`]）は別の関数にして、結合テスト（`tests/app`）から
+//! [`AppState`] で直接呼ぶ。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -321,6 +322,29 @@ pub fn view_region_frame_bytes(state: &AppState, pane: u32) -> Result<Vec<u8>, E
     }
 }
 
+/// 現像中の写真のマスク `index` の重み（DEV-18・DEV-19 のマスクの重ねて表示）を [`frames`] の形のバイト列に
+/// する（[`mask_overlay_frame`] の本体）。ヘッダーは `MaskOverlayInfo`、画素は重み（0〜255）を R・G・B に
+/// 同じ値で入れる（プレビューと同じ格子。`uncropped` は `pick_white_balance` と同じ）。
+pub fn mask_overlay_frame_bytes(
+    state: &AppState,
+    variant_id: VariantId,
+    index: usize,
+    uncropped: Option<bool>,
+) -> Result<Vec<u8>, ErrorInfo> {
+    let core = state.core()?;
+    let o = core
+        .mask_overlay(variant_id, index, uncropped)
+        .map_err(|e| e.info())?;
+    let rgb: Vec<u8> = o.weights.iter().flat_map(|&w| [w, w, w]).collect();
+    frames::encode(&o.info, o.info.width, o.info.height, &rgb).ok_or_else(|| {
+        error(
+            ErrorKind::Internal,
+            "マスクの重ねて表示の画素の長さが合いません",
+            None,
+        )
+    })
+}
+
 /// 現像中の写真の最新のプレビュー（[`frames`] の形のバイト列。まだなければ空）。
 #[tauri::command]
 pub async fn develop_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, ErrorInfo> {
@@ -357,6 +381,22 @@ pub async fn view_region_frame(
 ) -> Result<tauri::ipc::Response, ErrorInfo> {
     let state = Arc::clone(&state);
     blocking(move || view_region_frame_bytes(&state, pane).map(tauri::ipc::Response::new)).await
+}
+
+/// 現像中の写真のマスク `index` の重み（[`frames`] の形のバイト列。DEV-18・DEV-19）。
+#[tauri::command]
+pub async fn mask_overlay_frame(
+    state: Shared<'_>,
+    variant_id: VariantId,
+    index: usize,
+    uncropped: Option<bool>,
+) -> Result<tauri::ipc::Response, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        mask_overlay_frame_bytes(&state, variant_id, index, uncropped)
+            .map(tauri::ipc::Response::new)
+    })
+    .await
 }
 
 /// 画面の色空間（canvas が Display P3 を使えるか）。

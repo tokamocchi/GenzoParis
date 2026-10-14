@@ -312,6 +312,7 @@ pub fn run() {
             commands::before_frame,
             commands::before_region_frame,
             commands::view_region_frame,
+            commands::mask_overlay_frame,
             commands::set_display_target,
             commands::list_catalog_backups,
             commands::restore_catalog,

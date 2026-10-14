@@ -26,6 +26,8 @@ use std::sync::{Mutex, PoisonError};
 use genzo_color::{DisplayProfile, DisplayProfileFallbackReason};
 use genzo_pipeline::engine::StageBackend;
 use genzo_pipeline::finish::output::{ClipCounts, Dither, Histogram};
+use genzo_pipeline::finish::{FinishPlan, GeometryStage};
+use genzo_pipeline::local::{LocalField, LocalPlan, LocalSlots};
 use genzo_pipeline::sensor::denoise::{NR_EPSILON, NoisePlan};
 use genzo_pipeline::sensor::highlight::{HR_CONFIDENCE_WEIGHT, HR_SEARCH_RADIUS};
 use genzo_pipeline::sensor::wb::SaturationClip;
@@ -39,7 +41,9 @@ use genzo_raw::{CfaPattern, RawImage};
 use crate::context::{GpuContext, GpuContextOptions};
 use crate::error::{GpuError, Result};
 use crate::kernels::{Batch, Dispatch, Kernel, KernelCache, Params};
-use crate::stages::{DisplayMatrices, GpuStageKind, GpuStageRegistry, kind_of, prepare_rgb};
+use crate::stages::{
+    DisplayMatrices, GpuStageKind, GpuStageRegistry, PrepareEnv, kind_of, local_params, prepare_rgb,
+};
 
 /// GPU 上の RGB の画像（f32 の R, G, B の並び。行優先）と、その範囲・色の契約。
 ///
@@ -118,6 +122,14 @@ impl Current {
     }
 }
 
+/// チェーンが作ったローカル補正の局所の値の面（GPU か CPU のどちらか、または両方にある）。
+struct ChainLocal {
+    slots: LocalSlots,
+    roi: Roi,
+    gpu: Option<wgpu::Buffer>,
+    cpu: Option<LocalField>,
+}
+
 /// ステージの列を実行する途中の状態（[`GpuRenderer::run_stages`] とプレビュー・書き出しで使う）。
 pub(crate) struct Chain<'r> {
     r: &'r GpuRenderer,
@@ -125,6 +137,7 @@ pub(crate) struct Chain<'r> {
     current: Current,
     replaced: u64,
     backends: Vec<(&'static str, StageBackend)>,
+    local: Option<ChainLocal>,
 }
 
 impl<'r> Chain<'r> {
@@ -135,6 +148,7 @@ impl<'r> Chain<'r> {
             current: Current::Cpu(input),
             replaced: 0,
             backends: Vec::new(),
+            local: None,
         }
     }
 
@@ -146,7 +160,134 @@ impl<'r> Chain<'r> {
             current: Current::Gpu(input),
             replaced: 0,
             backends: Vec::new(),
+            local: None,
         }
+    }
+
+    /// 段階 C の計画のステージを順に実行する（genzo-pipeline の `FinishPlan::run_stages` の GPU 版。ローカル補正が
+    /// あれば、ステージ 9 の後（ステージ 9 を飛ばすときは最初）に今の画像から局所の値の面を作る）。`rois` は
+    /// `FinishPlan::stage_rois` の結果。
+    pub(crate) fn run_plan(
+        &mut self,
+        plan: &FinishPlan,
+        ctx: &StageContext<'_>,
+        rois: &[Roi],
+    ) -> Result<()> {
+        for ((stage, params), roi) in plan.stages().iter().zip(&rois[1..]) {
+            if self.local.is_none()
+                && stage.id() != GeometryStage::ID
+                && let Some(local) = plan.local()
+            {
+                self.compute_local(local)?;
+            }
+            self.step(*stage, ctx, params, *roi)?;
+        }
+        Ok(())
+    }
+
+    /// 今の画像（基準の画像）から局所の値の面を作る（GPU にあれば `local.wgsl` の `local_main`、CPU にあれば
+    /// genzo-pipeline の `LocalPlan::field`）。
+    pub(crate) fn compute_local(&mut self, plan: &LocalPlan) -> Result<()> {
+        let roi = self.current.roi();
+        let local = match &self.current {
+            Current::Gpu(tile) => {
+                let tile = tile.clone();
+                let (params, aux) = local_params(plan, roi, roi)?;
+                let bytes = roi.pixel_count() * plan.slots.count() as u64 * 4;
+                let buffer = self
+                    .r
+                    .gpu
+                    .create_storage("genzo-gpu.local（局所の値の面）", bytes.max(16))?;
+                let aux = self.r.gpu.create_storage_init("genzo-gpu.aux", &aux)?;
+                self.batch()?.dispatch(Dispatch {
+                    kernel: Kernel::Local,
+                    params: params.finish()?,
+                    src: &tile.buffer,
+                    dst: &buffer,
+                    aux: Some(&aux),
+                    aux_out: None,
+                    local: None,
+                    threads: (roi.width, roi.height),
+                })?;
+                ChainLocal {
+                    slots: plan.slots,
+                    roi,
+                    gpu: Some(buffer),
+                    cpu: None,
+                }
+            }
+            Current::Cpu(tile) => ChainLocal {
+                slots: plan.slots,
+                roi,
+                gpu: None,
+                cpu: Some(plan.field(tile)?),
+            },
+        };
+        self.local = Some(local);
+        Ok(())
+    }
+
+    /// 局所の値の面の範囲（チェーンが作ったもの、なければ文脈のもの）。
+    fn local_roi(&self, ctx: &StageContext<'_>) -> Option<Roi> {
+        self.local
+            .as_ref()
+            .map(|l| l.roi)
+            .or_else(|| ctx.local.map(|f| f.roi))
+    }
+
+    /// GPU 上の局所の値の面（CPU にしかなければアップロードする）。
+    fn local_gpu(&mut self, ctx: &StageContext<'_>) -> Result<wgpu::Buffer> {
+        if self.local.is_none()
+            && let Some(f) = ctx.local
+        {
+            self.local = Some(ChainLocal {
+                slots: f.slots,
+                roi: f.roi,
+                gpu: None,
+                cpu: Some(f.clone()),
+            });
+        }
+        let gpu = &self.r.gpu;
+        let l = self
+            .local
+            .as_mut()
+            .ok_or_else(|| GpuError::Internal("局所の値の面がない".to_owned()))?;
+        if l.gpu.is_none() {
+            let cpu = l.cpu.as_ref().expect("GPU か CPU のどちらかにある");
+            let planes: &[f32] = if cpu.planes.is_empty() {
+                &[0.0; 4]
+            } else {
+                &cpu.planes
+            };
+            l.gpu = Some(gpu.create_storage_init(
+                "genzo-gpu.local（局所の値の面）",
+                bytemuck::cast_slice(planes),
+            )?);
+        }
+        Ok(l.gpu.clone().expect("直前に作った"))
+    }
+
+    /// CPU 上の局所の値の面（GPU にしかなければ読み出す）。チェーンが作っていなければ `None`。
+    fn local_cpu(&mut self) -> Result<Option<LocalField>> {
+        let needs_download = self
+            .local
+            .as_ref()
+            .is_some_and(|l| l.cpu.is_none() && l.gpu.is_some());
+        if needs_download {
+            self.flush()?;
+            let l = self.local.as_mut().expect("確かめた");
+            let n = l.roi.pixel_count() * l.slots.count() as u64;
+            let bytes = self
+                .r
+                .gpu
+                .read_buffer(l.gpu.as_ref().expect("確かめた"), n * 4)?;
+            l.cpu = Some(LocalField {
+                roi: l.roi,
+                slots: l.slots,
+                planes: bytemuck::pod_collect_to_vec(&bytes),
+            });
+        }
+        Ok(self.local.as_ref().and_then(|l| l.cpu.clone()))
     }
 
     fn batch(&mut self) -> Result<&mut Batch<'r>> {
@@ -229,10 +370,15 @@ impl<'r> Chain<'r> {
             }
             .into());
         }
+        let local_roi = self.local_roi(ctx);
         let prepared = match kind {
             Some(kind) if !kind.is_sensor() => {
                 let displays = self.r.displays();
-                match prepare_rgb(kind, stage, ctx, params, in_roi, output_roi, &displays) {
+                let env = PrepareEnv {
+                    displays: &displays,
+                    local: local_roi,
+                };
+                match prepare_rgb(kind, stage, ctx, params, in_roi, output_roi, &env) {
                     Ok(p) => Some(p),
                     Err(GpuError::Unsupported { stage, reason }) => {
                         tracing::debug!(stage, reason, "GPU 版で扱えないので CPU 版で処理する");
@@ -245,6 +391,11 @@ impl<'r> Chain<'r> {
         };
         let backend = match prepared {
             Some(p) => {
+                let local = if p.uses_local {
+                    Some(self.local_gpu(ctx)?)
+                } else {
+                    None
+                };
                 let input = self.gpu_tile()?;
                 let out = self.r.alloc(output_roi, stage.output_contract())?;
                 let aux = match &p.aux {
@@ -263,6 +414,7 @@ impl<'r> Chain<'r> {
                     dst: &out.buffer,
                     aux: aux.as_ref(),
                     aux_out: plane.as_ref(),
+                    local: local.as_ref(),
                     threads: (output_roi.width, output_roi.height),
                 })?;
                 self.current = Current::Gpu(out);
@@ -274,7 +426,13 @@ impl<'r> Chain<'r> {
                     // 画像全体を渡されたステージ 9 を CPU 版で処理する場合は、鏡映で広げる。
                     input = input.gather_mirror(need, grid.width, grid.height)?;
                 }
-                let (out, n) = run_stage_cpu(stage, ctx, &input, output_roi, params)?;
+                // チェーンが作った局所の値の面があれば、CPU 版のステージの文脈に付ける。
+                let field = self.local_cpu()?;
+                let ctx = match &field {
+                    Some(f) => ctx.with_local(f),
+                    None => *ctx,
+                };
+                let (out, n) = run_stage_cpu(stage, &ctx, &input, output_roi, params)?;
                 self.replaced += n;
                 self.current = Current::Cpu(out);
                 StageBackend::Cpu
@@ -497,6 +655,19 @@ impl GpuRenderer {
         })
     }
 
+    /// 基準の画像 `reference` から、ローカル補正の局所の値の面を GPU 版（`local.wgsl` の `local_main`）で作る
+    /// （genzo-pipeline の `LocalPlan::field` の GPU 版。一致テスト用）。
+    pub fn local_field(&self, plan: &LocalPlan, reference: &ImageTile) -> Result<LocalField> {
+        let mut chain = Chain::from_cpu(self, reference.clone());
+        chain.gpu_tile()?;
+        chain.compute_local(plan)?;
+        let field = chain
+            .local_cpu()?
+            .ok_or_else(|| GpuError::Internal("局所の値の面を作れなかった".to_owned()))?;
+        chain.finish()?;
+        Ok(field)
+    }
+
     // -----------------------------------------------------------------------
     // 17c ヒストグラム・17b 量子化
     // -----------------------------------------------------------------------
@@ -530,6 +701,7 @@ impl GpuRenderer {
             dst: &hist,
             aux: None,
             aux_out: None,
+            local: None,
             threads: (roi.width, roi.height),
         })?;
         batch.submit()?;
@@ -657,6 +829,7 @@ impl GpuRenderer {
             dst: &out,
             aux: None,
             aux_out: None,
+            local: None,
             threads: (stride as u32, rows as u32),
         })?;
         batch.submit()?;
@@ -766,6 +939,7 @@ impl GpuRenderer {
                     dst: &out.buffer,
                     aux: None,
                     aux_out: None,
+                    local: None,
                     threads: (output_roi.width, output_roi.height),
                 })?;
                 let n = batch.submit()?;
@@ -793,6 +967,7 @@ impl GpuRenderer {
                     dst: &out.buffer,
                     aux: Some(&aux),
                     aux_out: None,
+                    local: None,
                     threads: (output_roi.width, output_roi.height),
                 })?;
                 let n = batch.submit()?;
@@ -809,19 +984,18 @@ impl GpuRenderer {
                 }
                 let src = self.upload(&tile)?;
                 let out = self.alloc(output_roi, ColorContract::B2Working)?;
-                let mut p = Params::new(Kernel::ColorMatrix, tile.roi, output_roi);
-                p.mat("MAT", plan.camera_to_working().rows());
                 let mut batch = Batch::new(&self.gpu, &self.kernels)?;
-                batch.dispatch(Dispatch {
-                    kernel: Kernel::ColorMatrix,
-                    params: p.finish()?,
-                    src: &src.buffer,
-                    dst: &out.buffer,
-                    aux: None,
-                    aux_out: None,
-                    threads: (output_roi.width, output_roi.height),
-                })?;
+                let aux = record_color_matrix(
+                    &self.gpu,
+                    &mut batch,
+                    plan,
+                    &src.buffer,
+                    tile.roi,
+                    &out.buffer,
+                    output_roi,
+                )?;
                 let n = batch.submit()?;
+                drop(aux);
                 Ok((SensorData::Rgb(self.download(&out)?), n))
             }
             (_, input) => Err(PipelineError::SensorInputMismatch {
@@ -984,6 +1158,60 @@ pub(crate) fn check_raw(plan: &SensorPlan, raw: &RawImage) -> Result<()> {
     Ok(())
 }
 
+/// ステージ 8 を記録する（カメラプロファイル（DEV-17）の色相彩度のマップがあれば `profile.wgsl` の HSV の表のカーネル、
+/// なければ行列のカーネル）。表の補助の入力のバッファを返す（投入が終わるまで持つこと）。
+pub(crate) fn record_color_matrix(
+    gpu: &crate::context::GpuContext,
+    batch: &mut Batch<'_>,
+    plan: &SensorPlan,
+    src: &wgpu::Buffer,
+    src_roi: Roi,
+    dst: &wgpu::Buffer,
+    out_roi: Roi,
+) -> Result<Option<wgpu::Buffer>> {
+    let mapped = plan
+        .camera_profile()
+        .and_then(|p| p.hue_sat_map.as_ref().map(|m| (p, m)));
+    match mapped {
+        Some((p, map)) => {
+            let (params, aux) = crate::stages::hsv_table_params(
+                map,
+                &p.camera_to_prophoto,
+                &p.prophoto_to_working,
+                src_roi,
+                out_roi,
+            );
+            let aux = gpu.create_storage_init("genzo-gpu.aux", &aux)?;
+            batch.dispatch(Dispatch {
+                kernel: Kernel::HsvTable,
+                params: params.finish()?,
+                src,
+                dst,
+                aux: Some(&aux),
+                aux_out: None,
+                local: None,
+                threads: (out_roi.width, out_roi.height),
+            })?;
+            Ok(Some(aux))
+        }
+        None => {
+            let mut p = Params::new(Kernel::ColorMatrix, src_roi, out_roi);
+            p.mat("MAT", plan.camera_to_working().rows());
+            batch.dispatch(Dispatch {
+                kernel: Kernel::ColorMatrix,
+                params: p.finish()?,
+                src,
+                dst,
+                aux: None,
+                aux_out: None,
+                local: None,
+                threads: (out_roi.width, out_roi.height),
+            })?;
+            Ok(None)
+        }
+    }
+}
+
 /// ステージ 2 のディスパッチを記録する。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_normalize(
@@ -1011,6 +1239,7 @@ pub(crate) fn record_normalize(
         dst: values,
         aux: None,
         aux_out: Some(flags),
+        local: None,
         threads: (roi.width, roi.height),
     })
 }
@@ -1052,6 +1281,7 @@ pub(crate) fn record_white_balance(
         dst: out,
         aux: Some(flags),
         aux_out: flags_out,
+        local: None,
         threads: (out_roi.width, out_roi.height),
     })
 }
@@ -1102,6 +1332,7 @@ pub(crate) fn record_highlight(
         dst: out,
         aux: Some(flags),
         aux_out: Some(flags_out),
+        local: None,
         threads: (out_roi.width, out_roi.height),
     })
 }
@@ -1139,6 +1370,7 @@ pub(crate) fn record_noise_reduction(
         dst: &p0,
         aux: None,
         aux_out: None,
+        local: None,
         threads: (r0.width, r0.height),
     })?;
     let acc = gpu.create_storage("genzo-gpu.nr（細部の和）", rgb_bytes(out_roi))?;
@@ -1163,6 +1395,7 @@ pub(crate) fn record_noise_reduction(
             dst: &tmp,
             aux: None,
             aux_out: None,
+            local: None,
             threads: (h_roi.width, h_roi.height),
         })?;
         let next = gpu.create_storage("genzo-gpu.nr（面）", rgb_bytes(next_roi))?;
@@ -1175,6 +1408,7 @@ pub(crate) fn record_noise_reduction(
             dst: &next,
             aux: None,
             aux_out: None,
+            local: None,
             threads: (next_roi.width, next_roi.height),
         })?;
         // 細部を縮小して足す（out_roi）。
@@ -1191,6 +1425,7 @@ pub(crate) fn record_noise_reduction(
             dst: &acc,
             aux: Some(&next),
             aux_out: None,
+            local: None,
             threads: (out_roi.width, out_roi.height),
         })?;
         keep.push(tmp);
@@ -1210,6 +1445,7 @@ pub(crate) fn record_noise_reduction(
         dst: &out,
         aux: Some(&acc),
         aux_out: None,
+        local: None,
         threads: (out_roi.width, out_roi.height),
     })?;
     keep.push(cur);
@@ -1247,6 +1483,7 @@ pub(crate) fn record_blur(
         dst: &luma,
         aux: None,
         aux_out: None,
+        local: None,
         threads: (need.width, need.height),
     })?;
     let weights = gpu.create_storage_init("genzo-gpu.detail（重み）", &blur.weights)?;
@@ -1261,6 +1498,7 @@ pub(crate) fn record_blur(
         dst: &tmp,
         aux: Some(&weights),
         aux_out: None,
+        local: None,
         threads: (h_roi.width, h_roi.height),
     })?;
     let plane = gpu.create_storage("genzo-gpu.detail（ぼかした面）", gray_bytes(out))?;
@@ -1273,6 +1511,7 @@ pub(crate) fn record_blur(
         dst: &plane,
         aux: Some(&weights),
         aux_out: None,
+        local: None,
         threads: (out.width, out.height),
     })?;
     Ok(plane)

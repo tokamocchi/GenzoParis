@@ -15,6 +15,8 @@
 //! 3. その点のまわりの正方形（S の軸にそろえる。半径は見える範囲（RAW の既定の切り抜き）の長辺の
 //!    [`WB_PICK_RADIUS`]、A1 の 1 画素以上）にある A1 の画素のうち、中心が既定の切り抜きの内側にある
 //!    ものを平均する。
+//!    カメラプロファイル（DCP。DEV-17）を選んでいても、プロファイルを使わない A1（今のカメラ行列のステージ 8）を使う
+//!    （色相彩度のマップは逆に戻せないため。プロファイルを選んだ写真で初めて使うときは、A1 を 1 回余分に作る）。
 //! 4. 平均を、ステージ 8 の逆（genzo-color の `working_to_camera_normalized`）と今の WB の係数で割って、
 //!    カメラ RGB（WB をかける前）に戻す。緑の係数は G1 の係数（1）を使う（G2 の係数は G1 と G2 の
 //!    感度をそろえる値で、ステージ 3 の後の緑は G1 の尺度のため。[`crate::sensor::wb`] の doc）。
@@ -100,6 +102,17 @@ impl Engine {
                 "点の位置は画像の幅・高さに対する 0〜1 の割合で指定してください（{px}, {py}）"
             )));
         }
+        // カメラプロファイル（DCP）の色相彩度のマップは逆に戻せないので、プロファイルを使わない A1（今のカメラ行列の
+        // ステージ 8）で求める（WB の係数の変換はプロファイルを使っても今のカメラ行列のまま。crate::profile）。
+        let without_profile;
+        let settings = if settings.profile.camera.is_some() {
+            let mut s = settings.clone();
+            s.profile.camera = None;
+            without_profile = s;
+            &without_profile
+        } else {
+            settings
+        };
         let a1 = self.a1(
             source,
             settings,

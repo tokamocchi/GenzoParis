@@ -57,6 +57,8 @@ ctrlc = "3.5.2"
 image.workspace = true
 # 書き出したファイルの Exif（GPS の有無）の確認。
 kamadak-exif.workspace = true
+# 結合テストのカメラプロファイル（DCP）を作る（`DcpProfile::to_bytes`。workspace の crate で、新しい crate は増えない）。
+genzo-color.workspace = true
 
 # Ctrl+C の結合テストで、プロセスグループに SIGINT を送る（Unix だけ。K3）。
 [target.'cfg(unix)'.dev-dependencies]

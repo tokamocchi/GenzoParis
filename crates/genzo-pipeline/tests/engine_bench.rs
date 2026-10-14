@@ -325,3 +325,70 @@ fn bench_stage_c_preview_2560_with_presence_sharpening_and_effects() {
         report(&result);
     }
 }
+
+/// 画像の幅（G 座標の 0〜1）を `passes` 回なぞる（2 回目・4 回目… は右から左。なぞるごとに `step` だけ下へ）ストローク。
+/// 点は大きさの 1/8 の間隔（画面の間引きと同じ。大きさ 0.05 で 1 回 161 点）。
+fn zigzag_stroke(size: f32, passes: usize, y: f32, step: f32) -> genzo_model::BrushStroke {
+    let spacing = size / 8.0;
+    let n = (1.0 / spacing).round() as usize;
+    let mut points = Vec::new();
+    for k in 0..passes {
+        for i in 0..=n {
+            let x = i as f32 * spacing;
+            points.push([if k % 2 == 0 { x } else { 1.0 - x }, y + step * k as f32]);
+        }
+    }
+    genzo_model::BrushStroke {
+        size,
+        points,
+        ..Default::default()
+    }
+}
+
+#[test]
+#[ignore = "計測（手動で --release で実行する）"]
+fn bench_brush_rasterize() {
+    // ブラシのラスター（G の長辺 2048 セル。genzo-pipeline の local::brush）を塗る時間。G の外接矩形 1.0 × 0.75。
+    // 初めから塗る（写真を開いたとき・使い回しがないとき）と、1 本を足して塗り足す（ブラシで 1 本描いたとき）。
+    use genzo_pipeline::local::brush::{clear_cache, raster_for, rasterize};
+    let g_box = (1.0f32, 0.75f32);
+    let fill = || zigzag_stroke(0.05, 6, 0.05, 0.11);
+    let cases: Vec<(&str, Vec<genzo_model::BrushStroke>)> = vec![
+        (
+            "brush_rasterize_one_pass",
+            vec![zigzag_stroke(0.05, 1, 0.3, 0.0)],
+        ),
+        ("brush_rasterize_fill", vec![fill()]),
+        ("brush_rasterize_fill_x5", (0..5).map(|_| fill()).collect()),
+        (
+            "brush_rasterize_large_x10",
+            (0..10).map(|_| zigzag_stroke(0.15, 3, 0.1, 0.25)).collect(),
+        ),
+    ];
+    for (name, strokes) in &cases {
+        let points: usize = strokes.iter().map(|s| s.points.len()).sum();
+        let result = Bench::batch(*name)
+            .note("strokes", strokes.len().to_string())
+            .note("points", points.to_string())
+            .note("backend", "cpu")
+            .run_warm(|| rasterize(strokes, g_box).unwrap())
+            .unwrap();
+        report(&result);
+    }
+    // 塗りつぶし 5 本の後に 1 本を足す（前の 5 本のラスターから塗り足す）。
+    let before: Vec<_> = (0..5).map(|_| fill()).collect();
+    let mut after = before.clone();
+    after.push(fill());
+    let result = Bench::latency("brush_append_one_stroke")
+        .note("strokes", "5+1")
+        .note("backend", "cpu")
+        .run_cold(
+            || {
+                clear_cache();
+                raster_for(&before, g_box);
+            },
+            || raster_for(&after, g_box).unwrap(),
+        )
+        .unwrap();
+    report(&result);
+}

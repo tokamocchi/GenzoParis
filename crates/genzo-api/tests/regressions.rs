@@ -1270,7 +1270,7 @@ fn render_deps_of_raw_photos_are_recorded() {
     match common::wait_ok(&core, job) {
         genzo_api::JobResult::Export(r) => match &r.items[0].outcome {
             genzo_api::ExportOutcome::Written { render_deps, .. } => {
-                assert_eq!(render_deps.as_ref(), Some(&deps));
+                assert_eq!(render_deps.as_deref(), Some(&deps));
             }
             other => panic!("{other:?}"),
         },

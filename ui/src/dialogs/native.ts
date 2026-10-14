@@ -43,6 +43,31 @@ export async function chooseCatalogFile(title: string, defaultPath?: string | nu
   return single(r);
 }
 
+const PROFILE_FILTERS = [
+  { name: "カメラプロファイル・ルック", extensions: ["dcp", "DCP", "cube", "CUBE"] },
+  { name: "カメラプロファイル（DCP）", extensions: ["dcp", "DCP"] },
+  { name: "ルック（3D LUT）", extensions: ["cube", "CUBE"] },
+];
+
+/**
+ * 取り込むカメラプロファイル（.dcp）・ルック（.cube）のファイルを選ぶ（複数可。取り消したら空）。Tauri の外では
+ * パスを「;」で区切って入力させる。
+ */
+export async function chooseProfileFiles(title: string): Promise<string[]> {
+  if (!inTauri()) {
+    const v = promptPath(`${title}（ファイルのパス。複数は「;」で区切る）`, "");
+    return v
+      ? v
+          .split(";")
+          .map((p) => p.trim())
+          .filter((p) => p.length > 0)
+      : [];
+  }
+  const r = await open({ title, directory: false, multiple: true, filters: PROFILE_FILTERS });
+  if (r === null) return [];
+  return Array.isArray(r) ? r : [r];
+}
+
 /** 新しいカタログの場所を選ぶ（保存のダイアログ）。 */
 export async function chooseNewCatalogPath(title: string, defaultPath?: string | null): Promise<string | null> {
   if (!inTauri()) return promptPath(`${title}（新しいカタログのパス）`, defaultPath ?? "");

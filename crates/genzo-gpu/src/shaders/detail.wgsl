@@ -89,7 +89,8 @@ fn plane_at(g: vec2<i32>) -> f32 {
 
 // ---------------------------------------------------------------------------
 // ステージ 12: テクスチャ・明瞭度・かすみの除去（finish::presence）
-// P_PR_FLAGS: 1 = ぼかし（テクスチャか明瞭度）、2 = テクスチャ、4 = 明瞭度、8 = かすみの除去、16 = ガイドを使う。
+// P_PR_FLAGS: 1 = ぼかし（テクスチャか明瞭度）、8 = かすみの推定を引く、16 = ガイドを使う（テクスチャ・明瞭度・かすみの除去
+// は値が 0 でなければ計算する。ローカル補正（local.wgsl）では画素ごとに局所の値を足した値）。
 // ---------------------------------------------------------------------------
 
 // aux の位置 off からの、ガイドと同じ寸法の面を連続座標 (x, y) で双線形に引く（sample_guide と同じ式）。
@@ -117,32 +118,75 @@ fn sample_aux(off: u32, x: f32, y: f32) -> f32 {
     return top + (bottom - top) * ty;
 }
 
-// PresenceStageParams::local_base。
-fn presence_local_base(g: f32) -> f32 {
-    let b = contrast_log2(pf(P_GAMMA), g + pf(P_TONE_EV));
-    return min(b + tone_log2_gain(b, b), LOG2_CEILING);
+// PresencePixel（ステージ 12 の 1 画素の値。全体の値か、局所の値を足したもの）。
+struct PresenceP {
+    tex: f32,
+    cla: f32,
+    dehaze: f32,
+    tp: ToneP,
+    air: vec3<f32>,
 }
 
-// PresenceStageParams::delta。
-fn presence_delta(flags: u32, p: f32, ps: f32, g: f32) -> f32 {
-    var delta = 0.0;
-    if ((flags & 2u) != 0u) {
-        delta = delta + pf(P_PR_TEX) * soft_limit(p - ps, TEXTURE_LIMIT);
+fn presence_global() -> PresenceP {
+    return PresenceP(pf(P_PR_TEX), pf(P_PR_CLA), pf(P_PR_DEHAZE), tone_global(), pf3(P_PR_AIR));
+}
+
+// PresencePixel::local_base。
+fn presence_local_base(tp: ToneP, g: f32) -> f32 {
+    let b = contrast_log2(tp.gamma, g + tp.ev);
+    return min(b + tone_log2_gain(tp, b, b), LOG2_CEILING);
+}
+
+// PresenceStageParams::pixel_with_local（P_LOCAL_U3 はテクスチャ・明瞭度・かすみの除去のスライダー / 100、
+// P_PR_HAZE_AIR は明るさを合わせる前の大気の光）。
+fn presence_with_local(pp: PresenceP, g: vec2<i32>) -> PresenceP {
+    var o = pp;
+    let base_changed = local_base_changed(g);
+    if (base_changed) {
+        o.tp = tone_with_local(pp.tp, g);
     }
-    if ((flags & 4u) != 0u) {
-        let t = presence_local_base(g);
+    let dt = local_value(LP_TEXTURE, g);
+    if (dt != 0.0) {
+        o.tex = add_unit(pf(P_LOCAL_U3), dt, -2.0, 2.0) * TEXTURE_GAIN;
+    }
+    let dc = local_value(LP_CLARITY, g);
+    if (dc != 0.0) {
+        o.cla = add_unit(pf(P_LOCAL_U3 + 1u), dc, -2.0, 2.0) * CLARITY_GAIN;
+    }
+    let dd = local_value(LP_DEHAZE, g);
+    if (dd != 0.0) {
+        o.dehaze = add_unit(pf(P_LOCAL_U3 + 2u), dd, -1.0, 1.0);
+    }
+    if (base_changed && o.dehaze != 0.0) {
+        // presence::matched_airlight。
+        let a = pf3(P_PR_HAZE_AIR);
+        let la = safe_log2(luminance(a));
+        let gain = exp2(presence_local_base(o.tp, la) - la);
+        o.air = vec3<f32>(a.x * gain, a.y * gain, a.z * gain);
+    }
+    return o;
+}
+
+// PresencePixel::delta。
+fn presence_delta(pp: PresenceP, p: f32, ps: f32, g: f32) -> f32 {
+    var delta = 0.0;
+    if (pp.tex != 0.0) {
+        delta = delta + pp.tex * soft_limit(p - ps, TEXTURE_LIMIT);
+    }
+    if (pp.cla != 0.0) {
+        let t = presence_local_base(pp.tp, g);
         let bp = log2(exp2(t) + LUMA_LOG_OFFSET);
         let m = (t - LOG2_MIDDLE_GRAY) / CLARITY_MID_WIDTH;
         let w = 1.0 / (1.0 + m * m);
-        delta = delta + pf(P_PR_CLA) * w * soft_limit(ps - bp, CLARITY_LIMIT);
+        delta = delta + pp.cla * w * soft_limit(ps - bp, CLARITY_LIMIT);
     }
     return delta;
 }
 
-// PresenceStageParams::dehaze_pixel。
-fn dehaze_pixel(c: vec3<f32>, d: f32) -> vec3<f32> {
-    let k = pf(P_PR_DEHAZE);
-    let a = pf3(P_PR_AIR);
+// PresencePixel::dehaze_pixel。
+fn dehaze_pixel(pp: PresenceP, c: vec3<f32>, d: f32) -> vec3<f32> {
+    let k = pp.dehaze;
+    let a = pp.air;
     if (k > 0.0) {
         let t = max(1.0 - DEHAZE_OMEGA * k * d, DEHAZE_T_MIN);
         let keep = 1.0 - t;
@@ -172,15 +216,25 @@ fn presence_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             dv = sample_aux(pu(P_HAZE_OFF), u, v);
         }
     }
+    var pp = presence_global();
+    if (local_on()) {
+        // TextureStage::run_cpu の局所の値（ステージ 12 の項目か局所の明るさの項目が 0 でない画素だけ）。
+        if (local_base_changed(g)
+            || local_value(LP_TEXTURE, g) != 0.0
+            || local_value(LP_CLARITY, g) != 0.0
+            || local_value(LP_DEHAZE, g) != 0.0) {
+            pp = presence_with_local(pp, g);
+        }
+    }
     var out = c;
     if ((flags & 1u) != 0u) {
-        let delta = presence_delta(flags, luma_log(c), plane_at(g), gv);
+        let delta = presence_delta(pp, luma_log(c), plane_at(g), gv);
         if (delta != 0.0) {
             out = apply_luma_log_delta(c, delta);
         }
     }
-    if ((flags & 8u) != 0u) {
-        out = dehaze_pixel(out, dv);
+    if (pp.dehaze != 0.0) {
+        out = dehaze_pixel(pp, out, dv);
     }
     store_out(gid, sanitize3(out));
 }
@@ -215,7 +269,23 @@ fn sharpen_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let e = sqrt(gx * gx + gy * gy) * pf(P_SH_GSCALE);
         m = smooth_step(0.5 * mask_edge, 1.5 * mask_edge, e);
     }
-    let delta = pf(P_SH_AMOUNT) * m * sharpen_shaped(luma_log(c) - plane_at(g));
+    var dsh = 0.0;
+    if (local_on()) {
+        dsh = local_value(LP_SHARPNESS, g);
+    }
+    var delta = 0.0;
+    if (dsh == 0.0) {
+        delta = pf(P_SH_AMOUNT) * m * sharpen_shaped(luma_log(c) - plane_at(g));
+    } else {
+        // SharpenStageParams::apply_local（負の適用量はぼかす）。
+        let a = add_unit(pf(P_LOCAL_U3), dsh, -1.0, 1.5) * SHARPEN_GAIN;
+        let d = luma_log(c) - plane_at(g);
+        if (a >= 0.0) {
+            delta = a * m * sharpen_shaped(d);
+        } else {
+            delta = a * d;
+        }
+    }
     if (delta == 0.0) {
         store_out(gid, sanitize3(c));
         return;

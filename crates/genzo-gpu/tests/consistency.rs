@@ -18,8 +18,9 @@ use genzo_pipeline::engine::StageBackend;
 use genzo_pipeline::guide::{GuideSpec, compute_guide};
 use genzo_pipeline::sensor::{SensorData, SensorPlan, run_sensor_stage};
 use genzo_pipeline::{
-    ColorContract, ImageTile, InputKind, ProcessVersion, RgbImage, Roi, SaturationClip,
-    SensorOptions, Stage, StageContext, StageRegistry, render_a1, run_stage_cpu,
+    ColorContract, ImageTile, InputKind, MemoryProfiles, ProcessVersion, ProfileResolver,
+    ProfileResources, RgbImage, Roi, SaturationClip, SensorOptions, Stage, StageContext,
+    StageRegistry, render_a1, run_stage_cpu,
 };
 use genzo_raw::CfaPattern;
 
@@ -42,9 +43,75 @@ fn with_detail_features(mut s: DevelopSettings) -> DevelopSettings {
     s
 }
 
+/// テストのカメラプロファイル（ルックテーブルの明度の分割 5・sRGB の符号化）とルック（3D LUT。17³・DOMAIN あり）
+/// （DEV-17。値はテスト用で、実在のプロファイルではない）。
+fn test_profiles() -> &'static ProfileResources {
+    use std::sync::OnceLock;
+    static RES: OnceLock<ProfileResources> = OnceLock::new();
+    RES.get_or_init(|| {
+        let mut lib = MemoryProfiles::new();
+        lib.insert_camera("test", test_dcp(), &"aa".repeat(32));
+        lib.insert_look("test", test_cube(), &"bb".repeat(32));
+        let mut s = DevelopSettings::default();
+        s.profile.camera = Some("test".into());
+        s.profile.look = Some("test".into());
+        ProfileResources::resolve(&s, Some(&lib as &dyn ProfileResolver))
+    })
+}
+
+/// テストの DCP（色相彩度のマップは色相で変わるずれ・彩度で変わる倍率、ルックテーブルは明度でも変わる）。
+fn test_dcp() -> genzo_color::DcpProfile {
+    use genzo_color::{HsvTable, Mat3};
+    let m = typical_camera().map(|r| r.map(f64::from));
+    let table = |hue: u32, sat: u32, val: u32, k: f32| {
+        let mut e = Vec::new();
+        for v in 0..val {
+            for h in 0..hue {
+                for s in 0..sat {
+                    // 彩度 0 の点は色相によらない（実際のプロファイルと同じ形。色相が定まらないため）。
+                    let sf = s as f32;
+                    e.push([
+                        k * (h as f32 * 7.0 - 20.0) * sf,
+                        1.0 + k * 0.1 * sf - 0.02 * h as f32 * sf,
+                        1.0 - 0.04 * v as f32 + 0.01 * h as f32 * sf,
+                    ]);
+                }
+            }
+        }
+        e
+    };
+    genzo_color::DcpProfile {
+        calibration_illuminants: [Some(17), Some(21)],
+        color_matrices: [Some(Mat3::from_rows(m)), Some(Mat3::from_rows(m))],
+        hue_sat_maps: [
+            Some(HsvTable::new([12, 4, 1], false, table(12, 4, 1, 1.0)).unwrap()),
+            Some(HsvTable::new([12, 4, 1], false, table(12, 4, 1, -0.5)).unwrap()),
+        ],
+        look_table: Some(HsvTable::new([9, 5, 5], true, table(9, 5, 5, 0.7)).unwrap()),
+        ..Default::default()
+    }
+}
+
+/// テストのルック（色を回して暗部を持ち上げる 17³ の LUT。入力の範囲は 0〜1.25）。
+fn test_cube() -> genzo_color::CubeLut {
+    let lut = genzo_color::Lut3d::from_fn(17, |v| {
+        [
+            0.05 + 0.9 * v[1],
+            0.03 + 0.8 * v[2] + 0.1 * v[0],
+            0.9 * v[0] * v[0],
+        ]
+    })
+    .unwrap();
+    genzo_color::CubeLut::new(None, 17, lut.data().to_vec(), [0.0; 3], [1.25; 3]).unwrap()
+}
+
 /// RGB のステージを有効にする設定（回転・切り抜きでステージ 9 も有効にする）。
 fn settings_for_all_stages() -> DevelopSettings {
     let mut s = with_detail_features(strong_settings());
+    // カメラプロファイルのルックテーブルとルック（DEV-17。文脈に test_profiles を付ける）。
+    s.profile.camera = Some("test".into());
+    s.profile.look = Some("test".into());
+    s.profile.look_amount = 70.0;
     rotate_and_crop(
         &mut s,
         4.0,
@@ -70,7 +137,8 @@ fn with_context(settings: &DevelopSettings, mut f: impl FnMut(&StageContext<'_>,
             .finish_context(settings)
             .unwrap()
             .with_guide(&guide)
-            .with_input_kind(kind);
+            .with_input_kind(kind)
+            .with_profiles(test_profiles());
         f(&ctx, &a1.image);
     }
 }
@@ -182,6 +250,13 @@ fn every_registered_rgb_stage_matches_the_cpu_version() {
                 continue;
             }
             let params = stage.params(&settings, ctx).unwrap();
+            // カメラプロファイルのルックテーブルは RAW（シーン参照）だけ。
+            if params.is_none()
+                && stage.id() == genzo_pipeline::finish::ProfileLookTableStage::ID
+                && ctx.input_kind == InputKind::DisplayReferred
+            {
+                continue;
+            }
             assert!(
                 params.is_some(),
                 "{}: GPU 版を登録したステージが、テストの設定で有効にならない（テストに設定を足すこと）",
@@ -630,7 +705,9 @@ fn extreme_values_stay_finite() {
             })
             .unwrap();
             let roi = Roi::full(n * n, n);
-            let params = stage.params(&settings, ctx).unwrap().unwrap();
+            let Some(params) = stage.params(&settings, ctx).unwrap() else {
+                continue;
+            };
             let need = stage.input_roi(roi, &params, ctx);
             let input = if need == roi {
                 ImageTile::from_image(roi, image).unwrap()
@@ -703,7 +780,20 @@ fn compare_sensor_stage(
         saturation_clip: clip,
         ..Default::default()
     };
-    let plan = SensorPlan::new(raw, settings, &options).unwrap();
+    compare_sensor_stage_with(g, id, raw, settings, &options, roi);
+}
+
+/// [`compare_sensor_stage`] の設定を指定する版（カメラプロファイルを渡すときなど）。
+fn compare_sensor_stage_with(
+    g: &GpuRenderer,
+    id: &str,
+    raw: &genzo_raw::RawImage,
+    settings: &DevelopSettings,
+    options: &SensorOptions,
+    roi: Roi,
+) {
+    let clip = options.saturation_clip;
+    let plan = SensorPlan::new(raw, settings, options).unwrap();
     let rois = plan.stage_rois(roi).unwrap();
     let ctx = plan.context();
     let mut data = SensorData::Raw(raw);
@@ -970,4 +1060,259 @@ fn sensor_stage_rejects_a_raw_that_does_not_match_the_plan_like_the_cpu_version(
         g.run_sensor_stage(norm, &plan, SensorData::Raw(&rggb), roi)
             .is_ok()
     );
+}
+
+/// ステージ 8 のカメラプロファイル（DEV-17。色相彩度のマップがあれば HSV の表のカーネル）の CPU 版と GPU 版の一致。
+#[test]
+fn stage_8_with_a_camera_profile_matches_the_cpu_version() {
+    let g = gpu_or_skip!();
+    let scene = camera_scene(66, 50);
+    let dcp = std::sync::Arc::new(test_dcp());
+    for (temperature, tint) in [(3200.0, 0.0), (5000.0, 10.0), (6500.0, -15.0)] {
+        let mut settings = DevelopSettings::default();
+        custom_wb(&mut settings, temperature, tint);
+        settings.profile.camera = Some("test".into());
+        let options = SensorOptions {
+            quality: RenderQuality::Draft,
+            camera_profile: Some(std::sync::Arc::clone(&dcp)),
+            ..Default::default()
+        };
+        for cfa in [CfaPattern::RGGB, CfaPattern::GBRG] {
+            let raw = raw_from(&scene, cfa, true);
+            let plan = SensorPlan::new(&raw, &settings, &options).unwrap();
+            assert!(
+                plan.camera_profile()
+                    .is_some_and(|p| p.hue_sat_map.is_some()),
+                "色相彩度のマップがある"
+            );
+            for roi in [Roi::new(-3, -2, 20, 15), Roi::full(33, 25)] {
+                compare_sensor_stage_with(
+                    g,
+                    genzo_pipeline::sensor::ColorMatrixStage::ID,
+                    &raw,
+                    &settings,
+                    &options,
+                    roi,
+                );
+            }
+        }
+    }
+}
+
+/// HSV の表（ルックテーブル）を、色相環・彩度（色域の外を含む）・明度（1 を超える値を含む）の細かい格子で比べる。
+#[test]
+fn look_table_matches_around_the_hue_circle_and_values() {
+    use genzo_color::dcp::{hsv_to_rgb, prophoto_to_working};
+    use genzo_pipeline::finish::ProfileLookTableStage;
+    let g = gpu_or_skip!();
+    let to_working = prophoto_to_working().unwrap().to_f32();
+    let sats = [0.0f32, 0.05, 0.3, 0.7, 1.0, 1.15];
+    let vals = [0.001f32, 0.02, 0.18, 0.5, 0.9, 1.0, 1.7, 6.0];
+    let hues: Vec<f32> = (0..240).map(|i| i as f32 * 0.025).collect();
+    let w = hues.len() as u32;
+    let h = (sats.len() * vals.len()) as u32;
+    let image = RgbImage::from_fn(w, h, ColorContract::B2Working, |x, y| {
+        let s = sats[y as usize % sats.len()];
+        let v = vals[y as usize / sats.len()];
+        to_working.apply(hsv_to_rgb(hues[x as usize], s, v))
+    })
+    .unwrap();
+    let mut settings = DevelopSettings::default();
+    settings.profile.camera = Some("test".into());
+    let frames =
+        genzo_pipeline::CoordinateFrames::new(w, h, genzo_model::Orientation::Normal).unwrap();
+    let ctx = StageContext::new(ProcessVersion::V2, frames).with_profiles(test_profiles());
+    let stage = ProfileLookTableStage;
+    let params = stage.params(&settings, &ctx).unwrap().unwrap();
+    let roi = Roi::full(w, h);
+    let input = ImageTile::from_image(roi, image).unwrap();
+    let (cpu, n_cpu) = run_stage_cpu(&stage, &ctx, &input, roi, &params).unwrap();
+    let (gpu, n_gpu) = g.run_stage(&stage, &ctx, &input, roi, &params).unwrap();
+    let report = compare_pixels(
+        cpu.image.data(),
+        gpu.image.data(),
+        stage_tolerance(stage.id()),
+    );
+    eprintln!("{}: {report}", stage.id());
+    assert!(report.passed(), "{report}");
+    assert_eq!(n_cpu, n_gpu);
+}
+
+/// ローカル補正（マスク。DEV-18・DEV-19）のすべての形・合成・差分を使う設定（処理バージョン 2）。
+fn masks_settings() -> DevelopSettings {
+    use genzo_model::{
+        BrushStroke, ColorSample, LocalAdjustment, LocalDelta, MaskComponent, MaskMode, MaskShape,
+    };
+    let mut s = with_detail_features(strong_settings());
+    s.process_version = 2;
+    let all = LocalDelta {
+        temperature: 40.0,
+        tint: -30.0,
+        exposure_ev: 0.8,
+        contrast: 35.0,
+        highlights: -60.0,
+        shadows: 45.0,
+        whites: 25.0,
+        blacks: -15.0,
+        texture: 50.0,
+        clarity: 40.0,
+        dehaze: 30.0,
+        saturation: -50.0,
+        sharpness: 70.0,
+    };
+    let mut radial = LocalAdjustment {
+        delta: all,
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Radial {
+            cx: 0.35,
+            cy: 0.3,
+            rx: 0.3,
+            ry: 0.18,
+            angle_deg: 25.0,
+            feather: 70.0,
+        }))
+    };
+    radial.components.push(MaskComponent {
+        mode: MaskMode::Subtract,
+        invert: false,
+        shape: MaskShape::Linear {
+            x0: 0.6,
+            y0: 0.0,
+            x1: 0.2,
+            y1: 0.4,
+        },
+    });
+    radial.components.push(MaskComponent {
+        mode: MaskMode::Intersect,
+        invert: false,
+        shape: MaskShape::LuminanceRange {
+            min: 15.0,
+            max: 85.0,
+            smoothness: 60.0,
+        },
+    });
+    let mut brush = LocalAdjustment {
+        delta: LocalDelta {
+            exposure_ev: -0.7,
+            saturation: 60.0,
+            sharpness: -90.0,
+            clarity: -40.0,
+            ..Default::default()
+        },
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Brush {
+            strokes: vec![
+                BrushStroke {
+                    size: 0.12,
+                    feather: 60.0,
+                    flow: 70.0,
+                    density: 90.0,
+                    points: vec![[0.1, 0.1], [0.5, 0.25], [0.9, 0.5]],
+                    ..Default::default()
+                },
+                BrushStroke {
+                    erase: true,
+                    size: 0.05,
+                    feather: 30.0,
+                    points: vec![[0.5, 0.25]],
+                    ..Default::default()
+                },
+            ],
+        }))
+    };
+    brush.components.push(MaskComponent {
+        mode: MaskMode::Intersect,
+        invert: true,
+        shape: MaskShape::ColorRange {
+            samples: vec![
+                ColorSample {
+                    x: 0.2,
+                    y: 0.2,
+                    lab: genzo_color::oklab::linear_bt2020_to_oklab([0.3, 0.12, 0.05]),
+                },
+                ColorSample {
+                    x: 0.3,
+                    y: 0.2,
+                    lab: genzo_color::oklab::linear_bt2020_to_oklab([0.05, 0.1, 0.3]),
+                },
+            ],
+            amount: 60.0,
+        },
+    });
+    // ほぼ全体を覆い（線形の始まりより手前は重み 1）、円形のマスクと重なって色温度・色かぶりの和が ±100 を超える
+    // マスク（和は ±100 に収める）。
+    let warm = LocalAdjustment {
+        delta: LocalDelta {
+            temperature: 100.0,
+            tint: -100.0,
+            ..Default::default()
+        },
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Linear {
+            x0: 0.95,
+            y0: 0.95,
+            x1: 1.0,
+            y1: 1.0,
+        }))
+    };
+    // 全体の値が 0 で、マスクだけで有効なステージ（コントラストは全体の値なし）。
+    s.contrast = 0.0;
+    s.masks = vec![radial, brush, warm];
+    s
+}
+
+#[test]
+fn local_field_and_local_stages_match_the_cpu_version() {
+    // 局所の値の面（local.wgsl の local_main）と、局所の値を引くステージ 10〜14 のカーネル（全体の値あり・マスクだけ）。
+    use genzo_pipeline::FinishPlan;
+    let g = gpu_or_skip!();
+    let settings = masks_settings();
+    let mut tested = Vec::new();
+    with_context(&settings, |ctx, a1_image| {
+        let plan = FinishPlan::new(&settings, ctx).unwrap();
+        let local = plan.local().expect("マスクがある").clone();
+        assert_eq!(local.slots.count(), 13);
+        for stage in genzo_pipeline::finish::scene_stages() {
+            let Some(params) = stage.params(&settings, ctx).unwrap() else {
+                continue;
+            };
+            if stage.id() == "finish.geometry" {
+                continue;
+            }
+            let (input, out) = case_for(stage, a1_image, ctx, &settings);
+            // 局所の値の面: 入力のタイルの範囲で作る（出力を覆う）。
+            let cpu_field = local.field(&input).unwrap();
+            let gpu_field = g.local_field(&local, &input).unwrap();
+            assert_eq!(gpu_field.roi, cpu_field.roi);
+            let r = compare(
+                &cpu_field.planes,
+                &gpu_field.planes,
+                stage_tolerance("local.field"),
+            );
+            eprintln!("local.field（{}）: {r}", stage.id());
+            assert!(r.passed(), "local.field: {r}");
+            assert!(
+                cpu_field.planes.iter().any(|v| *v != 0.0),
+                "マスクが効く画素がある"
+            );
+            let lctx = ctx.with_local(&cpu_field);
+            let (c, n_cpu) = run_stage_cpu(stage, &lctx, &input, out, &params).unwrap();
+            let (gp, n_gpu) = g
+                .run_stage(stage, &lctx, &input, out, &params)
+                .unwrap_or_else(|e| panic!("{}: {e}", stage.id()));
+            let report =
+                compare_pixels(c.image.data(), gp.image.data(), stage_tolerance(stage.id()));
+            eprintln!("{}（ローカル補正）: {report}", stage.id());
+            assert!(report.passed(), "{}: {report}", stage.id());
+            assert_eq!(n_cpu, n_gpu, "{}", stage.id());
+            tested.push(stage.id());
+        }
+    });
+    for id in [
+        "finish.exposure",
+        "finish.contrast",
+        "finish.tone",
+        "finish.texture",
+        "finish.color",
+        "finish.sharpen",
+    ] {
+        assert!(tested.contains(&id), "{id} を比べていない: {tested:?}");
+    }
 }

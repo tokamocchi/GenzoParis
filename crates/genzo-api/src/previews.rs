@@ -32,7 +32,8 @@ use genzo_model::{
 };
 use genzo_pipeline::finish::output::{Dither, quantize_u8, quantize_u16};
 use genzo_pipeline::{
-    ColorContract, OutputTarget, PhotoSource, PreviewRequest, RgbImage, SourceId, SourceImage,
+    ColorContract, Engine, OutputTarget, PhotoSource, PreviewRequest, RgbImage, SourceId,
+    SourceImage,
 };
 use genzo_worker::Lane;
 
@@ -70,6 +71,7 @@ pub(crate) fn source_thumb_rev(generation: &str, file_id: FileId, revision: u32)
 /// 外部データ（`render_deps`）は、保存された値ではなく、`raw_decoder`（RAW なら今の RAW デコーダの識別子。
 /// RAW 以外は `None`）だけを入れた値で置き換えて求める（写真を展開せずに求めるため。`deps` の doc）。
 pub(crate) fn rendered_key(
+    engine: &Engine,
     generation: &str,
     file_id: FileId,
     revision: u32,
@@ -82,6 +84,7 @@ pub(crate) fn rendered_key(
         _ => (CacheSpec::L0_THUMBNAIL, L0_FORMAT_VERSION),
     };
     let settings = crate::deps::with_render_deps(
+        engine,
         settings,
         &genzo_model::RenderDeps {
             raw_decoder: raw_decoder.unwrap_or_default().to_owned(),
@@ -239,6 +242,7 @@ pub(crate) fn load_source(
                 .as_ref()
                 .map(crate::types::LensCorrectionInfo::of),
             lens_correction_note: frame.lens_correction_note.clone(),
+            camera: frame.image.metadata.camera_name(),
         };
         let metadata = frame.image.metadata.clone();
         LoadedSource {
@@ -270,6 +274,7 @@ pub(crate) fn load_source(
                 as_shot_white_balance: None,
                 lens_correction: None,
                 lens_correction_note: None,
+                camera: None,
             },
             file,
             render_deps: genzo_model::RenderDeps::default(),
@@ -415,7 +420,7 @@ fn regenerate_inner(
     let request = PreviewRequest::new(RenderQuality::Final, CacheSpec::L1_PREVIEW.long_edge)
         .with_output(OutputTarget::CacheDisplayP3);
     // 保存された設定の外部データを、実際に使う値に置き換えて描く（`deps` の doc）。
-    let effective = crate::deps::with_render_deps(&settings, &deps);
+    let effective = crate::deps::with_render_deps(&inner.engine, &settings, &deps);
     let rendered = inner.render_preview(&source, &effective, &request, Some(variant_id))?;
     *warnings_out.borrow_mut() = rendered.warnings;
     let out = rendered
@@ -445,6 +450,7 @@ fn regenerate_inner(
     let g = &inner.cache_generation;
     let dec = inner.raw_decoder_for(&file.name);
     let l0_key = rendered_key(
+        &inner.engine,
         g,
         file.file_id,
         file.revision,
@@ -453,6 +459,7 @@ fn regenerate_inner(
         CacheKind::L0Thumb,
     );
     let l1_key = rendered_key(
+        &inner.engine,
         g,
         file.file_id,
         file.revision,
@@ -645,6 +652,7 @@ impl Core {
             let f = variant_file(c, variant_id)?;
             let s = c.develop_settings(variant_id)?;
             Ok(rendered_key(
+                &inner.engine,
                 &inner.cache_generation,
                 f.file_id,
                 f.revision,
@@ -729,8 +737,9 @@ mod tests {
     fn rendered_keys_follow_the_decoder_and_generation() {
         let file = FileId::new(1);
         let s = DevelopSettings::default();
+        let engine = Engine::new(genzo_pipeline::EngineConfig::default()).unwrap();
         let k = |g: &str, s: &DevelopSettings, dec: Option<&str>| {
-            rendered_key(g, file, 1, s, dec, CacheKind::L1Preview)
+            rendered_key(&engine, g, file, 1, s, dec, CacheKind::L1Preview)
         };
         let base = k("g1", &s, Some("libraw-0.21.2"));
         assert_ne!(base, k("g1", &s, Some("libraw-0.22.0")), "デコーダ");

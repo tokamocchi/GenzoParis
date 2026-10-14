@@ -23,11 +23,13 @@
 //! | [`sensor::highlight`] | ステージ 4: ハイライト復元（処理バージョン 2。DEV-06。近傍の色の比で再構成・明るさだけ復元） | 2.1 節・2.6 節 B1 |
 //! | [`sensor::demosaic`] | ステージ 5: RCD・双線形・2 × 2 の簡易処理 | 2.1 節・2.2 節 |
 //! | [`sensor::denoise`] | ステージ 6: ノイズ軽減（処理バージョン 2。DEV-13。ウェーブレットの係数の縮小。輝度と色） | 2.1 節・IQ-07b |
-//! | [`sensor::color_matrix`] | ステージ 8: カメラ RGB → リニア BT.2020 | 2.6 節 |
+//! | [`sensor::color_matrix`] | ステージ 8: カメラ RGB → リニア BT.2020（処理バージョン 2 のカメラプロファイル（DCP）の行列・色相彩度のマップを含む） | 2.6 節、DEV-17 |
+//! | [`profile`] | カメラプロファイル・ルック（処理バージョン 2。DEV-17）: ID から引く仕組み（[`profile::ProfileResolver`]）、描画ごとに引いたもの（[`profile::ProfileResources`]）、ステージ 8 の計画（[`profile::CameraProfilePlan`]） | 2.1 節・2.5 節 |
 //! | [`resample`] | 面積平均の縮小（決まった縮小フィルタ）とプレビューの寸法 | 2.2 節・IQ-07b |
 //! | [`interp`] | 明示的な補間（1D LUT・双線形） | 2.3 節 |
 //! | [`border`] | 画像の端の外の鏡映 | 2.7 節 |
 //! | [`coords`] | 座標系 S / O / D / G / C・RAW の向き・歪曲補正（D）・回転（G）・ステージ 9 の入力の格子（[`SensorGrid`]） | 2.7 節 |
+//! | [`local`] | ローカル補正（マスク。処理バージョン 2。DEV-18・DEV-19）: マスクの重み（線形・円形・ブラシのラスター・色域・輝度の範囲と合成）、局所の値の面（[`LocalField`]）、ステージ 10〜14 の画素ごとの値 | 2.1 節・2.7 節 |
 //! | [`lens`] | レンズ補正（処理バージョン 2。DEV-14）: ステージ 7 の周辺減光・倍率色収差（[`lens::LensStagePlan`]）、ステージ 9 の歪曲補正（[`lens::RadialDistortion`]）、埋め込みの補正の情報の解釈 | 2.1 節・2.7 節 |
 //! | [`sanitize`] | NaN・無限大の置き換え、対数の下限 | 2.3 節・2.6 節 |
 //! | [`guide`] | 段階 B: ガイドの計算（[`compute_guide`]・ガイデッドフィルタ）とキャッシュのキーの項目（[`GuideSpec`]） | 2.2 節・2.7 節 |
@@ -35,6 +37,7 @@
 //! | [`finish`] | 仕上げのステージ 9〜17 の一覧・段階 C の文脈（[`finish_context`]）・基準の実行とタイルの範囲（[`FinishPlan`]） | 2.1 節・2.2 節・2.6 節 |
 //! | [`finish::geometry`] | ステージ 9: 向き・回転・歪曲補正・切り抜き（1 回のリサンプリング。バイキュービック）と C の格子（[`finish::GeometryPlan`]） | 2.1 節・2.7 節 |
 //! | [`finish::exposure`] | ステージ 10: 露光量・コントラスト | DEV-04・IQ-02 |
+//! | [`finish::look`] | ステージ 10 の後: カメラプロファイルのルックテーブル、ステージ 15 の後: 独自のルック（3D LUT）（処理バージョン 2） | DEV-17 |
 //! | [`finish::tone`] | ステージ 11: ハイライト・シャドウ・白・黒（ガイドを使うローカルトーンマッピング） | DEV-05・2.7 節・PoC-5 |
 //! | [`finish::presence`] | ステージ 12: テクスチャ・明瞭度・かすみの除去（処理バージョン 2。輝度の対数の周波数分解・ガイド・かすみの推定） | DEV-11・2.7 節 |
 //! | [`finish::frequency`] | ステージ 12・14 の共通の部品（輝度の対数の領域・ガウスのぼかし） | 2.3 節 |
@@ -45,7 +48,7 @@
 //! | [`finish::effects`] | ステージ 16 の後: 効果（処理バージョン 2。切り抜き後の周辺光量補正・粒子） | DEV-24 |
 //! | [`finish::output`] | ステージ 17a 画面・17b 書き出し（量子化とディザリング）・17c ヒストグラム | 2.6 節・DEV-26 |
 //! | [`finish::reserved`] | v1 のステージの ID（4・6・7。実装は [`sensor::highlight`]・[`sensor::denoise`]・[`lens`]）と、処理バージョンで無視する設定の一覧 | 2.1 節 |
-//! | [`engine`] | エンジン: 段階 A0 / A1 / B のキャッシュ（[`Engine`]・ヒット・ミスの回数）、プレビュー（[`Engine::render_preview`]）、等倍・書き出しのタイル処理（[`FullResolutionJob`]）、ルーペの範囲（[`Engine::render_region`]）、書き出し（[`Engine::export`]）、取り消し（[`RenderControl`]）、切り抜く前の全体の表示（[`PreviewRequest::uncropped`]・[`Engine::full_resolution_with`]）、WB のスポイト（[`Engine::white_balance_at`]） | 2.2 節・2.4 節・2.7 節・4.1 節・6.1 節、DEV-03・DEV-15 |
+//! | [`engine`] | エンジン: 段階 A0 / A1 / B のキャッシュ（[`Engine`]・ヒット・ミスの回数）、プレビュー（[`Engine::render_preview`]）、等倍・書き出しのタイル処理（[`FullResolutionJob`]）、ルーペの範囲（[`Engine::render_region`]）、書き出し（[`Engine::export`]）、取り消し（[`RenderControl`]）、切り抜く前の全体の表示（[`PreviewRequest::uncropped`]・[`Engine::full_resolution_with`]）、WB のスポイト（[`Engine::white_balance_at`]）、マスクの重ねて表示・色域のスポイト（[`Engine::mask_overlay`]・[`Engine::mask_color_at`]） | 2.2 節・2.4 節・2.7 節・4.1 節・6.1 節、DEV-03・DEV-15 |
 //! | [`input`] | RAW 以外の入力: 符号化した RGB と ICC からリニア BT.2020（B2）へ（[`working_image_from_encoded`]） | 2.6 節 |
 //!
 //! # データの流れ
@@ -207,8 +210,8 @@
 //!   警告できる）。処理バージョン 2 では、ハイライト復元（ステージ 4。[`sensor::highlight`]）・ノイズ軽減（ステージ 6。
 //!   [`sensor::denoise`]）・レンズ補正（ステージ 7 と、ステージ 9 の歪曲補正。[`lens`]）・カラーミキサー・カラー
 //!   グレーディング・白黒（ステージ 13。[`finish::color`]）・テクスチャ・明瞭度・かすみの除去（ステージ 12。
-//!   [`finish::presence`]）・シャープ（ステージ 14。[`finish::sharpen`]）・効果（ステージ 16。[`finish::effects`]）を
-//!   適用する（マスクはまだ予約のまま）。
+//!   [`finish::presence`]）・シャープ（ステージ 14。[`finish::sharpen`]）・効果（ステージ 16。[`finish::effects`]）・
+//!   ローカル補正（マスク。ステージ 10〜14 の画素ごとの値。[`local`]）を適用する。
 //! - **写真ごとの乱数の種**: 粒子の模様は [`StageContext::photo_seed`]（エンジンが [`SourceId::photo_seed`] から入れる）と
 //!   G の座標だけで決まる。プレビュー・等倍・書き出しで同じ種を使う。
 //!
@@ -231,9 +234,9 @@
 //! キャッシュ L0 / L1 の符号化と保存（B5 は [`OutputTarget::CacheDisplayP3`] の出力を量子化したもの）、
 //! 書き出しのファイル（genzo-media）。
 //!
-//! **v1 / PoC で決めること**: マスク（ステージ 4・6・7・12〜14・16 の効果と歪曲補正は処理バージョン 2 で実装した。
-//! 式と定数の多くは仮置き。[`sensor::highlight`]・[`sensor::denoise`]・[`lens`]・[`finish::color`]・
-//! [`finish::presence`]・[`finish::sharpen`]・[`finish::effects`] の doc）。仮置きの式と定数
+//! **v1 / PoC で決めること**: ステージ 4・6・7・12〜14・16 の効果と歪曲補正・ローカル補正（マスク）は処理バージョン 2 で
+//! 実装したが、式と定数の多くは仮置き（[`sensor::highlight`]・[`sensor::denoise`]・[`lens`]・[`finish::color`]・
+//! [`finish::presence`]・[`finish::sharpen`]・[`finish::effects`]・[`local`] の doc）。仮置きの式と定数
 //! （コントラスト・トーン・ガイド・自然な彩度・ステージ 15・パラメトリックのカーブ）は PoC-4 / PoC-5
 //! で見直す（各モジュールの doc に「仮置き」と書いた）。IQ-07b（縮小プレビューとフル解像度の一致）は、
 //! 細線・色の境界の合成画像で満たせていない（tests/engine.rs の計測値。プレビューは縮小してから
@@ -265,6 +268,8 @@ pub mod image;
 pub mod input;
 pub mod interp;
 pub mod lens;
+pub mod local;
+pub mod profile;
 pub mod registry;
 pub mod resample;
 pub mod sanitize;
@@ -276,15 +281,17 @@ pub use contract::ColorContract;
 pub use coords::{CoordinateFrames, SensorGrid};
 pub use engine::{
     CacheCounters, DEFAULT_TILE_SIZE, Engine, EngineConfig, EngineStats, ExportOptions,
-    ExportPixels, ExportedImage, FullResolutionJob, NeverCancel, OutputTarget, PhotoSource,
-    PreviewRender, PreviewRequest, RegionRender, RenderControl, SourceId, WB_PICK_RADIUS,
-    WhiteBalancePick,
+    ExportPixels, ExportedImage, FullResolutionJob, MaskColorPick, MaskOverlay, MaskReference,
+    NeverCancel, OutputTarget, PhotoSource, PreviewRender, PreviewRequest, RegionRender,
+    RenderControl, SourceId, WB_PICK_RADIUS, WhiteBalancePick,
 };
 pub use error::{PipelineError, Result};
 pub use finish::{FinishPlan, finish_context};
 pub use guide::{GuideSpec, compute_guide};
 pub use image::{CfaImage, GrayImage, ImageTile, RgbImage, Roi};
 pub use input::working_image_from_encoded;
+pub use local::{LocalField, LocalParam, LocalPlan, LocalSlots};
+pub use profile::{MemoryProfiles, ProfileResolver, ProfileResources};
 pub use registry::{GpuCoverage, StageRegistry};
 pub use resample::{DEFAULT_PREVIEW_LONG_EDGE, downscale_area, preview_size};
 pub use sensor::demosaic::DemosaicMethod;

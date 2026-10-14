@@ -129,6 +129,7 @@ use super::scene_to_display::{SCENE_TO_DISPLAY_MIDDLE_GRAY, SCENE_TO_DISPLAY_MID
 use crate::contract::ColorContract;
 use crate::error::Result;
 use crate::image::{ImageTile, Roi};
+use crate::local::{LocalParam, LocalSlots, LocalValues, add_unit, checked_field, local_slots};
 use crate::stage::{InputKind, Stage, StageContext, StageParams};
 use crate::version::ProcessVersion;
 
@@ -507,6 +508,10 @@ pub struct ColorStageParams {
     pub black_white: Option<BlackWhiteParams>,
     /// カラーグレーディング（処理バージョン 2 で、どれかの範囲が何かするとき）。
     pub grading: Option<GradingParams>,
+    /// ローカル補正の局所の値の面の割り当て（処理バージョン 2 で彩度の面があるときだけ。[`crate::local`]）。
+    pub local: Option<LocalSlots>,
+    /// 全体の色の項目が何もせず、ローカル補正だけで有効か（局所の彩度が 0 の画素は変えない）。
+    pub local_only: bool,
 }
 
 impl ColorStageParams {
@@ -525,6 +530,8 @@ impl ColorStageParams {
             mixer: None,
             black_white: None,
             grading: None,
+            local: None,
+            local_only: false,
         }
     }
 
@@ -582,6 +589,22 @@ impl ColorStageParams {
         };
         let kv = 1.0 + self.vibrance * VIBRANCE_MAX * wc * (1.0 - SKIN_PROTECTION * skin);
         ks * kv
+    }
+
+    /// 局所の値 `v` を当てた 1 画素（ローカル補正。彩度 `ds` を足す: `clamp(彩度 / 100 + ds / 100, −1, 2)`。`ds` が 0 なら
+    /// 全体の式。全体の色の項目が何もしないときは、`ds` が 0 の画素を変えない）。
+    #[inline]
+    pub fn apply_local(&self, c: [f32; 3], v: &LocalValues) -> [f32; 3] {
+        let ds = v[LocalParam::Saturation.index()];
+        if ds == 0.0 {
+            if self.local_only {
+                return c;
+            }
+            return self.apply(c);
+        }
+        let mut q = *self;
+        q.saturation = add_unit(self.saturation, ds, -1.0, 2.0);
+        q.apply(c)
     }
 
     /// 1 画素に適用する（モジュールの doc の順）。
@@ -685,9 +708,11 @@ impl Stage for ColorStage {
         settings: &DevelopSettings,
         ctx: &StageContext<'_>,
     ) -> Result<Option<StageParams>> {
-        let c = settings.normalized().color;
-        let p = ColorStageParams::from_color(&c, ctx.process_version, ctx.input_kind);
-        Ok((!p.is_identity()).then(|| StageParams::new(p)))
+        let s = settings.normalized();
+        let mut p = ColorStageParams::from_color(&s.color, ctx.process_version, ctx.input_kind);
+        p.local = local_slots(&s, ctx).filter(|l| l.uses(LocalParam::Saturation));
+        p.local_only = p.is_identity();
+        Ok((!p.local_only || p.local.is_some()).then(|| StageParams::new(p)))
     }
     fn input_roi(&self, output_roi: Roi, _: &StageParams, _: &StageContext<'_>) -> Roi {
         output_roi
@@ -701,9 +726,11 @@ impl Stage for ColorStage {
     ) -> Result<()> {
         let p = *params.expect::<ColorStageParams>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 | ProcessVersion::V2 => {
-                map_pixels(input, output, |_, _, c| p.apply(c))
-            }
+            ProcessVersion::V1 | ProcessVersion::V2 => {}
+        }
+        match checked_field(ctx, Self::ID, p.local, output.roi)? {
+            None => map_pixels(input, output, |_, _, c| p.apply(c)),
+            Some(f) => map_pixels(input, output, |x, y, c| p.apply_local(c, &f.values(x, y))),
         }
     }
 }

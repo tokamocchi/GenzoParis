@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 
 use genzo_media::{ExifData, FfmpegTools, RgbImage8};
 use genzo_model::{GpsCoord, OutputColorSpace};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const GENZO: &str = env!("CARGO_BIN_EXE_genzo");
 
@@ -1615,6 +1615,228 @@ fn export_png(env: &Env, id: &str, name: &str) -> image::RgbImage {
         "png16",
     ]);
     image::open(written_path(&e)).unwrap().to_rgb8()
+}
+
+/// `develop mask`（ローカル補正。DEV-18・DEV-19）: 追加（円形・輝度・色域のスポイト・標準入力のブラシ）・部品の
+/// 追加と削除・調整と有効の変更・重ねて表示の PNG・色のスポイト・削除。書き出しで、マスクの中だけが明るくなる。
+/// 番号の誤り・形の指定の誤りは終了コードで知らせる。
+#[test]
+fn develop_masks_are_added_changed_and_removed() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (90, 60), 4, None, false);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.jpg").to_string();
+    let label = || {
+        let history = env.json(&["develop", "history", &a]);
+        history.as_array().unwrap().last().unwrap()["label"].clone()
+    };
+    assert_eq!(
+        env.json(&["develop", "mask", "list", &a])["masks"],
+        json!([])
+    );
+    let before = export_png(&env, &a, "out-before");
+    // 90 × 60 の画像の G 座標は (0, 0)〜(1, 0.6667)。左上に半径 0.12 の円（ぼかしなし）で +1 EV。
+    let added = env.json(&[
+        "develop",
+        "mask",
+        "add",
+        &a,
+        "--radial",
+        "0.2,0.2,0.12,0.12,0,0",
+        "--exposure",
+        "1",
+        "--name",
+        "左上",
+    ]);
+    assert_eq!(added["changed"], true);
+    let m = &added["masks"][0];
+    assert_eq!(m["number"], 1);
+    assert_eq!(m["display_name"], "左上");
+    assert_eq!(m["components"][0]["mode"], "add");
+    assert_eq!(m["components"][0]["shape"]["radial"]["rx"], json!(0.12));
+    assert_eq!(m["delta"]["exposure_ev"], 1.0);
+    assert_eq!(label(), "マスクを追加");
+    let after = export_png(&env, &a, "out-mask");
+    let n = 6;
+    let inside = (18 - n / 2, 18 - n / 2);
+    let outside = (90 - n, 60 - n);
+    let (i0, i1) = (mean_luma(&before, inside, n), mean_luma(&after, inside, n));
+    assert!(i1 > i0 + 10.0, "マスクの中: {i0:.2} → {i1:.2}");
+    let (o0, o1) = (
+        mean_luma(&before, outside, n),
+        mean_luma(&after, outside, n),
+    );
+    assert!((o1 - o0).abs() < 0.5, "マスクの外: {o0:.2} → {o1:.2}");
+    // 輝度の範囲を交差で足す（既定の合成は交差）。
+    let part = env.json(&[
+        "develop",
+        "mask",
+        "add-part",
+        &a,
+        "1",
+        "--luminance",
+        "0,60,10",
+    ]);
+    let c = &part["masks"][0]["components"][1];
+    assert_eq!(c["mode"], "intersect");
+    assert_eq!(
+        c["shape"]["luminance_range"],
+        json!({"min": 0.0, "max": 60.0, "smoothness": 10.0})
+    );
+    assert_eq!(label(), "マスク「左上」の範囲");
+    // 調整と有効の変更。
+    let set = env.json(&[
+        "develop",
+        "mask",
+        "set",
+        &a,
+        "1",
+        "--exposure",
+        "-0.5",
+        "--dehaze",
+        "20",
+    ]);
+    assert_eq!(set["masks"][0]["delta"]["exposure_ev"], -0.5);
+    assert_eq!(set["masks"][0]["delta"]["dehaze"], 20.0);
+    assert_eq!(label(), "マスク「左上」の露光量 -0.50・かすみの除去 +20");
+    env.json(&["develop", "mask", "set", &a, "1", "--enabled", "off"]);
+    assert_eq!(label(), "マスク「左上」を無効にする");
+    env.json(&["develop", "mask", "set", &a, "1", "--enabled", "on"]);
+    // 重ねて表示の PNG（プレビューの大きさ。円の中が白、外が黒）。
+    env.json(&["develop", "mask", "remove-part", &a, "1", "2"]);
+    let png = env.path("overlay.png");
+    let o = env.json(&[
+        "develop",
+        "mask",
+        "overlay",
+        &a,
+        "1",
+        "--out",
+        png.to_str().unwrap(),
+    ]);
+    let img = image::open(&png).unwrap().to_rgb8();
+    assert_eq!(
+        (img.width(), img.height()),
+        (
+            o["overlay"]["width"].as_u64().unwrap() as u32,
+            o["overlay"]["height"].as_u64().unwrap() as u32
+        )
+    );
+    let (w, h) = img.dimensions();
+    assert_eq!(img.get_pixel(w * 2 / 10, h * 3 / 10).0, [255, 255, 255]);
+    assert_eq!(img.get_pixel(w - 2, h - 2).0, [0, 0, 0]);
+    assert!(o["covered_pixels"].as_u64().unwrap() > 0);
+    // 既にあるファイルには書かない（使い方の誤り）。
+    let again = env.run(&[
+        "develop",
+        "mask",
+        "overlay",
+        &a,
+        "1",
+        "--out",
+        png.to_str().unwrap(),
+    ]);
+    assert_eq!(again.code, 2, "{}", again.stderr);
+    // 色のスポイト: 点の G 座標と OKLab。
+    let pick = env.json(&[
+        "develop",
+        "mask",
+        "pick-color",
+        &a,
+        "--x",
+        "0.5",
+        "--y",
+        "0.5",
+    ]);
+    assert!((pick["x"].as_f64().unwrap() - 0.5).abs() < 0.02, "{pick}");
+    assert!(
+        (pick["y"].as_f64().unwrap() - 1.0 / 3.0).abs() < 0.02,
+        "{pick}"
+    );
+    assert!(pick["lab"][0].as_f64().unwrap() > 0.0);
+    // 色域のマスク（見本 2 つ・許容量 30）。
+    let color = env.json(&[
+        "develop",
+        "mask",
+        "add",
+        &a,
+        "--color-at",
+        "0.5,0.5",
+        "--color-at",
+        "0.2,0.2",
+        "--color-amount",
+        "30",
+    ]);
+    let cr = &color["masks"][1]["components"][0];
+    assert_eq!(cr["mode"], "intersect");
+    assert_eq!(
+        cr["shape"]["color_range"]["samples"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(cr["shape"]["color_range"]["amount"], 30.0);
+    assert_eq!(color["masks"][1]["display_name"], "マスク 2");
+    // 標準入力のブラシ。
+    let brush = env.run_stdin(
+        &["develop", "mask", "add", &a, "--brush", "-", "--json"],
+        Some(r#"[{"size": 0.05, "points": [[0.5, 0.3], [0.6, 0.3]]}, {"erase": true, "points": [[0.55, 0.3]]}]"#),
+    );
+    assert_eq!(brush.code, 0, "{}", brush.stderr);
+    let strokes = &brush.json()["masks"][2]["components"][0]["shape"]["brush"]["strokes"];
+    assert_eq!(strokes.as_array().unwrap().len(), 2);
+    assert_eq!(strokes[1]["erase"], true);
+    assert_eq!(strokes[1]["size"], json!(0.05));
+    // 一覧（人が読む表）。
+    let table = env.run(&["develop", "mask", "list", &a]);
+    assert_eq!(table.code, 0, "{}", table.stderr);
+    assert!(table.stdout.contains("左上"), "{}", table.stdout);
+    assert!(
+        table.stdout.contains("色域 2 色（交差）"),
+        "{}",
+        table.stdout
+    );
+    assert!(table.stdout.contains("ブラシ 2 本"), "{}", table.stdout);
+    // 削除。
+    let removed = env.json(&["develop", "mask", "remove", &a, "2"]);
+    assert_eq!(removed["masks"].as_array().unwrap().len(), 2);
+    assert_eq!(label(), "マスクを削除");
+    // 誤り: 番号が範囲の外（入力の誤り 1）・形がない・形が 2 つ・0 番（使い方の誤り 2）・値の範囲の外（1）。
+    assert_eq!(
+        env.run(&["develop", "mask", "set", &a, "5", "--exposure", "1"])
+            .code,
+        1
+    );
+    assert_eq!(env.run(&["develop", "mask", "add", &a]).code, 2);
+    assert_eq!(
+        env.run(&[
+            "develop",
+            "mask",
+            "add",
+            &a,
+            "--linear",
+            "0,0,1,1",
+            "--luminance",
+            "0,50"
+        ])
+        .code,
+        2
+    );
+    assert_eq!(env.run(&["develop", "mask", "remove", &a, "0"]).code, 2);
+    assert_eq!(
+        env.run(&["develop", "mask", "set", &a, "1", "--exposure", "9"])
+            .code,
+        1
+    );
+    assert_eq!(
+        env.json(&["develop", "mask", "list", &a])["masks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 /// `develop set` の白黒・カラーミキサー・カラーグレーディングのオプション（DEV-25・DEV-09・DEV-10）: 保存・
@@ -4499,4 +4721,245 @@ fn video_commands_report_playback_and_make_proxies() {
     assert_eq!(r.code, 1, "{}", r.stdout);
     assert_eq!(r.json()["error"]["kind"], "invalid_input");
     assert_eq!(hashes(&env.photos), before);
+}
+
+/// 合成のカメラプロファイル（DCP。光源 1 つ）。
+fn write_test_dcp(path: &Path, model: &str) {
+    let profile = genzo_color::DcpProfile {
+        name: Some(format!("{model} テスト")),
+        unique_camera_model: Some(model.to_owned()),
+        calibration_illuminants: [Some(21), None],
+        color_matrices: [
+            Some(genzo_color::Mat3::from_rows([
+                [0.7424, -0.2329, -0.0466],
+                [-0.4598, 1.2471, 0.2347],
+                [-0.0715, 0.1505, 0.6066],
+            ])),
+            None,
+        ],
+        tone_curve: Some(vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]]),
+        ..Default::default()
+    };
+    std::fs::write(path, profile.to_bytes()).unwrap();
+}
+
+/// 合成の 3D LUT（大きさ 2。赤を強め、青を弱める）。
+fn write_test_cube(path: &Path) {
+    let mut text = String::from("TITLE \"テストのルック\"\nLUT_3D_SIZE 2\n");
+    for b in [0.0f32, 1.0] {
+        for g in [0.0f32, 1.0] {
+            for r in [0.0f32, 1.0] {
+                text.push_str(&format!("{} {g} {}\n", (r * 1.5).min(1.0), b * 0.7));
+            }
+        }
+    }
+    std::fs::write(path, text).unwrap();
+}
+
+/// カメラプロファイル・ルック（DEV-17）: `profile inspect / import / list / show / remove`、`develop set --profile /
+/// --look / --look-amount`（取り込んでいない ID は警告）、`develop copy --groups profile`、`render --cube`・`--dcp`
+/// （種類の違うファイルは使い方の誤り）。取り込みで元のファイルは変えない。
+#[test]
+fn profile_import_list_develop_and_render_options() {
+    let env = Env::new();
+    for (i, name) in ["A.jpg", "B.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (90, 60), i as u8 + 1, None, false);
+    }
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+    );
+    let src = env.path("profiles-src");
+    std::fs::create_dir_all(&src).unwrap();
+    let dcp = src.join("テスト機 標準.dcp");
+    write_test_dcp(&dcp, "Test Camera X1");
+    let cube = src.join("film.cube");
+    write_test_cube(&cube);
+    let bad = src.join("壊れた.dcp");
+    std::fs::write(&bad, b"not a dcp").unwrap();
+    let before_src = hashes(&src);
+
+    // 取り込まずに確かめる（カタログは使わない）。
+    let r = genzo_with(
+        &[
+            "profile",
+            "inspect",
+            dcp.to_str().unwrap(),
+            "--camera",
+            "test camera x1",
+            "--json",
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["kind"], "camera");
+    assert_eq!(v["id"], "テスト機 標準");
+    assert_eq!(v["matches_camera"], true);
+    assert!(
+        v["notes"][0].as_str().unwrap().contains("トーンカーブ"),
+        "{v}"
+    );
+
+    // 取り込み（壊れたファイルがあれば終了コード 3）。
+    let r = env.run(&[
+        "profile",
+        "import",
+        dcp.to_str().unwrap(),
+        cube.to_str().unwrap(),
+        bad.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["imported"].as_array().unwrap().len(), 2);
+    assert_eq!(v["failed"].as_array().unwrap().len(), 1);
+    assert_eq!(hashes(&src), before_src, "元のファイルは変えない");
+    let list = env.json(&["profile", "list", "--camera", "Test Camera X1"]);
+    let profiles = list["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2, "{list}");
+    assert_eq!(profiles[0]["matches_camera"], true);
+    let looks = env.json(&["profile", "list", "--kind", "look"]);
+    assert_eq!(looks["profiles"].as_array().unwrap().len(), 1);
+    assert_eq!(looks["profiles"][0]["name"], "テストのルック");
+    let show = env.json(&["profile", "show", "look", "film"]);
+    assert_eq!(show["sha256"].as_str().unwrap().len(), 64);
+    let text = env.run(&["profile", "list"]);
+    assert_eq!(text.code, 0);
+    assert!(text.stdout.contains("film"), "{}", text.stdout);
+
+    // 現像設定に指定する（RAW 以外の写真でもルックは使われる）。
+    let plain = export_png(&env, &a, "out-plain");
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--look",
+        "film",
+        "--look-amount",
+        "80",
+    ]);
+    assert_eq!(set["settings"]["profile"]["look"], "film");
+    assert_eq!(set["settings"]["profile"]["look_amount"], 80.0);
+    assert_eq!(
+        set["settings"]["render_deps"]["look"]["sha256"], show["sha256"],
+        "使ったファイルの内容を記録する"
+    );
+    let history = env.json(&["develop", "history", &a]);
+    assert_eq!(
+        history.as_array().unwrap().last().unwrap()["label"],
+        "ルック「film」"
+    );
+    let looked = export_png(&env, &a, "out-look");
+    assert_eq!(looked.dimensions(), plain.dimensions());
+    let (w, h) = looked.dimensions();
+    let center = (w / 2 - 3, h / 2 - 3);
+    assert_ne!(
+        mean_luma(&plain, center, 6).to_bits(),
+        mean_luma(&looked, center, 6).to_bits()
+    );
+    // 取り込んでいない ID は警告する（保存はする）。
+    let r = env.run(&["develop", "set", &b, "--look", "ない"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stderr.contains("取り込まれていません"), "{}", r.stderr);
+    let r = env.run(&[
+        "develop",
+        "set",
+        &b,
+        "--look",
+        "none",
+        "--look-amount",
+        "101",
+    ]);
+    assert_eq!(r.code, 1, "範囲の外: {}", r.stderr);
+    // 項目を選んで写す。
+    env.json(&["develop", "copy", &a, "--to", &b, "--groups", "profile"]);
+    let got = env.json(&["develop", "get", &b]);
+    assert_eq!(got["profile"]["look"], "film");
+    assert_eq!(got["profile"]["look_amount"], 80.0);
+    assert_eq!(got["exposure_ev"], 0.0);
+    // 標準の色・ルックなしに戻す。
+    let set = env.json(&[
+        "develop",
+        "set",
+        &b,
+        "--profile",
+        "standard",
+        "--look",
+        "none",
+    ]);
+    assert!(set["settings"]["profile"]["look"].is_null());
+    assert!(set["settings"]["profile"]["camera"].is_null());
+
+    // 除く（2 回目は見つからない）。
+    env.json(&["profile", "remove", "look", "film"]);
+    let r = env.run(&["profile", "remove", "look", "film"]);
+    assert_eq!(r.code, 1);
+    assert_eq!(
+        env.json(&["profile", "list"])["profiles"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // カタログなしの render: ファイルのルックを使う。種類の違うファイルは使い方の誤り。
+    let jpg = env.photos.join("A.jpg");
+    let out = env.path("render-look.png");
+    let r = genzo_with(
+        &[
+            "render",
+            jpg.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--cube",
+            cube.to_str().unwrap(),
+            "--look-amount",
+            "50",
+            "--gpu",
+            "off",
+            "--json",
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["settings"]["profile"]["look"], "film");
+    assert_eq!(v["settings"]["profile"]["look_amount"], 50.0);
+    assert!(out.exists());
+    let r = genzo_with(
+        &[
+            "render",
+            jpg.to_str().unwrap(),
+            "--out",
+            env.path("render-dcp.png").to_str().unwrap(),
+            "--dcp",
+            dcp.to_str().unwrap(),
+            "--gpu",
+            "off",
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stderr.contains("RAW 以外"), "{}", r.stderr);
+    let r = genzo_with(
+        &[
+            "render",
+            jpg.to_str().unwrap(),
+            "--out",
+            env.path("render-bad.png").to_str().unwrap(),
+            "--dcp",
+            cube.to_str().unwrap(),
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(hashes(&src), before_src);
 }

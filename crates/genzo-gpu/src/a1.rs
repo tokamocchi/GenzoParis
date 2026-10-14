@@ -3,7 +3,8 @@
 //!
 //! ステージ 2（正規化）→ 3（WB・飽和の切りそろえ）→〔4（ハイライト復元。処理バージョン 2 で復元するとき）〕→ 5（2 × 2 の
 //! 簡易処理）→〔6（ノイズ軽減。処理バージョン 2 で量が 0 でないとき）〕→〔7（レンズ補正。処理バージョン 2 で補正があるとき）〕
-//! → 8（色変換）→ 面積平均の縮小（横・縦）を GPU で実行する。式と範囲のたどり方は genzo-pipeline の
+//! → 8（色変換。カメラプロファイル（処理バージョン 2。DEV-17）の色相彩度のマップがあれば HSV の表のカーネル）→ 面積平均の
+//! 縮小（横・縦）を GPU で実行する。式と範囲のたどり方は genzo-pipeline の
 //! `SensorPlan::render_preview` と同じ:
 //!
 //! - プレビューの出力の行の帯（[`A1_BAND_ROWS`] 行）ごとに、縮小に必要な半分の格子の行
@@ -33,8 +34,8 @@ use genzo_raw::RawImage;
 use crate::error::{GpuError, Result};
 use crate::kernels::{Batch, Dispatch, Kernel, Params, read_count};
 use crate::renderer::{
-    GpuRenderer, cfa_table, check_raw, pack_raw, record_highlight, record_noise_reduction,
-    record_normalize, record_white_balance,
+    GpuRenderer, cfa_table, check_raw, pack_raw, record_color_matrix, record_highlight,
+    record_noise_reduction, record_normalize, record_white_balance,
 };
 
 /// 1 回に投入するプレビューの出力の行数（GPU のメモリと投入の回数の釣り合い）。**仮置き**: α7 IV で
@@ -204,6 +205,7 @@ impl GpuRenderer {
                 dst: &half,
                 aux: None,
                 aux_out: None,
+                local: None,
                 threads: (half_roi.width, half_roi.height),
             })?;
             // ステージ 6: ノイズ軽減（あるときだけ）。
@@ -239,6 +241,7 @@ impl GpuRenderer {
                         dst: &buf,
                         aux: Some(&aux),
                         aux_out: None,
+                        local: None,
                         threads: (lens_roi.width, lens_roi.height),
                     })?;
                     keep.push(aux);
@@ -254,17 +257,12 @@ impl GpuRenderer {
             let rgb = self
                 .gpu
                 .create_storage("genzo-gpu.a1_band（画像）", roi.pixel_count() * 12)?;
-            let mut p = Params::new(Kernel::ColorMatrix, cm_roi, roi);
-            p.mat("MAT", plan.camera_to_working().rows());
-            batch.dispatch(Dispatch {
-                kernel: Kernel::ColorMatrix,
-                params: p.finish()?,
-                src: cm_src,
-                dst: &rgb,
-                aux: None,
-                aux_out: None,
-                threads: (roi.width, roi.height),
-            })?;
+            // カメラプロファイル（DEV-17）の色相彩度のマップがあれば HSV の表のカーネル。
+            if let Some(aux) =
+                record_color_matrix(&self.gpu, &mut batch, &plan, cm_src, cm_roi, &rgb, roi)?
+            {
+                keep.push(aux);
+            }
             match &tables {
                 Some((h_taps, h_off, v_taps, v_off, _)) => {
                     // 横方向: (gw × 行) → (pw × 行)。
@@ -281,6 +279,7 @@ impl GpuRenderer {
                         dst: &hbuf,
                         aux: Some(h_taps),
                         aux_out: None,
+                        local: None,
                         threads: (h_roi.width, h_roi.height),
                     })?;
                     // 縦方向: 出力の行 y..y1。
@@ -297,6 +296,7 @@ impl GpuRenderer {
                         dst: &vbuf,
                         aux: Some(v_taps),
                         aux_out: None,
+                        local: None,
                         threads: (v_roi.width, v_roi.height),
                     })?;
                     batch.copy(

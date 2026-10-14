@@ -48,7 +48,8 @@ pub const EXIT_CODES_HELP: &str = "終了コード:
   2    使い方の誤り（引数の誤り・カタログの指定がない）
   3    結果は出したが、一部が失敗した・問題が見つかった（書き出し・削除・サムネイルの作り直しの一部の
        失敗、取り込みで登録できなかったファイル、写真の移動・名前の変更・再リンクで飛ばした・失敗した
-       写真、catalog check で見つかった問題、missing check で見つかった見つからない写真、bench での悪化）
+       写真、catalog check で見つかった問題、missing check で見つかった見つからない写真、bench での悪化、
+       profile import で取り込めなかったファイル）
   130  Ctrl+C で中断した";
 
 /// 全体のオプション（どのサブコマンドの後にも書ける）。
@@ -185,6 +186,11 @@ pub enum Command {
     /// 現像設定の表示・変更・履歴・コピー・仮想コピー
     #[command(subcommand)]
     Develop(DevelopCommand),
+    /// カメラプロファイル（DCP）・ルック（3D LUT の .cube。DEV-17）: 取り込み・一覧・詳細・除く・ファイルの確認。
+    /// 取り込んだものはカタログのデータのフォルダの profiles に写し（元のファイルは変えない）、`develop set
+    /// --profile`・`--look` に ID で指定する。Adobe のプロファイルなどは同梱しない（利用者が用意したファイルを使う）
+    #[command(subcommand)]
+    Profile(ProfileCommand),
     /// 書き出す（P3 のジョブ。進捗は標準エラー）
     Export(ExportArgs),
     /// カタログなしで 1 つのファイルを現像して書き出す（ワーカーで展開する）
@@ -251,6 +257,77 @@ pub enum Command {
     /// 再生用のファイルを作る（利用者の ffmpeg で H.264 ＋ AAC の MP4。長辺 1280）・キャッシュの状況と消去
     #[command(subcommand)]
     Video(VideoCommand),
+}
+
+/// カメラプロファイル・ルックの種類（genzo-api の `ProfileKind`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ProfileKindArg {
+    /// カメラプロファイル（.dcp）。
+    Camera,
+    /// ルック（.cube）。
+    Look,
+}
+
+impl From<ProfileKindArg> for genzo_api::ProfileKind {
+    fn from(k: ProfileKindArg) -> Self {
+        match k {
+            ProfileKindArg::Camera => Self::Camera,
+            ProfileKindArg::Look => Self::Look,
+        }
+    }
+}
+
+/// `profile` のサブコマンド（DEV-17）。
+#[derive(Debug, Subcommand)]
+pub enum ProfileCommand {
+    /// ファイルを取り込む（.dcp はカメラプロファイル、.cube はルック。ID は拡張子を除いたファイルの名前）。
+    /// 取り込めなかったファイルがあれば終了コード 3
+    Import {
+        /// ファイル（複数可）
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
+        /// 同じ ID（大文字・小文字は区別しない）で内容の違うものを置き換える（使っている写真は、次に開いたときに
+        /// 「内容が違う」と知らせる）
+        #[arg(long)]
+        replace: bool,
+    },
+    /// 取り込んだものの一覧（種類 → 表示の名前の順）
+    List {
+        /// 種類で絞る
+        #[arg(long, value_enum)]
+        kind: Option<ProfileKindArg>,
+        /// 機種（例: "SONY ILCE-7M4"）。カメラプロファイルがその機種用かを表示する
+        #[arg(long, conflicts_with = "for_variant")]
+        camera: Option<String>,
+        /// この写真の機種で、カメラプロファイルがその機種用かを表示する
+        #[arg(long = "for", value_name = "VARIANT", value_parser = parse_variant_id)]
+        for_variant: Option<VariantId>,
+    },
+    /// 詳細（説明・使わない情報・著作権の表示・埋め込みの方針・内容の SHA-256）
+    Show {
+        /// 種類
+        #[arg(value_enum)]
+        kind: ProfileKindArg,
+        /// ID（`profile list` の ID）
+        id: String,
+    },
+    /// 一覧から除く（使っている写真は、標準の色・ルックなしで描いて「見つからない」と知らせる。取り込んだ写しは、
+    /// どの項目も指さなくなれば消す。元のファイルは変えない）
+    Remove {
+        /// 種類
+        #[arg(value_enum)]
+        kind: ProfileKindArg,
+        /// ID
+        id: String,
+    },
+    /// 取り込まずにファイルを読んで中身を表示する（カタログは使わない）
+    Inspect {
+        /// .dcp・.cube のファイル
+        file: PathBuf,
+        /// 機種（渡すと、その機種用かを表示する）
+        #[arg(long)]
+        camera: Option<String>,
+    },
 }
 
 /// `video` のサブコマンド（VID-04）。
@@ -1222,6 +1299,9 @@ pub enum DevelopCommand {
         /// テクスチャ・明瞭度・かすみの除去・シャープ・効果（DEV-11・DEV-12・DEV-24。JSON の後に当てる。箱に入れる）
         #[command(flatten)]
         detail: Box<DetailArgs>,
+        /// カメラプロファイル・ルック（DEV-17。JSON の後に当てる）
+        #[command(flatten)]
+        profile: ProfileArgs,
     },
     /// 処理バージョンを最新に更新する（DATA-09。レンズ補正などは処理バージョン 2 から使われる。ほかの設定は
     /// 変えない。履歴に 1 件記録する。すでに最新の写真・動画は何もしない。複数の ID をまとめて更新できる）
@@ -1273,7 +1353,8 @@ pub enum DevelopCommand {
         #[arg(long, value_enum, value_delimiter = ',')]
         groups: Vec<GroupArg>,
         /// コピー先の処理バージョンがコピー元より古ければ、コピー元の版に更新する（DATA-09。省略時はコピー先の
-        /// 版のまま。古い版の写真では、レンズ補正・ハイライト復元・ノイズ軽減・明瞭度・シャープ・効果などは使われない）
+        /// 版のまま。古い版の写真では、レンズ補正・ハイライト復元・ノイズ軽減・カメラプロファイル・明瞭度・シャープ・効果・
+        /// マスクなどは使われない）
         #[arg(long)]
         upgrade_process_version: bool,
     },
@@ -1316,6 +1397,325 @@ pub enum DevelopCommand {
     /// 比較表示（LIB-03）の同期ズームと同じ範囲を、2 枚までの写真について同時に描いて PNG に書く（コア API
     /// `render_view_region` を試す。範囲の中心は写真ごとの割合、大きさは出力の画素で、どの写真も同じ）
     Compare(CompareArgs),
+    /// ローカル補正（マスク。DEV-18・DEV-19）: 一覧・追加・部品の追加と削除・名前と調整の変更・削除・重ねて
+    /// 表示の PNG・色のスポイト。マスクと部品は 1 から数えた番号で指定する（`develop mask list` で見られる）。
+    /// 位置・半径・ブラシの大きさは G 座標（ジオメトリ補正後・切り抜く前の全体の外接矩形の長辺を 1 とする。左上が
+    /// 0,0）。処理バージョン 2 から使われる
+    #[command(subcommand)]
+    Mask(MaskCommand),
+}
+
+/// `develop mask` のサブコマンド（DEV-18・DEV-19）。
+#[derive(Debug, Subcommand)]
+pub enum MaskCommand {
+    /// マスクの一覧（番号・名前・有効か・部品・調整）
+    List {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+    },
+    /// マスクを足す（形を 1 つ指定する。調整もオプションで指定できる。履歴に 1 件記録する）
+    Add {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// 最初の部品
+        #[command(flatten)]
+        part: MaskPartArgs,
+        /// 名前（100 文字まで。省略時は「マスク 1」などの番号で表示する）
+        #[arg(long)]
+        name: Option<String>,
+        /// 調整
+        #[command(flatten)]
+        delta: MaskDeltaArgs,
+    },
+    /// マスクに部品を足す（形を 1 つ指定する。色域・輝度の範囲の既定の合成は交差、ほかは加える）
+    AddPart {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// マスクの番号（1 から）
+        #[arg(value_parser = parse_mask_number)]
+        mask: usize,
+        /// 足す部品
+        #[command(flatten)]
+        part: MaskPartArgs,
+    },
+    /// マスクの部品を除く
+    RemovePart {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// マスクの番号（1 から）
+        #[arg(value_parser = parse_mask_number)]
+        mask: usize,
+        /// 部品の番号（1 から）
+        #[arg(value_parser = parse_mask_number)]
+        part: usize,
+    },
+    /// マスクの名前・有効か・調整を変える（指定しない項目は今の値のまま。履歴に 1 件記録する）
+    Set {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// マスクの番号（1 から）
+        #[arg(value_parser = parse_mask_number)]
+        mask: usize,
+        /// 名前（空にすると番号で表示する）
+        #[arg(long)]
+        name: Option<String>,
+        /// 使うか
+        #[arg(long, value_enum)]
+        enabled: Option<SwitchArg>,
+        /// 調整をすべて 0 に戻してから、指定した調整を当てる
+        #[arg(long)]
+        reset_adjustments: bool,
+        /// 調整
+        #[command(flatten)]
+        delta: MaskDeltaArgs,
+    },
+    /// マスクを除く（履歴に 1 件記録する。Undo で戻せる）
+    Remove {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// マスクの番号（1 から）
+        #[arg(value_parser = parse_mask_number)]
+        mask: usize,
+    },
+    /// マスクの重み（アプリの重ねて表示と同じ。プレビューの大きさ）を PNG（8bit のグレー。白が 100%）に書く
+    /// （写真を開いて計算する）
+    Overlay {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// マスクの番号（1 から）
+        #[arg(value_parser = parse_mask_number)]
+        mask: usize,
+        /// 書き出す PNG のファイル（既にあれば使い方の誤り。上書きしない）
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// 切り抜く前の全体の大きさで書く（省略時は切り抜いた後のプレビュー）
+        #[arg(long)]
+        uncropped: bool,
+    },
+    /// 色域の範囲のスポイト: プレビューの点の G 座標と色（OKLab。`add --color-at` が見本に使う値）を表示する
+    /// （写真を開いて計算する）
+    PickColor {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// 点の横の位置（切り抜いた後のプレビューの幅に対する割合。0〜1）
+        #[arg(long)]
+        x: f64,
+        /// 点の縦の位置（高さに対する割合。0〜1）
+        #[arg(long)]
+        y: f64,
+    },
+}
+
+/// マスクの番号（1 から）を読む。
+pub fn parse_mask_number(s: &str) -> Result<usize, String> {
+    match s.trim().parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!("番号は 1 以上の整数で指定してください: {s}")),
+    }
+}
+
+/// カンマ区切りの数を読む（`min`〜`max` 個）。
+fn parse_numbers(s: &str, min: usize, max: usize, form: &str) -> Result<Vec<f32>, String> {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if !(min..=max).contains(&parts.len()) {
+        return Err(format!("「{form}」の形で指定してください: {s}"));
+    }
+    parts
+        .iter()
+        .map(|t| {
+            t.parse::<f32>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| format!("値が数値ではありません: {t}"))
+        })
+        .collect()
+}
+
+/// `X0,Y0,X1,Y1` を読む。
+fn parse_linear(s: &str) -> Result<[f32; 4], String> {
+    let v = parse_numbers(s, 4, 4, "X0,Y0,X1,Y1")?;
+    Ok([v[0], v[1], v[2], v[3]])
+}
+
+/// `CX,CY,RX,RY[,角度[,ぼかし]]` を読む（角度の既定 0、ぼかしの既定 50）。
+fn parse_radial(s: &str) -> Result<[f32; 6], String> {
+    let v = parse_numbers(s, 4, 6, "CX,CY,RX,RY[,角度[,ぼかし]]")?;
+    Ok([
+        v[0],
+        v[1],
+        v[2],
+        v[3],
+        v.get(4).copied().unwrap_or(0.0),
+        v.get(5).copied().unwrap_or(50.0),
+    ])
+}
+
+/// `MIN,MAX[,滑らかさ]` を読む（滑らかさの既定 50）。
+fn parse_luminance(s: &str) -> Result<[f32; 3], String> {
+    let v = parse_numbers(s, 2, 3, "MIN,MAX[,滑らかさ]")?;
+    Ok([v[0], v[1], v.get(2).copied().unwrap_or(50.0)])
+}
+
+/// `X,Y`（プレビューの幅・高さに対する割合。0〜1）を読む。
+fn parse_point(s: &str) -> Result<[f64; 2], String> {
+    let v = parse_numbers(s, 2, 2, "X,Y")?;
+    let (x, y) = (f64::from(v[0]), f64::from(v[1]));
+    if !((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)) {
+        return Err(format!("X・Y は 0〜1 の割合で指定してください: {s}"));
+    }
+    Ok([x, y])
+}
+
+/// マスクの部品の形（1 つだけ指定する）。
+#[derive(Debug, Clone, Args)]
+#[group(required = true, multiple = false)]
+pub struct MaskShapeArgs {
+    /// 線形グラデーション: 100% の点と 0% の点（X0,Y0,X1,Y1。G 座標）
+    #[arg(long, value_name = "X0,Y0,X1,Y1", value_parser = parse_linear, allow_hyphen_values = true)]
+    pub linear: Option<[f32; 4]>,
+    /// 円形グラデーション: 中心と半径（CX,CY,RX,RY[,角度[,ぼかし]]。G 座標。角度は時計回りの度・既定 0、ぼかしは
+    /// 0〜100・既定 50）
+    #[arg(long, value_name = "CX,CY,RX,RY[,A[,F]]", value_parser = parse_radial, allow_hyphen_values = true)]
+    pub radial: Option<[f32; 6]>,
+    /// ブラシ: ストロークの JSON のファイル（- で標準入力。ストロークの配列か 1 つ。項目は erase・size（半径。
+    /// G 座標）・feather・flow・density・points（G 座標の [x, y] の配列））
+    #[arg(long, value_name = "FILE")]
+    pub brush: Option<String>,
+    /// 色域の範囲: プレビューの点（X,Y。切り抜いた後のプレビューの幅・高さに対する割合）の色を見本にする（繰り返すと
+    /// 5 つまで。写真を開いて計算する）
+    #[arg(long, value_name = "X,Y", value_parser = parse_point)]
+    pub color_at: Vec<[f64; 2]>,
+    /// 輝度の範囲（MIN,MAX[,滑らかさ]。0〜100。表示の明るさの %。滑らかさの既定 50）
+    #[arg(long, value_name = "MIN,MAX[,S]", value_parser = parse_luminance)]
+    pub luminance: Option<[f32; 3]>,
+}
+
+/// 部品の合成のしかた（genzo-model の MaskMode）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MaskModeArg {
+    /// 加える（max）。
+    Add,
+    /// 除く（m · (1 − c)）。
+    Subtract,
+    /// 交差（m · c）。
+    Intersect,
+}
+
+impl MaskModeArg {
+    /// genzo-model の値。
+    pub fn mode(self) -> genzo_model::MaskMode {
+        match self {
+            MaskModeArg::Add => genzo_model::MaskMode::Add,
+            MaskModeArg::Subtract => genzo_model::MaskMode::Subtract,
+            MaskModeArg::Intersect => genzo_model::MaskMode::Intersect,
+        }
+    }
+}
+
+/// マスクの部品（形・合成のしかた・反転）。
+#[derive(Debug, Clone, Args)]
+pub struct MaskPartArgs {
+    /// 形
+    #[command(flatten)]
+    pub shape: MaskShapeArgs,
+    /// 合成のしかた（省略時は、色域・輝度の範囲は intersect、ほかは add）
+    #[arg(long, value_enum)]
+    pub mode: Option<MaskModeArg>,
+    /// 部品の範囲を反転する
+    #[arg(long)]
+    pub invert: bool,
+    /// 色域の範囲の許容量（0〜100。既定 50。--color-at のとき）
+    #[arg(long, value_name = "N")]
+    pub color_amount: Option<f32>,
+}
+
+/// マスクの調整（genzo-model の LocalDelta。露光量は EV、ほかは -100〜100。指定しない項目は変えない）。
+#[derive(Debug, Clone, Default, Args)]
+pub struct MaskDeltaArgs {
+    /// 色温度（-100〜100。正で暖かく、負で冷たく）
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub temperature: Option<f32>,
+    /// 色かぶり補正（-100〜100。正でマゼンタ、負で緑）
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub tint: Option<f32>,
+    /// 露光量（EV。-5〜5）
+    #[arg(long, value_name = "EV", allow_hyphen_values = true)]
+    pub exposure: Option<f32>,
+    /// コントラスト
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub contrast: Option<f32>,
+    /// ハイライト
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub highlights: Option<f32>,
+    /// シャドウ
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub shadows: Option<f32>,
+    /// 白レベル
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub whites: Option<f32>,
+    /// 黒レベル
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub blacks: Option<f32>,
+    /// テクスチャ
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub texture: Option<f32>,
+    /// 明瞭度
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub clarity: Option<f32>,
+    /// かすみの除去
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub dehaze: Option<f32>,
+    /// 彩度
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub saturation: Option<f32>,
+    /// シャープ（全体の適用量に足す。負の値はぼかす）
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub sharpness: Option<f32>,
+}
+
+impl MaskDeltaArgs {
+    /// 指定した項目と値（genzo-model の LocalDelta::NAMES の名前）。
+    fn items(&self) -> [(&'static str, Option<f32>); 13] {
+        [
+            ("temperature", self.temperature),
+            ("tint", self.tint),
+            ("exposure_ev", self.exposure),
+            ("contrast", self.contrast),
+            ("highlights", self.highlights),
+            ("shadows", self.shadows),
+            ("whites", self.whites),
+            ("blacks", self.blacks),
+            ("texture", self.texture),
+            ("clarity", self.clarity),
+            ("dehaze", self.dehaze),
+            ("saturation", self.saturation),
+            ("sharpness", self.sharpness),
+        ]
+    }
+
+    /// どれかを指定したか。
+    pub fn any(&self) -> bool {
+        self.items().iter().any(|(_, v)| v.is_some())
+    }
+
+    /// 差分に当てる（値の範囲は genzo-model の検証で確かめる）。
+    pub fn apply(&self, d: &mut genzo_model::LocalDelta) {
+        let names = genzo_model::LocalDelta::NAMES;
+        let items = self.items();
+        for (slot, name) in d.values_mut().into_iter().zip(names) {
+            if let Some((_, Some(v))) = items.iter().find(|(n, _)| *n == name) {
+                *slot = *v;
+            }
+        }
+    }
 }
 
 /// オン / オフの指定。
@@ -1331,6 +1731,41 @@ impl SwitchArg {
     /// 有効か。
     pub fn is_on(self) -> bool {
         self == SwitchArg::On
+    }
+}
+
+/// `develop set` のカメラプロファイル・ルックの指定（DEV-17。設定の JSON の `profile` と同じ項目。処理バージョン 2 から
+/// 使われる）。値の範囲は genzo-model の検証で確かめる。
+#[derive(Debug, Clone, Default, Args)]
+pub struct ProfileArgs {
+    /// カメラプロファイルの ID（`profile list` の ID。`standard` で標準の色。JSON の profile.camera）
+    #[arg(long = "profile", value_name = "ID|standard")]
+    pub camera: Option<String>,
+    /// ルックの ID（`none` でルックなし。profile.look）
+    #[arg(long, value_name = "ID|none")]
+    pub look: Option<String>,
+    /// ルックの適用量（0〜100。既定 100。profile.look_amount）
+    #[arg(long, value_name = "N")]
+    pub look_amount: Option<f32>,
+}
+
+impl ProfileArgs {
+    /// どれかを指定したか。
+    pub fn any(&self) -> bool {
+        self.camera.is_some() || self.look.is_some() || self.look_amount.is_some()
+    }
+
+    /// 指定した項目を `profile` に当てる（指定しなかった項目は今の値のまま）。
+    pub fn apply(&self, profile: &mut genzo_model::ProfileSettings) {
+        if let Some(c) = &self.camera {
+            profile.camera = (c != "standard").then(|| c.clone());
+        }
+        if let Some(l) = &self.look {
+            profile.look = (l != "none").then(|| l.clone());
+        }
+        if let Some(a) = self.look_amount {
+            profile.look_amount = a;
+        }
     }
 }
 
@@ -1905,6 +2340,15 @@ pub struct RenderArgs {
     /// 現像設定の JSON のファイル（- で標準入力。既定の設定にマージする）
     #[arg(long, value_name = "FILE")]
     pub settings: Option<String>,
+    /// カメラプロファイル（DCP）のファイル（取り込まずに使う。DEV-17。RAW だけ）
+    #[arg(long, value_name = "FILE")]
+    pub dcp: Option<PathBuf>,
+    /// ルック（3D LUT の .cube）のファイル（取り込まずに使う。DEV-17）
+    #[arg(long, value_name = "FILE")]
+    pub cube: Option<PathBuf>,
+    /// ルックの適用量（0〜100。既定 100）
+    #[arg(long, value_name = "N")]
+    pub look_amount: Option<f32>,
     /// 書き出しの設定。
     #[command(flatten)]
     pub opts: ExportOpts,
@@ -1939,6 +2383,22 @@ pub struct BenchArgs {
     /// 同じオプション。処理バージョン 2。箱に入れる）
     #[command(flatten)]
     pub detail: Box<DetailArgs>,
+    /// 計測の設定に当てるカメラプロファイル（DCP）のファイル（取り込まずに使う。DEV-17。`render --dcp` と同じ）
+    #[arg(long, value_name = "FILE")]
+    pub dcp: Option<PathBuf>,
+    /// 計測の設定に当てるルック（3D LUT の .cube）のファイル（取り込まずに使う。`render --cube` と同じ）
+    #[arg(long, value_name = "FILE")]
+    pub cube: Option<PathBuf>,
+    /// ルックの適用量（0〜100。既定 100）
+    #[arg(long, value_name = "N")]
+    pub look_amount: Option<f32>,
+    /// 計測の設定に当てるマスク（DEV-18・DEV-19）: 現像設定の `masks` と同じ形の JSON（マスクの配列、または `masks` を
+    /// 持つ現像設定。`develop get` の出力をそのまま使える）のファイル（- で標準入力）
+    #[arg(long, value_name = "FILE", conflicts_with = "sample_masks")]
+    pub masks: Option<String>,
+    /// 計測の設定に、決まった見本のマスク（線形・円形・画像を塗りつぶすブラシ・輝度範囲。bench の doc）を当てる
+    #[arg(long)]
+    pub sample_masks: bool,
 }
 
 /// 計測する処理。
@@ -2066,6 +2526,8 @@ pub enum GroupArg {
     Detail,
     /// 効果（切り抜き後の周辺光量補正・粒子）。
     Effects,
+    /// カメラプロファイル・ルック・ルックの適用量（DEV-17）。
+    Profile,
     /// ローカル補正。
     Masks,
 }
@@ -2086,6 +2548,7 @@ pub fn setting_groups(groups: &[GroupArg]) -> SettingGroups {
         lens: has(GroupArg::Lens),
         detail: has(GroupArg::Detail),
         effects: has(GroupArg::Effects),
+        profile: has(GroupArg::Profile),
         masks: has(GroupArg::Masks),
     }
 }
@@ -2795,6 +3258,67 @@ mod tests {
             cli.command,
             Command::Develop(DevelopCommand::Source { variant }) if variant == VariantId::new(7)
         ));
+    }
+
+    /// カメラプロファイル・ルック（DEV-17）: `develop set --profile / --look / --look-amount` と `profile` の
+    /// サブコマンド。`standard`・`none` は標準の色・ルックなし。
+    #[test]
+    fn develop_set_profile_options_and_profile_commands() {
+        let cli = parse(&[
+            "genzo",
+            "develop",
+            "set",
+            "7",
+            "--profile",
+            "ILCE-7M4 標準",
+            "--look",
+            "film",
+            "--look-amount",
+            "40",
+        ])
+        .unwrap();
+        let Command::Develop(DevelopCommand::Set { profile, .. }) = cli.command else {
+            panic!()
+        };
+        assert!(profile.any());
+        let mut p = genzo_model::ProfileSettings::default();
+        profile.apply(&mut p);
+        assert_eq!(p.camera.as_deref(), Some("ILCE-7M4 標準"));
+        assert_eq!(p.look.as_deref(), Some("film"));
+        assert_eq!(p.look_amount, 40.0);
+        let cli = parse(&[
+            "genzo",
+            "develop",
+            "set",
+            "7",
+            "--profile",
+            "standard",
+            "--look",
+            "none",
+        ])
+        .unwrap();
+        let Command::Develop(DevelopCommand::Set { profile, .. }) = cli.command else {
+            panic!()
+        };
+        profile.apply(&mut p);
+        assert_eq!((p.camera, p.look, p.look_amount), (None, None, 40.0));
+        assert!(parse(&["genzo", "develop", "set", "7", "--look-amount", "x"]).is_err());
+        let cli = parse(&["genzo", "profile", "import", "a.dcp", "b.cube", "--replace"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Profile(ProfileCommand::Import { files, replace: true }) if files.len() == 2
+        ));
+        assert!(parse(&["genzo", "profile", "import"]).is_err());
+        let cli = parse(&["genzo", "profile", "remove", "look", "film"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Profile(ProfileCommand::Remove { kind: ProfileKindArg::Look, id }) if id == "film"
+        ));
+        assert!(parse(&["genzo", "profile", "list", "--camera", "x", "--for", "3"]).is_err());
+        // `develop copy --groups profile` はプロファイル・ルックだけを写す。
+        let g = setting_groups(&[GroupArg::Profile]);
+        assert!(g.profile && !g.masks && !g.color && !g.basic_tone);
+        assert!(!setting_groups(&[GroupArg::Masks]).profile);
     }
 
     #[test]

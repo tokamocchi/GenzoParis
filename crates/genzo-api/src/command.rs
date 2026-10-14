@@ -29,15 +29,15 @@ use crate::types::{
     CaptureTimeUndo, CatalogSchema, CatalogStats, CollectionInfo, ContentHashStatus, CopySettings,
     CoreSettings, DeleteKind, DeletePlan, DeleteReport, DevelopState, DisplayInfo,
     DuplicateGroupList, Facets, FileCheckReport, FileIdentity, FolderInfo, FrameInfo, HistoryItem,
-    ImportOptions, IndexOf, JobInfo, KeywordHit, KeywordInfo, KeywordUsage, MetadataSummary,
-    NamePreview, PasteReport, PasteVersion, PickedWhiteBalance, RangeResult, RegionInfo,
-    RegionRequest, SearchFilter, SearchResult, SearchSort, SettingGroups, SettingsUpdate,
-    ShownVariants, StackInfo, StartupReport, ThumbnailData, Timeline, VariantDetails,
-    VariantKeywords, VideoPlayback, VideoProxyCacheStatus, ViewOutputSize,
+    ImportOptions, IndexOf, JobInfo, KeywordHit, KeywordInfo, KeywordUsage, MaskOverlayInfo,
+    MetadataSummary, NamePreview, PasteReport, PasteVersion, PickedMaskColor, PickedWhiteBalance,
+    RangeResult, RegionInfo, RegionRequest, SearchFilter, SearchResult, SearchSort, SettingGroups,
+    SettingsUpdate, ShownVariants, StackInfo, StartupReport, ThumbnailData, Timeline,
+    VariantDetails, VariantKeywords, VideoPlayback, VideoProxyCacheStatus, ViewOutputSize,
 };
 use crate::types::{
-    FileMovePlan, FileMoveReport, FileRenamePlan, RelinkReport, RelinkRequest, RelocatePlan,
-    RenameSpec, VolumeInfo,
+    FileMovePlan, FileMoveReport, FileRenamePlan, ProfileEntry, ProfileImportReport, ProfileKind,
+    RelinkReport, RelinkRequest, RelocatePlan, RenameSpec, VolumeInfo,
 };
 
 /// コマンド（UI → コア）。
@@ -560,6 +560,30 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         uncropped: Option<bool>,
     },
+    /// 色域の範囲（DEV-19）のスポイト: プレビューの上の点の色（適用はしない。[`crate::Core::mask_color_at`]）。
+    /// → [`Response::MaskColor`]
+    MaskColorAt {
+        /// 現像中の写真。
+        variant_id: VariantId,
+        /// 点の x（UI が表示しているプレビューの画像の幅に対する割合。0〜1）。
+        x: f64,
+        /// 点の y（高さに対する割合。0〜1）。
+        y: f64,
+        /// クリックした画像の `FrameInfo::uncropped`（省略可。[`Command::WhiteBalanceAt`] と同じ）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uncropped: Option<bool>,
+    },
+    /// マスクの重ねて表示（DEV-18）の画像の情報（[`crate::Core::mask_overlay`]。画素は UI ではアプリのバイナリの
+    /// 応答で取る）。→ [`Response::MaskOverlay`]
+    MaskOverlay {
+        /// 現像中の写真。
+        variant_id: VariantId,
+        /// マスクの番号（設定の `masks` の位置）。
+        index: usize,
+        /// 表示（省略時は最新に公開したプレビューの表示）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uncropped: Option<bool>,
+    },
     /// 切り抜きの編集中の表示を切り替える（`uncropped` の間は切り抜く前の全体を描く。
     /// [`crate::Core::set_develop_view`]）。→ [`Response::Ok`]
     SetDevelopView {
@@ -580,6 +604,30 @@ pub enum Command {
     SetDisplayProfile {
         /// ICC プロファイルのバイト列（`null` なら取得できないとして sRGB とみなす）。
         icc: Option<Vec<u8>>,
+    },
+
+    // --- カメラプロファイル・ルック（DEV-17） ---
+    /// 取り込んだカメラプロファイル・ルックの一覧（[`crate::Core::list_profiles`]）。→ [`Response::Profiles`]
+    ListProfiles {
+        /// 機種（渡すと、カメラプロファイルがその機種用かを [`ProfileEntry::matches_camera`] に入れる）。
+        #[serde(default)]
+        camera: Option<String>,
+    },
+    /// カメラプロファイル（.dcp）・ルック（.cube）を取り込む（[`crate::Core::import_profiles`]）。
+    /// → [`Response::ProfileImport`]
+    ImportProfiles {
+        /// ファイル。
+        paths: Vec<PathBuf>,
+        /// 同じ ID で内容の違うものを置き換えるか。
+        #[serde(default)]
+        replace: bool,
+    },
+    /// 取り込んだものを一覧から除く（[`crate::Core::remove_profile`]）。→ [`Response::Updated`]（除いた数）
+    RemoveProfile {
+        /// 種類。
+        kind: ProfileKind,
+        /// ID。
+        id: String,
     },
 
     // --- 書き出し ---
@@ -989,6 +1037,10 @@ pub enum Response {
     },
     /// WB のスポイトの結果（色温度と tint）。
     WhiteBalance(PickedWhiteBalance),
+    /// 色域の範囲のスポイトの結果（点の G 座標と OKLab）。
+    MaskColor(PickedMaskColor),
+    /// マスクの重ねて表示の画像の情報。
+    MaskOverlay(MaskOverlayInfo),
     /// 切り抜き。
     Crop {
         /// 切り抜き（G の外接矩形の各軸の割合）。
@@ -996,6 +1048,13 @@ pub enum Response {
     },
     /// 画面のプロファイルの情報。
     Display(DisplayInfo),
+    /// 取り込んだカメラプロファイル・ルックの一覧。
+    Profiles {
+        /// 一覧（種類 → 表示の名前の順）。
+        profiles: Vec<ProfileEntry>,
+    },
+    /// カメラプロファイル・ルックの取り込みの結果。
+    ProfileImport(ProfileImportReport),
     /// 削除の計画。
     DeletePlan(DeletePlan),
     /// 削除の結果。
@@ -1395,6 +1454,17 @@ impl Core {
                 y,
                 uncropped,
             } => R::WhiteBalance(self.white_balance_at(variant_id, x, y, uncropped)?),
+            C::MaskColorAt {
+                variant_id,
+                x,
+                y,
+                uncropped,
+            } => R::MaskColor(self.mask_color_at(variant_id, x, y, uncropped)?),
+            C::MaskOverlay {
+                variant_id,
+                index,
+                uncropped,
+            } => R::MaskOverlay(self.mask_overlay(variant_id, index, uncropped)?.info),
             C::SetDevelopView { uncropped } => {
                 self.set_develop_view(uncropped)?;
                 R::Ok
@@ -1407,6 +1477,16 @@ impl Core {
                 crop: self.constrain_crop(variant_id, &crop, angle_deg)?,
             },
             C::SetDisplayProfile { icc } => R::Display(self.set_display_profile(icc.as_deref())?),
+            C::ListProfiles { camera } => R::Profiles {
+                profiles: self.list_profiles(camera.as_deref())?,
+            },
+            C::ImportProfiles { paths, replace } => {
+                R::ProfileImport(self.import_profiles(&paths, replace)?)
+            }
+            C::RemoveProfile { kind, id } => {
+                self.remove_profile(kind, &id)?;
+                R::Updated { count: 1 }
+            }
             C::Export {
                 variant_ids,
                 settings,
@@ -1591,6 +1671,44 @@ mod tests {
                 r#"{"type":"set_rating","variant_ids":[1],"rating":6}"#
             )
             .is_err()
+        );
+    }
+
+    /// カメラプロファイル・ルック（DEV-17）のコマンドと応答の JSON の形（ui/src/api/types.ts）。
+    #[test]
+    fn profile_commands_have_plain_json_forms() {
+        let c: Command = serde_json::from_str(r#"{"type":"list_profiles"}"#).unwrap();
+        assert_eq!(c, Command::ListProfiles { camera: None });
+        let c: Command = serde_json::from_str(
+            r#"{"type":"import_profiles","paths":["/x/a.dcp","/x/b.cube"],"replace":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::ImportProfiles {
+                paths: vec![PathBuf::from("/x/a.dcp"), PathBuf::from("/x/b.cube")],
+                replace: true,
+            }
+        );
+        let c: Command =
+            serde_json::from_str(r#"{"type":"remove_profile","kind":"look","id":"film"}"#).unwrap();
+        assert_eq!(
+            c,
+            Command::RemoveProfile {
+                kind: ProfileKind::Look,
+                id: "film".into(),
+            }
+        );
+        let json =
+            serde_json::to_value(Response::ProfileImport(ProfileImportReport::default())).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "profile_import", "imported": [], "replaced": [], "repaired": [], "unchanged": [], "failed": []})
+        );
+        let json = serde_json::to_value(Response::Profiles { profiles: vec![] }).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "profiles", "profiles": []})
         );
     }
 

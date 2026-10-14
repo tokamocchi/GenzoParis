@@ -1125,6 +1125,7 @@ fn color_mixer_grading_and_black_white_are_applied_or_reported() {
         lens: false,
         detail: false,
         effects: false,
+        profile: false,
         masks: false,
     };
     let report = core
@@ -1238,6 +1239,7 @@ fn presence_sharpening_and_effects_are_applied_or_reported() {
         lens: false,
         detail: false,
         effects: true,
+        profile: false,
         masks: false,
     };
     let report = core
@@ -1268,5 +1270,318 @@ fn presence_sharpening_and_effects_are_applied_or_reported() {
             info.warnings
         );
     }
+    core.close().unwrap();
+}
+
+/// 合成のカメラプロファイル（DCP。光源 2 つ）。`scale` で行列を少し変える（置き換えの確認用）。
+fn test_dcp(model: &str, scale: f64) -> Vec<u8> {
+    use genzo_color::Mat3;
+    let cm = |k: f64| {
+        Mat3::from_rows([
+            [0.7424 * k, -0.2329, -0.0466],
+            [-0.4598, 1.2471, 0.2347],
+            [-0.0715, 0.1505, 0.6066],
+        ])
+    };
+    genzo_color::DcpProfile {
+        name: Some(format!("{model} テスト")),
+        unique_camera_model: Some(model.to_owned()),
+        calibration_illuminants: [Some(17), Some(21)],
+        color_matrices: [Some(cm(1.08 * scale)), Some(cm(scale))],
+        ..Default::default()
+    }
+    .to_bytes()
+}
+
+/// 合成の 3D LUT（大きさ 2。`k` で赤を強める）。
+fn test_cube(title: &str, k: f32) -> String {
+    let mut text = format!("TITLE \"{title}\"\nLUT_3D_SIZE 2\n");
+    for b in [0.0f32, 1.0] {
+        for g in [0.0f32, 1.0] {
+            for r in [0.0f32, 1.0] {
+                text.push_str(&format!("{} {g} {}\n", (r * k).min(1.0), b * 0.8));
+            }
+        }
+    }
+    text
+}
+
+/// カメラプロファイル・ルック（DEV-17）: 取り込み・一覧・ルックの適用と記録（render_deps）・置き換えた後に開くと
+/// 警告・除くと「見つからない」・RAW 以外ではカメラプロファイルを使わないと知らせる・版 1 では適用しない。
+/// LibRaw が有効なら、RAW にカメラプロファイルを当てて記録する。
+#[test]
+fn camera_profiles_and_looks_are_applied_recorded_and_reported() {
+    use genzo_api::{ProfileKind, WarningCode};
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
+    let has_raw = common::make_dng(&env.photos.join("R.dng"), "2024:05:01 08:00:00");
+    let src = env.dir.path().join("profiles-src");
+    std::fs::create_dir_all(&src).unwrap();
+    let model = format!(
+        "{} {}",
+        genzo_testkit::bayer::SYNTHETIC_MAKE,
+        genzo_testkit::bayer::SYNTHETIC_MODEL
+    );
+    let dcp = src.join("合成 標準.dcp");
+    std::fs::write(&dcp, test_dcp(&model, 1.0)).unwrap();
+    let cube = src.join("film.cube");
+    std::fs::write(&cube, test_cube("フィルム", 1.6)).unwrap();
+    let core = env.open();
+    let events = core.subscribe();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let a = by_name(&items, "A.jpg").variant_id;
+
+    // 取り込み（元のファイルは変えない）。
+    let before_src = hashes(&src);
+    let report = core
+        .import_profiles(&[dcp.clone(), cube.clone()], false)
+        .unwrap();
+    assert_eq!(report.imported.len(), 2, "{report:?}");
+    assert_eq!(hashes(&src), before_src);
+    let list = core.list_profiles(Some(&model)).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].kind, ProfileKind::Camera);
+    assert_eq!(list[0].id, "合成 標準");
+    assert_eq!(list[0].matches_camera, Some(true));
+    assert!(list[0].description.contains("光源 2 つ"), "{:?}", list[0]);
+    let look = list[1].clone();
+    assert_eq!((look.kind, look.id.as_str()), (ProfileKind::Look, "film"));
+    assert!(
+        core.profiles_dir()
+            .join(format!("{}.cube", look.sha256))
+            .exists()
+    );
+
+    // RAW 以外の写真: ルックは使える。カメラプロファイルは使わないと知らせる。
+    let state = core.open_develop(a).unwrap();
+    assert_eq!(state.source.camera, None);
+    assert!(core.render_develop().unwrap().warnings.is_empty());
+    let plain = core.develop_frame().unwrap().b3.image.clone();
+    let mut s = state.settings.clone();
+    s.profile.look = Some("film".into());
+    core.set_settings(&s, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let looked = core.develop_frame().unwrap().b3.image.clone();
+    let changed = looked
+        .data()
+        .iter()
+        .zip(plain.data())
+        .filter(|(p, q)| p != q)
+        .count();
+    assert!(changed > looked.data().len() / 4, "{changed}");
+    // 適用量 0 は使わない（元と同じ）。
+    let mut zero = s.clone();
+    zero.profile.look_amount = 0.0;
+    core.set_settings(&zero, false).unwrap();
+    core.render_develop().unwrap();
+    assert_eq!(core.develop_frame().unwrap().b3.image.data(), plain.data());
+    core.set_settings(&s, false).unwrap();
+    core.flush_develop().unwrap();
+    let saved = core.develop_settings(a).unwrap();
+    let rec = saved.render_deps.look.clone().expect("ルックの記録");
+    assert_eq!(rec.id, "cube:film");
+    assert_eq!(rec.sha256, look.sha256);
+    assert_eq!(labels(&core, a).last().unwrap(), "ルック「film」");
+    let mut cam = s.clone();
+    cam.profile.camera = Some("合成 標準".into());
+    core.set_settings(&cam, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(
+        info.warnings.iter().any(|w| w.contains("RAW 以外")),
+        "{:?}",
+        info.warnings
+    );
+    core.set_settings(&s, false).unwrap();
+    core.close_develop().unwrap();
+
+    // 置き換えると、次に開いたときに「内容が違う」と知らせる（R-08）。
+    std::fs::write(&cube, test_cube("フィルム 2", 1.3)).unwrap();
+    let r = core
+        .import_profiles(std::slice::from_ref(&cube), false)
+        .unwrap();
+    assert_eq!(r.failed.len(), 1, "置き換えるときだけ");
+    let r = core
+        .import_profiles(std::slice::from_ref(&cube), true)
+        .unwrap();
+    assert_eq!(r.replaced.len(), 1);
+    drain(&events);
+    core.open_develop(a).unwrap();
+    let warned = drain(&events).into_iter().any(|e| {
+        matches!(
+            e,
+            Event::Warning { code: WarningCode::RenderDepsChanged, message, .. }
+                if message.contains("ルック「film」")
+        )
+    });
+    assert!(warned);
+    core.close_develop().unwrap();
+
+    // 除くと「見つからない」（ルックなしで描く）。
+    core.remove_profile(ProfileKind::Look, "film").unwrap();
+    assert!(matches!(
+        core.remove_profile(ProfileKind::Look, "film"),
+        Err(ApiError::NotFound(_))
+    ));
+    core.open_develop(a).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(
+        info.warnings
+            .iter()
+            .any(|w| w.contains("ルックが見つからない")),
+        "{:?}",
+        info.warnings
+    );
+    assert_eq!(core.develop_frame().unwrap().b3.image.data(), plain.data());
+    // 版 1 の写真では適用しない（処理バージョンを更新すると使える）。
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..s.clone()
+    };
+    core.set_settings(&v1, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(
+        info.warnings
+            .iter()
+            .any(|w| w.contains("ルックはこの処理バージョンでは適用されません")),
+        "{:?}",
+        info.warnings
+    );
+    core.close_develop().unwrap();
+
+    if !has_raw {
+        return;
+    }
+    // RAW: 機種が合うカメラプロファイルを当てて記録する（警告なし）。
+    let r = by_name(&items, "R.dng").variant_id;
+    let state = core.open_develop(r).unwrap();
+    assert_eq!(state.source.camera.as_deref(), Some(model.as_str()));
+    core.render_develop().unwrap();
+    let standard = core.develop_frame().unwrap().b3.image.clone();
+    let mut s = state.settings.clone();
+    s.profile.camera = Some("合成 標準".into());
+    core.set_settings(&s, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let profiled = core.develop_frame().unwrap().b3.image.clone();
+    assert_ne!(profiled.data(), standard.data());
+    core.flush_develop().unwrap();
+    let saved = core.develop_settings(r).unwrap();
+    assert_eq!(
+        saved.render_deps.profile.as_ref().map(|p| p.id.as_str()),
+        Some("dcp:合成 標準")
+    );
+    assert!(saved.render_deps.raw_decoder.starts_with("libraw"));
+    core.close_develop().unwrap();
+    core.close().unwrap();
+}
+
+/// ローカル補正（マスク。DEV-18・DEV-19）: 描画に効く・履歴の名前・プレビューの G 座標の範囲・重ねて表示・色域の
+/// スポイト・版 1 の写真では使わず知らせる。
+#[test]
+fn masks_are_applied_overlaid_and_picked() {
+    use genzo_model::{
+        ColorSample, LocalAdjustment, LocalDelta, MaskComponent, MaskMode, MaskShape,
+    };
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let a = by_name(&items, "A.jpg").variant_id;
+    let state = core.open_develop(a).unwrap();
+    assert_eq!(state.settings.process_version, 2);
+    let base = core.render_develop().unwrap();
+    // 64 × 48 の画像の G 座標は (0, 0)〜(1, 0.75)。
+    let g = base.g_bounds.expect("G 座標の範囲");
+    assert!(
+        (g[2] - 1.0).abs() < 1e-9 && (g[3] - 0.75).abs() < 1e-9,
+        "{g:?}"
+    );
+    let before = core.develop_frame().unwrap().b3.image.clone();
+    let mut s = state.settings.clone();
+    s.masks.push(LocalAdjustment {
+        name: "左上".to_owned(),
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Radial {
+            cx: 0.25,
+            cy: 0.2,
+            rx: 0.15,
+            ry: 0.15,
+            angle_deg: 0.0,
+            feather: 0.0,
+        }))
+    });
+    core.set_settings(&s, false).unwrap();
+    core.flush_develop().unwrap();
+    assert_eq!(labels(&core, a).last().unwrap(), "マスクを追加");
+    // 差分 0 のマスクは描画を変えないが、重ねて表示はできる。
+    let o = core.mask_overlay(a, 0, None).unwrap();
+    assert_eq!(
+        (o.info.width, o.info.height),
+        (before.width(), before.height())
+    );
+    let at = |o: &genzo_api::MaskOverlayFrame, x: u32, y: u32| {
+        o.weights[(y * o.info.width + x) as usize]
+    };
+    assert_eq!(at(&o, 16, 13), 255);
+    assert_eq!(at(&o, 60, 44), 0);
+    assert!(matches!(
+        core.mask_overlay(a, 3, None),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    s.masks[0].delta = LocalDelta {
+        exposure_ev: 1.0,
+        ..Default::default()
+    };
+    core.set_settings(&s, false).unwrap();
+    core.render_develop().unwrap();
+    let after = core.develop_frame().unwrap().b3.image.clone();
+    // マスクの中は明るく、外は変わらない。
+    let (p0, p1) = (before.pixel(16, 13).unwrap(), after.pixel(16, 13).unwrap());
+    assert!(p1[1] > p0[1] * 1.5, "{p0:?} {p1:?}");
+    assert_eq!(before.pixel(60, 44), after.pixel(60, 44));
+    core.flush_develop().unwrap();
+    assert_eq!(
+        labels(&core, a).last().unwrap(),
+        "マスク「左上」の露光量 +1.00"
+    );
+    // 色域のスポイト: 点の G 座標と OKLab（見本の色として使える）。
+    let pick = core.mask_color_at(a, 0.25, 0.5, None).unwrap();
+    assert!(
+        (pick.x - 0.25).abs() < 0.02 && (pick.y - 0.375).abs() < 0.02,
+        "{pick:?}"
+    );
+    assert!(pick.lab[0] > 0.0);
+    s.masks[0].components.push(MaskComponent {
+        mode: MaskMode::Intersect,
+        invert: false,
+        shape: MaskShape::ColorRange {
+            samples: vec![ColorSample {
+                x: pick.x,
+                y: pick.y,
+                lab: pick.lab,
+            }],
+            amount: 40.0,
+        },
+    });
+    core.set_settings(&s, false).unwrap();
+    core.flush_develop().unwrap();
+    assert_eq!(labels(&core, a).last().unwrap(), "マスク「左上」の範囲");
+    assert!(core.mask_color_at(a, 1.5, 0.5, None).is_err());
+    // 版 1 の写真では使わず、知らせる。
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..s.clone()
+    };
+    core.set_settings(&v1, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(
+        info.warnings
+            .iter()
+            .any(|w| w.contains("ローカル補正") && w.contains("処理バージョンを更新")),
+        "{:?}",
+        info.warnings
+    );
     core.close().unwrap();
 }

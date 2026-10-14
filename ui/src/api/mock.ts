@@ -35,8 +35,11 @@ import type {
   LensCorrectionInfo,
   LogFolderInfo,
   LogStatus,
+  MaskOverlayInfo,
   MetadataSummary,
   NamePreview,
+  ProfileEntry,
+  ProfileImportReport,
   RegionInfo,
   RegionRequest,
   SmartRule,
@@ -284,6 +287,7 @@ export function mockDevelopSettings(over: Partial<DevelopSettings> = {}): Develo
       vignette: { amount: 0, midpoint: 50, roundness: 0, feather: 50, highlights: 0 },
       grain: { amount: 0, size: 25, roughness: 50 },
     },
+    profile: { camera: null, look: null, look_amount: 100 },
     masks: [],
     render_deps: { camera_profile: { id: "", sha256: "" }, lens_profile: null, raw_decoder: "" },
     ...over,
@@ -360,6 +364,7 @@ export function mockSourceInfo(over: Partial<SourceInfo> = {}): SourceInfo {
     as_shot_white_balance: { temperature_k: 5100, tint: 8 },
     lens_correction: MOCK_LENS_CORRECTION_INFO,
     lens_correction_note: null,
+    camera: "SONY ILCE-7M4",
     ...over,
   };
 }
@@ -1122,4 +1127,194 @@ export function mockVideoCommands(
     }
   });
   return { jobs };
+}
+
+// ---------------------------------------------------------------------------
+// v1 の profile: カメラプロファイル・ルック（DEV-17）の見本
+// ---------------------------------------------------------------------------
+
+/** 取り込んだカメラプロファイル・ルックの項目の見本（利用者が用意した DCP・.cube を取り込んだもの）。 */
+export function mockProfileEntry(over: Partial<ProfileEntry> = {}): ProfileEntry {
+  return {
+    kind: "camera",
+    id: "ILCE-7M4 標準",
+    name: "ILCE-7M4 標準",
+    camera_model: "Sony ILCE-7M4",
+    matches_camera: null,
+    usable: true,
+    description: "光源 2 つ（標準光源 A・D65）で補間・ForwardMatrix あり・色相彩度のマップ（90 × 30 × 1）",
+    notes: ["トーンカーブ（256 点）は使いません（このアプリのシーン → ディスプレイの変換を使います）"],
+    copyright: null,
+    embed_policy: "コピーを許す（0）",
+    original_name: "ILCE-7M4 標準.dcp",
+    sha256: "ab".repeat(32),
+    size: 123_456,
+    imported_at: "2026-10-14T01:02:03Z",
+    ...over,
+  };
+}
+
+/** 見本の一覧（その機種用のカメラプロファイル 1 つ・ほかの機種用 1 つ・ルック 1 つ）。 */
+export function mockProfileEntries(): ProfileEntry[] {
+  return [
+    mockProfileEntry(),
+    mockProfileEntry({
+      id: "EOS R5 風景",
+      name: "EOS R5 風景",
+      camera_model: "Canon EOS R5",
+      original_name: "EOS R5 風景.dcp",
+      sha256: "cd".repeat(32),
+    }),
+    mockProfileEntry({
+      kind: "look",
+      id: "film",
+      name: "フィルム風",
+      camera_model: null,
+      description: "3D LUT（33 × 33 × 33。sRGB の値の LUT とみなします）",
+      notes: [],
+      embed_policy: null,
+      original_name: "film.cube",
+      sha256: "ef".repeat(32),
+    }),
+  ];
+}
+
+/**
+ * カメラプロファイル・ルックのコマンドの応答を足す（list_profiles・import_profiles・remove_profile）。一覧は
+ * `entries`（取り込み・除くで変わる）。list_profiles の camera は、機種の名前の末尾が一致するかで matches_camera を
+ * 入れる（コアの規則の簡略版）。取り込みは、拡張子が .dcp・.cube のパスを取り込み、それ以外を失敗にする。送った
+ * コマンドは `sent` に残す。
+ */
+export function mockProfileCommands(
+  b: MockBridge,
+  entries: ProfileEntry[] = mockProfileEntries(),
+): { sent: Record<string, unknown>[]; entries: ProfileEntry[] } {
+  const sent: Record<string, unknown>[] = [];
+  const state = { entries: [...entries] };
+  const base = b.responses.get("core_execute");
+  const matches = (model: string | null, camera: string) => {
+    if (!model) return false;
+    const a = model.toLowerCase();
+    const c = camera.toLowerCase();
+    return a === c || a.endsWith(` ${c}`) || c.endsWith(` ${a}`);
+  };
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    switch (c.type) {
+      case "list_profiles": {
+        sent.push(c);
+        const camera = (c.camera as string | null | undefined) ?? null;
+        const profiles = state.entries.map((e) => ({
+          ...e,
+          matches_camera: e.kind === "camera" && camera !== null ? matches(e.camera_model, camera) : null,
+        }));
+        return { type: "profiles", profiles };
+      }
+      case "import_profiles": {
+        sent.push(c);
+        const report: ProfileImportReport = { imported: [], replaced: [], repaired: [], unchanged: [], failed: [] };
+        for (const path of c.paths as string[]) {
+          const name = path.split(/[\\/]/).pop() ?? path;
+          const m = /^(.*)\.(dcp|cube)$/i.exec(name);
+          if (!m) {
+            report.failed.push({ path, message: "対応していない形式です（カメラプロファイルは .dcp、ルックは .cube）" });
+            continue;
+          }
+          const kind = m[2].toLowerCase() === "dcp" ? "camera" : "look";
+          const e = mockProfileEntry({
+            kind,
+            id: m[1],
+            name: m[1],
+            camera_model: kind === "camera" ? "Sony ILCE-7M4" : null,
+            original_name: name,
+          });
+          const i = state.entries.findIndex((x) => x.kind === kind && x.id.toLowerCase() === e.id.toLowerCase());
+          if (i < 0) {
+            state.entries.push(e);
+            report.imported.push(e);
+          } else if (c.replace) {
+            state.entries[i] = { ...e, id: state.entries[i].id };
+            report.replaced.push(state.entries[i]);
+          } else {
+            report.failed.push({ path, message: `同じ ID（${state.entries[i].id}）のものがすでにあります（内容が違います）` });
+          }
+        }
+        return { type: "profile_import", ...report };
+      }
+      case "remove_profile": {
+        sent.push(c);
+        const i = state.entries.findIndex((x) => x.kind === c.kind && x.id === c.id);
+        if (i < 0) return new Error(`見つかりません: ${String(c.id)}`);
+        state.entries.splice(i, 1);
+        return { type: "updated", count: 1 };
+      }
+      default:
+        return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
+    }
+  });
+  return { sent, entries: state.entries };
+}
+
+// ---------------------------------------------------------------------------
+// v1 の masks: ローカル補正（DEV-18・DEV-19）の見本
+// ---------------------------------------------------------------------------
+
+/** 色域のスポイトで返す色の見本（OKLab。やや赤みの明るい色）。 */
+export const MOCK_MASK_LAB: [number, number, number] = [0.72, 0.08, 0.03];
+
+/**
+ * ローカル補正のコマンドの応答を足す: mask_color_at（点の割合を G 座標にした位置と MOCK_MASK_LAB。`gBounds` は
+ * プレビューの縁の G 座標）・mask_overlay_frame（幅 × 高さの格子で、左半分が重み 255・右半分が 0）。範囲の外の点・
+ * 番号はエラーにする（コアの invalid_input と同じく）。送ったコマンドは `sent` に残す。
+ */
+export function mockMaskCommands(
+  b: MockBridge,
+  opts: { gBounds?: [number, number, number, number]; width?: number; height?: number; masks?: () => number } = {},
+): { sent: Record<string, unknown>[] } {
+  const sent: Record<string, unknown>[] = [];
+  const gb = opts.gBounds ?? [0, 0, 1, 0.75];
+  const width = opts.width ?? 4;
+  const height = opts.height ?? 3;
+  const base = b.responses.get("core_execute");
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    if (c.type === "mask_color_at") {
+      sent.push(c);
+      const x = c.x as number;
+      const y = c.y as number;
+      if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return new Error("点が画像の外です");
+      return {
+        type: "mask_color",
+        x: gb[0] + x * (gb[2] - gb[0]),
+        y: gb[1] + y * (gb[3] - gb[1]),
+        lab: MOCK_MASK_LAB,
+      };
+    }
+    return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
+  });
+  b.responses.set("mask_overlay_frame", (args?: Record<string, unknown>) => {
+    sent.push({ type: "mask_overlay_frame", ...args });
+    const index = args?.index as number;
+    if (opts.masks && !(index >= 0 && index < opts.masks())) return new Error("マスクの番号が範囲の外です");
+    const header: MaskOverlayInfo = {
+      variant_id: args?.variantId as number,
+      generation: 1,
+      index,
+      width,
+      height,
+      uncropped: (args?.uncropped as boolean | undefined) ?? false,
+    };
+    const json = new TextEncoder().encode(JSON.stringify(header));
+    const out = new Uint8Array(4 + json.length + width * height * 4);
+    new DataView(out.buffer).setUint32(0, json.length, true);
+    out.set(json, 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const w = x < width / 2 ? 255 : 0;
+        out.set([w, w, w, 255], 4 + json.length + (y * width + x) * 4);
+      }
+    }
+    return out.buffer;
+  });
+  return { sent };
 }

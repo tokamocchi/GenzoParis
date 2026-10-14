@@ -259,7 +259,7 @@ fn view_input(
     let state = inner.with_catalog(|c| c.develop_state(variant_id))?;
     Ok(RegionInput {
         source,
-        settings: crate::deps::with_render_deps(&state.settings, &deps),
+        settings: crate::deps::with_render_deps(&inner.engine, &state.settings, &deps),
         generation: 0,
         uncropped: false,
     })

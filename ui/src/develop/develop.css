@@ -200,6 +200,106 @@
   cursor: ew-resize;
 }
 
+/* ローカル補正（マスク。DEV-18・DEV-19）の層。つまみとブラシのときだけポインターを受ける。 */
+.dv-stage.tool-brush {
+  cursor: none;
+}
+.dv-mask-overlay {
+  pointer-events: none;
+}
+.dv-mask {
+  overflow: hidden;
+  pointer-events: none;
+}
+.dv-mask.painting {
+  pointer-events: all;
+  cursor: none;
+}
+.dv-mask.painting .dv-mask-shape {
+  opacity: 0.45;
+}
+.dv-mask-shape {
+  opacity: 0.6;
+}
+.dv-mask-shape.selected {
+  opacity: 1;
+}
+.dv-mask-line {
+  fill: none;
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+.dv-mask-line.zero,
+.dv-mask-line.mid {
+  stroke-dasharray: 6 4;
+}
+.dv-mask-line.mid {
+  stroke-width: 1;
+}
+.dv-mask-shape.subtract .dv-mask-line {
+  stroke: var(--fg-2);
+}
+.dv-mask-axis {
+  stroke: var(--fg-1);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.dv-mask-grip {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: stroke;
+  cursor: move;
+}
+.dv-mask.painting .dv-mask-grip,
+.dv-mask.painting .dv-mask-knob {
+  pointer-events: none;
+}
+.dv-mask-knob {
+  fill: var(--fg-0);
+  stroke: var(--bg-0);
+  stroke-width: 1.5;
+  pointer-events: all;
+  cursor: grab;
+}
+.dv-mask-knob.zero {
+  fill: var(--bg-0);
+  stroke: var(--fg-0);
+}
+.dv-mask-knob.rotate {
+  fill: var(--bg-2);
+  stroke: var(--fg-0);
+  cursor: alias;
+}
+.dv-mask-sample circle,
+.dv-mask-sample line {
+  fill: none;
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+.dv-mask-stroke {
+  fill: none;
+  stroke: rgba(255, 40, 40, 0.35);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+.dv-mask-stroke.erase {
+  stroke: rgba(232, 232, 232, 0.3);
+}
+.dv-mask-cursor circle,
+.dv-mask-cursor line {
+  fill: none;
+  stroke: var(--fg-0);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.dv-mask-cursor circle.inner {
+  stroke-dasharray: 3 3;
+}
+
 /* ---------------------------------------------------------------- 右のパネル */
 
 .dp {
@@ -233,6 +333,72 @@
   font-size: 12px;
   color: var(--fg-2);
   margin: 2px 0 8px;
+}
+.dp-wrap {
+  flex-wrap: wrap;
+}
+.dp-mask-list {
+  list-style: none;
+  margin: 4px 0 8px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.dp-mask-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+}
+.dp-mask-list li + li {
+  border-top: 1px solid var(--line);
+}
+.dp-mask-list li.selected {
+  background: var(--bg-3);
+}
+.dp-mask-list select {
+  min-width: 0;
+}
+.dp-mask-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--fg-0);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 0;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dp-mask-hint {
+  color: var(--fg-2);
+  margin-left: 4px;
+}
+.dp-mask-rename {
+  flex: 1;
+  min-width: 0;
+}
+.dp-swatch-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.dp-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid var(--line-strong);
+}
+.dp-lum-bar {
+  height: 10px;
+  margin: 4px 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
 }
 .dp-sub {
   margin: 10px 0 4px;

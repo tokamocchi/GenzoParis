@@ -227,6 +227,8 @@ pub(crate) struct Inner {
     /// 再生用のファイルを作れるか（ffmpeg とエンコーダー。初めて要るときに 1 度だけ確かめる）。
     pub proxy_support: std::sync::OnceLock<crate::playback::ProxySupport>,
     pub engine: Engine,
+    /// カメラプロファイル・ルックのライブラリ（DEV-17。`profiles` の doc。`engine` にも渡している）。
+    pub profiles: Arc<crate::profiles::ProfileLibrary>,
     pub gpu: Mutex<GpuState>,
     pub display: Mutex<DisplayState>,
     /// 検索の状態と、作り直しのスレッドとの受け渡し（`search` の doc）。
@@ -501,6 +503,7 @@ impl Core {
             maintenance,
             video,
             engine,
+            profiles,
             display,
         } = parts;
         let proxies = crate::playback::ProxyState::open(&config.data_dir, &settings);
@@ -519,6 +522,7 @@ impl Core {
             proxies: Mutex::new(proxies),
             proxy_support: std::sync::OnceLock::new(),
             engine,
+            profiles,
             gpu: Mutex::new(GpuState::default()),
             display: Mutex::new(display),
             search: Arc::new(SearchShared::default()),
@@ -818,6 +822,7 @@ struct Parts {
     maintenance: Scheduler,
     video: Scheduler,
     engine: Engine,
+    profiles: Arc<crate::profiles::ProfileLibrary>,
     display: DisplayState,
 }
 
@@ -912,7 +917,9 @@ fn build_parts(
     // 動画の再生用のファイルの作成（VID-04）。変換は ffmpeg の子プロセスが行う（本体のメモリの予算の枠は取らない）。
     let video = Scheduler::with_budget(1, "genzo-video", budget)
         .map_err(|e| ApiError::Job(e.to_string()))?;
-    let engine = Engine::new(EngineConfig::default())?;
+    // カメラプロファイル・ルック（DEV-17）: 描画のたびに、現像設定の ID からデータのフォルダのライブラリを引く。
+    let profiles = Arc::new(crate::profiles::ProfileLibrary::new(&config.data_dir));
+    let engine = Engine::new(EngineConfig::default())?.with_profile_resolver(profiles.clone());
     let display = DisplayState::assumed_srgb()?;
     Ok(Parts {
         recovered,
@@ -929,6 +936,7 @@ fn build_parts(
         maintenance,
         video,
         engine,
+        profiles,
         display,
     })
 }

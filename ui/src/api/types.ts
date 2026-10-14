@@ -370,6 +370,72 @@ export interface RenderDeps {
   camera_profile: { id: string; sha256: string };
   lens_profile: { id: string; sha256: string } | null;
   raw_decoder: string;
+  /** 使ったカメラプロファイルのファイル（DEV-17。ID は `dcp:<ID>`。使っていなければ無い）。 */
+  profile?: { id: string; sha256: string } | null;
+  /** 使ったルックのファイル（ID は `cube:<ID>`）。 */
+  look?: { id: string; sha256: string } | null;
+}
+
+/**
+ * カメラプロファイル・ルック（DEV-17。genzo-model の ProfileSettings。処理バージョン 2 から使える）。ID は取り込んだ
+ * ライブラリの ID（genzo-api の ProfileEntry の id）。
+ */
+export interface ProfileSettings {
+  /** カメラプロファイル（DCP）の ID（null で標準の色。RAW だけ）。 */
+  camera: string | null;
+  /** ルック（3D LUT の .cube）の ID（null でルックなし）。 */
+  look: string | null;
+  /** ルックの適用量（0〜100。既定 100）。 */
+  look_amount: number;
+}
+
+/** 取り込んだものの種類（genzo-api の ProfileKind）。 */
+export type ProfileKind = "camera" | "look";
+
+/** 取り込んだカメラプロファイル・ルック（genzo-api の ProfileEntry）。 */
+export interface ProfileEntry {
+  kind: ProfileKind;
+  /** ID（現像設定に保存する値。元のファイルの名前から拡張子を除いたもの）。 */
+  id: string;
+  /** 表示の名前（DCP の ProfileName・.cube の TITLE。なければ ID）。 */
+  name: string;
+  /** DCP の機種（UniqueCameraModel）。 */
+  camera_model: string | null;
+  /** 一覧を求めたときに渡した機種用か（カメラプロファイルだけ。機種を渡さなかった・ルックは null）。 */
+  matches_camera: boolean | null;
+  /** 使えるか（取り込んだ写しがない・内容が違う・解析できないなら false）。 */
+  usable: boolean;
+  /** 中身の説明。 */
+  description: string;
+  /** 使わない情報（DCP のトーンカーブなど）の説明。 */
+  notes: string[];
+  /** 著作権の表示（DCP の ProfileCopyright。そのまま表示する）。 */
+  copyright: string | null;
+  /** 埋め込みの方針（DCP の ProfileEmbedPolicy の説明）。 */
+  embed_policy: string | null;
+  original_name: string;
+  sha256: string;
+  size: number;
+  /** 取り込んだ日時（UTC。RFC 3339）。 */
+  imported_at: string;
+}
+
+/** 取り込めなかったファイル。 */
+export interface ProfileImportFailure {
+  path: string;
+  message: string;
+}
+
+/** 取り込みの結果（genzo-api の ProfileImportReport）。 */
+export interface ProfileImportReport {
+  imported: ProfileEntry[];
+  /** 同じ ID のものを置き換えた（使っている写真は、次に開いたときに「内容が違う」と知らせる）。 */
+  replaced: ProfileEntry[];
+  /** 同じ ID・同じ内容のものがあり、消えた・壊れた写しを書き直した（使えるようになった）。 */
+  repaired: ProfileEntry[];
+  /** 同じ ID・同じ内容のものがあった。 */
+  unchanged: ProfileEntry[];
+  failed: ProfileImportFailure[];
 }
 
 export interface DevelopSettings {
@@ -392,9 +458,149 @@ export interface DevelopSettings {
   detail: DetailParams;
   /** 効果（切り抜き後の周辺光量補正・粒子。DEV-24。古いコアの応答では欠けうる）。 */
   effects: EffectsParams;
-  /** 部分補正（v1。MVP の画面では扱わず、そのまま保つ）。 */
-  masks: unknown[];
+  /** カメラプロファイル・ルック（DEV-17。古いコアの応答では欠けうる）。 */
+  profile?: ProfileSettings;
+  /** ローカル補正（マスク。DEV-18・DEV-19。処理バージョン 2 から使える）。 */
+  masks: LocalAdjustment[];
   render_deps: RenderDeps;
+}
+
+// ---------------------------------------------------------------------------
+// ローカル補正（マスク。genzo-model の develop::masks。DEV-18・DEV-19）
+//
+// 位置・半径・ブラシの大きさは G 座標（ジオメトリ補正後・切り抜く前の全体の外接矩形の長辺を 1 とする座標。左上が
+// (0, 0)）。画面の画像の上の位置との対応は FrameInfo.g_bounds（この画像の縁の G 座標）で求める。
+// ---------------------------------------------------------------------------
+
+/** 部品の合成のしかた（加える: max、除く: m · (1 − c)、交差: m · c）。 */
+export type MaskMode = "add" | "subtract" | "intersect";
+
+/** ブラシのストローク（genzo-model の BrushStroke）。 */
+export interface BrushStroke {
+  /** 消しゴム（重みを減らす）か。 */
+  erase: boolean;
+  /** 大きさ（半径。G 座標。RANGES.brushSize）。 */
+  size: number;
+  /** ぼかし（0〜100）。 */
+  feather: number;
+  /** 流量（0〜100）。 */
+  flow: number;
+  /** 密度（0〜100）。 */
+  density: number;
+  /** 点の列（G 座標の [x, y]）。1 点なら円。 */
+  points: [number, number][];
+}
+
+/** 色域の範囲の見本の色（genzo-model の ColorSample。スポイトの結果 PickedMaskColor をそのまま使う）。 */
+export interface ColorSample {
+  x: number;
+  y: number;
+  /** OKLab（露光量の前のシーンリニアの値から求めたもの）。 */
+  lab: [number, number, number];
+}
+
+/** 線形グラデーション: (x0, y0) を通る線で 100%、(x1, y1) を通る線で 0%。 */
+export interface LinearShape {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/** 円形グラデーション（楕円の内側で 100%。angle_deg は時計回り。feather は縁から内側の割合）。 */
+export interface RadialShape {
+  cx: number;
+  cy: number;
+  rx: number;
+  ry: number;
+  angle_deg: number;
+  feather: number;
+}
+
+/** 色域の範囲（DEV-19）。 */
+export interface ColorRangeShape {
+  samples: ColorSample[];
+  /** 許容量（0〜100）。 */
+  amount: number;
+}
+
+/** 輝度の範囲（DEV-19。表示の明るさの百分率）。 */
+export interface LuminanceRangeShape {
+  min: number;
+  max: number;
+  smoothness: number;
+}
+
+/** 部品の形（genzo-model の MaskShape。外部タグの JSON）。 */
+export type MaskShape =
+  | { linear: LinearShape }
+  | { radial: RadialShape }
+  | { brush: { strokes: BrushStroke[] } }
+  | { color_range: ColorRangeShape }
+  | { luminance_range: LuminanceRangeShape };
+
+/** 部品（genzo-model の MaskComponent）。 */
+export interface MaskComponent {
+  mode: MaskMode;
+  invert: boolean;
+  shape: MaskShape;
+}
+
+/**
+ * ローカル補正の調整値の差分（genzo-model の LocalDelta）。露光量は EV（−5〜5）、ほかは −100〜+100。マスクの重み
+ * を掛けて全体の値に足す。
+ */
+export interface LocalDelta {
+  temperature: number;
+  tint: number;
+  exposure_ev: number;
+  contrast: number;
+  highlights: number;
+  shadows: number;
+  whites: number;
+  blacks: number;
+  texture: number;
+  clarity: number;
+  dehaze: number;
+  saturation: number;
+  sharpness: number;
+}
+
+/** マスク 1 つ分（genzo-model の LocalAdjustment）。 */
+export interface LocalAdjustment {
+  enabled: boolean;
+  /** 名前（空なら「マスク 1」などの番号で表示する。最大 MAX_MASK_NAME_CHARS 文字）。 */
+  name: string;
+  components: MaskComponent[];
+  delta: LocalDelta;
+}
+
+/** マスクの数などの上限（genzo-model の develop::masks の定数）。 */
+export const MASK_LIMITS = {
+  masks: 100,
+  components: 32,
+  strokes: 1000,
+  strokePoints: 5000,
+  totalBrushPoints: 100_000,
+  colorSamples: 5,
+  nameChars: 100,
+} as const;
+
+/** 色域のスポイトの結果（genzo-api の PickedMaskColor）。 */
+export interface PickedMaskColor {
+  x: number;
+  y: number;
+  lab: [number, number, number];
+}
+
+/** マスクの重ねて表示の画像の情報（genzo-api の MaskOverlayInfo。画素は mask_overlay_frame で取る）。 */
+export interface MaskOverlayInfo {
+  variant_id: VariantId;
+  generation: number;
+  index: number;
+  width: number;
+  height: number;
+  uncropped: boolean;
 }
 
 /** 値の範囲（genzo-model の develop::ranges）。 */
@@ -417,6 +623,14 @@ export const RANGES = {
   sharpenAmount: { min: 0, max: 150 },
   /** シャープの半径（写真のフル解像度の画素）。 */
   sharpenRadius: { min: 0.5, max: 3 },
+  /** マスクの位置（G 座標。画像の外側も少し許す）。 */
+  maskCoord: { min: -1, max: 2 },
+  /** 円形マスクの半径（G 座標）。 */
+  maskRadius: { min: 0, max: 2 },
+  /** 円形マスクの回転（度）。 */
+  maskAngleDeg: { min: -180, max: 180 },
+  /** ブラシの大きさ（半径。G 座標）。 */
+  brushSize: { min: 0.0005, max: 0.5 },
 } as const;
 
 /** WB のプリセットの色温度と tint（genzo-model の WbPreset::temperature_tint）。 */
@@ -442,6 +656,8 @@ export interface SettingGroups {
   detail: boolean;
   /** 効果（切り抜き後の周辺光量補正・粒子。DEV-24）。 */
   effects: boolean;
+  /** カメラプロファイル・ルック・ルックの適用量（DEV-17。古い形では欠け、コアは写す）。 */
+  profile?: boolean;
   masks: boolean;
 }
 
@@ -1029,6 +1245,8 @@ export interface SourceInfo {
    * lens_correction_note）。もともと情報がない場合と区別して出す。読めた・なかった・RAW 以外・古いコアでは無い。
    */
   lens_correction_note?: string | null;
+  /** 機種（メーカーと機種の名前。RAW だけ。カメラプロファイルの UniqueCameraModel と比べる。DEV-17）。 */
+  camera?: string | null;
 }
 
 /** 埋め込みのレンズ補正の情報の要約（genzo-api の LensCorrectionInfo）。 */
@@ -1126,6 +1344,11 @@ export interface FrameInfo {
    */
   output_width?: number;
   output_height?: number;
+  /**
+   * この画像の縁の G 座標（左・上・右・下。ローカル補正の位置を画像の上に描くのに使う。画像の幅に対する割合 fx の
+   * G 座標の x は 左 + fx · (右 − 左)）。古いコアでは無い。
+   */
+  g_bounds?: [number, number, number, number];
 }
 
 export type RegionSpace = "output" | "geometry";
@@ -1481,6 +1704,10 @@ export type Command =
   | { type: "end_drag" }
   | { type: "upgrade_process_version" }
   | { type: "upgrade_process_versions"; variant_ids: VariantId[] }
+  // カメラプロファイル・ルック（DEV-17。genzo-api の profiles.rs）。
+  | { type: "list_profiles"; camera?: string | null }
+  | { type: "import_profiles"; paths: string[]; replace: boolean }
+  | { type: "remove_profile"; kind: ProfileKind; id: string }
   | { type: "render_develop" }
   | { type: "render_region"; request: RegionRequest }
   | { type: "cancel_region" }
@@ -1508,6 +1735,8 @@ export type Command =
     }
   | { type: "create_virtual_copy"; variant_id: VariantId; name: string | null }
   | { type: "white_balance_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
+  | { type: "mask_color_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
+  | { type: "mask_overlay"; variant_id: VariantId; index: number; uncropped?: boolean }
   | { type: "set_develop_view"; uncropped: boolean }
   | {
       type: "constrain_crop";
@@ -1605,8 +1834,12 @@ export type Response =
   | { type: "history"; entries: HistoryItem[] }
   | { type: "variant_created"; variant_id: VariantId }
   | { type: "white_balance"; temperature_k: number; tint: number }
+  | ({ type: "mask_color" } & PickedMaskColor)
+  | ({ type: "mask_overlay" } & MaskOverlayInfo)
   | { type: "crop"; crop: CropRect }
   | ({ type: "display" } & DisplayInfo)
+  | { type: "profiles"; profiles: ProfileEntry[] }
+  | ({ type: "profile_import" } & ProfileImportReport)
   | ({ type: "delete_plan" } & DeletePlan)
   | ({ type: "deleted" } & DeleteReport)
   | ({ type: "core_settings" } & CoreSettings)

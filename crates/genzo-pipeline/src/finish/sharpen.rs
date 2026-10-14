@@ -24,6 +24,13 @@
 //!   効く。IQ-07b の比較の基準（フル解像度を画素の範囲で平均したもの）とも合う）。
 //! - タイルの余白: ガウスの半径 + 1 画素（勾配）。
 //! - 処理バージョン 1 では何もしない（値があれば [`super::unimplemented_settings`] で知らせる）。
+//!
+//! # ローカル補正（処理バージョン 2。DEV-18。[`crate::local`]）
+//!
+//! 画素の局所のシャープ `dsh`（−100〜+100）を適用量に足す: `a' = clamp(適用量 / 100 + dsh / 100, −1, 1.5) ×
+//! SHARPEN_GAIN`。`a' ≥ 0` なら上の式（`Δ = a'·m·h`）、`a' < 0` なら **ぼかす**: `Δ = a'·d`（ディテール・マスクを使わない。
+//! `a' = −1` で `p' = b`、半径のガウスでぼかした明るさになる）。`dsh` が 0 の画素は全体の式（全体の適用量が 0 で
+//! マスクだけで有効なときは `Δ = 0` で変わらない）。
 
 use genzo_model::{DevelopSettings, Phase};
 
@@ -34,6 +41,7 @@ use super::map_pixels;
 use crate::contract::ColorContract;
 use crate::error::Result;
 use crate::image::{ImageTile, Roi};
+use crate::local::{LocalParam, LocalSlots, add_unit, checked_field, local_slots};
 use crate::stage::{Stage, StageContext, StageParams};
 use crate::version::ProcessVersion;
 
@@ -63,6 +71,10 @@ pub struct SharpenStageParams {
     pub gradient_scale: f32,
     /// ぼかし（σ = 半径 × 縮小率）。
     pub kernel: GaussKernel,
+    /// 適用量のスライダーの値 / 100（ローカル補正の値を足すため）。
+    pub amount_unit: f32,
+    /// ローカル補正の局所の値の面の割り当て（シャープの面があるときだけ）。
+    pub local: Option<LocalSlots>,
 }
 
 impl SharpenStageParams {
@@ -92,6 +104,25 @@ impl SharpenStageParams {
     #[inline]
     pub fn apply(&self, c: [f32; 3], b: f32, m: f32) -> [f32; 3] {
         let delta = self.amount * m * self.shaped(luma_log(c) - b);
+        if delta == 0.0 {
+            return c;
+        }
+        apply_luma_log_delta(c, delta)
+    }
+
+    /// 局所のシャープ `dsh` を当てた 1 画素（モジュールの doc の「ローカル補正」。`dsh` が 0 なら [`apply`](Self::apply)）。
+    #[inline]
+    pub fn apply_local(&self, c: [f32; 3], b: f32, m: f32, dsh: f32) -> [f32; 3] {
+        if dsh == 0.0 {
+            return self.apply(c, b, m);
+        }
+        let a = add_unit(self.amount_unit, dsh, -1.0, 1.5) * SHARPEN_GAIN;
+        let d = luma_log(c) - b;
+        let delta = if a >= 0.0 {
+            a * m * self.shaped(d)
+        } else {
+            a * d
+        };
         if delta == 0.0 {
             return c;
         }
@@ -132,8 +163,10 @@ impl Stage for SharpenStage {
             ProcessVersion::V1 => return Ok(None),
             ProcessVersion::V2 => {}
         }
-        let s = settings.normalized().detail.sharpening;
-        if s.is_disabled() {
+        let all = settings.normalized();
+        let local = local_slots(&all, ctx).filter(|l| l.uses(LocalParam::Sharpness));
+        let s = all.detail.sharpening;
+        if s.is_disabled() && local.is_none() {
             return Ok(None);
         }
         let detail = s.detail / 100.0;
@@ -146,6 +179,8 @@ impl Stage for SharpenStage {
             mask_edge: SHARPEN_MASK_EDGE_MAX * s.masking / 100.0,
             gradient_scale: ctx.resolution_scale as f32,
             kernel: GaussKernel::new(ctx.length_px(fraction)),
+            amount_unit: s.amount / 100.0,
+            local,
         })))
     }
     fn input_roi(&self, output_roi: Roi, params: &StageParams, _: &StageContext<'_>) -> Roi {
@@ -172,6 +207,8 @@ impl Stage for SharpenStage {
         let b_roi = out.expand(1);
         let b = blur_plane(&plane, need, b_roi, &p.kernel)?;
         let bw = b_roi.width as usize;
+        let field = checked_field(ctx, Self::ID, p.local, out)?;
+        let plane = field.and_then(|f| f.slots.plane(LocalParam::Sharpness).map(|k| (f, k)));
         map_pixels(input, output, |x, y, c| {
             let i = (x - i64::from(b_roi.x)) as usize;
             let j = (y - i64::from(b_roi.y)) as usize;
@@ -183,7 +220,15 @@ impl Stage for SharpenStage {
             } else {
                 1.0
             };
-            p.apply(c, at(0, 0), m)
+            match plane {
+                Some((f, _)) => p.apply_local(
+                    c,
+                    at(0, 0),
+                    m,
+                    f.values(x, y)[LocalParam::Sharpness.index()],
+                ),
+                None => p.apply(c, at(0, 0), m),
+            }
         })
     }
 }

@@ -233,10 +233,10 @@ impl GpuRenderer {
                 return Ok(a1);
             }
         }
+        // カメラプロファイル（DEV-17）はエンジンと同じ仕組みで引く（キャッシュのキーもエンジンと同じ）。
         let options = SensorOptions {
-            quality: RenderQuality::Draft,
             demosaic: None,
-            ..engine.config().sensor.clone()
+            ..engine.sensor_options_with(RenderQuality::Draft, &engine.resolve_profiles(settings))
         };
         let a1 = Arc::new(self.render_a1_draft(raw, settings, &options, long_edge)?);
         let mut c = self.caches.lock().unwrap_or_else(PoisonError::into_inner);
@@ -304,9 +304,11 @@ impl GpuRenderer {
             Some(raw) => self.draft_a1(engine, source, raw, settings, request.long_edge)?,
             None => engine.a1(source, settings, quality, request.long_edge)?,
         };
-        let base: StageContext<'static> = a1
+        let profiles = engine.resolve_profiles(settings);
+        let base: StageContext<'_> = a1
             .finish_context(settings)?
-            .with_photo_seed(source.id.photo_seed());
+            .with_photo_seed(source.id.photo_seed())
+            .with_profiles(&profiles);
         let (plan, guide) = match FinishPlan::new(settings, &base) {
             Ok(plan) => (plan, None),
             Err(PipelineError::GuideMismatch { .. }) => {
@@ -342,9 +344,7 @@ impl GpuRenderer {
         } else {
             Chain::from_cpu(self, gather_mirror(&a1.image, rois[0])?)
         };
-        for ((stage, params), roi) in plan.stages().iter().zip(&rois[1..]) {
-            chain.step(*stage, &ctx, params, *roi)?;
-        }
+        chain.run_plan(&plan, &ctx, &rois)?;
         // B3 の置き場所（出力のステージは別のバッファに書くので、後から読み出せる）。
         // B3 の GPU 上の画像（出力のステージは別のバッファに書くので、後から読み出せる）。
         let b3_gpu = chain.gpu_tile()?;
@@ -388,7 +388,12 @@ impl GpuRenderer {
             backends,
             a1_on_gpu: draft_raw.is_some(),
             used_guide: guide.is_some(),
-            warnings: a1.warnings.clone(),
+            warnings: a1
+                .warnings
+                .iter()
+                .copied()
+                .chain(profiles.stage_c_warnings())
+                .collect(),
             unimplemented: unimplemented_settings(settings),
             non_finite_replaced: replaced + a1.non_finite_replaced,
         })

@@ -50,8 +50,9 @@ use crate::events::{CatalogChange, Event, WarningCode};
 use crate::previews::{load_source, schedule_regenerate, variant_file};
 use crate::render::display_target;
 use crate::types::{
-    DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem, PasteReport, PasteVersion,
-    PickedWhiteBalance, SettingGroups, SourceInfo,
+    DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem, MaskOverlayFrame,
+    MaskOverlayInfo, PasteReport, PasteVersion, PickedMaskColor, PickedWhiteBalance, SettingGroups,
+    SourceInfo,
 };
 
 /// 自動保存に失敗したときに、もう一度試すまでの時間（**仮置き**: 10 秒。ディスクの容量不足などで
@@ -392,10 +393,33 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     } else if fx_old.grain != fx_new.grain {
         parts.push("粒子".to_owned());
     }
-    if old.masks != new.masks {
-        parts.push("ローカル補正".to_owned());
+    let (pf_old, pf_new) = (&old.profile, &new.profile);
+    if pf_old.camera != pf_new.camera {
+        parts.push(match &pf_new.camera {
+            Some(id) => format!("プロファイル「{id}」"),
+            None => "プロファイル（標準）".to_owned(),
+        });
     }
-    if old.process_version != new.process_version || old.render_deps != new.render_deps {
+    if pf_old.look != pf_new.look {
+        parts.push(match &pf_new.look {
+            Some(id) => format!("ルック「{id}」"),
+            None => "ルックなし".to_owned(),
+        });
+    } else if pf_old.look_amount != pf_new.look_amount {
+        parts.push(format!("ルックの適用量 {:.0}", pf_new.look_amount));
+    }
+    if old.masks != new.masks {
+        parts.push(describe_masks(&old.masks, &new.masks));
+    }
+    // 外部データのうち、カメラプロファイル・ルックの参照は設定の ID に付いて変わる（上の名前で表す）。
+    let raw_deps = |d: &genzo_model::RenderDeps| genzo_model::RenderDeps {
+        profile: None,
+        look: None,
+        ..d.clone()
+    };
+    if old.process_version != new.process_version
+        || raw_deps(&old.render_deps) != raw_deps(&new.render_deps)
+    {
         parts.push("処理バージョン".to_owned());
     }
     match parts.len() {
@@ -403,6 +427,79 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
         1..=3 => parts.join("・"),
         _ => format!("{}ほか", parts[..3].join("・")),
     }
+}
+
+/// マスクの表示の名前（名前がなければ「マスク 1」など、1 から数えた番号）。
+pub fn mask_display_name(m: &genzo_model::LocalAdjustment, index: usize) -> String {
+    if m.name.trim().is_empty() {
+        format!("マスク {}", index + 1)
+    } else {
+        m.name.clone()
+    }
+}
+
+/// マスクの変更の履歴の名前（DEV-18。「マスクを追加」「マスク「空」の露光量 +0.50」など）。
+fn describe_masks(
+    old: &[genzo_model::LocalAdjustment],
+    new: &[genzo_model::LocalAdjustment],
+) -> String {
+    use genzo_model::LocalDelta;
+    if new.len() > old.len() {
+        return "マスクを追加".to_owned();
+    }
+    if new.len() < old.len() {
+        return "マスクを削除".to_owned();
+    }
+    let Some((i, (a, b))) = old.iter().zip(new).enumerate().find(|(_, (a, b))| a != b) else {
+        return "マスク".to_owned();
+    };
+    let name = mask_display_name(b, i);
+    if a.enabled != b.enabled {
+        return format!(
+            "マスク「{name}」を{}",
+            if b.enabled {
+                "有効にする"
+            } else {
+                "無効にする"
+            }
+        );
+    }
+    if a.delta != b.delta {
+        const LABELS: [&str; LocalDelta::LEN] = [
+            "色温度",
+            "色かぶり補正",
+            "露光量",
+            "コントラスト",
+            "ハイライト",
+            "シャドウ",
+            "白レベル",
+            "黒レベル",
+            "テクスチャ",
+            "明瞭度",
+            "かすみの除去",
+            "彩度",
+            "シャープ",
+        ];
+        let (va, vb) = (a.delta.values(), b.delta.values());
+        let changed: Vec<String> = (0..LocalDelta::LEN)
+            .filter(|&k| va[k] != vb[k])
+            .map(|k| {
+                if LocalDelta::NAMES[k] == "exposure_ev" {
+                    format!("{} {:+.2}", LABELS[k], vb[k])
+                } else {
+                    format!("{} {:+.0}", LABELS[k], vb[k])
+                }
+            })
+            .collect();
+        return match changed.len() {
+            1 | 2 => format!("マスク「{name}」の{}", changed.join("・")),
+            _ => format!("マスク「{name}」の調整"),
+        };
+    }
+    if a.name != b.name {
+        return format!("マスクの名前「{name}」");
+    }
+    format!("マスク「{name}」の範囲")
 }
 
 /// 保存待ちの変更を保存する（呼び出し側が state のロックを持つ。写真を開く・一括適用・Undo / Redo・
@@ -653,6 +750,7 @@ pub(crate) fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFram
             uncropped: job.uncropped,
             output_width,
             output_height,
+            g_bounds: Some(r.g_bounds),
         },
         b3: Arc::new(r.b3),
         display_rgb8: Arc::new(display_rgb8),
@@ -695,6 +793,26 @@ fn publish_frame(inner: &Inner, frame: DevelopFrame) {
 pub(crate) fn rerender(inner: &Arc<Inner>) {
     let mut state = inner.develop.state.lock();
     if let Some(s) = state.as_mut() {
+        if let Some(b) = s.before.as_mut() {
+            b.force_redraw();
+        }
+        redraw(inner, s);
+    }
+}
+
+/// 取り込んだカメラプロファイル・ルックが変わった（取り込み・置き換え・除く。DEV-17）ので、現像中の写真の設定の
+/// 参照（`render_deps.profile`・`render_deps.look`）を今引けるものにして描き直す（メモリの中だけ。保存された値は、
+/// 次に保存したときに記録する。開いたときに空の参照を埋めるのと同じ）。
+pub(crate) fn refresh_profiles(inner: &Arc<Inner>) {
+    let mut state = inner.develop.state.lock();
+    if let Some(s) = state.as_mut() {
+        let settings = crate::deps::with_render_deps(&inner.engine, &s.settings, &s.render_deps);
+        let saved = crate::deps::with_render_deps(&inner.engine, &s.saved, &s.render_deps);
+        if settings == s.settings && saved == s.saved {
+            return;
+        }
+        s.settings = settings;
+        s.saved = saved;
         if let Some(b) = s.before.as_mut() {
             b.force_redraw();
         }
@@ -749,10 +867,9 @@ pub(crate) fn session_snapshot(
         generation: s.generation,
         uncropped: s.uncropped,
         frame_uncropped: s.frame.as_ref().map(|f| f.info.uncropped),
-        before_settings: s
-            .before
-            .as_ref()
-            .map(|b| crate::before::effective_settings(b.base(), &s.settings, &s.render_deps)),
+        before_settings: s.before.as_ref().map(|b| {
+            crate::before::effective_settings(&inner.engine, b.base(), &s.settings, &s.render_deps)
+        }),
     })
 }
 
@@ -1043,15 +1160,18 @@ impl Core {
         // 外部データ（render_deps）は実際に使う値にする。保存された値が空なら、ここで埋める（メモリの中だけ。
         // 次に保存したときに記録する）。違えば警告する（`deps` の doc）。
         let deps = loaded.render_deps;
-        if crate::deps::recorded_deps_differ(&dstate.settings.render_deps, &deps) {
+        let settings = crate::deps::with_render_deps(&inner.engine, &dstate.settings, &deps);
+        if crate::deps::recorded_deps_differ(&dstate.settings.render_deps, &settings.render_deps) {
             inner.events.warn(
                 WarningCode::RenderDepsChanged,
-                crate::deps::deps_changed_message(&dstate.settings.render_deps, &deps),
+                crate::deps::deps_changed_message(
+                    &dstate.settings.render_deps,
+                    &settings.render_deps,
+                ),
                 Some(variant_id),
                 None,
             );
         }
-        let settings = crate::deps::with_render_deps(&dstate.settings, &deps);
         let generation = inner.develop.next_generation();
         let mut session = Session {
             variant_id,
@@ -1126,7 +1246,7 @@ impl Core {
         }
         let was_dirty = s.dirty();
         // 外部データ（render_deps）はセッションの値のまま（利用者の設定では変えない。`deps` の doc）。
-        s.settings = crate::deps::with_render_deps(settings, &s.render_deps);
+        s.settings = crate::deps::with_render_deps(&inner.engine, settings, &s.render_deps);
         s.generation = inner.develop.next_generation();
         s.last_change = Instant::now();
         s.retry_after = None;
@@ -1379,7 +1499,8 @@ impl Core {
         };
         if let Some(settings) = &result {
             if let Some(s) = state.as_mut().filter(|s| s.variant_id == variant_id) {
-                let settings = crate::deps::with_render_deps(settings, &s.render_deps);
+                let settings =
+                    crate::deps::with_render_deps(&inner.engine, settings, &s.render_deps);
                 s.settings = settings.clone();
                 s.saved = settings;
                 s.saved_seq = seq;
@@ -1586,7 +1707,11 @@ impl Core {
                     Some((sv, d)) if *sv == v => d.clone(),
                     _ => current.render_deps.clone(),
                 };
-                items.push((v, crate::deps::with_render_deps(&new, &deps), label));
+                items.push((
+                    v,
+                    crate::deps::with_render_deps(&inner.engine, &new, &deps),
+                    label,
+                ));
             }
             if !items.is_empty() {
                 c.save_develop_labeled(&items)?;
@@ -1732,6 +1857,95 @@ impl Core {
         })
     }
 
+    /// 色域の範囲（DEV-19）のスポイト: プレビューの上の点の色（適用はしない。UI が見本の色として `set_settings` する）。
+    ///
+    /// - `x`・`y`・`uncropped`: [`Core::white_balance_at`] と同じ（プレビューの出力の画像の幅・高さに対する割合と、
+    ///   クリックした画像の [`FrameInfo::uncropped`]）。
+    /// - 今の設定（保存待ち・ドラッグ中の値を含む）の、ステージ 9 の出力（露光量の前。局所の値の面の基準の画像と同じ）の
+    ///   点のまわり（WB のスポイトと同じ割合の半径）の平均の OKLab と、点の G 座標を返す（genzo-pipeline の
+    ///   `Engine::mask_color_at`）。RAW 以外の写真でも使える。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。点が 0〜1 の外・暗すぎる点・
+    /// 画像の外の点は [`ApiError::InvalidArgument`]。
+    pub fn mask_color_at(
+        &self,
+        variant_id: VariantId,
+        x: f64,
+        y: f64,
+        uncropped: Option<bool>,
+    ) -> Result<PickedMaskColor, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let snap = session_snapshot(inner, variant_id)?;
+        let view = pick_view(uncropped, snap.frame_uncropped, snap.uncropped);
+        let pick = inner
+            .engine
+            .mask_color_at(
+                &snap.source,
+                &snap.settings,
+                (x, y),
+                inner.engine.config().preview_long_edge,
+                view,
+            )
+            .map_err(|e| match e {
+                genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
+                e => e.into(),
+            })?;
+        Ok(PickedMaskColor {
+            x: pick.x as f32,
+            y: pick.y as f32,
+            lab: pick.lab,
+        })
+    }
+
+    /// マスクの重ねて表示（O キー。DEV-18）: マスク `index`（今の設定の `masks` の番号）の重みの画像。
+    ///
+    /// 同じ表示（`uncropped`。省略時は最新に公開したプレビューの表示）のプレビューと同じ格子なので、UI はプレビューに
+    /// そのまま重ねられる（genzo-pipeline の `Engine::mask_overlay`。範囲マスクはステージ 9 の出力で決まる）。差分が 0・
+    /// 無効のマスクも求められる。処理バージョン 1 の写真でも求められる（描画には使われない）。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。番号が範囲の外なら
+    /// [`ApiError::InvalidArgument`]。
+    pub fn mask_overlay(
+        &self,
+        variant_id: VariantId,
+        index: usize,
+        uncropped: Option<bool>,
+    ) -> Result<MaskOverlayFrame, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let snap = session_snapshot(inner, variant_id)?;
+        let view = pick_view(uncropped, snap.frame_uncropped, snap.uncropped);
+        let o = inner
+            .engine
+            .mask_overlay(
+                &snap.source,
+                &snap.settings,
+                index,
+                inner.engine.config().preview_long_edge,
+                view,
+            )
+            .map_err(|e| match e {
+                genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
+                e => e.into(),
+            })?;
+        Ok(MaskOverlayFrame {
+            info: MaskOverlayInfo {
+                variant_id,
+                generation: snap.generation,
+                index,
+                width: o.width,
+                height: o.height,
+                uncropped: view,
+            },
+            weights: o
+                .weights
+                .iter()
+                .map(|w| (w.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect(),
+        })
+    }
+
     /// 切り抜き `crop` を、現像中の写真の寸法と角度 `angle_deg` で、描画が実際に使う範囲にする（回転で画像の
     /// 外に出る切り抜きは、中心と縦横比を保って画像の内側に収まる最大の大きさに縮める。genzo-pipeline の
     /// `finish::geometry::constrain_crop`。描画のステージ 9 と同じ計算）。設定は変えない。
@@ -1843,6 +2057,7 @@ mod tests {
                 as_shot_white_balance: None,
                 lens_correction: None,
                 lens_correction_note: None,
+                camera: None,
             },
             render_deps: genzo_model::RenderDeps::default(),
             settings: DevelopSettings::default(),
@@ -2020,5 +2235,24 @@ mod tests {
             describe_change(&a, &i),
             "カラーミキサー・カラーグレーディング"
         );
+        // カメラプロファイル・ルック（DEV-17）。参照（render_deps）の変化は「処理バージョン」にしない。
+        let mut j = a.clone();
+        j.profile.camera = Some("Sony ILCE-7M4 標準".into());
+        j.profile.look = Some("film".into());
+        j.render_deps.profile = Some(genzo_model::DataRef::new(
+            "dcp:Sony ILCE-7M4 標準",
+            "ab".repeat(32),
+        ));
+        assert_eq!(
+            describe_change(&a, &j),
+            "プロファイル「Sony ILCE-7M4 標準」・ルック「film」"
+        );
+        let mut k = j.clone();
+        k.profile.look_amount = 40.0;
+        assert_eq!(describe_change(&j, &k), "ルックの適用量 40");
+        assert_eq!(describe_change(&j, &a), "プロファイル（標準）・ルックなし");
+        let mut l = a.clone();
+        l.render_deps.raw_decoder = "libraw-x".into();
+        assert_eq!(describe_change(&a, &l), "処理バージョン");
     }
 }

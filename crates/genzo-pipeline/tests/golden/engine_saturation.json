@@ -157,6 +157,11 @@
           "texture": 0.0
         },
         "process_version": 1,
+        "profile": {
+          "camera": null,
+          "look": null,
+          "look_amount": 100.0
+        },
         "render_deps": {
           "camera_profile": {
             "id": "",
@@ -186,7 +191,7 @@
         },
         "white_balance": "as_shot"
       },
-      "develop_hash": "772a6bddb94fe0da6083b373ec89f820d08153dc0bb37127104bd39c456c7aa3",
+      "develop_hash": "772c6755f9a98cf1fc3360b5e55f61f6ada6d58d77b317441e529248c52e925d",
       "process_version": 1
     },
     "process_version": 1,

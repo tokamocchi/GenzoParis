@@ -15,6 +15,10 @@
 //   切り抜き・角度はアフターと同じ）を、ビフォーだけ・左右に並べる・分割で出す。等倍表示の中心は両方で同じ
 //   （面ごとに、アフターは render_region、ビフォーは render_before_region で描く）。compareMath.ts の doc。
 // - 撮影情報（LIB-17。I）: ルーペと同じ表示を重ねる（寸法は切り抜いた後の出力の大きさ）。
+// - ローカル補正（マスク。DEV-18・DEV-19）: 選んでいるマスクの線形・円形のつまみ・色域の見本の印を重ね、ブラシで描く
+//   （MaskLayer.tsx）。重ねて表示（O）は選んでいるマスクの重みを赤で重ねる。色域のスポイトはクリックした点の色を
+//   見本にする。ビフォー / アフターの表示・切り抜きの編集の間は出さない。全体表示でも等倍表示でも、画像の箱と
+//   FrameInfo.g_bounds で位置を合わせる。
 // - 画像のまわりは色みのない灰色だけにする（写真の色の判断に影響しないように）。
 
 import {
@@ -29,6 +33,7 @@ import {
 
 import { type Frame, drawFrame } from "../api/frames";
 import type { BeforeSource, CropRect, FrameInfo, RegionInfo, VariantId } from "../api/types";
+import { RANGES } from "../api/types";
 import { comboLabel, isTyping, useHotkeys } from "../keyboard";
 import { actions, appStore, useApp } from "../state/app";
 import {
@@ -58,20 +63,27 @@ import { colorControls, toggleBlackWhite } from "./colorLogic";
 import { type CropHandle, cropFractionAspect, dragCrop, rotatedImageCorners } from "./cropMath";
 import { useGeometryInfo, useLoadedSummary, useLoadedSummaryObject } from "./hooks";
 import { activatesOnEnter } from "./keyTargets";
+import { MaskLayer, MaskOverlayCanvas, useMaskOverlay } from "./MaskLayer";
+import { type Box, boundsOrDefault, maskControls } from "./maskLogic";
 import { clippingOverlay } from "./pixels";
 import {
   cancelCrop,
+  cancelMaskTool,
   cancelWbTool,
   commitCrop,
   constrainDraft,
+  currentMask,
   endAllTools,
+  pickMaskColor,
   pickWhiteBalance,
+  setBrushOptions,
   setCompareMode,
   setDraftCrop,
   setZoom,
   startCrop,
   toggleClipping,
   toggleCompareMode,
+  toggleMaskOverlay,
   toggleWbTool,
   useDevelopView,
   viewStore,
@@ -87,6 +99,8 @@ const REGION_PAN_DELAY_MS = 60;
 const CLICK_SLOP_PX = 4;
 /** 切り抜きの編集中に画像のまわりに空ける幅（CSS の画素。仮置き）。枠の端のつまみをつかめるようにする。 */
 const CROP_INSET_PX = 24;
+/** ブラシの大きさを [ ・ ] で変える倍率（仮置き）。 */
+const BRUSH_SIZE_STEP = 1.25;
 
 /**
  * 等倍表示で要求する範囲（出力の画素）。見えている範囲を 1 画素ずつ広げ（端の丸めで外れないように）、
@@ -396,6 +410,12 @@ function Stage() {
   const showClipping = useDevelopView((s) => s.showClipping);
   const angle = useDevelop((s) => s.settings?.geometry.angle_deg ?? 0);
   const info = useGeometryInfo();
+  const settings = useDevelop((s) => s.settings);
+  const hasState = useDevelop((s) => s.state !== null);
+  const maskIndex = useDevelopView((s) => s.maskIndex);
+  const componentIndex = useDevelopView((s) => s.componentIndex);
+  const maskOverlay = useDevelopView((s) => s.maskOverlay);
+  const brush = useDevelopView((s) => s.brush);
 
   const header: FrameInfo | null = frame?.header ?? null;
   const outW = header?.output_width ?? 0;
@@ -485,10 +505,15 @@ function Stage() {
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !frame) return;
-    if (tool === "crop") return;
+    if (tool === "crop" || tool === "brush") return;
     if (tool === "wb") {
       const p = pointToImage(e.clientX, e.clientY);
       if (p) void pickWhiteBalance(p.fx, p.fy);
+      return;
+    }
+    if (tool === "mask_color") {
+      const p = pointToImage(e.clientX, e.clientY);
+      if (p) void pickMaskColor(p.fx, p.fy);
       return;
     }
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -540,13 +565,31 @@ function Stage() {
   const k = crop ? cropFractionAspect(crop.aspect, info) : null;
   const corners = crop && info ? rotatedImageCorners(info.ow, info.oh, angle) : null;
 
+  // ローカル補正（マスク）の表示: アフターだけの表示（面は 1 つでステージの左上から）で、切り抜きの編集中でないとき。
+  // 画像の箱は、全体表示なら配置、等倍表示なら下敷きのプレビューを等倍に引き伸ばした箱。
+  const afterOrigin = originOf(afterCenter, outW, outH);
+  const imageBox: Box | null =
+    frame && fit ? (afterOrigin ? { left: -afterOrigin.x / dpr, top: -afterOrigin.y / dpr, width: outW / dpr, height: outH / dpr } : fit) : null;
+  const sel = !crop && !comparing && hasState ? currentMask(settings, { maskIndex, componentIndex }) : null;
+  const gb = boundsOrDefault(header?.g_bounds);
+  const maskEditable = !!settings && maskControls(settings, !hasState || opening).editable;
+  const overlay = useMaskOverlay(
+    sel && maskOverlay && variantId !== null && header
+      ? { variantId, index: sel.index, generation: header.generation, uncropped }
+      : null,
+  );
+
   const classes = ["dv-stage"];
-  if (tool === "wb") classes.push("tool-wb");
+  if (tool === "wb" || tool === "mask_color") classes.push("tool-wb");
+  else if (tool === "brush") classes.push("tool-brush");
   else if (zoomed) classes.push(panning ? "panning" : "zoomed");
   else if (canZoom && !crop) classes.push("can-zoom");
 
   let hint: string | null = null;
   if (tool === "wb") hint = "スポイト: 中立（灰色）にしたい点をクリック（Esc で取り消し）";
+  else if (tool === "mask_color") hint = "色域: 選びたい色の点をクリック（Esc で取り消し）";
+  else if (tool === "brush")
+    hint = `ブラシ${brush.erase ? "（消しゴム）" : ""}: ドラッグで描く。Alt を押しながらで${brush.erase ? "描く" : "消す"}・[ ] で大きさ・Esc で終わる`;
   else if (crop && !cropReady) hint = "切り抜く前の全体を描いています…（Esc で取り消し）";
   else if (crop) hint = "切り抜き: 枠の四隅・四辺・中をドラッグ。Enter で完了、Esc で取り消し";
   else if (zoomed) hint = comparing ? "等倍表示（ビフォーとアフターは同じ位置）: ドラッグで移動。クリック・Z・Esc で全体表示" : "等倍表示: ドラッグで移動。クリック・Z・Esc で全体表示";
@@ -577,7 +620,7 @@ function Stage() {
             frame={frame}
             region={afterRegion}
             fit={fit}
-            origin={originOf(afterCenter, outW, outH)}
+            origin={afterOrigin}
             dpr={dpr}
             showClipping={showClipping && !crop}
             clipLeft={split ? splitAt : null}
@@ -597,6 +640,21 @@ function Stage() {
         ),
       )}
       {cropReady && fit && <CropOverlay box={fit} crop={crop.crop} aspect={k} imageCorners={corners} />}
+      {sel && overlay && imageBox && <MaskOverlayCanvas frame={overlay} style={imageBox} />}
+      {sel && imageBox && (
+        <MaskLayer
+          width={size.width}
+          height={size.height}
+          box={imageBox}
+          gb={gb}
+          mask={sel.mask}
+          index={sel.index}
+          component={sel.component}
+          painting={tool === "brush" && maskEditable}
+          brush={brush}
+          editable={maskEditable}
+        />
+      )}
       {comparing && split && <div className="dv-split-line" style={{ left: splitAt }} />}
       {comparing &&
         (split ? (
@@ -668,7 +726,12 @@ function toggleBlackWhiteKey(): void {
   applySettings(toggleBlackWhite(d.settings), false);
 }
 
-/** 現像の画面のキー（W・R・Z・J・I・V・\・Y・Shift ＋ Y と、道具を使っている間の Esc・Enter）。 */
+/** ブラシの大きさを範囲に収める（G 座標の半径。RANGES.brushSize）。 */
+function brushSize(v: number): number {
+  return Math.round(Math.min(RANGES.brushSize.max, Math.max(RANGES.brushSize.min, v)) * 10000) / 10000;
+}
+
+/** 現像の画面のキー（W・R・Z・J・I・V・O・[・]・\・Y・Shift ＋ Y と、道具を使っている間の Esc・Enter）。 */
 function useDevelopKeys(enabled: boolean) {
   const tool = useDevelopView((s) => s.tool);
   const zoomed = useDevelopView((s) => s.zoom !== null);
@@ -700,6 +763,13 @@ function useDevelopKeys(enabled: boolean) {
         cycleInfoMode();
       },
       v: () => toggleBlackWhiteKey(),
+      o: () => toggleMaskOverlay(),
+      "[": () => {
+        if (viewStore.get().tool === "brush") setBrushOptions({ size: brushSize(viewStore.get().brush.size / BRUSH_SIZE_STEP) });
+      },
+      "]": () => {
+        if (viewStore.get().tool === "brush") setBrushOptions({ size: brushSize(viewStore.get().brush.size * BRUSH_SIZE_STEP) });
+      },
       "\\": () => toggleCompareMode("before"),
       // macOS の日本語配列の ¥ のキー（Option なしでは "¥" になる）。
       "¥": () => toggleCompareMode("before"),
@@ -720,6 +790,7 @@ function useDevelopKeys(enabled: boolean) {
         e.stopPropagation();
         if (s.crop) void cancelCrop();
         else if (s.tool === "wb") cancelWbTool();
+        else if (s.tool === "brush" || s.tool === "mask_color") cancelMaskTool();
         else if (s.zoom) setZoom(null);
       } else if (e.key === "Enter" && s.crop && !activatesOnEnter(e.target)) {
         // ボタンなどにフォーカスがあるときは、その要素の動作に任せる（横取りして保存しない）。

@@ -191,7 +191,8 @@ fn export_one(
     let loaded = load_source(inner, &file, Lane::Batch, ctx.token())?;
     // 保存された設定の外部データ（render_deps）を、実際に使う値に置き換えて描き、使った値を結果に記録する
     // （`deps` の doc）。保存された値と違えば警告する。
-    let render_deps = loaded.render_deps.clone();
+    let effective = crate::deps::with_render_deps(&inner.engine, &develop, &loaded.render_deps);
+    let render_deps = effective.render_deps.clone();
     if crate::deps::recorded_deps_differ(&develop.render_deps, &render_deps) {
         inner.events.warn(
             crate::events::WarningCode::RenderDepsChanged,
@@ -200,7 +201,7 @@ fn export_one(
             None,
         );
     }
-    let develop = crate::deps::with_render_deps(&develop, &render_deps);
+    let develop = effective;
     let token = ctx.token().clone();
     let control = move || token.is_cancelled();
     let (image, backend) =
@@ -246,7 +247,7 @@ fn export_one(
                 backend,
                 warnings,
                 render_deps: (render_deps != genzo_model::RenderDeps::default())
-                    .then_some(render_deps),
+                    .then(|| Box::new(render_deps)),
             })
         }
         WriteOutcome::Skipped { existing } => Ok(ExportOutcome::Skipped {

@@ -10,7 +10,8 @@
 //!     定数など）。**16 進の浮動小数点の表記**（`0x1.0d01c6p-2f`）で書くので、10 進への丸めの差が出ず、
 //!     CPU 版の値とビット単位で同じになる。
 //! - バインディングはすべてのカーネルで同じ配置（0: 入力、1: 出力、2: パラメータ、3: 原子的な
-//!   カウンター（`[0]` は置き換えた NaN・無限大の数）、4: 補助の入力（LUT・ガイドなど）、5: 補助の出力）。
+//!   カウンター（`[0]` は置き換えた NaN・無限大の数）、4: 補助の入力（LUT・ガイドなど）、5: 補助の出力、6: ローカル補正の
+//!   局所の値の面（`local.wgsl`。DEV-18））。
 //!   使わないものは小さな空のバッファを結び付ける。
 //! - パイプラインは最初に使うときにコンパイルして、[`KernelCache`] に保持する。
 //!
@@ -27,6 +28,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
+use genzo_color::dcp::HUE_SHIFT_TO_SECTORS;
 use genzo_color::oklab::{
     BT2020_TO_OKLAB_LMS_F32, OKLAB_LMS_TO_BT2020_F32, OKLAB_M2_F32, OKLAB_M2_INV_F32,
 };
@@ -39,18 +41,22 @@ use genzo_pipeline::finish::color::{SKIN_PROTECTION, VIBRANCE_CHROMA_REF, VIBRAN
 use genzo_pipeline::finish::effects::{
     GRAIN_MAX_SPAN, VIGNETTE_DARK_MAX, VIGNETTE_HL_HI, VIGNETTE_HL_LO, VIGNETTE_LIGHT_MAX,
 };
-use genzo_pipeline::finish::exposure::CONTRAST_CHROMA_GAIN_MAX;
+use genzo_pipeline::finish::exposure::{CONTRAST_CHROMA_GAIN_MAX, CONTRAST_STRENGTH};
 use genzo_pipeline::finish::frequency::LUMA_LOG_OFFSET;
 use genzo_pipeline::finish::presence::{
-    CLARITY_LIMIT, CLARITY_MID_WIDTH, DEHAZE_ADD_FLOOR, DEHAZE_ADD_MAX, DEHAZE_OMEGA, DEHAZE_T_MIN,
-    TEXTURE_LIMIT,
+    CLARITY_GAIN, CLARITY_LIMIT, CLARITY_MID_WIDTH, DEHAZE_ADD_FLOOR, DEHAZE_ADD_MAX, DEHAZE_OMEGA,
+    DEHAZE_T_MIN, TEXTURE_GAIN, TEXTURE_LIMIT,
 };
+use genzo_pipeline::finish::sharpen::SHARPEN_GAIN;
 use genzo_pipeline::finish::tone::{
     BLACKS_CENTER_EV, BLACKS_MAX_EV, BLACKS_WIDTH_EV, HIGHLIGHTS_CENTER_EV, HIGHLIGHTS_MAX_EV,
     HIGHLIGHTS_WIDTH_EV, SHADOWS_CENTER_EV, SHADOWS_MAX_EV, SHADOWS_WIDTH_EV, WHITES_CENTER_EV,
     WHITES_MAX_EV, WHITES_WIDTH_EV,
 };
 use genzo_pipeline::finish::{BT2020_LUMINANCE, LOG2_CEILING, LOG2_MIDDLE_GRAY, MIDDLE_GRAY};
+use genzo_pipeline::local::{
+    COLOR_L_FLOOR, LOCAL_EXPOSURE_LIMIT, LOCAL_TEMPERATURE_EV, LOCAL_TINT_EV,
+};
 use genzo_pipeline::sanitize::LOG_FLOOR;
 
 use crate::context::GpuContext;
@@ -69,6 +75,9 @@ const RESAMPLE: &str = include_str!("../shaders/resample.wgsl");
 const DENOISE: &str = include_str!("../shaders/denoise.wgsl");
 const NOISE: &str = include_str!("../shaders/noise.wgsl");
 const DETAIL: &str = include_str!("../shaders/detail.wgsl");
+const LUT3D: &str = include_str!("../shaders/lut3d.wgsl");
+const PROFILE: &str = include_str!("../shaders/profile.wgsl");
+const LOCAL: &str = include_str!("../shaders/local.wgsl");
 
 /// 座標を i32 にするときの切り詰めの範囲（2^30。CPU 版は i64 で 2^40。極端な座標でだけ結果が違う）。
 pub(crate) const COORD_LIMIT: f32 = (1u32 << 30) as f32;
@@ -98,11 +107,12 @@ pub(crate) enum Module {
     Sensor,
     Resample,
     Denoise,
+    Profile,
 }
 
 impl Module {
     #[cfg(test)]
-    pub(crate) const ALL: [Module; 8] = [
+    pub(crate) const ALL: [Module; 9] = [
         Module::Finish,
         Module::Output,
         Module::Geometry,
@@ -111,6 +121,7 @@ impl Module {
         Module::Sensor,
         Module::Resample,
         Module::Denoise,
+        Module::Profile,
     ];
 
     fn label(self) -> &'static str {
@@ -123,19 +134,21 @@ impl Module {
             Module::Sensor => "genzo-gpu.sensor",
             Module::Resample => "genzo-gpu.resample",
             Module::Denoise => "genzo-gpu.denoise",
+            Module::Profile => "genzo-gpu.profile",
         }
     }
 
     fn parts(self) -> &'static [&'static str] {
         match self {
-            Module::Finish => &[COMMON, PIXEL_IO, COLOR_LIB, FINISH, NOISE, DETAIL],
-            Module::Output => &[COMMON, PIXEL_IO, COLOR_LIB, OUTPUT],
+            Module::Finish => &[COMMON, PIXEL_IO, COLOR_LIB, FINISH, NOISE, DETAIL, LOCAL],
+            Module::Output => &[COMMON, PIXEL_IO, COLOR_LIB, LUT3D, OUTPUT],
             Module::Geometry => &[COMMON, PIXEL_IO, GEOMETRY],
             Module::Histogram => &[COMMON, HISTOGRAM],
             Module::Quantize => &[COMMON, NOISE, QUANTIZE],
             Module::Sensor => &[COMMON, SENSOR],
             Module::Resample => &[COMMON, PIXEL_IO, RESAMPLE],
             Module::Denoise => &[COMMON, PIXEL_IO, DENOISE],
+            Module::Profile => &[COMMON, PIXEL_IO, COLOR_LIB, LUT3D, PROFILE],
         }
     }
 
@@ -213,6 +226,26 @@ impl Module {
                 ("GR_INV_CELL", 2),
                 ("GR_W", 2),
                 ("GR_STRENGTH", 1),
+                // ローカル補正（local.wgsl。処理バージョン 2。DEV-18）。
+                ("PR_HAZE_AIR", 3),
+                ("LOCAL_FLAGS", 1),
+                ("LOCAL_X", 1),
+                ("LOCAL_Y", 1),
+                ("LOCAL_W", 1),
+                ("LOCAL_N", 1),
+                ("LOCAL_SLOT", 13),
+                ("LOCAL_EV", 1),
+                ("LOCAL_CU", 1),
+                ("LOCAL_U3", 3),
+                ("LOCAL_OX", 1),
+                ("LOCAL_OY", 1),
+                ("LOCAL_SX", 1),
+                ("LOCAL_SY", 1),
+                ("LOCAL_GAIN", 1),
+                ("LOCAL_RANGE", 1),
+                ("LOCAL_PLANES", 1),
+                ("LOCAL_MASKS", 1),
+                ("LOCAL_DATA", 1),
             ],
             Module::Output => &[
                 ("W2D", 9),
@@ -278,6 +311,17 @@ impl Module {
                 ("AUX_Y", 1),
                 ("AUX_W", 1),
                 ("EPS", 1),
+            ],
+            Module::Profile => &[
+                ("MAT", 9),
+                ("MAT2", 9),
+                ("HSV_DIMS", 3),
+                ("HSV_SRGB", 1),
+                ("HSV_HSCALE", 1),
+                ("LUT_N", 1),
+                ("DOMAIN_MIN", 3),
+                ("DOMAIN_SCALE", 3),
+                ("AMOUNT", 1),
             ],
         }
     }
@@ -346,10 +390,13 @@ pub(crate) enum Kernel {
     Presence,
     Sharpen,
     Effects,
+    HsvTable,
+    Look,
+    Local,
 }
 
 impl Kernel {
-    pub(crate) const ALL: [Kernel; 30] = [
+    pub(crate) const ALL: [Kernel; 33] = [
         Kernel::Exposure,
         Kernel::Contrast,
         Kernel::Tone,
@@ -380,6 +427,9 @@ impl Kernel {
         Kernel::Presence,
         Kernel::Sharpen,
         Kernel::Effects,
+        Kernel::HsvTable,
+        Kernel::Look,
+        Kernel::Local,
     ];
 
     pub(crate) fn module(self) -> Module {
@@ -395,7 +445,8 @@ impl Kernel {
             | Kernel::BlurV
             | Kernel::Presence
             | Kernel::Sharpen
-            | Kernel::Effects => Module::Finish,
+            | Kernel::Effects
+            | Kernel::Local => Module::Finish,
             Kernel::Display | Kernel::Export => Module::Output,
             Kernel::Geometry | Kernel::LensCorrection => Module::Geometry,
             Kernel::Histogram => Module::Histogram,
@@ -410,6 +461,7 @@ impl Kernel {
             | Kernel::NrDetail
             | Kernel::NrInverse => Module::Denoise,
             Kernel::ColorMatrix | Kernel::DownscaleH | Kernel::DownscaleV => Module::Resample,
+            Kernel::HsvTable | Kernel::Look => Module::Profile,
         }
     }
 
@@ -443,6 +495,9 @@ impl Kernel {
             Kernel::Presence => "presence_main",
             Kernel::Sharpen => "sharpen_main",
             Kernel::Effects => "effects_main",
+            Kernel::HsvTable => "hsv_table_main",
+            Kernel::Look => "look_main",
+            Kernel::Local => "local_main",
         }
     }
 
@@ -457,6 +512,7 @@ impl Kernel {
                 | Kernel::LumaLog
                 | Kernel::BlurH
                 | Kernel::BlurV
+                | Kernel::Local
         )
     }
 
@@ -614,6 +670,32 @@ impl Kernel {
                 "GR_W",
                 "GR_STRENGTH",
             ],
+            Kernel::HsvTable => &["MAT", "MAT2", "HSV_DIMS", "HSV_SRGB", "HSV_HSCALE"],
+            Kernel::Local => &[
+                "LOCAL_OX",
+                "LOCAL_OY",
+                "LOCAL_SX",
+                "LOCAL_SY",
+                "LOCAL_GAIN",
+                "LOCAL_RANGE",
+                "LOCAL_PLANES",
+                "LOCAL_MASKS",
+                "LOCAL_DATA",
+                "S2D_MODE",
+                "S2D_FLOOR_RATIO",
+                "LUT_OFF",
+                "LUT_LEN",
+                "LUT_LO",
+                "LUT_INV",
+            ],
+            Kernel::Look => &[
+                "MAT",
+                "MAT2",
+                "LUT_N",
+                "DOMAIN_MIN",
+                "DOMAIN_SCALE",
+                "AMOUNT",
+            ],
         }
     }
 }
@@ -651,6 +733,7 @@ fn wgsl_rows(out: &mut String, name: &str, rows: [[f32; 3]; 3]) {
 pub(crate) fn shared_constants() -> Vec<(&'static str, f32)> {
     vec![
         ("LUMA_R", BT2020_LUMINANCE[0]),
+        ("HSV_DEG_TO_H", HUE_SHIFT_TO_SECTORS),
         ("LUMA_G", BT2020_LUMINANCE[1]),
         ("LUMA_B", BT2020_LUMINANCE[2]),
         ("LOG_FLOOR", LOG_FLOOR),
@@ -718,6 +801,14 @@ pub(crate) fn shared_constants() -> Vec<(&'static str, f32)> {
         ("VIGNETTE_HL_LO", VIGNETTE_HL_LO),
         ("VIGNETTE_HL_HI", VIGNETTE_HL_HI),
         ("GRAIN_MAX_SPAN", GRAIN_MAX_SPAN),
+        ("CONTRAST_STRENGTH", CONTRAST_STRENGTH),
+        ("TEXTURE_GAIN", TEXTURE_GAIN),
+        ("CLARITY_GAIN", CLARITY_GAIN),
+        ("SHARPEN_GAIN", SHARPEN_GAIN),
+        ("COLOR_L_FLOOR", COLOR_L_FLOOR),
+        ("LOCAL_EXPOSURE_LIMIT", LOCAL_EXPOSURE_LIMIT),
+        ("LOCAL_TEMPERATURE_EV", LOCAL_TEMPERATURE_EV),
+        ("LOCAL_TINT_EV", LOCAL_TINT_EV),
     ]
 }
 
@@ -872,6 +963,8 @@ pub(crate) struct Dispatch<'a> {
     pub(crate) dst: &'a wgpu::Buffer,
     pub(crate) aux: Option<&'a wgpu::Buffer>,
     pub(crate) aux_out: Option<&'a wgpu::Buffer>,
+    /// ローカル補正の局所の値の面（binding 6。使わなければ空のバッファ）。
+    pub(crate) local: Option<&'a wgpu::Buffer>,
     /// スレッドの数（x, y）。ワークグループの数はこれをワークグループの大きさで割って切り上げる。
     pub(crate) threads: (u32, u32),
 }
@@ -909,6 +1002,7 @@ impl KernelCache {
                     entry(3, false),
                     entry(4, true),
                     entry(5, false),
+                    entry(6, true),
                 ],
             });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1061,6 +1155,7 @@ impl<'g> Batch<'g> {
             .create_storage_init("genzo-gpu.params", bytemuck::cast_slice(&d.params))?;
         let aux = d.aux.unwrap_or(&self.kernels.dummy_ro);
         let aux_out = d.aux_out.unwrap_or(&self.kernels.dummy_rw);
+        let local = d.local.unwrap_or(&self.kernels.dummy_ro);
         let gpu = self.gpu;
         let layout = &self.kernels.layout;
         let stats = &self.stats;
@@ -1093,6 +1188,10 @@ impl<'g> Batch<'g> {
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: aux_out.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: local.as_entire_binding(),
                     },
                 ],
             });

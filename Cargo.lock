@@ -1644,6 +1644,7 @@ dependencies = [
  "ctrlc",
  "genzo-api",
  "genzo-catalog",
+ "genzo-color",
  "genzo-gpu",
  "genzo-jobs",
  "genzo-media",

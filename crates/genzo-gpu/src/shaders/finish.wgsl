@@ -2,6 +2,7 @@
 // 式と演算の順序は genzo-pipeline の finish の各モジュールの doc と同じ。
 //
 // binding 4（aux）: ステージ 11 はガイド（G 座標の log2 の輝度。行優先）、ステージ 15・16 は 1D LUT の表。
+// ステージ 10・11・13 は、ローカル補正（処理バージョン 2。DEV-18）があれば画素の局所の値（local.wgsl）を足して計算する。
 
 @group(0) @binding(4) var<storage, read> aux: array<f32>;
 
@@ -14,8 +15,23 @@ fn exposure_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!in_output(gid)) {
         return;
     }
-    let k = pf(P_GAIN);
-    let c = load_global(out_global(gid));
+    let g = out_global(gid);
+    var k = pf(P_GAIN);
+    let c = load_global(g);
+    if (local_on()) {
+        // ExposureParams::apply_local。
+        let dt = local_value(LP_TEMPERATURE, g);
+        let di = local_value(LP_TINT, g);
+        let de = local_value(LP_EXPOSURE, g);
+        if (de != 0.0) {
+            k = exp2(clamp(pf(P_LOCAL_EV) + de, -LOCAL_EXPOSURE_LIMIT, LOCAL_EXPOSURE_LIMIT));
+        }
+        if (dt != 0.0 || di != 0.0) {
+            let wb = local_wb_gains(dt, di);
+            store_out(gid, sanitize3(vec3<f32>(c.x * (k * wb.x), c.y * (k * wb.y), c.z * (k * wb.z))));
+            return;
+        }
+    }
     store_out(gid, sanitize3(vec3<f32>(c.x * k, c.y * k, c.z * k)));
 }
 
@@ -26,25 +42,47 @@ fn contrast_log2(gamma: f32, l: f32) -> f32 {
 
 // ContrastParams::apply: 輝度の倍率 r と、色の成分の倍率 k（中間グレーより暗い部分は
 // CONTRAST_CHROMA_GAIN_MAX まで）。k = r なら RGB × r、それ以外は Y·r + k·(RGB − Y)。
-@compute @workgroup_size(8, 8)
-fn contrast_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (!in_output(gid)) {
-        return;
-    }
-    let c = load_global(out_global(gid));
+fn contrast_apply(gamma: f32, c: vec3<f32>) -> vec3<f32> {
     let y = luminance(c);
     let l = safe_log2(y);
-    let r = exp2(contrast_log2(pf(P_GAMMA), l) - l);
+    let r = exp2(contrast_log2(gamma, l) - l);
     var k = r;
     if (y < MIDDLE_GRAY) {
         k = min(r, CONTRAST_CHROMA_GAIN_MAX);
     }
     if (k == r) {
-        store_out(gid, sanitize3(vec3<f32>(c.x * r, c.y * r, c.z * r)));
-        return;
+        return vec3<f32>(c.x * r, c.y * r, c.z * r);
     }
     let y2 = y * r;
-    store_out(gid, sanitize3(vec3<f32>(y2 + k * (c.x - y), y2 + k * (c.y - y), y2 + k * (c.z - y))));
+    return vec3<f32>(y2 + k * (c.x - y), y2 + k * (c.y - y), y2 + k * (c.z - y));
+}
+
+// ContrastParams::with_local の γ（dc は 0 でないこと）。
+fn local_gamma(dc: f32) -> f32 {
+    return 1.0 + CONTRAST_STRENGTH * add_unit(pf(P_LOCAL_CU), dc, -2.0, 2.0);
+}
+
+@compute @workgroup_size(8, 8)
+fn contrast_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (!in_output(gid)) {
+        return;
+    }
+    let g = out_global(gid);
+    let c = load_global(g);
+    var gamma = pf(P_GAMMA);
+    if (local_on()) {
+        // ContrastStageParams::apply_local。
+        let dc = local_value(LP_CONTRAST, g);
+        if (dc == 0.0) {
+            if (local_only()) {
+                store_out(gid, sanitize3(c));
+                return;
+            }
+        } else {
+            gamma = local_gamma(dc);
+        }
+    }
+    store_out(gid, sanitize3(contrast_apply(gamma, c)));
 }
 
 // ---------------------------------------------------------------------------
@@ -56,19 +94,67 @@ fn sigmoid2(z: f32) -> f32 {
     return 1.0 / (1.0 + exp2(-z));
 }
 
+// ステージ 11 の値（ToneStageParams のハイライト・シャドウ・白・黒・EV・γ）。
+struct ToneP {
+    h: f32,
+    s: f32,
+    w: f32,
+    b: f32,
+    ev: f32,
+    gamma: f32,
+}
+
+// 全体の値（P_TONE_*・P_GAMMA）。
+fn tone_global() -> ToneP {
+    return ToneP(pf(P_TONE_H), pf(P_TONE_S), pf(P_TONE_W), pf(P_TONE_B), pf(P_TONE_EV), pf(P_GAMMA));
+}
+
+// ToneStageParams::with_local（局所の明るさの項目の局所の値を足す）。
+fn tone_with_local(tp: ToneP, g: vec2<i32>) -> ToneP {
+    var o = tp;
+    o.h = add_unit(tp.h, local_value(LP_HIGHLIGHTS, g), -2.0, 2.0);
+    o.s = add_unit(tp.s, local_value(LP_SHADOWS, g), -2.0, 2.0);
+    o.w = add_unit(tp.w, local_value(LP_WHITES, g), -2.0, 2.0);
+    o.b = add_unit(tp.b, local_value(LP_BLACKS, g), -2.0, 2.0);
+    let de = local_value(LP_EXPOSURE, g);
+    if (de != 0.0) {
+        o.ev = clamp(tp.ev + de, -LOCAL_EXPOSURE_LIMIT, LOCAL_EXPOSURE_LIMIT);
+    }
+    let dc = local_value(LP_CONTRAST, g);
+    if (dc != 0.0) {
+        o.gamma = local_gamma(dc);
+    }
+    return o;
+}
+
+// 局所の明るさの項目（露光量・コントラスト・ハイライト・シャドウ・白・黒）のどれかの局所の値が 0 でないか。
+fn local_base_changed(g: vec2<i32>) -> bool {
+    return local_value(LP_EXPOSURE, g) != 0.0
+        || local_value(LP_CONTRAST, g) != 0.0
+        || local_tone_changed(g);
+}
+
+// ハイライト・シャドウ・白・黒のどれかの局所の値が 0 でないか。
+fn local_tone_changed(g: vec2<i32>) -> bool {
+    return local_value(LP_HIGHLIGHTS, g) != 0.0
+        || local_value(LP_SHADOWS, g) != 0.0
+        || local_value(LP_WHITES, g) != 0.0
+        || local_value(LP_BLACKS, g) != 0.0;
+}
+
 // ToneStageParams::log2_gain。
-fn tone_log2_gain(base: f32, l: f32) -> f32 {
+fn tone_log2_gain(tp: ToneP, base: f32, l: f32) -> f32 {
     let detail = l - base;
     let b = base - LOG2_MIDDLE_GRAY;
     let base2 = base
-        + pf(P_TONE_H) * HIGHLIGHTS_MAX_EV * sigmoid2((b - HIGHLIGHTS_CENTER_EV) / HIGHLIGHTS_WIDTH_EV)
-        + pf(P_TONE_S) * SHADOWS_MAX_EV * sigmoid2(-(b - SHADOWS_CENTER_EV) / SHADOWS_WIDTH_EV);
+        + tp.h * HIGHLIGHTS_MAX_EV * sigmoid2((b - HIGHLIGHTS_CENTER_EV) / HIGHLIGHTS_WIDTH_EV)
+        + tp.s * SHADOWS_MAX_EV * sigmoid2(-(b - SHADOWS_CENTER_EV) / SHADOWS_WIDTH_EV);
     let l1 = base2 + detail;
     let d1 = l1 - LOG2_MIDDLE_GRAY;
     let l2 = min(
         l1
-            + pf(P_TONE_W) * WHITES_MAX_EV * sigmoid2((d1 - WHITES_CENTER_EV) / WHITES_WIDTH_EV)
-            + pf(P_TONE_B) * BLACKS_MAX_EV * sigmoid2(-(d1 - BLACKS_CENTER_EV) / BLACKS_WIDTH_EV),
+            + tp.w * WHITES_MAX_EV * sigmoid2((d1 - WHITES_CENTER_EV) / WHITES_WIDTH_EV)
+            + tp.b * BLACKS_MAX_EV * sigmoid2(-(d1 - BLACKS_CENTER_EV) / BLACKS_WIDTH_EV),
         LOG2_CEILING,
     );
     return l2 - l;
@@ -117,9 +203,20 @@ fn tone_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let u = (f32(pi(P_GUIDE_OX) + g.x) + 0.5) * pf(P_GUIDE_SX);
     let v = (f32(pi(P_GUIDE_OY) + g.y) + 0.5) * pf(P_GUIDE_SY);
     let guide_value = sample_guide(u, v);
+    var tp = tone_global();
+    if (local_on()) {
+        // ToneStageParams::apply_local。
+        if (local_only() && !local_tone_changed(g)) {
+            store_out(gid, sanitize3(c));
+            return;
+        }
+        if (local_base_changed(g)) {
+            tp = tone_with_local(tp, g);
+        }
+    }
     let l = safe_log2(luminance(c));
-    let base = contrast_log2(pf(P_GAMMA), guide_value + pf(P_TONE_EV));
-    let r = exp2(tone_log2_gain(base, l));
+    let base = contrast_log2(tp.gamma, guide_value + tp.ev);
+    let r = exp2(tone_log2_gain(tp, base, l));
     store_out(gid, sanitize3(vec3<f32>(c.x * r, c.y * r, c.z * r)));
 }
 
@@ -135,9 +232,9 @@ const COLOR_FLAG_BW_MIX: u32 = 4u;
 const COLOR_FLAG_GRADING: u32 = 8u;
 const COLOR_FLAG_SAT: u32 = 16u;
 
-// ColorStageParams::chroma_gain。
-fn chroma_gain(da: f32, db: f32) -> f32 {
-    let ks = 1.0 + pf(P_SAT);
+// ColorStageParams::chroma_gain（sat は彩度 / 100。ローカル補正では局所の値を足したもの）。
+fn chroma_gain(sat: f32, da: f32, db: f32) -> f32 {
+    let ks = 1.0 + sat;
     let vib = pf(P_VIB);
     if (vib == 0.0) {
         return ks;
@@ -272,7 +369,24 @@ fn color_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!in_output(gid)) {
         return;
     }
-    let lab = oklab_from_bt2020(load_global(out_global(gid)));
+    let g = out_global(gid);
+    let c0 = load_global(g);
+    var sat = pf(P_SAT);
+    var use_sat = (pu(P_COLOR_FLAGS) & COLOR_FLAG_SAT) != 0u;
+    if (local_on()) {
+        // ColorStageParams::apply_local。
+        let ds = local_value(LP_SATURATION, g);
+        if (ds == 0.0) {
+            if (local_only()) {
+                store_out(gid, sanitize3(c0));
+                return;
+            }
+        } else {
+            sat = add_unit(pf(P_SAT), ds, -1.0, 2.0);
+            use_sat = sat != 0.0 || pf(P_VIB) != 0.0;
+        }
+    }
+    let lab = oklab_from_bt2020(c0);
     let flags = pu(P_COLOR_FLAGS);
     let na = pf(P_NEUTRAL_A);
     let nb = pf(P_NEUTRAL_B);
@@ -319,8 +433,8 @@ fn color_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         }
-        if ((flags & COLOR_FLAG_SAT) != 0u) {
-            let k = chroma_gain(da, db);
+        if (use_sat) {
+            let k = chroma_gain(sat, da, db);
             da = da * k;
             db = db * k;
         }

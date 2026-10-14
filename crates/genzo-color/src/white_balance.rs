@@ -184,11 +184,18 @@ pub fn white_point_from_temperature_tint(temperature_k: f64, tint: f64) -> Resul
     Ok(Uv::new(p.u + duv * n[0], p.v + duv * n[1]).to_xy())
 }
 
-/// 白の色度から色温度（相関色温度）と tint を求める（二分法）。
+/// 白の色度の相関色温度（K。プランク軌跡の法線（等色温度線）の上にある点を同じ色温度とみなす。二分法）。
 ///
-/// 推定値が範囲外ならエラー [`ColorError::WhiteBalanceEstimateOutOfRange`]（推定値を含む。
-/// 探索範囲 1000〜100000 K の外なら色温度は探索範囲の端の値）。
-pub fn temperature_tint_from_white_point(white: Xy) -> Result<TemperatureTint> {
+/// 探索範囲 1000〜100000 K の外なら範囲の端の値を返す（範囲外をエラーにしない。カメラプロファイルの行列の
+/// 補間の重み（genzo-color の [`crate::dcp`]）など、近い値で足りる用途のため）。色度が不正（y ≤ 0、有限でない）
+/// ならエラー。
+pub fn correlated_color_temperature(white: Xy) -> Result<f64> {
+    let w = checked_uv(white)?;
+    Ok(1e6 / cct_mired(w))
+}
+
+/// 色度を uv にする（不正ならエラー）。
+fn checked_uv(white: Xy) -> Result<Uv> {
     if !(white.x.is_finite() && white.y.is_finite() && white.y > 0.0) {
         return Err(ColorError::InvalidChromaticity {
             x: white.x,
@@ -202,6 +209,11 @@ pub fn temperature_tint_from_white_point(white: Xy) -> Result<TemperatureTint> {
             y: white.y,
         });
     }
+    Ok(w)
+}
+
+/// uv の相関色温度（mired。探索範囲の外なら端の値）。
+fn cct_mired(w: Uv) -> f64 {
     // g(m) = (w − P(m)) · 接線(m)。接線は mired が増える向きなので、g は mired について減少する。
     // 法線 n = (−t_v, t_u) から、接線は t = (n_v, −n_u)。
     let g = |mired: f64| -> f64 {
@@ -210,7 +222,7 @@ pub fn temperature_tint_from_white_point(white: Xy) -> Result<TemperatureTint> {
     };
     let mut lo = 1e6 / SEARCH_MAX_K;
     let mut hi = 1e6 / SEARCH_MIN_K;
-    let mired = if g(lo) < 0.0 {
+    if g(lo) < 0.0 {
         lo
     } else if g(hi) > 0.0 {
         hi
@@ -224,8 +236,16 @@ pub fn temperature_tint_from_white_point(white: Xy) -> Result<TemperatureTint> {
             }
         }
         0.5 * (lo + hi)
-    };
-    let temperature_k = 1e6 / mired;
+    }
+}
+
+/// 白の色度から色温度（相関色温度）と tint を求める（二分法）。
+///
+/// 推定値が範囲外ならエラー [`ColorError::WhiteBalanceEstimateOutOfRange`]（推定値を含む。
+/// 探索範囲 1000〜100000 K の外なら色温度は探索範囲の端の値）。
+pub fn temperature_tint_from_white_point(white: Xy) -> Result<TemperatureTint> {
+    let w = checked_uv(white)?;
+    let temperature_k = 1e6 / cct_mired(w);
     let (p, n) = planckian_frame(temperature_k);
     let duv = (w.u - p.u) * n[0] + (w.v - p.v) * n[1];
     let tint = (duv - reference_duv(temperature_k, p, n)) / TINT_DUV_PER_UNIT;

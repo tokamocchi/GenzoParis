@@ -1,6 +1,6 @@
 // 現像設定の組み立て（WB の選択・レンズ補正・ハイライト復元・ノイズ軽減の操作の可否・リセット。DOM を使わない純粋な
 // 計算）。色（カラーミキサー・カラーグレーディング・白黒）は colorLogic.ts、テクスチャ・明瞭度・かすみの除去・シャープ・
-// 効果は detailLogic.ts。
+// 効果は detailLogic.ts、カメラプロファイル・ルックは profileLogic.ts。
 
 import {
   type AsShotWhiteBalance,
@@ -18,6 +18,7 @@ import {
 import { defaultColor } from "./colorLogic";
 import { FULL_CROP } from "./cropMath";
 import { defaultEffects, defaultPresence, defaultSharpening } from "./detailLogic";
+import { defaultProfile } from "./profileLogic";
 
 /** WB の選択（撮影時の設定・プリセット・カスタム）。 */
 export type WbMode = "as_shot" | WbPreset | "custom";
@@ -241,8 +242,9 @@ export function sensorControls(
  *
  * - schema_version・process_version・render_deps は今の値を保つ（コアが管理する値）。
  * - レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・色（カラーミキサー・
- *   カラーグレーディング・白黒）は既定に戻す（画面のパネルで見える項目）。
- * - masks は今の値を保つ（画面にない項目を、利用者が見えないところで消さない）。
+ *   カラーグレーディング・白黒）・カメラプロファイルとルック（標準の色・ルックなし）は既定に戻す（画面のパネルで
+ *   見える項目）。
+ * - マスク（ローカル補正。DEV-18・DEV-19）も除く（現像のパネルの「マスク」で見える項目。履歴から取り消せる）。
  */
 export function resetAll(s: DevelopSettings): DevelopSettings {
   return {
@@ -255,6 +257,7 @@ export function resetAll(s: DevelopSettings): DevelopSettings {
     },
     presence: defaultPresence(),
     effects: defaultEffects(),
+    profile: defaultProfile(),
     white_balance: "as_shot",
     exposure_ev: 0,
     contrast: 0,
@@ -268,5 +271,6 @@ export function resetAll(s: DevelopSettings): DevelopSettings {
     },
     color: defaultColor(),
     geometry: defaultGeometry(),
+    masks: [],
   };
 }

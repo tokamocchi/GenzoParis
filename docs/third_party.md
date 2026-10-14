@@ -84,6 +84,8 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | darktable のレンズ補正（埋め込みのメタデータの解釈。参考） | Sony の ARW に埋め込まれたレンズ補正の値（0x7032・0x7035・0x7037）の意味と、DNG の opcode（WarpRectilinear・FixVignetteRadial）の形・式の確認（DEV-14。決定事項ログ No.121。04 の 2.1 節のステージ 7・9） | darktable のブランチ master（2026-10-13 に取得。コミットは記録していない）の `src/iop/lens.cc`・`src/common/exif.cc`・`src/common/dng_opcode.c`（SHA-256 は 3.9 節） | https://github.com/darktable-org/darktable | GPL-3.0-or-later（3 つのファイルのヘッダの「either version 3 of the License, or (at your option) any later version」で確認） | 該当なし（第三者のファイルは取り込んでいない。自前の Rust のコード `crates/genzo-raw/src/lens.rs`・`crates/genzo-pipeline/src/lens.rs`） | アプリのソースに含まれる（自前のコード） | 値の解釈（節点の位置・尺度・式）が darktable と同じなので、参考にした実装として、darktable の著作権表示（「Copyright (C) 2019-2026 darktable developers」）と出典・SHA-256 を `crates/genzo-pipeline/src/lens.rs` の doc に記載した（2026-10-13）。書き方の妥当性は人・専門家の確認待ち | AI 記入（2026-10-13）。扱いは人・専門家の確認待ち |
 | ハイライト復元・ノイズ軽減の手法（公開の手法。参考） | ハイライト復元（DEV-06。04 の 2.1 節のステージ 4）とノイズ軽減（DEV-13。ステージ 6）の考え方: 近傍の色の比による再構成（最小二乗の比）、平方根による分散の安定化（Anscombe 変換の近似）、B3 スプラインの à trous ウェーブレットと non-negative garrote による係数の縮小（決定事項ログ No.126・127） | 該当なし（2026-10-13 の自前の実装。`crates/genzo-pipeline/src/sensor/highlight.rs`・`denoise.rs`、GPU 版は `crates/genzo-gpu/src/shaders/sensor.wgsl`・`denoise.wgsl`） | 文献の手法（3.10 節。**この実装では文献・第三者のコードを取得していない。AI の知識**） | 自前のコードとして、アプリと同じ GPL-3.0-or-later。第三者のコード（darktable・RawTherapee など）は参照・取り込みしていない | 該当なし（自前の Rust・WGSL のコード） | アプリのソースに含まれる（自前のコード） | 不要の見込み（コードを写していないため）。手法の出典は 3.10 節に記す | AI 記入（2026-10-13）。出典の書き方は人の確認待ち |
 | テクスチャ・明瞭度・かすみの除去・シャープ・効果の手法（公開の手法。参考） | テクスチャ・明瞭度・かすみの除去（DEV-11。04 の 2.1 節のステージ 12）・シャープ（DEV-12。ステージ 14）・効果（DEV-24。ステージ 16）の考え方: 輝度の対数の領域のぼかしとの差（周波数分解）とアンシャープマスク、暗いチャンネルの事前分布によるかすみの推定、ガイデッドフィルタによる精緻化、超楕円の周辺光量、格子の値の補間による粒子（決定事項ログ No.137〜139） | 該当なし（2026-10-14 の自前の実装。`crates/genzo-pipeline/src/finish/presence.rs`・`sharpen.rs`・`effects.rs`・`frequency.rs`・`crates/genzo-pipeline/src/haze.rs`、GPU 版は `crates/genzo-gpu/src/shaders/detail.wgsl`・`noise.wgsl`） | 文献の手法（3.11 節。**この実装では文献・第三者のコードを取得していない。AI の知識**） | 自前のコードとして、アプリと同じ GPL-3.0-or-later。第三者のコード（darktable・RawTherapee・論文の著者の公開のコードなど）は参照・取り込みしていない | 該当なし（自前の Rust・WGSL のコード） | アプリのソースに含まれる（自前のコード） | 不要の見込み（コードを写していないため）。手法の出典は 3.11 節に記す | AI 記入（2026-10-14）。出典の書き方と、手法の権利（特許など）の有無は人の確認待ち |
+| Adobe の DNG の仕様（カメラプロファイル（DCP）の形と色の計算の考え方。参考） | 利用者が取り込むカメラプロファイル（DCP）の読み込みと、ステージ 8 の行列・色相彩度のマップ、ルックテーブルの計算（DEV-17。04 の 2.1 節・2.6 節、決定事項ログ No.143〜146）。**Adobe のプロファイル（DCP のファイル）は同梱しない** | 該当なし（2026-10-14 の自前の実装。`crates/genzo-color/src/dcp.rs`・`cube.rs`、`crates/genzo-pipeline/src/profile.rs`・`finish/look.rs`、GPU 版は `crates/genzo-gpu/src/shaders/profile.wgsl`・`lut3d.wgsl`） | 仕様の文書は**この実装では取得していない**（考え方は AI の知識）。タグの番号は、開発環境の libtiff の `tiff.h`（Ubuntu の `libtiff-dev` 4.5.1+git230720-4ubuntu2.5）と照合した（3.12 節） | 仕様の利用の条件（特許のライセンスなど）は**未確認**（**人・専門家の確認待ち**。AI は判断しない）。第三者のコード（Adobe の DNG SDK・dcamprof・RawTherapee・darktable など）は参照・取り込みしていない | 該当なし（自前の Rust・WGSL のコード） | アプリのソースに含まれる（自前のコード） | 未確認（3.12 節） | AI 記入（2026-10-14）。人・専門家の確認待ち |
+| 利用者が取り込むカメラプロファイル・ルック（DCP・.cube） | 現像の色（DEV-17）。利用者が自分で用意したファイルを、カタログのデータのフォルダの `profiles` に写して使う | 利用者による | 利用者による（このアプリは配布しない・ダウンロードしない） | ファイルごとの条件（利用者が確かめる）。画面にファイルの著作権の表示（ProfileCopyright）と埋め込みの方針（ProfileEmbedPolicy）をそのまま出す | 該当なし（実行時に読む） | **配布物に含めない** | — | AI 記入（2026-10-14）。画面の文言は人の確認待ち（implementation_status の人の判断の表 No.159） |
 | ColorChecker Classic の基準値 | PoC-4 の色の評価の基準とテスト（`crates/genzo-testkit/src/colorchecker.rs`。2014 年 11 月以降の版と、より前の版の 24 色 × L\*a\*b\*（D50）） | X-Rite の公表値（CGATS のファイル。2014 年 11 月以降の版の測定日は 2015-04-28）。値は colour-science 0.4.6 のデータから写したもの | X-Rite（現在は Calibrite）の公表資料。2026-10-10 の照合には、GitHub 上の第三者のリポジトリにある CGATS ファイルの写しを使った（3.8 節） | 利用条件は未確認（**要確認**） | 該当なし（テストのデータ） | `genzo-testkit` はテストと計測用の crate。開発用の CLI（`genzo`）は計測の記録のために依存するが、配布するアプリに含めるかは未定（含める場合は利用条件の確認が要る） | 出典（X-Rite）を doc に記載 | AI 記入（2026-10-10）。値は写しと一致、一次資料とは未照合（人の確認待ち） |
 | カメラ行列（α7 IV / α7C） | カメラ RGB から XYZ への変換（04 の 2.5 節の `render_deps`、2.6 節） | 未作成 | 候補は LibRaw の内蔵の表、DNG の ColorMatrix、カラーチャートからの自作（3.6 節） | 要確認（出典ごとに利用条件を確認する） | アプリのデータファイルとして持ち、ID とハッシュで参照する | アプリに同梱する予定 | 出典による（要確認） | 未着手 |
 | Mesa（llvmpipe） | 開発環境（Linux のコンテナ）で wgpu を動かすための、ソフトウェアの Vulkan | 25.2.8（`mesa-vulkan-drivers` 25.2.8-0ubuntu0.24.04.4）。Vulkan のローダーは `libvulkan1` 1.3.275.0 | Ubuntu 24.04 の apt | 主に MIT とされる（未確認。配布しないため優先度は低い） | wgpu が実行時に Vulkan のローダー経由で読み込む。ビルド時のリンクはない | **配布物に含めない** | 不要（配布しない） | 開発環境だけで使う |
@@ -289,6 +291,34 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   1. 手法の出典の書き方（コードは写していないので著作権表示は要らない見込みだが、論文の参照の要否と書き方）。
   2. 手法の権利（特許など）の有無と扱い（implementation_status の人の判断の表 No.151）。
   3. 実写での画質（人の判断の表 No.149）。
+
+### 3.12 カメラプロファイル（DCP）とルック（3D LUT）（DNG の仕様の考え方。第三者のコードは参照していない）
+
+**実装の状況**（2026-10-14、AI 記入。DEV-17、決定事項ログ No.143〜146）
+- DCP の読み込み（TIFF と同じ形。番号 `0x4352`）・検証・行列と色相彩度のマップの補間・ルックテーブル、.cube の読み込みは、自前の Rust のコード（`crates/genzo-color/src/dcp.rs`・`cube.rs`）と WGSL（`crates/genzo-gpu/src/shaders/profile.wgsl`）です。**第三者のファイル・コードは取得も取り込みもしていません**（Adobe の DNG SDK、dcamprof、RawTherapee・darktable の DCP の読み込み、LUT のライブラリなどは、この実装のために読んでいません）。
+- 使った考え方（**DNG の仕様の文書はこの調査では取得していない。AI の知識による**）: カメラの色空間から XYZ への対応（2 つの光源の行列の逆色温度による補間、白の色度の繰り返し、ForwardMatrix、色相彩度のマップとルックテーブルの HSV の表、明度の軸の符号化）。式の書き方・正規化・HSV の表を明度 1 超・色域の外に広げる扱いは、この実装で決めたもの（04 の 2.6 節）。.cube の形（`LUT_3D_SIZE`・`DOMAIN_MIN`・`DOMAIN_MAX`・`TITLE`）も AI の知識による。
+- タグの番号の照合: 開発環境の `/usr/include/x86_64-linux-gnu/tiff.h`（Ubuntu 24.04 の `libtiff-dev` 4.5.1+git230720-4ubuntu2.5。SHA-256 `ec0904a51c9392cb6a63dc5e9d563e5adb8af64517264176f370b96b6deb5200`）の `TIFFTAG_*` の値と、読むタグ（UniqueCameraModel 50708、ColorMatrix1・2 50721・50722、CalibrationIlluminant1・2 50778・50779、ProfileCalibrationSignature 50932、ProfileName 50936、ProfileHueSatMapDims 50937、ProfileHueSatMapData1・2 50938・50939、ProfileToneCurve 50940、ProfileEmbedPolicy 50941、ProfileCopyright 50942、ForwardMatrix1・2 50964・50965、ProfileLookTableDims・Data 50981・50982、ProfileHueSatMapEncoding・ProfileLookTableEncoding 51107・51108、BaselineExposureOffset 51109、DefaultBlackRender 51110、使わない 3 つ目の光源の CalibrationIlluminant3 52529・ColorMatrix3 52531・ForwardMatrix3 52532・ProfileHueSatMapData3 52537）が一致することを確かめた（2026-10-14）。libtiff のコードは取り込んでいない（番号の照合だけ）。
+- 光源の番号（EXIF の LightSource）と色温度の対応（17 → 2850 K など。`dcp.rs` の `illuminant_temperature`）は AI の知識で、一次資料と照合していない（**要確認**。implementation_status の人の判断の表 No.155）。
+- **Adobe のプロファイルは同梱しない**（利用者の指示）。利用者が取り込む DCP・.cube はアプリが配布するものではなく、ファイルの著作権の表示・埋め込みの方針は画面にそのまま出すだけで、このアプリは書き出したファイルに埋め込まない。
+
+- **人の確認が必要な事項**
+  1. DNG の仕様の利用の条件（特許のライセンスなど）が、仕様の考え方で自前に実装したこのアプリの配布に関係するか（AI は判断しない。人の判断の表 No.159）。
+  2. 手法の出典の書き方（DNG の仕様の参照の要否と書き方）。
+  3. 利用者が取り込むプロファイルの利用条件についての画面の文言（人の判断の表 No.159）。
+  4. 光源の色温度の表の一次資料での確認（人の判断の表 No.155）。
+
+### 3.13 ローカル補正（マスク）・範囲マスクの手法（一般的な手法。第三者のコードは参照していない）
+
+**実装の状況**（2026-10-14、AI 記入。DEV-18・DEV-19、決定事項ログ No.150〜157）
+- マスクの重み（線形・円形のグラデーション、ブラシのラスター、色域・輝度の範囲、部品の合成）と局所の値の面（`crates/genzo-pipeline/src/local/`）、GPU 版（`crates/genzo-gpu/src/shaders/local.wgsl`）、画面（`ui/src/develop/maskLogic.ts`・`MaskLayer.tsx`・`MaskPanel.tsx`）は自前の Rust・WGSL・TypeScript のコードです。**第三者のファイル・コードは取得も取り込みもしていません**（darktable の「drawn and parametric masks」、RawTherapee の「Local Adjustments」、Lightroom Classic の資料などは、この実装のために読んでいません）。**新しい依存（crate・npm のパッケージ）は足していません。**
+- 使った考え方（**AI の知識による。文献はこの調査では取得していない**）: smoothstep の段（線形・円形・輝度の範囲の縁）、折れ線からの距離によるブラシの覆い方と「密度まで塗る・消す」の式、OKLab（`genzo-color` の既存の `oklab`。Björn Ottosson, 2020）の色度の距離による色域の選択。式の形・定数（許容量の幅・滑らかさの幅・局所の色温度の強さなど）は、この実装で決めたもの（仮置き）。
+- 画面の見本の色の表示（`maskLogic.ts` の `labToCss`）は、OKLab → 線形 sRGB の逆変換に Ottosson の公表の行列の値（小数 10 桁）を使った（`genzo-color` の `oklab.rs` と同じ出典。値は AI の知識により、一次資料と照合していない。**要確認**）。表示の近似で、描画には使わない。
+- 画面の構成とキー（O で重ねて表示、[ ] でブラシの大きさ）は、Lightroom Classic の操作に近づけた（AI の知識による。Adobe の資料・コードは参照していない）。
+
+- **人の確認が必要な事項**
+  1. 手法の権利（特許など）の有無と扱い（一般的な手法と考えているが、**AI は判断しない**）。
+  2. 画面の構成・操作を Lightroom Classic に近づけたことの扱い（**AI は判断しない**）。
+  3. 実写での画質（implementation_status の人の判断の表 No.163・164）。
 
 ## 4. 今後記入する対象
 

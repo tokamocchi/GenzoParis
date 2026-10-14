@@ -31,6 +31,21 @@
 //! なので中間グレーで連続）。
 //! `2^64` を超える結果は抑える（[`super::LOG2_CEILING`]。あふれによる無限大を防ぐ）。
 //! ステージ 11 のガイド（局所の明るさ）にも同じ変換をかける（[`ContrastParams::apply_log2`]）。
+//!
+//! # ローカル補正（処理バージョン 2。DEV-18。[`crate::local`]）
+//!
+//! 画素の局所の値（色温度 `dt`・色かぶり `di`・露光量 `de`・コントラスト `dc`）を全体の値に足す:
+//!
+//! ```text
+//! 露光量:     de = dt = di = 0 なら RGB × k（全体の倍率）。それ以外は
+//!             k' = de = 0 なら k、それ以外は exp2(clamp(EV + de, ±LOCAL_EXPOSURE_LIMIT))（f32）
+//!             g = dt = di = 0 なら (1, 1, 1)、それ以外は local::white_balance_gains(dt, di)（和は ±100 に収める）
+//!             RGB' = (R·(k'·g_R), G·(k'·g_G), B·(k'·g_B))
+//! コントラスト: dc = 0 なら全体の式（全体のコントラストが 0 でマスクだけで有効なときは何もしない）。
+//!             それ以外は γ' = 1 + CONTRAST_STRENGTH × clamp(contrast / 100 + dc / 100, −2, 2) の式
+//! ```
+//!
+//! マスクの外（局所の値が 0）の画素は、マスクのない描画とビット単位で同じになる。
 
 use genzo_model::{DevelopSettings, Phase};
 
@@ -38,6 +53,10 @@ use super::{LOG2_CEILING, LOG2_MIDDLE_GRAY, MIDDLE_GRAY, luminance, map_pixels};
 use crate::contract::ColorContract;
 use crate::error::Result;
 use crate::image::{ImageTile, Roi};
+use crate::local::{
+    LOCAL_EXPOSURE_LIMIT, LocalParam, LocalSlots, LocalValues, add_unit, checked_field,
+    local_slots, white_balance_gains,
+};
 use crate::sanitize::safe_log2;
 use crate::stage::{Stage, StageContext, StageParams};
 use crate::version::ProcessVersion;
@@ -60,15 +79,38 @@ pub struct ExposureParams {
     pub ev: f32,
     /// 掛ける倍率 `2^EV`（f64 で計算して f32 に丸めた値）。
     pub gain: f32,
+    /// ローカル補正の局所の値の面の割り当て（色温度・色かぶり・露光量のどれかの面があるときだけ）。
+    pub local: Option<LocalSlots>,
 }
 
 impl ExposureParams {
-    /// EV から作る。
+    /// EV から作る（ローカル補正なし）。
     pub fn new(ev: f32) -> Self {
         Self {
             ev,
             gain: f64::from(ev).exp2() as f32,
+            local: None,
         }
+    }
+
+    /// 局所の値 `v` を当てた 1 画素（モジュールの doc の「ローカル補正」）。
+    #[inline]
+    pub fn apply_local(&self, c: [f32; 3], v: &LocalValues) -> [f32; 3] {
+        let dt = v[LocalParam::Temperature.index()];
+        let di = v[LocalParam::Tint.index()];
+        let de = v[LocalParam::Exposure.index()];
+        let k = if de == 0.0 {
+            self.gain
+        } else {
+            (self.ev + de)
+                .clamp(-LOCAL_EXPOSURE_LIMIT, LOCAL_EXPOSURE_LIMIT)
+                .exp2()
+        };
+        if dt == 0.0 && di == 0.0 {
+            return [c[0] * k, c[1] * k, c[2] * k];
+        }
+        let g = white_balance_gains(dt, di);
+        [c[0] * (k * g[0]), c[1] * (k * g[1]), c[2] * (k * g[2])]
     }
 }
 
@@ -103,8 +145,16 @@ impl Stage for ExposureStage {
     ) -> Result<Option<StageParams>> {
         match ctx.process_version {
             ProcessVersion::V1 | ProcessVersion::V2 => {
-                let ev = settings.normalized().exposure_ev;
-                Ok((ev != 0.0).then(|| StageParams::new(ExposureParams::new(ev))))
+                let s = settings.normalized();
+                let local =
+                    local_slots(&s, ctx).filter(|l| l.uses_any(&LocalParam::EXPOSURE_STAGE));
+                let ev = s.exposure_ev;
+                Ok((ev != 0.0 || local.is_some()).then(|| {
+                    StageParams::new(ExposureParams {
+                        local,
+                        ..ExposureParams::new(ev)
+                    })
+                }))
             }
         }
     }
@@ -120,10 +170,12 @@ impl Stage for ExposureStage {
     ) -> Result<()> {
         let p = *params.expect::<ExposureParams>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 | ProcessVersion::V2 => {
-                let k = p.gain;
-                map_pixels(input, output, |_, _, c| [c[0] * k, c[1] * k, c[2] * k])
-            }
+            ProcessVersion::V1 | ProcessVersion::V2 => {}
+        }
+        let k = p.gain;
+        match checked_field(ctx, Self::ID, p.local, output.roi)? {
+            None => map_pixels(input, output, |_, _, c| [c[0] * k, c[1] * k, c[2] * k]),
+            Some(f) => map_pixels(input, output, |x, y, c| p.apply_local(c, &f.values(x, y))),
         }
     }
 }
@@ -138,8 +190,24 @@ pub struct ContrastParams {
 impl ContrastParams {
     /// スライダーの値（−100〜100）から作る。
     pub fn from_slider(contrast: f32) -> Self {
+        Self::from_unit(contrast / 100.0)
+    }
+
+    /// スライダーの値 / 100（ローカル補正の和は −2〜2）から作る: `γ = 1 + CONTRAST_STRENGTH × unit`。
+    pub fn from_unit(unit: f32) -> Self {
         Self {
-            gamma: 1.0 + CONTRAST_STRENGTH * (contrast / 100.0),
+            gamma: 1.0 + CONTRAST_STRENGTH * unit,
+        }
+    }
+
+    /// 全体のコントラスト（スライダーの値 / 100）`unit` に局所の値 `dc`（スライダーの値）を足したもの（`dc` が 0 なら
+    /// `self`）。
+    #[inline]
+    pub fn with_local(&self, unit: f32, dc: f32) -> Self {
+        if dc == 0.0 {
+            *self
+        } else {
+            Self::from_unit(add_unit(unit, dc, -2.0, 2.0))
         }
     }
 
@@ -177,7 +245,36 @@ impl ContrastParams {
     }
 }
 
-/// コントラスト（ステージ 10 の後、11 の前。仮置き）。コントラストが 0 なら飛ばす。
+/// コントラストのステージのパラメータ（全体の値と、ローカル補正）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContrastStageParams {
+    /// 全体のコントラスト。
+    pub contrast: ContrastParams,
+    /// 全体のコントラストのスライダーの値 / 100。
+    pub unit: f32,
+    /// ローカル補正の局所の値の面の割り当て（コントラストの面があるときだけ）。
+    pub local: Option<LocalSlots>,
+    /// 全体のコントラストが 0 で、ローカル補正だけで有効か（局所の値が 0 の画素は変えない）。
+    pub local_only: bool,
+}
+
+impl ContrastStageParams {
+    /// 局所の値 `v` を当てた 1 画素（モジュールの doc の「ローカル補正」）。
+    #[inline]
+    pub fn apply_local(&self, c: [f32; 3], v: &LocalValues) -> [f32; 3] {
+        let dc = v[LocalParam::Contrast.index()];
+        if dc == 0.0 {
+            if self.local_only {
+                return c;
+            }
+            return self.contrast.apply(c);
+        }
+        self.contrast.with_local(self.unit, dc).apply(c)
+    }
+}
+
+/// コントラスト（ステージ 10 の後、11 の前。仮置き）。コントラストが 0 なら飛ばす（ローカル補正のコントラストが
+/// あれば有効）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ContrastStage;
 
@@ -208,8 +305,17 @@ impl Stage for ContrastStage {
     ) -> Result<Option<StageParams>> {
         match ctx.process_version {
             ProcessVersion::V1 | ProcessVersion::V2 => {
-                let p = ContrastParams::from_slider(settings.normalized().contrast);
-                Ok((!p.is_identity()).then(|| StageParams::new(p)))
+                let s = settings.normalized();
+                let p = ContrastParams::from_slider(s.contrast);
+                let local = local_slots(&s, ctx).filter(|l| l.uses(LocalParam::Contrast));
+                Ok((!p.is_identity() || local.is_some()).then(|| {
+                    StageParams::new(ContrastStageParams {
+                        contrast: p,
+                        unit: s.contrast / 100.0,
+                        local,
+                        local_only: p.is_identity(),
+                    })
+                }))
             }
         }
     }
@@ -223,11 +329,13 @@ impl Stage for ContrastStage {
         output: &mut ImageTile,
         params: &StageParams,
     ) -> Result<()> {
-        let p = *params.expect::<ContrastParams>(Self::ID)?;
+        let p = *params.expect::<ContrastStageParams>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 | ProcessVersion::V2 => {
-                map_pixels(input, output, |_, _, c| p.apply(c))
-            }
+            ProcessVersion::V1 | ProcessVersion::V2 => {}
+        }
+        match checked_field(ctx, Self::ID, p.local, output.roi)? {
+            None => map_pixels(input, output, |_, _, c| p.contrast.apply(c)),
+            Some(f) => map_pixels(input, output, |x, y, c| p.apply_local(c, &f.values(x, y))),
         }
     }
 }

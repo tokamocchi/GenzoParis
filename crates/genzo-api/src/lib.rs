@@ -43,7 +43,7 @@
 //! |---|---|---|
 //! | [`Core`]（`core`） | 起動（カタログ・前回の終了の確認・ファイル操作の確定・自動バックアップ・キャッシュの持ち主の確認と作り直し）と終了、実行モデル、ロックの順序 | 1.2 節・1.3 節、DATA-03b・04・05・07 |
 //! | `lock` | カタログの排他（1 つのカタログは 1 つのアプリだけが開く。[`ApiError::CatalogInUse`]） | 3 章 |
-//! | `deps` | 現像設定の外部データ（`render_deps`: カメラ行列の出どころとハッシュ・RAW デコーダ・埋め込みのレンズ補正の情報の出どころとハッシュ）の記録 | 2.5 節、R-08、DEV-14 |
+//! | `deps` | 現像設定の外部データ（`render_deps`: カメラ行列の出どころとハッシュ・RAW デコーダ・埋め込みのレンズ補正の情報の出どころとハッシュ・カメラプロファイルとルックのファイルの ID とハッシュ）の記録と、変わったときの警告 | 2.5 節、R-08、DEV-14・17 |
 //! | [`config`] | [`CoreConfig`]（ワーカーの起動方法 [`WorkerLaunch`]、GPU の使用 [`GpuMode`]）と仮置きの値 | 1.2 節 |
 //! | [`command`] | [`Command`]・[`Response`]・[`Core::execute`] | 1.5 節 |
 //! | [`events`] | [`Event`]（ジョブの進捗・カタログの変更・プレビューの更新・検索結果の世代・警告） | 1.5 節 |
@@ -59,7 +59,7 @@
 //! | `stacks` | スタック（[`Core::create_stack`]・[`Core::set_stacks_collapsed`]・[`Core::auto_stack`]。検索結果のまとめ方は `search`）と仮想コピーの名前・マスターの入れ替え（[`Core::rename_virtual_copy`]・[`Core::set_as_master`]） | LIB-12・13、3.10 節 |
 //! | `previews` | サムネイル（[`Core::thumbnail`]）・L1（[`Core::preview_path`]）と、現像結果からの作り直し | 4 章・4.1 節、PRV-01・02・04 |
 //! | `playback` | 動画の再生（[`Core::video_playback`]・配信するファイル [`Core::video_stream`]）と、WebView で再生できない動画の再生用のファイル（[`Core::create_video_proxy`]。利用者の ffmpeg で H.264 ＋ AAC の MP4 にする。上限容量の LRU のキャッシュ） | VID-04、4.2 節 |
-//! | `develop` | 現像のセッション（[`Core::open_develop`]・[`Core::set_settings`]・Undo / Redo・一括適用・仮想コピー）、WB のスポイト（[`Core::white_balance_at`]）、切り抜きの編集の支え（[`Core::set_develop_view`]・[`Core::constrain_crop`]）、処理バージョンの更新（[`Core::upgrade_process_version`]・まとめて [`Core::upgrade_process_versions`]。レンズ補正などの v1 の機能は処理バージョン 2 から。貼り付けは版を変えない: [`PasteVersion`]）。埋め込みのレンズ補正の情報の要約は [`SourceInfo::lens_correction`] | DEV-00〜08・14・15・26・27・30、DATA-09、6.2 節 |
+//! | `develop` | 現像のセッション（[`Core::open_develop`]・[`Core::set_settings`]・Undo / Redo・一括適用・仮想コピー）、WB のスポイト（[`Core::white_balance_at`]）、切り抜きの編集の支え（[`Core::set_develop_view`]・[`Core::constrain_crop`]）、処理バージョンの更新（[`Core::upgrade_process_version`]・まとめて [`Core::upgrade_process_versions`]。レンズ補正などの v1 の機能は処理バージョン 2 から。貼り付けは版を変えない: [`PasteVersion`]）。埋め込みのレンズ補正の情報の要約は [`SourceInfo::lens_correction`]。ローカル補正（マスク）の色域のスポイト（[`Core::mask_color_at`]。点の G 座標と OKLab）・重ねて表示の重み（[`Core::mask_overlay`]）、画面の画像とマスクの G 座標の対応（[`FrameInfo::g_bounds`]）、履歴の名前（[`describe_change`]・[`mask_display_name`]） | DEV-00〜08・14・15・18・19・26・27・30、DATA-09、6.2 節 |
 //! | `render` | GPU → CPU の切り替え、画面のプロファイル（[`Core::set_display_profile`]） | 2.4 節・6.3 節、IQ-05 |
 //! | `region` | 表示範囲の描画（[`Core::render_region`]。ルーペの等倍表示・拡大とパン。P0 の最新の 1 件だけ、取り消しあり） | PRV-03・LIB-02、2.7 節・6.1 節 |
 //! | `view` | 比較表示の表示範囲の描画（[`Core::render_view_region`]・[`Core::view_output_size`]。面ごとに任意の写真を描く。展開した入力を上限まで持ち、[`Core::release_view`] で捨てる） | LIB-03、1.5 節・6.1 節 |
@@ -70,6 +70,7 @@
 //! | `fileops` | アプリの中でのファイル操作（[`Core::move_files`]・[`Core::rename_files`]・[`Core::create_folder`]・[`Core::rename_folder`]・[`Core::move_folder`]・[`Core::remove_folder`]）と、途中で終わった移動・名前の変更の確定 | FILE-02、6.4 節・3.14 節、DATA-07 |
 //! | `relink` | 見つからない写真の確認（[`Core::check_missing`]）・再リンクの候補と結び付け（[`Core::find_relink_candidates`]・[`Core::relink_files`]）・フォルダの場所の指定し直し（[`Core::relocate_folder`]） | FILE-04、3.3 節・3.14 節 |
 //! | `delete` | 削除（[`Core::plan_delete`]・[`Core::execute_delete`]）とファイル操作の確定 | FILE-01、6.4 節、DATA-07 |
+//! | `profiles` | カメラプロファイル（DCP）・ルック（3D LUT の .cube）のライブラリ（[`Core::import_profiles`]・[`Core::list_profiles`]・[`Core::remove_profile`]。データのフォルダの `profiles` に内容の SHA-256 の名前で写しを置き、一覧を一時ファイルから置き換える。描画のエンジンが現像設定の ID から引く）。Adobe のプロファイルなどは同梱しない | DEV-17、2.1 節・2.5 節・6.4 節 |
 //! | `settings` | 設定（[`Core::settings`]・[`Core::update_settings`]） | SYS-05 |
 //! | [`maintenance`] | バックアップ・詳細チェック・復元（[`prepare_restore`]・[`apply_restore`]）、ジョブの操作 | SYS-04、DATA-04・05 |
 //! | [`logging`] | ログのファイル（上限とローテーション）・パニックのフックとクラッシュレポート・ログのフォルダの確認と消去（アプリと CLI が起動時に [`logging::init`]）。外部へは送信しない | SYS-07、SEC-02 |
@@ -140,6 +141,7 @@ mod organize;
 mod paths;
 mod playback;
 mod previews;
+mod profiles;
 mod region;
 mod relink;
 mod render;
@@ -161,7 +163,7 @@ pub use core::{
 pub use delete::{OsTrash, TrashBackend};
 pub use develop::{
     HISTORY_LABEL_BLACK_WHITE, HISTORY_LABEL_COLOR, HISTORY_LABEL_GENERIC, HISTORY_LABEL_PASTE,
-    HISTORY_LABEL_UPGRADE_PROCESS, describe_change, upgrade_process_label,
+    HISTORY_LABEL_UPGRADE_PROCESS, describe_change, mask_display_name, upgrade_process_label,
 };
 pub use error::{ApiError, ErrorInfo, ErrorKind};
 pub use events::{CatalogChange, Event, WarningCode};
@@ -175,6 +177,7 @@ pub use playback::{
     video_content_type,
 };
 pub use previews::{L0_FORMAT_VERSION, L1_FORMAT_VERSION};
+pub use profiles::{MAX_PROFILE_ENTRIES, PROFILES_DIR, inspect_profile_file, load_profile_files};
 pub use region::{MAX_REGION_OUTPUT_PIXELS, MAX_REGION_SCALE, MAX_REGION_SOURCE_PIXELS};
 pub use relink::{MAX_RELINK_CANDIDATES, MAX_RELINK_TARGETS};
 pub use search::MAX_RANGE_LEN;

@@ -4,12 +4,14 @@
 //! |---|---|---|---|---|---|
 //! | 9. ジオメトリ（向き・回転・歪曲補正・切り抜き） | [`geometry`] | [`GeometryStage`] | `finish.geometry` | B2（S の格子）→ B2（C の格子） | 2.1 節・2.7 節、DEV-15・DEV-14 |
 //! | 10. 露光量 | [`exposure`] | [`ExposureStage`] | `finish.exposure` | B2 → B2 | DEV-04、IQ-02 |
+//! | 10 の後. カメラプロファイルのルックテーブル（処理バージョン 2） | [`look`] | [`ProfileLookTableStage`] | `finish.profile_look_table` | B2 → B2 | DEV-17 |
 //! | 10 の後. コントラスト | [`exposure`] | [`ContrastStage`] | `finish.contrast` | B2 → B2 | DEV-04（仮置き） |
 //! | 11. トーン（ハイライト・シャドウ・白・黒） | [`tone`] | [`ToneStage`] | `finish.tone` | B2 → B2（ガイドを使う） | DEV-05、2.7 節、PoC-5 |
 //! | 12. テクスチャ・明瞭度・かすみの除去（処理バージョン 2） | [`presence`] | [`TextureStage`] | `finish.texture` | B2 → B2（明瞭度・かすみの除去はガイドを使う。周辺の画素を使う） | DEV-11、2.7 節 |
 //! | 13. 色（彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒。後の 3 つは処理バージョン 2） | [`color`] | [`ColorStage`] | `finish.color` | B2 → B2 | DEV-08・DEV-09・DEV-10・DEV-25 |
 //! | 14. シャープ（処理バージョン 2） | [`sharpen`] | [`SharpenStage`] | `finish.sharpen` | B2 → B2（周辺の画素を使う） | DEV-12 |
 //! | 15. シーン → ディスプレイ変換 | [`scene_to_display`] | [`SceneToDisplayStage`] | `finish.scene_to_display` | B2 → B3 | 2.6 節「トーンの圧縮」 |
+//! | 15 の後. 独自のルック（3D LUT。処理バージョン 2） | [`look`] | [`LookStage`] | `finish.look` | B3 → B3 | DEV-17 |
 //! | 16. トーンカーブ | [`tone_curve`] | [`ToneCurveStage`] | `finish.tone_curve` | B3 → B3 | DEV-07、2.6 節 |
 //! | 16 の後. 効果（切り抜き後の周辺光量補正・粒子。処理バージョン 2） | [`effects`] | [`EffectsStage`] | `finish.effects` | B3 → B3 | DEV-24 |
 //! | 17a. 画面 | [`output`] | [`DisplayStage`] | `output.display` | B3 → B4a | 2.6 節、5 章 |
@@ -48,6 +50,7 @@ pub mod effects;
 pub mod exposure;
 pub mod frequency;
 pub mod geometry;
+pub mod look;
 pub mod output;
 pub mod presence;
 pub mod reserved;
@@ -55,6 +58,8 @@ pub mod scene_to_display;
 pub mod sharpen;
 pub mod tone;
 pub mod tone_curve;
+
+use std::sync::Arc;
 
 use genzo_color::RgbColorSpace;
 use genzo_model::{DevelopSettings, RenderQuality};
@@ -64,6 +69,7 @@ pub use self::color::ColorStage;
 pub use self::effects::EffectsStage;
 pub use self::exposure::{ContrastStage, ExposureStage};
 pub use self::geometry::{GeometryPlan, GeometryStage, constrain_crop};
+pub use self::look::{LookStage, ProfileLookTableStage};
 pub use self::output::{
     DisplayStage, DisplayTransform, Dither, ExportStage, ExportTransform, Histogram, quantize_u8,
     quantize_u16,
@@ -79,6 +85,7 @@ use crate::border::mirror_cover;
 use crate::coords::{CoordinateFrames, SensorGrid};
 use crate::error::{PipelineError, Result};
 use crate::image::{ImageTile, Roi};
+use crate::local::{LocalField, LocalPlan};
 use crate::sensor::A1Image;
 use crate::stage::{Stage, StageContext, StageParams, run_stage_cpu};
 use crate::version::ProcessVersion;
@@ -142,16 +149,18 @@ pub(crate) fn map_pixels(
 }
 
 /// シーンの処理（ステージ 9〜16）の組み込みのステージ（処理の順）。
-pub fn scene_stages() -> [&'static dyn Stage; 10] {
+pub fn scene_stages() -> [&'static dyn Stage; 12] {
     [
         &GeometryStage,
         &ExposureStage,
+        &ProfileLookTableStage,
         &ContrastStage,
         &ToneStage,
         &TextureStage,
         &ColorStage,
         &SharpenStage,
         &SceneToDisplayStage,
+        &LookStage,
         &ToneCurveStage,
         &EffectsStage,
     ]
@@ -218,6 +227,7 @@ impl A1Image {
 pub struct FinishPlan {
     stages: Vec<(&'static dyn Stage, StageParams)>,
     geometry: GeometryPlan,
+    local: Option<Arc<LocalPlan>>,
 }
 
 impl std::fmt::Debug for FinishPlan {
@@ -225,6 +235,7 @@ impl std::fmt::Debug for FinishPlan {
         f.debug_struct("FinishPlan")
             .field("stages", &self.active_stage_ids())
             .field("output_size", &self.output_size())
+            .field("local", &self.local.as_ref().map(|l| l.slots))
             .finish()
     }
 }
@@ -239,7 +250,23 @@ impl FinishPlan {
                 stages.push((stage, p));
             }
         }
-        Ok(Self { stages, geometry })
+        // ローカル補正（処理バージョン 2。DEV-18）。局所の値を使うステージがなければ作らない。
+        let local = match ctx.process_version {
+            ProcessVersion::V1 => None,
+            ProcessVersion::V2 => LocalPlan::new(&settings.normalized(), ctx, &geometry)?
+                .filter(|_| stages.iter().any(|(s, _)| s.id() != GeometryStage::ID))
+                .map(Arc::new),
+        };
+        Ok(Self {
+            stages,
+            geometry,
+            local,
+        })
+    }
+
+    /// ローカル補正の計画（有効なマスクがなければ `None`。[`crate::local`]）。
+    pub fn local(&self) -> Option<&Arc<LocalPlan>> {
+        self.local.as_ref()
     }
 
     /// ジオメトリ（C の格子と S の格子の対応）。
@@ -290,7 +317,7 @@ impl FinishPlan {
         let rois = self.stage_rois(ctx, output_roi);
         let grid = ctx.sensor_grid;
         let first = rois[0];
-        let mut tile = if source.roi.contains_roi(&first) {
+        let tile = if source.roi.contains_roi(&first) {
             source.crop(first)?
         } else {
             let cover =
@@ -306,9 +333,34 @@ impl FinishPlan {
             }
             source.gather_mirror(first, grid.width, grid.height)?
         };
+        self.run_stages(ctx, &rois, tile)
+    }
+
+    /// 有効なステージを順に実行する（`rois` は [`stage_rois`](Self::stage_rois) の結果、`input` は最初のステージの
+    /// 入力で `rois[0]` を覆うこと）。ローカル補正があれば、ステージ 9 の後（ステージ 9 を飛ばすときは最初）に
+    /// 基準の画像から局所の値の面を作り（[`LocalPlan::field`]）、後のステージの文脈に付ける。置き換えた NaN・
+    /// 無限大の数も返す。
+    pub fn run_stages(
+        &self,
+        ctx: &StageContext<'_>,
+        rois: &[Roi],
+        input: ImageTile,
+    ) -> Result<(ImageTile, u64)> {
+        let mut tile = input;
         let mut replaced = 0;
+        let mut field: Option<LocalField> = None;
         for ((stage, p), roi) in self.stages.iter().zip(&rois[1..]) {
-            let (next, n) = run_stage_cpu(*stage, ctx, &tile, *roi, p)?;
+            if field.is_none()
+                && stage.id() != GeometryStage::ID
+                && let Some(local) = &self.local
+            {
+                field = Some(local.field(&tile)?);
+            }
+            let c = match &field {
+                Some(f) => ctx.with_local(f),
+                None => *ctx,
+            };
+            let (next, n) = run_stage_cpu(*stage, &c, &tile, *roi, p)?;
             tile = next;
             replaced += n;
         }
@@ -350,12 +402,14 @@ mod tests {
             [
                 "finish.geometry",
                 "finish.exposure",
+                "finish.profile_look_table",
                 "finish.contrast",
                 "finish.tone",
                 "finish.texture",
                 "finish.color",
                 "finish.sharpen",
                 "finish.scene_to_display",
+                "finish.look",
                 "finish.tone_curve",
                 "finish.effects",
             ]

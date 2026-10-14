@@ -74,6 +74,12 @@ pub mod ranges {
     pub const MASK_RADIUS: ValueRange = ValueRange::new(0.0, 2.0);
     /// 円形マスクの回転（度）。
     pub const MASK_ANGLE_DEG: ValueRange = ValueRange::new(-180.0, 180.0);
+    /// ブラシの大きさ（半径。G 座標。外接矩形の長辺を 1 とする。DEV-18）。
+    pub const BRUSH_SIZE: ValueRange = ValueRange::new(0.0005, 0.5);
+    /// 色域の範囲の見本の色の OKLab の L（露光量の前のシーンリニアの値から求めるので 1 を超えうる。DEV-19）。
+    pub const MASK_LAB_L: ValueRange = ValueRange::new(0.0, 10.0);
+    /// 色域の範囲の見本の色の OKLab の a・b。
+    pub const MASK_LAB_AB: ValueRange = ValueRange::new(-4.0, 4.0);
     /// カラーグレーディングの色相（度。0〜360。0 と 360 は同じ色相）。
     pub const HUE_DEG: ValueRange = ValueRange::new(0.0, 360.0);
 }
@@ -84,8 +90,6 @@ pub const MAX_CURVE_POINTS: usize = 64;
 pub const MIN_CROP_SIZE: f32 = 0.001;
 /// 縦横比の各項の上限。
 pub const MAX_ASPECT_TERM: u32 = 65_535;
-/// ローカル補正（マスク）の数の上限。
-pub const MAX_MASKS: usize = 100;
 
 /// ホワイトバランス（DEV-03。04 の 2.1 節のステージ 3）。
 ///
@@ -866,6 +870,59 @@ impl EffectsParams {
     }
 }
 
+/// カメラプロファイル・ルックの ID の文字数の上限（[`is_valid_profile_id`]）。
+pub const MAX_PROFILE_ID_CHARS: usize = 200;
+
+/// カメラプロファイル・ルックの ID として使える文字列か（1〜[`MAX_PROFILE_ID_CHARS`] 文字、制御文字を含まない、
+/// 前後に空白がない）。
+pub fn is_valid_profile_id(id: &str) -> bool {
+    let n = id.chars().count();
+    (1..=MAX_PROFILE_ID_CHARS).contains(&n) && !id.chars().any(char::is_control) && id.trim() == id
+}
+
+/// カメラプロファイル・ルック（DEV-17。v1。04 の 2.1 節のステージ 8 と、段階 C のルックテーブル・ルック。処理
+/// バージョン 2 から適用する）。
+///
+/// プロファイル（DCP）とルック（3D LUT。.cube）は、利用者が取り込んだもの（genzo-api の `profiles`。カタログの
+/// データのフォルダの `profiles`）を ID で指す。使ったファイルの内容は [`RenderDeps::profile`]・
+/// [`RenderDeps::look`] に記録し、変わったら警告する（レビュー R-08）。既定は標準（RAW のカメラ行列。今までどおり）
+/// でルックなし（何もしない）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileSettings {
+    /// カメラプロファイル（DCP）の ID。`None` は標準（RAW のカメラ行列）。RAW 以外の写真には使わない。
+    pub camera: Option<String>,
+    /// ルック（3D LUT。.cube）の ID。`None` はなし。
+    pub look: Option<String>,
+    /// ルックの適用量（%。0〜100。既定 100）。
+    pub look_amount: f32,
+}
+
+impl Default for ProfileSettings {
+    fn default() -> Self {
+        Self {
+            camera: None,
+            look: None,
+            look_amount: Self::DEFAULT_LOOK_AMOUNT,
+        }
+    }
+}
+
+impl ProfileSettings {
+    /// ルックの適用量の既定値。
+    pub const DEFAULT_LOOK_AMOUNT: f32 = 100.0;
+
+    /// ルックが効くか（ルックがあり、適用量が 0 でない）。
+    pub fn look_is_active(&self) -> bool {
+        self.look.is_some() && self.look_amount > 0.0
+    }
+
+    /// 何もしない（標準のプロファイルで、ルックが効かない）か。
+    pub fn is_neutral(&self) -> bool {
+        self.camera.is_none() && !self.look_is_active()
+    }
+}
+
 /// ハイライト復元の方式（DEV-06。v1。04 の 2.1 節のステージ 4。処理バージョン 2 から適用する）。
 ///
 /// JSON では `"clip"`・`"neutral"`・`"reconstruct"`。
@@ -983,95 +1040,6 @@ impl DetailParams {
     }
 }
 
-/// マスクの形（DEV-18。v1。仮の定義で、v1 の実装時に見直す）。
-///
-/// 位置と半径は 04 の 2.7 節の G 座標（外接矩形の長辺を 1 とする座標）で表す。
-/// [`CropRect`]（各軸の割合）とは異なり縦横の尺度が同じなので、`rx == ry` の円形マスクは
-/// 画像の縦横比によらず円になる。切り抜きを変えてもマスクの位置は変わらない。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaskShape {
-    /// 線形グラデーション。(x0, y0) で効果 100%、(x1, y1) で 0%。
-    Linear {
-        /// 始点の x。
-        x0: f32,
-        /// 始点の y。
-        y0: f32,
-        /// 終点の x。
-        x1: f32,
-        /// 終点の y。
-        y1: f32,
-    },
-    /// 円形グラデーション。
-    Radial {
-        /// 中心の x。
-        cx: f32,
-        /// 中心の y。
-        cy: f32,
-        /// 横方向の半径。
-        rx: f32,
-        /// 縦方向の半径。
-        ry: f32,
-        /// 回転（度）。
-        angle_deg: f32,
-        /// ぼかし（0〜100）。
-        feather: f32,
-        /// 内側と外側を反転する。
-        invert: bool,
-    },
-}
-
-/// ローカル補正の調整値の差分（ステージ 10〜14 にマスクの値で重み付けして適用する。04 の 2.1 節）。
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LocalDelta {
-    /// 露光量（EV）。
-    pub exposure_ev: f32,
-    /// コントラスト。
-    pub contrast: f32,
-    /// ハイライト。
-    pub highlights: f32,
-    /// シャドウ。
-    pub shadows: f32,
-    /// 白レベル。
-    pub whites: f32,
-    /// 黒レベル。
-    pub blacks: f32,
-    /// 彩度。
-    pub saturation: f32,
-}
-
-impl LocalDelta {
-    /// すべての差分が 0 か。
-    pub fn is_zero(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
-/// ローカル補正（マスク）1 つ分（DEV-18。v1。仮の定義で、v1 の実装時に見直す）。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct LocalAdjustment {
-    /// 有効か。
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// マスクの形。
-    pub mask: MaskShape,
-    /// 調整値の差分。
-    #[serde(default)]
-    pub delta: LocalDelta,
-}
-
-impl LocalAdjustment {
-    /// 結果に影響しない（無効、または差分がすべて 0）か。
-    pub fn is_neutral(&self) -> bool {
-        !self.enabled || self.delta.is_zero()
-    }
-}
-
-fn default_true() -> bool {
-    true
-}
-
 /// 結果に影響する外部データの参照（04 の 2.5 節。レビュー R-08）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1103,6 +1071,15 @@ pub struct RenderDeps {
     pub lens_profile: Option<DataRef>,
     /// RAW デコーダとその設定（例: `"libraw-0.21.2"`）。
     pub raw_decoder: String,
+    /// カメラプロファイル（DCP。DEV-17）。ID は `dcp:<プロファイルの ID>`、SHA-256 はファイルの内容。標準（RAW の
+    /// カメラ行列。そのときの行列は [`camera_profile`](Self::camera_profile)）・RAW 以外・見つからないときは `None`。
+    /// ステージ 3 の色温度 ⇔ WB の係数の変換は、プロファイルを使っても `camera_profile` の行列のまま。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<DataRef>,
+    /// ルック（3D LUT。DEV-17）。ID は `cube:<ルックの ID>`、SHA-256 はファイルの内容。使わない・見つからないときは
+    /// `None`。段階 C だけに影響する（[`RenderDeps::hash_for_phase`]）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub look: Option<DataRef>,
 }
 
 #[cfg(test)]
@@ -1223,14 +1200,5 @@ mod tests {
             serde_json::to_string(&AspectRatio::Ratio { w: 3, h: 2 }).unwrap(),
             r#"{"ratio":{"w":3,"h":2}}"#
         );
-    }
-
-    #[test]
-    fn local_adjustment_defaults() {
-        let adj: LocalAdjustment =
-            serde_json::from_str(r#"{"mask":{"linear":{"x0":0,"y0":0,"x1":0,"y1":1}}}"#).unwrap();
-        assert!(adj.enabled);
-        assert!(adj.delta.is_zero());
-        assert!(adj.is_neutral());
     }
 }

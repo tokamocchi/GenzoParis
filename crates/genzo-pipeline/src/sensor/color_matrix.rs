@@ -9,6 +9,9 @@
 //! 足す。融合積和演算は使わない）。負の値（色域外）はそのまま残す（B2）。
 //!
 //! カメラ行列がない場合の扱いは [`crate::sensor`] のモジュールの doc を参照。
+//!
+//! カメラプロファイル（DCP。DEV-17。処理バージョン 2）を使うときは、プロファイルの行列（[`crate::profile`]）に置き換え、
+//! 色相彩度のマップがあれば [`apply_camera_profile`]（行列 → マップ → 行列）で計算する。
 
 use genzo_color::{Mat3, Mat3F32, camera_to_working_matrix};
 use rayon::prelude::*;
@@ -41,6 +44,31 @@ pub fn apply_color_matrix(image: &mut RgbImage, matrix: &Mat3F32) -> Result<()> 
         .for_each(|chunk| {
             for p in chunk {
                 *p = matrix.apply(*p);
+            }
+        });
+    image.set_contract(ColorContract::B2Working);
+    Ok(())
+}
+
+/// B1 の画像にカメラプロファイル（色相彩度のマップがあるもの。[`crate::profile::CameraProfilePlan::apply`]）を当てて
+/// B2 にする（その場で書き換える）。
+pub fn apply_camera_profile(
+    image: &mut RgbImage,
+    plan: &crate::profile::CameraProfilePlan,
+) -> Result<()> {
+    if image.contract() != ColorContract::B1CameraRgb {
+        return Err(PipelineError::ContractMismatch {
+            stage: super::ColorMatrixStage::ID,
+            expected: ColorContract::B1CameraRgb,
+            found: image.contract(),
+        });
+    }
+    image
+        .data_mut()
+        .par_chunks_mut(PIXELS_PER_TASK)
+        .for_each(|chunk| {
+            for p in chunk {
+                *p = plan.apply(*p);
             }
         });
     image.set_contract(ColorContract::B2Working);

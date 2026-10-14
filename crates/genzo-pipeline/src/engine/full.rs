@@ -48,6 +48,7 @@ use crate::error::{PipelineError, Result};
 use crate::finish::geometry::{GeometryPlan, OUTSIDE_IMAGE_FILL};
 use crate::finish::{FinishPlan, UnimplementedSetting, finish_context, unimplemented_settings};
 use crate::image::{ImageTile, RgbImage, Roi};
+use crate::profile::ProfileResources;
 use crate::resample::{AreaWeights, downscale_column_row};
 use crate::sensor::{SensorPlan, SensorWarning, SourceImage};
 use crate::stage::{GpuStageLookup, Guide, StageContext};
@@ -588,13 +589,17 @@ impl Engine {
         uncropped: bool,
     ) -> Result<FullResolutionJob> {
         let version = ProcessVersion::from_u32(settings.process_version)?;
-        let (sensor, frames, grid, warnings) = self.full_resolution_input(source, settings)?;
+        let profiles = self.resolve_profiles(settings);
+        let (sensor, frames, grid, mut warnings) =
+            self.full_resolution_input(source, settings, &profiles)?;
+        warnings.extend(profiles.stage_c_warnings());
         let base: StageContext<'static> =
             finish_context(settings, frames, grid, RenderQuality::Final)?
                 .with_input_kind(source.image.input_kind())
                 .with_uncropped(uncropped)
                 .with_photo_seed(source.id.photo_seed());
-        let (plan, guide) = plan_with_guide(settings, &base, || {
+        // プロファイル・ルックはパラメータに入るので、計画を作るときだけ文脈に付ける（crate::profile）。
+        let (plan, guide) = plan_with_guide(settings, &base.with_profiles(&profiles), || {
             self.guide(
                 source,
                 settings,
@@ -627,7 +632,8 @@ impl Engine {
         uncropped: bool,
     ) -> Result<GeometryPlan> {
         ProcessVersion::from_u32(settings.process_version)?;
-        let (_, frames, grid, _) = self.full_resolution_input(source, settings)?;
+        let (_, frames, grid, _) =
+            self.full_resolution_input(source, settings, &ProfileResources::default())?;
         let ctx: StageContext<'static> =
             finish_context(settings, frames, grid, RenderQuality::Final)?.with_uncropped(uncropped);
         GeometryPlan::from_settings(settings, &ctx)
@@ -639,6 +645,7 @@ impl Engine {
         &self,
         source: &PhotoSource,
         settings: &DevelopSettings,
+        profiles: &ProfileResources,
     ) -> Result<(
         Option<SensorPlan>,
         CoordinateFrames,
@@ -647,8 +654,11 @@ impl Engine {
     )> {
         Ok(match &source.image {
             SourceImage::Raw(raw) => {
-                let plan =
-                    SensorPlan::new(raw, settings, &self.sensor_options(RenderQuality::Final))?;
+                let plan = SensorPlan::new(
+                    raw,
+                    settings,
+                    &self.sensor_options_with(RenderQuality::Final, profiles),
+                )?;
                 let (frames, grid) = (plan.frames(), plan.sensor_grid());
                 let warnings = plan.warnings().to_vec();
                 (Some(plan), frames, grid, warnings)

@@ -1,5 +1,5 @@
 //! v1 のステージの ID と、処理バージョンで適用しない設定の一覧（docs/04_architecture.md の 2.1 節のステージ 4・6・7・
-//! 12・13・14・16）。v1 の機能のステージは処理バージョン 2 で実装した（下の表）。マスクはまだ予約。
+//! 12・13・14・16 とローカル補正）。v1 の機能のステージは処理バージョン 2 で実装した（下の表）。
 //!
 //! | ステージ | ID | 段階 | 現像設定の項目 | 処理バージョン 1 | 処理バージョン 2 |
 //! |---|---|---|---|---|---|
@@ -11,10 +11,12 @@
 //! | 13. のカラーミキサー・カラーグレーディング・白黒 | [`super::ColorStage::ID`] | C | `color.mixer`・`color.grading`・`color.black_white` | 適用しない（彩度・自然な彩度だけ） | 適用する（[`super::color`]） |
 //! | 14. シャープ | [`super::SharpenStage::ID`] | C | `detail.sharpening` | 適用しない | 適用する（[`super::sharpen`]） |
 //! | 16. の効果（切り抜き後の周辺光量補正・粒子） | [`super::EffectsStage::ID`] | C | `effects` | 適用しない | 適用する（[`super::effects`]） |
-//! | ローカル補正（マスク） | — | C | `masks` | 適用しない | 適用しない（予約） |
+//! | 8. のカメラプロファイル（DCP）と 10 の後のルックテーブル | `sensor.color_matrix`・[`super::ProfileLookTableStage::ID`] | A1・C | `profile.camera` | 適用しない（カメラ行列） | 適用する（[`crate::profile`]・[`super::look`]） |
+//! | 15 の後の独自のルック（3D LUT） | [`super::LookStage::ID`] | C | `profile.look`・`profile.look_amount` | 適用しない | 適用する（[`super::look`]） |
+//! | ローカル補正（マスク） | （ステージ 10〜14 の画素ごとの値） | C | `masks` | 適用しない | 適用する（[`crate::local`]） |
 //!
 //! **決めごと**: 処理バージョン 1 は、これらの設定に値があっても **無視して** 処理を続ける
-//! （ステージの `params` は常に `None`。処理バージョン 2 でも、マスクは同じ）。エラーにしないのは、センサー処理（1 段目）が
+//! （ステージの `params` は常に `None`）。エラーにしないのは、センサー処理（1 段目）が
 //! ノイズ軽減・レンズ補正を同じように無視しているのと合わせ、写真を開けなくしないため。値が
 //! 入っていることは [`unimplemented_settings`] で調べられるので、エンジン・UI は警告を出せる。
 //! これらを実装するときは、既存の写真の結果を変えないよう **処理バージョンを上げる**（2.5 節）。
@@ -36,8 +38,7 @@ pub const NOISE_REDUCTION_ID: &str = "sensor.noise_reduction";
 /// ステージ 7（レンズ補正の周辺減光・倍率色収差。v1。処理バージョン 2 で適用する）の ID。
 pub const LENS_CORRECTION_ID: &str = "sensor.lens_correction";
 
-/// 設定の処理バージョンでは適用しない（値があっても無視する）現像設定の項目（マスクはどの版でも、ほかの項目は
-/// 処理バージョン 1 だけ）。
+/// 設定の処理バージョンでは適用しない（値があっても無視する）現像設定の項目（処理バージョン 1 だけ）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnimplementedSetting {
     /// ハイライト復元（ステージ 4）。
@@ -64,6 +65,10 @@ pub enum UnimplementedSetting {
     PostCropVignette,
     /// 粒子（ステージ 16 の効果）。
     Grain,
+    /// カメラプロファイル（DCP。ステージ 8 とルックテーブル）。
+    CameraProfile,
+    /// 独自のルック（3D LUT）。
+    Look,
     /// ローカル補正（マスク）。
     Masks,
 }
@@ -79,6 +84,8 @@ impl UnimplementedSetting {
             Self::Presence => TextureStage::ID,
             Self::Sharpening => SharpenStage::ID,
             Self::PostCropVignette | Self::Grain => EffectsStage::ID,
+            Self::CameraProfile => "sensor.color_matrix",
+            Self::Look => super::LookStage::ID,
             Self::Masks => "finish.masks",
         }
     }
@@ -123,7 +130,15 @@ impl fmt::Display for UnimplementedSetting {
             Self::Grain => {
                 "粒子はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
             }
-            Self::Masks => "ローカル補正（マスク）はこの処理バージョンでは適用されません",
+            Self::CameraProfile => {
+                "カメラプロファイルはこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
+            Self::Look => {
+                "ルックはこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
+            Self::Masks => {
+                "ローカル補正（マスク）はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
         })
     }
 }
@@ -171,16 +186,22 @@ pub fn unimplemented_settings(settings: &DevelopSettings) -> Vec<UnimplementedSe
         if !s.effects.grain.is_neutral() {
             out.push(UnimplementedSetting::Grain);
         }
-    }
-    if !s.masks.iter().all(LocalAdjustment::is_neutral) {
-        out.push(UnimplementedSetting::Masks);
+        if s.profile.camera.is_some() {
+            out.push(UnimplementedSetting::CameraProfile);
+        }
+        if s.profile.look_is_active() {
+            out.push(UnimplementedSetting::Look);
+        }
+        if !s.masks.iter().all(LocalAdjustment::is_neutral) {
+            out.push(UnimplementedSetting::Masks);
+        }
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use genzo_model::{LocalDelta, MaskShape};
+    use genzo_model::{LocalDelta, MaskComponent, MaskShape};
 
     use super::*;
 
@@ -200,17 +221,16 @@ mod tests {
         s.lens.profile_enabled = true;
         s.lens.remove_chromatic_aberration = true;
         s.masks.push(LocalAdjustment {
-            enabled: true,
-            mask: MaskShape::Linear {
-                x0: 0.0,
-                y0: 0.0,
-                x1: 0.0,
-                y1: 1.0,
-            },
             delta: LocalDelta {
                 exposure_ev: 0.5,
                 ..Default::default()
             },
+            ..LocalAdjustment::new(MaskComponent::add(MaskShape::Linear {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 0.0,
+                y1: 1.0,
+            }))
         });
         s.lens.vignetting_amount = 20.0;
         s.highlight_recovery.method = genzo_model::HighlightMethod::Reconstruct;
@@ -259,9 +279,11 @@ mod tests {
         assert!(u[1].to_string().contains("ノイズ軽減"));
         assert!(u[1].to_string().contains("処理バージョンを更新"));
         assert!(u[4].to_string().contains("処理バージョンを更新"));
-        // 処理バージョン 2 ではマスクのほかはすべて適用する（マスクはまだ予約のまま）。
+        assert!(u[12].to_string().contains("ローカル補正"));
+        assert!(u[12].to_string().contains("処理バージョンを更新"));
+        // 処理バージョン 2 ではすべて適用する（マスクも。DEV-18）。
         s.process_version = 2;
-        assert_eq!(unimplemented_settings(&s), [UnimplementedSetting::Masks]);
+        assert!(unimplemented_settings(&s).is_empty());
         // 版 1 でも、復元しない設定（量 0）・量 0 のノイズ軽減は知らせない。
         let mut quiet = DevelopSettings {
             process_version: 1,

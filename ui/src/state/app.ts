@@ -88,7 +88,9 @@ export type DialogState =
   | { kind: "move_folder"; folderId: FolderId }
   | { kind: "relink"; variantIds: VariantId[] | null }
   | { kind: "relocate_folder"; folderId: FolderId }
-  | { kind: "remove_folder"; folderId: FolderId };
+  | { kind: "remove_folder"; folderId: FolderId }
+  // カメラプロファイル・ルック（DEV-17）の一覧: 取り込み・詳細（説明・注意・著作権の表示）・除く。
+  | { kind: "profiles" };
 
 export interface Toast {
   id: number;

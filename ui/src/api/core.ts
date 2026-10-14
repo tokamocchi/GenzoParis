@@ -58,6 +58,10 @@ import type {
   NamePreview,
   PasteReport,
   PasteVersion,
+  PickedMaskColor,
+  ProfileEntry,
+  ProfileImportReport,
+  ProfileKind,
   RangeResult,
   Rating,
   RegionInfo,
@@ -281,6 +285,17 @@ export const endDrag = async (): Promise<DevelopState> =>
 /** 現像中の写真の処理バージョンを最新に更新する（DATA-09。履歴に 1 件。すでに最新なら何もしない）。 */
 export const upgradeProcessVersion = async (): Promise<DevelopState> =>
   strip(await execute({ type: "upgrade_process_version" }, "develop"));
+// --- カメラプロファイル・ルック（DEV-17） ---
+/** 取り込んだカメラプロファイル・ルックの一覧（`camera` を渡すと、その機種用かを matches_camera に入れる）。 */
+export const listProfiles = async (camera: string | null): Promise<ProfileEntry[]> =>
+  (await execute({ type: "list_profiles", camera }, "profiles")).profiles;
+/** .dcp・.cube のファイルを取り込む（元のファイルは変えない。`replace` で同じ ID の違う内容を置き換える）。 */
+export const importProfiles = async (paths: string[], replace: boolean): Promise<ProfileImportReport> =>
+  strip(await execute({ type: "import_profiles", paths, replace }, "profile_import"));
+/** 取り込んだものを一覧から除く。 */
+export const removeProfile = async (kind: ProfileKind, id: string) => {
+  await execute({ type: "remove_profile", kind, id }, "updated");
+};
 export const renderDevelop = async (): Promise<FrameInfo> =>
   strip(await execute({ type: "render_develop" }, "frame"));
 export const renderRegion = async (request: RegionRequest): Promise<RegionInfo> =>
@@ -356,6 +371,22 @@ export const whiteBalanceAt = async (variant_id: VariantId, x: number, y: number
     "white_balance",
   );
   return { temperature_k: r.temperature_k, tint: r.tint };
+};
+/**
+ * 色域の範囲（DEV-19）のスポイト: 表示中のプレビューの x・y（0〜1）の点の G 座標と色（OKLab）。適用はしない（画面が
+ * マスクの見本の色に入れて送る）。`uncropped` は whiteBalanceAt と同じ。
+ */
+export const maskColorAt = async (
+  variant_id: VariantId,
+  x: number,
+  y: number,
+  uncropped?: boolean,
+): Promise<PickedMaskColor> => {
+  const r = await execute(
+    { type: "mask_color_at", variant_id, x, y, ...(uncropped === undefined ? {} : { uncropped }) },
+    "mask_color",
+  );
+  return { x: r.x, y: r.y, lab: r.lab };
 };
 /** 切り抜きの編集中の表示（`uncropped` なら切り抜く前の全体を描く）。 */
 export const setDevelopView = async (uncropped: boolean) => {

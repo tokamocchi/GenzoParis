@@ -127,6 +127,10 @@ const TESTS: &[(&str, fn())] = &[
         develop::view_region_frames_match_their_panes,
     ),
     (
+        "develop::mask_overlay_frames_match_their_headers",
+        develop::mask_overlay_frames_match_their_headers,
+    ),
+    (
         "backup::corrupt_catalog_is_restored_from_a_backup",
         backup::corrupt_catalog_is_restored_from_a_backup,
     ),

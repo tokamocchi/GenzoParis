@@ -88,6 +88,16 @@ pub enum PipelineError {
         reason: &'static str,
     },
 
+    /// ローカル補正（マスク。DEV-18）の局所の値の面（[`crate::local::LocalField`]）が必要なのに文脈にない、または
+    /// パラメータ・範囲と合わない（段階 C の実行の誤り）。
+    #[error("ステージ {stage} の局所の値の面が使えません: {reason}")]
+    LocalFieldMismatch {
+        /// ステージの ID。
+        stage: &'static str,
+        /// 理由。
+        reason: &'static str,
+    },
+
     /// 同じ ID のステージを 2 回登録しようとした（7.1 節）。
     #[error("ステージの ID {0} は登録済みです")]
     DuplicateStageId(&'static str),

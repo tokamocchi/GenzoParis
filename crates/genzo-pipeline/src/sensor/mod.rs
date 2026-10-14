@@ -61,6 +61,7 @@ use std::sync::Arc;
 
 use genzo_color::Mat3;
 use genzo_color::Mat3F32;
+use genzo_color::dcp::DcpProfile;
 use genzo_color::space::XYZ_TO_BT2020;
 use genzo_model::{DevelopSettings, Orientation, RenderQuality};
 use genzo_raw::{CfaPattern, PixelRect, RawImage};
@@ -73,6 +74,7 @@ use crate::error::{PipelineError, Result};
 use crate::finish::geometry::sample_bicubic_channel;
 use crate::image::{CfaImage, ImageTile, RgbImage, Roi};
 use crate::lens::{LensStagePlan, ProfileDistortion, requests_sensor_corrections};
+use crate::profile::CameraProfilePlan;
 use crate::resample::{
     AreaWeights, downscale_area, downscale_column_row, downscale_row, preview_size,
 };
@@ -120,6 +122,17 @@ pub enum SensorWarning {
     HighlightRecoveryNotApplicable,
     /// RAW 以外の写真では、ステージ 6（ノイズ軽減）を使わない（センサーの段階の処理。人の判断の表 No.139）。
     NoiseReductionNotApplicable,
+    /// 設定のカメラプロファイル（DCP。DEV-17）が見つからないため、標準の色（RAW のカメラ行列）で描いた
+    /// （[`crate::profile`]）。
+    CameraProfileMissing,
+    /// RAW 以外の写真では、カメラプロファイルを使わない（ステージ 8 がない）。
+    CameraProfileNotApplicable,
+    /// カメラプロファイルの機種（UniqueCameraModel）が写真の機種と違う（使うが、色が合わないことがある）。
+    CameraProfileOtherCamera,
+    /// カメラプロファイルの計算ができない（行列で中立色を求められないなど）ため、標準の色で描いた。
+    CameraProfileUnusable,
+    /// 設定のルック（3D LUT。DEV-17）が見つからないため、ルックなしで描いた（[`crate::profile`]）。
+    LookMissing,
 }
 
 impl fmt::Display for SensorWarning {
@@ -155,6 +168,21 @@ impl fmt::Display for SensorWarning {
             SensorWarning::NoiseReductionNotApplicable => {
                 f.write_str("RAW 以外の写真では、ノイズ軽減は使われません")
             }
+            SensorWarning::CameraProfileMissing => f.write_str(
+                "選んだカメラプロファイルが見つからないため、標準の色で表示しています（プロファイルを取り込み直すか、ほかのプロファイルを選んでください）",
+            ),
+            SensorWarning::CameraProfileNotApplicable => {
+                f.write_str("RAW 以外の写真では、カメラプロファイルは使われません")
+            }
+            SensorWarning::CameraProfileOtherCamera => f.write_str(
+                "選んだカメラプロファイルは、この写真の機種用ではありません（色が合わないことがあります）",
+            ),
+            SensorWarning::CameraProfileUnusable => f.write_str(
+                "選んだカメラプロファイルでは色を計算できないため、標準の色で表示しています",
+            ),
+            SensorWarning::LookMissing => f.write_str(
+                "選んだルックが見つからないため、ルックなしで表示しています（ルックを取り込み直すか、ほかのルックを選んでください）",
+            ),
         }
     }
 }
@@ -173,6 +201,9 @@ pub struct SensorOptions {
     /// render_deps）。`None` なら RAW の `cam_xyz` を使う（今は呼び出し側が渡さないので、常にこちら。
     /// モジュールの doc の「カメラ行列の出どころ」）。
     pub camera_matrix: Option<Mat3>,
+    /// 設定のカメラプロファイル（DCP。DEV-17）を引いたもの（[`crate::profile`]。エンジンが描画ごとに入れる）。設定が
+    /// プロファイルを指していて、これが `None` なら「見つからない」として標準の色で描く。処理バージョン 1 では使わない。
+    pub camera_profile: Option<Arc<DcpProfile>>,
 }
 
 impl Default for SensorOptions {
@@ -182,6 +213,7 @@ impl Default for SensorOptions {
             demosaic: None,
             saturation_clip: SaturationClip::default(),
             camera_matrix: None,
+            camera_profile: None,
         }
     }
 }
@@ -629,7 +661,16 @@ impl SensorStage for ColorMatrixStage {
                 } else {
                     tile.crop(output_roi)?
                 };
-                color_matrix::apply_color_matrix(&mut tile.image, &plan.camera_to_working)?;
+                match plan
+                    .camera_profile
+                    .as_ref()
+                    .filter(|p| p.hue_sat_map.is_some())
+                {
+                    Some(p) => color_matrix::apply_camera_profile(&mut tile.image, p)?,
+                    None => {
+                        color_matrix::apply_color_matrix(&mut tile.image, &plan.camera_to_working)?
+                    }
+                }
                 Ok(SensorData::Rgb(tile))
             }
         }
@@ -810,6 +851,7 @@ pub struct SensorPlan {
     noise: Option<NoisePlan>,
     cam_xyz: Mat3,
     camera_to_working: Mat3F32,
+    camera_profile: Option<CameraProfilePlan>,
     lens: Option<LensStagePlan>,
     lens_geometry: Option<ProfileDistortion>,
     warnings: Vec<SensorWarning>,
@@ -847,13 +889,42 @@ impl SensorPlan {
                 FALLBACK_CAM_XYZ
             }
         };
-        let camera_to_working = color_matrix::camera_to_working(&cam_xyz)?;
+        let mut camera_to_working = color_matrix::camera_to_working(&cam_xyz)?;
         let resolved =
             wb::resolve_white_balance(&settings.white_balance, raw.as_shot_wb, &cam_xyz)?;
         if let Some(c) = resolved.clamped {
             warnings.push(SensorWarning::WhiteBalanceClamped(c));
         }
         let wb = WbCoefficients::new(resolved.multipliers)?;
+        // ステージ 8 のカメラプロファイル（DCP。版 2 から。crate::profile）。WB の係数（ステージ 3。今のカメラ行列で
+        // 求めたもの）の逆数をカメラの中立色にして、プロファイルの行列・マップを補間する。
+        let mut camera_profile = None;
+        if process_version.has_v1_features() && settings.profile.camera.is_some() {
+            match &options.camera_profile {
+                None => warnings.push(SensorWarning::CameraProfileMissing),
+                Some(dcp) => {
+                    let m = wb.multipliers;
+                    let neutral = [
+                        1.0 / f64::from(m[0]),
+                        1.0 / f64::from(m[1]),
+                        1.0 / f64::from(m[2]),
+                    ];
+                    match CameraProfilePlan::new(dcp, neutral) {
+                        Ok((plan, combined)) => {
+                            if let Some(camera) = raw.metadata.camera_name()
+                                && dcp.unique_camera_model.is_some()
+                                && !dcp.matches_camera(&camera)
+                            {
+                                warnings.push(SensorWarning::CameraProfileOtherCamera);
+                            }
+                            camera_to_working = combined;
+                            camera_profile = Some(plan);
+                        }
+                        Err(_) => warnings.push(SensorWarning::CameraProfileUnusable),
+                    }
+                }
+            }
+        }
         let demosaic = options.demosaic.unwrap_or(DemosaicMethod::for_quality(
             process_version,
             options.quality,
@@ -909,10 +980,16 @@ impl SensorPlan {
             noise,
             cam_xyz,
             camera_to_working,
+            camera_profile,
             lens,
             lens_geometry,
             warnings,
         })
+    }
+
+    /// ステージ 8 のカメラプロファイルの計画（DCP を使うときだけ。[`crate::profile`]）。
+    pub fn camera_profile(&self) -> Option<&CameraProfilePlan> {
+        self.camera_profile.as_ref()
     }
 
     /// ステージ 7（レンズ補正）の計画（補正がなければ `None`）。
@@ -976,7 +1053,8 @@ impl SensorPlan {
         &self.cam_xyz
     }
 
-    /// カメラ RGB → 作業色空間の行列（ステージ 8）。
+    /// カメラ RGB → 作業色空間の行列（ステージ 8。カメラプロファイルを使うときは、色相彩度のマップを除いたプロファイルの
+    /// 行列。マップがあれば、ステージ 8 は [`camera_profile`](Self::camera_profile) の計画で計算する）。
     pub fn camera_to_working(&self) -> &Mat3F32 {
         &self.camera_to_working
     }
@@ -1358,9 +1436,9 @@ pub fn working_lens_warnings(settings: &DevelopSettings) -> Result<Vec<SensorWar
     })
 }
 
-/// RAW 以外の写真の警告（版 2 で、センサーの段階のステージ（4・6・7）を求めている設定なら、使われないことを
-/// 知らせる: [`SensorWarning::HighlightRecoveryNotApplicable`]・[`SensorWarning::NoiseReductionNotApplicable`]・
-/// [`SensorWarning::LensSensorCorrectionsNotApplicable`]）。
+/// RAW 以外の写真の警告（版 2 で、センサーの段階のステージ（4・6・7・8 のカメラプロファイル）を求めている設定なら、
+/// 使われないことを知らせる: [`SensorWarning::HighlightRecoveryNotApplicable`]・[`SensorWarning::NoiseReductionNotApplicable`]・
+/// [`SensorWarning::CameraProfileNotApplicable`]・[`SensorWarning::LensSensorCorrectionsNotApplicable`]）。
 pub fn working_sensor_warnings(settings: &DevelopSettings) -> Result<Vec<SensorWarning>> {
     let version = ProcessVersion::from_u32(settings.process_version)?;
     let s = settings.normalized();
@@ -1371,6 +1449,9 @@ pub fn working_sensor_warnings(settings: &DevelopSettings) -> Result<Vec<SensorW
         }
         if !s.detail.noise_reduction.is_disabled() {
             out.push(SensorWarning::NoiseReductionNotApplicable);
+        }
+        if s.profile.camera.is_some() {
+            out.push(SensorWarning::CameraProfileNotApplicable);
         }
     }
     out.extend(working_lens_warnings(settings)?);
