@@ -620,6 +620,8 @@ impl Core {
         inner.check_open()?;
         crate::fileops::ensure_no_conflicting_jobs(inner, None)?;
         let _ops = inner.file_ops.lock();
+        // 排他を取った後にも確かめる（取り込みは、この排他を持ったまま取り込みのジョブを登録する）。
+        crate::fileops::ensure_no_conflicting_jobs(inner, None)?;
         crate::volumes::refresh(inner)?;
         let token = CancellationToken::new();
         let mut report = RelinkReport::default();
@@ -765,6 +767,8 @@ impl Core {
         inner.check_open()?;
         crate::fileops::ensure_no_conflicting_jobs(inner, None)?;
         let _ops = inner.file_ops.lock();
+        // 排他を取った後にも確かめる（取り込みは、この排他を持ったまま取り込みのジョブを登録する）。
+        crate::fileops::ensure_no_conflicting_jobs(inner, None)?;
         crate::volumes::refresh(inner)?;
         let plan = relocate_plan(inner, folder, new_path)?;
         if let Some(p) = &plan.problem {

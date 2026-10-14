@@ -1118,6 +1118,15 @@ impl Core {
     ) -> Result<u64, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
+        // アプリの中のファイル操作（名前の変更・フォルダの操作・再リンクなど。ジョブを登録しないものを含む）の
+        // 途中では取り込まない。ファイル操作の排他を持ったまま、確認と取り込みのジョブの登録を行うので、
+        // ファイル操作の側は排他を取った後に取り込みのジョブを見つけて止まる（PR #4 の Codex の指摘）。
+        let Some(_ops) = inner.file_ops.try_lock() else {
+            return Err(ApiError::InvalidArgument(
+                "ファイルの移動・名前の変更・フォルダの操作の実行中は取り込めません。終わってからやり直してください"
+                    .to_owned(),
+            ));
+        };
         // 写真の移動（FILE-02）の実行中は取り込まない（移している途中のファイルを登録し直さないため）。
         if inner.jobs.is_running(JobKind::MoveFiles, None) {
             return Err(ApiError::InvalidArgument(

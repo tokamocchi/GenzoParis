@@ -999,6 +999,8 @@ impl Core {
         }
         ensure_no_conflicting_jobs(inner, None)?;
         let _ops = inner.file_ops.lock();
+        // 排他を取った後にも確かめる（取り込みは、この排他を持ったまま取り込みのジョブを登録する）。
+        ensure_no_conflicting_jobs(inner, None)?;
         crate::volumes::refresh(inner)?;
         let offset = inner.default_offset();
         let photos = inner.with_catalog_api(|c| build_rename_plan(c, variant_ids, spec, offset))?;
@@ -1092,6 +1094,8 @@ impl Core {
             ));
         }
         let _ops = inner.file_ops.lock();
+        // 排他を取った後にも確かめる（取り込みは、この排他を持ったまま取り込みのジョブを登録する）。
+        ensure_no_conflicting_jobs(inner, None)?;
         let r = inner.with_catalog(|c| c.remove_folder(folder))?;
         if let Some(v) = r.volume {
             inner.volume_states.lock().remove(&v);
@@ -1110,6 +1114,8 @@ impl Core {
         let inner = &self.inner;
         ensure_no_conflicting_jobs(inner, None)?;
         let _ops = inner.file_ops.lock();
+        // 排他を取った後にも確かめる（取り込みは、この排他を持ったまま取り込みのジョブを登録する）。
+        ensure_no_conflicting_jobs(inner, None)?;
         crate::volumes::refresh(inner)?;
         // 行き先は、ファイル操作の排他を取った後のフォルダの記録から求める（排他の前に求めると、同時に動いた
         // 別の操作の前の場所を使い、フォルダを元の場所へ戻してしまう。PR #4 の Codex の指摘）。
