@@ -714,7 +714,12 @@ impl Core {
         let reread = match refresh_file(inner, &updated, &path, Lane::Batch, token) {
             Ok(Refreshed::Changed) => true,
             Ok(_) => false,
-            Err(e) => return Err(format!("結び付けた後にファイルを確かめられません: {e}")),
+            Err(e) => {
+                // 読み直せなかった: 場所を元に戻す（失敗と報告するのに、カタログの場所だけが変わったままに
+                // しない）。元の場所は見つからないファイルの場所なので、ほかのファイルとはぶつからない。
+                let _ = inner.with_catalog(|c| c.relink_file(rec.id, rec.folder_id, &rec.name));
+                return Err(format!("結び付けた後にファイルを確かめられません: {e}"));
+            }
         };
         if let Some(h) = same_hash {
             let now = inner
