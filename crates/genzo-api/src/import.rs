@@ -1153,6 +1153,7 @@ impl Core {
                 JobKind::Import,
                 "取り込み",
                 move |ctx| {
+                    let _one = ctx.inner.import_run.lock();
                     run_import(ctx, &root, recursive, resolved, &tags).map(JobResult::Import)
                 },
             ));
@@ -1163,6 +1164,7 @@ impl Core {
             JobKind::Import,
             "コピー取り込み",
             move |ctx| {
+                let _one = ctx.inner.import_run.lock();
                 crate::copy_import::run_copy_import(ctx, &root, recursive, resolved, &tags, &plan)
                     .map(JobResult::Import)
             },

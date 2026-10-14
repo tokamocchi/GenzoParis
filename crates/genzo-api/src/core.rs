@@ -262,6 +262,10 @@ pub(crate) struct Inner {
     /// アプリの中でのファイル操作（移動・リネーム・フォルダの操作・再リンク。FILE-02・FILE-04）を 1 つずつに
     /// するロック（ほかのロックを持たずに最初に取る。持っている間にカタログ・キャッシュのロックを短く取る）。
     pub file_ops: Mutex<()>,
+    /// 取り込みのジョブ（IMP-01〜06）を 1 つずつにするロック（ジョブの中で、始めから終わりまで持つ）。同時に
+    /// 動く 2 つの取り込みが、どちらも登録の前に重複を確かめ、同じ内容のファイルを両方とも登録しないため
+    /// （IMP-04。PR #4 の Codex の指摘）。
+    pub import_run: Mutex<()>,
     /// 見つからない写真の確認のジョブの状態（`relink` の doc）。
     pub check: Mutex<crate::relink::CheckJobState>,
     pub settings: Mutex<CoreSettings>,
@@ -551,6 +555,7 @@ impl Core {
             volume_states: Mutex::new(volume_states),
             on_file_op: hooks.on_file_op,
             file_ops: Mutex::new(()),
+            import_run: Mutex::new(()),
             check: Mutex::new(crate::relink::CheckJobState::default()),
             settings: Mutex::new(settings),
             settings_update: Mutex::new(()),

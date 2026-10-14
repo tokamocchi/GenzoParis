@@ -900,6 +900,14 @@ fn build_rename_plan(
     Ok(out)
 }
 
+/// フォルダの名前の変更・移動の行き先（ファイル操作の排他の中で、今のフォルダの記録から求める）。
+enum FolderDest {
+    /// 同じ親の中で、この名前にする。
+    Rename(String),
+    /// このフォルダの中へ移す（名前は変えない）。
+    Move(FolderId),
+}
+
 impl Core {
     /// 写真をフォルダ `dest_folder` へ移動する予定（ファイル・方法・移せない理由。カタログもファイルも変えない）。
     /// 写真（asset）ごとに、RAW と同時記録の JPEG を一緒に動かす。モジュールの doc。
@@ -1054,14 +1062,7 @@ impl Core {
         let inner = &self.inner;
         inner.check_open()?;
         let name = validate_name(name)?;
-        let rel = inner.with_catalog(|c| c.folder(folder))?.rel_path;
-        let parent = rel.rsplit_once('/').map_or("", |(p, _)| p);
-        let new_rel = if parent.is_empty() {
-            name.clone()
-        } else {
-            format!("{parent}/{name}")
-        };
-        self.folder_op(FileOpKind::Rename, folder, &new_rel)
+        self.folder_op(FileOpKind::Rename, folder, FolderDest::Rename(name))
     }
 
     /// フォルダを別のフォルダ `new_parent` の中へ移す（同じボリュームの中だけ。ディスクとカタログ）。
@@ -1072,22 +1073,7 @@ impl Core {
     ) -> Result<FolderInfo, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
-        let (f, p) = inner.with_catalog(|c| Ok((c.folder(folder)?, c.folder(new_parent)?)))?;
-        if f.volume_id != p.volume_id {
-            return Err(ApiError::InvalidArgument(
-                "別のドライブへのフォルダの移動はできません（写真を選んで、移動先のフォルダへ移してください）"
-                    .to_owned(),
-            ));
-        }
-        if f.parent_id == Some(new_parent) {
-            return self.folder_info(folder);
-        }
-        let new_rel = if p.rel_path.is_empty() {
-            f.name().to_owned()
-        } else {
-            format!("{}/{}", p.rel_path, f.name())
-        };
-        self.folder_op(FileOpKind::Move, folder, &new_rel)
+        self.folder_op(FileOpKind::Move, folder, FolderDest::Move(new_parent))
     }
 
     /// フォルダ（と配下のフォルダ）をカタログから除く（FILE-04。カタログの中だけで、ディスクのフォルダと
@@ -1119,12 +1105,48 @@ impl Core {
         &self,
         kind: FileOpKind,
         folder: FolderId,
-        new_rel: &str,
+        dest: FolderDest,
     ) -> Result<FolderInfo, ApiError> {
         let inner = &self.inner;
         ensure_no_conflicting_jobs(inner, None)?;
         let _ops = inner.file_ops.lock();
         crate::volumes::refresh(inner)?;
+        // 行き先は、ファイル操作の排他を取った後のフォルダの記録から求める（排他の前に求めると、同時に動いた
+        // 別の操作の前の場所を使い、フォルダを元の場所へ戻してしまう。PR #4 の Codex の指摘）。
+        let new_rel = inner.with_catalog_api(|c| {
+            let f = c.folder(folder)?;
+            match &dest {
+                FolderDest::Rename(name) => {
+                    let parent = f.rel_path.rsplit_once('/').map_or("", |(p, _)| p);
+                    Ok(Some(if parent.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{parent}/{name}")
+                    }))
+                }
+                FolderDest::Move(new_parent) => {
+                    let p = c.folder(*new_parent)?;
+                    if f.volume_id != p.volume_id {
+                        return Err(ApiError::InvalidArgument(
+                            "別のドライブへのフォルダの移動はできません（写真を選んで、移動先のフォルダへ移してください）"
+                                .to_owned(),
+                        ));
+                    }
+                    if f.parent_id == Some(*new_parent) {
+                        return Ok(None);
+                    }
+                    Ok(Some(if p.rel_path.is_empty() {
+                        f.name().to_owned()
+                    } else {
+                        format!("{}/{}", p.rel_path, f.name())
+                    }))
+                }
+            }
+        })?;
+        let Some(new_rel) = new_rel else {
+            return self.folder_info(folder);
+        };
+        let new_rel = new_rel.as_str();
         let (from_dir, to_dir) = inner.with_catalog_api(|c| {
             let f = c.folder(folder)?;
             if f.rel_path.is_empty() {
