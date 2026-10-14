@@ -40,7 +40,12 @@ pub struct OsVolume {
 }
 
 /// 実在するパス `path` のボリューム（分からなければ `None`）。
+///
+/// `path` がないときは、どの OS でも `None`。Linux・macOS は `stat`・`statfs` が失敗して `None` に
+/// なるが、Windows の `GetVolumePathNameW` はないパスでも先頭（ドライブ）からボリュームを返すため、
+/// ここでそろえる（ないフォルダを、同じドライブ文字の今のボリュームのものと取り違えない）。
 pub fn identify(path: &Path) -> Option<OsVolume> {
+    std::fs::symlink_metadata(path).ok()?;
     imp::identify(path)
 }
 
