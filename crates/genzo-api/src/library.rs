@@ -436,10 +436,17 @@ fn same_volume_still_mounted(inner: &Inner, rec: &FileRecord, path: &Path) -> Re
     let matches = |id: &crate::volumes::VolumeIdentity| {
         id.uuid == loc.volume_uuid && crate::volumes::same_path(&id.mount, mount)
     };
+    // まず、ファイルそのものが記録のボリュームにあるかを、取り込みと同じ方法（パスから）で確かめる。マウント先
+    // から求め直す方法だけでは、macOS の起動ディスク（データのボリュームを `/` として記録する）で一致しない
+    // ことがあり、内容が変わったファイルを読み直せなかった（CI の macOS）。
     let same = inner
         .volume_probe
-        .identify(mount)
-        .is_some_and(|id| matches(&id))
+        .identify(path)
+        .is_some_and(|id| id.uuid == loc.volume_uuid)
+        || inner
+            .volume_probe
+            .identify(mount)
+            .is_some_and(|id| matches(&id))
         || inner.volume_probe.mounted().iter().any(matches);
     if same {
         Ok(())
