@@ -89,7 +89,7 @@ npm run app:dev
 
 - 本体（`genzo-paris`）は、ワーカー（`genzo-worker`）を「環境変数 `GENZO_WORKER_PATH` → 本体と同じフォルダ」の順に探します。開発用の起動では、同じ `target/debug` に置かれたものを使います。
 - 配布物の作り方（`npm run app:worker`・`npm run app:build`、GitHub Actions の `release.yml`）と、FFmpeg・署名・ライセンスの注意は [docs/packaging.md](docs/packaging.md) を見てください。**`release.yml` は手動でだけ動き、公開のリポジトリでは、成果物を誰でも取得できる状態にしてよいかの確認の印がないと止まります**（2.5 節）。
-- E2E（Linux の開発環境用）: `e2e/run.sh <アプリの実行ファイル> e2e/scenario.mjs [出力のフォルダ]`。Xvfb・WebKitWebDriver・`tauri-driver` が要ります（`e2e/run.sh` の冒頭）。写真のフォルダは `cargo run -p genzo-testkit --example e2e_fixtures -- <フォルダ>` で作り、環境変数 `E2E_PHOTOS` で渡します。アプリは `npm --prefix ui run build` の後に `cargo build -p genzo-app --features custom-protocol` で、ワーカーは同じフォルダに `cargo build -p genzo-worker --features libraw` でビルドします。Windows・macOS の WebView の確認の代わりにはなりません。
+- E2E（Linux の開発環境用）: `e2e/run.sh <アプリの実行ファイル> e2e/scenario.mjs [出力のフォルダ]`。Xvfb・WebKitWebDriver・`tauri-driver` が要ります（`e2e/run.sh` の冒頭）。写真のフォルダは `cargo run -p genzo-testkit --example e2e_fixtures -- <フォルダ>` で作り、動画を 1 本 FFmpeg で足して（合成の映像。例: `ffmpeg -f lavfi -i testsrc=duration=2:size=640x360:rate=30 -pix_fmt yuv420p "<フォルダ>/動画 01.mp4"`）、環境変数 `E2E_PHOTOS` で渡します。写真・動画の数は、シナリオが取り込んだ後にカタログから数えます（動画がなくても通りますが、そのときは動画の扱い（GPS を削除する設定では書き出さないこと）を確かめません）。アプリは `npm --prefix ui run build` の後に `cargo build -p genzo-app --features custom-protocol` で（実行ファイルは `target/debug/genzo-paris`）、ワーカーは同じフォルダに `cargo build -p genzo-worker --features libraw` でビルドします。出力のフォルダ（画面の保存先）の既定は `e2e/out` です（git の対象外）。Windows・macOS の WebView の確認の代わりにはなりません。
 
 ### CLI（`genzo`）
 
