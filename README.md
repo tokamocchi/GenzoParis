@@ -37,6 +37,16 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+Linux（Ubuntu）から、Windows 向けのコード（`cfg(windows)`）の型と警告を確かめられます（コンパイルの検査だけで、リンク・実行はしません）。C のライブラリ（SQLite・lcms2 など）は mingw-w64 で Windows 向けにビルドします。
+
+```sh
+sudo apt install mingw-w64
+rustup target add x86_64-pc-windows-gnu
+cargo clippy --workspace --all-targets --keep-going --target x86_64-pc-windows-gnu -- -D warnings
+```
+
+CI の Windows のジョブは MSVC 向け（`x86_64-pc-windows-msvc`）です。MSVC 向けは Linux では C のライブラリをビルドできないので、gnu 向けで代わりに確かめます（Rust のコードは `target_env` で分けていないので、Windows 用のコードは同じように検査されます）。MSVC でのリンク・実行は、CI か Windows の実機で確かめてください。
+
 ### LibRaw（機能フラグ `libraw`）
 
 RAW の展開には LibRaw（0.21 以降。スレッドセーフ版の `libraw_r`）を使います。機能フラグ `libraw` は既定では無効で、LibRaw がなくてもビルドとテストができます。LibRaw の関数を呼ぶのはワーカープロセスだけで、本体からは呼びません（[docs/04_architecture.md](docs/04_architecture.md) の 1.2 節）。

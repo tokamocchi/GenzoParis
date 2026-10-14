@@ -51,8 +51,15 @@
 //! assert_eq!((thumb.width, thumb.height), (64, 32));
 //! # Ok::<(), genzo_media::MediaError>(())
 //! ```
+//!
+//! # unsafe
+//!
+//! この crate は `unsafe` を使わない（`#![deny(unsafe_code)]`）。例外は Windows の上書きしない名前の変更
+//! （[`rename`] の Windows 用の `rename_no_replace`。`MoveFileExW` の呼び出し 1 か所）だけで、その関数にだけ
+//! `#[allow(unsafe_code)]` を付けて SAFETY のコメントを書く。デコード・エンコードなど信頼できない入力を扱う
+//! コードには使わない（決定事項ログ No.172）。
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod buffer;
 pub mod cache;

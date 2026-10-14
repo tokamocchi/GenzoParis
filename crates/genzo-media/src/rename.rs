@@ -17,6 +17,8 @@
 //!   （genzo-api の `fileops::settle`）が一時的な名前を見つけて名前の変更を終わらせる。
 //!
 //! このモジュールは std と OS の API（rustix・windows-sys）だけを使う（Windows・macOS 向けにも型の確認ができるように）。
+//! Windows の `MoveFileExW` の呼び出しは、この crate で `unsafe` を許す唯一の場所（crate の doc の「unsafe」。
+//! 決定事項ログ No.172）。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -218,11 +220,15 @@ mod imp {
         Some(out)
     }
 
+    // この crate で `unsafe` を許す唯一の場所（crate の doc の「unsafe」。決定事項ログ No.172）。std の
+    // `fs::rename` は移動先を置き換えるので、上書きしない名前の変更には Win32 API を直接呼ぶ。
+    #[allow(unsafe_code)]
     pub(super) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
         let f = wide(from)?;
         let t = wide(to)?;
-        // SAFETY: f・t は NUL で終わる UTF-16 の文字列で、呼び出しの間は生きている。フラグは 0（上書きしない・
-        // 別のドライブへコピーしない）。
+        // SAFETY: f・t は `wide` が作った NUL で終わる UTF-16 の文字列（途中に NUL はない）で、呼び出しの間は
+        // 生きている。関数はどちらも読むだけで、ポインタを保持しない。フラグは 0（上書きしない・別のドライブへ
+        // コピーしない）。
         let ok = unsafe { MoveFileExW(f.as_ptr(), t.as_ptr(), 0) };
         if ok == 0 {
             // ERROR_FILE_EXISTS（80）・ERROR_ALREADY_EXISTS（183）は AlreadyExists になる（std の対応表）。
