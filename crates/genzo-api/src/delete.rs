@@ -329,6 +329,9 @@ impl Core {
             .plans
             .remove(&plan_id)
             .ok_or_else(|| ApiError::NotFound(format!("削除の計画 {plan_id}")))?;
+        // 写真の移動・名前の変更（FILE-02）と重ならないよう、ファイル操作の排他を持ったまま確かめて実行する
+        // （移動の途中のファイルを、カタログの古い場所で「見つからない」として消さない。PR #4 の Codex の指摘）。
+        let _ops = inner.file_ops.lock();
         // 計画の後にカタログが変わっていないか確かめる。
         let current = inner.with_catalog_api(|c| match plan.kind {
             DeleteKind::VirtualCopies => {
@@ -517,6 +520,42 @@ pub(crate) fn recover_file_ops(catalog: &mut Catalog, events: &EventHub) -> Resu
     let ops = catalog.unfinished_file_ops()?;
     let mut n = 0;
     for op in ops {
+        if matches!(op.kind, FileOpKind::Move | FileOpKind::Rename) {
+            // 移動・名前の変更（FILE-02）: 移動先にあるファイルだけをカタログに反映する（fileops の settle）。
+            let settle = crate::fileops::settle(catalog, &op);
+            let pending = match &settle {
+                crate::fileops::Settle::Pending(note) => Some(note.clone()),
+                _ => None,
+            };
+            match crate::fileops::record_settle(catalog, &op, settle)? {
+                Some((state, note)) => {
+                    n += 1;
+                    events.emit_sticky(Event::Warning {
+                        code: WarningCode::FileOperationRecovered,
+                        message: format!(
+                            "終わっていなかったファイル操作 {}（{}）を {} として確定しました: {note}",
+                            op.id,
+                            op.kind,
+                            state.as_str()
+                        ),
+                        variant_id: None,
+                        path: None,
+                    });
+                }
+                None => events.emit_sticky(Event::Warning {
+                    code: WarningCode::FileOperationRecovered,
+                    message: format!(
+                        "終わっていなかったファイル操作 {}（{}）の確定を保留しました: {}",
+                        op.id,
+                        op.kind,
+                        pending.unwrap_or_default()
+                    ),
+                    variant_id: None,
+                    path: None,
+                }),
+            }
+            continue;
+        }
         let (state, note) = decide(&op);
         if !matches!(state, FileOpState::Done | FileOpState::Failed) {
             // 元の場所が見えない（ドライブを外したなど）: 確定せずに残し、次の起動で判断し直す。
@@ -621,34 +660,10 @@ fn decide(op: &FileOpRecord) -> (FileOpState, String) {
                 )
             }
         }
-        FileOpKind::Move | FileOpKind::Rename => {
-            let moved = entries
-                .iter()
-                .filter(|e| !exists(&e.from) && e.to.as_ref().is_some_and(exists))
-                .count();
-            let untouched = entries
-                .iter()
-                .filter(|e| exists(&e.from) && !e.to.as_ref().is_some_and(exists))
-                .count();
-            if moved == entries.len() {
-                (
-                    FileOpState::Done,
-                    "すべてのファイルが移動先にある".to_owned(),
-                )
-            } else if untouched == entries.len() {
-                (
-                    FileOpState::Failed,
-                    "すべてのファイルが元の場所にある".to_owned(),
-                )
-            } else {
-                (
-                    FileOpState::Failed,
-                    format!(
-                        "{} 件のうち {moved} 件だけが移動先にある（手で確かめてください）",
-                        entries.len()
-                    ),
-                )
-            }
-        }
+        // 移動・名前の変更は recover_file_ops が fileops::settle で確定する。
+        FileOpKind::Move | FileOpKind::Rename => (
+            FileOpState::Executing,
+            "移動・名前の変更は別の経路で確定します".to_owned(),
+        ),
     }
 }

@@ -111,6 +111,10 @@ pub enum GpuMode {
     Off,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_backup_generations() -> usize {
     genzo_catalog::DEFAULT_BACKUP_GENERATIONS
 }
@@ -147,6 +151,11 @@ pub struct CoreConfig {
     /// 自動バックアップの置き場。`None` なら `data_dir/backups`。
     #[serde(default)]
     pub backup_dir: Option<PathBuf>,
+    /// 現像プリセット・書き出しプリセット（DEV-29・EXP-02）のフォルダ。カタログをまたいで使うので、カタログの
+    /// データのフォルダとは別（`None` なら [`crate::default_presets_dir`]: 環境変数 `GENZO_PRESETS_DIR`、なければ
+    /// OS のアプリのデータのフォルダの `presets`。アプリと CLI で同じ場所）。
+    #[serde(default)]
+    pub presets_dir: Option<PathBuf>,
     /// 自動バックアップの世代数（DATA-04。既定 5。0 なら自動バックアップをしない）。
     #[serde(default = "default_backup_generations")]
     pub backup_generations: usize,
@@ -162,6 +171,21 @@ pub struct CoreConfig {
     /// 表示に L1 が要るとき（[`crate::Core::request_preview`]）に作る。
     #[serde(default)]
     pub render_previews_after_import: bool,
+    /// ファイルの内容のハッシュ（全体の BLAKE3。ORG-03）を、バックグラウンドで自動的に計算してよいか
+    /// （開いたとき・取り込みの後。カタログの設定 [`crate::CoreSettings::hash_in_background`] が有効なとき
+    /// だけ動く）。
+    ///
+    /// 既定は `false`: 短い間だけ開く CLI・テストでは、すべてのファイルを読む計算を始めない（CLI は
+    /// `genzo hash compute` で明示的に計算する）。デスクトップアプリは `true` にする。明示的な計算
+    /// （[`crate::Core::compute_content_hashes`]）と、取り込みの重複の確認での計算は、これによらず行う。
+    #[serde(default)]
+    pub background_hashing: bool,
+    /// 見つからない写真のバックグラウンドの確認（FILE-04。カタログを開いたときと、ボリュームがつながったときに、
+    /// すべてのファイルの存在を確かめて印を付ける。`relink` の doc）を自動で動かすか。既定は `false`（CLI・
+    /// テストは短い間だけ開くので、`genzo missing check` で明示的に確かめる）。デスクトップアプリは `true` にする。
+    /// 明示的な確認（[`crate::Core::check_missing`]）は、これによらず動く。
+    #[serde(default)]
+    pub background_file_check: bool,
     /// バッチ用のワーカーの数（1〜2）。`None` なら genzo-worker の既定値。
     #[serde(default)]
     pub batch_workers: Option<usize>,
@@ -180,9 +204,16 @@ pub struct CoreConfig {
     /// ワーカーの起動と握手のタイムアウト（`None` なら genzo-worker の既定値。テスト用）。
     #[serde(skip)]
     pub worker_startup_timeout: Option<Duration>,
-    /// ワーカーに追加で渡す環境変数（`GENZO_FFMPEG` など）。
+    /// ワーカーに追加で渡す環境変数（`GENZO_FFMPEG` など）。コアが動画の再生用のファイルを作るとき（VID-04。
+    /// `playback` の doc）も、ここの `GENZO_FFMPEG`・`GENZO_FFPROBE` を使う。
     #[serde(skip)]
     pub worker_env: Vec<(OsString, OsString)>,
+    /// 動画の再生用のファイルを作る ffmpeg・ffprobe が [`CoreConfig::worker_env`] になければ、このプロセスの
+    /// 環境変数（`GENZO_FFMPEG`・`GENZO_FFPROBE`）・PATH の `ffmpeg`・`ffprobe` を使うか（既定は `true`。CLI・テスト）。
+    /// デスクトップアプリは `false` にする（アプリが探した場所（決定事項ログ No.67。設定でフォルダを指定したら、
+    /// そこだけ）のものだけを使い、見つからなければ作れない理由を返す）。
+    #[serde(default = "default_true")]
+    pub ffmpeg_path_fallback: bool,
     /// 現像設定の自動保存の待ち時間（`None` なら [`DEVELOP_SAVE_DELAY`]。テスト用: 長くすると、
     /// 時間によらずに「まとめて 1 件」を確かめられる）。
     #[serde(skip)]
@@ -205,9 +236,12 @@ impl CoreConfig {
             gpu: GpuMode::Auto,
             gpu_allow_software: false,
             backup_dir: None,
+            presets_dir: None,
             backup_generations: default_backup_generations(),
             backup_on_close: false,
             render_previews_after_import: false,
+            background_hashing: false,
+            background_file_check: false,
             batch_workers: None,
             background_threads: None,
             worker_test_hooks: false,
@@ -215,6 +249,7 @@ impl CoreConfig {
             worker_timeouts: None,
             worker_startup_timeout: None,
             worker_env: Vec::new(),
+            ffmpeg_path_fallback: true,
             develop_save_delay: None,
             develop_save_max_delay: None,
         }
@@ -265,6 +300,10 @@ mod tests {
         assert!(
             !CoreConfig::new("/a.db", "/d").render_previews_after_import,
             "決定 No.24"
+        );
+        assert!(
+            !min.background_hashing && !CoreConfig::new("/a.db", "/d").background_hashing,
+            "内容のハッシュのバックグラウンドの計算は、アプリが有効にしたときだけ"
         );
         assert_eq!(min.backup_dir(), PathBuf::from("/d").join("backups"));
         let w: WorkerLaunch = serde_json::from_str(

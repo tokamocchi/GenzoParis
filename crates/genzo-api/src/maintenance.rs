@@ -83,7 +83,8 @@ impl Core {
 
     /// キャッシュを回収するジョブを投入する（4.1 節「回収」。アイドル時に呼ぶ）: カタログに存在しない
     /// variant のサムネイル（L0）を削除し、L1 の索引とフォルダの内容を突き合わせ、上限容量を超えた分を
-    /// 古いものから削除する。ジョブの ID を返す。
+    /// 古いものから削除する。動画の再生用のファイル（VID-04）も、今の内容のものでないものと上限を超えた分を
+    /// 削除する（`playback` の doc）。ジョブの ID を返す。
     pub fn collect_cache_garbage(&self) -> Result<u64, ApiError> {
         self.inner.check_open()?;
         Ok(spawn_job(
@@ -117,15 +118,26 @@ impl Core {
                         path: root.clone(),
                         source: Box::new(source),
                     })?;
-                inner.with_cache(|cache| {
+                let (previews_removed, temp_files_removed) = inner.with_cache(|cache| {
                     let reconcile = cache.previews.apply_scan(scan)?;
                     let capacity = cache.previews.capacity_bytes();
                     let evicted = cache.previews.evict_to(capacity, None)?;
-                    Ok(JobResult::CollectGarbage {
-                        thumbnails_removed,
-                        previews_removed: (reconcile.dropped + evicted.removed) as u64,
-                        temp_files_removed: reconcile.temp_files_removed as u64,
-                    })
+                    Ok((
+                        (reconcile.dropped + evicted.removed) as u64,
+                        reconcile.temp_files_removed as u64,
+                    ))
+                })?;
+                if ctx.is_cancelled() {
+                    return Err(ApiError::Cancelled);
+                }
+                // 3. 動画の再生用のファイル（VID-04）: 今のキーでないもの・上限を超えた分・古い一時ファイル。
+                let (video_proxies_removed, proxy_temp_removed) =
+                    crate::playback::collect_garbage(inner)?;
+                Ok(JobResult::CollectGarbage {
+                    thumbnails_removed,
+                    previews_removed,
+                    temp_files_removed: temp_files_removed + proxy_temp_removed,
+                    video_proxies_removed,
                 })
             },
         ))

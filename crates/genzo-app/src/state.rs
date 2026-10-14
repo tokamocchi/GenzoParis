@@ -43,6 +43,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog_file::{self, Assessment};
+use crate::logs::AppLogs;
 use crate::settings::{self, AppSettings};
 use crate::tools::{self, ExternalTools};
 
@@ -85,6 +86,8 @@ pub struct Session {
     pub data_dir: PathBuf,
     /// 見つけた ffmpeg・ffprobe。
     pub tools: ExternalTools,
+    /// `genzo://` で配信する動画のファイル（少しの間だけ覚える。[`crate::protocol::MediaCache`]）。
+    pub media: crate::protocol::MediaCache,
     /// イベントを送るスレッド（閉じたら止める）。
     events: Forwarder,
 }
@@ -169,6 +172,8 @@ pub struct AppState {
     events: EventSink,
     /// ワーカーの起動方法（テストで差し替える。`None` なら既定の別の実行ファイル）。
     worker: Option<WorkerLaunch>,
+    /// ログとクラッシュレポート（SYS-07）。
+    logs: AppLogs,
 }
 
 /// エラーの情報を作る。
@@ -218,7 +223,19 @@ impl AppState {
             display: Mutex::new(DisplayTarget::default()),
             events,
             worker: None,
+            logs: AppLogs::new(genzo_api::logging::status().unwrap_or_default()),
         }
+    }
+
+    /// ログの状態を指定する（テスト用。既定は genzo-api の `logging::status`）。
+    pub fn with_logs(mut self, logs: AppLogs) -> Self {
+        self.logs = logs;
+        self
+    }
+
+    /// ログとクラッシュレポート。
+    pub fn logs(&self) -> &AppLogs {
+        &self.logs
     }
 
     /// ワーカーの起動方法を指定する（テスト用）。
@@ -400,6 +417,14 @@ impl AppState {
         config.gpu = settings.gpu;
         config.backup_on_close = settings.backup_on_close;
         config.worker_env = tools.worker_env();
+        // 動画の再生用のファイル（VID-04）は、アプリが探した ffmpeg・ffprobe だけで作る（PATH に頼らない。
+        // 決定事項ログ No.67。見つからなければ、作れない理由を画面に出す）。
+        config.ffmpeg_path_fallback = false;
+        // ファイルの内容のハッシュ（ORG-03）を、開いている間にバックグラウンドで計算する（カタログの設定で
+        // 止められる。CLI は計算しない）。
+        config.background_hashing = true;
+        // 見つからない写真の確認（FILE-04）も、カタログを開いたときとドライブがつながったときに動かす。
+        config.background_file_check = true;
         let core = Arc::new(Core::open(config).map_err(api)?);
         // 色空間を指定してからセッションを公開するまで、色空間のロックを持つ（set_display_target の doc）。
         let display = self.display.lock();
@@ -415,10 +440,12 @@ impl AppState {
             catalog_path: path.clone(),
             data_dir,
             tools,
+            media: crate::protocol::MediaCache::default(),
             events,
         });
         *self.session.write() = Some(Arc::clone(&session));
         drop(display);
+        tracing::info!(catalog = %path.display(), create, "カタログを開きました");
         if let Err(e) = self.update_settings(|s| s.remember_catalog(&path)) {
             tracing::warn!(?e, "最近開いたカタログを記録できない");
         }
@@ -469,6 +496,7 @@ impl AppState {
         match session.core.close() {
             Ok(()) => {
                 session.events.stop();
+                tracing::info!(catalog = %session.catalog_path.display(), "カタログを閉じました");
                 Ok(())
             }
             Err(e) if !session.core.is_closed() => {

@@ -11,27 +11,42 @@ import type {
   AssetKind,
   CatalogStatus,
   CloseFailure,
+  CollectionId,
+  CollectionKind,
   ColorLabel,
   CoreEvent,
   CoreSettings,
+  CrashReportSummary,
   DeleteKind,
   DevelopSettings,
   ErrorInfo,
   Flag,
+  FolderId,
+  HistoryEntryId,
+  ImportOptions,
   JobInfo,
   JobKind,
   JobState,
+  KeywordId,
+  PresetKind,
   Rating,
   SearchFilter,
   SearchSort,
+  SnapshotId,
   VariantId,
   VariantSummary,
 } from "../api/types";
+import { describeImportReport } from "../dialogs/importLogic";
+import { notifyResult } from "../dialogs/resultLog";
+import { describeCheckJob } from "../library/fileOpsLogic";
 import { type CatalogChangeSet, searchCache, thumbRevs } from "./search";
 import { createStore, useStore } from "./store";
 
-/** 表示モード（G: グリッド、E: ルーペ、D: 現像）。 */
-export type Mode = "grid" | "loupe" | "develop";
+/**
+ * 表示モード（G: グリッド、E: ルーペ、C: 比較表示、N: 選別表示、D: 現像）。比較表示・選別表示（LIB-03）は
+ * state/compare.ts の openCompare・openSurvey で始める。
+ */
+export type Mode = "grid" | "loupe" | "compare" | "survey" | "develop";
 
 /** ダイアログ（同時に 1 つ）。 */
 export type DialogState =
@@ -39,9 +54,68 @@ export type DialogState =
   | { kind: "export"; variantIds: VariantId[] }
   | { kind: "delete"; deleteKind: DeleteKind; variantIds: VariantId[] }
   | { kind: "paste_settings"; targets: VariantId[] }
-  | { kind: "settings"; tab?: "general" | "catalog" | "backup" }
+  // 処理バージョンをまとめて最新に更新する（DATA-09。写真の右クリックのメニュー）。
+  | { kind: "upgrade_process"; targets: VariantId[] }
+  | { kind: "settings"; tab?: "general" | "view" | "catalog" | "backup" }
   | { kind: "shortcuts" }
-  | { kind: "close_failed"; failure: CloseFailure; quitting: boolean };
+  | { kind: "close_failed"; failure: CloseFailure; quitting: boolean }
+  | { kind: "crash_reports"; reports: CrashReportSummary[] }
+  // キーワード（LIB-09）: 作る（parentId の下）・名前の変更・移動・削除の確認。
+  | { kind: "keyword"; mode: "create" | "rename" | "move"; keywordId?: KeywordId; parentId?: KeywordId | null }
+  | { kind: "keyword_delete"; keywordId: KeywordId }
+  // コレクション（LIB-10・LIB-11）: 作る（種類・親のセット・入れる写真）・名前の変更・移動・削除の確認・
+  // スマートコレクションの条件の編集（collectionId がなければ新しく作る）・写真を入れる先を選ぶ。
+  | {
+      kind: "collection";
+      mode: "create" | "rename" | "move";
+      collectionKind?: CollectionKind;
+      collectionId?: CollectionId;
+      parentId?: CollectionId | null;
+      variantIds?: VariantId[];
+    }
+  | { kind: "collection_delete"; collectionId: CollectionId }
+  | { kind: "smart_collection"; collectionId?: CollectionId; parentId?: CollectionId | null }
+  | { kind: "add_to_collection"; variantIds: VariantId[] }
+  // 仮想コピー（LIB-13）の名前の変更。スタック（LIB-12）: 撮影時刻の間隔による自動スタック。
+  | { kind: "virtual_copy_name"; variantId: VariantId }
+  | { kind: "auto_stack" }
+  // 撮影日時の一括修正（LIB-16）: 対象の写真と、基準の写真（表示中の写真）。
+  | { kind: "capture_time"; variantIds: VariantId[]; current: VariantId | null }
+  // アプリの中でのファイル操作（FILE-02）: 写真の移動（落とした先のフォルダ。null ならダイアログで選ぶ）・
+  // 名前の変更・フォルダの作成（folderId の中へ）と名前の変更・フォルダの移動。見つからない写真（FILE-04）:
+  // 候補を探して結び付け直す（null ならすべての見つからない写真）・フォルダの場所の指定し直し・写真の登録されて
+  // いないフォルダをカタログから除く。
+  | { kind: "move_files"; variantIds: VariantId[]; destFolder: FolderId | null }
+  | { kind: "rename_files"; variantIds: VariantId[] }
+  | { kind: "folder_name"; mode: "create" | "rename"; folderId: FolderId; currentName?: string }
+  | { kind: "move_folder"; folderId: FolderId }
+  | { kind: "relink"; variantIds: VariantId[] | null }
+  | { kind: "relocate_folder"; folderId: FolderId }
+  | { kind: "remove_folder"; folderId: FolderId }
+  // カメラプロファイル・ルック（DEV-17）の一覧: 取り込み・詳細（説明・注意・著作権の表示）・除く。
+  | { kind: "profiles" }
+  // スナップショット（DEV-28）: 作る（今の状態か、履歴の項目 entryId の状態）・名前の変更。
+  | {
+      kind: "snapshot_name";
+      mode: "create" | "rename";
+      variantId: VariantId;
+      snapshotId?: SnapshotId;
+      entryId?: HistoryEntryId;
+      currentName?: string;
+    }
+  // 現像プリセット（DEV-29）: 今の写真の設定から作る・今の設定で更新（含める項目を選ぶ）、選んだ写真に適用する。
+  | { kind: "develop_preset"; mode: "create" | "update"; variantId: VariantId; presetId?: string }
+  | { kind: "apply_preset"; targets: VariantId[]; presetId?: string }
+  // プリセット（DEV-29・EXP-02）の名前の変更・フォルダへの移動・フォルダの名前の変更・削除の確認。
+  | {
+      kind: "preset_name";
+      mode: "rename" | "move" | "rename_folder";
+      presetKind: PresetKind;
+      presetId?: string;
+      folder?: string;
+      currentName: string;
+    }
+  | { kind: "preset_delete"; presetKind: PresetKind; presetId: string; name: string };
 
 export interface Toast {
   id: number;
@@ -86,8 +160,8 @@ export interface AppState {
   mode: Mode;
   filter: SearchFilter;
   sort: SearchSort;
-  /** 今の検索結果（世代と件数）。 */
-  search: { generation: number; count: number } | null;
+  /** 今の検索結果（世代と件数。hidden は折りたたんだスタックの中に隠した写真の数。LIB-12）。 */
+  search: { generation: number; count: number; hidden: number } | null;
   searching: boolean;
   selection: Selection;
   /** 評価・フラグ・カラーラベルを付けたら次の写真へ進む（LIB-05）。 */
@@ -109,9 +183,38 @@ export interface AppState {
   foldersVersion: number;
   /** variant の詳細を読み直す合図（評価・キャプション・現像設定の変更）。 */
   detailsVersion: number;
+  /** キーワード・コレクションの一覧と、写真のキーワードを読み直す合図（LIB-09〜11。それらの変更・削除の後に増える）。 */
+  organizeVersion: number;
+  /** 撮影日時の変化の通し番号（catalog_changed の capture_time で増える。タイムラインの読み直し。ORG-01・LIB-16）。 */
+  captureTimeVersion: number;
+  /**
+   * ターゲットコレクション（B キーで選んだ写真を入れる・外す手動のコレクション。LIB-10）。カタログごとに
+   * ブラウザに保存する（state/organize.ts）。
+   */
+  targetCollection: CollectionId | null;
 }
 
 export const DEFAULT_SORT: SearchSort = { key: "capture_time", direction: "ascending" };
+
+/** ターゲットコレクションを保存する鍵（カタログごと。コレクションの ID はカタログの中だけで意味を持つ）。 */
+export function targetCollectionKey(catalogPath: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < catalogPath.length; i++) {
+    h ^= catalogPath.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `genzo.library.targetCollection.${(h >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function loadTargetCollection(catalogPath: string): CollectionId | null {
+  try {
+    const v = localStorage.getItem(targetCollectionKey(catalogPath));
+    const n = v === null ? NaN : Number(v);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
 
 const AUTO_ADVANCE_KEY = "genzo.autoAdvance";
 
@@ -154,6 +257,9 @@ export const appStore = createStore<AppState>({
   clipboard: null,
   foldersVersion: 0,
   detailsVersion: 0,
+  organizeVersion: 0,
+  captureTimeVersion: 0,
+  targetCollection: null,
 });
 
 // サムネイルの新しい rev は、まとめて（1 フレームに 1 回）知らせる。ルーペの `s.thumbRevs[id]` の購読も
@@ -206,9 +312,19 @@ export const JOB_LABEL: Record<JobKind, string> = {
   integrity_check: "カタログの詳細チェック",
   reresolve_capture_times: "撮影日時の推定し直し",
   collect_garbage: "キャッシュの整理",
+  hash_files: "内容のハッシュの計算",
+  move_files: "写真の移動",
+  check_missing: "見つからない写真の確認",
+  find_relink_candidates: "再リンクの候補の探索",
+  video_proxy: "再生用のファイルの作成",
 };
 
 const jobWaiters = new Map<number, ((info: JobInfo) => void)[]>();
+/**
+ * 画面が待ったジョブ（actions.waitJob。結果は待っている側が知らせる）。終わった後も覚えておく（待っている側の
+ * 問い合わせが先に終わっても、job_finished のイベントで重ねて知らせないため）。カタログを開く・閉じると忘れる。
+ */
+const attendedJobs = new Set<number>();
 
 /** ジョブを登録する（進捗の表示に使う）。 */
 function trackJob(jobId: number, kind: JobKind, label?: string): void {
@@ -230,6 +346,7 @@ function trackJob(jobId: number, kind: JobKind, label?: string): void {
 
 /** ジョブが終わるのを待って、結果を返す。 */
 function waitJob(jobId: number): Promise<JobInfo> {
+  attendedJobs.add(jobId);
   return new Promise((resolve, reject) => {
     const list = jobWaiters.get(jobId) ?? [];
     list.push(resolve);
@@ -339,7 +456,7 @@ function importRunning(): boolean {
 }
 
 /** 使うのを待たせている新しい世代（取り込み中の search_updated。searchThrottle が使う）。 */
-let pendingSearch: { generation: number; count: number } | null = null;
+let pendingSearch: { generation: number; count: number; hidden?: number } | null = null;
 
 const searchThrottle = new Throttle(IMPORT_REFRESH_MS, () => {
   const p = pendingSearch;
@@ -348,17 +465,17 @@ const searchThrottle = new Throttle(IMPORT_REFRESH_MS, () => {
 });
 
 /** 新しい世代の検索結果にする（今より新しい世代のときだけ。したら true）。 */
-function applySearch(r: { generation: number; count: number }): boolean {
+function applySearch(r: { generation: number; count: number; hidden?: number }): boolean {
   if (r.generation <= searchCache.generation) return false;
   searchCache.reset(r.generation, r.count);
-  appStore.set({ search: { generation: r.generation, count: r.count } });
+  appStore.set({ search: { generation: r.generation, count: r.count, hidden: r.hidden ?? 0 } });
   return true;
 }
 
 /** 新しい世代の知らせ（search_updated）。取り込み中は IMPORT_REFRESH_MS に 1 回にまとめる。 */
-function searchUpdated(generation: number, count: number): void {
+function searchUpdated(generation: number, count: number, hidden = 0): void {
   if (generation <= searchCache.generation || (pendingSearch && generation <= pendingSearch.generation)) return;
-  pendingSearch = { generation, count };
+  pendingSearch = { generation, count, hidden };
   if (importRunning()) searchThrottle.request();
   else searchThrottle.fire();
 }
@@ -394,7 +511,14 @@ async function runSearch(): Promise<void> {
   }
 }
 
-/** 選択中の写真の位置を、今の世代で求め直す（見つからなければ選択を外す）。 */
+/**
+ * 選択中の写真の位置を、今の世代で求め直す（見つからなければ選択を外す）。
+ *
+ * 選択は表示している写真だけにする（LIB-12。docs/04 の 3.10 節・決定事項 No.86）: 複数選択のうち、今の結果に
+ * 出ていない写真（折りたたんだスタックに隠れた写真・絞り込みで外れた写真）を選択から外す（評価・ラベル・
+ * キーワード・削除などが、画面に見えない写真に付かないように）。表示中の写真が折りたたんだスタックに隠れたら、
+ * そのスタックの代表（結果に出ている 1 枚。ふつうは一番上）を選ぶ。
+ */
 async function relocateSelection(): Promise<void> {
   const sel = appStore.get().selection;
   if (sel.current === null) {
@@ -402,13 +526,42 @@ async function relocateSelection(): Promise<void> {
     if (searchCache.count > 0 && appStore.get().mode !== "grid") await selectIndex(0);
     return;
   }
+  const current = sel.current;
+  // 問い合わせている間に選び直されていたら、その選択のままにする（前の写真の位置を、別の写真の位置として
+  // 書かない。外れたときの選び直し・選択の解除もしない）。
+  const changed = () => {
+    const now = appStore.get().selection;
+    return now.current !== current || now.ids !== sel.ids;
+  };
   try {
-    const r = await core.indexOf(sel.current);
-    if (r.generation !== searchCache.generation) return;
-    // 問い合わせている間に選び直されていたら、その選択のままにする（前の写真の位置を、別の写真の位置として
-    // 書かない。外れたときの選び直し・選択の解除もしない）。
-    if (appStore.get().selection.current !== sel.current) return;
+    const r = await core.indexOf(current);
+    if (r.generation !== searchCache.generation || changed()) return;
+    const generation = r.generation;
+    // 複数選択なら、結果に出ている写真だけを残す（表示中の写真が出ていれば、それも含まれる）。
+    let ids = sel.ids;
+    if (ids.some((id) => id !== current)) {
+      const shown = await core.shownVariants(ids);
+      if (shown.generation !== generation || searchCache.generation !== generation || changed()) return;
+      ids = shown.variant_ids;
+    }
     if (r.index === null) {
+      // 折りたたんだスタックに隠れた: その代表を選ぶ（ほかの選択は、結果に出ているものを残す）。
+      const rep = await stackRepresentative(current, generation);
+      if (searchCache.generation !== generation || changed()) return;
+      if (rep !== null) {
+        const loaded = searchCache.getLoadedById(rep.id);
+        if (loaded) rememberSelected([loaded]);
+        appStore.set({
+          selection: {
+            ids: ids.includes(rep.id) ? ids : [...ids, rep.id],
+            current: rep.id,
+            currentIndex: rep.index,
+            anchorIndex: rep.index,
+            anchorId: rep.id,
+          },
+        });
+        return;
+      }
       // 絞り込みで外れた。ルーペ・現像では近い位置の写真に移る。
       const fallback =
         sel.currentIndex !== null ? Math.min(sel.currentIndex, searchCache.count - 1) : -1;
@@ -420,21 +573,78 @@ async function relocateSelection(): Promise<void> {
       return;
     }
     const index = r.index;
+    const narrowed = ids;
     appStore.set((s) =>
-      s.selection.current !== sel.current
+      s.selection.current !== current
         ? {}
         : {
             selection: {
               ...s.selection,
+              ids: narrowed,
               currentIndex: index,
               // 範囲の起点が表示中の写真なら、その位置も合わせる。
-              anchorIndex: s.selection.anchorId === sel.current ? index : s.selection.anchorIndex,
+              anchorIndex: s.selection.anchorId === current ? index : s.selection.anchorIndex,
             },
           },
     );
   } catch (e) {
     if (!isStale(e)) reportError(e);
   }
+}
+
+/**
+ * 結果に出ていない写真 `id` が、折りたたんだスタックに入っていれば、そのスタックの代表（結果に出ている 1 枚）と
+ * その位置（なければ null）。隠した写真がない結果（スタックがない・すべて展開する条件）では問い合わせない。
+ */
+async function stackRepresentative(id: VariantId, generation: number): Promise<{ id: VariantId; index: number } | null> {
+  if ((appStore.get().search?.hidden ?? 0) === 0) return null;
+  const stack = (await core.variantStacks([id]))[0];
+  if (!stack || !stack.collapsed) return null;
+  const shown = await core.shownVariants(stack.members);
+  const rep = shown.variant_ids[0];
+  if (shown.generation !== generation || rep === undefined) return null;
+  const at = await core.indexOf(rep);
+  return at.generation === generation && at.index !== null ? { id: rep, index: at.index } : null;
+}
+
+/**
+ * 写真を id で選ぶ（選択をその 1 枚にし、今の世代の位置を求める）。スタック・仮想コピーの操作の後に、
+ * 一番上の写真・作った仮想コピーを選ぶのに使う（呼ぶ前に runSearch で、その操作を反映した世代にしておくこと。
+ * 結果にない写真は、グリッドでは選択を外す）。
+ */
+async function selectById(id: VariantId): Promise<void> {
+  selectSeq++;
+  const known = searchCache.getLoadedById(id);
+  if (known) rememberSelected([known]);
+  appStore.set({ selection: { ids: [id], current: id, currentIndex: null, anchorIndex: null, anchorId: id } });
+  await relocateSelection();
+}
+
+/**
+ * 選択を `ids` にし、表示中の写真を `current` にする（比較表示・選別表示が、作業中の写真・並べる写真を決める。
+ * LIB-03）。`current` は選択に含める。位置は今の世代で求め直す（結果に出ていない写真は選択から外れる。
+ * relocateSelection）。
+ */
+async function selectIds(ids: readonly VariantId[], current: VariantId): Promise<void> {
+  selectSeq++;
+  const list = ids.includes(current) ? [...ids] : [current, ...ids];
+  const items: VariantSummary[] = [];
+  for (const id of list) {
+    const v = searchCache.getLoadedById(id);
+    if (v) items.push(v);
+  }
+  rememberSelected(items);
+  const at = searchCache.findLoaded(current);
+  appStore.set({
+    selection: {
+      ids: list,
+      current,
+      currentIndex: at >= 0 ? at : null,
+      anchorIndex: at >= 0 ? at : null,
+      anchorId: current,
+    },
+  });
+  await relocateSelection();
 }
 
 /**
@@ -653,6 +863,19 @@ async function kindOf(id: VariantId): Promise<AssetKind> {
 }
 
 /**
+ * `ids` のうち、動画と分かっているものの数（読み込み済みの検索結果・選んだときの項目から。コアには問い合わせない。
+ * 書き出しのダイアログの注意書き（EXP-05）に使う）。
+ */
+function knownVideoCount(ids: readonly VariantId[]): number {
+  let n = 0;
+  for (const id of new Set(ids)) {
+    const kind = searchCache.getLoadedById(id)?.kind ?? selectedSummaries.get(id)?.kind;
+    if (kind === "video") n += 1;
+  }
+  return n;
+}
+
+/**
  * 写真の現像設定をコピーする（Ctrl / ⌘ + Shift + C。DEV-30）。動画には現像設定がない（コアは既定の設定を返し、
  * 貼り付けると貼り付け先を既定に戻してしまう）ので、種類を確かめてからコピーする。`latest` は現像中の写真なら
  * 画面の最新の値（送信前を含む）。コピーしたら true。
@@ -731,7 +954,8 @@ function enqueueMark(run: () => Promise<void>): Promise<void> {
 
 async function afterMark(): Promise<void> {
   const s = appStore.get();
-  if (s.autoAdvance && s.mode !== "grid") await moveSelection(1);
+  // 比較表示・選別表示では次へ進まない（表示中の写真は作業中の面・枠の写真なので。決定事項ログ No.115・116）。
+  if (s.autoAdvance && (s.mode === "loupe" || s.mode === "develop")) await moveSelection(1);
   else if (s.autoAdvance && s.mode === "grid" && s.selection.ids.length <= 1) await moveSelection(1);
 }
 
@@ -819,10 +1043,23 @@ const importVersionsThrottle = new Throttle(IMPORT_REFRESH_MS, () =>
   appStore.set((s) => ({ detailsVersion: s.detailsVersion + 1, foldersVersion: s.foldersVersion + 1 })),
 );
 
+/** フォルダの一覧を読み直す変更。 */
+const FOLDER_CHANGES = new Set<string>(["imported", "removed", "files", "folders", "file_status"]);
+
+/**
+ * 画面が待っていないジョブ（コアが自動で始めたもの）の結果。見つからない写真の確認（FILE-04）は、変わりが
+ * あったときだけ知らせる。
+ */
+function unattendedJobFinished(info: JobInfo): void {
+  if (info.kind !== "check_missing") return;
+  const notice = describeCheckJob(info, false);
+  if (notice) notifyResult(notice);
+}
+
 function handleEvent(e: CoreEvent): void {
   switch (e.type) {
     case "search_updated":
-      searchUpdated(e.generation, e.count);
+      searchUpdated(e.generation, e.count, e.hidden ?? 0);
       break;
     case "catalog_changed":
       // 評価・キャプション・現像設定など、同じ世代のまま内容が変わるもの。続けて来る変更（履歴の移動・
@@ -835,8 +1072,16 @@ function handleEvent(e: CoreEvent): void {
       }
       appStore.set((s) => ({
         detailsVersion: s.detailsVersion + 1,
-        foldersVersion:
-          e.change === "imported" || e.change === "removed" ? s.foldersVersion + 1 : s.foldersVersion,
+        // フォルダの一覧（見つからない写真の数・つながっていないドライブの印を含む）は、取り込み・削除と、
+        // ファイルの場所・状態・フォルダの変更（FILE-02〜04）で読み直す。
+        foldersVersion: FOLDER_CHANGES.has(e.change) ? s.foldersVersion + 1 : s.foldersVersion,
+        // キーワード・コレクションの一覧（件数を含む）は、それらの変更と、写真の削除・評価などの変更
+        // （スマートコレクションの件数）で読み直す。
+        organizeVersion:
+          e.change === "keywords" || e.change === "collections" || e.change === "removed" || e.change === "marks"
+            ? s.organizeVersion + 1
+            : s.organizeVersion,
+        captureTimeVersion: e.change === "capture_time" ? s.captureTimeVersion + 1 : s.captureTimeVersion,
       }));
       break;
     case "thumbnail_updated":
@@ -864,9 +1109,11 @@ function handleEvent(e: CoreEvent): void {
         return { jobs: { ...s.jobs, [e.job_id]: { ...cur, state: e.state, message: e.message } } };
       });
       if (e.kind === "import") {
-        // 取り込みが終わった: 間引いて待たせている読み直しを、すぐする。
+        // 取り込みが終わった: 間引いて待たせている読み直しを、すぐする。キーワード・コレクションの一覧（取り込み時に
+        // 付けたキーワード・スマートコレクションの件数。IMP-05）も読み直す（取り込みの途中では読み直さない）。
         searchThrottle.flush();
         importVersionsThrottle.flush();
+        appStore.set((s) => ({ organizeVersion: s.organizeVersion + 1 }));
       }
       if (e.state === "failed") notify("error", `${JOB_LABEL[e.kind]}に失敗しました`, e.message ?? undefined);
       // 結果の問い合わせの間にカタログを切り替えたら、結果を捨てる（ジョブの番号はカタログごとに 1 から数え直す
@@ -875,7 +1122,10 @@ function handleEvent(e: CoreEvent): void {
       void core
         .job(e.job_id)
         .then((info) => {
-          if (session === catalogSession) finishJob(info);
+          if (session !== catalogSession) return;
+          finishJob(info);
+          // 画面が待ったジョブ（actions.waitJob）は、待っている側が結果を知らせる。
+          if (!attendedJobs.has(info.job_id)) unattendedJobFinished(info);
         })
         .catch((err) => {
           if (session !== catalogSession) return;
@@ -923,6 +1173,7 @@ let catalogSession = 0;
 
 /** 前のカタログの、待たせている読み直しとサムネイルの rev を捨てる（カタログを開いた・閉じたとき）。 */
 function forgetCatalogState(): void {
+  attendedJobs.clear();
   pendingSearch = null;
   searchThrottle.cancel();
   importVersionsThrottle.cancel();
@@ -953,7 +1204,11 @@ async function catalogOpened(status: CatalogStatus): Promise<void> {
   });
   modeSeq++;
   writtenColorLabels.clear();
-  appStore.set((s) => ({ foldersVersion: s.foldersVersion + 1 }));
+  appStore.set((s) => ({
+    foldersVersion: s.foldersVersion + 1,
+    organizeVersion: s.organizeVersion + 1,
+    targetCollection: loadTargetCollection(status.catalog_path),
+  }));
   for (const w of status.warnings) handleEvent(w);
   await runSearch();
 }
@@ -980,6 +1235,7 @@ function catalogClosed(): void {
     dialog: null,
     clipboard: null,
     jobs: {},
+    targetCollection: null,
   });
   modeSeq++;
   writtenColorLabels.clear();
@@ -1037,10 +1293,10 @@ async function openCatalog(path: string, create: boolean): Promise<boolean> {
  * 待っている間にカタログを閉じた（切り替え・復元を含む）ときは、閉じたカタログの結果なので、知らせも検索の
  * し直しもせずに返す（catalogClosed が待ちを取り消しとして返す）。
  */
-async function importFolder(path: string, recursive: boolean): Promise<JobInfo | null> {
+async function importFolder(path: string, recursive: boolean, options?: ImportOptions): Promise<JobInfo | null> {
   const session = catalogSession;
   try {
-    const jobId = await core.importFolder(path, recursive);
+    const jobId = await core.importFolder(path, recursive, options);
     if (session !== catalogSession) return null;
     const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
     trackJob(jobId, "import", `取り込み: ${name}`);
@@ -1048,11 +1304,8 @@ async function importFolder(path: string, recursive: boolean): Promise<JobInfo |
     if (session !== catalogSession) return info;
     const r = info.result;
     if (r && r.type === "import") {
-      const problems = r.errors.length + r.not_registered.length;
-      const text = `取り込み: ${r.added.toLocaleString()} 件を追加、${r.updated.toLocaleString()} 件を更新${
-        r.unchanged ? `、${r.unchanged.toLocaleString()} 件は変更なし` : ""
-      }`;
-      notify(problems > 0 ? "warning" : "success", text, problems > 0 ? `${problems} 件のファイルを登録できませんでした` : undefined);
+      // 詳細（コピーしたファイルの一覧など）は結果の記録にも残し、上の帯の「結果」から見られるようにする。
+      notifyResult(describeImportReport(r));
     } else if (info.state === "succeeded" && info.error) {
       // 終わったが結果を読めなかった（失敗は job_finished のイベントで知らせるので、ここでは知らせない）。
       notify("warning", "取り込みは終わりましたが、結果を読めません", info.error.message);
@@ -1067,6 +1320,14 @@ async function importFolder(path: string, recursive: boolean): Promise<JobInfo |
   }
 }
 
+/** コピー取り込みの結果の次の連番を、次のフォルダの取り込みの開始番号にする（名前を変えないときはそのまま）。 */
+export function continueSequence(options: ImportOptions | undefined, info: JobInfo | null): ImportOptions | undefined {
+  const rename = options?.copy?.rename;
+  const r = info?.result;
+  if (!options?.copy || !rename || !r || r.type !== "import" || !r.copy) return options;
+  return { ...options, copy: { ...options.copy, rename: { ...rename, sequence_start: r.copy.next_sequence } } };
+}
+
 /**
  * フォルダを順に取り込む（1 つずつ。結果は importFolder が知らせる）。
  *
@@ -1075,17 +1336,20 @@ async function importFolder(path: string, recursive: boolean): Promise<JobInfo |
  * ときも残りをやめる（利用者の取り消しのほか、カタログを閉じるときにコアが取り消して、閉じ終わる前に
  * 知らせてくることがあるため）。
  */
-async function importFolders(folders: readonly string[], recursive: boolean): Promise<void> {
+async function importFolders(folders: readonly string[], recursive: boolean, options?: ImportOptions): Promise<void> {
   const session = catalogSession;
   const stop = (reason: string, rest: number) => {
     if (rest > 0) notify("info", `${reason}ため、残りの ${rest.toLocaleString()} 個のフォルダは取り込みませんでした`);
   };
+  let current = options;
   for (let i = 0; i < folders.length; i++) {
     if (session !== catalogSession || appStore.get().catalog === null) {
       stop("カタログを閉じた", folders.length - i);
       return;
     }
-    const info = await importFolder(folders[i], recursive);
+    const info = await importFolder(folders[i], recursive, current);
+    // コピー取り込みの連番は、次のフォルダで続きから付ける（IMP-03。フォルダごとに 1 から始め直さない）。
+    current = continueSequence(current, info);
     const rest = folders.length - i - 1;
     if (session !== catalogSession) {
       stop("カタログを閉じた", rest);
@@ -1158,12 +1422,28 @@ export const actions = {
     appStore.set({ filter });
     void runSearch();
   },
+  /**
+   * どこを見るか（フォルダ・コレクション・すべての写真）を切り替える。フォルダとコレクションはどちらか
+   * 1 つ（Lightroom の「ソース」と同じ）で、ほかの絞り込みの条件は残す。
+   */
+  showFolder(folderId: number, includeSubfolders: boolean) {
+    actions.setFilter({ folder_id: folderId, include_subfolders: includeSubfolders, collection_id: null });
+  },
+  showCollection(collectionId: CollectionId) {
+    actions.setFilter({ collection_id: collectionId, folder_id: null });
+  },
+  showAll() {
+    actions.setFilter({ folder_id: null, collection_id: null });
+  },
   setSort(sort: SearchSort) {
     appStore.set({ sort });
     void runSearch();
   },
   // 選択
   selectIndex,
+  selectById,
+  selectIds,
+  locate,
   moveSelection,
   /** 位置の写真を選んでルーペで開く（グリッドのダブルクリック）。選べなかったら開かない（戻り値は開いたか）。 */
   async openInLoupe(index: number, expect?: VariantId): Promise<boolean> {
@@ -1173,6 +1453,7 @@ export const actions = {
     return ok && seq === modeSeq;
   },
   kindOf,
+  knownVideoCount,
   /** 選択中の写真の概要（選んだときの項目。順は決まっていない）。 */
   selectedSummaries: (): Iterable<SelectedSummary> => selectedSummaries.values(),
   async selectAll() {

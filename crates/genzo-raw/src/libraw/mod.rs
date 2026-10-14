@@ -451,6 +451,7 @@ impl<'a> Processor<'a> {
             datetime_original: c_string(&m.datetime_original),
             subsec_time_original: c_string(&m.subsec_time_original),
             offset_time_original: c_string(&m.offset_time_original),
+            body_serial: c_string(&m.body_serial),
             gps: GpsSnapshot {
                 parsed: m.gps_parsed != 0,
                 latitude: m.gps_latitude,
@@ -552,7 +553,9 @@ pub(crate) fn decode(source: Source<'_>) -> Result<DecodedRaw, RawError> {
         data_error_count: p.error_count(),
         data_range_checked,
     };
-    convert::build_decoded(&sizes, &color, &meta, data, decoder, &range)
+    let mut decoded = convert::build_decoded(&sizes, &color, &meta, data, decoder, &range)?;
+    crate::decode::attach_lens_correction(&mut decoded, source);
+    Ok(decoded)
 }
 
 /// 撮影情報を読む（[`crate::read_metadata`] の実体）。

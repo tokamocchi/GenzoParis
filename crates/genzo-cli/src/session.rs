@@ -108,6 +108,8 @@ impl Session {
         let mut config = CoreConfig::new(&catalog, data_dir(g, &catalog));
         config.worker = WorkerLaunch::current_exe();
         config.gpu = g.gpu.into();
+        // プリセット（DEV-29・EXP-02）のフォルダ（--presets-dir、GENZO_PRESETS_DIR、アプリと同じ場所）。
+        config.presets_dir = crate::presets_dir(g);
         if let Some(r) = opts.render_previews_after_import {
             config.render_previews_after_import = r;
         }
@@ -205,8 +207,9 @@ impl Session {
 
     /// ジョブを待ち、成功しなければエラーにする。
     ///
-    /// 取り消された取り込み・書き出しは、途中までの結果を返す（結果に `cancelled: true` の印がある。
-    /// 呼び出し側は結果を出し、一部が終わらなかったものとして扱う）。
+    /// 取り消された取り込み・書き出し・写真の移動・見つからない写真の確認・再リンクの候補の探索は、途中までの
+    /// 結果を返す（結果に `cancelled: true` の印がある。呼び出し側は結果を出し、一部が終わらなかったものとして
+    /// 扱う）。
     pub fn wait_job_ok(&self, job_id: u64, what: &str) -> CliResult<JobInfo> {
         let info = self.wait_job(job_id, what)?;
         match info.state {
@@ -214,7 +217,13 @@ impl Session {
             JobState::Cancelled
                 if matches!(
                     info.result,
-                    Some(JobResult::Import(_) | JobResult::Export(_))
+                    Some(
+                        JobResult::Import(_)
+                            | JobResult::Export(_)
+                            | JobResult::MoveFiles(_)
+                            | JobResult::CheckMissing(_)
+                            | JobResult::RelinkCandidates(_)
+                    )
                 ) =>
             {
                 Ok(info)
@@ -296,6 +305,11 @@ pub fn job_kind_text(kind: JobKind) -> &'static str {
         JobKind::IntegrityCheck => "詳細チェック",
         JobKind::ReresolveCaptureTimes => "撮影日時の推定し直し",
         JobKind::CollectGarbage => "キャッシュの回収",
+        JobKind::HashFiles => "内容のハッシュの計算",
+        JobKind::MoveFiles => "写真の移動",
+        JobKind::CheckMissing => "見つからない写真の確認",
+        JobKind::FindRelinkCandidates => "再リンクの候補の探索",
+        JobKind::VideoProxy => "再生用のファイルの作成",
     }
 }
 

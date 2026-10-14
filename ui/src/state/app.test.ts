@@ -8,7 +8,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { installBridge } from "../api/bridge";
 import { ApiError } from "../api/errors";
 import { dispatchCoreEventForTest } from "../api/events";
-import { MockBridge } from "../api/mock";
+import { MOCK_IMPORT_REPORT, MockBridge } from "../api/mock";
 import type { CatalogStatus, ColorLabel, DevelopSettings, ErrorInfo, JobInfo, VariantSummary } from "../api/types";
 import { PasteSettingsDialog } from "../dialogs/PasteSettingsDialog";
 import { actions, appStore, IMPORT_REFRESH_MS, nextColorLabel } from "./app";
@@ -35,10 +35,18 @@ const closedError: ErrorInfo = {
   hint: null,
 };
 
+/** core_execute で送ったコマンドのうち、`type` のもの。 */
+function sentCommands(type: string): Record<string, unknown>[] {
+  return mock.calls
+    .filter((c) => c.command === "core_execute")
+    .map((c) => c.args?.command as Record<string, unknown>)
+    .filter((c) => c.type === type);
+}
+
 /** 検索結果を世代 `generation` で読み込み済みにする。 */
 async function loadResults(generation = 1): Promise<void> {
   searchCache.reset(generation, COUNT);
-  appStore.set({ search: { generation, count: COUNT } });
+  appStore.set({ search: { generation, count: COUNT, hidden: 0 } });
   await searchCache.ensure(0, COUNT);
 }
 
@@ -74,6 +82,12 @@ beforeEach(() => {
       }
       case "index_of":
         return { type: "index_of", generation: searchCache.generation, index: (c.variant_id as number) - 100 };
+      case "shown_variants":
+        return {
+          type: "shown_variants",
+          generation: searchCache.generation,
+          variant_ids: (c.variant_ids as number[]).filter((id) => id >= 100 && id < 100 + COUNT),
+        };
       case "set_color_label":
       case "set_rating":
         if (c.type === "set_color_label") {
@@ -290,6 +304,31 @@ describe("取り込み", () => {
     await actions.importFolders(["/p/a", "/p/b", "/p/c"], true);
     expect(mock.coreCommands().filter((t) => t === "import_folder")).toHaveLength(3);
   });
+
+  it("取り込みの設定（重複・RAW と JPEG）を送り、結果の重複を知らせる（IMP-04・IMP-06）", async () => {
+    const sent: Record<string, unknown>[] = [];
+    overrides.import_folder = (c) => {
+      sent.push(c);
+      return { type: "job_started", job_id: 50 };
+    };
+    overrides.job = (c) => ({
+      type: "job",
+      job_id: c.job_id,
+      kind: "import",
+      state: "succeeded",
+      done: 1,
+      total: 1,
+      result: { type: "import", ...MOCK_IMPORT_REPORT },
+      error: null,
+    });
+    await actions.importFolders(["/p/SD"], true, { skip_duplicates: true, separate_raw_jpeg: false });
+    expect(sent[0]).toMatchObject({ path: "/p/SD", recursive: true, options: { skip_duplicates: true, separate_raw_jpeg: false } });
+    const toast = appStore.get().toasts.find((t) => t.message.startsWith("取り込み:"));
+    expect(toast?.message).toBe("取り込み: 10 件を追加、0 件を更新、重複の 2 件は取り込まず");
+    // 設定を省くと、コマンドにも載せない（カタログの設定に従う）。
+    await actions.importFolders(["/p/SD"], true);
+    expect(sent[1]).not.toHaveProperty("options");
+  });
 });
 
 describe("検索", () => {
@@ -303,7 +342,7 @@ describe("検索", () => {
     await actions.runSearch();
     expect(searchCache.generation).toBe(7);
     expect(searchCache.count).toBe(12);
-    expect(appStore.get().search).toEqual({ generation: 7, count: 12 });
+    expect(appStore.get().search).toEqual({ generation: 7, count: 12, hidden: 0 });
     expect(appStore.get().searching).toBe(false);
   });
 
@@ -311,7 +350,33 @@ describe("検索", () => {
     await loadResults(5);
     await actions.runSearch();
     expect(searchCache.generation).toBe(6);
-    expect(appStore.get().search).toEqual({ generation: 6, count: COUNT });
+    expect(appStore.get().search).toEqual({ generation: 6, count: COUNT, hidden: 0 });
+  });
+
+  it("検索し直したら、複数選択を結果に出ている写真だけにする（隠れた・外れた写真に操作を付けない。LIB-12）", async () => {
+    await loadResults(5);
+    appStore.set({
+      selection: { ids: [101, 102, 103, 104], current: 102, currentIndex: 2, anchorIndex: 2, anchorId: 102 },
+    });
+    // 103 と 104 は、新しい結果に出ていない（折りたたんだスタックに隠れた・絞り込みで外れた）。
+    overrides.shown_variants = (c) => ({
+      type: "shown_variants",
+      generation: searchCache.generation,
+      variant_ids: (c.variant_ids as number[]).filter((id) => id < 103),
+    });
+    await actions.runSearch();
+    expect(appStore.get().selection).toMatchObject({ ids: [101, 102], current: 102, currentIndex: 2 });
+    expect(actions.targets()).toEqual([101, 102]);
+    await actions.setRating(2);
+    expect(sentCommands("set_rating")).toEqual([{ type: "set_rating", variant_ids: [101, 102], rating: 2 }]);
+  });
+
+  it("1 枚だけを選んでいれば、結果に出ているかの問い合わせはしない（位置だけを求める）", async () => {
+    await loadResults(5);
+    appStore.set({ selection: { ids: [102], current: 102, currentIndex: 2, anchorIndex: 2, anchorId: 102 } });
+    await actions.runSearch();
+    expect(sentCommands("shown_variants")).toHaveLength(0);
+    expect(appStore.get().selection).toMatchObject({ ids: [102], current: 102, currentIndex: 2 });
   });
 });
 
@@ -368,10 +433,10 @@ describe("取り込み中の読み直しの間引き（performance-4）", () => 
       dispatchCoreEventForTest({ type: "search_updated", generation: 4, count: 33 });
       vi.advanceTimersByTime(IMPORT_REFRESH_MS - 201);
       expect(searchCache.generation).toBe(2);
-      expect(appStore.get().search).toEqual({ generation: 2, count: 31 });
+      expect(appStore.get().search).toEqual({ generation: 2, count: 31, hidden: 0 });
       vi.advanceTimersByTime(1);
       expect(searchCache.generation).toBe(4);
-      expect(appStore.get().search).toEqual({ generation: 4, count: 33 });
+      expect(appStore.get().search).toEqual({ generation: 4, count: 33, hidden: 0 });
       expect(reset).toHaveBeenCalledTimes(2);
     } finally {
       reset.mockRestore();
@@ -385,6 +450,17 @@ describe("取り込み中の読み直しの間引き（performance-4）", () => 
     expect(searchCache.generation).toBe(2);
     dispatchCoreEventForTest({ type: "job_finished", job_id: 9, kind: "import", state: "succeeded", message: null });
     expect(searchCache.generation).toBe(3);
+  });
+
+  it("取り込みが終わったら、キーワード・コレクションの一覧を読み直す（取り込み時のキーワード・新しい写真の件数。IMP-05）", () => {
+    const o0 = appStore.get().organizeVersion;
+    dispatchCoreEventForTest({ type: "catalog_changed", change: "imported", variant_ids: [1], all: false });
+    expect(appStore.get().organizeVersion).toBe(o0);
+    dispatchCoreEventForTest({ type: "job_finished", job_id: 9, kind: "import", state: "succeeded", message: null });
+    expect(appStore.get().organizeVersion).toBe(o0 + 1);
+    // 取り込み以外のジョブでは読み直さない。
+    dispatchCoreEventForTest({ type: "job_finished", job_id: 10, kind: "export", state: "succeeded", message: null });
+    expect(appStore.get().organizeVersion).toBe(o0 + 1);
   });
 
   it("待たせている間に選ぶと（今の世代の range が stale）、新しい世代にして選ぶ", async () => {
@@ -565,7 +641,7 @@ describe("選んだ写真の種類（M5）", () => {
       return { type: "range", generation: c.generation, start, items };
     };
     searchCache.reset(20, BIG);
-    appStore.set({ search: { generation: 20, count: BIG }, clipboard: null });
+    appStore.set({ search: { generation: 20, count: BIG, hidden: 0 }, clipboard: null });
     // 動画（位置 3）と写真（位置 4）を選び、80 ページ先までスクロールする（位置 3 のページは上限で捨てる）。
     await actions.selectIndex(VIDEO);
     await actions.selectIndex(4, { toggle: true });
@@ -642,7 +718,7 @@ describe("選別の操作の順序（PR #2 の Codex の指摘）", () => {
 describe("表示の切り替え（PR #2 の Codex の指摘）", () => {
   it("先頭の写真を選んでいる間にグリッドへ戻したら、ルーペに切り替えない", async () => {
     searchCache.reset(1, COUNT);
-    appStore.set({ search: { generation: 1, count: COUNT }, mode: "grid" });
+    appStore.set({ search: { generation: 1, count: COUNT, hidden: 0 }, mode: "grid" });
     mock.delay = (call) => ((call.args?.command as { type: string } | undefined)?.type === "range" ? 20 : 0);
     actions.setMode("loupe");
     actions.setMode("grid");
@@ -671,7 +747,7 @@ describe("選ぶ操作の競合（PR #2 の Codex の指摘）", () => {
       return { type: "range", generation: c.generation, start, items };
     };
     searchCache.reset(1, big);
-    appStore.set({ search: { generation: 1, count: big } });
+    appStore.set({ search: { generation: 1, count: big, hidden: 0 } });
     // 位置 500 のページ（400〜599）の読み込みだけを遅くする。
     mock.delay = (call) => {
       const cmd = call.args?.command as { type: string; start?: number } | undefined;
@@ -780,7 +856,7 @@ describe("選んでいる途中の表示の切り替え（E2E で見つけた競
       return { type: "range", generation: c.generation, start, items };
     };
     searchCache.reset(1, big);
-    appStore.set({ search: { generation: 1, count: big }, mode: "grid" });
+    appStore.set({ search: { generation: 1, count: big, hidden: 0 }, mode: "grid" });
     mock.delay = (call) => {
       const cmd = call.args?.command as { type: string; start?: number } | undefined;
       return cmd?.type === "range" && cmd.start === 400 ? 30 : 0;

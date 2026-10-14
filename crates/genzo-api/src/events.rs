@@ -68,6 +68,18 @@ pub enum Event {
         /// 処理した側。
         backend: RenderBackend,
     },
+    /// 現像中の写真のビフォー（DEV-31。[`crate::Core::set_before`]）のプレビューが更新された（ピクセルは
+    /// [`crate::Core::before_frame`] で取る）。
+    BeforeUpdated {
+        /// variant。
+        variant_id: VariantId,
+        /// ビフォーの描画の世代（[`crate::BeforeInfo::generation`]）。
+        generation: u64,
+        /// 幅。
+        width: u32,
+        /// 高さ。
+        height: u32,
+    },
     /// サムネイル（L0）・標準プレビュー（L1）が更新された（`genzo://thumb/{variant_id}?rev={rev}`）。
     ThumbnailUpdated {
         /// variant。
@@ -80,8 +92,11 @@ pub enum Event {
     SearchUpdated {
         /// 新しい世代。
         generation: u64,
-        /// 件数。
+        /// 件数（表示する写真の数。折りたたんだスタックは 1 枚に数える）。
         count: u64,
+        /// 折りたたんだスタックの中に隠した写真の数（LIB-12。0 なら JSON に書かない）。
+        #[serde(default, skip_serializing_if = "crate::types::is_zero")]
+        hidden: u64,
     },
     /// 警告（GPU から CPU への切り替え、前回の異常終了など。6.3 節）。
     Warning {
@@ -108,6 +123,8 @@ pub enum CatalogChange {
     Marks,
     /// キャプション。
     Caption,
+    /// 説明のメタデータ（タイトル・作成者・著作権など。キャプションを含む。LIB-15）。
+    Metadata,
     /// 現像設定（保存・Undo / Redo・一括適用）。
     Develop,
     /// variant の追加（仮想コピー）。
@@ -118,6 +135,23 @@ pub enum CatalogChange {
     FileStatus,
     /// 撮影日時（既定のタイムゾーンの変更など）。
     CaptureTime,
+    /// キーワード（写真への付与・外す、キーワードの作成・名前の変更・移動・削除・書き出しの印。LIB-09）。
+    /// キーワードそのものの変更では `variant_ids` は空。
+    Keywords,
+    /// コレクション（メンバーの追加・削除、コレクションの作成・名前の変更・移動・削除・条件の変更。
+    /// LIB-10・LIB-11）。コレクションそのものの変更では `variant_ids` は空。
+    Collections,
+    /// スタック（作る・解除・写真の追加と除外・一番上の写真・折りたたみ・自動スタック。LIB-12）。
+    /// `variant_ids` は、印（位置・数・折りたたみ）の変わったスタックの写真。
+    Stacks,
+    /// 仮想コピーの名前・マスターの入れ替え（LIB-13）。
+    Variants,
+    /// ファイルの場所（アプリの中での移動・リネーム・再リンク。FILE-02・FILE-04）。`variant_ids` は場所の
+    /// 変わった写真。
+    Files,
+    /// フォルダ・ボリューム（作成・移動・名前の変更・場所の指定し直し・見つからない印・つながりの変化。
+    /// FILE-02〜FILE-04）。`variant_ids` は空で、`all` が真（フォルダの一覧を読み直す）。
+    Folders,
 }
 
 /// 警告の種類。
@@ -158,6 +192,16 @@ pub enum WarningCode {
     /// 現像設定に記録したカメラ行列・RAW デコーダ（render_deps）が、今の値と違う（LibRaw を更新したなど。
     /// 同じ設定でも色が変わりうる）。
     RenderDepsChanged,
+    /// コピー取り込みで、カタログへの登録に失敗したため、そのバッチでコピーしたファイルを消した（IMP-02。
+    /// 元のファイルはそのまま）。
+    ImportCopyRolledBack,
+    /// 以前の形式（パスで識別）のボリュームのフォルダを、ドライブの ID で識別するボリュームへ移した（FILE-03）。
+    VolumesRebound,
+    /// 動画のコピーの警告（登録の後に元のファイルが変わっていた・同じ名前があったので連番を付けたなど。EXP-05）。
+    VideoCopy,
+    /// 別のドライブへ移した写真の元のファイルを、ゴミ箱へ移せなかった（FILE-02。カタログは移動先を指し、元の
+    /// ファイルは元の場所に残る）。
+    MoveSourceLeft,
 }
 
 /// イベントの購読者の一覧。
@@ -225,6 +269,7 @@ mod tests {
         hub.emit(Event::SearchUpdated {
             generation: 1,
             count: 0,
+            hidden: 0,
         });
         hub.emit_sticky(Event::Warning {
             code: WarningCode::UncleanShutdown,
@@ -245,18 +290,21 @@ mod tests {
         hub.emit(Event::SearchUpdated {
             generation: 2,
             count: 3,
+            hidden: 0,
         });
         assert_eq!(
             rx.try_recv().unwrap(),
             Event::SearchUpdated {
                 generation: 2,
-                count: 3
+                count: 3,
+                hidden: 0,
             }
         );
         drop(rx);
         hub.emit(Event::SearchUpdated {
             generation: 3,
             count: 0,
+            hidden: 0,
         });
         assert!(hub.subscribers.lock().is_empty(), "drop した購読者は外す");
         // JSON の形。

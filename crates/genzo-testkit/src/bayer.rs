@@ -137,6 +137,7 @@ pub fn mosaic_with_clip_counts(
         as_shot_wb: params.wb,
         cam_xyz: params.cam_xyz,
         metadata,
+        lens_correction: None,
     };
     // 寸法以外（黒レベル・白レベル・WB・行列）を先に検証する（データは後で入れる）。
     raw.data = vec![0; camera_rgb.pixel_count() as usize];

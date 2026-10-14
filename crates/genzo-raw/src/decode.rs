@@ -41,6 +41,7 @@
 //! | 撮影時の WB | `cam_mul` を CFA の位置の順に並べ、G1 を 1 にする（[`WbSource`]）。`pre_mul` は記録だけ |
 //! | カメラ行列 | 下の「カメラ行列」 |
 //! | 撮影情報 | `idata`・`lens`・`other`（ISO・シャッター速度・絞り・焦点距離・GPS）と `sizes.flip`。撮影日時は EXIF のコールバックで読んだ元の文字列（[`CaptureTimeSource`]） |
+//! | 埋め込みのレンズ補正 | LibRaw ではなく、展開の後に同じ入力の TIFF の構造を自前で読む（[`crate::lens`]。[`RawImage::lens_correction`]）。読めなければ補正の情報なしにして、理由を [`RawDetails::lens_correction_note`] に残す |
 //!
 //! **カメラ行列（[`RawImage::cam_xyz`]）**
 //! - LibRaw の `cam_xyz[4][3]` は、ドキュメントでは「Camera RGB - XYZ conversion matrix」
@@ -285,15 +286,42 @@ pub struct RawDetails {
     pub data_range_checked: bool,
     /// 飽和の閾値（[`RawImage::saturation_level`] と同じ）。
     pub saturation_level: f32,
+    /// 埋め込みのレンズ補正の情報（[`RawImage::lens_correction`]。[`crate::lens`]）を読めなかった・
+    /// 不正だった理由（展開は続け、補正の情報なしとして扱う）。読めたか、なかった場合は `None`。
+    #[serde(default)]
+    pub lens_correction_note: Option<String>,
 }
 
 /// 読み込み元。
 #[cfg_attr(not(feature = "libraw"), allow(dead_code))]
+#[derive(Clone, Copy)]
 pub(crate) enum Source<'a> {
     /// ファイルのパス。
     Path(&'a Path),
     /// メモリ上のデータ。
     Bytes(&'a [u8]),
+}
+
+/// 展開した RAW に、埋め込みのレンズ補正の情報（[`crate::lens`]）を加える。読めない・不正な情報は
+/// 使わず、理由を [`RawDetails::lens_correction_note`] に記録する（展開は失敗にしない。補正の情報が
+/// 壊れていても写真は開けるようにするため）。
+#[cfg_attr(not(feature = "libraw"), allow(dead_code))]
+pub(crate) fn attach_lens_correction(d: &mut DecodedRaw, source: Source<'_>) {
+    let read = match source {
+        Source::Path(p) => crate::lens::read_lens_correction(p),
+        Source::Bytes(b) => crate::lens::read_lens_correction_bytes(b),
+    };
+    let checked = read.and_then(|v| {
+        if let Some(l) = &v {
+            l.validate()?;
+        }
+        Ok(v)
+    });
+    match checked {
+        Ok(Some(l)) if !l.is_empty() => d.image.lens_correction = Some(l),
+        Ok(_) => {}
+        Err(e) => d.details.lens_correction_note = Some(e.to_string()),
+    }
 }
 
 /// 実行時に読み込んだ LibRaw の版（`LibRaw::version()`。例: `"0.21.2-Release"`）。
@@ -456,6 +484,7 @@ mod tests {
             as_shot_wb: [2.0, 1.0, 1.5, 1.0],
             cam_xyz: None,
             metadata: PhotoMetadata::default(),
+            lens_correction: None,
         };
         let details = RawDetails {
             decoder_id: "libraw-0.21.2".to_owned(),
@@ -492,6 +521,7 @@ mod tests {
             input_size: 0,
             data_range_checked: false,
             saturation_level: 16383.0,
+            lens_correction_note: None,
         };
         DecodedRaw { image, details }
     }

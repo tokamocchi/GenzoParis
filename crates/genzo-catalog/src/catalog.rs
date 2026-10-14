@@ -124,6 +124,12 @@ pub struct Catalog {
     path: Option<PathBuf>,
     read_only: bool,
     report: OpenReport,
+    /// 読んだスタックの所属（[`Catalog::stack_layout`]。カタログが変わっていなければ使い回す）。
+    pub(crate) stack_cache: crate::stack::StackLayoutCache,
+    /// つながっていないボリューム（FILE-03。[`Catalog::set_offline_volumes`]）。このボリュームのファイル・
+    /// フォルダの場所はマウント先が分からないものとして返す（記録したマウント先に別のドライブがつながって
+    /// いても、そのファイルを読まないため）。カタログには保存しない（開いている間だけの状態）。
+    pub(crate) offline_volumes: std::collections::HashSet<genzo_model::VolumeId>,
 }
 
 impl std::fmt::Debug for Catalog {
@@ -188,6 +194,8 @@ impl Catalog {
                 schema_version: outcome.to,
                 migration_backup: outcome.backup,
             },
+            stack_cache: Default::default(),
+            offline_volumes: Default::default(),
         })
     }
 
@@ -208,6 +216,8 @@ impl Catalog {
                 schema_version: outcome.to,
                 migration_backup: None,
             },
+            stack_cache: Default::default(),
+            offline_volumes: Default::default(),
         })
     }
 
@@ -237,6 +247,8 @@ impl Catalog {
                 schema_version: found,
                 migration_backup: None,
             },
+            stack_cache: Default::default(),
+            offline_volumes: Default::default(),
         })
     }
 
@@ -271,6 +283,11 @@ impl Catalog {
     /// スキーマの版（`PRAGMA user_version`）。
     pub fn schema_version(&self) -> Result<u32> {
         schema::user_version(&self.conn)
+    }
+
+    /// カタログの構造（表・列・索引・ビュー・トリガー。ORG-07）。読むだけ。
+    pub fn describe_schema(&self) -> Result<schema::SchemaDescription> {
+        schema::describe_schema(&self.conn)
     }
 
     /// 接続の設定を読む（テスト・診断用）。

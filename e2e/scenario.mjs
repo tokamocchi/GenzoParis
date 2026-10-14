@@ -2,7 +2,8 @@
 //
 // 写真のフォルダは環境変数 E2E_PHOTOS（`cargo run -p genzo-testkit --example e2e_fixtures -- <フォルダ>`
 // で作り、動画は ffmpeg で足す。README の「E2E」）。画面の操作の結果を、画面とコアの状態の両方で確かめ、
-// 各段階の画面を E2E_OUT に保存する。
+// 各段階の画面を E2E_OUT に保存する。写真・動画の数は取り込んだ後にカタログから数える（動画がなくても
+// 通るが、動画の手順は確かめない）。
 //
 // OS のダイアログ（フォルダの選択）は WebDriver で操作できないため、取り込みはコアのコマンドで行い、
 // 書き出し先は書き出しのダイアログが覚える前回の書き出し先（localStorage）に入れておく。
@@ -31,7 +32,11 @@ function hashes(dir) {
 }
 
 const before = hashes(PHOTOS);
-const photoCount = Object.keys(before).length;
+/** 写真のフォルダのファイルの数（写真と動画）。 */
+const fileCount = Object.keys(before).length;
+/** 取り込んだ写真・動画の数（手順 2 でカタログの種類から数える）。 */
+let photoTotal = 0;
+let videoTotal = 0;
 
 const wd = new WebDriver();
 await wd.start(process.env.E2E_APP);
@@ -98,19 +103,32 @@ try {
     const st = await invoke(wd, "app_status");
     assert(st.catalog && st.catalog.catalog_path.endsWith("catalog.db"), "既定の catalog.db を開いた");
     assert(st.catalog.capabilities?.raw_decoder, `RAW のデコーダがある（${JSON.stringify(st.catalog.worker_error)}）`);
+    // ログをアプリのデータのフォルダのファイルに残している（SYS-07。使い捨ての HOME の下）。
+    assert(st.logs?.file?.endsWith("app.log"), `ログのファイルがある（${JSON.stringify(st.logs)}）`);
+    const logs = await invoke(wd, "log_folder_info");
+    assert(logs.files.some((f) => f.name === "app.log" && f.bytes > 0), "app.log に書いている");
   });
 
   await run("2. フォルダを取り込み、グリッドに並ぶ（IMP-01・VID-01・LIB-01）", async () => {
     const r = await core(wd, { type: "import_folder", path: PHOTOS, recursive: true });
     const job = await waitJob(wd, r.job_id);
     assert(job.state === "succeeded", `取り込みが成功（${JSON.stringify(job.error)}）`);
-    await wd.waitFor(async () => (await gridCells()) === photoCount, { what: `${photoCount} 件のセル` });
-    // サムネイルが読み込まれるまで待つ（動画は ffmpeg が要る）。
+    await wd.waitFor(async () => (await gridCells()) === fileCount, { what: `${fileCount} 件のセル` });
+    const items = await allItems(wd);
+    photoTotal = items.filter((i) => i.kind === "photo").length;
+    videoTotal = items.filter((i) => i.kind === "video").length;
+    assert(photoTotal + videoTotal === fileCount, `写真 ${photoTotal} 枚と動画 ${videoTotal} 本（${fileCount} 件）`);
+    assert(photoTotal > 0, "写真がある");
+    console.log(`  写真 ${photoTotal} 枚、動画 ${videoTotal} 本`);
+    if (videoTotal === 0) {
+      console.log("  注意: 写真のフォルダに動画がないので、動画の扱い（書き出さないこと）は確かめません（README の「E2E」）");
+    }
+    // サムネイルが読み込まれるまで待つ（写真はすべて。動画は ffmpeg が要るので数えない）。
     await wd.waitFor(
       async () =>
         (await wd.exec(
           "return [...document.querySelectorAll('[data-index] img')].filter((i) => i.complete && i.naturalWidth > 0).length",
-        )) >= photoCount - 1,
+        )) >= photoTotal,
       { what: "サムネイルの表示", timeoutMs: 30000 },
     );
     await screenshot(wd, "grid");
@@ -121,7 +139,7 @@ try {
     await waitJob(wd, r.job_id);
     await sleep(500);
     const items = await allItems(wd);
-    assert(items.length === photoCount, `件数は ${photoCount} のまま（${items.length}）`);
+    assert(items.length === fileCount, `件数は ${fileCount} のまま（${items.length}）`);
   });
 
   await run("4. キーボードで評価・フラグを付ける（LIB-04・05）", async () => {
@@ -152,7 +170,7 @@ try {
     await screenshot(wd, "filtered");
     const all = await wd.find("css selector", 'select[aria-label="評価"] option[value="0"]');
     await wd.click(all);
-    await wd.waitFor(async () => (await gridCells()) === photoCount, { what: "解除して全件" });
+    await wd.waitFor(async () => (await gridCells()) === fileCount, { what: "解除して全件" });
   });
 
   await run("6. ルーペで表示し、前後に送る（LIB-02）", async () => {
@@ -304,7 +322,7 @@ try {
     await screenshot(wd, "develop-cropped");
   });
 
-  await run("12. 書き出す（EXP-01・EXP-04。GPS の削除は既定でオン）", async () => {
+  await run("12. 書き出す（EXP-01・EXP-04・EXP-05。GPS の削除は既定でオン）", async () => {
     await wd.keys("g");
     await wd.chord([KEY.CTRL], "a");
     await wd.exec(
@@ -318,13 +336,23 @@ try {
     );
     await wd.chord([KEY.CTRL, KEY.SHIFT], "e");
     await waitText("書き出し先");
+    if (videoTotal > 0) {
+      // GPS を削除する設定では、動画（元のファイルのままコピーする）は書き出さないと先に知らせる。
+      await waitText(`動画 ${videoTotal.toLocaleString("ja-JP")} 本は書き出しません`);
+    }
     await screenshot(wd, "export-dialog");
     await clickButton("書き出す");
-    await wd.waitFor(() => readdirSync(EXPORT_DIR).filter((n) => n.endsWith(".jpg")).length === photoCount - 1, {
-      what: `写真 ${photoCount - 1} 枚の JPEG（動画は書き出さない）`,
-      timeoutMs: 120000,
-    });
-    console.log(`  書き出し: ${readdirSync(EXPORT_DIR).join(", ")}`);
+    // 書き出しのジョブの終わりの知らせを待ってから、書き出し先を確かめる（途中の状態で判定しない）。
+    await waitText(`書き出し: ${photoTotal.toLocaleString("ja-JP")} 枚を書き出しました`, 120000);
+    await screenshot(wd, "exported");
+    const names = readdirSync(EXPORT_DIR).sort();
+    console.log(`  書き出し: ${names.join(", ")}`);
+    const jpegs = names.filter((n) => n.endsWith(".jpg"));
+    assert(jpegs.length === photoTotal, `写真 ${photoTotal} 枚の JPEG（${jpegs.length} 枚）`);
+    assert(
+      names.length === jpegs.length,
+      "書き出し先には JPEG だけがある（GPS を削除する設定では動画を書き出さない。一時ファイルも残さない）",
+    );
   });
 
   await run("13. 今すぐバックアップする（SYS-04）", async () => {
@@ -346,7 +374,7 @@ try {
       "//div[contains(@class,'dialog-actions')]//button[contains(normalize-space(.), 'カタログから除去')]",
     );
     await wd.click(btn);
-    await wd.waitFor(async () => (await allItems(wd)).length === photoCount - 1, { what: "1 件の除去" });
+    await wd.waitFor(async () => (await allItems(wd)).length === fileCount - 1, { what: "1 件の除去" });
   });
 
   await run("15. 元のファイルを変えていない（DATA-01）", async () => {

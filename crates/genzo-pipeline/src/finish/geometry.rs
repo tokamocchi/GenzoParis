@@ -1,8 +1,9 @@
 //! ステージ 9: ジオメトリ（docs/04_architecture.md の 2.1 節・2.7 節。DEV-15）。
 //!
-//! 向き（RAW の Orientation）・角度補正（回転）・切り抜きを、**1 回のリサンプリング**で行う
-//! （2.1 節の補足「リサンプリングを 1 回だけ行う」）。出力の画素ごとに C → G → O → S → 入力の格子と
-//! 逆にたどり（逆写像）、入力の格子をバイキュービック補間で引く。歪曲補正（v1）は未実装。
+//! 向き（RAW の Orientation）・角度補正（回転）・レンズの歪曲補正（処理バージョン 2。DEV-14）・切り抜きを、
+//! **1 回のリサンプリング**で行う（2.1 節の補足「リサンプリングを 1 回だけ行う」）。出力の画素ごとに
+//! C → G → D → O → S → 入力の格子と逆にたどり（逆写像）、入力の格子をバイキュービック補間で引く
+//! （D は歪曲補正の後の枠。[`crate::coords`]）。
 //!
 //! # 格子の決めごと
 //!
@@ -65,6 +66,16 @@
 //! 結果: v0·r0 + v1·r1 + v2·r2 + v3·r3（v は y 方向の重み）
 //! ```
 //!
+//! **歪曲補正があるとき**（[`GeometryPlan::warp`]。[`crate::lens::RadialDistortion`]）は、アフィン変換の
+//! 代わりに次の式で入力の格子の座標を求める（係数は f64 で合成して f32 に丸める。GPU 版も同じ）:
+//!
+//! ```text
+//! dx = p00·X + p01·Y + p02,   dy = p10·X + p11·Y + p12      （D の座標から中心を引いたもの。O の画素）
+//! u = (dx·dx + dy·dy)·inv_r2,  k = 表(u)                    （1D LUT。crate::interp::Lut1d の式）
+//! ex = k·dx,  ey = k·dy
+//! x = q00·ex + q01·ey + q02,   y = q10·ex + q11·ey + q12     （O → S → 入力の格子）
+//! ```
+//!
 //! `t = 0` では重みが厳密に (0, 1, 0, 0) なので、画素の中心ではその画素の値をそのまま返す
 //! （回転 0 で補間が恒等）。Catmull-Rom は輪郭の近くでわずかに行き過ぎる（負の値も出る）が、B2 は
 //! 負の値を保持する契約なので切り捨てない。縮小の用途（出力の密度が入力より低い）には向かない
@@ -80,6 +91,8 @@ use crate::contract::ColorContract;
 use crate::coords::{CoordinateFrames, SensorGrid};
 use crate::error::{PipelineError, Result};
 use crate::image::{ImageTile, Roi};
+use crate::interp::Lut1d;
+use crate::lens::RadialDistortion;
 use crate::stage::{Stage, StageContext, StageParams};
 use crate::version::ProcessVersion;
 
@@ -90,6 +103,67 @@ const CROP_SCALE_TOLERANCE: f64 = 1e-9;
 /// [`GeometryPlan::input_roi`] で、補間のタップの範囲に加える余白（画素）。f32 の座標の丸めで
 /// タップが 1 画素ずれても入力の範囲に収まるようにする。
 const INPUT_ROI_SAFETY: i64 = 1;
+
+/// 歪曲補正があるとき、[`GeometryPlan::input_roi`] で範囲の辺の上に取る点の数（1 辺あたり）と、加える
+/// 余白（画素。点の間で曲線が外へふくらむ分と、f32 と f64 の差）。
+const WARP_EDGE_SAMPLES: usize = 128;
+const WARP_ROI_SAFETY: i64 = 2;
+
+/// 歪曲補正があるときのステージ 9 の写像（モジュールの doc の「歪曲補正があるとき」の式）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WarpPlan {
+    /// G の格子の連続座標 → D の座標から中心を引いたもの（f32。行ごとに `[a, b, t]`）。
+    pub pre: [[f32; 3]; 2],
+    /// `1 / R²`（f32）。
+    pub inv_r2: f32,
+    /// 倍率 `K(u)` の表（自動の倍率を含む）。
+    pub lut: Lut1d,
+    /// 中心からの差 `(ex, ey)` → 入力の格子の連続座標（f32）。
+    pub post: [[f32; 3]; 2],
+    pre_f64: [[f64; 3]; 2],
+    post_f64: [[f64; 3]; 2],
+    distortion: RadialDistortion,
+}
+
+impl WarpPlan {
+    /// G の格子の連続座標 → 入力の格子の連続座標（f64。範囲の計算用）。
+    fn map_f64(&self, x: f64, y: f64) -> (f64, f64) {
+        let a = &self.pre_f64;
+        let dx = a[0][0] * x + a[0][1] * y + a[0][2];
+        let dy = a[1][0] * x + a[1][1] * y + a[1][2];
+        let k = self
+            .distortion
+            .eval_f64((dx * dx + dy * dy) * self.distortion.inv_r2);
+        let (ex, ey) = (k * dx, k * dy);
+        let b = &self.post_f64;
+        (
+            b[0][0] * ex + b[0][1] * ey + b[0][2],
+            b[1][0] * ex + b[1][1] * ey + b[1][2],
+        )
+    }
+
+    /// G の格子の連続座標 → 入力の格子の連続座標（f32。画素の計算と同じ式。GPU 版も同じ）。
+    #[inline]
+    pub fn map_f32(&self, x: f32, y: f32) -> (f32, f32) {
+        let a = &self.pre;
+        let dx = a[0][0] * x + a[0][1] * y + a[0][2];
+        let dy = a[1][0] * x + a[1][1] * y + a[1][2];
+        let u = (dx * dx + dy * dy) * self.inv_r2;
+        let k = self.lut.eval(u);
+        let ex = k * dx;
+        let ey = k * dy;
+        let b = &self.post;
+        (
+            b[0][0] * ex + b[0][1] * ey + b[0][2],
+            b[1][0] * ex + b[1][1] * ey + b[1][2],
+        )
+    }
+
+    /// 歪曲補正（D → O）。
+    pub fn distortion(&self) -> &RadialDistortion {
+        &self.distortion
+    }
+}
 
 /// 切り抜く前の全体の表示（[`GeometryPlan::uncropped`]）で、回転で画像の外になった四隅の画素を塗る値
 /// （B3 と、画面・書き出しの符号化した値のどちらにも使う）。**仮置き**: 黒（0）。UI の背景との区別は
@@ -111,6 +185,7 @@ pub struct GeometryPlan {
     crop_lattice: Roi,
     to_input: [[f64; 3]; 2],
     to_input_f32: [[f32; 3]; 2],
+    warp: Option<WarpPlan>,
     uncropped: bool,
 }
 
@@ -192,6 +267,36 @@ impl GeometryPlan {
             ];
         }
         let to_input_f32 = to_input.map(|row| row.map(|v| v as f32));
+        // 歪曲補正: G の格子 → G（px）→ D（回転）から中心を引いたもの、倍率、O → S → 入力の格子。
+        let warp = match frames.distortion {
+            None => None,
+            Some(dist) => {
+                let a = frames.g_to_undistorted_affine();
+                let (cx, cy) = dist.center;
+                let pre_f64 = [
+                    [a[0][0] * inv_dx, a[0][1] * inv_dy, a[0][2] - cx],
+                    [a[1][0] * inv_dx, a[1][1] * inv_dy, a[1][2] - cy],
+                ];
+                let b = frames.oriented_to_sensor_affine();
+                let mut post_f64 = [[0.0; 3]; 2];
+                for (r, scale) in [(0usize, sx), (1, sy)] {
+                    post_f64[r] = [
+                        b[r][0] * scale,
+                        b[r][1] * scale,
+                        (b[r][0] * cx + b[r][1] * cy + b[r][2]) * scale,
+                    ];
+                }
+                Some(WarpPlan {
+                    pre: pre_f64.map(|row| row.map(|v| v as f32)),
+                    inv_r2: dist.inv_r2 as f32,
+                    lut: dist.to_lut1d()?,
+                    post: post_f64.map(|row| row.map(|v| v as f32)),
+                    pre_f64,
+                    post_f64,
+                    distortion: dist,
+                })
+            }
+        };
         Ok(Self {
             frames,
             grid,
@@ -202,6 +307,7 @@ impl GeometryPlan {
             crop_lattice,
             to_input,
             to_input_f32,
+            warp,
             uncropped,
         })
     }
@@ -224,7 +330,8 @@ impl GeometryPlan {
     /// 常に真。切り抜く前の全体の表示で回転していると、外接矩形の四隅の画素が偽になる。
     pub fn c_pixel_in_image(&self, x: i64, y: i64) -> bool {
         let (gx, gy) = self.c_to_g_px(x as f64 + 0.5, y as f64 + 0.5);
-        let (u, v) = self.frames.g_to_oriented(gx, gy);
+        // D の枠（歪曲補正の後。O と同じ大きさで、画像のない部分を持たない）で判定する。
+        let (u, v) = self.frames.g_to_undistorted(gx, gy);
         let (ow, oh) = self.frames.oriented_size();
         (0.0..=f64::from(ow)).contains(&u) && (0.0..=f64::from(oh)).contains(&v)
     }
@@ -310,7 +417,14 @@ impl GeometryPlan {
         (self.crop_lattice.width, self.crop_lattice.height)
     }
 
+    /// 歪曲補正があるときの写像（なければ `None`。そのときは [`lattice_to_input_f32`](Self::lattice_to_input_f32)
+    /// のアフィン変換）。
+    pub fn warp(&self) -> Option<&WarpPlan> {
+        self.warp.as_ref()
+    }
+
     /// G の格子の連続座標 → 入力の格子の連続座標のアフィン変換（f64。行ごとに `[a, b, t]`）。
+    /// **歪曲補正（[`warp`](Self::warp)）があるときは使えない**（歪曲を含まない）。
     pub fn lattice_to_input(&self) -> [[f64; 3]; 2] {
         self.to_input
     }
@@ -340,10 +454,13 @@ impl GeometryPlan {
         )
     }
 
-    /// C の連続座標 → 入力の格子の連続座標（f64）。
+    /// C の連続座標 → 入力の格子の連続座標（f64。歪曲補正を含む）。
     pub fn c_to_input(&self, cx: f64, cy: f64) -> (f64, f64) {
         let x = cx + f64::from(self.crop_lattice.x);
         let y = cy + f64::from(self.crop_lattice.y);
+        if let Some(w) = &self.warp {
+            return w.map_f64(x, y);
+        }
         let a = &self.to_input;
         (
             a[0][0] * x + a[0][1] * y + a[0][2],
@@ -354,7 +471,8 @@ impl GeometryPlan {
     /// 何もしない（出力が入力の格子とまったく同じ）か。回転 0・切り抜きなし・向きが通常で、
     /// G の格子が入力の格子と一致する場合。このときステージ 9 を飛ばす。
     pub fn is_identity(&self) -> bool {
-        self.crop_lattice == Roi::full(self.grid.width, self.grid.height)
+        self.warp.is_none()
+            && self.crop_lattice == Roi::full(self.grid.width, self.grid.height)
             && self.to_input_f32 == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
     }
 
@@ -370,13 +488,28 @@ impl GeometryPlan {
         let (y0, y1) = (f64::from(output_roi.y), output_roi.y_end() as f64);
         let mut min = (f64::INFINITY, f64::INFINITY);
         let mut max = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-        for (cx, cy) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
-            let (x, y) = self.c_to_input(cx, cy);
+        let mut add = |(x, y): (f64, f64)| {
             min = (min.0.min(x), min.1.min(y));
             max = (max.0.max(x), max.1.max(y));
+        };
+        for (cx, cy) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+            add(self.c_to_input(cx, cy));
         }
-        let lo = |v: f64| (v - 0.5).floor() as i64 - 1 - INPUT_ROI_SAFETY;
-        let hi = |v: f64| (v - 0.5).floor() as i64 + 3 + INPUT_ROI_SAFETY;
+        // 歪曲補正があると辺の像が曲線になるので、辺の上の点も写す（画素の中心の位置も含める）。
+        let extra = if self.warp.is_some() {
+            for i in 0..=WARP_EDGE_SAMPLES {
+                let t = i as f64 / WARP_EDGE_SAMPLES as f64;
+                let (x, y) = (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+                for p in [(x, y0), (x, y1), (x0, y), (x1, y)] {
+                    add(self.c_to_input(p.0, p.1));
+                }
+            }
+            WARP_ROI_SAFETY
+        } else {
+            0
+        };
+        let lo = |v: f64| (v - 0.5).floor() as i64 - 1 - INPUT_ROI_SAFETY - extra;
+        let hi = |v: f64| (v - 0.5).floor() as i64 + 3 + INPUT_ROI_SAFETY + extra;
         roi_from_span(lo(min.0), hi(max.0), lo(min.1), hi(max.1))
     }
 }
@@ -438,11 +571,12 @@ pub fn constrain_crop(frames: &CoordinateFrames, crop: &CropRect) -> CropRect {
     let inside = |(u, v): (f64, f64)| (0.0..=ow).contains(&u) && (0.0..=oh).contains(&v);
     // 中心（画像の外なら画像の中心）。
     let mut c = ((l + r) * 0.5, (t + b) * 0.5);
-    if !inside(frames.g_to_oriented(c.0, c.1)) {
+    // D の枠（歪曲補正の後。O と同じ大きさで、画像のない部分を持たない）の内側に収める。
+    if !inside(frames.g_to_undistorted(c.0, c.1)) {
         c = (gw * 0.5, gh * 0.5);
     }
     let (hw, hh) = ((r - l) * 0.5, (b - t) * 0.5);
-    let oc = frames.g_to_oriented(c.0, c.1);
+    let oc = frames.g_to_undistorted(c.0, c.1);
     // 四隅の中心からの差を O に移した向き（回転の線形部分 Rᵀ）。
     let (cos, sin) = frames.rotation_cos_sin();
     let mut scale: f64 = 1.0;
@@ -531,6 +665,32 @@ fn fetch(tile: &ImageTile, grid: (u32, u32), x: i64, y: i64) -> [f32; 3] {
     local(cx, cy).unwrap_or([0.0; 3])
 }
 
+/// 入力の格子の連続座標 (x, y) の 1 つのチャンネル `c`（0〜2）をバイキュービックで補間する
+/// （[`sample_bicubic`] と同じ式。ステージ 7 の色収差の補正が R・B だけを引くのに使う）。
+#[inline]
+pub(crate) fn sample_bicubic_channel(
+    tile: &ImageTile,
+    grid: (u32, u32),
+    x: f32,
+    y: f32,
+    c: usize,
+) -> f32 {
+    let (ix, tx) = cubic_base(x);
+    let (iy, ty) = cubic_base(y);
+    let wx = cubic_weights(tx);
+    let wy = cubic_weights(ty);
+    let mut rows = [0.0f32; 4];
+    for (k, row) in rows.iter_mut().enumerate() {
+        let yy = iy - 1 + k as i64;
+        let p0 = fetch(tile, grid, ix - 1, yy)[c];
+        let p1 = fetch(tile, grid, ix, yy)[c];
+        let p2 = fetch(tile, grid, ix + 1, yy)[c];
+        let p3 = fetch(tile, grid, ix + 2, yy)[c];
+        *row = wx[0] * p0 + wx[1] * p1 + wx[2] * p2 + wx[3] * p3;
+    }
+    wy[0] * rows[0] + wy[1] * rows[1] + wy[2] * rows[2] + wy[3] * rows[3]
+}
+
 /// 入力の格子の連続座標 (x, y) をバイキュービックで補間する（モジュールの doc の式）。
 #[inline]
 pub(crate) fn sample_bicubic(tile: &ImageTile, grid: (u32, u32), x: f32, y: f32) -> [f32; 3] {
@@ -557,8 +717,8 @@ pub(crate) fn sample_bicubic(tile: &ImageTile, grid: (u32, u32), x: f32, y: f32)
 ///
 /// - 入力: B2（入力の格子 = [`StageContext::sensor_grid`]、S の向き）。出力: B2（C の格子）。
 /// - パラメータ: [`GeometryPlan`]。何もしない場合（[`GeometryPlan::is_identity`]）は `None`。
-/// - 歪曲補正（v1）は未実装（`lens.profile_enabled` でも適用しない。
-///   [`super::reserved::unimplemented_settings`] で警告できる）。
+/// - 歪曲補正（処理バージョン 2。文脈の [`CoordinateFrames::distortion`]）は同じリサンプリングに含める
+///   （[`GeometryPlan::warp`]）。版 1 の文脈には歪曲補正を付けない（[`super::finish_context`]）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GeometryStage;
 
@@ -588,7 +748,7 @@ impl Stage for GeometryStage {
         ctx: &StageContext<'_>,
     ) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => {
+            ProcessVersion::V1 | ProcessVersion::V2 => {
                 let plan = GeometryPlan::from_settings(settings, ctx)?;
                 Ok((!plan.is_identity()).then(|| StageParams::new(plan)))
             }
@@ -610,10 +770,11 @@ impl Stage for GeometryStage {
     ) -> Result<()> {
         let plan = params.expect::<GeometryPlan>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 => {}
+            ProcessVersion::V1 | ProcessVersion::V2 => {}
         }
         let grid = (plan.grid.width, plan.grid.height);
         let a = plan.to_input_f32;
+        let warp = plan.warp.as_ref();
         let roi = output.roi;
         let ox = i64::from(plan.crop_lattice.x) + i64::from(roi.x);
         let oy = i64::from(plan.crop_lattice.y) + i64::from(roi.y);
@@ -627,8 +788,13 @@ impl Stage for GeometryStage {
                 let yy = (oy + j as i64) as f32 + 0.5;
                 for (i, px) in row.iter_mut().enumerate() {
                     let xx = (ox + i as i64) as f32 + 0.5;
-                    let x = a[0][0] * xx + a[0][1] * yy + a[0][2];
-                    let y = a[1][0] * xx + a[1][1] * yy + a[1][2];
+                    let (x, y) = match warp {
+                        Some(w) => w.map_f32(xx, yy),
+                        None => (
+                            a[0][0] * xx + a[0][1] * yy + a[0][2],
+                            a[1][0] * xx + a[1][1] * yy + a[1][2],
+                        ),
+                    };
                     *px = sample_bicubic(input, grid, x, y);
                 }
             });
@@ -739,7 +905,7 @@ mod tests {
             (c.right, c.bottom),
             (c.left, c.bottom),
         ] {
-            let (u, v) = f.g_to_oriented(f64::from(x) * gw, f64::from(y) * gh);
+            let (u, v) = f.g_to_undistorted(f64::from(x) * gw, f64::from(y) * gh);
             assert!(
                 (-1e-3..=600.001).contains(&u) && (-1e-3..=400.001).contains(&v),
                 "{u} {v}"
@@ -842,5 +1008,68 @@ mod tests {
             }
         }
         assert!(p.input_roi(Roi::new(0, 0, 0, 3)).is_empty());
+    }
+
+    /// 歪曲補正（処理バージョン 2）があるときも、出力の範囲の補間のタップは入力の範囲に収まり、
+    /// f32 の画素の式と f64 の写像はほぼ同じ点を指す。
+    #[test]
+    fn warp_plan_covers_every_tap_and_matches_the_f64_mapping() {
+        use crate::lens::RadialDistortion;
+        for (o, deg) in [(Orientation::Normal, 0.0), (Orientation::Rotate90Cw, 6.0)] {
+            for amount in [-80.0f32, 70.0] {
+                let lens = genzo_model::LensCorrection {
+                    distortion: amount,
+                    ..Default::default()
+                };
+                let base = frames(90, 60, o, deg);
+                let dist = RadialDistortion::for_settings(&base, ProcessVersion::V2, &lens);
+                assert!(dist.is_some());
+                let f = base.with_distortion(dist);
+                let p = GeometryPlan::new(
+                    &geometry(deg as f32, CropRect::FULL),
+                    f,
+                    SensorGrid::full_resolution(&f),
+                )
+                .unwrap();
+                assert!(!p.is_identity());
+                let w = p.warp().unwrap();
+                let (ow, oh) = p.output_size();
+                for roi in [
+                    Roi::full(ow, oh),
+                    Roi::new(3, 5, 9, 7),
+                    Roi::new(ow as i32 - 2, 0, 2, 2),
+                ] {
+                    let need = p.input_roi(roi);
+                    for j in roi.y..roi.y + roi.height as i32 {
+                        for i in roi.x..roi.x + roi.width as i32 {
+                            let xx = (i64::from(p.crop_lattice().x) + i64::from(i)) as f32 + 0.5;
+                            let yy = (i64::from(p.crop_lattice().y) + i64::from(j)) as f32 + 0.5;
+                            let (x, y) = w.map_f32(xx, yy);
+                            let (ix, _) = cubic_base(x);
+                            let (iy, _) = cubic_base(y);
+                            assert!(
+                                need.contains(ix - 1, iy - 1) && need.contains(ix + 2, iy + 2),
+                                "{o:?} {amount} {roi:?} ({i}, {j})"
+                            );
+                            let (xd, yd) = p.c_to_input(f64::from(i) + 0.5, f64::from(j) + 0.5);
+                            assert!(
+                                (f64::from(x) - xd).abs() < 1e-3
+                                    && (f64::from(y) - yd).abs() < 1e-3
+                            );
+                        }
+                    }
+                }
+                // 切り抜く前の全体の表示の「画像の外」は D の枠で判定する（回転がなければ画像の外はない）。
+                if deg == 0.0 {
+                    let u = GeometryPlan::uncropped(
+                        &geometry(0.0, CropRect::FULL),
+                        f,
+                        SensorGrid::full_resolution(&f),
+                    )
+                    .unwrap();
+                    assert!(!u.c_pixel_outside_image(0, 0));
+                }
+            }
+        }
     }
 }

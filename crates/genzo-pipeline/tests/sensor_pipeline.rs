@@ -576,9 +576,16 @@ fn process_versions_are_checked() {
     let raw = raw_from(&scene, CfaPattern::RGGB, Some(typical_camera()));
     let plan =
         SensorPlan::new(&raw, &DevelopSettings::default(), &SensorOptions::default()).unwrap();
+    // 新しい写真の既定は処理バージョン 2。
+    assert_eq!(plan.process_version(), ProcessVersion::V2);
+    assert_eq!(plan.context().process_version, ProcessVersion::V2);
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..Default::default()
+    };
+    let plan = SensorPlan::new(&raw, &v1, &SensorOptions::default()).unwrap();
     assert_eq!(plan.process_version(), ProcessVersion::V1);
-    assert_eq!(plan.context().process_version, ProcessVersion::V1);
-    for v in [0, 2, 1000] {
+    for v in [0, 3, 1000] {
         let s = DevelopSettings {
             process_version: v,
             ..Default::default()
@@ -788,6 +795,7 @@ fn physical_raw(w: u32, h: u32, cam: &Mat3, xyz: impl Fn(u32, u32) -> [f64; 3]) 
         as_shot_wb: [(wc[1] / wc[0]) as f32, 1.0, (wc[1] / wc[2]) as f32, 1.0],
         cam_xyz: Some(cam.rows().map(|r| r.map(|v| v as f32))),
         metadata: PhotoMetadata::default(),
+        lens_correction: None,
     }
 }
 

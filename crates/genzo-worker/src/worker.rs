@@ -47,7 +47,7 @@ use genzo_media::{
     MediaError, RgbImage, RgbImage8, Sample, SourceProfile, SrgbAssumption,
     cache_jpeg_from_decoded, cache_jpeg_from_encoded, render_cache_jpeg,
 };
-use genzo_model::{Orientation, PhotoMetadata};
+use genzo_model::{Orientation, PhotoMetadata, WatermarkContent};
 use genzo_raw::{CfaPattern, RawError, RawImage, ThumbnailFormat};
 
 use crate::limits;
@@ -55,7 +55,7 @@ use crate::protocol::{
     GarbageMode, Job, JobOutput, LineRead, LinearImageInfo, MAX_LINE_BYTES, MemoryLimitStatus,
     OversizeMode, PROTOCOL_VERSION, PhotoFormat, PhotoProbe, PongInfo, ProfileSummary,
     RawFrameInfo, Request, Response, ShmRef, ThumbnailInfo, ThumbnailSource, VideoFrameInfo,
-    WorkerError, WorkerErrorKind, read_line_limited,
+    WatermarkInfo, WatermarkRequest, WorkerError, WorkerErrorKind, read_line_limited,
 };
 use crate::shm::{PayloadKind, SHM_MAGIC, ShmHeader, ShmWriter};
 use crate::validate::{MAX_THUMBNAIL_EDGE, sanitize_metadata};
@@ -86,6 +86,39 @@ pub fn main_entry() -> ExitCode {
     run_worker(Vec::new(), std::env::args_os().skip(1).collect())
 }
 
+/// パニックのときに標準エラーに出すバックトレースの大きさの上限（バイト）。本体は標準エラー出力の末尾
+/// （[`crate::client::STDERR_TAIL_BYTES`]）を異常終了の記録に付けるので、パニックの内容（先に出す）が
+/// 末尾に残る大きさにする。
+const PANIC_BACKTRACE_BYTES: usize = 6 * 1024;
+
+/// パニックのとき、標準のフック（内容を標準エラーに出す）の後に、バックトレースを標準エラーに出す
+/// （SYS-07。本体がワーカーの標準エラー出力をログに残す。genzo-worker の `client`）。環境変数
+/// `RUST_BACKTRACE` が指定されていれば、標準のフックが出すので出さない。
+fn install_panic_backtrace() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        if std::env::var_os("RUST_BACKTRACE").is_some_and(|v| v != "0") {
+            return;
+        }
+        eprintln!("genzo-worker のバックトレース:\n{}", panic_backtrace_text());
+    }));
+}
+
+/// 今のスレッドのバックトレース（[`PANIC_BACKTRACE_BYTES`] までに切る）。
+fn panic_backtrace_text() -> String {
+    let mut text = std::backtrace::Backtrace::force_capture().to_string();
+    if text.len() > PANIC_BACKTRACE_BYTES {
+        let mut cut = PANIC_BACKTRACE_BYTES;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n…（以降は省略）");
+    }
+    text
+}
+
 /// この実行ファイルをワーカーとして起動し直すときに、先頭に付ける引数（[`run_worker`] で設定する）。
 static RELAUNCH_PREFIX: std::sync::OnceLock<Vec<OsString>> = std::sync::OnceLock::new();
 
@@ -103,6 +136,7 @@ static RELAUNCH_PREFIX: std::sync::OnceLock<Vec<OsString>> = std::sync::OnceLock
 pub fn run_worker(relaunch_prefix: Vec<OsString>, args: Vec<OsString>) -> ExitCode {
     // 1 つのプロセスでワーカーを実行するのは 1 回だけなので、最初の値を使う。
     let _ = RELAUNCH_PREFIX.set(relaunch_prefix);
+    install_panic_backtrace();
     let mut memory_limit = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -326,6 +360,7 @@ enum Pending {
         path: PathBuf,
         image: RawImage,
         cam_xyz_source: genzo_raw::CamXyzSource,
+        lens_note: Option<String>,
     },
     Image {
         path: PathBuf,
@@ -335,6 +370,11 @@ enum Pending {
         key: ThumbKey,
         jpeg: Vec<u8>,
         info: ThumbnailInfo,
+    },
+    Watermark {
+        request: WatermarkRequest,
+        bitmap: genzo_media::watermark::WatermarkBitmap,
+        info: WatermarkInfo,
     },
 }
 
@@ -409,6 +449,7 @@ impl<'a> Worker<'a> {
                 quality,
                 shm,
             } => self.thumbnail(true, path, max_edge, quality, &shm, pending),
+            Job::RenderWatermark { request, shm } => self.render_watermark(request, &shm, pending),
             Job::TestCrash { .. }
             | Job::TestHang { .. }
             | Job::TestGarbage { .. }
@@ -437,12 +478,13 @@ impl<'a> Worker<'a> {
     }
 
     fn decode_raw(&mut self, path: PathBuf, shm: &ShmRef, pending: Option<Pending>) -> JobResult {
-        let (image, cam_xyz_source) = match pending {
+        let (image, cam_xyz_source, lens_note) = match pending {
             Some(Pending::Raw {
                 path: p,
                 image,
                 cam_xyz_source,
-            }) if p == path => (image, cam_xyz_source),
+                lens_note,
+            }) if p == path => (image, cam_xyz_source, lens_note),
             _ => {
                 check_input(&path)?;
                 let format = detect_photo_format(&path)?;
@@ -452,10 +494,16 @@ impl<'a> Worker<'a> {
                         format!("RAW ではない（{format:?}）"),
                     ));
                 }
-                // 行列の出どころ（render_deps の記録用）も返すため、詳細付きで展開する。
+                // 行列の出どころ（render_deps の記録用）と、埋め込みのレンズ補正の情報が使えなかった理由
+                // （画面に出す）も返すため、詳細付きで展開する。
                 let decoded = genzo_raw::decode_file_with_details(&path).map_err(raw_err)?;
                 let source = decoded.details.cam_xyz_source;
-                (decoded.into_verified_image().map_err(raw_err)?, source)
+                let lens_note = decoded.details.lens_correction_note.clone();
+                (
+                    decoded.into_verified_image().map_err(raw_err)?,
+                    source,
+                    lens_note,
+                )
             }
         };
         let data_len = image.data.len() as u64 * 2;
@@ -464,6 +512,7 @@ impl<'a> Worker<'a> {
                 path,
                 image,
                 cam_xyz_source,
+                lens_note,
             });
             return Err(e);
         }
@@ -499,6 +548,8 @@ impl<'a> Worker<'a> {
             metadata,
             decoder_id: genzo_raw::decoder_id(),
             cam_xyz_source: Some(cam_xyz_source),
+            lens_correction: image.lens_correction,
+            lens_correction_note: lens_note,
         }))
     }
 
@@ -556,6 +607,118 @@ impl<'a> Worker<'a> {
             profile: profile_summary(&decoded.profile),
             alpha_dropped: decoded.alpha_dropped,
         }))
+    }
+
+    /// 透かしを作る（EXP-03。`genzo_media::watermark`）。共有メモリが足りなければ、作った透かしを覚えて
+    /// 送り直しに使う。
+    fn render_watermark(
+        &mut self,
+        request: WatermarkRequest,
+        shm: &ShmRef,
+        pending: Option<Pending>,
+    ) -> JobResult {
+        let (bitmap, info) = match pending {
+            Some(Pending::Watermark {
+                request: r,
+                bitmap,
+                info,
+            }) if r == request => (bitmap, info),
+            _ => {
+                if let Some(p) = request.problem() {
+                    return Err(WorkerError::new(WorkerErrorKind::InvalidRequest, p));
+                }
+                let file = request.content.file();
+                check_input(file)?;
+                match &request.content {
+                    WatermarkContent::Image { path } => {
+                        let bytes = genzo_media::decode::read_file_limited(
+                            path,
+                            genzo_media::watermark::MAX_WATERMARK_IMAGE_BYTES,
+                        )
+                        .map_err(media_err)?;
+                        let b = genzo_media::watermark::image_watermark(
+                            &bytes,
+                            request.size_px,
+                            request.max_width,
+                            request.max_height,
+                            request.color_space,
+                        )
+                        .map_err(media_err)?;
+                        let info = WatermarkInfo {
+                            width: b.width(),
+                            height: b.height(),
+                            missing: String::new(),
+                            shrunk: false,
+                        };
+                        (b, info)
+                    }
+                    WatermarkContent::Text {
+                        text,
+                        font,
+                        font_index,
+                        color,
+                    } => {
+                        let bytes = genzo_media::decode::read_file_limited(
+                            font,
+                            genzo_media::watermark::MAX_FONT_FILE_BYTES,
+                        )
+                        .map_err(media_err)?;
+                        let t = genzo_media::watermark::text_watermark(
+                            &bytes,
+                            *font_index,
+                            text,
+                            *color,
+                            request.size_px,
+                            request.align,
+                            request.max_width,
+                            request.max_height,
+                            request.color_space,
+                        )
+                        .map_err(media_err)?;
+                        let info = WatermarkInfo {
+                            width: t.bitmap.width(),
+                            height: t.bitmap.height(),
+                            missing: t
+                                .missing
+                                .iter()
+                                .take(WatermarkInfo::MAX_MISSING_CHARS)
+                                .collect(),
+                            shrunk: t.shrunk,
+                        };
+                        (t.bitmap, info)
+                    }
+                }
+            }
+        };
+        let data_len = PayloadKind::RgbaU16
+            .data_len_for(info.width, info.height)
+            .ok_or_else(|| internal("寸法が大きすぎる"))?;
+        if let Err(e) = ShmWriter::check_capacity(shm, data_len) {
+            self.pending = Some(Pending::Watermark {
+                request,
+                bitmap,
+                info,
+            });
+            return Err(e);
+        }
+        let mut writer = ShmWriter::open(shm)?;
+        let dst = writer
+            .data_mut(data_len as usize)
+            .ok_or_else(|| internal("共有メモリにデータが収まらない"))?;
+        for (d, v) in dst.chunks_exact_mut(2).zip(bitmap.rgba()) {
+            d.copy_from_slice(&v.to_le_bytes());
+        }
+        writer.finish(
+            ShmHeader {
+                kind: PayloadKind::RgbaU16,
+                width: info.width,
+                height: info.height,
+                data_len,
+                checksum: None,
+            },
+            shm.checksum,
+        )?;
+        Ok(JobOutput::Watermark(info))
     }
 
     fn thumbnail(
@@ -1165,6 +1328,8 @@ fn oversize(mode: OversizeMode, shm: &ShmRef) -> JobResult {
         metadata: PhotoMetadata::default(),
         decoder_id: Some("test-oversize".to_owned()),
         cam_xyz_source: None,
+        lens_correction: None,
+        lens_correction_note: None,
     };
     match mode {
         OversizeMode::TooManyPixels => {
@@ -1228,6 +1393,13 @@ mod tests {
     use super::*;
     use crate::shm::{SHM_HEADER_LEN, ShmArena};
     use genzo_media::jpeg::encode_jpeg;
+
+    #[test]
+    fn panic_backtrace_is_bounded() {
+        let text = panic_backtrace_text();
+        assert!(!text.is_empty());
+        assert!(text.len() <= PANIC_BACKTRACE_BYTES + "\n…（以降は省略）".len());
+    }
 
     fn run(options: &WorkerOptions, requests: &[Request]) -> Vec<Response> {
         let mut input = Vec::new();

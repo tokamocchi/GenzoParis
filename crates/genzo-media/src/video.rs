@@ -316,6 +316,16 @@ pub fn parse_ffprobe_json(json: &[u8]) -> Result<VideoProbe> {
     let creation_time = meaningful(tag(format, "com.apple.quicktime.creationdate"))
         .or_else(|| meaningful(tag(format, "creation_time")))
         .or_else(|| meaningful(tag(Some(stream), "creation_time")));
+    // 機材（LIB-16 の機材の区別）: Apple の端末のタグ → 一般のタグ（make・model）。エンコーダーの名前
+    // （`encoder`）は、変換に使ったソフトの名前のことがあるので使わない。DJI・Sony の動画のタグは実データで
+    // 未確認（PoC-7）。
+    let device = |apple: &str, plain: &str| {
+        meaningful(tag(format, apple))
+            .or_else(|| meaningful(tag(format, plain)))
+            .map(|s| s.chars().take(64).collect::<String>())
+    };
+    let make = device("com.apple.quicktime.make", "make");
+    let model = device("com.apple.quicktime.model", "model");
 
     Ok(VideoProbe {
         metadata: VideoMetadata {
@@ -328,6 +338,8 @@ pub fn parse_ffprobe_json(json: &[u8]) -> Result<VideoProbe> {
             width,
             height,
             creation_time,
+            make,
+            model,
         },
         stream_index,
         rotation_deg,
@@ -356,7 +368,7 @@ const SD_MAX_HEIGHT: u32 = 576;
 /// mpv などのプレイヤーの慣習と同じく、幅 1280 未満かつ高さ 576 以下を SD とする（シネスコで
 /// 切り抜いた 1280×534 などの HD を SD と誤らないよう、高さだけでは決めない）。寸法が分からなければ
 /// SD とみなさない（BT.709）。
-fn untagged_is_sd(probe: &VideoProbe) -> bool {
+pub(crate) fn untagged_is_sd(probe: &VideoProbe) -> bool {
     probe.color_space.is_none()
         && probe
             .coded_size
@@ -365,7 +377,7 @@ fn untagged_is_sd(probe: &VideoProbe) -> bool {
 
 /// ffmpeg の scale フィルターの `in_color_matrix` に渡す値。記録があれば `auto`（記録どおり）、
 /// なければ SD（[`untagged_is_sd`]）は `bt601`、それ以外は `bt709`。
-fn input_color_matrix(probe: &VideoProbe) -> &'static str {
+pub(crate) fn input_color_matrix(probe: &VideoProbe) -> &'static str {
     if probe.color_space.is_some() {
         "auto"
     } else if untagged_is_sd(probe) {
@@ -376,7 +388,7 @@ fn input_color_matrix(probe: &VideoProbe) -> &'static str {
 }
 
 /// `file:` を付けた入力の指定。
-fn file_url(path: &Path) -> OsString {
+pub(crate) fn file_url(path: &Path) -> OsString {
     let mut s = OsString::from("file:");
     s.push(path.as_os_str());
     s
@@ -425,7 +437,7 @@ impl FfmpegTools {
         })
     }
 
-    fn check_status(program: &OsStr, out: &crate::process::ProcessOutput) -> Result<()> {
+    pub(crate) fn check_status(program: &OsStr, out: &crate::process::ProcessOutput) -> Result<()> {
         if out.status.success() {
             Ok(())
         } else {
@@ -606,7 +618,10 @@ mod tests {
         "format": {
             "duration": "12.512000",
             "tags": {"creation_time": "2024-05-01T03:04:05.000000Z",
-                     "com.apple.quicktime.creationdate": "2024-05-01T12:04:05+0900"}
+                     "com.apple.quicktime.creationdate": "2024-05-01T12:04:05+0900",
+                     "com.apple.quicktime.make": "Apple",
+                     "com.apple.quicktime.model": "iPhone 15",
+                     "encoder": "Lavf60.16.100"}
         }
     }"#;
 
@@ -625,6 +640,10 @@ mod tests {
         assert_eq!(m.color_transfer.as_deref(), Some("arib-std-b67"));
         assert_eq!(m.color_primaries.as_deref(), Some("bt2020"));
         assert_eq!(m.creation_time.as_deref(), Some("2024-05-01T12:04:05+0900"));
+        // 機材のタグ（エンコーダーの名前は使わない）。
+        assert_eq!(m.make.as_deref(), Some("Apple"));
+        assert_eq!(m.model.as_deref(), Some("iPhone 15"));
+        assert_eq!(m.camera_name().as_deref(), Some("Apple iPhone 15"));
         assert_eq!(p.color_space.as_deref(), Some("bt2020nc"));
         assert_eq!(p.pix_fmt.as_deref(), Some("yuv420p10le"));
         assert_eq!(

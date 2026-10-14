@@ -101,6 +101,9 @@ pub enum ApiError {
         #[source]
         source: std::io::Error,
     },
+    /// 同じ名前のものがある（プリセットなど。DEV-29・EXP-02。名前を変えてやり直す）。
+    #[error("{0}")]
+    NameConflict(String),
     /// ジョブの実行の基盤のエラー（スケジューラの終了・パニックなど）。
     #[error("ジョブのエラー: {0}")]
     Job(String),
@@ -124,6 +127,7 @@ impl ApiError {
             Self::Cancelled => true,
             Self::Worker(WorkerClientError::Cancelled) => true,
             Self::Pipeline(PipelineError::Cancelled) => true,
+            Self::Media(MediaError::Cancelled) => true,
             Self::Gpu(e) => e.is_cancelled(),
             _ => false,
         }
@@ -264,7 +268,7 @@ fn classify(e: &ApiError) -> (ErrorKind, Option<&'static str>) {
         ApiError::Closed => (K::Closed, None),
         ApiError::CatalogInUse { .. } => (K::Conflict, Some(HINT_IN_USE)),
         ApiError::Cancelled => (K::Cancelled, None),
-        ApiError::PlanOutdated(_) => (K::Conflict, None),
+        ApiError::PlanOutdated(_) | ApiError::NameConflict(_) => (K::Conflict, None),
         ApiError::FileAccess { .. } => (K::FileAccess, Some(HINT_FILE)),
         ApiError::Trash { .. } => (K::TrashUnavailable, Some(HINT_TRASH)),
         ApiError::Catalog(c) => classify_catalog(c),
@@ -299,7 +303,9 @@ fn classify_catalog(e: &CatalogError) -> (ErrorKind, Option<&'static str>) {
             (K::InvalidInput, None)
         }
         CatalogError::Develop(_) => (K::InvalidInput, None),
-        CatalogError::Conflict(_) | CatalogError::AlreadyExists(_) => (K::Conflict, None),
+        CatalogError::Conflict(_)
+        | CatalogError::NameConflict(_)
+        | CatalogError::AlreadyExists(_) => (K::Conflict, None),
         CatalogError::IntegrityCheckFailed(_)
         | CatalogError::Corrupt(_)
         | CatalogError::NotOurDatabase(_) => (K::CatalogCorrupt, Some(HINT_RESTORE)),
@@ -361,6 +367,7 @@ fn classify_media(e: &MediaError) -> (ErrorKind, Option<&'static str>) {
         | MediaError::ToolTimeout { .. }
         | MediaError::ToolOutputTooLarge { .. }
         | MediaError::ToolFailed { .. } => (K::Worker, Some(HINT_FFMPEG)),
+        MediaError::Cancelled => (K::Cancelled, None),
         _ => (K::Internal, None),
     }
 }

@@ -297,6 +297,7 @@ fn settings_are_stored_in_the_catalog() {
             preview_cache_bytes: Some(500_000_000),
             default_utc_offset_minutes: Some(0),
             preview_cache_dir: None,
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(

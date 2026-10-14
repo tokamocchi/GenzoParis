@@ -4,7 +4,7 @@
 
 import { bridge } from "./bridge";
 import { toApiError } from "./errors";
-import type { DisplayTarget, FrameInfo, RegionInfo } from "./types";
+import type { DisplayTarget, FrameInfo, MaskOverlayInfo, RegionInfo, VariantId } from "./types";
 
 export interface Frame<H> {
   header: H;
@@ -39,9 +39,10 @@ export function decodeFrame<H extends { width: number; height: number }>(
 
 async function fetchFrame<H extends { width: number; height: number }>(
   command: string,
+  args?: Record<string, unknown>,
 ): Promise<Frame<H> | null> {
   try {
-    return decodeFrame<H>(await bridge().invokeBinary(command));
+    return decodeFrame<H>(await bridge().invokeBinary(command, args));
   } catch (e) {
     throw toApiError(e);
   }
@@ -51,6 +52,23 @@ async function fetchFrame<H extends { width: number; height: number }>(
 export const fetchDevelopFrame = () => fetchFrame<FrameInfo>("develop_frame");
 /** 表示範囲の描画の最新の結果。 */
 export const fetchRegionFrame = () => fetchFrame<RegionInfo>("region_frame");
+/** ビフォー / アフターの表示のビフォーの最新のプレビュー（DEV-31）。 */
+export const fetchBeforeFrame = () => fetchFrame<FrameInfo>("before_frame");
+/** ビフォーの表示範囲の描画の最新の結果（DEV-31）。 */
+export const fetchBeforeRegionFrame = () => fetchFrame<RegionInfo>("before_region_frame");
+/** 比較表示（LIB-03）の面 `pane` の表示範囲の描画の最新の結果。 */
+export const fetchViewRegionFrame = (pane: number) => fetchFrame<RegionInfo>("view_region_frame", { pane });
+
+/**
+ * マスク `index` の重ねて表示（DEV-18。画素の R・G・B に重み 0〜255。プレビューと同じ格子）。`uncropped` は
+ * クリックした画像の FrameInfo.uncropped（省略時は最新に公開したプレビューの表示）。
+ */
+export const fetchMaskOverlay = (variant_id: VariantId, index: number, uncropped?: boolean) =>
+  fetchFrame<MaskOverlayInfo>("mask_overlay_frame", {
+    variantId: variant_id,
+    index,
+    ...(uncropped === undefined ? {} : { uncropped }),
+  });
 
 let p3Support: boolean | null = null;
 

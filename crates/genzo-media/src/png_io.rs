@@ -1,5 +1,7 @@
 //! PNG の書き出し（8bit / 16bit。EXP-01）。ICC プロファイルは iCCP チャンク、Exif は eXIf チャンク
-//! （PNG 第 3 版（W3C）で規定されたチャンク。版の発行年などは原典で確認すること）に入れる。
+//! （PNG 第 3 版（W3C）で規定されたチャンク。版の発行年などは原典で確認すること）に入れる。説明の
+//! メタデータ（LIB-15）の XMP は、キーワード `XML:com.adobe.xmp` の圧縮しない iTXt チャンクに入れる
+//! （XMP の仕様書の第 3 部。[`encode_png_with_xmp_to`]）。
 //!
 //! iCCP があるときは sRGB・gAMA・cHRM のチャンクを書かない（PNG の規定で、iCCP と sRGB は同時に
 //! 置かない）。
@@ -22,6 +24,54 @@ pub fn encode_png_to<T: Sample, W: Write>(
     exif_tiff: Option<&[u8]>,
     w: W,
 ) -> Result<()> {
+    encode_png_with_xmp_to(img, icc, exif_tiff, None, w)
+}
+
+/// RGB 画像を PNG にして `w` に書く（`xmp` があれば iTXt チャンクにも入れる）。
+pub fn encode_png_with_xmp_to<T: Sample, W: Write>(
+    img: &RgbImage<T>,
+    icc: Option<&[u8]>,
+    exif_tiff: Option<&[u8]>,
+    xmp: Option<&str>,
+    w: W,
+) -> Result<()> {
+    encode_png_with_metadata_to(
+        img,
+        &PngMetadata {
+            icc,
+            exif_tiff,
+            xmp,
+            resolution_ppi: None,
+        },
+        w,
+    )
+}
+
+/// PNG に入れるメタデータ（[`encode_png_with_metadata_to`]）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PngMetadata<'a> {
+    /// ICC プロファイル（iCCP）。
+    pub icc: Option<&'a [u8]>,
+    /// Exif の TIFF の構造（eXIf）。
+    pub exif_tiff: Option<&'a [u8]>,
+    /// XMP のパケット（iTXt）。
+    pub xmp: Option<&'a str>,
+    /// 解像度（ppi。pHYs に 1 メートルあたりの画素の数（四捨五入）で書く。EXP-03）。`None` なら pHYs を書かない。
+    pub resolution_ppi: Option<u32>,
+}
+
+/// RGB 画像を、メタデータ（[`PngMetadata`]）と一緒に PNG にして `w` に書く。
+pub fn encode_png_with_metadata_to<T: Sample, W: Write>(
+    img: &RgbImage<T>,
+    meta: &PngMetadata<'_>,
+    w: W,
+) -> Result<()> {
+    let PngMetadata {
+        icc,
+        exif_tiff,
+        xmp,
+        resolution_ppi,
+    } = *meta;
     let (width, height) = img.dimensions();
     let mut info = png::Info::with_size(width, height);
     info.color_type = png::ColorType::Rgb;
@@ -31,8 +81,23 @@ pub fn encode_png_to<T: Sample, W: Write>(
     };
     info.icc_profile = icc.map(|b| b.to_vec().into());
     info.exif_metadata = exif_tiff.map(|b| b.to_vec().into());
+    if let Some(ppi) = resolution_ppi {
+        // 1 インチ = 0.0254 メートル。
+        let ppm = (f64::from(ppi.max(1)) / 0.0254).round() as u32;
+        info.pixel_dims = Some(png::PixelDimensions {
+            xppu: ppm,
+            yppu: ppm,
+            unit: png::Unit::Meter,
+        });
+    }
     let mut encoder =
         png::Encoder::with_info(w, info).map_err(|e| MediaError::encode(format!("PNG: {e}")))?;
+    if let Some(x) = xmp {
+        // ITXtChunk::new は圧縮しない（png crate の text_metadata）。
+        encoder
+            .add_itxt_chunk(crate::xmp_write::XMP_PNG_KEYWORD.to_owned(), x.to_owned())
+            .map_err(|e| MediaError::encode(format!("PNG: {e}")))?;
+    }
     encoder.set_compression(PNG_COMPRESSION);
     let mut writer = encoder
         .write_header()
@@ -79,6 +144,29 @@ mod tests {
             pos += 12 + len;
         }
         out
+    }
+
+    #[test]
+    fn xmp_is_written_as_an_uncompressed_itxt_chunk() {
+        let img8 = RgbImage8::from_fn(3, 2, |x, _| [x as u8, 0, 0]).unwrap();
+        let xmp = "<x:xmpmeta>清水寺</x:xmpmeta>";
+        let mut bytes = Vec::new();
+        encode_png_with_xmp_to(&img8, None, None, Some(xmp), &mut bytes).unwrap();
+        assert!(chunk_types(&bytes).iter().any(|t| t == b"iTXt"));
+        let reader = png::Decoder::new(std::io::Cursor::new(&bytes))
+            .read_info()
+            .unwrap();
+        let chunk = reader
+            .info()
+            .utf8_text
+            .iter()
+            .find(|c| c.keyword == crate::xmp_write::XMP_PNG_KEYWORD)
+            .expect("XMP の iTXt");
+        assert!(!chunk.compressed);
+        assert_eq!(chunk.get_text().unwrap(), xmp);
+        // xmp なしなら iTXt を書かない。
+        let plain = encode_png(&img8, None, None).unwrap();
+        assert!(!chunk_types(&plain).iter().any(|t| t == b"iTXt"));
     }
 
     #[test]

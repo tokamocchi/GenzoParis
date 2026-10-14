@@ -352,6 +352,8 @@ int32_t genzo_lr_get_meta(genzo_lr *h, genzo_lr_meta *out) {
     out->flip = lr.imgdata.sizes.flip;
     out->width = lr.imgdata.sizes.width;
     out->height = lr.imgdata.sizes.height;
+    copy_str(out->body_serial, sizeof out->body_serial, lr.imgdata.shootinginfo.BodySerial,
+             sizeof lr.imgdata.shootinginfo.BodySerial);
     return 0;
   } catch (...) {
     return GENZO_LR_E_EXCEPTION;

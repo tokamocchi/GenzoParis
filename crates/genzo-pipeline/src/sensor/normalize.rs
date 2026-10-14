@@ -164,6 +164,7 @@ mod tests {
             as_shot_wb: [2.0, 1.0, 1.5, 1.0],
             cam_xyz: None,
             metadata: PhotoMetadata::default(),
+            lens_correction: None,
         }
     }
 

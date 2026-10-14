@@ -38,6 +38,64 @@
   position: absolute;
   display: block;
 }
+
+/* ビフォー / アフター（DEV-31）の面。面の外にはみ出した画像は見せない。 */
+.dv-pane {
+  position: absolute;
+  overflow: hidden;
+}
+.dv-pane-label {
+  position: absolute;
+  top: 8px;
+  transform: translateX(-50%);
+  max-width: 45%;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  background: rgba(20, 20, 20, 0.72);
+  color: var(--fg-1);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 2;
+}
+.dv-split-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--fg-1);
+  opacity: 0.7;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* 中央の下のツールバー（ビフォー / アフター・撮影情報） */
+.dv-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-1);
+  font-size: 12px;
+}
+.dv-bar-label {
+  color: var(--fg-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+.dv-seg {
+  display: inline-flex;
+  gap: 2px;
+}
+.dv-bar-grow {
+  flex: 1;
+}
 .dv-image {
   /* 縮小は滑らかに（等倍以上は画素の境界をそのまま見せたいが、等倍表示は 1:1 で描くので縮小だけ）。 */
   image-rendering: auto;
@@ -142,6 +200,106 @@
   cursor: ew-resize;
 }
 
+/* ローカル補正（マスク。DEV-18・DEV-19）の層。つまみとブラシのときだけポインターを受ける。 */
+.dv-stage.tool-brush {
+  cursor: none;
+}
+.dv-mask-overlay {
+  pointer-events: none;
+}
+.dv-mask {
+  overflow: hidden;
+  pointer-events: none;
+}
+.dv-mask.painting {
+  pointer-events: all;
+  cursor: none;
+}
+.dv-mask.painting .dv-mask-shape {
+  opacity: 0.45;
+}
+.dv-mask-shape {
+  opacity: 0.6;
+}
+.dv-mask-shape.selected {
+  opacity: 1;
+}
+.dv-mask-line {
+  fill: none;
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+.dv-mask-line.zero,
+.dv-mask-line.mid {
+  stroke-dasharray: 6 4;
+}
+.dv-mask-line.mid {
+  stroke-width: 1;
+}
+.dv-mask-shape.subtract .dv-mask-line {
+  stroke: var(--fg-2);
+}
+.dv-mask-axis {
+  stroke: var(--fg-1);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.dv-mask-grip {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: stroke;
+  cursor: move;
+}
+.dv-mask.painting .dv-mask-grip,
+.dv-mask.painting .dv-mask-knob {
+  pointer-events: none;
+}
+.dv-mask-knob {
+  fill: var(--fg-0);
+  stroke: var(--bg-0);
+  stroke-width: 1.5;
+  pointer-events: all;
+  cursor: grab;
+}
+.dv-mask-knob.zero {
+  fill: var(--bg-0);
+  stroke: var(--fg-0);
+}
+.dv-mask-knob.rotate {
+  fill: var(--bg-2);
+  stroke: var(--fg-0);
+  cursor: alias;
+}
+.dv-mask-sample circle,
+.dv-mask-sample line {
+  fill: none;
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+.dv-mask-stroke {
+  fill: none;
+  stroke: rgba(255, 40, 40, 0.35);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+.dv-mask-stroke.erase {
+  stroke: rgba(232, 232, 232, 0.3);
+}
+.dv-mask-cursor circle,
+.dv-mask-cursor line {
+  fill: none;
+  stroke: var(--fg-0);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.dv-mask-cursor circle.inner {
+  stroke-dasharray: 3 3;
+}
+
 /* ---------------------------------------------------------------- 右のパネル */
 
 .dp {
@@ -176,6 +334,72 @@
   color: var(--fg-2);
   margin: 2px 0 8px;
 }
+.dp-wrap {
+  flex-wrap: wrap;
+}
+.dp-mask-list {
+  list-style: none;
+  margin: 4px 0 8px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.dp-mask-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+}
+.dp-mask-list li + li {
+  border-top: 1px solid var(--line);
+}
+.dp-mask-list li.selected {
+  background: var(--bg-3);
+}
+.dp-mask-list select {
+  min-width: 0;
+}
+.dp-mask-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--fg-0);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 0;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dp-mask-hint {
+  color: var(--fg-2);
+  margin-left: 4px;
+}
+.dp-mask-rename {
+  flex: 1;
+  min-width: 0;
+}
+.dp-swatch-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.dp-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid var(--line-strong);
+}
+.dp-lum-bar {
+  height: 10px;
+  margin: 4px 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+}
 .dp-sub {
   margin: 10px 0 4px;
   font-size: 12px;
@@ -187,6 +411,19 @@
   gap: 6px;
   padding: 10px;
   border-bottom: 1px solid var(--line);
+}
+.dp-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 6px;
+  font-size: 12px;
+  color: var(--fg-1);
+  cursor: pointer;
+}
+.dp-check.disabled {
+  color: var(--fg-2);
+  cursor: default;
 }
 .dp-empty {
   padding: 24px 12px;
@@ -397,4 +634,92 @@
 }
 .dl-history li.undone .time {
   color: var(--fg-3);
+}
+
+/* プリセット（DEV-29）・スナップショット（DEV-28） */
+.dl-section-buttons {
+  display: inline-flex;
+  gap: 2px;
+}
+.dl-history li .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dl-history li .menu-button {
+  padding: 0 4px;
+  visibility: hidden;
+}
+.dl-history li:hover .menu-button,
+.dl-history li .menu-button[aria-expanded="true"] {
+  visibility: visible;
+}
+.dl-presets ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.dl-presets li.dl-preset-group {
+  display: block;
+  padding: 0;
+  cursor: default;
+}
+.dl-presets li.dl-preset-group:hover {
+  background: none;
+}
+.dl-preset-folder {
+  display: flex;
+  gap: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.dl-preset-folder .time {
+  margin-left: auto;
+}
+.dl-presets li.nested {
+  padding-left: 18px;
+}
+.dl-presets li.unusable {
+  color: var(--fg-3);
+  cursor: default;
+}
+
+/* カラーグレーディングの色相環（DEV-10） */
+.dp-wheel-row {
+  display: flex;
+  justify-content: center;
+  margin: 6px 0 8px;
+}
+.dp-wheel {
+  position: relative;
+  border-radius: 50%;
+  cursor: crosshair;
+  touch-action: none;
+  box-shadow: 0 0 0 1px var(--line-strong);
+}
+.dp-wheel.disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.dp-wheel-dot {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  border: 2px solid var(--fg-0);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.dp-tabs .dp-tab-swatch {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 4px;
+  border-radius: 50%;
+  vertical-align: 1px;
 }

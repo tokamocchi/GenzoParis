@@ -1,19 +1,44 @@
-//! 選別とメタデータの更新（LIB-04、LIB-14、LIB-15、LIB-16）と、asset の詳細の読み取り。
+//! 選別とメタデータの更新（LIB-04、LIB-14、LIB-15、LIB-16）と、asset の詳細の読み取り（説明の
+//! メタデータの一括編集は `iptc`）。
 //!
 //! 評価・フラグ・カラーラベルは variant に付ける（04 の 3.1 節。仮想コピーごとに違う評価を
 //! 付けられる）。キャプションと撮影日時は asset に付ける。一括の変更は 1 つのトランザクションで行う。
 
 use chrono::{DateTime, Utc};
 use genzo_model::{
-    AssetId, AssetKind, CaptureTime, ColorLabel, Flag, GpsCoord, Orientation, Rating, VariantId,
-    VideoMetadata,
+    AssetId, AssetKind, CaptureTime, ColorLabel, Flag, GpsCoord, MetadataField, Orientation,
+    Rating, VariantId, VideoMetadata, normalize_metadata_value,
 };
 use rusqlite::{OptionalExtension, params};
 
 use crate::catalog::Catalog;
 use crate::error::{CatalogError, Result};
-use crate::register::{capture_from_columns, load_capture, refresh_asset_text};
+use crate::register::{CaptureColumns, capture_from_columns, load_capture, refresh_asset_text};
 use crate::util::{i64_to_u32, ids_to_json, parse_db_utc, parse_enum};
+
+/// asset の撮影日時の列を書く（変えた行の数）。
+pub(crate) fn write_capture(
+    conn: &rusqlite::Connection,
+    asset_id: i64,
+    capture: &CaptureTime,
+) -> Result<usize> {
+    Ok(conn
+        .prepare_cached(
+            "UPDATE asset SET captured_at_raw = ?2, captured_offset = ?3, tz_source = ?4,
+                 tz_assumed = ?5, time_correction_s = ?6, captured_at_utc = ?7, tz_basis = ?8
+             WHERE id = ?1",
+        )?
+        .execute(params![
+            asset_id,
+            capture.raw,
+            capture.offset,
+            capture.tz_source.as_str(),
+            capture.tz_assumed,
+            capture.correction_s,
+            capture.utc_db_string(),
+            capture.basis,
+        ])?)
+}
 
 /// asset の詳細（メタデータの表示用。LIB-14）。
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +51,8 @@ pub struct AssetRecord {
     pub capture: CaptureTime,
     /// カメラ。
     pub camera: Option<String>,
+    /// カメラの本体のシリアル番号（LIB-16 の機材の区別。記録しないカメラ・版 11 より前に登録したものは `None`）。
+    pub camera_serial: Option<String>,
     /// レンズ。
     pub lens: Option<String>,
     /// ISO 感度。
@@ -93,8 +120,13 @@ impl Catalog {
     }
 
     /// キャプションを変更する（`None` または空白だけで削除）。テキスト検索の索引も更新する。
+    ///
+    /// 値は genzo-model の [`normalize_metadata_value`] で整える（前後の空白・制御文字を除く。上限
+    /// [`genzo_model::MAX_METADATA_CHARS`] 文字を超えれば [`CatalogError::InvalidInput`]）。ほかの説明の
+    /// メタデータとまとめて変えるときは [`Catalog::set_asset_metadata`]（LIB-15）。
     pub fn set_caption(&mut self, asset_id: AssetId, caption: Option<&str>) -> Result<()> {
-        let caption = caption.map(str::trim).filter(|s| !s.is_empty());
+        let caption = normalize_metadata_value(MetadataField::Caption, caption)
+            .map_err(|e| CatalogError::InvalidInput(e.to_string()))?;
         let tx = self.conn.transaction()?;
         let n = tx.execute(
             "UPDATE asset SET caption = ?2 WHERE id = ?1",
@@ -108,23 +140,11 @@ impl Catalog {
         Ok(())
     }
 
-    /// 撮影日時を変更する（LIB-16 の時計のずれ・タイムゾーンの修正の保存。
-    /// 修正後の値は [`CaptureTime::with_user_offset`] などで求める）。
+    /// 撮影日時を変更する（既定のタイムゾーンの変更による推定し直しなど。修正後の値は
+    /// [`CaptureTime::with_default_offset`] などで求める）。利用者の修正（LIB-16）は、履歴を残して元に戻せる
+    /// [`Catalog::adjust_capture_times`] で行う。
     pub fn set_capture_time(&mut self, asset_id: AssetId, capture: &CaptureTime) -> Result<()> {
-        let n = self.conn.execute(
-            "UPDATE asset SET captured_at_raw = ?2, captured_offset = ?3, tz_source = ?4,
-                 tz_assumed = ?5, time_correction_s = ?6, captured_at_utc = ?7
-             WHERE id = ?1",
-            params![
-                asset_id.get(),
-                capture.raw,
-                capture.offset,
-                capture.tz_source.as_str(),
-                capture.tz_assumed,
-                capture.correction_s,
-                capture.utc_db_string()
-            ],
-        )?;
+        let n = write_capture(&self.conn, asset_id.get(), capture)?;
         if n == 0 {
             return Err(CatalogError::NotFound(format!("asset {asset_id}")));
         }
@@ -152,7 +172,7 @@ impl Catalog {
                     a.shutter, a.focal, a.width, a.height, a.orientation, a.gps_lat, a.gps_lon,
                     a.caption, a.created_at,
                     m.asset_id, m.duration_s, m.fps, m.codec, m.bit_depth, m.color_transfer,
-                    m.color_primaries
+                    m.color_primaries, a.tz_basis, a.camera_serial
              FROM asset a LEFT JOIN video_meta m ON m.asset_id = a.id
              WHERE a.id = ?1",
         )?;
@@ -185,21 +205,26 @@ impl Catalog {
                 height: to_u32(row.get(14)?, "height")?,
                 // 動画の作成日時の元の文字列は、撮影日時の元の文字列として保存している。
                 creation_time: row.get(1)?,
+                // 機材のタグはメーカーと機種を分けて保存していない（表示名は camera）。
+                make: None,
+                model: None,
             }),
             None => None,
         };
         Ok(AssetRecord {
             id: asset_id,
             kind: parse_enum(&kind)?,
-            capture: capture_from_columns(
-                row.get(1)?,
-                row.get(2)?,
-                &tz_source,
-                row.get(4)?,
-                row.get(5)?,
-                utc.as_deref(),
-            )?,
+            capture: capture_from_columns(CaptureColumns {
+                raw: row.get(1)?,
+                offset: row.get(2)?,
+                tz_source: &tz_source,
+                tz_assumed: row.get(4)?,
+                basis: row.get(27)?,
+                correction_s: row.get(5)?,
+                utc: utc.as_deref(),
+            })?,
             camera: row.get(7)?,
+            camera_serial: row.get(28)?,
             lens: row.get(8)?,
             iso: to_u32(row.get(9)?, "iso")?,
             aperture: row.get(10)?,

@@ -74,6 +74,7 @@ fn write_version_3_catalog_with_utc_only_clip(path: &Path) -> chrono::DateTime<U
         offset: Some("+00:00".to_owned()),
         tz_source: TzSource::Exif,
         tz_assumed: Some("+00:00".to_owned()),
+        basis: None,
         correction_s: 0,
         utc: Some(instant),
     };
@@ -281,7 +282,9 @@ fn search_results_are_refreshed_in_the_background() {
     let updates: Vec<(u64, u64)> = ev
         .iter()
         .filter_map(|e| match e {
-            Event::SearchUpdated { generation, count } => Some((*generation, *count)),
+            Event::SearchUpdated {
+                generation, count, ..
+            } => Some((*generation, *count)),
             _ => None,
         })
         .collect();

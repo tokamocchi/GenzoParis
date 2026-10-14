@@ -9,12 +9,16 @@
 //!   機能フラグが無効の build でも同じ関数があり、[`RawError::Unsupported`] を返す。
 //!   LibRaw の C++ API は C++ のシム（`src/shim/genzo_libraw_shim.cpp`）を通して呼ぶ。
 //! - [`dng`] モジュール: テスト用の合成 DNG の書き出し（機能フラグに関係なく使える）。
+//! - [`lens`] モジュール: RAW に埋め込まれたレンズ補正の情報（Sony の ARW のタグ・DNG の opcode。
+//!   DEV-14）の読み取り。TIFF の構造を自前で読む（機能フラグに関係なく使える。展開ではワーカーの中で
+//!   LibRaw の後に読む）。
 //!
 //! 本体は、ワーカーから受け取ったバッファを [`RawImage::validate`] で検証してから使う。
 
 mod convert;
 mod decode;
 pub mod dng;
+pub mod lens;
 #[cfg(feature = "libraw")]
 mod libraw;
 pub mod thumbnail;
@@ -28,6 +32,10 @@ pub use decode::{
     CamXyzSource, CaptureTimeSource, DecodedRaw, DngColorMatrixInfo, LIBRAW_ENABLED, RawDetails,
     WbSource, decode_bytes, decode_file, decode_file_with_details, decoder_id, extract_thumbnail,
     extract_thumbnail_bytes, libraw_version, read_metadata, read_metadata_bytes,
+};
+pub use lens::{
+    DngLensCorrection, DngVignetteRadial, DngWarpPlane, DngWarpRectilinear, LensCorrectionData,
+    MAX_CA_RATIO_DEVIATION, SonyLensCorrection, read_lens_correction, read_lens_correction_bytes,
 };
 pub use thumbnail::{EmbeddedThumbnail, MAX_THUMBNAIL_BYTES, ThumbnailFormat};
 pub use types::{

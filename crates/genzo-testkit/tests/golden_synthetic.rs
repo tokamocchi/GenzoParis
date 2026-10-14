@@ -35,6 +35,10 @@ fn store() -> GoldenStore {
     GoldenStore::new(genzo_testkit::golden_dir!())
 }
 
+/// 基準を作った処理バージョン。合成の手順は現像のパイプラインを使わず処理バージョンに依存しないので、
+/// 版 1 のまま固定する（処理バージョン 2 を足したときに基準を作り直さないため。決定事項ログ No.120）。
+const SYNTH_PROCESS_VERSION: u32 = 1;
+
 fn check(spec: &GoldenSpec, image: &genzo_testkit::FloatImage) {
     match store().assert_matches(spec, image) {
         GoldenOutcome::Passed(report) => assert!(report.passed()),
@@ -68,7 +72,8 @@ fn colorchecker_after_nov2014_srgb_encoded() {
     .with_input(InputRef::from_bytes(
         "synthetic:colorchecker_after_nov2014",
         params.as_bytes(),
-    ));
+    ))
+    .with_process_version(SYNTH_PROCESS_VERSION);
     check(&spec, &encoded);
 }
 
@@ -95,6 +100,7 @@ fn zone_plate_bayer_normalized() {
     .with_input(InputRef::from_bytes(
         "synthetic:zone_plate_bayer",
         params.as_bytes(),
-    ));
+    ))
+    .with_process_version(SYNTH_PROCESS_VERSION);
     check(&spec, &b0);
 }

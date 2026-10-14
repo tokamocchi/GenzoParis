@@ -234,6 +234,58 @@ struct RenderOutput {
     timings_ms: serde_json::Value,
 }
 
+/// `render --dcp`・`--cube`・`--look-amount`（DEV-17。`bench` も同じ）: ファイルを読み、設定の `profile` をそれを
+/// 指すようにする（指定がなければ `None`）。種類が拡張子と合わない（`--dcp` に .cube など）・読めないならエラー。
+pub(crate) fn profile_files(
+    dcp: Option<&PathBuf>,
+    cube: Option<&PathBuf>,
+    look_amount: Option<f32>,
+    settings: &mut DevelopSettings,
+) -> CliResult<Option<genzo_pipeline::MemoryProfiles>> {
+    let mut paths = Vec::new();
+    for (path, want, opt) in [
+        (dcp, genzo_api::ProfileKind::Camera, "--dcp"),
+        (cube, genzo_api::ProfileKind::Look, "--cube"),
+    ] {
+        if let Some(p) = path {
+            ensure_file(p)?;
+            paths.push((p.clone(), want, opt));
+        }
+    }
+    if let Some(v) = look_amount {
+        settings.profile.look_amount = v;
+    }
+    if paths.is_empty() {
+        settings
+            .validate()
+            .map_err(genzo_model::DevelopError::from)?;
+        return Ok(None);
+    }
+    let files: Vec<PathBuf> = paths.iter().map(|(p, _, _)| p.clone()).collect();
+    let (mem, entries) = genzo_api::load_profile_files(&files)?;
+    for ((path, want, opt), e) in paths.iter().zip(&entries) {
+        if e.kind != *want {
+            return Err(CliError::Usage(format!(
+                "{opt} の {} は{}のファイルではありません（カメラプロファイルは .dcp、ルックは .cube）",
+                path.display(),
+                if *want == genzo_api::ProfileKind::Camera {
+                    "カメラプロファイル"
+                } else {
+                    "ルック"
+                }
+            )));
+        }
+        match e.kind {
+            genzo_api::ProfileKind::Camera => settings.profile.camera = Some(e.id.clone()),
+            genzo_api::ProfileKind::Look => settings.profile.look = Some(e.id.clone()),
+        }
+    }
+    settings
+        .validate()
+        .map_err(genzo_model::DevelopError::from)?;
+    Ok(Some(mem))
+}
+
 /// `render`。
 pub fn render(g: &GlobalArgs, out: Output, a: RenderArgs) -> CliResult<Status> {
     let kind = input_kind(&a.file)?;
@@ -261,10 +313,18 @@ pub fn render(g: &GlobalArgs, out: Output, a: RenderArgs) -> CliResult<Status> {
             a.out.display()
         )));
     }
-    let settings = match &a.settings {
+    let mut settings = match &a.settings {
         Some(src) => merged_settings(&DevelopSettings::default(), &read_json_input(src)?, false)?,
         None => DevelopSettings::default(),
     };
+    // カメラプロファイル・ルックのファイル（DEV-17。取り込まずにメモリに読む。ID はファイルの名前から拡張子を
+    // 除いたもの）。
+    let profiles = profile_files(
+        a.dcp.as_ref(),
+        a.cube.as_ref(),
+        a.look_amount,
+        &mut settings,
+    )?;
 
     let t0 = Instant::now();
     let mut worker = Worker::spawn()?;
@@ -273,7 +333,10 @@ pub fn render(g: &GlobalArgs, out: Output, a: RenderArgs) -> CliResult<Status> {
     let t_decode = t0.elapsed();
 
     let t1 = Instant::now();
-    let engine = Engine::new(EngineConfig::default())?;
+    let mut engine = Engine::new(EngineConfig::default())?;
+    if let Some(p) = profiles {
+        engine = engine.with_profile_resolver(Arc::new(p));
+    }
     let gpu = gpu_renderer(g.gpu, out);
     let outcome = genzo_gpu::export_with_fallback(
         gpu.as_ref(),
@@ -302,6 +365,15 @@ pub fn render(g: &GlobalArgs, out: Output, a: RenderArgs) -> CliResult<Status> {
         }
     };
     let image = outcome.image;
+    // 現像の警告（カメラプロファイルが RAW 以外では使われない・機種が違うなど）。
+    for w in image
+        .warnings
+        .iter()
+        .map(ToString::to_string)
+        .chain(image.unimplemented.iter().map(ToString::to_string))
+    {
+        out.warn(w);
+    }
     let (w, h) = (image.width, image.height);
     let pixels = match image.pixels {
         ExportPixels::Rgb8(v) => DynRgbImage::Rgb8(RgbImage8::from_raw(w, h, v)?),
@@ -336,7 +408,7 @@ pub fn render(g: &GlobalArgs, out: Output, a: RenderArgs) -> CliResult<Status> {
         source_height: loaded.size.1,
         is_raw: loaded.is_raw,
         decoder: loaded.decoder.clone(),
-        export,
+        export: export.clone(),
         settings,
         timings_ms: json!({
             "decode": t_decode.as_secs_f64() * 1e3,

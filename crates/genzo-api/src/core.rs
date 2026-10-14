@@ -99,6 +99,52 @@ pub struct CoreHooks {
     /// スレッドで呼ぶ（値は variant）。
     #[doc(hidden)]
     pub on_regenerate_start: Option<Arc<dyn Fn(genzo_model::VariantId) + Send + Sync>>,
+    /// テスト専用: コピー取り込み（IMP-02）が途中の段階に着いたときに、ジョブのスレッドで呼ぶ
+    /// （[`CopyImportStage`]。動画の書き出し（EXP-05）のコピーでも [`CopyImportStage::Written`] で呼ぶ）。`Err` を返すと、その段階の失敗（書き込み・照合の失敗、公開の後の失敗、カタログへの
+    /// 登録の失敗）として扱うので、失敗したときの後始末（このジョブが作ったファイルだけを消す）を確かめられる。
+    #[doc(hidden)]
+    pub on_copy_import: Option<CopyImportHook>,
+    /// OS のボリューム ID の問い合わせ（FILE-03。既定は [`crate::OsVolumes`]。テストでは偽物を渡して、ドライブの
+    /// 付け外し・マウント先の変化を確かめる）。
+    pub volumes: Arc<dyn crate::volumes::VolumeProbe>,
+    /// テスト専用: アプリの中でのファイル操作（FILE-02）が途中の段階に着いたときに呼ぶ（[`FileOpStage`]）。
+    /// `Err` を返すと、その段階の失敗として扱うので、途中で失敗したときの戻し方を確かめられる。
+    #[doc(hidden)]
+    pub on_file_op: Option<FileOpHook>,
+}
+
+/// [`CoreHooks::on_file_op`] の関数。
+#[doc(hidden)]
+pub type FileOpHook = Arc<dyn Fn(&FileOpStage) -> Result<(), String> + Send + Sync>;
+
+/// アプリの中でのファイル操作の途中の段階（テスト専用のフック [`CoreHooks::on_file_op`] に渡す）。
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileOpStage {
+    /// 1 つのファイルを移した（名前を変えた・コピーして公開した）直後（値は移動先）。`Err` は次のファイルの失敗。
+    Moved(std::path::PathBuf),
+    /// カタログを更新する直前（値は記録の ID）。`Err` はカタログの更新の失敗。
+    Completing(i64),
+}
+
+/// [`CoreHooks::on_copy_import`] の関数。
+#[doc(hidden)]
+pub type CopyImportHook = Arc<dyn Fn(&CopyImportStage) -> Result<(), String> + Send + Sync>;
+
+/// コピー取り込みの途中の段階（テスト専用のフック [`CoreHooks::on_copy_import`] に渡す）。
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyImportStage {
+    /// 一時ファイルに書いて同期した後、内容の照合の前（値は一時ファイル。フックの中で書き換えると照合で
+    /// 失敗する）。
+    Written(std::path::PathBuf),
+    /// 1 つのファイルを公開した直後（値はコピー先）。
+    Published(std::path::PathBuf),
+    /// カタログへの登録の直前（値は登録するファイルの数）。
+    Registering(usize),
+    /// カタログへの登録（コミット）の直後（値は登録したファイルの数）。`Err` は登録の後の処理の失敗（結果の
+    /// 集計・サムネイルの記録の読み取りなど）として扱う。
+    Registered(usize),
 }
 
 /// 現像設定の保存（現像のロックを外して書く保存）の途中の段階（テスト専用のフック
@@ -146,6 +192,9 @@ impl Default for CoreHooks {
             on_region_request: None,
             on_develop_save: None,
             on_regenerate_start: None,
+            on_copy_import: None,
+            volumes: Arc::new(crate::volumes::OsVolumes),
+            on_file_op: None,
         }
     }
 }
@@ -165,12 +214,30 @@ pub(crate) struct Inner {
     pub workers: Mutex<Option<Arc<WorkerPool>>>,
     pub background: Scheduler,
     pub interactive: Scheduler,
+    /// ファイルの内容のハッシュの計算（ORG-03。`identity` の doc）を実行する 1 本のスレッド。長くかかるので、
+    /// 書き出し・プレビューの作り直しの P3 のスレッドを占めないよう分ける。
+    pub maintenance: Scheduler,
+    /// ファイルの内容のハッシュの計算のジョブの状態（`identity` の doc）。
+    pub hash: Mutex<crate::identity::HashJobState>,
+    /// 動画の再生用のファイルの作成（VID-04。`playback` の doc）を実行する 1 本のスレッド。数十秒〜数分かかるので、
+    /// P3 のスレッドを占めないよう分ける。
+    pub video: Scheduler,
+    /// 動画の再生用のファイルのキャッシュと、作っている途中のもの（`playback` の doc）。
+    pub proxies: Mutex<crate::playback::ProxyState>,
+    /// 再生用のファイルを作れるか（ffmpeg とエンコーダー。初めて要るときに 1 度だけ確かめる）。
+    pub proxy_support: std::sync::OnceLock<crate::playback::ProxySupport>,
     pub engine: Engine,
+    /// カメラプロファイル・ルックのライブラリ（DEV-17。`profiles` の doc。`engine` にも渡している）。
+    pub profiles: Arc<crate::profiles::ProfileLibrary>,
+    /// 現像プリセット・書き出しプリセット（DEV-29・EXP-02。`presets` の doc。アプリのデータのフォルダ）。
+    pub presets: crate::presets::PresetStore,
     pub gpu: Mutex<GpuState>,
     pub display: Mutex<DisplayState>,
     /// 検索の状態と、作り直しのスレッドとの受け渡し（`search` の doc）。
     pub search: Arc<SearchShared>,
     pub develop: Arc<DevelopShared>,
+    /// 比較表示（LIB-03）の表示範囲の描画と、展開した入力（`view` の doc）。
+    pub view: crate::view::ViewShared,
     pub jobs: JobRegistry,
     pub plans: Mutex<PlanStore>,
     pub trash: Arc<dyn TrashBackend>,
@@ -184,6 +251,23 @@ pub(crate) struct Inner {
     pub on_develop_save: Option<Arc<dyn Fn(DevelopSaveStage) + Send + Sync>>,
     /// [`CoreHooks::on_regenerate_start`]。
     pub on_regenerate_start: Option<Arc<dyn Fn(VariantId) + Send + Sync>>,
+    /// [`CoreHooks::on_copy_import`]。
+    pub on_copy_import: Option<CopyImportHook>,
+    /// [`CoreHooks::volumes`]。
+    pub volume_probe: Arc<dyn crate::volumes::VolumeProbe>,
+    /// ボリュームのつながりの状態（`volumes` の doc。最後に確かめたもの）。
+    pub volume_states: Mutex<HashMap<genzo_model::VolumeId, crate::volumes::VolumeState>>,
+    /// [`CoreHooks::on_file_op`]。
+    pub on_file_op: Option<FileOpHook>,
+    /// アプリの中でのファイル操作（移動・リネーム・フォルダの操作・再リンク。FILE-02・FILE-04）を 1 つずつに
+    /// するロック（ほかのロックを持たずに最初に取る。持っている間にカタログ・キャッシュのロックを短く取る）。
+    pub file_ops: Mutex<()>,
+    /// 取り込みのジョブ（IMP-01〜06）を 1 つずつにするロック（ジョブの中で、始めから終わりまで持つ）。同時に
+    /// 動く 2 つの取り込みが、どちらも登録の前に重複を確かめ、同じ内容のファイルを両方とも登録しないため
+    /// （IMP-04。PR #4 の Codex の指摘）。
+    pub import_run: Mutex<()>,
+    /// 見つからない写真の確認のジョブの状態（`relink` の doc）。
+    pub check: Mutex<crate::relink::CheckJobState>,
     pub settings: Mutex<CoreSettings>,
     /// 設定の更新（[`Core::update_settings`]）を 1 つずつにするロック（保存・メモリ上の設定への反映・
     /// キャッシュの上限への反映を、別々のロックで行うので、更新全体を守る。ロックの順序の節）。
@@ -401,7 +485,7 @@ impl Core {
 
         // ここから先で失敗したら、カタログを閉じてから返す（開いたままにすると、次に開いたときに
         // 「前回は正常に終了しなかった」と報告してしまうため）。
-        let parts = match build_parts(&mut catalog, &config, &events) {
+        let parts = match build_parts(&mut catalog, &config, &events, hooks.volumes.as_ref()) {
             Ok(p) => p,
             Err(e) => {
                 if let Err(close_err) = catalog.close() {
@@ -412,6 +496,7 @@ impl Core {
         };
         let Parts {
             recovered,
+            volume_states,
             reresolve_capture_times,
             cache_generation,
             raw_decoder,
@@ -421,9 +506,20 @@ impl Core {
             pool,
             background,
             interactive,
+            maintenance,
+            video,
             engine,
+            profiles,
             display,
         } = parts;
+        let proxies = crate::playback::ProxyState::open(&config.data_dir, &settings);
+        // プリセット（DEV-29・EXP-02）: アプリのデータのフォルダ（読むだけならフォルダを作らない）。
+        let presets = crate::presets::PresetStore::new(
+            config
+                .presets_dir
+                .clone()
+                .or_else(crate::presets::default_presets_dir),
+        );
 
         let inner = Arc::new(Inner {
             config,
@@ -433,11 +529,19 @@ impl Core {
             workers: Mutex::new(Some(Arc::new(pool))),
             background,
             interactive,
+            maintenance,
+            hash: Mutex::new(crate::identity::HashJobState::default()),
+            video,
+            proxies: Mutex::new(proxies),
+            proxy_support: std::sync::OnceLock::new(),
             engine,
+            profiles,
+            presets,
             gpu: Mutex::new(GpuState::default()),
             display: Mutex::new(display),
             search: Arc::new(SearchShared::default()),
             develop: Arc::new(DevelopShared::default()),
+            view: crate::view::ViewShared::default(),
             jobs: JobRegistry::default(),
             plans: Mutex::new(PlanStore::default()),
             trash: hooks.trash,
@@ -446,6 +550,13 @@ impl Core {
             on_region_request: hooks.on_region_request,
             on_develop_save: hooks.on_develop_save,
             on_regenerate_start: hooks.on_regenerate_start,
+            on_copy_import: hooks.on_copy_import,
+            volume_probe: hooks.volumes,
+            volume_states: Mutex::new(volume_states),
+            on_file_op: hooks.on_file_op,
+            file_ops: Mutex::new(()),
+            import_run: Mutex::new(()),
+            check: Mutex::new(crate::relink::CheckJobState::default()),
             settings: Mutex::new(settings),
             settings_update: Mutex::new(()),
             reresolve_job: Mutex::new(None),
@@ -504,6 +615,12 @@ impl Core {
         }
         // 前回作り直せなかった L0 / L1（編集の直後に終了したなど）を作り直す。
         crate::previews::regenerate_pending(&inner);
+        // 見つからない写真を確かめる（FILE-04。アプリが許したときだけ）。内容のハッシュの計算と同じ 1 本の
+        // スレッドで、先に動かす（ハッシュの計算は見つからないファイルを飛ばすため）。
+        crate::relink::request_background_check(&inner);
+        // ファイルの内容のハッシュのまだないファイル（版 10 より前から移行したカタログを含む）を、バックグラウンド
+        // で計算する（ORG-03。アプリが許し、設定が有効なときだけ）。
+        crate::identity::request_background_hashing(&inner);
         Ok(Self { inner })
     }
 
@@ -566,17 +683,25 @@ impl Core {
         &self.inner.config.catalog_path
     }
 
-    /// バックグラウンドのジョブ（P3）と現像のプレビュー（P0）がすべて終わるまで待つ（CLI・テスト用）。
+    /// バックグラウンドのジョブ（P3）・ファイルの内容のハッシュの計算・現像のプレビュー（P0）がすべて終わるまで
+    /// 待つ（CLI・テスト用）。
     ///
-    /// ジョブの中で投入されたジョブ（取り込みの後のプレビューの作り直しなど）も待つ。
+    /// ジョブの中で投入されたジョブ（取り込みの後のプレビューの作り直しなど）も待つ。内容のハッシュを
+    /// バックグラウンドで計算する設定（[`CoreConfig::background_hashing`]）では、すべてのファイルを読み終える
+    /// まで待つことになる。
     pub fn wait_idle(&self) {
+        let schedulers = [
+            &self.inner.background,
+            &self.inner.interactive,
+            &self.inner.maintenance,
+        ];
         loop {
-            self.inner.background.wait_idle();
-            self.inner.interactive.wait_idle();
-            if self.inner.background.queued_count() == 0
-                && self.inner.background.running_count() == 0
-                && self.inner.interactive.queued_count() == 0
-                && self.inner.interactive.running_count() == 0
+            for s in schedulers {
+                s.wait_idle();
+            }
+            if schedulers
+                .iter()
+                .all(|s| s.queued_count() == 0 && s.running_count() == 0)
             {
                 break;
             }
@@ -643,10 +768,13 @@ fn close_inner(inner: &Arc<Inner>, mode: CloseMode) -> Result<(), ApiError> {
     if let Some(h) = inner.saver.lock().take() {
         let _ = h.join();
     }
-    // 2. ジョブを取り消して、終わるのを待つ。
+    // 2. ジョブを取り消して、終わるのを待つ（比較表示の描画・展開も取り消し、展開した入力を捨てる）。
     inner.jobs.cancel_all();
+    inner.view.release();
     inner.background.shutdown_now();
     inner.interactive.shutdown_now();
+    inner.maintenance.shutdown_now();
+    inner.video.shutdown_now();
     // キューから実行されずに外れたジョブも、取り消しとして記録して知らせる。
     inner.jobs.reap_unrun(inner);
     // 検索結果の作り直しのスレッドを止める（読み取り専用の接続を閉じる。カタログを閉じる前に）。
@@ -696,6 +824,7 @@ fn close_inner(inner: &Arc<Inner>, mode: CloseMode) -> Result<(), ApiError> {
 /// カタログを開いた後に用意する部品。
 struct Parts {
     recovered: u64,
+    volume_states: HashMap<genzo_model::VolumeId, crate::volumes::VolumeState>,
     reresolve_capture_times: bool,
     cache_generation: String,
     raw_decoder: Option<String>,
@@ -705,7 +834,10 @@ struct Parts {
     pool: WorkerPool,
     background: Scheduler,
     interactive: Scheduler,
+    maintenance: Scheduler,
+    video: Scheduler,
     engine: Engine,
+    profiles: Arc<crate::profiles::ProfileLibrary>,
     display: DisplayState,
 }
 
@@ -714,7 +846,29 @@ fn build_parts(
     catalog: &mut Catalog,
     config: &CoreConfig,
     events: &EventHub,
+    probe: &dyn crate::volumes::VolumeProbe,
 ) -> Result<Parts, ApiError> {
+    // ボリューム（FILE-03）: 以前の形式（パスから作った ID）のボリュームのフォルダを、見えるものから OS の
+    // ボリューム ID のボリュームへ移し、つながっているかを確かめる（つながっていないボリュームのファイルの場所は
+    // 分からないものとして扱う。ファイル操作の確定も、今のマウント先で確かめる）。
+    match crate::volumes::rebind_path_volumes(catalog, probe) {
+        Ok(Some(r)) => events.emit_sticky(Event::Warning {
+            code: WarningCode::VolumesRebound,
+            message: crate::volumes::rebind_message(&r),
+            variant_id: None,
+            path: None,
+        }),
+        Ok(None) => {}
+        Err(e) => events.emit_sticky(Event::Warning {
+            code: WarningCode::VolumesRebound,
+            message: format!(
+                "以前の形式のボリュームのフォルダを、ドライブの ID で識別するように移せませんでした（次に開いたときに試し直します）: {e}"
+            ),
+            variant_id: None,
+            path: None,
+        }),
+    }
+    let volume_states = crate::volumes::refresh_volumes(catalog, probe)?;
     // 終わっていないファイル操作の確定（6.4 節。DATA-07）。
     let recovered = recover_file_ops(catalog, events)?;
     // 設定（SYS-05）。既定のタイムゾーンは、まだ保存していなければ保存する。
@@ -770,12 +924,21 @@ fn build_parts(
         budget.clone(),
     )
     .map_err(|e| ApiError::Job(e.to_string()))?;
-    let interactive =
-        Scheduler::with_budget(1, "genzo-p0", budget).map_err(|e| ApiError::Job(e.to_string()))?;
-    let engine = Engine::new(EngineConfig::default())?;
+    let interactive = Scheduler::with_budget(1, "genzo-p0", budget.clone())
+        .map_err(|e| ApiError::Job(e.to_string()))?;
+    // ファイルの内容のハッシュの計算（ORG-03）。読み込みの小さなバッファだけを使う（メモリの予算の枠は取らない）。
+    let maintenance = Scheduler::with_budget(1, "genzo-hash", budget.clone())
+        .map_err(|e| ApiError::Job(e.to_string()))?;
+    // 動画の再生用のファイルの作成（VID-04）。変換は ffmpeg の子プロセスが行う（本体のメモリの予算の枠は取らない）。
+    let video = Scheduler::with_budget(1, "genzo-video", budget)
+        .map_err(|e| ApiError::Job(e.to_string()))?;
+    // カメラプロファイル・ルック（DEV-17）: 描画のたびに、現像設定の ID からデータのフォルダのライブラリを引く。
+    let profiles = Arc::new(crate::profiles::ProfileLibrary::new(&config.data_dir));
+    let engine = Engine::new(EngineConfig::default())?.with_profile_resolver(profiles.clone());
     let display = DisplayState::assumed_srgb()?;
     Ok(Parts {
         recovered,
+        volume_states,
         reresolve_capture_times,
         cache_generation,
         raw_decoder,
@@ -785,7 +948,10 @@ fn build_parts(
         pool,
         background,
         interactive,
+        maintenance,
+        video,
         engine,
+        profiles,
         display,
     })
 }

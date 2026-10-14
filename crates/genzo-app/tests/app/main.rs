@@ -87,8 +87,48 @@ const TESTS: &[(&str, fn())] = &[
         library::previews_are_not_cached_long_when_settings_go_back,
     ),
     (
+        "library::keywords_and_collections_through_the_app",
+        library::keywords_and_collections_through_the_app,
+    ),
+    (
+        "library::stacks_and_virtual_copies_through_the_app",
+        library::stacks_and_virtual_copies_through_the_app,
+    ),
+    (
+        "library::content_identity_through_the_app",
+        library::content_identity_through_the_app,
+    ),
+    (
+        "library::copy_import_through_the_app",
+        library::copy_import_through_the_app,
+    ),
+    (
+        "library::capture_times_and_timeline_through_the_app",
+        library::capture_times_and_timeline_through_the_app,
+    ),
+    (
+        "library::files_volumes_and_relink_through_the_app",
+        library::files_volumes_and_relink_through_the_app,
+    ),
+    (
+        "library::videos_are_streamed_only_from_the_catalog",
+        library::videos_are_streamed_only_from_the_catalog,
+    ),
+    (
         "develop::develop_and_region_frames_match_their_headers",
         develop::develop_and_region_frames_match_their_headers,
+    ),
+    (
+        "develop::before_frames_match_their_headers",
+        develop::before_frames_match_their_headers,
+    ),
+    (
+        "develop::view_region_frames_match_their_panes",
+        develop::view_region_frames_match_their_panes,
+    ),
+    (
+        "develop::mask_overlay_frames_match_their_headers",
+        develop::mask_overlay_frames_match_their_headers,
     ),
     (
         "backup::corrupt_catalog_is_restored_from_a_backup",

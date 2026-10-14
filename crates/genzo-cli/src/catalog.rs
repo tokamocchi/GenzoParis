@@ -1,4 +1,5 @@
-//! `catalog` のサブコマンド: 作成・情報・詳細チェック・バックアップ・復元（SYS-04、DATA-04・05）。
+//! `catalog` のサブコマンド: 作成・情報・詳細チェック・バックアップ・構造（ORG-07）・復元（SYS-04、
+//! DATA-04・05）。
 
 use std::path::Path;
 
@@ -18,8 +19,73 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: CatalogCommand) -> CliResult<Status
         CatalogCommand::Info => info(g, out),
         CatalogCommand::Check { files } => check(g, out, files),
         CatalogCommand::Backup { to } => backup(g, out, to),
+        CatalogCommand::Schema { sql } => schema(g, out, sql),
         CatalogCommand::Restore { backup, to } => restore(out, &backup, &to),
     }
+}
+
+/// `catalog schema`: カタログの構造（ORG-07）。`--json` は genzo-api の `CatalogSchema`、`--sql` は作る SQL。
+fn schema(g: &GlobalArgs, out: Output, sql: bool) -> CliResult<Status> {
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    let schema = s.core.catalog_schema()?;
+    let path = s.core.config().catalog_path.clone();
+    s.close()?;
+    if out.json {
+        out.print_json(&schema);
+        return Ok(Status::Success);
+    }
+    if sql {
+        out.line(format!(
+            "-- GenzoParis のカタログ（スキーマの版 {}）: {}",
+            schema.schema_version,
+            path.display()
+        ));
+        for o in &schema.objects {
+            out.line(format!("{};\n", o.sql.trim()));
+        }
+        return Ok(Status::Success);
+    }
+    out.line(format!(
+        "カタログ: {}（スキーマの版 {}）",
+        path.display(),
+        schema.schema_version
+    ));
+    out.line(
+        "外部から読むときは、読み取り専用で開き（sqlite3 -readonly など）、公開ビューを使ってください（docs/catalog_schema.md）。",
+    );
+    for t in &schema.tables {
+        let mark = if schema.public_views.contains(&t.name) {
+            "（公開ビュー）"
+        } else {
+            match t.kind.as_str() {
+                "view" => "（ビュー）",
+                "virtual" => "（仮想表）",
+                _ => "",
+            }
+        };
+        let columns: Vec<String> = t
+            .columns
+            .iter()
+            .map(|c| {
+                if c.decl_type.is_empty() {
+                    c.name.clone()
+                } else {
+                    format!("{} {}", c.name, c.decl_type)
+                }
+            })
+            .collect();
+        out.line(format!("{}{mark}: {}", t.name, columns.join(", ")));
+    }
+    let indexes = schema.objects.iter().filter(|o| o.kind == "index").count();
+    let triggers = schema
+        .objects
+        .iter()
+        .filter(|o| o.kind == "trigger")
+        .count();
+    out.line(format!(
+        "索引 {indexes} 個・トリガー {triggers} 個（--sql で作る SQL を表示）"
+    ));
+    Ok(Status::Success)
 }
 
 fn shutdown_text(s: PreviousShutdown) -> &'static str {

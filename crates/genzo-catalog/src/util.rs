@@ -83,6 +83,23 @@ pub(crate) fn non_empty_name<'a>(name: &'a str, what: &str) -> Result<&'a str> {
     Ok(trimmed)
 }
 
+/// 名前（キーワード・コレクション）を確かめる: 前後の空白を除いて空でなく、`max_chars` 文字（Unicode の
+/// スカラー値の数）以下で、改行・タブなどの制御文字を含まない。前後の空白を除いた名前を返す。
+pub(crate) fn checked_name<'a>(name: &'a str, what: &str, max_chars: usize) -> Result<&'a str> {
+    let name = non_empty_name(name, what)?;
+    if name.chars().count() > max_chars {
+        return Err(CatalogError::InvalidInput(format!(
+            "{what}は {max_chars} 文字までです"
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(CatalogError::InvalidInput(format!(
+            "{what}に改行・タブなどの制御文字は使えません"
+        )));
+    }
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -122,5 +139,9 @@ mod tests {
         assert_eq!(non_empty_name("  a ", "名前").unwrap(), "a");
         assert!(non_empty_name("   ", "名前").is_err());
         assert!(non_empty_name("a\0b", "名前").is_err());
+        assert_eq!(checked_name(" あい ", "名前", 2).unwrap(), "あい");
+        assert!(checked_name("あいう", "名前", 2).is_err());
+        assert!(checked_name("a\nb", "名前", 10).is_err());
+        assert!(checked_name("a\u{85}b", "名前", 10).is_err());
     }
 }

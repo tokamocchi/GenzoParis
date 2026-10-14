@@ -27,7 +27,7 @@ const nonEmpty = (v: unknown[] | null | undefined) => Array.isArray(v) && v.leng
 const isSet = (v: unknown) => v !== null && v !== undefined;
 
 /**
- * 有効な条件の数（フォルダは「どこを見るか」なので数えない）。撮影日の範囲は開始・終了をまとめて 1 つ、
+ * 有効な条件の数（フォルダ・コレクションは「どこを見るか」なので数えない）。撮影日の範囲は開始・終了をまとめて 1 つ、
  * 評価の下限・上限もまとめて 1 つに数える。
  */
 export function activeConditionCount(f: SearchFilter): number {
@@ -50,13 +50,18 @@ export function activeConditionCount(f: SearchFilter): number {
   return n;
 }
 
-/** 条件をすべて解除する（フォルダの選択は残す）。 */
+/**
+ * 条件をすべて解除する（フォルダ・コレクションの選択と、スタックをすべて展開する表示の指定（expand_stacks。
+ * 絞り込みの条件ではない）は残す）。
+ */
 export function clearConditions(f: SearchFilter): SearchFilter {
   const out: SearchFilter = {};
   if (isSet(f.folder_id)) {
     out.folder_id = f.folder_id;
     out.include_subfolders = f.include_subfolders ?? false;
   }
+  if (isSet(f.collection_id)) out.collection_id = f.collection_id;
+  if (f.expand_stacks) out.expand_stacks = true;
   return out;
 }
 
@@ -260,6 +265,19 @@ export function isNumericRangeReversed(f: SearchFilter, r: NumericRange): boolea
 /** 数値の範囲の条件のうち、指定しているものの数（下限・上限をまとめて 1 つ）。 */
 export function numericRangeCount(f: SearchFilter): number {
   return NUMERIC_RANGES.filter((r) => isSet(f[r.min]) || isSet(f[r.max])).length;
+}
+
+/**
+ * 「詳しい条件」の中で指定しているものの数（数値の範囲・マスターだけ・スタックをすべて展開・ファイルの状態
+ * （見つからない写真だけ。FILE-04）。ボタンの数の表示）。
+ */
+export function moreConditionCount(f: SearchFilter): number {
+  return (
+    numericRangeCount(f) +
+    (f.masters_only ? 1 : 0) +
+    (f.expand_stacks ? 1 : 0) +
+    (Array.isArray(f.file_statuses) && f.file_statuses.length > 0 ? 1 : 0)
+  );
 }
 
 // ---------------------------------------------------------------------------

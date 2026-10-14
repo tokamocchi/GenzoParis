@@ -10,7 +10,9 @@ use genzo_media::MAX_IMAGE_PIXELS;
 use genzo_model::PhotoMetadata;
 use genzo_raw::{MAX_PIXELS, RawImage};
 
-use crate::protocol::{LinearImageInfo, RawFrameInfo, ThumbnailInfo};
+use crate::protocol::{
+    LinearImageInfo, RawFrameInfo, ThumbnailInfo, WatermarkInfo, WatermarkRequest,
+};
 use crate::shm::{BufferError, PayloadKind, ReceivedPayload};
 
 /// 受け取るサムネイルの JPEG の大きさの上限（バイト）。
@@ -37,6 +39,31 @@ pub(crate) fn sanitize_metadata(m: &mut PhotoMetadata) {
     if m.gps.is_some_and(|g| !g.is_valid()) {
         m.gps = None;
     }
+}
+
+/// ワーカーが返した説明の文（埋め込みのレンズ補正の情報が使えなかった理由など）の文字数の上限。
+///
+/// **仮置き**: 300 文字（理由の文は 100 文字前後）。
+pub const MAX_WORKER_NOTE_CHARS: usize = 300;
+
+/// ワーカーが返した説明の文を、画面・CLI に出せる形にする（制御文字は空白にし、前後の空白を除き、
+/// [`MAX_WORKER_NOTE_CHARS`] 文字で切る（切ったら「…」を付ける）。空なら `None`）。乗っ取られたワーカーが
+/// 長い文・端末の制御文字を送っても、そのまま出さないため。
+pub(crate) fn sanitize_note(note: Option<String>) -> Option<String> {
+    let note = note?;
+    let cleaned: String = note
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut out: String = trimmed.chars().take(MAX_WORKER_NOTE_CHARS).collect();
+    if trimmed.chars().count() > MAX_WORKER_NOTE_CHARS {
+        out.push('…');
+    }
+    Some(out)
 }
 
 /// 寸法を確かめて画素数を返す。
@@ -107,6 +134,8 @@ pub(crate) fn raw_image(
         as_shot_wb: info.as_shot_wb,
         cam_xyz: info.cam_xyz,
         metadata,
+        // 埋め込みのレンズ補正の情報（節点の数・係数の範囲は validate で確かめる）。
+        lens_correction: info.lens_correction,
     };
     image
         .validate()
@@ -187,6 +216,63 @@ pub(crate) fn thumbnail_jpeg(
         ));
     }
     Ok(data)
+}
+
+/// 透かし（RGBA の 16bit）を複製する（EXP-03）。寸法が依頼の上限（文字の外接矩形の端の余裕の 2 画素を足した値）以下で、
+/// 画素数の上限（`genzo_media::watermark::MAX_WATERMARK_PIXELS`）以下で、長さが寸法と合うことを確かめる。値はどれも
+/// 0〜65535 で使えるので、中身は確かめない。
+pub(crate) fn watermark(
+    payload: &ReceivedPayload<'_>,
+    info: &WatermarkInfo,
+    request: &WatermarkRequest,
+) -> Result<genzo_media::watermark::WatermarkBitmap, BufferError> {
+    let h = *payload.header();
+    if h.kind != PayloadKind::RgbaU16 {
+        return Err(BufferError::UnexpectedKind {
+            expected: PayloadKind::RgbaU16,
+            actual: h.kind,
+        });
+    }
+    checked_pixels(
+        h.width,
+        h.height,
+        genzo_media::watermark::MAX_WATERMARK_PIXELS,
+    )?;
+    if h.width > request.max_width.saturating_add(2)
+        || h.height > request.max_height.saturating_add(2)
+    {
+        return Err(BufferError::Invalid(format!(
+            "透かしの寸法 {} × {} が上限 {} × {} を超える",
+            h.width, h.height, request.max_width, request.max_height
+        )));
+    }
+    same_dimensions(payload, (info.width, info.height))?;
+    let expected = PayloadKind::RgbaU16.data_len_for(h.width, h.height).ok_or(
+        BufferError::InvalidDimensions {
+            width: h.width,
+            height: h.height,
+        },
+    )?;
+    expect_len(payload, expected)?;
+    let data = read_u16_le(payload, expected)?;
+    genzo_media::watermark::WatermarkBitmap::new(h.width, h.height, data)
+        .map_err(|e| BufferError::Invalid(e.to_string()))
+}
+
+/// フォントにない文字の一覧（ワーカーが返したもの）を整える（制御文字・空白を除き、重なりを除き、
+/// [`WatermarkInfo::MAX_MISSING_CHARS`] 文字まで）。
+pub(crate) fn sanitize_missing(missing: &str) -> Vec<char> {
+    let mut out = Vec::new();
+    for c in missing.chars() {
+        if c.is_control() || c.is_whitespace() || out.contains(&c) {
+            continue;
+        }
+        out.push(c);
+        if out.len() >= WatermarkInfo::MAX_MISSING_CHARS {
+            break;
+        }
+    }
+    out
 }
 
 /// データの長さ `len`（バイト。寸法との一致は確かめ済み）を `usize` にする。
@@ -286,7 +372,23 @@ mod tests {
             metadata: PhotoMetadata::default(),
             decoder_id: Some("test".into()),
             cam_xyz_source: None,
+            lens_correction: None,
+            lens_correction_note: None,
         }
+    }
+
+    #[test]
+    fn worker_notes_are_trimmed_and_cleaned() {
+        assert_eq!(sanitize_note(None), None);
+        assert_eq!(sanitize_note(Some(" \n ".into())), None);
+        assert_eq!(
+            sanitize_note(Some("係数が\u{1b}[31m不正\n".into())).as_deref(),
+            Some("係数が [31m不正")
+        );
+        let long = "あ".repeat(MAX_WORKER_NOTE_CHARS + 10);
+        let got = sanitize_note(Some(long)).unwrap();
+        assert_eq!(got.chars().count(), MAX_WORKER_NOTE_CHARS + 1);
+        assert!(got.ends_with('…'));
     }
 
     fn u16_bytes(values: &[u16]) -> Vec<u8> {
@@ -302,6 +404,34 @@ mod tests {
         let img = raw_image(&p, raw_info(6, 4)).unwrap();
         assert_eq!(img.data, values);
         assert_eq!(img.cfa, CfaPattern::RGGB);
+    }
+
+    /// 埋め込みのレンズ補正の情報（DEV-14）は受け渡し、不正な値（乗っ取られたワーカーの送った値など）は
+    /// 使わない。
+    #[test]
+    fn raw_carries_and_checks_the_lens_correction() {
+        use genzo_raw::{LensCorrectionData, SonyLensCorrection};
+        let f = Fixture::new();
+        let buf = f.buffer(PayloadKind::CfaU16, 6, 4, &u16_bytes(&[600; 24]));
+        let p = buf.open_payload(PayloadKind::CfaU16, false).unwrap();
+        let lens = LensCorrectionData::SonyArw(SonyLensCorrection {
+            distortion: vec![-3; 16],
+            ..Default::default()
+        });
+        let mut ok = raw_info(6, 4);
+        ok.lens_correction = Some(lens.clone());
+        assert_eq!(raw_image(&p, ok).unwrap().lens_correction, Some(lens));
+        let mut bad = raw_info(6, 4);
+        bad.lens_correction = Some(LensCorrectionData::SonyArw(SonyLensCorrection {
+            vignetting: vec![0; 200],
+            ..Default::default()
+        }));
+        assert!(matches!(raw_image(&p, bad), Err(BufferError::Invalid(_))));
+        // JSON にない（古いワーカー）なら None。
+        let mut json = serde_json::to_value(raw_info(6, 4)).unwrap();
+        json.as_object_mut().unwrap().remove("lens_correction");
+        let info: RawFrameInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.lens_correction, None);
     }
 
     #[test]

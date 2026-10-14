@@ -3,13 +3,8 @@
 // # 写真
 //
 // - 標準プレビュー（L1。長辺 2560）を画面に合わせて中央に出す。L1 が読めるまでは、サムネイル（L0）を同じ
-//   大きさで出す（PERF-05: 先に埋め込み JPEG、後で現像結果）。
-// - L1 がまだない（404）ときは、genzo:// の処理がコアに作る処理を予約する（genzo-app の protocol.rs）。
-//   要求し直すたびにコアの作り直しが最初からになるので、404 になった写真は作成待ちとして覚え（l1Status.ts）、
-//   作り終えた知らせ（thumbnail_updated）が届くまで要求しない。rev が変われば URI が変わって読み直す。
-//   rev が同じまま（L1 だけがキャッシュの回収で消えていた）のときは、URI に印（retry）を付けて読み直す。
-//   知らせを取りこぼした場合に備え、作成待ちのまま L1_CHECK_MS たったら、作る処理を予約しない preview_path で
-//   1 回だけ確かめる。
+//   大きさで出す（PERF-05: 先に埋め込み JPEG、後で現像結果）。L1 の作成待ち・読み直しは previewImages.tsx
+//   （比較表示・選別表示と共通）。
 // - 写真送りの途中（前の写真から L1_SETTLE_MS 未満で移った）は、L1 の要求と先読みを L1_SETTLE_MS 待つ
 //   （通り過ぎる写真ごとに作る処理を予約しない）。
 // - 前後の写真の L1 を先に読んでおく（PERF-04。prefetch.ts）。表示中の写真の L1 が読めた（または作成待ちに
@@ -22,43 +17,41 @@
 //   拡大した L1 を出しておく。
 // - Z・Esc・クリック（ドラッグでない）で全体表示に戻る。写真が変わったら全体表示に戻る（写真ごとに
 //   PhotoView を作り直す）。開いた写真は閉じない（現像の画面に切り替えたときに、そのまま使える）。
-// - I で情報（ファイル名・撮影日時・評価）の表示を切り替える。
+// - I で撮影情報（LIB-17。情報 1 → 情報 2 → なし。項目は設定の「表示」で選ぶ）の表示を切り替える
+//   （InfoOverlay。現像の画面と同じ表示）。
 //
 // # 動画
 //
-// - サムネイル（代表フレーム。VID-02）を大きく出し、長さ・フレームレート・コーデック・解像度（VID-03）と
-//   「OS のアプリで再生」（VID-04 は v1 のため OS のアプリを使う）を出す。
+// - アプリの中で再生する（VID-04。VideoPlayer.tsx）。再生する前は、サムネイル（代表フレーム。VID-02）を出す。
+//   長さ・フレームレート・コーデック・解像度（VID-03）と「OS のアプリで再生」も出す。
 
 import { type PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import * as appApi from "../api/app";
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
 import { type Frame, drawFrame } from "../api/frames";
 import type { RegionInfo, VariantDetails, VariantId, VariantSummary } from "../api/types";
-import { previewUrl, thumbUrl } from "../api/uri";
-import { FlagMark, LabelDot, Stars } from "../components/Marks";
-import { formatCaptureTime, formatDuration } from "../format";
+import { previewUrl } from "../api/uri";
 import { isTyping, useHotkeys } from "../keyboard";
 import { actions, appStore, useApp } from "../state/app";
 import { useDevelop } from "../state/develop";
+import { openRelink } from "../state/files";
 import { cancelRegionRender, regionFor, renderRegion } from "../state/region";
 import { searchCache, useSearchVersion } from "../state/search";
 import { useCoreEvent, useViewRect } from "./hooks";
+import { InfoOverlay } from "./InfoOverlay";
+import { cycleInfoMode } from "./infoItems";
 import { resolveOutputSize } from "./outputSize";
-import { l1Status, prefetchL1, prefetchState } from "./prefetch";
+import { prefetchL1 } from "./prefetch";
+import { SlotImages, usePreviewImages } from "./previewImages";
 import {
   DRAG_THRESHOLD_PX,
-  L1_CHECK_MS,
   MAX_REGION_PIXELS,
   PAN_SETTLE_MS,
   type Rect,
   clampCenter,
   expandRegion,
   fitRect,
-  formatCodec,
-  formatFps,
-  formatResolution,
   l1RequestDelay,
   limitRegion,
   normalizedPoint,
@@ -68,37 +61,16 @@ import {
   regionUsable,
   sameRect,
   snapToDevicePixels,
-  withRetryParam,
   zoomOffset,
 } from "./viewerMath";
+import { VideoPlayer } from "./VideoPlayer";
 import "./viewer.css";
-
-/** L1 の読み直しの回数の上限（同じ rev のまま読めない場合。仮置き）。 */
-const MAX_L1_RETRY = 5;
 
 /** 一時的な知らせ（等倍表示を使えない理由など）を出しておく時間（ミリ秒。仮置き）。 */
 const MESSAGE_MS = 5000;
 
 /** 動画の詳細を読みに行くまでの待ち（ミリ秒。写真送りの間に読みに行かない。仮置き）。 */
 const DETAILS_DELAY_MS = 100;
-
-const SHOW_INFO_KEY = "genzo.loupe.showInfo";
-
-function loadShowInfo(): boolean {
-  try {
-    return localStorage.getItem(SHOW_INFO_KEY) !== "0";
-  } catch {
-    return true;
-  }
-}
-
-function saveShowInfo(v: boolean): void {
-  try {
-    localStorage.setItem(SHOW_INFO_KEY, v ? "1" : "0");
-  } catch {
-    // 保存できなくても、このセッションでは切り替える。
-  }
-}
 
 // ---------------------------------------------------------------------------
 // ルーペ
@@ -127,7 +99,6 @@ export function Loupe() {
   const detailsVersion = useApp((s) => s.detailsVersion);
   const revOverride = useApp((s) => (current !== null ? s.thumbRevs[current] : undefined));
   useSearchVersion();
-  const [showInfo, setShowInfo] = useState(loadShowInfo);
 
   // 写真送りの間隔（表示する写真が変わったときだけ、描画の中で更新する。StrictMode の 2 回目の描画では
   // 同じ写真なので変わらない）。
@@ -158,8 +129,7 @@ export function Loupe() {
   useHotkeys(
     {
       i: () => {
-        saveShowInfo(!showInfo);
-        setShowInfo(!showInfo);
+        cycleInfoMode();
       },
     },
     hotkeysEnabled,
@@ -187,7 +157,13 @@ export function Loupe() {
   return (
     <div className="loupe">
       {summary.kind === "video" ? (
-        <VideoView key={current} summary={summary} details={details} thumbRev={thumbRev} />
+        <VideoPlayer
+          key={current}
+          summary={summary}
+          details={details}
+          thumbRev={thumbRev}
+          hotkeysEnabled={hotkeysEnabled}
+        />
       ) : (
         <PhotoView
           key={current}
@@ -198,7 +174,13 @@ export function Loupe() {
           onL1Settled={setSettledSeq}
         />
       )}
-      {showInfo && <InfoOverlay summary={summary} index={currentIndex} count={count} />}
+      <InfoOverlay
+        summary={summary}
+        details={details}
+        index={currentIndex}
+        count={count}
+        version={detailsVersion}
+      />
       <FileNotice summary={summary} />
     </div>
   );
@@ -285,61 +267,6 @@ function usePrefetchNeighbors(currentIndex: number | null, nav: Navigation, read
 }
 
 // ---------------------------------------------------------------------------
-// 画像の読み込み（読めるまで前の画像を出しておく）
-// ---------------------------------------------------------------------------
-
-interface LoadedImage {
-  url: string;
-  width: number;
-  height: number;
-}
-
-function useImageSlot(url: string | null) {
-  const [shown, setShown] = useState<LoadedImage | null>(null);
-  const [failed, setFailed] = useState<string | null>(null);
-  return {
-    url,
-    /** 最後に読めた画像（URI が変わっても、新しい画像が読めるまで出しておく）。 */
-    shown,
-    ready: url !== null && shown?.url === url,
-    failed: url !== null && failed === url,
-    onLoad: (u: string, img: HTMLImageElement) =>
-      setShown({ url: u, width: img.naturalWidth, height: img.naturalHeight }),
-    onError: (u: string) => setFailed(u),
-  };
-}
-
-type ImageSlot = ReturnType<typeof useImageSlot>;
-
-/** 読めた画像と、読み込み中の画像（隠す）。同じ URI の要素は作り直さない（key が URI）。 */
-function SlotImages(props: { slot: ImageSlot; onError?: (url: string) => void }) {
-  const { slot } = props;
-  const urls: string[] = [];
-  if (slot.shown) urls.push(slot.shown.url);
-  if (slot.url && slot.url !== slot.shown?.url && !slot.failed) urls.push(slot.url);
-  return (
-    <>
-      {urls.map((u) => (
-        <img
-          key={u}
-          className="loupe-img"
-          src={u}
-          alt=""
-          draggable={false}
-          decoding="async"
-          style={u === slot.shown?.url ? undefined : { visibility: "hidden" }}
-          onLoad={(e) => slot.onLoad(u, e.currentTarget)}
-          onError={() => {
-            slot.onError(u);
-            props.onError?.(u);
-          }}
-        />
-      ))}
-    </>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // 写真
 // ---------------------------------------------------------------------------
 
@@ -372,92 +299,15 @@ function PhotoView(props: {
     };
   }, []);
 
-  // --- 画像（L0・L1） ---
-  const [retry, setRetry] = useState<{ rev: string | null; n: number }>({ rev: thumbRev, n: 0 });
-  const retryCount = retry.rev === thumbRev ? retry.n : 0;
-  const revRef = useRef(thumbRev);
-  revRef.current = thumbRev;
-  const bumpRetry = () =>
-    setRetry((r) => {
-      const n = r.rev === revRef.current ? r.n : 0;
-      return n >= MAX_L1_RETRY ? r : { rev: revRef.current, n: n + 1 };
-    });
-  const l0 = useImageSlot(thumbRev ? thumbUrl(id, thumbRev) : null);
-  const l1Url = withRetryParam(previewUrl(id, thumbRev), retryCount);
-  // 作成待ち（404 になった。作り終えた知らせを待つ）・作れなかった間は要求しない（l1Status.ts）。
-  const l1State = l1Status.state(id, thumbRev, Date.now());
-  // 写真送りの途中は少し待ってから要求する。先読み中なら、その結果を待つ（同じ URI を重ねて要求しない）。
-  const [l1Go, setL1Go] = useState(() => {
-    const p = prefetchState(l1Url);
-    return p ? p.ready : nav.delay <= 0;
+  // --- 画像（L0・L1。previewImages.tsx） ---
+  // 写真送りの途中は少し待ってから L1 を要求する。
+  const { l0, l1, l1Failed, onL1Error, l1Settled, l1Gone } = usePreviewImages({
+    summary,
+    thumbRev,
+    waitMs: () => remainingDelay(nav),
   });
-  useEffect(() => {
-    if (l1Go) return;
-    let cancelled = false;
-    const p = prefetchState(l1Url);
-    if (p) {
-      void p.done.then(() => {
-        if (!cancelled) setL1Go(true);
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
-    const timer = setTimeout(() => setL1Go(true), remainingDelay(nav));
-    return () => clearTimeout(timer);
-    // 写真ごとに作り直す部品なので、待つのは最初の 1 回だけ。
-  }, [l1Go]);
-  const l1 = useImageSlot(l1Go && l1State === "none" ? l1Url : null);
-  // 要求を始めたときの通し番号（404 と作り終えた知らせの順序の入れ替わりを見分ける。l1Status.ts）。
-  const l1Request = useRef<{ url: string | null; rev: string | null; stamp: number }>({
-    url: null,
-    rev: null,
-    stamp: 0,
-  });
-  if (l1Request.current.url !== l1.url) {
-    l1Request.current = { url: l1.url, rev: thumbRev, stamp: l1Status.stamp() };
-  }
-  const l1ReadyRef = useRef(false);
-  l1ReadyRef.current = l1.ready;
-  const [previewFailed, setPreviewFailed] = useState(false);
-  const l1Failed = previewFailed || l1State === "failed";
-
-  // L1 が読めない: 作成待ちにする（作る処理は genzo:// の処理が予約した。作り終えた知らせを待つ）。要求の
-  // 後に作り終えていれば、すぐ読み直す。もう使っていない URI の失敗は使わない（要求を始めた時点が分からない）。
-  const onL1Error = (url: string) => {
-    const r = l1Request.current;
-    if (r.url !== url || !mounted.current) return;
-    if (!l1Status.markMissing(id, r.rev, r.stamp, Date.now())) bumpRetry();
-  };
-  useCoreEvent((e) => {
-    if (e.type === "thumbnail_updated" && e.variant_id === id) {
-      // rev が変われば URI が変わって読み直す。同じ rev なら印を付けて読み直す（作成待ちの印は prefetch.ts が
-      // 先に消している）。
-      if (!l1ReadyRef.current && e.rev === revRef.current) bumpRetry();
-    } else if (e.type === "warning" && e.code === "preview_failed" && e.variant_id === id) {
-      setPreviewFailed(true);
-    }
-  });
-
-  // 作成待ちのまま L1_CHECK_MS たった: 知らせを取りこぼしていないか、作る処理を予約しない preview_path で
-  // 1 回だけ確かめる（request_preview は、なければ作り直しを予約し直すので使わない）。
-  useEffect(() => {
-    if (l1State !== "waiting" || !fileOk) return;
-    const timer = setTimeout(() => {
-      core
-        .execute({ type: "preview_path", variant_id: id }, "path")
-        .then((r) => {
-          if (!r.path || !mounted.current) return;
-          l1Status.clear(id);
-          bumpRetry();
-        })
-        .catch(() => undefined);
-    }, L1_CHECK_MS);
-    return () => clearTimeout(timer);
-  }, [l1State, fileOk, id]);
 
   // 表示中の写真の L1 が決まった（読めた・作成待ち・作れなかった）: 前後の先読みを始めてよい。
-  const l1Settled = l1.ready || l1.failed || l1State !== "none";
   const { onL1Settled } = props;
   useEffect(() => {
     if (l1Settled) onL1Settled(nav.seq);
@@ -734,8 +584,6 @@ function PhotoView(props: {
   const rh = region && region.header.variant_id === id ? region.header : null;
   const background = l1.shown?.url ?? l0.shown?.url ?? null;
 
-  // L1 を今は出せない（読めなかった・作成待ち・作れなかった）。
-  const l1Gone = l1.failed || l1State !== "none";
   let status: string | null = null;
   if (zoom.kind === "preparing") status = "等倍表示を準備しています…";
   else if (zoomed && busy) status = rh ? "描き直しています…" : "等倍で描いています…";
@@ -826,127 +674,8 @@ function PhotoView(props: {
 }
 
 // ---------------------------------------------------------------------------
-// 動画
-// ---------------------------------------------------------------------------
-
-function VideoView(props: { summary: VariantSummary; details: VariantDetails | null; thumbRev: string | null }) {
-  const { summary, details } = props;
-  const id = summary.variant_id;
-  const viewRef = useRef<HTMLDivElement>(null);
-  const view = useViewRect(viewRef);
-  const slot = useImageSlot(props.thumbRev ? thumbUrl(id, props.thumbRev) : null);
-  const tools = useApp((s) => s.catalog?.tools ?? null);
-  // undefined: 詳細を読み込み中。null: 動画の情報がない（ffprobe がない・読めなかった）。
-  const video = details && details.summary.variant_id === id ? details.video : undefined;
-  const natural = slot.shown
-    ? { width: slot.shown.width, height: slot.shown.height }
-    : video?.width && video?.height
-      ? { width: video.width, height: video.height }
-      : (orientedSize(summary.width, summary.height, summary.orientation) ?? { width: 16, height: 9 });
-  const box = fitRect(natural.width, natural.height, view.width, view.height);
-  const noThumb = !slot.shown && (slot.url === null || slot.failed);
-  const missing = summary.file_status === "missing";
-
-  const play = () => {
-    appApi.openVariantFile(id).catch((e) => actions.reportError(e, "動画を開けません"));
-  };
-  const openSettings = () => actions.openDialog({ kind: "settings", tab: "general" });
-
-  return (
-    <div className="loupe-video">
-      <div ref={viewRef} className="loupe-view video">
-        {!noThumb && (
-          <div
-            className="loupe-photo"
-            style={{ left: box.x, top: box.y, width: box.width, height: box.height }}
-            onDoubleClick={missing ? undefined : play}
-            title={missing ? undefined : "ダブルクリックで OS のアプリで再生"}
-          >
-            <SlotImages slot={slot} />
-            <span className="loupe-video-mark" aria-hidden="true">
-              ▶
-            </span>
-          </div>
-        )}
-        {noThumb && (
-          <div className="loupe-center-note">
-            <p>動画のサムネイルがありません</p>
-            {tools && !tools.ffmpeg && (
-              <>
-                <p className="hint">
-                  ffmpeg が見つからないため、サムネイルを作れません。FFmpeg を入れて（見つからなければ設定で場所を指定して）アプリを再起動し、動画のフォルダを取り込み直してください。
-                </p>
-                <button className="btn small" onClick={openSettings}>
-                  設定で FFmpeg の場所を指定する
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-      <div className="loupe-video-bar">
-        <dl className="loupe-video-meta">
-          <div>
-            <dt>長さ</dt>
-            <dd>{formatDuration(video?.duration_s)}</dd>
-          </div>
-          <div>
-            <dt>フレームレート</dt>
-            <dd>{formatFps(video?.fps)}</dd>
-          </div>
-          <div>
-            <dt>コーデック</dt>
-            <dd>{formatCodec(video?.codec, video?.bit_depth)}</dd>
-          </div>
-          <div>
-            <dt>解像度</dt>
-            <dd>{formatResolution(video?.width, video?.height)}</dd>
-          </div>
-        </dl>
-        {video === null && (
-          <span className="hint">
-            {tools && !tools.ffprobe
-              ? "ffprobe が見つからないため、動画の情報を読めません"
-              : "動画の情報がありません"}
-          </span>
-        )}
-        <span className="loupe-video-spacer" />
-        <button className="btn" onClick={play} disabled={missing} title={missing ? "元ファイルが見つかりません" : undefined}>
-          OS のアプリで再生
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // 情報の表示
 // ---------------------------------------------------------------------------
-
-function InfoOverlay(props: { summary: VariantSummary; index: number | null; count: number }) {
-  const { summary } = props;
-  return (
-    <div className="loupe-info">
-      <div className="loupe-info-name">
-        {summary.file_name}
-        {!summary.is_master && (
-          <span className="muted">（仮想コピー{summary.variant_name ? `: ${summary.variant_name}` : ""}）</span>
-        )}
-      </div>
-      <div>{formatCaptureTime(summary.capture)}</div>
-      <div className="loupe-info-marks">
-        <Stars rating={summary.rating} />
-        <FlagMark flag={summary.flag} />
-        <LabelDot label={summary.color_label} />
-      </div>
-      {props.index !== null && (
-        <div className="muted">
-          {(props.index + 1).toLocaleString()} / {props.count.toLocaleString()}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function FileNotice(props: { summary: VariantSummary }) {
   const { summary } = props;
@@ -962,6 +691,13 @@ function FileNotice(props: { summary: VariantSummary }) {
           : "ファイルが壊れているか、読み取れない形式の可能性があります。"}
         {photo ? "等倍表示はできません。" : missing ? "再生できません。" : ""}
       </div>
+      {missing && (
+        <div className="loupe-notice-actions">
+          <button type="button" className="btn small" onClick={() => openRelink([summary.variant_id])}>
+            探して結び付け直す…
+          </button>
+        </div>
+      )}
     </div>
   );
 }

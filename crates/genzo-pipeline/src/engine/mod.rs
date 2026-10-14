@@ -84,6 +84,14 @@
 //! # Ok::<(), genzo_pipeline::PipelineError>(())
 //! ```
 //!
+//! # カメラプロファイル・ルック（DEV-17。[`crate::profile`]）
+//!
+//! [`Engine::with_profile_resolver`] で渡した仕組みで、設定の ID からプロファイル・ルックを描画のたびに引く
+//! （[`Engine::resolve_profiles`]）。キャッシュのキー（A1・ガイド）は、設定の `render_deps.profile`・
+//! `render_deps.look` を引いたファイルの参照に置き換えた設定（[`Engine::effective_settings`]）で求めるので、
+//! ファイルの中身が変われば作り直す。WB のスポイトは、カメラプロファイルを使わない A1 で求める（色相彩度の
+//! マップは逆に戻せないため。[`pick`]）。
+//!
 //! # 並列化と決定性
 //!
 //! 画素ごとの計算は、C の格子の全体での座標だけに依存する（タイルの分け方・スレッド数によらない）。
@@ -95,6 +103,7 @@ pub mod cache;
 pub mod control;
 pub mod export;
 pub mod full;
+pub mod masks;
 pub mod pick;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -112,6 +121,7 @@ pub use self::export::{
     EXPORT_ICC_VERSION, ExportOptions, ExportPixels, ExportedImage, export_icc_profile,
 };
 pub use self::full::{FullResolutionJob, RegionRender, StageBackend, TileRois};
+pub use self::masks::{MaskColorPick, MaskOverlay, MaskReference};
 pub use self::pick::{WB_PICK_RADIUS, WhiteBalancePick};
 
 use self::cache::Lru;
@@ -126,6 +136,7 @@ use crate::finish::{
 };
 use crate::guide::{GUIDE_FORMAT_VERSION, GuideSpec, compute_guide, guide_size};
 use crate::image::{ImageTile, RgbImage, Roi, checked_len};
+use crate::profile::{ProfileResolver, ProfileResources};
 use crate::resample::DEFAULT_PREVIEW_LONG_EDGE;
 use crate::sensor::{A1Image, SensorOptions, SensorWarning, SourceImage, render_a1};
 use crate::stage::{Guide, Stage, StageContext, run_stage_cpu};
@@ -168,6 +179,13 @@ impl SourceId {
             file_id,
             file_revision,
         }
+    }
+
+    /// 写真ごとの乱数の種（[`crate::StageContext::photo_seed`]。ステージ 16 の粒子の模様）。元ファイルの ID だけから
+    /// 決める（内容のリビジョンを含めない。仮想コピーは同じ模様になる。決定事項ログ No.139）。
+    pub fn photo_seed(&self) -> u32 {
+        let v = self.file_id.get() as u64;
+        crate::finish::output::hash32((v as u32) ^ crate::finish::output::hash32((v >> 32) as u32))
     }
 }
 
@@ -214,11 +232,12 @@ impl PhotoSource {
         }
     }
 
-    /// 座標系（S の寸法・既定の切り抜き・向き。回転なし）。
+    /// 座標系（S の寸法・既定の切り抜き・向き・プロファイルの歪曲。回転・歪曲補正なし）。
     pub fn frames(&self) -> Result<CoordinateFrames> {
         let (w, h) = self.image.sensor_size();
-        CoordinateFrames::new(w, h, self.image.orientation())?
-            .with_default_crop(self.image.default_crop())
+        Ok(CoordinateFrames::new(w, h, self.image.orientation())?
+            .with_default_crop(self.image.default_crop())?
+            .with_lens_geometry(self.image.lens_geometry()))
     }
 }
 
@@ -431,6 +450,8 @@ pub struct Engine {
     config: EngineConfig,
     state: Mutex<EngineState>,
     tiles_rendered: Arc<AtomicU64>,
+    /// カメラプロファイル・ルックを ID から引く仕組み（[`Engine::with_profile_resolver`]）。
+    profiles: Option<Arc<dyn ProfileResolver>>,
 }
 
 #[derive(Debug)]
@@ -455,7 +476,30 @@ impl Engine {
             config,
             state: Mutex::new(state),
             tiles_rendered: Arc::new(AtomicU64::new(0)),
+            profiles: None,
         })
+    }
+
+    /// カメラプロファイル・ルックを ID から引く仕組みを付けたもの（[`crate::profile`]。付けなければ、設定がプロファイル・
+    /// ルックを指していても「見つからない」として標準の色・ルックなしで描く）。
+    pub fn with_profile_resolver(mut self, resolver: Arc<dyn ProfileResolver>) -> Self {
+        self.profiles = Some(resolver);
+        self
+    }
+
+    /// カメラプロファイル・ルックを引く仕組み。
+    pub fn profile_resolver(&self) -> Option<&Arc<dyn ProfileResolver>> {
+        self.profiles.as_ref()
+    }
+
+    /// 設定のカメラプロファイル・ルックを引く（処理バージョン 2 から。[`ProfileResources::resolve`]）。
+    pub fn resolve_profiles(&self, settings: &DevelopSettings) -> ProfileResources {
+        ProfileResources::resolve(settings, self.profiles.as_deref())
+    }
+
+    /// キャッシュのキーに使う設定（`render_deps.profile`・`render_deps.look` を、引いたファイルの参照にしたもの）。
+    pub fn effective_settings(&self, settings: &DevelopSettings) -> DevelopSettings {
+        self.resolve_profiles(settings).apply_render_deps(settings)
     }
 
     /// 設定。
@@ -499,7 +543,7 @@ impl Engine {
         s.guide.clear();
     }
 
-    /// 品質に合わせたセンサー処理の設定。
+    /// 品質に合わせたセンサー処理の設定（カメラプロファイルは使わない）。
     fn sensor_options(&self, quality: RenderQuality) -> SensorOptions {
         SensorOptions {
             quality,
@@ -508,6 +552,19 @@ impl Engine {
                 RenderQuality::Draft => None,
             },
             ..self.config.sensor.clone()
+        }
+    }
+
+    /// 品質に合わせたセンサー処理の設定に、引いたカメラプロファイル（[`SensorOptions::camera_profile`]）を入れたもの
+    /// （genzo-gpu の簡易処理の A1 も使う）。
+    pub fn sensor_options_with(
+        &self,
+        quality: RenderQuality,
+        profiles: &ProfileResources,
+    ) -> SensorOptions {
+        SensorOptions {
+            camera_profile: profiles.camera.as_ref().map(|c| Arc::clone(&c.data)),
+            ..self.sensor_options(quality)
         }
     }
 
@@ -546,7 +603,8 @@ impl Engine {
     // 段階 A1
     // -----------------------------------------------------------------------
 
-    /// 段階 A1 のキャッシュのキー（genzo-model の `CacheKey`。`size` は `(長辺, 0)`）。
+    /// 段階 A1 のキャッシュのキー（genzo-model の `CacheKey`。`size` は `(長辺, 0)`。設定は
+    /// [`effective_settings`](Self::effective_settings) にしてから求める）。
     pub fn a1_cache_key(
         &self,
         source: &PhotoSource,
@@ -557,7 +615,7 @@ impl Engine {
         CacheKey::for_settings(
             source.id.file_id,
             source.id.file_revision,
-            settings,
+            &self.effective_settings(settings),
             (long_edge, 0),
             source.effective_quality(quality),
             CacheFormat {
@@ -587,10 +645,11 @@ impl Engine {
         if let Some(a1) = self.lock().a1.lookup(&key) {
             return Ok(a1);
         }
+        let profiles = self.resolve_profiles(settings);
         let a1 = Arc::new(render_a1(
             &source.image,
             settings,
-            &self.sensor_options(quality),
+            &self.sensor_options_with(quality, &profiles),
             long_edge,
         )?);
         self.lock().a1.insert(key, Arc::clone(&a1));
@@ -610,12 +669,14 @@ impl Engine {
         long_edge: u32,
     ) -> Result<GuideKey> {
         let spec = GuideSpec::from_settings(settings)?;
+        // ガイドの寸法は G の外接矩形で決まる（歪曲補正の D は O と同じ大きさなので回転だけで決まる）。
         let frames = source.frames()?.with_rotation(spec.rotation_deg)?;
         let size = guide_size(&frames, spec.params.long_edge);
+        let effective = self.effective_settings(settings);
         let cache = CacheKey::for_settings(
             source.id.file_id,
             source.id.file_revision,
-            settings,
+            &effective,
             size,
             source.effective_quality(quality),
             CacheFormat {
@@ -624,11 +685,12 @@ impl Engine {
                 format_version: GUIDE_FORMAT_VERSION,
             },
         );
-        debug_assert_eq!(cache.develop_hash, GuideSpec::develop_hash(settings));
+        debug_assert_eq!(cache.develop_hash, GuideSpec::develop_hash(&effective));
         Ok(GuideKey {
             cache,
             a1_long_edge: long_edge,
             params: spec.params.into(),
+            haze: spec.haze,
         })
     }
 
@@ -697,9 +759,12 @@ impl Engine {
         }
         let quality = source.effective_quality(request.quality);
         let a1 = self.a1(source, settings, quality, request.long_edge)?;
-        let base: StageContext<'static> = a1
+        let profiles = self.resolve_profiles(settings);
+        let base: StageContext<'_> = a1
             .finish_context(settings)?
-            .with_uncropped(request.uncropped);
+            .with_uncropped(request.uncropped)
+            .with_photo_seed(source.id.photo_seed())
+            .with_profiles(&profiles);
         let (plan, guide) = plan_with_guide(settings, &base, || {
             self.guide_with(source, settings, quality, request.long_edge, Some(&a1))
         })?;
@@ -742,7 +807,12 @@ impl Engine {
             geometry: plan.geometry().clone(),
             active_stages: plan.active_stage_ids(),
             used_guide: guide.is_some(),
-            warnings: a1.warnings.clone(),
+            warnings: a1
+                .warnings
+                .iter()
+                .copied()
+                .chain(profiles.stage_c_warnings())
+                .collect(),
             unimplemented: unimplemented_settings(settings),
             non_finite_replaced: replaced + a1.non_finite_replaced,
         })
@@ -775,13 +845,7 @@ pub(crate) fn run_scene_stages(
     rois: &[Roi],
     input: ImageTile,
 ) -> Result<(ImageTile, u64)> {
-    let mut tile = input;
-    let mut replaced = 0;
-    for ((stage, params), roi) in plan.stages().iter().zip(&rois[1..]) {
-        let (next, n) = run_stage_cpu(*stage, ctx, &tile, *roi, params)?;
-        tile = next;
-        replaced += n;
-    }
+    let (tile, replaced) = plan.run_stages(ctx, rois, input)?;
     if tile.contract() != ColorContract::B3DisplayReferred {
         return Err(PipelineError::ContractMismatch {
             stage: "engine.scene",

@@ -1,7 +1,9 @@
 //! (c) 現像: OpenDevelop → SetSettings → WaitForFrame → 画素のバイト列（frames の形）のヘッダーの寸法と
-//! 画素の長さが合う。画面の色空間（Display P3 / sRGB）の切り替え。
+//! 画素の長さが合う。画面の色空間（Display P3 / sRGB）の切り替え。ビフォー / アフター（DEV-31）の
+//! ビフォーの画素のバイト列。比較表示（LIB-03）の面ごとの表示範囲の画素のバイト列。マスク（DEV-18・DEV-19）の
+//! 重ねて表示のバイト列と色のスポイト。
 
-use genzo_api::{DevelopSettings, FrameInfo, RegionInfo, Response, VariantId};
+use genzo_api::{DevelopSettings, FrameInfo, MaskOverlayInfo, RegionInfo, Response, VariantId};
 use genzo_app::commands;
 use genzo_app::state::{AppState, DisplayTarget};
 use serde::de::DeserializeOwned;
@@ -142,5 +144,220 @@ pub fn develop_and_region_frames_match_their_headers() {
     );
     let status = state.open_catalog(&path, false).unwrap();
     assert_eq!(status.display.description.as_deref(), Some(DISPLAY_P3));
+    state.close_catalog(false).unwrap();
+}
+
+/// ビフォー / アフター（DEV-31）: set_before → wait_for_before → before_frame のバイト列（ヘッダーは FrameInfo）。
+/// ビフォーの表示範囲（before_region_frame。ヘッダーの before が真）。画面の色空間を変えるとビフォーも描き直す。
+pub fn before_frames_match_their_headers() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("ビフォー");
+    write_image(&photos.join("朝.jpg"), (160, 120), 7);
+    let path = env.catalog("ビフォー.db");
+    state.open_catalog(&path, true).unwrap();
+    import(&state, &photos);
+    let id = all_items(&state)[0].variant_id;
+    ok(&state, json!({"type": "open_develop", "variant_id": id}));
+    assert!(
+        commands::before_frame_bytes(&state).unwrap().is_empty(),
+        "設定していなければ空"
+    );
+    let mut settings = DevelopSettings {
+        exposure_ev: 1.0,
+        ..Default::default()
+    };
+    settings.geometry.crop.left = 0.5;
+    let g = set_settings(&state, &settings);
+    let after = wait_frame(&state, g);
+    let info = match ok(
+        &state,
+        json!({"type": "set_before", "source": {"kind": "initial"}}),
+    ) {
+        Response::Before { before: Some(b) } => b,
+        other => panic!("{other:?}"),
+    };
+    let timeout_ms = WAIT_LIMIT.as_millis() as u64;
+    let wait_before = |generation: u64| match ok(
+        &state,
+        json!({"type": "wait_for_before", "generation": generation, "timeout_ms": timeout_ms}),
+    ) {
+        Response::FrameOrNone { frame: Some(f) } if f.generation >= generation => *f,
+        other => panic!("ビフォーが描けない: {other:?}"),
+    };
+    let bf = wait_before(info.generation);
+    let (header, srgb) = decode::<FrameInfo>(&commands::before_frame_bytes(&state).unwrap(), |h| {
+        (h.width, h.height)
+    });
+    assert_eq!(header.variant_id, id);
+    assert_eq!((header.width, header.height), (after.width, after.height));
+    assert_eq!(header.generation, bf.generation);
+
+    // 表示範囲。
+    let region = match ok(
+        &state,
+        json!({"type": "render_before_region", "request": {
+            "variant_id": id, "x": 0.0, "y": 0.0, "width": 40.0, "height": 30.0
+        }}),
+    ) {
+        Response::Region(r) => r,
+        other => panic!("{other:?}"),
+    };
+    assert!(region.before);
+    let (rh, _) =
+        decode::<RegionInfo>(&commands::before_region_frame_bytes(&state).unwrap(), |h| {
+            (h.width, h.height)
+        });
+    assert_eq!(rh, *region);
+
+    // 画面の色空間を変えると、ビフォーも描き直す。
+    state.set_display_target(DisplayTarget::DisplayP3).unwrap();
+    let st = match ok(&state, json!({"type": "develop_state"})) {
+        Response::DevelopOrNone { state: Some(s) } => s,
+        other => panic!("{other:?}"),
+    };
+    let g2 = st.before.expect("ビフォーは続く").generation;
+    assert!(g2 > info.generation);
+    wait_before(g2);
+    let (_, p3) = decode::<FrameInfo>(&commands::before_frame_bytes(&state).unwrap(), |h| {
+        (h.width, h.height)
+    });
+    assert_ne!(p3, srgb);
+    ok(&state, json!({"type": "close_develop"}));
+    state.close_catalog(false).unwrap();
+}
+
+/// 比較表示（LIB-03）: 現像のセッションを開かずに、2 つの面に別の写真の表示範囲を描き、面ごとのバイト列
+/// （view_region_frame。ヘッダーの pane が面）を取る。比較表示をやめると空になる。
+pub fn view_region_frames_match_their_panes() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("比較");
+    write_image(&photos.join("左.jpg"), (160, 120), 3);
+    write_image(&photos.join("右.jpg"), (120, 90), 9);
+    let path = env.catalog("比較.db");
+    state.open_catalog(&path, true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let left = crate::support::by_name(&items, "左.jpg").variant_id;
+    let right = crate::support::by_name(&items, "右.jpg").variant_id;
+    assert!(
+        commands::view_region_frame_bytes(&state, 0)
+            .unwrap()
+            .is_empty()
+    );
+    match ok(
+        &state,
+        json!({"type": "view_output_size", "pane": 1, "variant_id": right}),
+    ) {
+        Response::ViewSize(s) => assert_eq!((s.width, s.height), (120, 90)),
+        other => panic!("{other:?}"),
+    }
+    for (pane, id, w, h) in [(0u32, left, 40.0, 30.0), (1, right, 24.0, 18.0)] {
+        let info = match ok(
+            &state,
+            json!({"type": "render_view_region", "pane": pane, "request": {
+                "variant_id": id, "x": 4.0, "y": 2.0, "width": w, "height": h
+            }}),
+        ) {
+            Response::Region(r) => r,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(info.pane, Some(pane));
+        let (header, _) = decode::<RegionInfo>(
+            &commands::view_region_frame_bytes(&state, pane).unwrap(),
+            |h| (h.width, h.height),
+        );
+        assert_eq!(header, *info);
+        assert_eq!(header.variant_id, id);
+    }
+    assert!(
+        commands::view_region_frame_bytes(&state, genzo_api::MAX_VIEW_PANES)
+            .unwrap()
+            .is_empty(),
+        "範囲の外の面は空"
+    );
+    match ok(&state, json!({"type": "develop_state"})) {
+        Response::DevelopOrNone { state: None } => {}
+        other => panic!("現像のセッションは開かない: {other:?}"),
+    }
+    ok(&state, json!({"type": "release_view"}));
+    assert!(
+        commands::view_region_frame_bytes(&state, 0)
+            .unwrap()
+            .is_empty()
+    );
+    state.close_catalog(false).unwrap();
+}
+
+/// マスク（DEV-18・DEV-19）: プレビューの FrameInfo に G 座標の範囲が入る。マスクの重ねて表示のバイト列
+/// （mask_overlay_frame。ヘッダーは MaskOverlayInfo、重みを R・G・B に同じ値で入れる）は、プレビューと同じ寸法で、
+/// 円形のマスクの中が 255・外が 0。色のスポイト（mask_color_at）は点の G 座標を返す。
+pub fn mask_overlay_frames_match_their_headers() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("マスク");
+    write_image(&photos.join("空.jpg"), (160, 120), 7);
+    let path = env.catalog("マスク.db");
+    state.open_catalog(&path, true).unwrap();
+    import(&state, &photos);
+    let id = all_items(&state)[0].variant_id;
+    let dev = match ok(&state, json!({"type": "open_develop", "variant_id": id})) {
+        Response::Develop(d) => d,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(dev.settings.process_version, 2);
+    // 160 × 120 の画像の G 座標は (0, 0)〜(1, 0.75)。半径 0.2 の円を左上に置く。
+    let mut value = serde_json::to_value(&dev.settings).unwrap();
+    value["masks"] = json!([{
+        "enabled": true,
+        "name": "左上",
+        "components": [{"mode": "add", "invert": false, "shape": {"radial": {
+            "cx": 0.25, "cy": 0.25, "rx": 0.2, "ry": 0.2, "angle_deg": 0.0, "feather": 0.0
+        }}}],
+        "delta": {"exposure_ev": 0.5}
+    }]);
+    let settings: DevelopSettings = serde_json::from_value(value).unwrap();
+    let frame = wait_frame(&state, set_settings(&state, &settings));
+    let g = frame.g_bounds.expect("G 座標の範囲");
+    assert!(
+        (g[2] - 1.0).abs() < 1e-9 && (g[3] - 0.75).abs() < 1e-9,
+        "{g:?}"
+    );
+    let (header, pixels) = decode::<MaskOverlayInfo>(
+        &commands::mask_overlay_frame_bytes(&state, id, 0, None).unwrap(),
+        |h| (h.width, h.height),
+    );
+    assert_eq!(header.variant_id, id);
+    assert_eq!(header.index, 0);
+    assert_eq!((header.width, header.height), (frame.width, frame.height));
+    assert!(
+        pixels.chunks_exact(4).all(|p| p[0] == p[1] && p[1] == p[2]),
+        "重みを R・G・B に同じ値で入れる"
+    );
+    let at = |fx: f64, fy: f64| {
+        let x = (fx * f64::from(header.width)) as usize;
+        let y = (fy * f64::from(header.height)) as usize;
+        pixels[(y * header.width as usize + x) * 4]
+    };
+    assert_eq!(at(0.25, 0.33), 255, "円の中心");
+    assert_eq!(at(0.9, 0.9), 0, "円の外");
+    assert!(
+        commands::mask_overlay_frame_bytes(&state, id, 1, None).is_err(),
+        "範囲の外のマスク"
+    );
+    match ok(
+        &state,
+        json!({"type": "mask_color_at", "variant_id": id, "x": 0.5, "y": 0.5}),
+    ) {
+        Response::MaskColor(p) => {
+            assert!(
+                (p.x - 0.5).abs() < 0.01 && (p.y - 0.375).abs() < 0.01,
+                "{p:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    ok(&state, json!({"type": "close_develop"}));
     state.close_catalog(false).unwrap();
 }

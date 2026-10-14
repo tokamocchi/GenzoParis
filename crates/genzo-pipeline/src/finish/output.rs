@@ -159,7 +159,9 @@ impl Stage for DisplayStage {
     }
     fn params(&self, _: &DevelopSettings, ctx: &StageContext<'_>) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(Some(StageParams::new(self.transform()?))),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                Ok(Some(StageParams::new(self.transform()?)))
+            }
         }
     }
     fn input_roi(&self, output_roi: Roi, _: &StageParams, _: &StageContext<'_>) -> Roi {
@@ -174,7 +176,9 @@ impl Stage for DisplayStage {
     ) -> Result<()> {
         let t = params.expect::<Arc<DisplayTransform>>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 => map_pixels(input, output, |_, _, c| t.apply(c)),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                map_pixels(input, output, |_, _, c| t.apply(c))
+            }
         }
     }
 }
@@ -307,7 +311,9 @@ impl Stage for ExportStage {
     }
     fn params(&self, _: &DevelopSettings, ctx: &StageContext<'_>) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(Some(StageParams::new(ExportTransform::new(self.space())))),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                Ok(Some(StageParams::new(ExportTransform::new(self.space()))))
+            }
         }
     }
     fn input_roi(&self, output_roi: Roi, _: &StageParams, _: &StageContext<'_>) -> Roi {
@@ -322,7 +328,9 @@ impl Stage for ExportStage {
     ) -> Result<()> {
         let t = *params.expect::<ExportTransform>(self.id())?;
         match ctx.process_version {
-            ProcessVersion::V1 => map_pixels(input, output, |_, _, c| t.apply(c)),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                map_pixels(input, output, |_, _, c| t.apply(c))
+            }
         }
     }
 }
@@ -441,6 +449,38 @@ pub fn quantize_u8(image: &RgbImage, origin: (i64, i64), dither: Dither) -> Resu
 /// （[`Dither::None`]）。
 pub fn quantize_u16(image: &RgbImage, origin: (i64, i64), dither: Dither) -> Result<Vec<u16>> {
     quantize(image, origin, dither, 65535.0, |q| q as u16)
+}
+
+/// 16bit に量子化した値（R, G, B, … の並び。[`quantize_u16`] の出力を、書き出しの仕上げ（出力シャープ・透かし。
+/// EXP-03）で変えたもの）を 8bit にする。`width` は 1 行の画素の数、`origin` は左上の、出力の画像全体での座標。
+///
+/// ディザリングのノイズは [`quantize_u8`] と同じ式・同じ座標（[`dither_noise`]）なので、仕上げのない書き出しと
+/// 同じ性質のノイズになる（値は 16bit に丸めた後の値から作るので、ビット単位では同じでない）。
+pub fn requantize_u16_to_u8(
+    data: &[u16],
+    width: u32,
+    origin: (i64, i64),
+    dither: Dither,
+) -> Vec<u8> {
+    let w = (width as usize).max(1);
+    let mut out = vec![0u8; data.len()];
+    out.par_chunks_mut(w * 3)
+        .zip(data.par_chunks(w * 3))
+        .enumerate()
+        .for_each(|(j, (dst, src))| {
+            let y = origin.1 + j as i64;
+            for (i, (d, p)) in dst.chunks_mut(3).zip(src.chunks(3)).enumerate() {
+                let x = origin.0 + i as i64;
+                for c in 0..d.len().min(p.len()) {
+                    let n = match dither {
+                        Dither::None => 0.0,
+                        Dither::Triangular { seed } => dither_noise(x, y, c as u32, seed),
+                    };
+                    d[c] = quantize_value(f32::from(p[c]) / 65535.0, 255.0, n) as u8;
+                }
+            }
+        });
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -705,6 +745,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 仕上げの後の 16bit → 8bit（EXP-03）: ディザなしは四捨五入、ディザは quantize_u8 と同じノイズで平均を保つ。
+    #[test]
+    fn requantize_rounds_and_dithers_like_quantize_u8() {
+        let data: Vec<u16> = (0..=255u16)
+            .flat_map(|k| [k * 257, k * 257, k * 257])
+            .collect();
+        let plain = requantize_u16_to_u8(&data, 16, (0, 0), Dither::None);
+        let want: Vec<u8> = (0..=255u8).flat_map(|k| [k, k, k]).collect();
+        assert_eq!(plain, want);
+        // 中間の値（127.5 / 255 に近い）。ディザは座標で決まり、平均を保つ。
+        let mid = vec![32_896u16; 64 * 64 * 3];
+        let a = requantize_u16_to_u8(&mid, 64, (0, 0), Dither::DEFAULT_8BIT);
+        let b = requantize_u16_to_u8(&mid, 64, (0, 0), Dither::DEFAULT_8BIT);
+        assert_eq!(a, b, "決定的");
+        let mean = a.iter().map(|&v| f64::from(v)).sum::<f64>() / a.len() as f64;
+        assert!((mean - 32_896.0 / 257.0).abs() < 0.05, "{mean}");
+        // 同じ値の 0〜1 の画像を quantize_u8 にしたものと、同じ座標のノイズ（同じ結果）。
+        let v = 0.3f32;
+        let img = RgbImage::filled(8, 4, ColorContract::B4bExport, [v; 3]).unwrap();
+        let q8 = quantize_u8(&img, (5, 9), Dither::DEFAULT_8BIT).unwrap();
+        let q16 = quantize_u16(&img, (5, 9), Dither::None).unwrap();
+        let re = requantize_u16_to_u8(&q16, 8, (5, 9), Dither::DEFAULT_8BIT);
+        let differ = q8.iter().zip(&re).filter(|(x, y)| x != y).count();
+        assert!(differ * 10 < q8.len(), "{differ} / {}", q8.len());
+        // 黒と白にはノイズを加えない。
+        let ends = [0u16, 0, 0, 65_535, 65_535, 65_535];
+        assert_eq!(
+            requantize_u16_to_u8(&ends, 2, (3, 3), Dither::DEFAULT_8BIT),
+            vec![0, 0, 0, 255, 255, 255]
+        );
     }
 
     #[test]

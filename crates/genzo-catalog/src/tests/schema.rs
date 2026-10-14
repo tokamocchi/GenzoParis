@@ -242,20 +242,8 @@ fn deleting_an_asset_cascades_but_keeps_keywords_and_collections() {
             [vc.get()],
         )
         .unwrap();
-    f.cat
-        .conn
-        .execute(
-            "INSERT INTO stack(id, top_variant_id) VALUES (1, ?1)",
-            [vc.get()],
-        )
-        .unwrap();
-    f.cat
-        .conn
-        .execute(
-            "INSERT INTO stack_member(stack_id, variant_id, position) VALUES (1, ?1, 0)",
-            [vc.get()],
-        )
-        .unwrap();
+    // 仮想コピーは元の写真と同じスタックに入る（LIB-12・LIB-13。版 9 から）。
+    assert_eq!(f.rows("stack_member"), 2);
 
     let report = f.cat.remove_assets(&[o.asset_id]).unwrap();
     assert_eq!(report.assets, vec![o.asset_id]);
@@ -274,16 +262,11 @@ fn deleting_an_asset_cascades_but_keeps_keywords_and_collections() {
     ] {
         assert_eq!(f.rows(table), 0, "{table}");
     }
-    // キーワード・コレクション・スタック自体は残る。
+    // キーワード・コレクション自体は残る。写真がなくなったスタックは消える（版 9 のトリガー
+    // stack_member_after_delete。1 枚以下のスタックを残さない）。
     assert_eq!(f.rows("keyword"), 2);
     assert_eq!(f.rows("collection"), 1);
-    assert_eq!(f.rows("stack"), 1);
-    let top: Option<i64> = f
-        .cat
-        .conn
-        .query_row("SELECT top_variant_id FROM stack", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(top, None);
+    assert_eq!(f.rows("stack"), 0);
     // テキスト検索の索引からも消える。
     let report = f.cat.check_integrity().unwrap();
     assert!(report.is_ok(), "{report:?}");
@@ -961,6 +944,7 @@ fn version_3_catalog_is_migrated_to_utc_only() {
         offset: Some("+00:00".to_owned()),
         tz_source,
         tz_assumed: Some(assumed.to_owned()),
+        basis: None,
         correction_s: 0,
         utc: Some(Utc.with_ymd_and_hms(2024, 5, 1, utc_hour, 0, 0).unwrap()),
     };

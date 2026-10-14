@@ -20,11 +20,19 @@
 //! 4. バッチ用ワーカーでメタデータを読む（写真: `ProbePhoto`、動画: `ProbeVideo`）。撮影日時は
 //!    genzo-model の `CaptureTime`（オフセットがなければ既定のタイムゾーン。3.1 節）。
 //!    **読めないファイルは `status = error` と理由を記録して続ける**（6.3 節）。
+//!    **重複の確認**（IMP-04。3.11 節。`identity` の doc）: 新しく登録するファイル（同じ場所に登録がないもの）
+//!    について、クイックハッシュが同じ登録済みのファイルがあれば、全体のハッシュで同じ内容かを確かめる。
+//!    「重複と思われるものを取り込まない」設定（[`ImportOptions::skip_duplicates`]。既定はカタログの設定で、
+//!    その既定は有効）なら、メタデータを読まずに飛ばす。同じ取り込みの中の同じ内容のファイルも、2 つ目からを
+//!    重複とする。結果の [`ImportReport::duplicates`] に、取り込まなかったもの・設定により登録したものを
+//!    並べる。
 //! 5. [`IMPORT_BATCH_FILES`] 件ずつ、1 つのトランザクションで登録する（冪等。同じフォルダを登録し直しても
-//!    件数は増えない。3.5 節）。
+//!    件数は増えない。3.5 節）。同じフォルダで拡張子だけが違う RAW と JPEG は 1 枚にまとめる（IMP-06。
+//!    [`ImportOptions::separate_raw_jpeg`] で別々にもできる）。重複の確認で求めた全体のハッシュは記録する。
 //! 6. 続けて、ワーカーでサムネイル（写真: `Thumbnail`、動画: `VideoThumbnail`。B5 の JPEG）を作り、L0 として
 //!    thumbs.db に保存する（PRV-01）。
 //! 7. 終わったら、現像結果からの L0 / L1 の作り直しを投入する（4 章「最初の表示」。設定で止められる）。
+//!    内容のハッシュのバックグラウンドの計算（ORG-03）も頼む（アプリが許し、設定が有効なときだけ）。
 //!
 //! P3 のジョブとして実行し、進捗をイベントで知らせ、取り消せる（バッチの区切りで確かめ、ワーカーの
 //! 処理中なら、そのワーカーを止める）。
@@ -33,7 +41,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use genzo_catalog::{FileFacts, RegisterFile, RegisterStatus};
+use genzo_catalog::{FileFacts, RegisterFile, RegisterOptions, RegisterStatus};
 use genzo_media::CacheSpec;
 use genzo_model::{AssetKind, CaptureTime, FileRole, FileStatus, FolderId, VariantId};
 use genzo_worker::{Lane, WorkerClientError, WorkerErrorKind};
@@ -43,10 +51,11 @@ use crate::config::{IMPORT_BATCH_FILES, SKIP_HIDDEN_FILES};
 use crate::core::Core;
 use crate::error::ApiError;
 use crate::events::{CatalogChange, Event};
+use crate::identity::{ContentCheck, ExistingCopy, ImportSeen, check_catalog_duplicate};
 use crate::jobs::{JobCtx, spawn_job};
-use crate::paths::{absolute_lexical, join_rel, split_volume};
+use crate::paths::{VolumePath, absolute_lexical, join_rel};
 use crate::previews::{source_thumb_rev, spawn_regenerate};
-use crate::types::{FileIssue, ImportReport, JobKind, JobResult};
+use crate::types::{DuplicateFile, FileIssue, ImportOptions, ImportReport, JobKind, JobResult};
 
 /// RAW として取り込む拡張子（小文字）。**仮置き**: 対象機種（α7 IV / α7C）の ARW と、DNG。
 pub const RAW_EXTENSIONS: &[&str] = &["arw", "dng"];
@@ -69,21 +78,21 @@ pub fn media_kind(name: &str) -> Option<AssetKind> {
 
 /// 取り込む候補のファイル。
 #[derive(Debug, Clone)]
-struct Candidate {
-    path: PathBuf,
+pub(crate) struct Candidate {
+    pub path: PathBuf,
     /// フォルダのボリューム内の相対パス。
-    dir_rel: String,
-    name: String,
-    kind: AssetKind,
+    pub dir_rel: String,
+    pub name: String,
+    pub kind: AssetKind,
 }
 
 /// 走査の結果。
 #[derive(Default)]
-struct Scan {
-    files: Vec<Candidate>,
-    dirs: Vec<String>,
-    skipped_links: u64,
-    unreadable: Vec<FileIssue>,
+pub(crate) struct Scan {
+    pub files: Vec<Candidate>,
+    pub dirs: Vec<String>,
+    pub skipped_links: u64,
+    pub unreadable: Vec<FileIssue>,
 }
 
 fn is_hidden(name: &str) -> bool {
@@ -154,8 +163,23 @@ impl ExcludedDirs {
         out
     }
 
+    /// 照合するフォルダを足す（コピー取り込みのコピー先など）。
+    pub(crate) fn add(&mut self, dir: &Path) {
+        let more = Self::new([dir]);
+        for l in more.lexical {
+            if !self.lexical.contains(&l) {
+                self.lexical.push(l);
+            }
+        }
+        for c in more.canonical {
+            if !self.canonical.contains(&c) {
+                self.canonical.push(c);
+            }
+        }
+    }
+
     /// `lexical`（字面の絶対パス）か `canonical`（実際のパス）が、飛ばすフォルダか、その中か。
-    fn contains(&self, lexical: &Path, canonical: Option<&Path>) -> bool {
+    pub(crate) fn contains(&self, lexical: &Path, canonical: Option<&Path>) -> bool {
         self.lexical.iter().any(|e| lexical.starts_with(e))
             || canonical.is_some_and(|c| self.canonical.iter().any(|e| c.starts_with(e)))
     }
@@ -191,8 +215,38 @@ pub(crate) fn excluded_dirs(inner: &crate::core::Inner) -> ExcludedDirs {
     ExcludedDirs::new(dirs)
 }
 
+/// 走査したフォルダ（取り込むフォルダ `root` のボリューム `vol` の中の相対パス `rel`）のボリューム。Unix では、
+/// 装置番号が取り込むフォルダと違えば（走査が別のボリュームのマウント先に入った）、そのボリュームとする。
+/// Windows では、ボリュームを割り当てたフォルダ（マウント先のフォルダ）を見分けず、取り込むフォルダのボリュームと
+/// する（実機で未確認）。
+fn dir_volume(
+    inner: &crate::core::Inner,
+    root: &Path,
+    vol: &VolumePath,
+    rel: &str,
+) -> Result<VolumePath, ApiError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let abs = join_rel(&vol.mount, rel, "");
+        let crossed = match (fs::metadata(root), fs::metadata(&abs)) {
+            (Ok(a), Ok(b)) => a.dev() != b.dev(),
+            _ => false,
+        };
+        if crossed {
+            return crate::volumes::locate(inner.volume_probe.as_ref(), &abs);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (inner, root);
+    Ok(VolumePath {
+        rel: rel.to_owned(),
+        ..vol.clone()
+    })
+}
+
 /// フォルダを走査する（シンボリックリンク・ジャンクションはたどらない。`excluded` の中は飛ばす）。
-fn scan(
+pub(crate) fn scan(
     root: &Path,
     root_rel: &str,
     recursive: bool,
@@ -338,10 +392,25 @@ fn clash_reason(what: &str, others: &[String]) -> String {
     )
 }
 
+/// 取り込みの設定（[`ImportOptions`] の `None` をカタログの設定で埋めたもの）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedOptions {
+    pub skip_duplicates: bool,
+    pub separate_raw_jpeg: bool,
+}
+
 /// 1 ファイルの準備の結果。
 enum Prepared {
     /// 登録する（メタデータを読めなかった場合は `request.error` に理由）。
-    Register(Box<RegisterFile>),
+    Register {
+        request: Box<RegisterFile>,
+        /// 同じ場所に登録がない（新しいファイル）か。
+        new: bool,
+        /// 登録済みのファイルとの内容の比較（新しいファイルだけ。IMP-04）。
+        check: ContentCheck,
+    },
+    /// 内容が同じファイルが登録済みなので、取り込まない（IMP-04）。
+    Duplicate(ExistingCopy),
     /// 登録済みで変化がない（解析を省いた）。サムネイルがなければ作る。
     Unchanged {
         master: VariantId,
@@ -356,7 +425,7 @@ enum Prepared {
 }
 
 /// `items` を最大 `threads` 本のスレッドで処理する（結果は入力の順）。
-fn parallel_map<T: Sync, R: Send>(
+pub(crate) fn parallel_map<T: Sync, R: Send>(
     items: &[T],
     threads: usize,
     f: impl Fn(&T) -> R + Sync,
@@ -385,8 +454,13 @@ fn parallel_map<T: Sync, R: Send>(
         .collect()
 }
 
-/// 1 ファイルを準備する（変化の確認とメタデータの読み取り）。
-fn prepare(ctx: &JobCtx<'_>, c: &Candidate, folder: FolderId) -> Prepared {
+/// 1 ファイルを準備する（変化の確認・重複の確認とメタデータの読み取り）。
+fn prepare(
+    ctx: &JobCtx<'_>,
+    c: &Candidate,
+    folder: FolderId,
+    options: ResolvedOptions,
+) -> Prepared {
     let inner = ctx.inner;
     if ctx.is_cancelled() {
         return Prepared::Cancelled;
@@ -397,10 +471,13 @@ fn prepare(ctx: &JobCtx<'_>, c: &Candidate, folder: FolderId) -> Prepared {
     };
     // 登録済みで変化がなければ、解析を省く（エラーだったファイルと、メタデータが空の asset（読めずに
     // 登録した後、見つからない状態を経て戻ったもの。implementation_status の No.45）は読み直す）。
+    // 同じ場所に登録があるか（なければ新しいファイルとして、重複を確かめる）。
+    let mut registered_here = false;
     let existing = inner.with_catalog_api(|cat| {
         let Some(rec) = cat.find_file(folder, &c.name)? else {
             return Ok(None);
         };
+        registered_here = true;
         if rec.facts != facts || rec.status != FileStatus::Ok {
             return Ok(None);
         }
@@ -431,6 +508,21 @@ fn prepare(ctx: &JobCtx<'_>, c: &Candidate, folder: FolderId) -> Prepared {
         Ok(None) => {}
         Err(e) => return Prepared::NotRegistered(e.to_string()),
     }
+    // 重複の確認（IMP-04）。取り込まない設定なら、メタデータを読まずに飛ばす。
+    let check = if registered_here {
+        ContentCheck::default()
+    } else {
+        match check_catalog_duplicate(inner, &c.path, &facts, ctx.token()) {
+            Ok(check) => check,
+            Err(e) if e.is_cancelled() => return Prepared::Cancelled,
+            Err(e) => return Prepared::NotRegistered(e.to_string()),
+        }
+    };
+    if options.skip_duplicates
+        && let Some(existing) = &check.duplicate_of
+    {
+        return Prepared::Duplicate(existing.clone());
+    }
     let pool = match inner.pool() {
         Ok(p) => p,
         Err(e) => return Prepared::NotRegistered(e.to_string()),
@@ -443,7 +535,11 @@ fn prepare(ctx: &JobCtx<'_>, c: &Candidate, folder: FolderId) -> Prepared {
         name: &c.name,
     };
     match probe_request(&pool, &target, facts, offset, Lane::Batch, ctx.token()) {
-        Ok(r) => Prepared::Register(Box::new(r)),
+        Ok(r) => Prepared::Register {
+            request: Box::new(r),
+            new: !registered_here,
+            check,
+        },
         Err(WorkerClientError::Cancelled) => Prepared::Cancelled,
         Err(e) => Prepared::NotRegistered(format!(
             "ワーカーを起動できないため登録しませんでした（もう一度取り込むと処理します）: {e}"
@@ -507,16 +603,22 @@ pub(crate) fn probe_request(
 }
 
 /// サムネイルを作る対象。
-struct ThumbTask {
-    variant: VariantId,
-    file_id: genzo_model::FileId,
-    revision: u32,
-    path: PathBuf,
-    kind: AssetKind,
+pub(crate) struct ThumbTask {
+    pub variant: VariantId,
+    pub file_id: genzo_model::FileId,
+    pub revision: u32,
+    pub path: PathBuf,
+    pub kind: AssetKind,
 }
 
 /// 取り込みの本体。
-fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportReport, ApiError> {
+fn run_import(
+    ctx: &JobCtx<'_>,
+    root: &Path,
+    recursive: bool,
+    options: ResolvedOptions,
+    tags: &genzo_catalog::ImportTags,
+) -> Result<ImportReport, ApiError> {
     let inner = ctx.inner;
     let root = absolute_lexical(root)?;
     let meta = fs::metadata(&root).map_err(|e| ApiError::FileAccess {
@@ -536,11 +638,19 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
             root.display()
         )));
     }
-    let vol = split_volume(&root)?;
+    // ボリューム（FILE-03。OS のボリューム ID。取れなければパスの先頭）。
+    let vol = crate::volumes::locate(inner.volume_probe.as_ref(), &root)?;
     let mut report = ImportReport {
         root: root.clone(),
+        skip_duplicates: options.skip_duplicates,
+        separate_raw_jpeg: options.separate_raw_jpeg,
         ..Default::default()
     };
+    let register_options = RegisterOptions {
+        pair_raw_jpeg: !options.separate_raw_jpeg,
+    };
+    // 同じ取り込みの中で登録した（する）ファイル（同じ内容のファイルの 2 つ目からを重複とするため）。
+    let mut seen = ImportSeen::default();
     let scanned = scan(&root, &vol.rel, recursive, &excluded, ctx.token());
     report.files_found = scanned.files.len() as u64;
     report.skipped_links = scanned.skipped_links;
@@ -549,23 +659,42 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
         report.cancelled = true;
         return Ok(report);
     }
-    let mount = vol
-        .mount
-        .to_str()
-        .ok_or_else(|| ApiError::InvalidArgument("UTF-8 で表せないパスです".to_owned()))?
-        .to_owned();
+    // 走査したフォルダのボリューム（ふつうは取り込むフォルダと同じ。走査が別のボリュームのマウント先に入った
+    // とき（Unix で装置番号が違う）は、そのボリューム。FILE-03）。
+    let dir_vols: std::collections::HashMap<String, VolumePath> = scanned
+        .dirs
+        .iter()
+        .map(|rel| Ok((rel.clone(), dir_volume(inner, &root, &vol, rel)?)))
+        .collect::<Result<_, ApiError>>()?;
     // フォルダを確保する（取り込んだフォルダは、ファイルがなくてもフォルダツリーに出す）。
-    let mut stored_rel: std::collections::HashMap<String, String> =
+    // 走査の相対パス → （ボリュームのマウント先, 登録済みのフォルダの相対パス, 走査したフォルダの相対パス）。
+    let mut stored_rel: std::collections::HashMap<String, (PathBuf, String, String)> =
         std::collections::HashMap::new();
-    let folders: std::collections::HashMap<String, FolderId> = inner.with_catalog(|c| {
-        let volume = c.ensure_volume(&vol.uuid, None, Some(&mount))?;
+    let folders: std::collections::HashMap<String, FolderId> = inner.with_catalog_api(|c| {
+        let mut volumes: std::collections::HashMap<String, genzo_model::VolumeId> =
+            std::collections::HashMap::new();
         let mut map = std::collections::HashMap::new();
         for rel in &scanned.dirs {
-            if !map.contains_key(rel) {
-                let id = c.ensure_folder(volume, rel)?;
-                stored_rel.insert(rel.clone(), c.folder(id)?.rel_path);
-                map.insert(rel.clone(), id);
+            if map.contains_key(rel) {
+                continue;
             }
+            let v = &dir_vols[rel];
+            let volume = match volumes.get(&v.uuid) {
+                Some(&id) => id,
+                None => {
+                    let mount = crate::volumes::mount_str(&v.mount)?;
+                    let id = c.ensure_volume(&v.uuid, v.label.as_deref(), Some(&mount))?;
+                    c.note_volume_seen(id, &mount, v.label.as_deref(), v.fs_type.as_deref())?;
+                    volumes.insert(v.uuid.clone(), id);
+                    id
+                }
+            };
+            let id = c.ensure_folder(volume, &v.rel)?;
+            stored_rel.insert(
+                rel.clone(),
+                (v.mount.clone(), c.folder(id)?.rel_path, v.rel.clone()),
+            );
+            map.insert(rel.clone(), id);
         }
         Ok(map)
     })?;
@@ -573,18 +702,18 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
     // フォルダのファイルは登録しない（登録済みのフォルダのレコードにまとめると、記録するパスが別のフォルダを
     // 指すため。F08）。同じフォルダ（大文字・小文字を区別しないボリュームで、名前の書き方が違うだけ）なら
     // 登録する。
-    let clashing_dirs: std::collections::HashMap<&str, &str> = stored_rel
+    let clashing_dirs: std::collections::HashMap<&str, PathBuf> = stored_rel
         .iter()
-        .filter(|(rel, stored)| {
-            if rel == stored {
+        .filter(|(_, (mount, stored, scanned_rel))| {
+            if stored == scanned_rel {
                 return false;
             }
-            let stored_path = join_rel(&vol.mount, stored, "");
-            let scanned_path = join_rel(&vol.mount, rel, "");
+            let stored_path = join_rel(mount, stored, "");
+            let scanned_path = join_rel(mount, scanned_rel, "");
             stored_path.exists()
                 && !same_file::is_same_file(&stored_path, &scanned_path).unwrap_or(false)
         })
-        .map(|(rel, stored)| (rel.as_str(), stored.as_str()))
+        .map(|(rel, (mount, stored, _))| (rel.as_str(), join_rel(mount, stored, "")))
         .collect();
     let mut files = Vec::with_capacity(scanned.files.len());
     for c in scanned.files {
@@ -592,7 +721,7 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
             Some(stored) => report.not_registered.push(FileIssue {
                 reason: format!(
                     "登録済みのフォルダ {} と、大文字・小文字か Unicode の正規化だけが違う名前のフォルダにあり、カタログでは区別できないため登録しません",
-                    join_rel(&vol.mount, stored, "").display()
+                    stored.display()
                 ),
                 path: c.path,
             }),
@@ -612,7 +741,9 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
             report.cancelled = true;
             break;
         }
-        let prepared = parallel_map(chunk, threads, |c| prepare(ctx, c, folders[&c.dir_rel]));
+        let prepared = parallel_map(chunk, threads, |c| {
+            prepare(ctx, c, folders[&c.dir_rel], options)
+        });
         if prepared.iter().any(|p| matches!(p, Prepared::Cancelled)) {
             report.cancelled = true;
             break;
@@ -620,19 +751,65 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
         // 登録（1 つのトランザクション）。
         let mut requests: Vec<RegisterFile> = Vec::new();
         let mut request_index: Vec<usize> = Vec::new();
+        // 登録する新しいファイルの全体のハッシュ（重複の確認で求めたもの。登録の後に記録する）。
+        let mut full_hashes: Vec<Option<String>> = Vec::new();
         let mut thumbs: Vec<ThumbTask> = Vec::new();
+        let batch_duplicates = report.duplicates.len();
         for (i, p) in prepared.into_iter().enumerate() {
             match p {
-                Prepared::Register(r) => {
+                Prepared::Register {
+                    request: r,
+                    new,
+                    check,
+                } => {
+                    let path = &chunk[i].path;
+                    let mut own_hash = check.full_hash;
+                    if new {
+                        // 登録済みのファイルと同じ内容（取り込む設定）か、同じ取り込みで先に登録したファイルと
+                        // 同じ内容か。
+                        let duplicate = match check.duplicate_of {
+                            Some(existing) => Some((existing.path, Some(existing.variant_id))),
+                            None => match seen.find(path, &r.facts, &mut own_hash, ctx.token()) {
+                                Ok(found) => found.map(|p| {
+                                    let v = seen.variant_of(&p);
+                                    (Some(p), v)
+                                }),
+                                Err(e) if e.is_cancelled() => {
+                                    report.cancelled = true;
+                                    break;
+                                }
+                                Err(e) => return Err(e),
+                            },
+                        };
+                        if let Some((existing_path, existing_variant_id)) = duplicate {
+                            report.duplicates.push(DuplicateFile {
+                                path: path.clone(),
+                                existing_path,
+                                existing_variant_id,
+                                skipped: options.skip_duplicates,
+                            });
+                            if options.skip_duplicates {
+                                continue;
+                            }
+                        }
+                        seen.add(path.clone(), r.facts.clone(), own_hash.clone());
+                    }
                     if let Some(reason) = &r.error {
                         report.errors.push(FileIssue {
-                            path: chunk[i].path.clone(),
+                            path: path.clone(),
                             reason: reason.clone(),
                         });
                     }
                     requests.push(*r);
                     request_index.push(i);
+                    full_hashes.push(own_hash);
                 }
+                Prepared::Duplicate(existing) => report.duplicates.push(DuplicateFile {
+                    path: chunk[i].path.clone(),
+                    existing_path: existing.path,
+                    existing_variant_id: Some(existing.variant_id),
+                    skipped: true,
+                }),
                 Prepared::Unchanged {
                     master,
                     file_id,
@@ -657,83 +834,76 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
                 Prepared::Cancelled => unreachable!("上で確かめた"),
             }
         }
-        let outcomes = inner.with_catalog_api(|c| {
-            // 既定のタイムゾーンで推定する撮影日時（utc_only の表示のオフセットを含む）は、登録の直前
-            // （カタログのロックの中）の設定で推定し直す（準備の後に設定が変わった場合、推定し直しの
-            // ジョブの一覧より後に登録されたものが古いオフセットのまま残らないように）。
-            let offset = inner.default_offset();
-            for r in &mut requests {
-                if r.capture.uses_default_offset() {
-                    r.capture = r
-                        .capture
-                        .with_default_offset(offset)
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
-                }
-            }
-            Ok(c.register_batch(&requests)?)
-        })?;
-        let mut changed: Vec<VariantId> = Vec::new();
-        for ((req, out), &i) in requests.iter().zip(&outcomes).zip(&request_index) {
-            match out.status {
-                RegisterStatus::Added => report.added += 1,
-                RegisterStatus::Updated => report.updated += 1,
-                RegisterStatus::Unchanged => report.unchanged += 1,
-            }
-            if out.status != RegisterStatus::Unchanged {
-                changed.push(out.master_variant_id);
-            }
-            let ok = req.error.is_none();
-            if ok && out.role == FileRole::Primary {
-                let has_thumb = inner
-                    .with_cache(|cache| cache.thumbs.cache_key(out.master_variant_id))?
-                    .is_some();
-                if out.status != RegisterStatus::Unchanged || !has_thumb {
-                    thumbs.push(ThumbTask {
-                        variant: out.master_variant_id,
-                        file_id: out.file_id,
-                        revision: out.revision,
-                        path: chunk[i].path.clone(),
-                        kind: req.kind,
-                    });
-                }
-                if req.kind == AssetKind::Photo && out.status != RegisterStatus::Unchanged {
-                    regenerate.push(out.master_variant_id);
-                }
+        if report.cancelled {
+            break;
+        }
+        let outcomes = register_requests(
+            inner,
+            &mut requests,
+            &register_options,
+            tags,
+            &full_hashes,
+            &mut report,
+        )?;
+        let paths: Vec<&Path> = request_index
+            .iter()
+            .map(|&i| chunk[i].path.as_path())
+            .collect();
+        for (out, &i) in outcomes.iter().zip(&request_index) {
+            seen.set_registered(
+                chunk[i].path.clone(),
+                out.master_variant_id,
+                out.file_id,
+                out.revision,
+            );
+        }
+        let changed = tally_outcomes(
+            inner,
+            &requests,
+            &outcomes,
+            &paths,
+            &mut report,
+            &mut thumbs,
+            &mut regenerate,
+        )?;
+        // 同じバッチで先に登録したファイルの重複は、登録の後に写真が分かる。
+        for d in &mut report.duplicates[batch_duplicates..] {
+            if d.existing_variant_id.is_none() {
+                d.existing_variant_id = d.existing_path.as_deref().and_then(|p| seen.variant_of(p));
             }
         }
-        changed.sort();
-        changed.dedup();
-        if !changed.is_empty() {
-            inner.events.emit(Event::CatalogChanged {
-                change: CatalogChange::Imported,
-                variant_ids: changed,
-                all: false,
-            });
-            crate::search::refresh(inner, &[]);
+        // 同じ取り込みの中の比較で求めた、先に登録したファイルの全体のハッシュを記録する。
+        let computed = seen.take_computed();
+        if !computed.is_empty() {
+            inner.with_catalog(|c| {
+                for (file_id, revision, facts, hash) in &computed {
+                    c.set_full_hash_if_current(*file_id, *revision, facts, hash)?;
+                }
+                Ok(())
+            })?;
         }
+        announce_changes(inner, changed);
         // サムネイル（L0。PRV-01）。
-        let results = parallel_map(&thumbs, threads, |t| make_source_thumbnail(ctx, t));
-        for (t, r) in thumbs.iter().zip(results) {
-            match r {
-                Ok(()) => report.thumbnails += 1,
-                Err(e) if e.is_cancelled() => report.cancelled = true,
-                Err(ApiError::Worker(WorkerClientError::Job(job)))
-                    if t.kind == AssetKind::Photo && job.kind == WorkerErrorKind::Unsupported =>
-                {
-                    no_embedded.push(t.variant);
-                }
-                Err(e) => report.thumbnail_failures.push(FileIssue {
-                    path: t.path.clone(),
-                    reason: e.to_string(),
-                }),
-            }
-        }
+        make_thumbnails(ctx, threads, &thumbs, &mut report, &mut no_embedded);
         done += chunk.len() as u64;
         ctx.progress(done, total);
         if report.cancelled {
             break;
         }
     }
+    after_import(inner, &report, regenerate, no_embedded);
+    Ok(report)
+}
+
+/// 取り込みの終わりの処理: 現像結果からの L0 / L1 の作り直し（設定で止められる。埋め込みのサムネイルが
+/// ない写真は設定によらず作る）と、内容のハッシュのバックグラウンドの計算の依頼（取り込み・コピー取り込みで
+/// 共通。取り消されたときはしない）。
+pub(crate) fn after_import(
+    inner: &std::sync::Arc<crate::core::Inner>,
+    report: &ImportReport,
+    mut regenerate: Vec<VariantId>,
+    no_embedded: Vec<VariantId>,
+) {
     if !inner.config.render_previews_after_import {
         regenerate.clear();
     }
@@ -745,11 +915,142 @@ fn run_import(ctx: &JobCtx<'_>, root: &Path, recursive: bool) -> Result<ImportRe
         regenerate.dedup();
         spawn_regenerate(inner, regenerate);
     }
-    Ok(report)
+    if !report.cancelled {
+        // 新しく登録したファイルの内容のハッシュ（ORG-03。アプリが許し、設定が有効なときだけ）。
+        crate::identity::request_background_hashing(inner);
+    }
+}
+
+/// 1 つのバッチを、1 つのトランザクションで登録し、新しく登録した写真に `tags` を付け（IMP-05）、求めた全体の
+/// ハッシュ（`full_hashes`。要求と同じ順）を記録する（取り込み・コピー取り込みで共通）。`Err` を返すのは、
+/// 登録をコミットする前の失敗だけ（何も登録していない）。ハッシュの記録の失敗は警告にする。
+///
+/// 既定のタイムゾーンで推定する撮影日時（utc_only の表示のオフセットを含む）は、登録の直前（カタログのロックの
+/// 中）の設定で推定し直す（準備の後に設定が変わった場合、推定し直しのジョブの一覧より後に登録されたものが古い
+/// オフセットのまま残らないように）。
+pub(crate) fn register_requests(
+    inner: &crate::core::Inner,
+    requests: &mut [RegisterFile],
+    options: &RegisterOptions,
+    tags: &genzo_catalog::ImportTags,
+    full_hashes: &[Option<String>],
+    report: &mut ImportReport,
+) -> Result<Vec<genzo_catalog::RegisterOutcome>, ApiError> {
+    let (outcomes, tagged) = inner.with_catalog_api(|c| {
+        let offset = inner.default_offset();
+        for r in requests.iter_mut() {
+            if r.capture.uses_default_offset() {
+                r.capture = r
+                    .capture
+                    .with_default_offset(offset)
+                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+            }
+        }
+        let (outcomes, tagged) = c.register_batch_tagged(requests, options, tags)?;
+        // 求めた全体のハッシュを記録する（記録の内容が求めた時と同じときだけ）。登録はコミット済みなので、
+        // 記録できなくても失敗にしない（警告だけ。全体のハッシュはバックグラウンドのジョブが後で求める）。
+        // 失敗にすると、コピー取り込みが登録済みのコピーを消してしまう。
+        for ((req, out), hash) in requests.iter().zip(&outcomes).zip(full_hashes) {
+            if let Some(h) = hash
+                && let Err(e) = c.set_full_hash_if_current(out.file_id, out.revision, &req.facts, h)
+            {
+                tracing::warn!(file_id = %out.file_id, error = %e, "取り込み: 全体のハッシュを記録できません");
+            }
+        }
+        Ok((outcomes, tagged))
+    })?;
+    report.tagged += tagged.assets;
+    Ok(outcomes)
+}
+
+/// 登録の結果を数え、サムネイル（L0）と現像結果からの作り直しの対象を集める。`paths` はファイルの場所（要求と
+/// 同じ順）。一覧を作り直す写真（新しく登録した・変化を検知した）を返す。
+pub(crate) fn tally_outcomes(
+    inner: &crate::core::Inner,
+    requests: &[RegisterFile],
+    outcomes: &[genzo_catalog::RegisterOutcome],
+    paths: &[&Path],
+    report: &mut ImportReport,
+    thumbs: &mut Vec<ThumbTask>,
+    regenerate: &mut Vec<VariantId>,
+) -> Result<Vec<VariantId>, ApiError> {
+    let mut changed: Vec<VariantId> = Vec::new();
+    for ((req, out), path) in requests.iter().zip(outcomes).zip(paths) {
+        match out.status {
+            RegisterStatus::Added => report.added += 1,
+            RegisterStatus::Updated => report.updated += 1,
+            RegisterStatus::Unchanged => report.unchanged += 1,
+        }
+        if out.paired {
+            report.paired += 1;
+        }
+        if out.status != RegisterStatus::Unchanged {
+            changed.push(out.master_variant_id);
+        }
+        let ok = req.error.is_none();
+        if ok && out.role == FileRole::Primary {
+            let has_thumb = inner
+                .with_cache(|cache| cache.thumbs.cache_key(out.master_variant_id))?
+                .is_some();
+            if out.status != RegisterStatus::Unchanged || !has_thumb {
+                thumbs.push(ThumbTask {
+                    variant: out.master_variant_id,
+                    file_id: out.file_id,
+                    revision: out.revision,
+                    path: path.to_path_buf(),
+                    kind: req.kind,
+                });
+            }
+            if req.kind == AssetKind::Photo && out.status != RegisterStatus::Unchanged {
+                regenerate.push(out.master_variant_id);
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// 一覧を作り直す写真を知らせ、表示中の検索結果を作り直す。
+pub(crate) fn announce_changes(inner: &crate::core::Inner, mut changed: Vec<VariantId>) {
+    changed.sort();
+    changed.dedup();
+    if !changed.is_empty() {
+        inner.events.emit(Event::CatalogChanged {
+            change: CatalogChange::Imported,
+            variant_ids: changed,
+            all: false,
+        });
+        crate::search::refresh(inner, &[]);
+    }
+}
+
+/// サムネイル（L0。PRV-01）を作る。埋め込みのサムネイルがない写真は `no_embedded` に入れる（現像結果から作る）。
+pub(crate) fn make_thumbnails(
+    ctx: &JobCtx<'_>,
+    threads: usize,
+    thumbs: &[ThumbTask],
+    report: &mut ImportReport,
+    no_embedded: &mut Vec<VariantId>,
+) {
+    let results = parallel_map(thumbs, threads, |t| make_source_thumbnail(ctx, t));
+    for (t, r) in thumbs.iter().zip(results) {
+        match r {
+            Ok(()) => report.thumbnails += 1,
+            Err(e) if e.is_cancelled() => report.cancelled = true,
+            Err(ApiError::Worker(WorkerClientError::Job(job)))
+                if t.kind == AssetKind::Photo && job.kind == WorkerErrorKind::Unsupported =>
+            {
+                no_embedded.push(t.variant);
+            }
+            Err(e) => report.thumbnail_failures.push(FileIssue {
+                path: t.path.clone(),
+                reason: e.to_string(),
+            }),
+        }
+    }
 }
 
 /// ワーカーで B5 のサムネイルを作り、L0 として保存する（PRV-01）。
-fn make_source_thumbnail(ctx: &JobCtx<'_>, t: &ThumbTask) -> Result<(), ApiError> {
+pub(crate) fn make_source_thumbnail(ctx: &JobCtx<'_>, t: &ThumbTask) -> Result<(), ApiError> {
     let inner = ctx.inner;
     let pool = inner.pool()?;
     let thumb = match t.kind {
@@ -793,18 +1094,89 @@ fn make_source_thumbnail(ctx: &JobCtx<'_>, t: &ThumbTask) -> Result<(), ApiError
 }
 
 impl Core {
-    /// フォルダを取り込む（IMP-01・VID-01）。P3 のジョブとして実行し、ジョブの ID を返す。
+    /// フォルダを取り込む（IMP-01・VID-01）。P3 のジョブとして実行し、ジョブの ID を返す。重複と思われる
+    /// もの・RAW と JPEG の扱いは、カタログの設定に従う（[`Core::import_folder_with`]）。
     ///
     /// 結果（[`ImportReport`]）は [`Core::wait_job`]・[`Core::job`] で取れる。
     pub fn import_folder(&self, path: &Path, recursive: bool) -> Result<u64, ApiError> {
+        self.import_folder_with(path, recursive, &ImportOptions::default())
+    }
+
+    /// 設定 `options` でフォルダを取り込む（IMP-01〜IMP-06）。`skip_duplicates`・`separate_raw_jpeg` の
+    /// `None` は、呼んだ時点のカタログの設定（[`crate::CoreSettings`] の `import_skip_duplicates`・
+    /// `import_separate_raw_jpeg`）に従う。
+    ///
+    /// `options.copy` があればコピー取り込み（IMP-02・IMP-03。`copy_import` の doc）。`options.metadata` の
+    /// キーワード・説明のメタデータは、新しく登録した写真に登録と同じトランザクションで付ける（IMP-05）。
+    /// 設定の誤り（テンプレート・キーワードの名前・メタデータの値・コピー先）は、ジョブを始める前に
+    /// [`ApiError::InvalidArgument`] などで返す。
+    pub fn import_folder_with(
+        &self,
+        path: &Path,
+        recursive: bool,
+        options: &ImportOptions,
+    ) -> Result<u64, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
+        // アプリの中のファイル操作（名前の変更・フォルダの操作・再リンクなど。ジョブを登録しないものを含む）の
+        // 途中では取り込まない。ファイル操作の排他を持ったまま、確認と取り込みのジョブの登録を行うので、
+        // ファイル操作の側は排他を取った後に取り込みのジョブを見つけて止まる（PR #4 の Codex の指摘）。
+        let Some(_ops) = inner.file_ops.try_lock() else {
+            return Err(ApiError::InvalidArgument(
+                "ファイルの移動・名前の変更・フォルダの操作の実行中は取り込めません。終わってからやり直してください"
+                    .to_owned(),
+            ));
+        };
+        // 写真の移動（FILE-02）の実行中は取り込まない（移している途中のファイルを登録し直さないため）。
+        if inner.jobs.is_running(JobKind::MoveFiles, None) {
+            return Err(ApiError::InvalidArgument(
+                "写真の移動の実行中は取り込めません。移動が終わってからやり直してください"
+                    .to_owned(),
+            ));
+        }
+        let resolved = {
+            let s = inner.settings.lock();
+            ResolvedOptions {
+                skip_duplicates: options.skip_duplicates.unwrap_or(s.import_skip_duplicates),
+                separate_raw_jpeg: options
+                    .separate_raw_jpeg
+                    .unwrap_or(s.import_separate_raw_jpeg),
+            }
+        };
+        let tags = options.metadata.to_tags();
+        tags.validate().map_err(|e| match e {
+            genzo_catalog::CatalogError::InvalidInput(m) => {
+                ApiError::InvalidArgument(format!("取り込みで付けるもの: {m}"))
+            }
+            other => ApiError::Catalog(other),
+        })?;
         let root = path.to_path_buf();
+        let Some(copy) = options.copy.clone() else {
+            if options.dry_run {
+                return Err(ApiError::InvalidArgument(
+                    "名前を決めるだけの確認（dry_run）は、コピー取り込みでだけ使えます".to_owned(),
+                ));
+            }
+            return Ok(spawn_job(
+                inner,
+                JobKind::Import,
+                "取り込み",
+                move |ctx| {
+                    let _one = ctx.inner.import_run.lock();
+                    run_import(ctx, &root, recursive, resolved, &tags).map(JobResult::Import)
+                },
+            ));
+        };
+        let plan = crate::copy_import::CopyPlan::new(inner, &root, copy, options.dry_run)?;
         Ok(spawn_job(
             inner,
             JobKind::Import,
-            "取り込み",
-            move |ctx| run_import(ctx, &root, recursive).map(JobResult::Import),
+            "コピー取り込み",
+            move |ctx| {
+                let _one = ctx.inner.import_run.lock();
+                crate::copy_import::run_copy_import(ctx, &root, recursive, resolved, &tags, &plan)
+                    .map(JobResult::Import)
+            },
         ))
     }
 }

@@ -12,11 +12,19 @@
 // - 角度（DEV-15）: 縦横比を固定していれば、角度と一緒に枠も合わせ直す（出力の縦横比を保つ）。
 // - これらのコマンドはコアに追加中のため、失敗しても画面が壊れないようにする（切り抜きの編集を始められ
 //   なければ知らせて元に戻る。制限できなければ、制限しない枠で保存する（コアが描画で同じ制限をかける））。
+// - ビフォー / アフターの表示（DEV-31。\ でビフォーだけ・Y で左右に並べる・Shift ＋ Y で分割）: 表示の
+//   形だけをここで持つ（ビフォーの設定と画素は state/develop.ts）。写真を変えても形は保つ。スポイト・切り抜きの
+//   編集を始めたら、ビフォー / アフターの表示をやめる（アフターの画像を操作する道具のため）。逆に、
+//   ビフォー / アフターの表示を始めたら、道具を終える。
+// - ローカル補正（マスク。DEV-18・DEV-19）: 選んでいるマスク・部品と、重ねて表示（O）・ブラシの道具の設定をここで
+//   持つ（マスクそのものは設定の masks）。ブラシで描く（brush）・色域のスポイト（mask_color）は道具。描いた
+//   ストロークは離したときに 1 本として設定に足す（履歴に 1 件）。スポイトはコアに点の色を求め（mask_color_at）、
+//   見本の色として足す。選んでいる番号が設定の外になったら（Undo など）、選んでいないとみなす（currentMask）。
 
 import * as core from "../api/core";
-import type { AspectRatio, CropRect, VariantId } from "../api/types";
+import type { AspectRatio, BeforeSource, CropRect, DevelopSettings, LocalAdjustment, VariantId } from "../api/types";
 import { actions } from "../state/app";
-import { applySettings, developStore, endDrag, enqueue, refreshFrame } from "../state/develop";
+import { applySettings, developStore, endDrag, enqueue, refreshFrame, setBeforeSource } from "../state/develop";
 import { cancelRegionRender } from "../state/region";
 import { createStore, useStore } from "../state/store";
 import {
@@ -28,11 +36,36 @@ import {
   sameCrop,
   sanitizeCrop,
 } from "./cropMath";
+import {
+  type BrushOptions,
+  DEFAULT_BRUSH,
+  addColorSample,
+  addComponent,
+  addMask,
+  appendStroke,
+  makeStroke,
+  newColorShape,
+  newComponent,
+  newMask,
+  shapeKind,
+} from "./maskLogic";
 import { formatAngle, sameShown } from "./scales";
 import { customWb } from "./settingsLogic";
 import { clamp01 } from "./zoomMath";
 
-export type DevelopTool = "none" | "wb" | "crop";
+export type DevelopTool = "none" | "wb" | "crop" | "brush" | "mask_color";
+
+/**
+ * 色域のスポイトで選んだ色の入れ先（new_mask: 新しいマスク、new_component: マスク `mask` に新しい部品、
+ * add_sample: マスク `mask` の部品 `component` に見本を足す）。
+ */
+export type MaskPickTarget =
+  | { kind: "new_mask" }
+  | { kind: "new_component"; mask: number }
+  | { kind: "add_sample"; mask: number; component: number };
+
+/** ビフォー / アフターの表示の形（off: アフターだけ、before: ビフォーだけ、side_by_side: 左右、split: 分割）。 */
+export type CompareMode = "off" | "before" | "side_by_side" | "split";
 
 /** 編集中の切り抜きの枠（保存前）。 */
 export interface CropDraft {
@@ -54,6 +87,18 @@ export interface DevelopViewState {
   zoom: { centerX: number; centerY: number } | null;
   /** 切り抜きの編集中の枠。 */
   crop: CropDraft | null;
+  /** ビフォー / アフターの表示の形（DEV-31）。 */
+  compare: CompareMode;
+  /** 選んでいるマスク（設定の masks の番号）。 */
+  maskIndex: number | null;
+  /** 選んでいるマスクの部品の番号。 */
+  componentIndex: number | null;
+  /** 選んでいるマスクを重ねて表示する（O）。 */
+  maskOverlay: boolean;
+  /** ブラシの道具の設定（次に描くストロークに使う）。 */
+  brush: BrushOptions;
+  /** 色域のスポイトの入れ先（tool が mask_color の間）。 */
+  pickTarget: MaskPickTarget | null;
 }
 
 export const viewStore = createStore<DevelopViewState>({
@@ -61,6 +106,12 @@ export const viewStore = createStore<DevelopViewState>({
   showClipping: false,
   zoom: null,
   crop: null,
+  compare: "off",
+  maskIndex: null,
+  componentIndex: null,
+  maskOverlay: false,
+  brush: DEFAULT_BRUSH,
+  pickTarget: null,
 });
 
 export function useDevelopView<T>(selector: (s: DevelopViewState) => T, equal?: (a: T, b: T) => boolean): T {
@@ -83,6 +134,54 @@ export function setZoom(center: { centerX: number; centerY: number } | null): vo
 }
 
 // ---------------------------------------------------------------------------
+// ビフォー / アフター（DEV-31）
+// ---------------------------------------------------------------------------
+
+/** ビフォー / アフターの表示の形を変える（off 以外にするときは、スポイト・切り抜きの編集を終える）。 */
+export function setCompareMode(mode: CompareMode): void {
+  const s = viewStore.get();
+  if (mode !== "off") {
+    if (s.crop) void cancelCrop();
+    if (s.tool === "wb" || s.tool === "brush" || s.tool === "mask_color") viewStore.set({ tool: "none", pickTarget: null });
+  }
+  viewStore.set({ compare: mode });
+}
+
+/** 表示を始めるときに使うビフォーの出どころ（スナップショット・履歴の「ビフォーに設定」。DEV-28。使ったら消す）。 */
+let wantedBefore: BeforeSource | null = null;
+
+/**
+ * スナップショット・履歴の項目をビフォーにする（DEV-28・DEV-31）。ビフォー / アフターの表示がオフなら、左右に
+ * 並べる表示にして、表示を始めるときにこの出どころを使う（DevelopView の useBeforeForCompare が takeWantedBefore で
+ * 受け取る。オフのまま設定すると、表示をやめたものとしてビフォーが捨てられるため）。表示中ならすぐに変える。
+ */
+export function showAsBefore(source: BeforeSource): void {
+  if (viewStore.get().compare === "off") {
+    wantedBefore = source;
+    setCompareMode("side_by_side");
+    return;
+  }
+  void setBeforeSource(source).catch((e) => actions.reportError(e, "ビフォーを変えられません"));
+}
+
+/** 表示を始めるときのビフォーの出どころ（showAsBefore で選んだもの。なければ null）を受け取る（1 回だけ）。 */
+export function takeWantedBefore(): BeforeSource | null {
+  const w = wantedBefore;
+  wantedBefore = null;
+  return w;
+}
+
+/** キーで形を切り替える（同じ形なら off に戻す。\・Y・Shift ＋ Y）。 */
+export function toggleCompareMode(mode: Exclude<CompareMode, "off">): void {
+  setCompareMode(nextCompareMode(viewStore.get().compare, mode));
+}
+
+/** 切り替えの次の形（同じ形なら off）。 */
+export function nextCompareMode(current: CompareMode, pressed: Exclude<CompareMode, "off">): CompareMode {
+  return current === pressed ? "off" : pressed;
+}
+
+// ---------------------------------------------------------------------------
 // スポイト
 // ---------------------------------------------------------------------------
 
@@ -96,11 +195,12 @@ export function toggleWbTool(): void {
   if (s.tool === "crop") return;
   const d = developStore.get();
   if (!d.state) return;
+  if (s.tool === "brush" || s.tool === "mask_color") viewStore.set({ tool: "none", pickTarget: null });
   if (!d.state.source.is_raw) {
     actions.notify("info", "RAW 以外の写真ではホワイトバランスを変えられません");
     return;
   }
-  viewStore.set({ tool: "wb" });
+  viewStore.set({ tool: "wb", compare: "off" });
 }
 
 /** スポイトをやめる（Esc）。 */
@@ -162,6 +262,7 @@ export async function startCrop(): Promise<void> {
   const d = developStore.get();
   if (!d.state || !d.settings || d.variantId === null) return;
   const seq = ++cropSeq;
+  if (s.tool === "brush" || s.tool === "mask_color") viewStore.set({ pickTarget: null });
   if (s.zoom) cancelRegionRender();
   watchSavedGeometry();
   angleBase = null;
@@ -170,6 +271,7 @@ export async function startCrop(): Promise<void> {
   viewStore.set({
     tool: "crop",
     zoom: null,
+    compare: "off",
     crop: { variantId: d.variantId, crop: { ...g.crop }, aspect, saved: { crop: g.crop, aspect } },
   });
   const error = await setUncropped(true);
@@ -370,11 +472,189 @@ export function commitAngle(): void {
 // 写真が変わったとき・画面を離れたとき
 // ---------------------------------------------------------------------------
 
-/** 道具をすべて終える（切り抜きは保存しない。等倍表示の描画は取り消す）。 */
+/**
+ * 道具をすべて終える（切り抜きは保存しない。等倍表示の描画は取り消す。マスクの選択も外す。重ねて表示の切り替えと
+ * ブラシの設定は保つ）。
+ */
 export function endAllTools(): void {
   angleBase = null;
   const s = viewStore.get();
   if (s.crop) void cancelCrop();
   if (s.zoom) cancelRegionRender();
-  viewStore.set({ tool: "none", zoom: null });
+  viewStore.set({ tool: "none", zoom: null, maskIndex: null, componentIndex: null, pickTarget: null });
+}
+
+// ---------------------------------------------------------------------------
+// ローカル補正（マスク。DEV-18・DEV-19）
+// ---------------------------------------------------------------------------
+
+/** 今の設定で有効な選択（番号が設定の外なら null）。 */
+export function currentMask(
+  settings: DevelopSettings | null,
+  s: Pick<DevelopViewState, "maskIndex" | "componentIndex">,
+): { index: number; mask: LocalAdjustment; component: number | null } | null {
+  const masks = settings?.masks ?? [];
+  const i = s.maskIndex;
+  if (i === null || i < 0 || i >= masks.length) return null;
+  const m = masks[i];
+  const j = s.componentIndex;
+  return { index: i, mask: m, component: j !== null && j >= 0 && j < m.components.length ? j : null };
+}
+
+/** マスクを選ぶ（null で外す。部品は最初のもの）。ブラシ・スポイトの道具は終える。 */
+export function selectMask(index: number | null): void {
+  const s = viewStore.get();
+  const toolOff = s.tool === "brush" || s.tool === "mask_color";
+  viewStore.set({
+    maskIndex: index,
+    componentIndex: index === null ? null : 0,
+    ...(toolOff ? { tool: "none" as const, pickTarget: null } : {}),
+  });
+}
+
+/** 部品を選ぶ（ブラシで描いている間にブラシでない部品を選んだら、描くのをやめる）。 */
+export function selectComponent(index: number | null): void {
+  const s = viewStore.get();
+  const d = developStore.get();
+  const sel = currentMask(d.settings, { maskIndex: s.maskIndex, componentIndex: index });
+  const isBrush = sel?.component != null && shapeKind(sel.mask.components[sel.component].shape) === "brush";
+  viewStore.set({
+    componentIndex: index,
+    ...(s.tool === "brush" && !isBrush ? { tool: "none" as const } : {}),
+    ...(s.tool === "mask_color" ? { tool: "none" as const, pickTarget: null } : {}),
+  });
+}
+
+/** 重ねて表示を切り替える（O。マスクを選んでいなければ最初のマスクを選ぶ。マスクがなければ知らせる）。 */
+export function toggleMaskOverlay(): void {
+  const s = viewStore.get();
+  const d = developStore.get();
+  if (!d.state || !d.settings) return;
+  const masks = d.settings.masks ?? [];
+  if (!s.maskOverlay && masks.length === 0) {
+    actions.notify("info", "マスクがありません（右のパネルの「マスク」で追加できます）");
+    return;
+  }
+  if (!s.maskOverlay && currentMask(d.settings, s) === null) {
+    viewStore.set({ maskIndex: 0, componentIndex: 0 });
+  }
+  viewStore.set({ maskOverlay: !s.maskOverlay });
+}
+
+/** ブラシの道具の設定を変える。 */
+export function setBrushOptions(patch: Partial<BrushOptions>): void {
+  viewStore.set((s) => ({ brush: { ...s.brush, ...patch } }));
+}
+
+/** マスク・ブラシ・スポイトの道具を使える状態か（写真を開いていて、処理バージョンが 2 以上）。 */
+function maskToolReady(): boolean {
+  const d = developStore.get();
+  return !!d.state && !!d.settings && d.settings.process_version >= 2;
+}
+
+/** 選んでいる部品をブラシで描き始める・やめる（選んでいる部品がブラシのときだけ）。 */
+export function toggleBrushTool(): void {
+  const s = viewStore.get();
+  if (s.tool === "brush") {
+    viewStore.set({ tool: "none" });
+    return;
+  }
+  if (s.crop || !maskToolReady()) return;
+  const sel = currentMask(developStore.get().settings, s);
+  if (!sel || sel.component === null || shapeKind(sel.mask.components[sel.component].shape) !== "brush") return;
+  viewStore.set({ tool: "brush", compare: "off", pickTarget: null });
+}
+
+/** マスク・ブラシ・スポイトの道具をやめる（Esc）。 */
+export function cancelMaskTool(): void {
+  const t = viewStore.get().tool;
+  if (t === "brush" || t === "mask_color") viewStore.set({ tool: "none", pickTarget: null });
+}
+
+/** 新しいマスクを足して選ぶ（ブラシなら描き始める）。 */
+export function addMaskWith(settings: DevelopSettings, mask: LocalAdjustment, startBrush: boolean): void {
+  const next = addMask(settings, mask);
+  if (next === settings) {
+    actions.notify("info", "これ以上マスクを足せません");
+    return;
+  }
+  applySettings(next, false);
+  selectMask(next.masks.length - 1);
+  if (startBrush) toggleBrushTool();
+}
+
+/** 部品を足した設定 `next` を送り、マスク `index` の最後の部品（足した部品）を選ぶ（ブラシなら描き始める）。 */
+export function applyAddedComponent(next: DevelopSettings, index: number, startBrush: boolean): void {
+  applySettings(next, false);
+  selectMaskComponent(index, next.masks[index].components.length - 1);
+  if (startBrush) toggleBrushTool();
+}
+
+/** マスク `i` の部品 `j` を選ぶ。 */
+export function selectMaskComponent(i: number, j: number): void {
+  viewStore.set({ maskIndex: i });
+  selectComponent(j);
+}
+
+/** 色域のスポイトを使い始める（入れ先を決めて。もう一度押すとやめる）。 */
+export function startMaskColorPick(target: MaskPickTarget): void {
+  const s = viewStore.get();
+  if (s.tool === "mask_color") {
+    viewStore.set({ tool: "none", pickTarget: null });
+    return;
+  }
+  if (s.crop || !maskToolReady()) return;
+  viewStore.set({ tool: "mask_color", compare: "off", pickTarget: target });
+}
+
+/**
+ * 色域のスポイト: 表示中のプレビューの点（各軸 0〜1）の色をコアに求め、入れ先に見本の色として足す（新しいマスク・
+ * 新しい部品・見本の追加）。道具は終える。点が画像の外（回転で外になった四隅など）ならコアのエラーを知らせる。
+ */
+export async function pickMaskColor(x: number, y: number): Promise<void> {
+  const d = developStore.get();
+  const id = d.variantId;
+  const uncropped = d.frame?.header.uncropped ?? false;
+  const target = viewStore.get().pickTarget;
+  viewStore.set({ tool: "none", pickTarget: null });
+  if (id === null || !d.state || !target) return;
+  await enqueue(async () => {
+    try {
+      const pick = await core.maskColorAt(id, clamp01(x), clamp01(y), uncropped);
+      const cur = developStore.get();
+      if (cur.variantId !== id || !cur.settings) return;
+      const s = cur.settings;
+      if (target.kind === "new_mask") {
+        addMaskWith(s, newMask(newColorShape(pick)), false);
+      } else if (target.kind === "new_component") {
+        const next = addComponent(s, target.mask, newComponent(newColorShape(pick)));
+        if (next === s) return;
+        applyAddedComponent(next, target.mask, false);
+      } else {
+        const next = addColorSample(s, target.mask, target.component, pick);
+        if (next !== s) applySettings(next, false);
+      }
+    } catch (e) {
+      actions.reportError(e, "スポイトで色を求められません");
+    }
+  });
+}
+
+/**
+ * 描いたストローク（G 座標の点の列）を、選んでいるマスクのブラシの部品に足す（離したとき。履歴に 1 件）。足せなければ
+ * 知らせる。
+ */
+export function commitBrushStroke(points: [number, number][], erase: boolean): void {
+  const d = developStore.get();
+  const s = viewStore.get();
+  if (!d.state || !d.settings) return;
+  const sel = currentMask(d.settings, s);
+  if (!sel || sel.component === null) return;
+  const stroke = makeStroke(points, { ...s.brush, erase });
+  const r = appendStroke(d.settings, sel.index, sel.component, stroke);
+  if ("error" in r) {
+    actions.notify("info", r.error);
+    return;
+  }
+  applySettings(r.settings, false);
 }

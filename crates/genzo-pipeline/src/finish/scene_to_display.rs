@@ -359,9 +359,9 @@ impl Stage for SceneToDisplayStage {
     }
     fn params(&self, _: &DevelopSettings, ctx: &StageContext<'_>) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(Some(StageParams::new(SceneToDisplayParams::for_input(
-                ctx.input_kind,
-            )))),
+            ProcessVersion::V1 | ProcessVersion::V2 => Ok(Some(StageParams::new(
+                SceneToDisplayParams::for_input(ctx.input_kind),
+            ))),
         }
     }
     fn input_roi(&self, output_roi: Roi, _: &StageParams, _: &StageContext<'_>) -> Roi {
@@ -376,7 +376,9 @@ impl Stage for SceneToDisplayStage {
     ) -> Result<()> {
         let p = params.expect::<SceneToDisplayParams>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 => map_pixels(input, output, |_, _, c| p.apply(c)),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                map_pixels(input, output, |_, _, c| p.apply(c))
+            }
         }
     }
 }

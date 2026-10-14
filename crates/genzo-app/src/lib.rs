@@ -7,11 +7,12 @@
 //! |---|---|
 //! | [`state`] | 開いているカタログ（コア）、カタログを開く・閉じる・復元する、イベントの転送 |
 //! | [`commands`] | Tauri のコマンド（画面 → アプリ。コアのコマンドの中継と、アプリ固有の操作） |
-//! | [`protocol`] | `genzo://` の URI スキーム（サムネイル・標準プレビューの JPEG） |
+//! | [`protocol`] | `genzo://` の URI スキーム（サムネイル・標準プレビューの JPEG、動画の元のファイルと再生用のファイルを Range の要求に応えて配信する。VID-04） |
 //! | [`frames`] | 現像のプレビュー・表示範囲の画素のバイナリの形 |
 //! | [`settings`] | アプリの設定（カタログの場所・FFmpeg・GPU） |
 //! | [`tools`] | ffmpeg・ffprobe を探す |
 //! | [`catalog_file`] | 既定のカタログの場所、データのフォルダ、カタログのファイルの判定 |
+//! | [`logs`] | ログ・クラッシュレポート（SYS-07。起動時の初期化、前回のクラッシュの知らせ、ログのフォルダを開く・消す、画面のエラーの記録。外部へは送信しない） |
 //!
 //! # 画面への画像の表示（決定事項ログ No.60。04 の 1.5 節からの変更）
 //!
@@ -64,6 +65,7 @@
 pub mod catalog_file;
 pub mod commands;
 pub mod frames;
+pub mod logs;
 pub mod protocol;
 pub mod settings;
 pub mod state;
@@ -125,15 +127,6 @@ impl QuitRequests {
 pub(crate) static QUIT_REQUESTS: QuitRequests = QuitRequests::new();
 /// macOS のアプリのメニューの「GenzoParis を終了」（⌘Q）の ID（`app_menu`）。
 pub const QUIT_MENU_ID: &str = "genzo-quit";
-
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_env("GENZO_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
-}
 
 /// 終了の要求を受けたとき（ウィンドウを閉じる・macOS の ⌘Q・`ExitRequested`）。
 ///
@@ -288,11 +281,13 @@ fn app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
 /// アプリを起動する。
 pub fn run() {
-    init_tracing();
+    // ログ（ファイルと標準エラー）とパニックのフック（SYS-07）。Windows の配布版は標準エラーがないので、
+    // ログはファイルにだけ残る。
+    let log_status = logs::init();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let config_dir = app.path().app_config_dir()?;
             let sink: state::EventSink = Arc::new(move |event| {
@@ -300,7 +295,9 @@ pub fn run() {
                     tracing::debug!(error = %e, "イベントを画面に送れない");
                 }
             });
-            app.manage(Arc::new(AppState::new(config_dir, sink)));
+            app.manage(Arc::new(
+                AppState::new(config_dir, sink).with_logs(logs::AppLogs::new(log_status)),
+            ));
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol("genzo", protocol::handle)
@@ -312,16 +309,25 @@ pub fn run() {
             commands::core_execute,
             commands::develop_frame,
             commands::region_frame,
+            commands::before_frame,
+            commands::before_region_frame,
+            commands::view_region_frame,
+            commands::mask_overlay_frame,
             commands::set_display_target,
             commands::list_catalog_backups,
             commands::restore_catalog,
             commands::update_app_settings,
+            commands::save_import_preferences,
             commands::locate_tools,
             commands::path_kinds,
             commands::reveal_variant_file,
             commands::open_variant_file,
             commands::quit_app,
             commands::ack_quit_request,
+            commands::log_folder_info,
+            commands::open_log_folder,
+            commands::clear_logs,
+            commands::report_ui_error,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event

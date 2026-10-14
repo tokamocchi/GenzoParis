@@ -13,7 +13,7 @@ use crate::buffer::{DynRgbImage, RgbImage, Sample};
 
 /// 向き `o` の画像（記録された寸法 `w × h`）を表示したときの画素 `(dx, dy)` が、記録された
 /// 画像のどの画素 `(sx, sy)` に当たるか。
-fn source_coord(o: Orientation, dx: u32, dy: u32, w: u32, h: u32) -> (u32, u32) {
+pub(crate) fn source_coord(o: Orientation, dx: u32, dy: u32, w: u32, h: u32) -> (u32, u32) {
     match o {
         Orientation::Normal => (dx, dy),
         Orientation::FlipHorizontal => (w - 1 - dx, dy),

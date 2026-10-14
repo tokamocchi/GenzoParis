@@ -170,6 +170,71 @@
 .lib-grid-toolbar .spacer {
   flex: 1;
 }
+.lib-grid-toolbar select {
+  max-width: 200px;
+  font-size: 12px;
+}
+.lib-grid-toolbar .hint {
+  color: var(--fg-2);
+}
+.lib-tl-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+/* タイムライン（ORG-01）の日付・イベントの見出しの行。 */
+.lib-tl-day,
+.lib-tl-event {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  box-sizing: border-box;
+  padding-bottom: 4px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.lib-tl-day {
+  color: var(--fg-0);
+  font-size: 15px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 2px;
+}
+.lib-tl-event {
+  color: var(--fg-1);
+  font-size: 12px;
+}
+.lib-tl-day .meta,
+.lib-tl-event .meta {
+  font-weight: normal;
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.lib-tl-day:hover .title,
+.lib-tl-event:hover .meta {
+  text-decoration: underline;
+}
+/* スクロールして日付の見出しが隠れたときに上端に出す、今の日付。 */
+.lib-tl-sticky {
+  position: absolute;
+  top: 6px;
+  left: 12px;
+  padding: 2px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  color: var(--fg-0);
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+  opacity: 0.92;
+}
 .lib-grid-toolbar input[type="range"] {
   width: 140px;
   accent-color: var(--fg-1);
@@ -499,6 +564,49 @@
   min-height: 64px;
   resize: vertical;
 }
+
+/* 説明のメタデータ（LIB-15） */
+.lib-iptc {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lib-iptc-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: center;
+  gap: 2px 8px;
+  font-size: 12px;
+}
+.lib-iptc-row.multiline {
+  align-items: start;
+}
+.lib-iptc-row > .label {
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+.lib-iptc-row > .label .saving {
+  display: block;
+  color: var(--fg-2);
+  font-size: 11px;
+}
+.lib-iptc-row > input,
+.lib-iptc-row > select,
+.lib-iptc-row > textarea {
+  min-width: 0;
+  width: 100%;
+}
+.lib-iptc-row > textarea.lib-caption {
+  min-height: 40px;
+}
+.lib-iptc-row > .error-text {
+  grid-column: 2;
+  font-size: 11px;
+}
+.lib-meta-note {
+  margin: 6px 10px;
+  font-size: 11px;
+}
 .lib-files {
   list-style: none;
   margin: 0;
@@ -529,4 +637,314 @@
 }
 .lib-meta .status-error {
   color: var(--danger);
+}
+.lib-meta-batch.stale {
+  opacity: 0.55;
+}
+
+/* ------------------------------------------------------------------ キーワード・コレクション（LIB-09〜11） */
+
+.lib-organize-filter {
+  width: 100%;
+  margin-bottom: 4px;
+}
+.lib-organize-row {
+  gap: 2px;
+}
+.lib-organize-row.drop-over {
+  background: var(--bg-4);
+  outline: 1px solid var(--accent);
+}
+.lib-organize-row.drop-no {
+  outline: 1px dashed var(--warn);
+}
+.lib-organize-name {
+  flex: 1 1 auto;
+}
+.lib-organize-note {
+  color: var(--fg-3);
+}
+.lib-organize-icon {
+  flex: none;
+  width: 16px;
+  color: var(--fg-2);
+  font-size: 11px;
+  text-align: center;
+}
+.lib-organize-count {
+  flex: none;
+  min-width: 2em;
+  color: var(--fg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.lib-organize-count.warn {
+  color: var(--warn);
+}
+.lib-organize-target {
+  flex: none;
+  color: var(--accent);
+  font-size: 12px;
+}
+.lib-organize-row .menu-button {
+  flex: none;
+  visibility: hidden;
+  padding: 0 4px;
+}
+.lib-organize-row:hover .menu-button,
+.lib-organize-row .menu-button:focus-visible,
+.lib-organize-row .menu-button[aria-expanded="true"] {
+  visibility: visible;
+}
+.lib-tag-box {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0 4px 0 0;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--fg-0);
+  font-size: 11px;
+  line-height: 14px;
+  cursor: pointer;
+}
+.lib-tag-box.all {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.lib-tag-box.some {
+  color: var(--fg-2);
+}
+.lib-tag-box:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 右のパネルのキーワードの欄（KeywordEditor） */
+.lib-keyword-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+.lib-keyword-chips li {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-2);
+}
+.lib-keyword-chips li.partial {
+  border-style: dashed;
+  color: var(--fg-2);
+}
+.lib-keyword-chips .name {
+  padding: 1px 4px 1px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lib-keyword-chips .name.link {
+  cursor: pointer;
+}
+.lib-keyword-chips .name.link:hover {
+  text-decoration: underline;
+}
+.lib-keyword-chips .note {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.lib-keyword-chips .remove {
+  padding: 0 6px 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.lib-keyword-chips .remove:hover:not(:disabled) {
+  color: var(--fg-0);
+}
+.lib-keyword-input {
+  position: relative;
+}
+.lib-keyword-input input {
+  width: 100%;
+}
+.lib-keyword-hits {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin: 2px 0 0;
+  padding: 2px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  list-style: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+.lib-keyword-hits li {
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lib-keyword-hits li:hover,
+.lib-keyword-hits li.active {
+  background: var(--bg-3);
+}
+
+/* 絞り込みの札（FilterBar の OrganizeChips） */
+.lib-organize-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.lib-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 240px;
+  padding: 1px 2px 1px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  color: var(--fg-0);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lib-chip button {
+  border: none;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.lib-chip button:hover {
+  color: var(--fg-0);
+}
+
+/* スタックの印（LIB-12。StackBadge.tsx）。押せる印なので、セルの印の並び（pointer-events: none）の中でも
+   押せるようにする。展開したスタックの写真は、セルの下端に色の帯を付けて、まとまりを示す。 */
+.stack-badge {
+  font: inherit;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-0);
+  border: 1px solid var(--accent);
+  color: var(--fg-0);
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.stack-badge.collapsed {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 700;
+}
+.stack-badge:hover,
+.stack-badge:focus-visible {
+  outline: 1px solid var(--fg-1);
+}
+.stack-icon {
+  margin-right: 2px;
+}
+.lib-cell.stack-member::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--accent);
+  opacity: 0.55;
+  pointer-events: none;
+}
+.lib-cell.stack-member.stack-first::after {
+  left: 6px;
+  border-top-left-radius: 2px;
+}
+.lib-grid-toolbar .menu-button {
+  margin-right: 8px;
+}
+
+/* 同じ写真のマスターと仮想コピーの一覧（LIB-13。MetadataPanel の VersionsSection）。 */
+.lib-versions {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+}
+.lib-version {
+  display: block;
+  width: 100%;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.lib-version:hover:not(:disabled) {
+  background: var(--bg-3);
+}
+.lib-version.on {
+  background: var(--bg-3);
+  color: var(--fg-0);
+  cursor: default;
+}
+
+/* 「詳しい条件」のチェックボックス（マスターだけ・スタックをすべて展開。FilterBar の MoreConditions）。 */
+.lib-filter-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  white-space: nowrap;
+}
+
+/* 右のパネルの撮影日時の「修正…」（LIB-16）。 */
+.lib-capture-edit {
+  margin-left: 6px;
+  vertical-align: baseline;
+}
+
+/* ------------------------------------------------------------------ フォルダの印・ドロップ（FILE-02〜04） */
+
+.lib-tree-seg.offline {
+  color: var(--fg-3);
+}
+.lib-tree-seg.missing {
+  color: var(--warn);
+}
+.lib-tree-seg.drop-over {
+  background: var(--bg-4);
+  outline: 1px solid var(--accent);
+}
+.lib-tree-seg.drop-no {
+  outline: 1px dashed var(--warn);
+}
+.lib-tree-mark {
+  flex: none;
+  padding: 0 2px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.lib-tree-mark.warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+.lib-tree-mark.muted {
+  color: var(--fg-3);
 }

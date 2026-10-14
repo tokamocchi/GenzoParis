@@ -1,11 +1,11 @@
-//! 選別（LIB-04）・キャプション・メタデータの表示（LIB-14）・フォルダ（LIB-06）・ファイルの状態の確認
-//! （04 の 3.3 節）。
+//! 選別（LIB-04）・キャプションと説明のメタデータの編集（LIB-15）・メタデータの表示（LIB-14）・
+//! フォルダ（LIB-06）・ファイルの状態の確認（04 の 3.3 節）。
 
 use std::path::Path;
 use std::sync::Arc;
 
 use genzo_catalog::{FileFacts, FileRecord};
-use genzo_model::{ColorLabel, FileStatus, Flag, Rating, VariantId};
+use genzo_model::{ColorLabel, FileStatus, Flag, MetadataField, Rating, VariantId};
 use genzo_worker::Lane;
 
 use crate::core::{Core, Inner};
@@ -14,7 +14,8 @@ use crate::events::{CatalogChange, Event};
 use crate::import::{ProbeTarget, media_kind, probe_request};
 use crate::paths::join_rel;
 use crate::types::{
-    CatalogStats, FileCheckReport, FileInfo, FileIssue, FolderInfo, VariantDetails, VariantSummary,
+    CatalogSchema, CatalogStats, FileCheckReport, FileInfo, FileIssue, FolderInfo, MetadataSummary,
+    StackInfo, VariantBrief, VariantDetails, VariantSummary,
 };
 
 /// 選別の操作の後: カタログの変更を知らせ、表示中の検索結果を作り直す（変えた variant は残す。3.7 節）。
@@ -88,16 +89,71 @@ impl Core {
         Ok(n)
     }
 
+    /// 説明のメタデータ（タイトル・キャプション・作成者・著作権など。LIB-15）を一括で変える（asset に付ける。
+    /// 1 つのトランザクション）。
+    ///
+    /// `changes` は（項目、値）の並びで、並べた項目だけを変える（`None`・空白だけなら削除）。値は
+    /// genzo-model の `normalize_metadata_value` で整える（前後の空白・制御文字を除く。上限 2,000 文字）。
+    /// 変えた asset の数を返す（同じ asset の仮想コピーは 1 つに数える）。値が不正なら種類
+    /// `invalid_input` のエラー（[`ApiError::Catalog`]）で、何も変えない。テキスト検索の索引も更新する
+    /// （3.6 節）。
+    /// 元のファイルには書かない。
+    pub fn set_metadata(
+        &self,
+        variant_ids: &[VariantId],
+        changes: &[(MetadataField, Option<String>)],
+    ) -> Result<usize, ApiError> {
+        self.inner.check_open()?;
+        let changes: Vec<(MetadataField, Option<&str>)> =
+            changes.iter().map(|(f, v)| (*f, v.as_deref())).collect();
+        let n = self.inner.with_catalog(|c| {
+            let assets = c.assets_of_variants(variant_ids)?;
+            c.set_asset_metadata(&assets, &changes)
+        })?;
+        self.inner.events.emit(Event::CatalogChanged {
+            change: CatalogChange::Metadata,
+            variant_ids: variant_ids.to_vec(),
+            all: false,
+        });
+        // テキスト検索の条件に合わなくなったものは残さない（キャプションと同じ）。
+        crate::search::refresh(&self.inner, &[]);
+        Ok(n)
+    }
+
+    /// 複数の写真の説明のメタデータのまとめ（項目ごとに、共通の値か、写真によって異なるか。LIB-15 の
+    /// 一括編集の画面用）。
+    pub fn metadata_summary(&self, variant_ids: &[VariantId]) -> Result<MetadataSummary, ApiError> {
+        self.inner.check_open()?;
+        self.inner.with_catalog(|c| {
+            let assets = c.assets_of_variants(variant_ids)?;
+            Ok(MetadataSummary::from(c.metadata_summary(&assets)?))
+        })
+    }
+
     /// variant の詳細（メタデータの表示。LIB-14）。
     pub fn variant_details(&self, variant_id: VariantId) -> Result<VariantDetails, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
-        let (summary, asset, files) = inner.with_catalog_api(|c| {
+        let (summary, asset, metadata, files, variants, stack) = inner.with_catalog_api(|c| {
             let s = c
                 .variant_summaries(&[variant_id])?
                 .pop()
                 .ok_or_else(|| ApiError::NotFound(format!("variant {variant_id}")))?;
             let a = c.asset(s.asset_id)?;
+            let m = c.asset_metadata(s.asset_id)?;
+            let variants: Vec<VariantBrief> = c
+                .variants_of_asset(s.asset_id)?
+                .into_iter()
+                .map(|v| VariantBrief {
+                    variant_id: v.id,
+                    is_master: v.is_master,
+                    name: v.name,
+                })
+                .collect();
+            let stack = c
+                .stacks_of_variants(&[variant_id])?
+                .pop()
+                .map(StackInfo::from);
             let mut files = Vec::new();
             for f in c.files_of_asset(s.asset_id)? {
                 files.push(FileInfo {
@@ -107,21 +163,26 @@ impl Core {
                     size: f.facts.size,
                     status: f.status,
                     status_reason: f.status_reason,
+                    full_hash: f.full_hash,
                 });
             }
-            Ok((s, a, files))
+            Ok((s, a, m, files, variants, stack))
         })?;
         let rev = inner.with_cache(|c| c.thumbs.cache_key(variant_id))?;
         Ok(VariantDetails {
             summary: VariantSummary::from_catalog(summary, rev),
+            camera_serial: asset.camera_serial,
             iso: asset.iso,
             aperture: asset.aperture,
             shutter_s: asset.shutter_s,
             focal_mm: asset.focal_mm,
             gps: asset.gps,
             caption: asset.caption,
+            metadata,
             video: asset.video,
             files,
+            variants,
+            stack,
         })
     }
 
@@ -137,28 +198,46 @@ impl Core {
                 variants: counts.variants,
                 files: counts.files,
                 history_entries: counts.history_entries,
+                stacks: c.stack_count()?,
             })
         })
     }
 
-    /// 登録されているフォルダ（LIB-06。ボリュームごと、相対パスの順）。
+    /// カタログの構造（表・列・索引・ビュー・トリガーと公開ビュー。ORG-07。読むだけ）。文書は
+    /// docs/catalog_schema.md。
+    pub fn catalog_schema(&self) -> Result<CatalogSchema, ApiError> {
+        self.inner.check_open()?;
+        self.inner
+            .with_catalog(|c| Ok(CatalogSchema::from(c.describe_schema()?)))
+    }
+
+    /// 登録されているフォルダ（LIB-06。ボリュームごと、相対パスの順）。ボリュームのつながり（FILE-03）・
+    /// 見つからない印と見つからないファイルの数（FILE-04）を含む。
     pub fn folders(&self) -> Result<Vec<FolderInfo>, ApiError> {
         self.inner.check_open()?;
         self.inner.with_catalog(|c| {
+            let mounts: std::collections::HashMap<genzo_model::VolumeId, Option<String>> = c
+                .volume_records()?
+                .into_iter()
+                .map(|v| (v.id, v.last_mount_path))
+                .collect();
+            let missing = c.missing_file_counts()?;
             let mut out = Vec::new();
-            for v in c.volumes()? {
-                let mount = v.last_mount_path.clone();
-                for f in c.folders(v.id)? {
-                    out.push(FolderInfo {
-                        folder_id: f.id,
-                        volume_id: f.volume_id,
-                        parent_id: f.parent_id,
-                        path: mount
-                            .as_deref()
-                            .map(|m| join_rel(std::path::Path::new(m), &f.rel_path, "")),
-                        rel_path: f.rel_path,
-                    });
-                }
+            for r in c.folder_records()? {
+                let f = r.folder;
+                let mount = mounts.get(&f.volume_id).cloned().flatten();
+                out.push(FolderInfo {
+                    folder_id: f.id,
+                    volume_id: f.volume_id,
+                    parent_id: f.parent_id,
+                    path: mount
+                        .as_deref()
+                        .map(|m| join_rel(std::path::Path::new(m), &f.rel_path, "")),
+                    online: !c.is_volume_offline(f.volume_id),
+                    missing: r.status == genzo_model::FolderStatus::Missing,
+                    missing_files: missing.get(&f.id).copied().unwrap_or(0),
+                    rel_path: f.rel_path,
+                });
             }
             Ok(out)
         })
@@ -223,7 +302,10 @@ impl Core {
                     changed_assets.push(f.asset_id);
                 }
                 // 読めない（状態を確かめられない・ハッシュを求められない）ファイルは、今の状態のまま。
-                Err(ApiError::FileAccess { .. }) => report.ok += 1,
+                Err(ApiError::FileAccess { path, message }) => {
+                    tracing::warn!(path = %path.display(), %message, "ファイルを確かめられません（状態は変えない）");
+                    report.ok += 1;
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -267,11 +349,17 @@ pub(crate) fn refresh_file(
     let meta = match std::fs::metadata(path) {
         Ok(m) if m.is_file() => m,
         // 通常のファイルでない（同じ名前のフォルダになっているなど）: 元のファイルはない。
-        Ok(_) => return Ok(Refreshed::Missing),
+        Ok(_) => {
+            same_volume_still_mounted(inner, rec, path)?;
+            return Ok(Refreshed::Missing);
+        }
         // 見つからない（フォルダごとなくなった・ドライブが外れた場合も含む）。`missing` は、戻れば `ok` に
         // 戻せる印なので記録してよい（ゴミ箱への移動は、フォルダごと見えなければ移さず失敗にする。移す
         // という取り消せない操作は、ないと確かめられたものだけを扱うため。delete.rs）。
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Refreshed::Missing),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            same_volume_still_mounted(inner, rec, path)?;
+            return Ok(Refreshed::Missing);
+        }
         // それ以外（権限がない・フォルダの部分がフォルダでない・一時的な入出力のエラーなど）は、あるか
         // ないかが分からない。見つからないものとして記録せず（状態を変えず）、読めないエラーにする。
         Err(e) => {
@@ -320,9 +408,57 @@ pub(crate) fn refresh_file(
         }
         return Ok(Refreshed::Restored);
     }
-    // 内容が変わった: メタデータを読み直して登録し直す。
+    // 内容が変わった: メタデータを読み直して登録し直す（マウント先に別のドライブがつながっていれば、別の写真の
+    // 内容で登録し直さない）。
+    same_volume_still_mounted(inner, rec, path)?;
     reread(inner, rec, path, facts, lane, token)?;
     Ok(Refreshed::Changed)
+}
+
+/// ファイルのボリュームのマウント先に、今も同じボリュームがつながっているか（FILE-03。最後に確かめた後に
+/// ドライブを入れ替えた場合に、別のドライブのファイルで見つからない印を付けたり、登録し直したりしない）。
+/// つながっていなければ [`ApiError::FileAccess`]（状態は変えない。次にボリュームを確かめ直したときに、
+/// つながっていないボリュームになる）。パスから作った ID のボリュームは確かめられないので確かめない。
+///
+/// 確かめ方はボリュームを確かめ直すとき（`volumes::refresh_volumes`）と同じで、マウント先のボリュームの ID が
+/// 違えば、つながっているボリュームの一覧からも同じ ID・同じマウント先のものを探す（macOS の起動ディスクは、
+/// データのボリュームのマウント先を `/` として記録するが、`/` を問い合わせると読み取り専用のシステムの
+/// ボリュームの ID が返る。検証のラウンド 1 の指摘）。
+fn same_volume_still_mounted(inner: &Inner, rec: &FileRecord, path: &Path) -> Result<(), ApiError> {
+    let loc = inner.with_catalog(|c| c.folder_location(rec.folder_id))?;
+    if loc
+        .volume_uuid
+        .starts_with(crate::paths::PATH_VOLUME_PREFIX)
+    {
+        return Ok(());
+    }
+    let Some(mount) = loc.mount_path.as_deref() else {
+        return Ok(());
+    };
+    let mount = Path::new(mount);
+    let matches = |id: &crate::volumes::VolumeIdentity| {
+        id.uuid == loc.volume_uuid && crate::volumes::same_path(&id.mount, mount)
+    };
+    // まず、ファイルそのものが記録のボリュームにあるかを、取り込みと同じ方法（パスから）で確かめる。マウント先
+    // から求め直す方法だけでは、macOS の起動ディスク（データのボリュームを `/` として記録する）で一致しない
+    // ことがあり、内容が変わったファイルを読み直せなかった（CI の macOS）。
+    let same = inner
+        .volume_probe
+        .identify(path)
+        .is_some_and(|id| id.uuid == loc.volume_uuid)
+        || inner
+            .volume_probe
+            .identify(mount)
+            .is_some_and(|id| matches(&id))
+        || inner.volume_probe.mounted().iter().any(matches);
+    if same {
+        Ok(())
+    } else {
+        Err(ApiError::FileAccess {
+            path: path.to_path_buf(),
+            message: "ファイルのドライブがつながっていないか、別のドライブに入れ替わっています（ドライブを確かめ直してください）".to_owned(),
+        })
+    }
 }
 
 /// ワーカーでメタデータを読み直し、取り込みと同じ経路（`register_file`）で登録し直す。

@@ -13,17 +13,48 @@
 //   ルーペ。評価・フラグなどのキーは App.tsx が持つ。
 // - selection.current が変わったら、そのセルが見えるようにスクロールする。グリッドを開き直したときは
 //   真ん中に置く。絞り込み・並べ替えを変えたら先頭に戻し、操作の対象が残っていればそこを見せる。
+// - スタック（LIB-12）: 検索結果はコアがスタックでまとめている（折りたたんだスタックは代表の 1 枚）。セルに
+//   スタックの印（StackBadge.tsx。クリックで展開・折りたたみ）を出し、展開したスタックの写真には下端に帯を付ける。
+// - 写真の右クリックのメニュー（仮想コピー・スタック・撮影日時・フォルダへの移動と名前の変更・再リンク。
+//   library/stackLogic.ts の photoMenuEntries）。選んで
+//   いない写真を右クリックしたら、その 1 枚を選んでから出す。下の帯の「スタック」のボタンからは、すべての
+//   スタックの展開・折りたたみと、撮影時刻による自動スタック。
+// - タイムライン（ORG-01。T・下の帯の「タイムライン」）: 撮影日時の順のとき、撮影日の見出しとイベント（撮影の
+//   間隔で区切ったまとまり）の見出しの行をセルの行の間に入れる（まとまりはコアが作る。state/timeline.ts）。
+//   見出しのクリックで、その日・イベントの写真を選ぶ。下の帯で区切りの間隔と、年・月への移動を選べる。
+//   スクロールして日付の見出しが隠れたら、上端に今の日付を出す。
 
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { memo, type MouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  type MouseEvent,
+  type PointerEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import type { SearchFilter, VariantId, VariantSummary } from "../api/types";
 import { thumbUrl } from "../api/uri";
 import { FlagMark, LabelDot, Stars } from "../components/Marks";
+import { MENU_SEPARATOR, type MenuAt, type MenuEntry, MenuButton, PopupMenu } from "../components/Menu";
 import { formatCaptureTime } from "../format";
-import { useHotkeys } from "../keyboard";
+import { comboLabel, useHotkeys } from "../keyboard";
 import { actions, appStore, type Selection, useApp } from "../state/app";
+import { dropPhotos } from "../state/organize";
 import { searchCache, thumbRevs, useSearchVersion } from "../state/search";
+import { addTargetsToStack, runPhotoMenu, setAllStacksCollapsed } from "../state/stacks";
+import {
+  loadTimeline,
+  setTimelineEnabled,
+  setTimelineGap,
+  timelineActive,
+  toggleTimeline,
+  useTimeline,
+} from "../state/timeline";
 import { activeConditionCount, clearConditions } from "./filterLogic";
 import {
   anchoredOffset,
@@ -37,14 +68,31 @@ import {
   isFullyVisible,
   MAX_RANGE,
   type NavKey,
-  navigate,
+  navigateLayout,
   pageRows,
   revealOffset,
+  ROW_CELLS,
+  ROW_DAY,
+  rowAt,
+  rowCells,
+  rowSize,
+  rowTop,
+  withTimeline,
 } from "./gridMath";
 import "./library.css";
-import { extensionMark, fileStatusTitle, virtualCopyLabel } from "./metadataLogic";
+import { extensionMark, fileStatusTitle, pairLabel, virtualCopyLabel } from "./metadataLogic";
+import { consumeDragClick, dragIds, watchPhotoDrag } from "./photoDrag";
 import { loadNumber, save } from "./prefs";
 import { ScrollMapper } from "./scrollMapper";
+import { StackBadgeButton } from "./StackBadge";
+import { PHOTO_MENU_SEPARATOR, photoMenuEntries } from "./stackLogic";
+import {
+  dayHeaderText,
+  eventHeaderText,
+  monthIndex,
+  monthsByYear,
+  TIMELINE_GAP_OPTIONS,
+} from "./timelineLogic";
 
 /** セルの帯にファイル名を出す、印を言葉で書くセルの幅（px。仮置き）。 */
 const WIDE_CELL = 140;
@@ -105,6 +153,17 @@ export function Grid() {
   const dialogOpen = useApp((s) => s.dialog !== null);
   const filter = useApp((s) => s.filter);
   const sort = useApp((s) => s.sort);
+  // タイムライン（ORG-01）。
+  const captureTimeVersion = useApp((s) => s.captureTimeVersion);
+  const catalogPath = useApp((s) => s.catalog?.catalog_path ?? null);
+  const tlEnabled = useTimeline((t) => t.enabled);
+  const tlGap = useTimeline((t) => t.gapSeconds);
+  const tlData = useTimeline((t) => (t.dataCatalog === catalogPath ? t.data : null));
+  const tlError = useTimeline((t) => t.error);
+  const tlActive = timelineActive(tlEnabled, sort);
+  useEffect(() => {
+    if (tlActive && generation !== null) void loadTimeline(generation, tlGap, catalogPath);
+  }, [tlActive, generation, tlGap, captureTimeVersion, catalogPath]);
 
   const [cellSize, setCellSize] = useState(() =>
     loadNumber("cellSize", CELL_SIZE.default, CELL_SIZE.min, CELL_SIZE.max),
@@ -117,21 +176,25 @@ export function Grid() {
   const renderShift = useRef(0);
 
   const ready = size.width > 0 && size.height > 0;
-  const layout = useMemo(() => gridLayout(size.width, count, cellSize), [size.width, count, cellSize]);
+  const layout = useMemo(() => {
+    const base = gridLayout(size.width, count, cellSize);
+    return tlActive && tlData ? withTimeline(base, tlData.groups, count) : base;
+  }, [size.width, count, cellSize, tlActive, tlData]);
   // スクロールのイベントは描画の合間に来るので、最新の配置を先に渡しておく。
   mapper.layout = layout;
   mapper.viewHeight = size.height;
 
-  // 行の高さが変わったら、react-virtual に行の位置を計算し直させる（react-virtual は estimateSize の変化を
-  // 見ず、getItemKey が変わったときに計算し直す）。
+  // 行の高さ・タイムラインの行の表が変わったら、react-virtual に行の位置を計算し直させる（react-virtual は
+  // estimateSize の変化を見ず、getItemKey が変わったときに計算し直す）。
   const rowHeight = layout.rowHeight;
+  const rowsTable = layout.timeline;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const getItemKey = useCallback((i: number) => i, [rowHeight]);
+  const getItemKey = useCallback((i: number) => i, [rowHeight, rowsTable]);
 
   const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: ready ? layout.rows : 0,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => layout.rowHeight,
+    estimateSize: (i) => rowSize(layout, i),
     getItemKey,
     paddingStart: GRID_GAP,
     overscan: 2,
@@ -195,7 +258,11 @@ export function Grid() {
     const prev = prevLayout.current;
     prevLayout.current = { layout, height: size.height };
     if (!prev) return;
-    if (prev.layout.cols !== layout.cols || prev.layout.rowHeight !== layout.rowHeight) {
+    if (
+      prev.layout.cols !== layout.cols ||
+      prev.layout.rowHeight !== layout.rowHeight ||
+      prev.layout.timeline !== layout.timeline
+    ) {
       const cur = appStore.get().selection.currentIndex;
       const anchor =
         cur !== null && isFullyVisible(prev.layout, cur, mapper.virtual, prev.height)
@@ -263,7 +330,7 @@ export function Grid() {
   const navTarget = useRef<number | null>(null);
   const go = (key: NavKey, extend: boolean) => {
     const from = navTarget.current ?? appStore.get().selection.currentIndex;
-    let next = navigate(key, from, searchCache.count, layout.cols, pageRows(layout, size.height));
+    let next = navigateLayout(key, from, searchCache.count, layout, pageRows(layout, size.height));
     if (next !== null && extend) next = clampRange(next);
     if (next === null || next === from) return;
     navTarget.current = next;
@@ -295,6 +362,8 @@ export function Grid() {
         }
         if (appStore.get().selection.current !== null) actions.setMode("loupe");
       },
+      // タイムラインの表示の切り替え（ORG-01）。
+      t: () => toggleTimeline(),
     },
     ready && !dialogOpen,
   );
@@ -307,7 +376,33 @@ export function Grid() {
     const id = el.dataset.id;
     return { index: Number(el.dataset.index), expect: id === undefined ? undefined : Number(id) };
   };
+  // タイムラインの見出しのクリック: その日（日付の見出し）・イベントの写真を選ぶ（範囲の上限まで）。
+  const selectGroupOf = (el: HTMLElement) => {
+    const tl = layout.timeline;
+    const g = Number(el.dataset.group);
+    if (!tl || !Number.isInteger(g) || g < 0 || g >= tl.groups.length) return;
+    let end = g + 1;
+    if (el.dataset.day === "1") while (end < tl.groups.length && !tl.dayStart[end]) end++;
+    const first = tl.groups[g].start;
+    const last = tl.groups[end - 1].start + tl.groups[end - 1].count - 1;
+    const to = clampRange(last);
+    void (async () => {
+      clicked.current = { index: first, toggle: false, at: performance.now() };
+      if (!(await actions.selectIndex(first, {}))) return;
+      if (to > first) {
+        clicked.current = { index: to, toggle: false, at: performance.now() };
+        await actions.selectIndex(to, { extend: true });
+      }
+    })();
+  };
   const onClick = (e: MouseEvent) => {
+    // 写真をドラッグした後のクリック（ボタンを離したとき）は、選択を変えない。
+    if (consumeDragClick()) return;
+    const head = (e.target as HTMLElement).closest<HTMLElement>("[data-group]");
+    if (head) {
+      selectGroupOf(head);
+      return;
+    }
     const c = cellOf(e);
     if (c === null) return;
     const toggle = !e.shiftKey && (e.metaKey || e.ctrlKey);
@@ -315,11 +410,57 @@ export function Grid() {
     const { index, opts } = cellClickSelection(c.index, c.expect, e, clampRange);
     void actions.selectIndex(index, opts);
   };
+  // 写真をつかんで動かすと、左のパネルのコレクション・キーワード・フォルダに落とせる（library/photoDrag.ts）。
+  const onPointerDown = (e: PointerEvent) => {
+    if (e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+    const c = cellOf(e);
+    if (c === null || c.expect === undefined) return;
+    const grabbed = c.expect;
+    watchPhotoDrag(
+      { x: e.clientX, y: e.clientY },
+      () => {
+        const sel = appStore.get().selection;
+        // 選んでいない写真をつかんだら、その 1 枚を選んでから運ぶ。
+        if (!sel.ids.includes(grabbed)) void actions.selectIndex(c.index, { expect: grabbed });
+        return dragIds(sel.ids, grabbed);
+      },
+      (ids, target) => void dropPhotos(ids, target),
+    );
+  };
   const onDoubleClick = (e: MouseEvent) => {
     const c = cellOf(e);
     if (c === null || e.shiftKey || e.metaKey || e.ctrlKey) return;
     // 選べなかったら（出していた写真が結果から外れたなど）、前の写真でルーペを開かない。
     void actions.openInLoupe(c.index, c.expect);
+  };
+  // 写真の右クリックのメニュー（選んでいない写真なら、その 1 枚を選んでから出す）。
+  const [menuAt, setMenuAt] = useState<MenuAt | null>(null);
+  const onContextMenu = (e: MouseEvent) => {
+    const c = cellOf(e);
+    if (c === null) return;
+    e.preventDefault();
+    const at = { x: e.clientX, y: e.clientY };
+    const sel = appStore.get().selection;
+    void (async () => {
+      if (c.expect === undefined || !sel.ids.includes(c.expect)) {
+        if (!(await actions.selectIndex(c.index, { expect: c.expect }))) return;
+      }
+      setMenuAt(at);
+    })();
+  };
+  const menuItems = (): MenuEntry[] => {
+    const cur = appStore.get().selection.current;
+    const item = cur === null ? undefined : searchCache.getLoadedById(cur);
+    return photoMenuEntries(actions.targets().length, item).map((m) =>
+      m === PHOTO_MENU_SEPARATOR
+        ? MENU_SEPARATOR
+        : {
+            label: m.label,
+            hint: m.keys ? comboLabel(m.keys) : undefined,
+            disabled: !m.enabled,
+            onSelect: () => void runPhotoMenu(m.action),
+          },
+    );
   };
 
   const changeCellSize = (v: number) => {
@@ -334,9 +475,38 @@ export function Grid() {
   renderShift.current = shift;
   const wide = layout.cellWidth >= WIDE_CELL;
 
-  // 描いている範囲（位置）を検索結果のキャッシュに知らせる。
-  const viewStart = items.length > 0 ? items[0].index * layout.cols : 0;
-  const viewEnd = items.length > 0 ? Math.min(count, (items[items.length - 1].index + 1) * layout.cols) : 0;
+  // 描いている範囲（位置）を検索結果のキャッシュに知らせる（タイムラインの見出しの行は飛ばす）。
+  let viewStart = 0;
+  let viewEnd = 0;
+  for (const it of items) {
+    const c = rowCells(layout, it.index, count);
+    if (c) {
+      viewStart = c.start;
+      break;
+    }
+  }
+  for (let k = items.length - 1; k >= 0; k--) {
+    const c = rowCells(layout, items[k].index, count);
+    if (c) {
+      viewEnd = c.end;
+      break;
+    }
+  }
+  // タイムライン: 上端にかかっている日の見出しが隠れていれば、その日付を上に出す。
+  const tl = layout.timeline;
+  let sticky: string | null = null;
+  if (tl && tl.count > 0) {
+    const g = tl.group[rowAt(layout, mapper.virtual)];
+    const dg = tl.dayGroup[g];
+    if (tl.top[tl.groupFirstRow[dg]] < mapper.virtual - 1) sticky = dayHeaderText(tl.groups, tl.dayStart, dg).title;
+  }
+  const months = tl ? monthsByYear(monthIndex(tl.groups)) : [];
+  const jumpToMonth = (key: string) => {
+    if (!tl) return;
+    const m = monthIndex(tl.groups).find((x) => x.key === key);
+    if (!m) return;
+    mapper.scrollTo(rowTop(layout, tl.groupFirstRow[m.group]) - GRID_GAP);
+  };
   useLayoutEffect(() => {
     searchCache.setView("grid", viewStart, viewEnd);
   }, [viewStart, viewEnd]);
@@ -350,12 +520,39 @@ export function Grid() {
         aria-label="サムネイルの一覧"
         onClick={onClick}
         onDoubleClick={onDoubleClick}
+        onPointerDown={onPointerDown}
+        onContextMenu={onContextMenu}
       >
         <div className="lib-grid-spacer" style={{ height: layout.scrollHeight }}>
           <div ref={layerRef} className="lib-grid-layer">
             {items.map((row) => {
-              const first = row.index * layout.cols;
-              const end = Math.min(count, first + layout.cols);
+              if (tl && tl.kind[row.index] !== ROW_CELLS) {
+                const g = tl.group[row.index];
+                const day = tl.kind[row.index] === ROW_DAY;
+                const text = day ? dayHeaderText(tl.groups, tl.dayStart, g) : null;
+                return (
+                  <div
+                    key={row.key}
+                    className={day ? "lib-tl-day" : "lib-tl-event"}
+                    data-group={g}
+                    data-day={day ? "1" : "0"}
+                    title={day ? "クリックでこの日の写真を選ぶ" : "クリックでこのまとまりの写真を選ぶ"}
+                    style={{ top: row.start + shift, height: rowSize(layout, row.index), paddingLeft: layout.insetLeft }}
+                  >
+                    {text ? (
+                      <>
+                        <span className="title">{text.title}</span>
+                        <span className="meta">{text.meta}</span>
+                      </>
+                    ) : (
+                      <span className="meta">{eventHeaderText(tl.groups[g])}</span>
+                    )}
+                  </div>
+                );
+              }
+              const range = rowCells(layout, row.index, count);
+              const first = range?.start ?? 0;
+              const end = range?.end ?? 0;
               const cells = [];
               for (let i = first; i < end; i++) {
                 // 速い間は読み込み済みの項目だけを出す（ページを要求しない）。
@@ -393,7 +590,68 @@ export function Grid() {
         </div>
         {searched && count === 0 && <EmptyState filter={filter} />}
       </div>
+      {sticky && (
+        <div className="lib-tl-sticky" aria-hidden="true">
+          {sticky}
+        </div>
+      )}
+      {menuAt && <PopupMenu at={menuAt} items={menuItems()} onClose={() => setMenuAt(null)} label="写真の操作" />}
       <div className="lib-grid-toolbar">
+        <MenuButton
+          label="スタック"
+          title="選んだ写真をスタックに足す・スタックの表示・撮影時刻による自動スタック"
+          items={() => [
+            {
+              label: "選んだ写真をスタックに足す",
+              disabled: actions.targets().length < 2,
+              onSelect: () => void addTargetsToStack(),
+            },
+            MENU_SEPARATOR,
+            { label: "すべてのスタックを展開", onSelect: () => void setAllStacksCollapsed(false) },
+            { label: "すべてのスタックを折りたたむ", onSelect: () => void setAllStacksCollapsed(true) },
+            MENU_SEPARATOR,
+            { label: "撮影時刻でスタック…", onSelect: () => actions.openDialog({ kind: "auto_stack" }) },
+          ]}
+        >
+          スタック ▾
+        </MenuButton>
+        <label className="lib-tl-toggle" title={sort.key === "capture_time" ? "撮影日・イベントの見出しを入れて並べる（T）" : "撮影日時の順に並べ替えて、撮影日・イベントの見出しを入れる（T）"}>
+          <input type="checkbox" checked={tlActive} onChange={(e) => setTimelineEnabled(e.target.checked)} />
+          タイムライン
+        </label>
+        {tlActive && (
+          <>
+            <label htmlFor="lib-tl-gap">イベントの区切り</label>
+            <select
+              id="lib-tl-gap"
+              value={tlGap}
+              onChange={(e) => setTimelineGap(Number(e.target.value))}
+              title="前の写真との撮影の間隔がこれを超えたら、別のまとまりにする"
+            >
+              {TIMELINE_GAP_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            {months.length > 0 && (
+              <select aria-label="年・月へ移動" value="" onChange={(e) => jumpToMonth(e.target.value)}>
+                <option value="">年・月へ移動…</option>
+                {months.map((y) => (
+                  <optgroup key={y.year} label={`${y.year} 年`}>
+                    {y.months.map((m) => (
+                      <option key={m.key} value={m.key}>
+                        {`${m.year} 年 ${m.month} 月（${m.count.toLocaleString("ja-JP")}）`}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            )}
+            {tlData?.events_merged && <span className="hint">まとまりが多いため、日付だけでまとめています</span>}
+            {tlError && <span className="hint error-text">タイムラインを読めません: {tlError}</span>}
+          </>
+        )}
         <span className="spacer" />
         <label htmlFor="lib-cell-size">サムネイルの大きさ</label>
         <input
@@ -439,7 +697,10 @@ interface CellProps {
 
 const GridCell = memo(function GridCell(p: CellProps) {
   const { item } = p;
-  const cls = `lib-cell${p.selected ? " selected" : ""}${p.current ? " current" : ""}${item ? "" : " loading"}`;
+  const stack = item?.stack ?? null;
+  // 展開したスタックの写真は、下端の帯でまとまりを示す（一番上の写真は帯の左端を空ける）。
+  const stackCls = stack && !stack.collapsed ? ` stack-member${stack.position === 1 ? " stack-first" : ""}` : "";
+  const cls = `lib-cell${p.selected ? " selected" : ""}${p.current ? " current" : ""}${item ? "" : " loading"}${stackCls}`;
   // セルの枠（上下 1 px ずつ）を除いた高さを、サムネイルの枠と下の帯に分ける。
   const thumbHeight = Math.max(0, p.height - CELL_FOOTER - 2);
   return (
@@ -472,6 +733,15 @@ function cellTitle(item: VariantSummary): string {
   const lines = [item.file_name, formatCaptureTime(item.capture)];
   const vc = virtualCopyLabel(item);
   if (vc) lines.push(vc);
+  const pair = pairLabel(item);
+  if (pair) lines.push(pair);
+  if (item.stack) {
+    lines.push(
+      item.stack.collapsed
+        ? `スタック（${item.stack.count} 枚を折りたたみ中）`
+        : `スタックの ${item.stack.position} 枚目（${item.stack.count} 枚）`,
+    );
+  }
   const status = fileStatusTitle(item.file_status);
   if (status) lines.push(status);
   return lines.join("\n");
@@ -499,13 +769,16 @@ function Thumb({ item, rev, paused }: { item: VariantSummary; rev: string | null
   );
 }
 
-/** 動画・仮想コピー・元ファイルがないことの印。 */
+/** 動画・仮想コピー・RAW と JPEG のペア・スタック・元ファイルがないことの印。 */
 function Badges({ item, wide }: { item: VariantSummary; wide: boolean }) {
   const vc = virtualCopyLabel(item);
+  const pair = pairLabel(item);
   const status = fileStatusTitle(item.file_status);
-  if (item.kind !== "video" && !vc && !status) return null;
+  const stack = item.stack ?? null;
+  if (item.kind !== "video" && !vc && !pair && !status && !stack) return null;
   return (
     <div className="lib-cell-badges">
+      {stack && <StackBadgeButton id={item.variant_id} badge={stack} wide={wide} />}
       {item.kind === "video" && (
         <span className="lib-badge" title="動画">
           {wide ? "▶ 動画" : "▶"}
@@ -514,6 +787,11 @@ function Badges({ item, wide }: { item: VariantSummary; wide: boolean }) {
       {vc && (
         <span className="lib-badge" title={vc}>
           {wide ? "仮想コピー" : "仮想"}
+        </span>
+      )}
+      {pair && (
+        <span className="lib-badge" title={pair}>
+          {wide ? "RAW+JPEG" : "+J"}
         </span>
       )}
       <span className="spacer" />
@@ -533,6 +811,7 @@ function Badges({ item, wide }: { item: VariantSummary; wide: boolean }) {
 function EmptyState({ filter }: { filter: SearchFilter }) {
   const conditions = activeConditionCount(filter);
   const hasFolder = filter.folder_id !== null && filter.folder_id !== undefined;
+  const hasCollection = filter.collection_id !== null && filter.collection_id !== undefined;
   let body;
   if (conditions > 0) {
     body = (
@@ -542,6 +821,21 @@ function EmptyState({ filter }: { filter: SearchFilter }) {
         <div className="actions">
           <button className="btn" onClick={() => actions.replaceFilter(clearConditions(filter))}>
             条件を解除
+          </button>
+        </div>
+      </>
+    );
+  } else if (hasCollection) {
+    body = (
+      <>
+        <h2>このコレクションには写真がありません</h2>
+        <p>
+          グリッドの写真を左のパネルのコレクションにドラッグするか、写真を選んで B（ターゲットコレクション）で入れられます。
+          スマートコレクションは、条件に合う写真が自動で入ります。
+        </p>
+        <div className="actions">
+          <button className="btn" onClick={() => actions.showAll()}>
+            すべての写真を表示
           </button>
         </div>
       </>

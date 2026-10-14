@@ -187,6 +187,7 @@ fn small_shared_memory_is_reallocated_once_and_remembered() {
         raw: SHM_HEADER_LEN as u64,
         image: SHM_HEADER_LEN as u64,
         thumbnail: SHM_HEADER_LEN as u64,
+        watermark: SHM_HEADER_LEN as u64,
     };
     let mut c = WorkerClient::spawn(cfg).unwrap();
     // 1 回目は「容量不足」と「確保し直した後」の 2 回の応答、2 回目は覚えた大きさで 1 回。
@@ -437,11 +438,24 @@ mod dng {
                 height: Some(H),
                 ..Default::default()
             },
+            lens_correction: None,
         }
     }
 
     /// 埋め込みの JPEG（左半分が赤、右半分が青の 64 × 48）付きの DNG を書く。
     pub fn write(dir: &Path, name: &str, img: &RawImage) -> PathBuf {
+        write_with_lens(dir, name, img, None)
+    }
+
+    /// [`write`] と同じで、埋め込みのレンズ補正の情報を書く（`DngOptions::lens_correction`。書く側は値を
+    /// 検証しないので、不正な値も書ける）。
+    #[cfg_attr(not(feature = "libraw"), allow(dead_code))]
+    pub fn write_with_lens(
+        dir: &Path,
+        name: &str,
+        img: &RawImage,
+        lens: Option<genzo_raw::LensCorrectionData>,
+    ) -> PathBuf {
         let preview =
             genzo_media::RgbImage8::from_fn(
                 64,
@@ -462,6 +476,7 @@ mod dng {
                     height: 48,
                     data: jpeg,
                 }),
+                lens_correction: lens,
                 ..DngOptions::default()
             },
         )
@@ -574,6 +589,52 @@ mod libraw {
         let before = c.stats().responses;
         c.decode_raw(&path, &token()).unwrap();
         assert_eq!(c.stats().responses - before, 1, "覚えた大きさで 1 回");
+        assert_eq!(shm_files_under(root.path()), 0);
+    }
+
+    /// 埋め込みのレンズ補正の情報が不正な DNG（DEV-14）: 写真は開け、補正の情報は使わず、理由を本体へ渡す
+    /// （検証の指摘: 理由がワーカーで捨てられ、画面では「情報がない」と区別できなかった）。
+    #[test]
+    fn invalid_lens_correction_is_dropped_with_a_note() {
+        use genzo_raw::{DngLensCorrection, DngWarpPlane, DngWarpRectilinear, LensCorrectionData};
+        let root = tempfile::tempdir().unwrap();
+        let warp = |kg0: f64| {
+            LensCorrectionData::DngOpcode(DngLensCorrection {
+                warp: Some(DngWarpRectilinear {
+                    planes: [1.0, kg0, 1.0]
+                        .into_iter()
+                        .map(|k0| DngWarpPlane {
+                            kr: [k0, 0.0, 0.0, 0.0],
+                            kt: [0.0, 0.0],
+                        })
+                        .collect(),
+                    center: [0.5, 0.5],
+                }),
+                vignette: None,
+            })
+        };
+        let mut c = WorkerClient::spawn(config(root.path())).unwrap();
+        // G の面の係数が小さく、色収差の倍率が巨大になる値は使わない。
+        let path = dng::write_with_lens(
+            root.path(),
+            "bad-lens.dng",
+            &dng::image(Orientation::Normal),
+            Some(warp(1e-5)),
+        );
+        let frame = c.decode_raw(&path, &token()).unwrap();
+        assert_eq!(frame.image.lens_correction, None);
+        let note = frame.lens_correction_note.expect("理由");
+        assert!(note.contains("WarpRectilinear"), "{note}");
+        // 正しい値なら使い、理由はない。
+        let path = dng::write_with_lens(
+            root.path(),
+            "good-lens.dng",
+            &dng::image(Orientation::Normal),
+            Some(warp(1.0)),
+        );
+        let frame = c.decode_raw(&path, &token()).unwrap();
+        assert!(frame.image.lens_correction.is_some());
+        assert_eq!(frame.lens_correction_note, None);
         assert_eq!(shm_files_under(root.path()), 0);
     }
 

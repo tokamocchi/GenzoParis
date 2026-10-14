@@ -13,6 +13,9 @@
 //!   Undo の後に新しい編集をしたら、それより先の履歴を削除する。
 //! - 設定の一括適用（DEV-30）は、複数の variant に同じ設定を 1 つのトランザクションで保存し、
 //!   それぞれに履歴を 1 件ずつ追加する。
+//! - 仮想コピー（LIB-13）: 作る（元の variant と同じスタックに入れる。[`Catalog::create_virtual_copy`]）・
+//!   名前の変更（[`Catalog::rename_virtual_copy`]）・マスターとの入れ替え（[`Catalog::set_as_master`]）・
+//!   削除（[`Catalog::delete_virtual_copies`]。マスターは削除できない）。評価・キーワードなどは variant ごと。
 
 use std::sync::OnceLock;
 
@@ -25,7 +28,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::catalog::Catalog;
 use crate::error::{CatalogError, Result};
-use crate::util::{i64_to_u32, non_empty_name, now_utc_string, parse_db_utc};
+use crate::util::{checked_name, i64_to_u32, now_utc_string, parse_db_utc};
 
 /// マスターの variant を作ったとき（登録したとき）の履歴の名前。
 pub const HISTORY_LABEL_IMPORT: &str = "読み込み";
@@ -253,6 +256,32 @@ pub struct Snapshot {
     pub name: String,
     /// 作った日時。
     pub created_at: DateTime<Utc>,
+    /// 保存した設定の処理バージョン（作ったときの写真の版。今の写真の版と違うことがある）。
+    pub process_version: u32,
+}
+
+/// スナップショットの名前の文字数の上限（Unicode のスカラー値の数。**仮置き**: 200。仮想コピーの名前と同じ）。
+pub const MAX_SNAPSHOT_NAME_CHARS: usize = 200;
+
+/// 仮想コピーの名前の文字数の上限（Unicode のスカラー値の数。**仮置き**: 200。コレクションの名前と同じ）。
+pub const MAX_VARIANT_NAME_CHARS: usize = 200;
+
+/// 仮想コピーの既定の名前（「コピー n」。同じ asset の仮想コピーの名前と重ならない最小の n（1 から））。
+pub(crate) fn default_copy_name(conn: &Connection, asset_id: i64) -> Result<String> {
+    let mut stmt =
+        conn.prepare_cached("SELECT name FROM variant WHERE asset_id = ?1 AND is_master = 0")?;
+    let names: std::collections::HashSet<String> = stmt
+        .query_map([asset_id], |row| row.get::<_, Option<String>>(0))?
+        .filter_map(|r| r.transpose())
+        .collect::<rusqlite::Result<_>>()?;
+    let mut n = 1u64;
+    loop {
+        let candidate = format!("コピー {n}");
+        if !names.contains(&candidate) {
+            return Ok(candidate);
+        }
+        n += 1;
+    }
 }
 
 /// variant の一覧の 1 件（マスターと仮想コピー）。
@@ -368,24 +397,47 @@ impl Catalog {
         items: &[(VariantId, DevelopSettings)],
         label: &str,
     ) -> Result<Vec<HistoryEntryId>> {
+        let items: Vec<(VariantId, &DevelopSettings, &str)> =
+            items.iter().map(|(v, s)| (*v, s, label)).collect();
+        self.save_develop_items(&items)
+    }
+
+    /// [`Catalog::save_develop_batch`] と同じ（1 つのトランザクション・重複は最後のもの・1 件でも失敗したら
+    /// すべて取り消す）で、履歴の名前を variant ごとに指定する（DEV-30 の貼り付けで、処理バージョンも
+    /// 更新した写真だけ名前を変える）。結果は `items` と同じ順。
+    pub fn save_develop_labeled(
+        &mut self,
+        items: &[(VariantId, DevelopSettings, String)],
+    ) -> Result<Vec<HistoryEntryId>> {
+        let items: Vec<(VariantId, &DevelopSettings, &str)> = items
+            .iter()
+            .map(|(v, s, label)| (*v, s, label.as_str()))
+            .collect();
+        self.save_develop_items(&items)
+    }
+
+    fn save_develop_items(
+        &mut self,
+        items: &[(VariantId, &DevelopSettings, &str)],
+    ) -> Result<Vec<HistoryEntryId>> {
         let mut last = std::collections::HashMap::new();
-        for (i, (v, _)) in items.iter().enumerate() {
+        for (i, (v, _, _)) in items.iter().enumerate() {
             last.insert(*v, i);
         }
         let encoded = items
             .iter()
-            .map(|(_, s)| encode(s))
+            .map(|(_, s, _)| encode(s))
             .collect::<Result<Vec<_>>>()?;
         let now = now_utc_string();
         let tx = self.conn.transaction()?;
         let mut saved = std::collections::HashMap::new();
-        for (i, (v, _)) in items.iter().enumerate() {
+        for (i, (v, _, label)) in items.iter().enumerate() {
             if last[v] == i {
                 saved.insert(*v, save_develop_tx(&tx, *v, &encoded[i], label, &now)?);
             }
         }
         tx.commit()?;
-        Ok(items.iter().map(|(v, _)| saved[v]).collect())
+        Ok(items.iter().map(|(v, _, _)| saved[v]).collect())
     }
 
     /// 1 つ前の履歴に戻す（Undo）。戻せない場合は `None`。
@@ -480,8 +532,11 @@ impl Catalog {
     }
 
     /// 現在の設定でスナップショットを作る（DEV-28）。
+    ///
+    /// 名前は前後の空白を除いて [`MAX_SNAPSHOT_NAME_CHARS`] 文字までで、改行・タブなどの制御文字は使えない。
+    /// 同じ写真のほかのスナップショットと同じ名前でもよい（Lightroom と同じ。作った日時で見分ける）。
     pub fn create_snapshot(&mut self, variant_id: VariantId, name: &str) -> Result<SnapshotId> {
-        let name = non_empty_name(name, "スナップショットの名前")?;
+        let name = checked_name(name, "スナップショットの名前", MAX_SNAPSHOT_NAME_CHARS)?;
         let now = now_utc_string();
         let changed = self.conn.execute(
             "INSERT INTO snapshot(variant_id, name, develop_json, process_version, created_at)
@@ -494,26 +549,96 @@ impl Catalog {
         Ok(SnapshotId::new(self.conn.last_insert_rowid()))
     }
 
+    /// 履歴の項目 `entry`（`variant_id` の履歴）の設定でスナップショットを作る（DEV-28。履歴のパネルの
+    /// 「この段階からスナップショットを作る」）。名前の規則は [`Catalog::create_snapshot`] と同じ。`entry` が
+    /// その写真の履歴になければ [`CatalogError::NotFound`]。今の設定・履歴の位置は変えない。
+    pub fn create_snapshot_from_history(
+        &mut self,
+        variant_id: VariantId,
+        entry: HistoryEntryId,
+        name: &str,
+    ) -> Result<SnapshotId> {
+        let name = checked_name(name, "スナップショットの名前", MAX_SNAPSHOT_NAME_CHARS)?;
+        let now = now_utc_string();
+        let changed = self.conn.execute(
+            "INSERT INTO snapshot(variant_id, name, develop_json, process_version, created_at)
+             SELECT variant_id, ?3, develop_json, process_version, ?4 FROM history_entry
+             WHERE id = ?2 AND variant_id = ?1",
+            params![variant_id.get(), entry.get(), name, now],
+        )?;
+        if changed == 0 {
+            return Err(CatalogError::NotFound(format!(
+                "履歴 {entry}（variant {variant_id} の履歴）"
+            )));
+        }
+        Ok(SnapshotId::new(self.conn.last_insert_rowid()))
+    }
+
+    /// スナップショットの名前を変える（規則は [`Catalog::create_snapshot`] と同じ）。
+    pub fn rename_snapshot(&mut self, snapshot: SnapshotId, name: &str) -> Result<()> {
+        let name = checked_name(name, "スナップショットの名前", MAX_SNAPSHOT_NAME_CHARS)?;
+        let n = self.conn.execute(
+            "UPDATE snapshot SET name = ?2 WHERE id = ?1",
+            params![snapshot.get(), name],
+        )?;
+        if n == 0 {
+            return Err(CatalogError::NotFound(format!(
+                "スナップショット {snapshot}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// スナップショットの 1 件（設定は含まない）。
+    pub fn snapshot(&self, snapshot: SnapshotId) -> Result<Snapshot> {
+        let row = self
+            .conn
+            .prepare_cached(
+                "SELECT variant_id, name, created_at, process_version FROM snapshot WHERE id = ?1",
+            )?
+            .query_row([snapshot.get()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .optional()?
+            .ok_or_else(|| CatalogError::NotFound(format!("スナップショット {snapshot}")))?;
+        let (variant_id, name, created_at, pv) = row;
+        Ok(Snapshot {
+            id: snapshot,
+            variant_id: VariantId::new(variant_id),
+            name,
+            created_at: parse_db_utc(&created_at)?,
+            process_version: i64_to_u32(pv, "process_version")?,
+        })
+    }
+
     /// variant のスナップショットの一覧（作った順）。
     pub fn snapshots(&self, variant_id: VariantId) -> Result<Vec<Snapshot>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, name, created_at FROM snapshot WHERE variant_id = ?1 ORDER BY id",
+            "SELECT id, name, created_at, process_version FROM snapshot WHERE variant_id = ?1
+             ORDER BY id",
         )?;
         let rows = stmt.query_map([variant_id.get()], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (id, name, created_at) = r?;
+            let (id, name, created_at, pv) = r?;
             out.push(Snapshot {
                 id: SnapshotId::new(id),
                 variant_id,
                 name,
                 created_at: parse_db_utc(&created_at)?,
+                process_version: i64_to_u32(pv, "process_version")?,
             });
         }
         Ok(out)
@@ -573,14 +698,20 @@ impl Catalog {
 
     /// 仮想コピーを作る（LIB-13）。元の variant の現在の現像設定をコピーする。
     ///
-    /// 評価・フラグ・ラベル・キーワードはコピーしない。`name` が `None` なら「コピー n」とする。
+    /// 評価・フラグ・ラベル・キーワード・コレクションはコピーしない（variant ごとに付ける）。`name` が `None`
+    /// なら「コピー n」（同じ写真の仮想コピーの名前と重ならない最小の n。[`default_copy_name`]）とする。名前は
+    /// [`MAX_VARIANT_NAME_CHARS`] 文字までで、制御文字は使えない。
+    ///
+    /// 作った仮想コピーは、元の variant と同じスタック（LIB-12）に入れる（Lightroom と同じ）: 元の variant が
+    /// スタックに入っていれば、そのすぐ後ろに入れ、入っていなければ元の variant を一番上にした新しいスタックを
+    /// 作る。どちらも、仮想コピーが見えるようにスタックを展開する。すべて 1 つのトランザクションで行う。
     pub fn create_virtual_copy(
         &mut self,
         source: VariantId,
         name: Option<&str>,
     ) -> Result<VariantId> {
         let name = name
-            .map(|n| non_empty_name(n, "仮想コピーの名前"))
+            .map(|n| checked_name(n, "仮想コピーの名前", MAX_VARIANT_NAME_CHARS))
             .transpose()?;
         let now = now_utc_string();
         let tx = self.conn.transaction()?;
@@ -594,14 +725,7 @@ impl Catalog {
             .ok_or_else(|| CatalogError::NotFound(format!("variant {source}")))?;
         let name = match name {
             Some(n) => n.to_owned(),
-            None => {
-                let copies: i64 = tx.query_row(
-                    "SELECT count(*) FROM variant WHERE asset_id = ?1 AND is_master = 0",
-                    [asset_id],
-                    |row| row.get(0),
-                )?;
-                format!("コピー {}", copies + 1)
-            }
+            None => default_copy_name(&tx, asset_id)?,
         };
         let develop = EncodedDevelop {
             json,
@@ -617,8 +741,97 @@ impl Catalog {
             HISTORY_LABEL_VIRTUAL_COPY,
             &now,
         )?;
+        let copy = VariantId::new(id);
+        match crate::stack::stack_of(&tx, source)? {
+            Some(stack) => {
+                let mut order = crate::stack::members_of(&tx, stack)?;
+                let at = order
+                    .iter()
+                    .position(|&v| v == source)
+                    .map_or(order.len(), |i| i + 1);
+                order.insert(at, copy);
+                crate::stack::write_order(&tx, stack, &order)?;
+                tx.prepare_cached("UPDATE stack SET collapsed = 0 WHERE id = ?1")?
+                    .execute([stack.get()])?;
+            }
+            None => {
+                crate::stack::insert_stack(&tx, &[source, copy], false)?;
+            }
+        }
         tx.commit()?;
-        Ok(VariantId::new(id))
+        Ok(copy)
+    }
+
+    /// 仮想コピーの名前を変える（LIB-13）。マスターには名前を付けられない（[`CatalogError::InvalidInput`]）。
+    /// 名前は [`MAX_VARIANT_NAME_CHARS`] 文字までで、制御文字は使えない。同じ写真のほかの仮想コピーと同じ名前でも
+    /// よい（書き出しのファイル名は、重なれば連番になる）。
+    pub fn rename_virtual_copy(&mut self, variant_id: VariantId, name: &str) -> Result<()> {
+        let name = checked_name(name, "仮想コピーの名前", MAX_VARIANT_NAME_CHARS)?;
+        let tx = self.conn.transaction()?;
+        let is_master: bool = tx
+            .query_row(
+                "SELECT is_master FROM variant WHERE id = ?1",
+                [variant_id.get()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| CatalogError::NotFound(format!("variant {variant_id}")))?;
+        if is_master {
+            return Err(CatalogError::InvalidInput(format!(
+                "variant {variant_id} はマスターのため、名前を付けられません"
+            )));
+        }
+        tx.execute(
+            "UPDATE variant SET name = ?2, updated_at = ?3 WHERE id = ?1",
+            params![variant_id.get(), name, now_utc_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 仮想コピーをマスター（元の写真）にする（LIB-13。Lightroom の「コピーをマスターに設定」）。前のマスターは
+    /// 仮想コピーになり、マスターにした仮想コピーの名前を受け継ぐ（もう一度入れ替えると元に戻る）。現像設定・
+    /// 履歴・評価・キーワード・コレクション・スタックの位置は、それぞれの variant のまま変えない。前のマスターの
+    /// ID を返す。すでにマスターなら何もせずに自分の ID を返す。
+    pub fn set_as_master(&mut self, variant_id: VariantId) -> Result<VariantId> {
+        let tx = self.conn.transaction()?;
+        let (asset_id, is_master, name): (i64, bool, Option<String>) = tx
+            .query_row(
+                "SELECT asset_id, is_master, name FROM variant WHERE id = ?1",
+                [variant_id.get()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| CatalogError::NotFound(format!("variant {variant_id}")))?;
+        if is_master {
+            return Ok(variant_id);
+        }
+        let old: i64 = tx
+            .query_row(
+                "SELECT id FROM variant WHERE asset_id = ?1 AND is_master = 1",
+                [asset_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                CatalogError::Corrupt(format!("asset {asset_id} にマスターがありません"))
+            })?;
+        let name = match name {
+            Some(n) => n,
+            None => default_copy_name(&tx, asset_id)?,
+        };
+        let now = now_utc_string();
+        // マスターは asset ごとに 1 つ（部分インデックスの UNIQUE）なので、先に前のマスターを外す。
+        tx.execute(
+            "UPDATE variant SET is_master = 0, name = ?2, updated_at = ?3 WHERE id = ?1",
+            params![old, name, now],
+        )?;
+        tx.execute(
+            "UPDATE variant SET is_master = 1, name = NULL, updated_at = ?2 WHERE id = ?1",
+            params![variant_id.get(), now],
+        )?;
+        tx.commit()?;
+        Ok(VariantId::new(old))
     }
 
     /// 仮想コピーを削除する（6.4 節）。マスターは削除できない。元ファイルは変更しない。

@@ -14,6 +14,7 @@
 //!
 //! | ステージ | abs | rel | 差が出る主な理由 |
 //! |---|---|---|---|
+//! | `sensor.lens_correction` | 1e−4 | 1e−4 | ステージ 9 と同じバイキュービック（色収差の R・B）と 1D LUT の利得 |
 //! | `finish.geometry` | 1e−4 | 1e−4 | 座標の積和（融合）・16 個の重み付きの和。座標の 1 ULP の差（座標 100 px で約 8e−6 px、7000 px で約 5e−4 px）が、くっきりした輪郭では値の差になる |
 //! | `finish.exposure` | 0 | 1e−6 | 掛け算だけ（丸めは同じはず） |
 //! | `finish.contrast` | 1e−6 | 2e−5 | `log2`・`exp2` の精度 |
@@ -21,11 +22,18 @@
 //! | `finish.color` | 1e−5 | 1e−4 | 立方根（WGSL にないので `pow` とニュートン法）、OKLab の行列の打ち消し |
 //! | `finish.scene_to_display` | 1e−6 | 1e−5 | 割り算の精度（2.5 ULP）、`log2` の精度による 1D LUT の位置の差（対数の軸。llvmpipe で差の最大 8.3e−7、許容に対する比 0.08） |
 //! | `finish.tone_curve` | 1e−5 | 1e−4 | `pow`（IEC 61966-2-1）、LUT の位置の差 |
+//! | `finish.texture`・`finish.sharpen` | 1e−5 | 2e−4 | `log2`・`exp2`、ぼかしの積和（融合）を横・縦で重ねる、ガイドの双線形・割り算（かすみの除去） |
+//! | `finish.effects` | 1e−5 | 1e−4 | `pow`（IEC 61966-2-1）・`exp2`・`log2`（楕円の距離）、粒子の重み付きの和 |
+//! | `finish.profile_look_table` | 1e−5 | 1e−4 | HSV の割り算（2.5 ULP）・表の位置の差、`pow`（明度の軸の IEC 61966-2-1）。llvmpipe で差の最大 9.537e−6（許容に対する比 0.010。色相環と明度を一周する一致テスト。2026-10-14 の計測。DEV-17） |
+//! | `finish.look` | 1e−5 | 1e−4 | `pow`（IEC 61966-2-1）、3D LUT の位置の差。llvmpipe で差の最大 1.639e−7（許容に対する比 0.005。2026-10-14 の計測。DEV-17） |
 //! | `output.display` | 1e−4 | 0 | 符号化（IEC 61966-2-1）の `pow`、色域の圧縮の割り算、3D LUT の位置の差（0〜1 の値） |
 //! | `output.export.*`・`output.cache.*` | 1e−4 | 0 | 同上（0〜1 の値） |
+//! | `sensor.highlight_recovery` | 1e−6 | 1e−5 | 近傍の組の積和（融合）と割り算（2.5 ULP） |
+//! | `sensor.noise_reduction` | 1e−5 | 1e−4 | 平方根（WGSL の `sqrt` の精度）・5 タップの積和を段の数だけ重ねる・縮小の割り算 |
 //! | `sensor.normalize`・`sensor.demosaic.half2x2` | 1e−7 | 1e−6 | 引き算と掛け算だけ |
 //! | `sensor.white_balance` | 1e−7 | 1e−6 | 掛け算だけ |
-//! | `sensor.color_matrix` | 1e−6 | 1e−5 | 行列の積和 |
+//! | `sensor.color_matrix` | 1e−6 | 1e−5 | 行列の積和（カメラプロファイルの色相彩度のマップがあれば HSV の表も。llvmpipe で差 0。DEV-17） |
+//! | `local.field`（ローカル補正の局所の値の面。DEV-18） | 1e−4 | 1e−4 | 立方根（色域の範囲の OKLab）・`pow`（輝度の範囲の IEC 61966-2-1）・`log2`（ステージ 15 の表の位置）・平方根（円形・色の距離）で重みがわずかに違い、差分（−100〜100）を掛ける |
 //! | 上にない ID（新しく登録したステージ） | 1e−5 | 1e−4 | [`DEFAULT_STAGE_TOLERANCE`] |
 //!
 //! 最終出力（17b の符号化した値）は **8bit 換算で ±1 以内**（IQ-07a の目安。[`FINAL_OUTPUT_MAX_DIFF_8BIT`]）。
@@ -67,12 +75,17 @@ pub const FINAL_OUTPUT_MAX_DIFF_8BIT: f64 = 1.0;
 pub fn stage_tolerance(stage_id: &str) -> StageTolerance {
     match stage_id {
         "finish.geometry" => StageTolerance::new(1e-4, 1e-4),
+        "sensor.lens_correction" => StageTolerance::new(1e-4, 1e-4),
         "finish.exposure" => StageTolerance::new(0.0, 1e-6),
         "finish.contrast" => StageTolerance::new(1e-6, 2e-5),
         "finish.tone" => StageTolerance::new(1e-6, 1e-4),
         "finish.color" => StageTolerance::new(1e-5, 1e-4),
         "finish.scene_to_display" => StageTolerance::new(1e-6, 1e-5),
         "finish.tone_curve" => StageTolerance::new(1e-5, 1e-4),
+        "finish.texture" | "finish.sharpen" => StageTolerance::new(1e-5, 2e-4),
+        "finish.effects" => StageTolerance::new(1e-5, 1e-4),
+        "finish.profile_look_table" | "finish.look" => StageTolerance::new(1e-5, 1e-4),
+        "local.field" => StageTolerance::new(1e-4, 1e-4),
         "output.display" => StageTolerance::new(1e-4, 0.0),
         id if id.starts_with("output.export.") || id.starts_with("output.cache.") => {
             StageTolerance::new(1e-4, 0.0)
@@ -81,6 +94,8 @@ pub fn stage_tolerance(stage_id: &str) -> StageTolerance {
             StageTolerance::new(1e-7, 1e-6)
         }
         "sensor.color_matrix" => StageTolerance::new(1e-6, 1e-5),
+        "sensor.highlight_recovery" => StageTolerance::new(1e-6, 1e-5),
+        "sensor.noise_reduction" => StageTolerance::new(1e-5, 1e-4),
         _ => DEFAULT_STAGE_TOLERANCE,
     }
 }

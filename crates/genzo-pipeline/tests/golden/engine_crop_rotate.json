@@ -12,6 +12,85 @@
     "develop": {
       "settings": {
         "color": {
+          "black_white": {
+            "enabled": false,
+            "mix": {
+              "aqua": 0.0,
+              "blue": 0.0,
+              "green": 0.0,
+              "magenta": 0.0,
+              "orange": 0.0,
+              "purple": 0.0,
+              "red": 0.0,
+              "yellow": 0.0
+            }
+          },
+          "grading": {
+            "balance": 0.0,
+            "blending": 50.0,
+            "global": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "highlights": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "midtones": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "shadows": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            }
+          },
+          "mixer": {
+            "aqua": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "blue": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "green": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "magenta": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "orange": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "purple": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "red": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "yellow": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            }
+          },
           "saturation": 0.0,
           "vibrance": 0.0
         },
@@ -19,13 +98,30 @@
         "detail": {
           "noise_reduction": {
             "color": 0.0,
-            "luminance": 0.0
+            "color_detail": 50.0,
+            "luminance": 0.0,
+            "luminance_contrast": 0.0,
+            "luminance_detail": 50.0
           },
           "sharpening": {
             "amount": 0.0,
-            "detail": 0.0,
+            "detail": 25.0,
             "masking": 0.0,
             "radius": 1.0
+          }
+        },
+        "effects": {
+          "grain": {
+            "amount": 0.0,
+            "roughness": 50.0,
+            "size": 25.0
+          },
+          "vignette": {
+            "amount": 0.0,
+            "feather": 50.0,
+            "highlights": 0.0,
+            "midpoint": 50.0,
+            "roundness": 0.0
           }
         },
         "exposure_ev": 0.0,
@@ -39,14 +135,33 @@
             "top": 0.1
           }
         },
+        "highlight_recovery": {
+          "amount": 100.0,
+          "method": "clip"
+        },
         "lens": {
+          "ca_blue_yellow": 0.0,
+          "ca_red_cyan": 0.0,
+          "distortion": 0.0,
           "distortion_scale": 100.0,
           "profile_enabled": false,
           "remove_chromatic_aberration": false,
+          "vignetting_amount": 0.0,
+          "vignetting_midpoint": 50.0,
           "vignetting_scale": 100.0
         },
         "masks": [],
+        "presence": {
+          "clarity": 0.0,
+          "dehaze": 0.0,
+          "texture": 0.0
+        },
         "process_version": 1,
+        "profile": {
+          "camera": null,
+          "look": null,
+          "look_amount": 100.0
+        },
         "render_deps": {
           "camera_profile": {
             "id": "",
@@ -55,7 +170,7 @@
           "lens_profile": null,
           "raw_decoder": ""
         },
-        "schema_version": 1,
+        "schema_version": 2,
         "tone": {
           "blacks": 0.0,
           "highlights": 0.0,
@@ -76,7 +191,7 @@
         },
         "white_balance": "as_shot"
       },
-      "develop_hash": "f29f3c2dc1a54f94f6685a9878d064559a10ed5f2d0580a2be2b1dec22a4b595",
+      "develop_hash": "8656d48c2191856f9006d79b6517cea5c54ea59435f292a05d202e541c8bfa6d",
       "process_version": 1
     },
     "process_version": 1,

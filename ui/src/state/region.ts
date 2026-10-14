@@ -5,10 +5,12 @@
 // - 範囲は出力の画像（C。切り抜いた後）のフル解像度の画素の座標（space: "output"）。倍率 1 が等倍。
 //   画面の 1 画素に画像の 1 画素を出す（HiDPI で実ピクセル。UX-03）ときは、倍率に devicePixelRatio を
 //   掛けずに、canvas の CSS の大きさを width / devicePixelRatio にする。
+// - ビフォー / アフターの表示（DEV-31）のビフォーの範囲は renderBeforeRegion（コアの render_before_region。
+//   アフターとは別の「最新の 1 件だけ」なので、両方を同時に描ける）。
 
 import * as core from "../api/core";
 import { isCancelled } from "../api/errors";
-import { type Frame, fetchRegionFrame } from "../api/frames";
+import { type Frame, fetchBeforeRegionFrame, fetchRegionFrame } from "../api/frames";
 import type { RegionInfo, RegionRequest } from "../api/types";
 import { openDevelopFor } from "./develop";
 
@@ -31,9 +33,27 @@ export async function renderRegion(req: RegionRequest): Promise<Frame<RegionInfo
   }
 }
 
-/** 実行中の描画を取り消す（ルーペを閉じた・全体表示に戻したとき）。 */
+let beforeSeq = 0;
+
+/** ビフォーの範囲を描く（DEV-31。新しい要求で置き換えられたら null。写真を開いていて、ビフォーを設定していること）。 */
+export async function renderBeforeRegion(req: RegionRequest): Promise<Frame<RegionInfo> | null> {
+  const my = ++beforeSeq;
+  try {
+    const info = await core.renderBeforeRegion(req);
+    if (my !== beforeSeq) return null;
+    const frame = await fetchBeforeRegionFrame();
+    if (my !== beforeSeq || !frame || frame.header.request !== info.request) return null;
+    return frame;
+  } catch (e) {
+    if (isCancelled(e)) return null;
+    throw e;
+  }
+}
+
+/** 実行中の描画を取り消す（ルーペを閉じた・全体表示に戻したとき。ビフォーの範囲の描画も）。 */
 export function cancelRegionRender(): void {
   seq++;
+  beforeSeq++;
   void core.cancelRegion().catch(() => undefined);
 }
 

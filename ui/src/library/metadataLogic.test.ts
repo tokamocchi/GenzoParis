@@ -13,7 +13,9 @@ import {
   formatIso,
   gpsDecimal,
   hasVideoInfo,
+  pairLabel,
   primaryFile,
+  shortHash,
   videoRows,
   virtualCopyLabel,
 } from "./metadataLogic";
@@ -80,10 +82,18 @@ describe("撮影日時の補足", () => {
     expect(captureNote(capture({ tz_source: "utc_only", offset: "Z" }))).toBe(
       "UTC だけが記録されているため、既定のタイムゾーン（+09:00）で表示",
     );
-    expect(captureNote(capture({ correction_s: -3600 }))).toBe("時刻を −3,600 秒補正");
+    expect(captureNote(capture({ correction_s: -3600 }))).toBe("時刻を -1 時間 補正");
     expect(captureNote(capture({ tz_source: "user_set", tz_assumed: "+02:00", correction_s: 5 }))).toBe(
-      "タイムゾーンは設定した値（+02:00）、時刻を +5 秒補正",
+      "タイムゾーンは設定した値（+02:00）、時刻を +5 秒 補正",
     );
+    // 撮影した瞬間はそのままで表示だけを変えた（LIB-16）。
+    expect(captureNote(capture({ tz_source: "user_set", tz_assumed: "+02:00", basis: "+09:00" }))).toBe(
+      "タイムゾーンは設定した値（+02:00。撮影した瞬間はそのまま）",
+    );
+    // UTC の印付きの時刻を現地時刻として読む（DJI など）。
+    expect(
+      captureNote(capture({ tz_source: "user_set", offset: "Z", tz_assumed: "+09:00", basis: "+09:00", correction_s: 90 })),
+    ).toBe("UTC の印付きの時刻を +09:00 の現地時刻として読む（設定した値）、時刻を +1 分 30 秒 補正");
   });
 });
 
@@ -152,6 +162,14 @@ describe("ファイル", () => {
     expect(virtualCopyLabel({ is_master: true, variant_name: null })).toBeNull();
     expect(virtualCopyLabel({ is_master: false, variant_name: null })).toBe("仮想コピー");
     expect(virtualCopyLabel({ is_master: false, variant_name: "白黒" })).toBe("仮想コピー: 白黒");
+  });
+
+  it("RAW と同時記録の JPEG の印と、内容のハッシュの短い表示（IMP-06・ORG-03）", () => {
+    expect(pairLabel({ has_sidecar_jpeg: false })).toBeNull();
+    expect(pairLabel({ has_sidecar_jpeg: true })).toContain("RAW + JPEG");
+    expect(shortHash(null)).toBe("未計算");
+    expect(shortHash(undefined)).toBe("未計算");
+    expect(shortHash("0123456789abcdef".repeat(4))).toBe("0123456789ab…");
   });
 });
 

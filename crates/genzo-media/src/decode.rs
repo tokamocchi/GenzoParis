@@ -408,6 +408,62 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImage> {
     Ok(finish_decoded(d, tiff_file))
 }
 
+/// 透明度を保ってデコードした画像（透かしの画像。EXP-03。[`decode_image_rgba_bytes`]）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedRgba {
+    /// 形式。
+    pub format: ImageFileFormat,
+    /// 幅。
+    pub width: u32,
+    /// 高さ。
+    pub height: u32,
+    /// 画素（R, G, B, A の 16bit。アルファは乗算していない。アルファのない画像は 65535）。向きは反映していない。
+    pub rgba: Vec<u16>,
+    /// 色を解釈するプロファイル。
+    pub profile: SourceProfile,
+    /// 元の画像にアルファチャンネルがあったか。
+    pub has_alpha: bool,
+    /// Exif の向き。
+    pub orientation: Orientation,
+}
+
+/// JPEG / PNG / TIFF のバイト列を、アルファチャンネルを保ってデコードする（透かしの画像。EXP-03）。
+///
+/// 写真のデコード（[`decode_image_bytes`]）と同じ上限・同じプロファイルの解釈で、画素だけを RGBA の 16bit にする
+/// （グレーは RGB に広げる。32bit 浮動小数点は 0〜1 に収め、NaN は 0）。信頼できない入力なので、ワーカーで使う
+/// （SEC-05）。
+pub fn decode_image_rgba_bytes(bytes: &[u8]) -> Result<DecodedRgba> {
+    let format = detect_or_err(bytes)?;
+    let mut decoder = open_decoder(bytes, format)?;
+    let dims = decoder.dimensions();
+    let (icc, exif) = read_metadata_blobs(&mut decoder, format, bytes);
+    let img = DynamicImage::from_decoder(decoder).map_err(image_err)?;
+    if (img.width(), img.height()) != dims {
+        return Err(MediaError::decode("デコードした寸法がヘッダーと一致しない"));
+    }
+    let has_alpha = img.color().has_alpha();
+    let rgba = match img {
+        DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_) => img
+            .into_rgba32f()
+            .into_raw()
+            .into_iter()
+            .map(u16::from_unit_f32)
+            .collect(),
+        other => other.into_rgba16().into_raw(),
+    };
+    let tiff_file = (format == ImageFileFormat::Tiff).then(|| bytes.to_vec());
+    let (metadata, hint) = metadata_from(exif, tiff_file, dims);
+    Ok(DecodedRgba {
+        format,
+        width: dims.0,
+        height: dims.1,
+        rgba,
+        profile: resolve_profile(icc, hint),
+        has_alpha,
+        orientation: metadata.orientation,
+    })
+}
+
 /// 元のファイルを読み取り専用で開く（DATA-01）。
 pub fn open_read_only(path: &Path) -> Result<File> {
     OpenOptions::new()

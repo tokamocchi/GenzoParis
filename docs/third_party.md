@@ -28,6 +28,21 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 - 2026-10-12（M4 の着手。デスクトップアプリ `genzo-app` の追加）: Tauri 2（`tauri` 2.11.6・`tauri-build` 2.6.3・`tauri-plugin-dialog` 2.7.3・`tauri-plugin-opener` 2.5.5。どれも `Cargo.toml` の `license` は Apache-2.0 OR MIT）を加えた。版は、公開から 2 週間以上たったもので、workspace の最小の Rust の版（1.88）に合う 2.11 系（Cargo の解決が MSRV に合わせて選んだ版）。`cargo deny check` の結果（cargo-deny 0.20.2）: advisories・bans・licenses・sources がすべて通った。ただし `deny.toml` に次の 2 つを加えた（理由と見直しの時期は `deny.toml` に書いた）。警告（同じクレートの複数の版）は Tauri の依存で 20 件ほどに増えた。
   - **MPL-2.0 の 5 crate を crate ごとに許可**（`cssparser`・`cssparser-macros`・`selectors`・`dtoa-short`・`option-ext`。Tauri の `tauri-utils` の HTML の処理と `dirs` の依存）。5 つとも、ソース・付属のファイルに MPL-2.0 の Exhibit B（"Incompatible With Secondary Licenses"）の表示がないことを確かめた（その文言は LICENSE の全文の中の定義とひな形にだけある）。MPL-2.0 は Exhibit B のないファイルなら GPL と組み合わせられる（MPL-2.0 の 3.3 節）とされるが、**法的な最終確認は人が行う**。
   - **メンテナンス終了の通知 6 件を除外**（RUSTSEC-2024-0370 `proc-macro-error`: Linux の GTK のバインディングのビルド時のマクロで、Windows・macOS の配布物には入らない。RUSTSEC-2025-0075・0080・0081・0098・0100 `unic-*`: `tauri-utils` の `urlpattern`）。どれも脆弱性ではなく、更新先がない。Tauri を上げるときに見直す。
+- 2026-10-13（v1 のパッケージ 1 infra。ログ・クラッシュレポート）: 既に workspace の依存だった `tracing-subscriber` 0.3.23 を `genzo-api` の直接の依存にし（`genzo-app` の直接の依存からは外した）、`tracing` 0.1.44（既存）を `genzo-worker` の依存に加えた。`Cargo.lock` は依存の行が変わっただけで、新しい crate は入っていない。この開発環境には cargo-deny がないため `cargo deny check` は実行していない（CI の `lint` ジョブで確かめる）。
+- 2026-10-13（v1 のパッケージ 5 identity。内容による同一性・重複の検出）: 既に依存のツリーにあった `libc` 0.2.190（`genzo-worker`・`genzo-cli` と同じ版）を `genzo-api` の Unix 用の依存に加え（ボリュームがネットワークのファイルシステムかを `statfs` で確かめる）、`windows-sys` 0.61.2（既存の版）の `genzo-api` の機能に `Win32_Storage_FileSystem`（`GetDriveTypeW`。`tempfile` 3.27.0 が同じ版で既に有効にしている機能）を加えた。`Cargo.lock` は `genzo-api` の依存の行が 1 行増えただけで、新しい crate は入っていない。このコンテナには cargo-deny がないため `cargo deny check` は実行していない（CI の `lint` ジョブで確かめる）。
+- 2026-10-13（v1 のパッケージ 6 import。コピー取り込み・リネーム規則・取り込み時のメタデータ）: 既に `genzo-api` の開発用の依存で、`genzo-media` が同じ版で使っている `tempfile` 3.27.0 を、`genzo-api` の通常の依存にした（コピーの一時ファイルと、上書きしない名前の変更 `persist_noclobber`。開発用の依存の行は外した）。`Cargo.lock` は変わらず、新しい crate は入っていない。このコンテナには cargo-deny がないため `cargo deny check` は実行していない（CI の `lint` ジョブで確かめる）。
+- 2026-10-13（v1 のパッケージ 8 files。アプリ内でのファイル操作・外付けドライブの識別・見つからない写真）: 新しい crate は足していない。既に依存のツリーにあった `windows-sys` 0.61.2（`genzo-api`・`genzo-worker`・`tempfile` と同じ版。`Cargo.toml` の `license` は MIT OR Apache-2.0）を `genzo-media` の Windows 用の依存に加え（上書きしない名前の変更 `MoveFileExW`。機能は `Win32_Storage_FileSystem`）、`genzo-api` の `windows-sys` の機能に `Win32_System_Diagnostics_Debug`（ボリュームを調べる間の `SetThreadErrorMode`）を加えた。`genzo-media` の Unix 用の依存の `rustix`（既存）は、上書きしない名前の変更（`renameat_with`）にも使う。`Cargo.lock` は `genzo-media` の依存の行が 1 行増えただけ。このコンテナには cargo-deny がないため `cargo deny check` は実行していない（CI の `lint` ジョブで確かめる）。型の確認のため、このコンテナの rustup に Windows（x86_64-pc-windows-msvc）・macOS（aarch64-apple-darwin）向けの標準ライブラリを入れた（開発環境だけ。配布物・リポジトリには入らない）。
+- 2026-10-13（v1 のパッケージ 10 video。動画のプレビュー再生）: 新しい crate・npm のパッケージは足していない（Range の解釈・ffmpeg の進捗の読み取り・キャッシュの管理は自作。`Cargo.lock`・`package-lock.json` は変わらない）。動画のデコードは WebView（OS の動画の機能）が行い、WebView で再生できない動画は、利用者が入れた ffmpeg で再生用のファイルに変換する（同梱しない。下の 3.4 節と WebView の行）。
+- 2026-10-14（v1 のパッケージ 18 export。出力シャープ・透かし・動画の書き出し）: **`ttf-parser` 0.25.1 を新しく足した**（workspace の依存。`default-features = false`・機能は `std` だけ。`genzo-media` の通常の依存）。透かしの文字（EXP-03）を描くために、利用者が選んだ OS のフォントのファイル（TrueType・OpenType）の字形の輪郭を読む。取得元は crates.io（`Cargo.lock` の checksum `d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31`）、リポジトリは https://github.com/harfbuzz/ttf-parser（HarfBuzz のプロジェクト）。`Cargo.toml` の `license` は **MIT OR Apache-2.0**（どちらも deny.toml で許可済み。crate に `LICENSE-MIT`・`LICENSE-APACHE` がある）。`#![forbid(unsafe_code)]` で、この機能の組み合わせでは依存の crate がない（`Cargo.lock` に増えたのは `ttf-parser` の 1 つだけ）。選んだ理由と代わりの案は決定事項ログ No.167。**フォントのファイル自体は同梱・ダウンロードしない**（利用者の OS のフォントを使う。フォントの使用許諾は人の判断の表 No.176）。テストのフォントは `genzo-media` の `testing`（機能フラグ `test-support`。他の crate の開発用の依存だけで有効）がその場で作り、リポジトリにフォントのファイルは置いていない。ほかに、既に workspace の依存の `image`（既存の版）を `genzo-worker` の開発用の依存に加えた（透かしの画像のテストの入力）。画面（`ui/`）の npm のパッケージは足していない。このコンテナには cargo-deny がないため `cargo deny check` は実行していない（CI の `lint` ジョブで確かめる）。**ライセンスの表記の要否・方法（配布物に MIT・Apache-2.0 の文を含めるか）は、ほかの Rust の crate と同じ扱いで、AI の判断で確定しない。** **この `ttf-parser` は、同じ日に `skrifa` へ置き換えて外した**（次の項目。RUSTSEC-2026-0192。決定事項ログ No.173）。
+- 2026-10-14（CI の修正。透かしの文字のフォントの解析の置き換え。決定事項ログ No.173）: CI の `lint` ジョブの cargo-deny（`check licenses advisories bans sources`）が、**RUSTSEC-2026-0192（`ttf-parser` is unmaintained。作者が保守の終了を表明し、代わりに `skrifa` を勧めている。更新先なし）** で失敗していた。**利用者の決定により、`ttf-parser` 0.25.1 を外して `skrifa` 0.47.0 に置き換えた**（workspace の依存。`default-features = false`・機能は `std` だけ。既定の `autohint_shaping` は自動ヒンティングの機能で、ヒンティングをしないので使わない。`genzo-media` の通常の依存）。`Cargo.toml`・`Cargo.lock` から `ttf-parser` はなくなった（`cargo tree -i ttf-parser` は該当なし）。新しく入った crate は次の 3 つで、どれも Google Fonts の fontations（https://github.com/googlefonts/fontations）の crate。取得元は crates.io で、`Cargo.lock` の checksum は crates.io の API の値と一致した。`Cargo.toml` の `license` はどれも **MIT OR Apache-2.0**（どちらも deny.toml で許可済み。crate に `LICENSE-MIT`・`LICENSE-APACHE` がある）で、skrifa と read-fonts は `#![forbid(unsafe_code)]`（font-types は宣言がなく、bytemuck の印の trait の `unsafe impl` が 3 か所ある）。MSRV はどれも 1.85（workspace の 1.88 以下）。
+  - `skrifa` 0.47.0（2026-09-08 公開。checksum `526e654b303ff4ad73a5a40b25de2b3ce3d039c5e3b6da5f89ae6e57004cb40f`）: 透かしの文字の字形の輪郭（TrueType の `glyf`（合成の字形を含む）・CFF・CFF2。ヒンティングなし・フォントの単位）、行の高さ、送り幅。
+  - `read-fonts` 0.44.0（2026-09-08 公開。checksum `d5a0cf4bb6cbce4c29756270d189a5e400ac05e91192161d83a0bcb6e68492e8`）: skrifa の下のフォントのファイルの解析（表の一覧・`head`・`hhea`・`maxp`・`cmap`）。`genzo-media` は skrifa の `raw` から、必須の表の確認と `cmap` の引き方に直接使う。
+  - `font-types` 0.12.5（2026-09-08 公開。checksum `b8eb065f3251655b3c90e22e5e363f310fc5332fb3402e37bbc94752283248f6`）: read-fonts の基本の型（字形の番号・固定小数点など）。
+  - 版は、公開から 2 週間以上たった最新の安定版にした。最新の skrifa 0.48.0・read-fonts 0.45.0・font-types 0.12.6 は 2026-10-03 の公開（11 日前）のため使わない。`font-types` は Cargo の解決では 0.12.6 になるので、`cargo update -p font-types --precise 0.12.5` で 0.12.5 にした（read-fonts 0.44.0 の要求は `^0.12.5`）。
+  - ほかに一緒に使う `bytemuck` 1.25.2・`bytemuck_derive` 1.12.1（Zlib OR Apache-2.0 OR MIT）と `once_cell` 1.21.4（MIT OR Apache-2.0）は、依存のツリーに既にあった版で、新しい crate ではない。
+  - cargo-deny 0.20.2 をこのコンテナに入れ（`cargo install cargo-deny --version 0.20.2 --locked`。EmbarkStudios の公式の crate。2026-07-09 公開）、CI と同じ `cargo deny check licenses advisories bans sources` を実行した: **advisories・bans・licenses・sources がすべて通った**。置き換えの前（同じ版の cargo-deny）は advisories が RUSTSEC-2026-0192 の 1 件で失敗した。警告（同じクレートの複数の版）は置き換えの前後で同じ 38 件で、新しい crate は含まない。deny.toml は変えていない。
+  - 描画の違い（置き換えの前後で画素を比べた結果）と、壊れたフォントの扱いは決定事項ログ No.173。フォントのファイル自体は、これまでどおり同梱・ダウンロードしない。
+  - **ライセンスの表記の要否・方法は、ほかの Rust の crate と同じ扱いで、AI の判断で確定しない**（DIST-05）。
 - **cargo-deny が見るのは、各クレートの `Cargo.toml` の `license` と、ライセンスのファイルだけです。** C のソースを同梱してビルドするクレートについて、同梱したソースの版やファイルのヘッダは確認しません。現在の依存では次の 3 つが該当します。
   - `lcms2-sys`（Little CMS 2）と `libsqlite3-sys`（SQLite）: 2 章の一覧に記録します。
   - `blake3`: BLAKE3 の作者たち自身による C とアセンブリの実装を同梱しています（`c/` ディレクトリ）。crate のライセンスは `Cargo.toml` で CC0-1.0 / Apache-2.0 / Apache-2.0 WITH LLVM-exception の選択です。`c/blake3.c` の先頭にはライセンスの表示がなく（1.8.7 で確認）、C の部分にも crate と同じライセンスが及ぶと考えていますが、要確認です。
@@ -76,12 +91,17 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | SQLite | カタログ DB とサムネイル DB（`genzo-catalog`。04 の 3 章） | 3.53.2（`libsqlite3-sys` 0.38.2 が同梱する amalgamation。`rusqlite` 0.40.2） | crates.io の `libsqlite3-sys`（`sqlite3/` に同梱）。上流は https://sqlite.org/ | パブリックドメイン（`sqlite3.c` のヘッダの「The author disclaims copyright to this source code」で確認）。バインディングの crate は MIT | 静的リンク。`rusqlite` の機能フラグ `bundled` と `backup`。コンパイルの設定は `libsqlite3-sys` の build.rs の既定（3.3 節）。システムの SQLite は使わない | 実行ファイルに含まれる。対応するソースは crates.io の `libsqlite3-sys` 0.38.2 | SQLite 自体は不要とされる（パブリックドメイン）。バインディングの MIT の表記は Rust のクレートとして扱う | AI 記入（2026-10-09）。人の確認待ち |
 | FFmpeg / ffprobe | 動画のメタデータの取得とサムネイルの生成（`genzo-media`）。子プロセスとして実行する（04 の 1.2 節） | 開発環境は 6.1.1。配布する版は未定 | 開発環境は Ubuntu 24.04 の apt（`ffmpeg` 7:6.1.1-3ubuntu5）。配布物での入手方法は未定 | ビルドの構成で LGPL-2.1-or-later・GPL-2.0-or-later・(L)GPL-3.0-or-later のいずれかになり、`--enable-nonfree` のビルドは再配布できないとされる。開発環境の版は `--enable-gpl` のビルド（`ffmpeg -version` の configure の引数と、Ubuntu の copyright ファイルで確認）。上流の LICENSE.md は未確認 | リンクしない（子プロセス）。同梱する場合は configure の引数を記録する | 未定（同梱するか、利用者に入れてもらうか）。同梱する場合は対応するソースとビルドの構成の提供が必要 | 同梱する場合は、ライセンスの全文、ビルドの構成、組み込んだ外部ライブラリの表記（要確認） | AI 記入（2026-10-09）。配布の方針は人の判断待ち |
 | RCD デモザイク | デモザイク（04 の 2.1 節のステージ 5。最終品質。既定のまま。決定事項ログ No.34） | CPU 版は `crates/genzo-pipeline/src/sensor/demosaic/rcd.rs`（2026-10-10。調査の時点の SHA-256 `3fe730d9b5bf8e4a876aae7d7c5bbed0075e3778c5271d1edf0dff7b471313fc`、追加したコミット 527f911）。GPU 版は未実装（書き出しのセンサー処理は CPU 版を使う）。第三者のファイルは取り込んでいない | アルゴリズムの考案者は Luis Sanz Rodríguez。考案者の実装は https://github.com/LuisSR/RCD-Demosaicing （`rcd_demosaicing.c`、Release 2.3）。改変した実装は RawTherapee・darktable・librtprocess にある（3.5 節に URL・コミット）。**`rcd.rs` は、これらの実装（特に 2021 年以降の改変版）と手順・定数・式の書き方・変数名が一致する**（2026-10-10 の AI の調査。3.5 節） | 自前のファイルとして、アプリと同じ GPL-3.0-or-later。比べた実装のファイルの表示は、RawTherapee・darktable・librtprocess が GPL-3.0-or-later、考案者の実装は LICENSE が GPL 第 3 版の全文でソースに表示なし（3.5 節）。由来の扱いと元の著作権表示の書き方は**人・専門家の確認待ち** | 該当なし（自前の Rust のコード） | アプリのソースに含まれる | 考案者の名前は doc コメントに記載済み。RawTherapee・darktable の版を参考にした実装として扱い、元の著作権表示（RawTherapee: Luis Sanz Rodriguez・Ingo Weyrich、darktable: darktable developers）と出典を `rcd.rs` のヘッダに記載した（2026-10-10。3.5 節）。書き方の妥当性は人・専門家の確認待ち | AI 記入（2026-10-10）。出典の調査は済み（2026-10-10）。扱いは人・専門家の確認待ち |
+| darktable のレンズ補正（埋め込みのメタデータの解釈。参考） | Sony の ARW に埋め込まれたレンズ補正の値（0x7032・0x7035・0x7037）の意味と、DNG の opcode（WarpRectilinear・FixVignetteRadial）の形・式の確認（DEV-14。決定事項ログ No.121。04 の 2.1 節のステージ 7・9） | darktable のブランチ master（2026-10-13 に取得。コミットは記録していない）の `src/iop/lens.cc`・`src/common/exif.cc`・`src/common/dng_opcode.c`（SHA-256 は 3.9 節） | https://github.com/darktable-org/darktable | GPL-3.0-or-later（3 つのファイルのヘッダの「either version 3 of the License, or (at your option) any later version」で確認） | 該当なし（第三者のファイルは取り込んでいない。自前の Rust のコード `crates/genzo-raw/src/lens.rs`・`crates/genzo-pipeline/src/lens.rs`） | アプリのソースに含まれる（自前のコード） | 値の解釈（節点の位置・尺度・式）が darktable と同じなので、参考にした実装として、darktable の著作権表示（「Copyright (C) 2019-2026 darktable developers」）と出典・SHA-256 を `crates/genzo-pipeline/src/lens.rs` の doc に記載した（2026-10-13）。書き方の妥当性は人・専門家の確認待ち | AI 記入（2026-10-13）。扱いは人・専門家の確認待ち |
+| ハイライト復元・ノイズ軽減の手法（公開の手法。参考） | ハイライト復元（DEV-06。04 の 2.1 節のステージ 4）とノイズ軽減（DEV-13。ステージ 6）の考え方: 近傍の色の比による再構成（最小二乗の比）、平方根による分散の安定化（Anscombe 変換の近似）、B3 スプラインの à trous ウェーブレットと non-negative garrote による係数の縮小（決定事項ログ No.126・127） | 該当なし（2026-10-13 の自前の実装。`crates/genzo-pipeline/src/sensor/highlight.rs`・`denoise.rs`、GPU 版は `crates/genzo-gpu/src/shaders/sensor.wgsl`・`denoise.wgsl`） | 文献の手法（3.10 節。**この実装では文献・第三者のコードを取得していない。AI の知識**） | 自前のコードとして、アプリと同じ GPL-3.0-or-later。第三者のコード（darktable・RawTherapee など）は参照・取り込みしていない | 該当なし（自前の Rust・WGSL のコード） | アプリのソースに含まれる（自前のコード） | 不要の見込み（コードを写していないため）。手法の出典は 3.10 節に記す | AI 記入（2026-10-13）。出典の書き方は人の確認待ち |
+| テクスチャ・明瞭度・かすみの除去・シャープ・効果の手法（公開の手法。参考） | テクスチャ・明瞭度・かすみの除去（DEV-11。04 の 2.1 節のステージ 12）・シャープ（DEV-12。ステージ 14）・効果（DEV-24。ステージ 16）の考え方: 輝度の対数の領域のぼかしとの差（周波数分解）とアンシャープマスク、暗いチャンネルの事前分布によるかすみの推定、ガイデッドフィルタによる精緻化、超楕円の周辺光量、格子の値の補間による粒子（決定事項ログ No.137〜139） | 該当なし（2026-10-14 の自前の実装。`crates/genzo-pipeline/src/finish/presence.rs`・`sharpen.rs`・`effects.rs`・`frequency.rs`・`crates/genzo-pipeline/src/haze.rs`、GPU 版は `crates/genzo-gpu/src/shaders/detail.wgsl`・`noise.wgsl`） | 文献の手法（3.11 節。**この実装では文献・第三者のコードを取得していない。AI の知識**） | 自前のコードとして、アプリと同じ GPL-3.0-or-later。第三者のコード（darktable・RawTherapee・論文の著者の公開のコードなど）は参照・取り込みしていない | 該当なし（自前の Rust・WGSL のコード） | アプリのソースに含まれる（自前のコード） | 不要の見込み（コードを写していないため）。手法の出典は 3.11 節に記す | AI 記入（2026-10-14）。出典の書き方と、手法の権利（特許など）の有無は人の確認待ち |
+| Adobe の DNG の仕様（カメラプロファイル（DCP）の形と色の計算の考え方。参考） | 利用者が取り込むカメラプロファイル（DCP）の読み込みと、ステージ 8 の行列・色相彩度のマップ、ルックテーブルの計算（DEV-17。04 の 2.1 節・2.6 節、決定事項ログ No.143〜146）。**Adobe のプロファイル（DCP のファイル）は同梱しない** | 該当なし（2026-10-14 の自前の実装。`crates/genzo-color/src/dcp.rs`・`cube.rs`、`crates/genzo-pipeline/src/profile.rs`・`finish/look.rs`、GPU 版は `crates/genzo-gpu/src/shaders/profile.wgsl`・`lut3d.wgsl`） | 仕様の文書は**この実装では取得していない**（考え方は AI の知識）。タグの番号は、開発環境の libtiff の `tiff.h`（Ubuntu の `libtiff-dev` 4.5.1+git230720-4ubuntu2.5）と照合した（3.12 節） | 仕様の利用の条件（特許のライセンスなど）は**未確認**（**人・専門家の確認待ち**。AI は判断しない）。第三者のコード（Adobe の DNG SDK・dcamprof・RawTherapee・darktable など）は参照・取り込みしていない | 該当なし（自前の Rust・WGSL のコード） | アプリのソースに含まれる（自前のコード） | 未確認（3.12 節） | AI 記入（2026-10-14）。人・専門家の確認待ち |
+| 利用者が取り込むカメラプロファイル・ルック（DCP・.cube） | 現像の色（DEV-17）。利用者が自分で用意したファイルを、カタログのデータのフォルダの `profiles` に写して使う | 利用者による | 利用者による（このアプリは配布しない・ダウンロードしない） | ファイルごとの条件（利用者が確かめる）。画面にファイルの著作権の表示（ProfileCopyright）と埋め込みの方針（ProfileEmbedPolicy）をそのまま出す | 該当なし（実行時に読む） | **配布物に含めない** | — | AI 記入（2026-10-14）。画面の文言は人の確認待ち（implementation_status の人の判断の表 No.159） |
 | ColorChecker Classic の基準値 | PoC-4 の色の評価の基準とテスト（`crates/genzo-testkit/src/colorchecker.rs`。2014 年 11 月以降の版と、より前の版の 24 色 × L\*a\*b\*（D50）） | X-Rite の公表値（CGATS のファイル。2014 年 11 月以降の版の測定日は 2015-04-28）。値は colour-science 0.4.6 のデータから写したもの | X-Rite（現在は Calibrite）の公表資料。2026-10-10 の照合には、GitHub 上の第三者のリポジトリにある CGATS ファイルの写しを使った（3.8 節） | 利用条件は未確認（**要確認**） | 該当なし（テストのデータ） | `genzo-testkit` はテストと計測用の crate。開発用の CLI（`genzo`）は計測の記録のために依存するが、配布するアプリに含めるかは未定（含める場合は利用条件の確認が要る） | 出典（X-Rite）を doc に記載 | AI 記入（2026-10-10）。値は写しと一致、一次資料とは未照合（人の確認待ち） |
 | カメラ行列（α7 IV / α7C） | カメラ RGB から XYZ への変換（04 の 2.5 節の `render_deps`、2.6 節） | 未作成 | 候補は LibRaw の内蔵の表、DNG の ColorMatrix、カラーチャートからの自作（3.6 節） | 要確認（出典ごとに利用条件を確認する） | アプリのデータファイルとして持ち、ID とハッシュで参照する | アプリに同梱する予定 | 出典による（要確認） | 未着手 |
 | Mesa（llvmpipe） | 開発環境（Linux のコンテナ）で wgpu を動かすための、ソフトウェアの Vulkan | 25.2.8（`mesa-vulkan-drivers` 25.2.8-0ubuntu0.24.04.4）。Vulkan のローダーは `libvulkan1` 1.3.275.0 | Ubuntu 24.04 の apt | 主に MIT とされる（未確認。配布しないため優先度は低い） | wgpu が実行時に Vulkan のローダー経由で読み込む。ビルド時のリンクはない | **配布物に含めない** | 不要（配布しない） | 開発環境だけで使う |
 | LibRaw の同梱（配布物） | 配布物のワーカーが読み込む LibRaw と、その依存の共有ライブラリ（決定事項ログ No.64） | 配布のビルドで入る版。2026-10-12 の release.yml の実行（run 38276847388）では、macOS は Homebrew の libraw 0.22.2・libomp 23.1.0・jpeg-turbo 3.2.0・little-cms2 2.19.1（ログの元のファイルのパス）。Windows の vcpkg の版はログに出ない（要確認）。実際に入ったファイルと SHA-256 は `crates/genzo-app/binaries/bundled-libs.txt`（配布のビルドが作り、artifact に入る） | Windows: vcpkg。同梱したのは `raw_r.dll`・`lcms2-2.dll`・`z.dll`（ワーカーと DLL の読み込みをたどった結果。jasper・libjpeg-turbo の DLL はたどった先になかった）。macOS: Homebrew。同梱したのは `libraw_r.25.dylib`・`libomp.dylib`・`libjpeg.8.dylib`・`liblcms2.2.dylib` | LibRaw は LGPL-2.1 / CDDL-1.0 の選択（3.1 節）。依存はそれぞれのライセンス（未確認） | 動的リンク（ワーカーだけ。本体は依存しない） | Windows: インストール先のフォルダ。macOS: `.app` の `Contents/Frameworks`（参照を書き換えてアドホック署名） | **ライセンスの文書を同梱していない（未対応）**。LGPL のソースの入手方法の案内も要る（人・専門家の確認待ち） | AI 記入（2026-10-12）。配布物は release.yml で作成（2026-10-12。[packaging.md](packaging.md) の 6.2 節） |
 | Visual C++ のランタイム | ワーカーと LibRaw の DLL が使う（Windows） | ビルドした Visual Studio の版による（同梱の一覧 `bundled-libs.txt` に元の場所と SHA-256 を書く）。2026-10-12 の実行では、windows-latest の Visual Studio 18 Enterprise の `VC\Redist\MSVC\14.51.36231\x64\Microsoft.VC145.CRT` から | Visual Studio の再頒布用のフォルダ（`VC\Redist\MSVC\<版>\x64\Microsoft.VC*.CRT` など） | Microsoft のライセンス（Visual Studio の `REDIST.TXT` の再頒布可能なファイル。条件は人が確認） | **インストール先に同梱する**（決定事項ログ No.73。本体は静的にリンク）。Windows Update では更新されない | 同梱する（ワーカーと LibRaw の DLL が読み込むもの。2026-10-12 の実行では `VCRUNTIME140.dll`・`VCRUNTIME140_1.dll`・`MSVCP140.dll`） | — | AI 記入（2026-10-12）。利用者の指示で同梱に変更。再頒布の条件は人の確認待ち |
-| WebView（Windows: WebView2、macOS: WKWebView） | アプリの画面の表示（Tauri 2。決定事項ログ No.60） | OS のもの（同梱しない） | Windows 10 / 11 の WebView2 ランタイム（Microsoft）、macOS の WebKit | OS の構成要素。WebView2 のランタイムがない Windows では、インストーラー（NSIS）が Microsoft の配布元から入れる（Tauri の既定の `downloadBootstrapper`。要確認） | 動的に使う（同梱しない） | 同梱しない | 要確認（WebView2 の配布の条件） | AI 記入（2026-10-12） |
+| WebView（Windows: WebView2、macOS: WKWebView） | アプリの画面の表示（Tauri 2。決定事項ログ No.60）。2026-10-13 から、動画の再生（VID-04。`video` 要素。デコードは OS の動画の機能: Windows の Media Foundation・macOS の AVFoundation。Windows の HEVC は OS の「HEVC ビデオ拡張機能」とハードウェアに依存。決定事項ログ No.117） | OS のもの（同梱しない） | Windows 10 / 11 の WebView2 ランタイム（Microsoft）、macOS の WebKit | OS の構成要素。WebView2 のランタイムがない Windows では、インストーラー（NSIS）が Microsoft の配布元から入れる（Tauri の既定の `downloadBootstrapper`。要確認） | 動的に使う（同梱しない） | 同梱しない | 要確認（WebView2 の配布の条件） | AI 記入（2026-10-12） |
 | NSIS（Windows のインストーラー） | Windows のインストーラーの作成（`npx tauri build`。SYS-08） | Tauri の CLI がビルドのときに取得する版（未記録） | Tauri の CLI が GitHub の tauri-apps/binary-releases から取得（要確認） | zlib/libpng のライセンスとされる（要確認） | インストーラーの実行ファイルに NSIS のスタブが入る | インストーラー | 要確認 | AI 記入（2026-10-12）。版と取得元は配布のビルドの記録で確かめる |
 | WebKitGTK・WebKitWebDriver | 開発環境（Linux のコンテナ）でアプリを動かす・E2E（`e2e/`） | 2.52.6（`libwebkit2gtk-4.1-dev`・`webkit2gtk-driver` 2.52.6-0ubuntu0.24.04.1） | Ubuntu 24.04 の apt | LGPL-2.1 / BSD とされる（要確認） | 開発環境だけ | 配布しない | — | AI 記入（2026-10-12） |
 | tauri-driver | E2E の WebDriver の中継（開発環境だけ） | 2.0.6（`cargo install tauri-driver --version 2.0.6 --locked`） | crates.io | Apache-2.0 OR MIT（crates.io の表示） | 開発環境だけ | 配布しない | — | AI 記入（2026-10-12） |
@@ -145,6 +165,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - 子プロセスとして実行することだけを根拠に、ライセンスの義務がなくなるとは判断しません（R-15）。
   - 配布物に同梱するかは未定です（02 の 2 章の 4、COMPAT-02・PERF-11）。同梱する場合は、configure の引数、組み込む外部ライブラリ（libx264・libx265 など）とそれぞれのライセンス、`--enable-nonfree` を使っていないことを記録し、対応するソースの提供方法を決めてください。
   - **H.264 / H.265（HEVC）などのコーデックの特許** は、ライセンスとは別の問題です。配布の範囲も含めて、必要に応じて専門家に確認してください（03 の 2.1 節）。
+  - 2026-10-13（VID-04。決定事項ログ No.117・118）: WebView で再生できない動画のために、**利用者が入れた ffmpeg** で再生用のファイル（H.264 ＋ AAC の MP4）を作り、利用者の PC のキャッシュ（データのフォルダの `video-proxies/`）に置くようにしました。エンコーダーは利用者の ffmpeg にあるもの（libx264（GPL-2.0-or-later とされる）・`h264_videotoolbox`（macOS の VideoToolbox）・`h264_mf`（Windows の Media Foundation）・`libopenh264`（Cisco の OpenH264）の順。AAC は ffmpeg の内蔵のエンコーダー）を使い、アプリは ffmpeg も作ったファイルも配布しません。作ったファイルの扱いと H.264 の特許について、確認が要るかは人が判断してください（人の判断の表 No.128。ライセンス・法的な表現は確定していません）。
 
 ### 3.5 RCD デモザイク
 
@@ -228,11 +249,92 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   6. **利用条件**: 公表値をテストのデータとして使う条件は未確認です。
 - 結果は決定事項ログ No.37 の「再検討の条件」の欄に書いてください。確認の後に `colorchecker.rs` の doc の「照合」の記述を更新します（コードの変更。未対応）。
 
+### 3.9 レンズ補正の埋め込みの情報の解釈（darktable を参考にした）
+
+**実装の状況**（2026-10-13、AI 記入。DEV-14、決定事項ログ No.121〜123）
+- 利用者の決定（DEV-14）: **ARW / DNG に埋め込まれた補正の情報を使い、ない場合は手動のスライダーで補正する。lensfun などの外部のデータは使わない・同梱しない**。アプリは外部のレンズのデータベース・プロファイルを持たず、ダウンロードもしません。
+- 読み取り（`crates/genzo-raw/src/lens.rs`）と補正の計算（`crates/genzo-pipeline/src/lens.rs`、GPU 版は `crates/genzo-gpu/src/shaders/geometry.wgsl`）は自前の Rust・WGSL のコードです。**第三者のファイルは取り込んでいません**（取得したソースはリポジトリの外に置き、リポジトリにはコピーしていない）。
+- Sony の値の意味には公開の仕様がないため、darktable の解釈（`_init_coeffs_md_v2`。新しい現像で使われる版 2）に合わせました: 節点の位置 `(i + 0.5) / (n − 1)`、節点の間の線形補間、歪曲 `1 + t · d · 2^−14`、色収差 `1 + a · 2^−21`、周辺減光 `v' = 2^(0.5 − 2^(t · v · 2^−13 − 1))` で画素を割る（下限 1e-4）。**コードは写していません**が、値の解釈と式が同じなので、参考にした実装として著作権表示と出典を `genzo-pipeline/src/lens.rs` の doc に書きました。
+- DNG の opcode の形（見出し・面の数・係数）は `dng_opcode.c` で確かめました（WarpRectilinear は面ごとに係数 6 個と中心 2 個）。式は darktable の `lens.cc` の DNG の扱いと同じです。ただし darktable は中心を画像の中心、半径の基準を画像の対角線の半分にしていて、GenzoParis は opcode の光学中心と、中心から最も遠い隅までの距離を使います（DNG の仕様の記述による。**仕様書はこの調査では取得していない。AI の知識**）。
+- Sony のタグの場所（RAW の SubIFD。Exiv2 の `Exif.SubImage1.*CorrParams`）は `exif.cc` で確かめました。ExifTool のタグの表は、この調査では取得していません。
+
+**調べたファイル**（2026-10-13、AI の調査。GitHub の公開リポジトリから匿名で取得。**法的な評価（派生物に当たるかなど）はしていません**。記録に使う前に元のページで確かめてください）
+
+| ファイル | 取得元 | 版（取得時点） | ライセンスの表示 | 著作権の表示 | SHA-256 |
+|---|---|---|---|---|---|
+| `src/iop/lens.cc` | https://raw.githubusercontent.com/darktable-org/darktable/master/src/iop/lens.cc | ブランチ master（2026-10-13。コミットは記録していない） | GPL-3.0-or-later | 「Copyright (C) 2019-2026 darktable developers.」 | `5801e7dd1ef957a8fd243badb3fc28b579a919aa9abcb39c42c9dd2444577886` |
+| `src/common/exif.cc` | https://raw.githubusercontent.com/darktable-org/darktable/master/src/common/exif.cc | 同上 | GPL-3.0-or-later | 「Copyright (C) 2009-2026 darktable developers.」 | `c5ecf9fff1234a329fd1e82c9ad6d571ba6e321d922eed01f5a58f6b87c314f5` |
+| `src/common/dng_opcode.c` | https://raw.githubusercontent.com/darktable-org/darktable/master/src/common/dng_opcode.c | 同上 | GPL-3.0-or-later | 「Copyright (C) 2011-2023 darktable developers.」 | `61f775f54e25aa1cba4cae6b3a4252adee86a9591ef4e1c9cbc694346a5b5e39` |
+
+- **人の確認が必要な事項**
+  1. 値の解釈を参考にした（コードは写していない）実装の、著作権表示の書き方と扱い（RCD デモザイクの 3.5 節と同じ論点）。
+  2. 取得したファイルのコミット（記録していない。上の SHA-256 で同じファイルかを確かめられる）。
+  3. Sony の値の意味が実機の ARW で正しいか（人の判断の表 No.131）。DNG の opcode の中心と半径の基準（同 No.132）。
+
+### 3.10 ハイライト復元・ノイズ軽減の手法（公開の手法。第三者のコードは参照していない）
+
+**実装の状況**（2026-10-13、AI 記入。DEV-06・DEV-13、決定事項ログ No.126・127）
+- ハイライト復元（`crates/genzo-pipeline/src/sensor/highlight.rs`、GPU 版は `crates/genzo-gpu/src/shaders/sensor.wgsl` の `highlight_main`）とノイズ軽減（`crates/genzo-pipeline/src/sensor/denoise.rs`、GPU 版は `crates/genzo-gpu/src/shaders/denoise.wgsl`）は自前の Rust・WGSL のコードです。**第三者のファイル・コードは取得も取り込みもしていません**（darktable の「inpaint opposed」「denoise (wavelets)」・RawTherapee の「color propagation」・dcraw の `-H` の各方式は、この実装のために読んでいません。名前と考え方は AI の知識として知っているもの）。
+- 使った考え方（公開の手法。**文献はこの調査では取得していない。出典は AI の知識による**）:
+  - 飽和したチャンネルを、近傍の飽和していない画素の色の比で再構成する（ハイライト復元の一般的な考え方）。比は最小二乗の形（`Σ u·c / Σ u²`）で、明るい参照を重く見る重みと、手がかりの少なさによる明るさだけの復元への移り方は、この実装で決めたもの。
+  - 分散の安定化: 光のショットノイズに対する平方根の変換（F. J. Anscombe, 1948 の変換の近似）。
+  - à trous（穴あき）のウェーブレット変換と B3 スプラインの 5 タップ `[1, 4, 6, 4, 1] / 16`（J.-L. Starck・F. Murtagh らの多重解像度の画像処理の文献で広く使われるもの）。
+  - 係数の縮小の non-negative garrote（L. Breiman, 1995。ウェーブレットの縮小への応用は H.-Y. Gao, 1998）。
+- 段ごとの雑音の大きさの表（`NR_LUMA_LEVEL_NOISE` など）は、合成の雑音をこのアプリの RCD でデモザイクして計測した値（`denoise/tests.rs`）。
+
+- **人の確認が必要な事項**
+  1. 手法の出典の書き方（コードは写していないので著作権表示は要らない見込みだが、論文の参照の要否と書き方）。
+  2. 実写での画質（人の判断の表 No.137・138）。
+
+### 3.11 テクスチャ・明瞭度・かすみの除去・シャープ・効果の手法（公開の手法。第三者のコードは参照していない）
+
+**実装の状況**（2026-10-14、AI 記入。DEV-11・DEV-12・DEV-24、決定事項ログ No.137〜140）
+- ステージ 12（`crates/genzo-pipeline/src/finish/presence.rs`）・14（`sharpen.rs`）・16 の効果（`effects.rs`）、共通の部品（`frequency.rs`）、段階 B のかすみの推定（`crates/genzo-pipeline/src/haze.rs`）、GPU 版（`crates/genzo-gpu/src/shaders/detail.wgsl`・`noise.wgsl`）は自前の Rust・WGSL のコードです。**第三者のファイル・コードは取得も取り込みもしていません**（論文の著者の公開のコード、darktable の「haze removal」「local contrast」「sharpen」「grain」、RawTherapee の各方式は、この実装のために読んでいません。名前と考え方は AI の知識として知っているもの）。
+- 使った考え方（公開の手法。**文献はこの調査では取得していない。出典は AI の知識による**）:
+  - かすみの推定: 暗いチャンネルの事前分布（K. He, J. Sun, X. Tang, "Single Image Haze Removal Using Dark Channel Prior", CVPR 2009）。窓の最小で暗いチャンネルを求め、その上位の画素の平均で大気の光を推定し、透過率 `1 − ω·暗いチャンネル` でかすみの式を戻す。窓の大きさ（G の長辺の 1 %）・上位の割合（0.1 %）・ω（0.95）・透過率の下限（0.1）・負の値（かすみを足す）の式は、この実装で決めたもの（仮置き）。
+  - 暗いチャンネルの精緻化: ガイデッドフィルタ（K. He, J. Sun, X. Tang, "Guided Image Filtering", ECCV 2010）。半径（窓の 2 倍）と ε（1e−3）はこの実装で決めたもの。
+  - テクスチャ・明瞭度・シャープ: ぼかした画像との差を強める（アンシャープマスク。写真の処理で古くから広く使われる考え方）を、輝度の対数の領域で行う。しきい値・上限・中間調の重み・勾配のマスクの形は、この実装で決めたもの。
+  - 周辺光量: 超楕円（|u|^q + |v|^q）の距離と smoothstep の重み。粒子: 整数のハッシュ（17b のディザと同じ関数。既存の自前のコード）で作る格子の値の双線形の補間（バリューノイズ）を 2 つの大きさで重ねる。
+- **特許などの権利**: これらの手法（特に暗いチャンネルの事前分布とガイデッドフィルタ）に特許などの権利があるか、あるならアプリの配布に関係するかは**調べていません**（**要確認**。AI はこれについて判断しません）。
+
+- **人の確認が必要な事項**
+  1. 手法の出典の書き方（コードは写していないので著作権表示は要らない見込みだが、論文の参照の要否と書き方）。
+  2. 手法の権利（特許など）の有無と扱い（implementation_status の人の判断の表 No.151）。
+  3. 実写での画質（人の判断の表 No.149）。
+
+### 3.12 カメラプロファイル（DCP）とルック（3D LUT）（DNG の仕様の考え方。第三者のコードは参照していない）
+
+**実装の状況**（2026-10-14、AI 記入。DEV-17、決定事項ログ No.143〜146）
+- DCP の読み込み（TIFF と同じ形。番号 `0x4352`）・検証・行列と色相彩度のマップの補間・ルックテーブル、.cube の読み込みは、自前の Rust のコード（`crates/genzo-color/src/dcp.rs`・`cube.rs`）と WGSL（`crates/genzo-gpu/src/shaders/profile.wgsl`）です。**第三者のファイル・コードは取得も取り込みもしていません**（Adobe の DNG SDK、dcamprof、RawTherapee・darktable の DCP の読み込み、LUT のライブラリなどは、この実装のために読んでいません）。
+- 使った考え方（**DNG の仕様の文書はこの調査では取得していない。AI の知識による**）: カメラの色空間から XYZ への対応（2 つの光源の行列の逆色温度による補間、白の色度の繰り返し、ForwardMatrix、色相彩度のマップとルックテーブルの HSV の表、明度の軸の符号化）。式の書き方・正規化・HSV の表を明度 1 超・色域の外に広げる扱いは、この実装で決めたもの（04 の 2.6 節）。.cube の形（`LUT_3D_SIZE`・`DOMAIN_MIN`・`DOMAIN_MAX`・`TITLE`）も AI の知識による。
+- タグの番号の照合: 開発環境の `/usr/include/x86_64-linux-gnu/tiff.h`（Ubuntu 24.04 の `libtiff-dev` 4.5.1+git230720-4ubuntu2.5。SHA-256 `ec0904a51c9392cb6a63dc5e9d563e5adb8af64517264176f370b96b6deb5200`）の `TIFFTAG_*` の値と、読むタグ（UniqueCameraModel 50708、ColorMatrix1・2 50721・50722、CalibrationIlluminant1・2 50778・50779、ProfileCalibrationSignature 50932、ProfileName 50936、ProfileHueSatMapDims 50937、ProfileHueSatMapData1・2 50938・50939、ProfileToneCurve 50940、ProfileEmbedPolicy 50941、ProfileCopyright 50942、ForwardMatrix1・2 50964・50965、ProfileLookTableDims・Data 50981・50982、ProfileHueSatMapEncoding・ProfileLookTableEncoding 51107・51108、BaselineExposureOffset 51109、DefaultBlackRender 51110、使わない 3 つ目の光源の CalibrationIlluminant3 52529・ColorMatrix3 52531・ForwardMatrix3 52532・ProfileHueSatMapData3 52537）が一致することを確かめた（2026-10-14）。libtiff のコードは取り込んでいない（番号の照合だけ）。
+- 光源の番号（EXIF の LightSource）と色温度の対応（17 → 2850 K など。`dcp.rs` の `illuminant_temperature`）は AI の知識で、一次資料と照合していない（**要確認**。implementation_status の人の判断の表 No.155）。
+- **Adobe のプロファイルは同梱しない**（利用者の指示）。利用者が取り込む DCP・.cube はアプリが配布するものではなく、ファイルの著作権の表示・埋め込みの方針は画面にそのまま出すだけで、このアプリは書き出したファイルに埋め込まない。
+
+- **人の確認が必要な事項**
+  1. DNG の仕様の利用の条件（特許のライセンスなど）が、仕様の考え方で自前に実装したこのアプリの配布に関係するか（AI は判断しない。人の判断の表 No.159）。
+  2. 手法の出典の書き方（DNG の仕様の参照の要否と書き方）。
+  3. 利用者が取り込むプロファイルの利用条件についての画面の文言（人の判断の表 No.159）。
+  4. 光源の色温度の表の一次資料での確認（人の判断の表 No.155）。
+
+### 3.13 ローカル補正（マスク）・範囲マスクの手法（一般的な手法。第三者のコードは参照していない）
+
+**実装の状況**（2026-10-14、AI 記入。DEV-18・DEV-19、決定事項ログ No.150〜157）
+- マスクの重み（線形・円形のグラデーション、ブラシのラスター、色域・輝度の範囲、部品の合成）と局所の値の面（`crates/genzo-pipeline/src/local/`）、GPU 版（`crates/genzo-gpu/src/shaders/local.wgsl`）、画面（`ui/src/develop/maskLogic.ts`・`MaskLayer.tsx`・`MaskPanel.tsx`）は自前の Rust・WGSL・TypeScript のコードです。**第三者のファイル・コードは取得も取り込みもしていません**（darktable の「drawn and parametric masks」、RawTherapee の「Local Adjustments」、Lightroom Classic の資料などは、この実装のために読んでいません）。**新しい依存（crate・npm のパッケージ）は足していません。**
+- 使った考え方（**AI の知識による。文献はこの調査では取得していない**）: smoothstep の段（線形・円形・輝度の範囲の縁）、折れ線からの距離によるブラシの覆い方と「密度まで塗る・消す」の式、OKLab（`genzo-color` の既存の `oklab`。Björn Ottosson, 2020）の色度の距離による色域の選択。式の形・定数（許容量の幅・滑らかさの幅・局所の色温度の強さなど）は、この実装で決めたもの（仮置き）。
+- 画面の見本の色の表示（`maskLogic.ts` の `labToCss`）は、OKLab → 線形 sRGB の逆変換に Ottosson の公表の行列の値（小数 10 桁）を使った（`genzo-color` の `oklab.rs` と同じ出典。値は AI の知識により、一次資料と照合していない。**要確認**）。表示の近似で、描画には使わない。
+- 画面の構成とキー（O で重ねて表示、[ ] でブラシの大きさ）は、Lightroom Classic の操作に近づけた（AI の知識による。Adobe の資料・コードは参照していない）。
+
+- **人の確認が必要な事項**
+  1. 手法の権利（特許など）の有無と扱い（一般的な手法と考えているが、**AI は判断しない**）。
+  2. 画面の構成・操作を Lightroom Classic に近づけたことの扱い（**AI は判断しない**）。
+  3. 実写での画質（implementation_status の人の判断の表 No.163・164）。
+
 ## 4. 今後記入する対象
 
 使うことが決まった時点で、2 章の一覧に追加します。
 
-- lensfun（使う場合。ライブラリは LGPL-3.0、データベースは CC BY-SA 3.0 とされる。03 の 2.2 節）
+- lensfun（使う場合。ライブラリは LGPL-3.0、データベースは CC BY-SA 3.0 とされる。03 の 2.2 節）。2026-10-13 の DEV-14 で、利用者の決定により**使わない**ことになった（埋め込みの補正の情報と手動の補正だけ。3.9 節）
 - ICC プロファイル（sRGB・Display P3 などのファイルを同梱する場合）
 - Exiv2（使う場合。GPL-2.0-or-later とされる。03 の 2.1 節）
 - LibRaw が依存するライブラリ（libjpeg、OpenMP のランタイム、lcms2 など）を同梱する場合

@@ -158,6 +158,14 @@ impl JobRegistry {
         }
     }
 
+    /// 種類が `kind` の、実行中（待っているものを含む）のジョブ（`except` を除く）があるか。
+    pub(crate) fn is_running(&self, kind: JobKind, except: Option<u64>) -> bool {
+        self.entries
+            .lock()
+            .iter()
+            .any(|(id, e)| e.kind == kind && !e.state.is_finished() && Some(*id) != except)
+    }
+
     /// 実行中のジョブの数。
     pub(crate) fn running_count(&self) -> usize {
         self.entries
@@ -269,9 +277,24 @@ impl JobResult {
         match self {
             JobResult::Import(r) => r.cancelled,
             JobResult::Export(r) => r.cancelled,
+            JobResult::HashFiles(r) => r.cancelled,
+            JobResult::MoveFiles(r) => r.cancelled,
+            JobResult::CheckMissing(r) => r.cancelled,
+            JobResult::RelinkCandidates(r) => r.cancelled,
             _ => false,
         }
     }
+}
+
+/// ジョブを実行するスケジューラ（[`spawn_job_on`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JobQueue {
+    /// P3 のバックグラウンドのスケジューラ（取り込み・書き出し・プレビューの作り直しなど）。
+    Background,
+    /// ファイルの内容のハッシュの計算の 1 本のスレッド（[`Inner`] の `maintenance`。`identity` の doc）。
+    Maintenance,
+    /// 動画の再生用のファイルの作成の 1 本のスレッド（[`Inner`] の `video`。`playback` の doc）。
+    Video,
 }
 
 /// P3 のジョブを投入する（[`Inner`] のバックグラウンドのスケジューラ）。ジョブの ID を返す。
@@ -279,10 +302,29 @@ pub(crate) fn spawn_job<F>(inner: &Arc<Inner>, kind: JobKind, label: &str, run: 
 where
     F: FnOnce(&JobCtx<'_>) -> Result<JobResult, ApiError> + Send + 'static,
 {
+    spawn_job_on(inner, JobQueue::Background, kind, label, run)
+}
+
+/// P3 のジョブを、`queue` のスケジューラに投入する。ジョブの ID を返す。
+pub(crate) fn spawn_job_on<F>(
+    inner: &Arc<Inner>,
+    queue: JobQueue,
+    kind: JobKind,
+    label: &str,
+    run: F,
+) -> u64
+where
+    F: FnOnce(&JobCtx<'_>) -> Result<JobResult, ApiError> + Send + 'static,
+{
     let token = CancellationToken::new();
     let id = inner.jobs.register(kind, token.clone());
     let weak = Arc::downgrade(inner);
-    let handle = inner.background.submit_with(
+    let scheduler = match queue {
+        JobQueue::Background => &inner.background,
+        JobQueue::Maintenance => &inner.maintenance,
+        JobQueue::Video => &inner.video,
+    };
+    let handle = scheduler.submit_with(
         genzo_jobs::JobOptions::new(genzo_jobs::Priority::P3)
             .parent(&token)
             .label(label),

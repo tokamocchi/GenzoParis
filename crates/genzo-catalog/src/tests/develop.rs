@@ -1,7 +1,9 @@
 //! 現像設定・履歴・Undo / Redo・スナップショット・仮想コピー・一括適用のテスト
 //! （DEV-00、DEV-27、DEV-28、DEV-30、LIB-13）。
 
-use genzo_model::{CURRENT_PROCESS_VERSION, DevelopSettings, HistoryEntryId, VariantId};
+use genzo_model::{
+    CURRENT_PROCESS_VERSION, DevelopSettings, HistoryEntryId, SnapshotId, VariantId,
+};
 
 use super::Fixture;
 use crate::{Catalog, CatalogError, HISTORY_LABEL_IMPORT, HISTORY_LABEL_VIRTUAL_COPY};
@@ -214,6 +216,86 @@ fn snapshots_can_be_created_applied_and_deleted() {
     assert!(f.cat.create_snapshot(VariantId::new(9999), "x").is_err());
 }
 
+/// 履歴の段階からのスナップショット・名前の変更・名前の規則・処理バージョン（DEV-28）。
+#[test]
+fn snapshots_from_history_can_be_renamed_and_keep_their_process_version() {
+    let mut f = Fixture::new();
+    let v = f.photo("A.ARW", 1, None).master_variant_id;
+    let first = f
+        .cat
+        .save_develop(v, &exposure(0.4), "露光量 +0.40")
+        .unwrap();
+    f.cat
+        .save_develop(v, &exposure(1.2), "露光量 +1.20")
+        .unwrap();
+    // 版 1 の設定（処理バージョンを下げた履歴）。
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..exposure(-0.5)
+    };
+    f.cat.save_develop(v, &v1, "処理バージョン 1").unwrap();
+    let history_before = f.cat.history(v).unwrap();
+
+    // 履歴の段階から作る（今の設定・履歴の位置は変えない）。
+    let s1 = f
+        .cat
+        .create_snapshot_from_history(v, first, "途中")
+        .unwrap();
+    assert_eq!(f.cat.snapshot_settings(s1).unwrap(), exposure(0.4));
+    assert_eq!(f.cat.develop_settings(v).unwrap(), v1);
+    assert_eq!(f.cat.history(v).unwrap(), history_before);
+    // 今の状態から作る（処理バージョンも写す）。
+    let s2 = f.cat.create_snapshot(v, "版 1").unwrap();
+    let list = f.cat.snapshots(v).unwrap();
+    assert_eq!(
+        list.iter()
+            .map(|s| (s.id, s.process_version))
+            .collect::<Vec<_>>(),
+        vec![(s1, CURRENT_PROCESS_VERSION), (s2, 1)]
+    );
+    assert_eq!(f.cat.snapshot(s2).unwrap(), list[1]);
+
+    // 名前の変更（前後の空白を除く・同じ名前でもよい）。
+    f.cat.rename_snapshot(s1, " 版 1 ").unwrap();
+    assert_eq!(f.cat.snapshot(s1).unwrap().name, "版 1");
+    assert!(matches!(
+        f.cat.rename_snapshot(s1, "a\nb"),
+        Err(CatalogError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        f.cat
+            .rename_snapshot(s1, &"あ".repeat(crate::MAX_SNAPSHOT_NAME_CHARS + 1)),
+        Err(CatalogError::InvalidInput(_))
+    ));
+    f.cat
+        .rename_snapshot(s1, &"あ".repeat(crate::MAX_SNAPSHOT_NAME_CHARS))
+        .unwrap();
+    assert!(matches!(
+        f.cat.rename_snapshot(SnapshotId::new(9999), "x"),
+        Err(CatalogError::NotFound(_))
+    ));
+    assert!(matches!(
+        f.cat.create_snapshot(v, "改行\nあり"),
+        Err(CatalogError::InvalidInput(_))
+    ));
+
+    // ほかの写真の履歴の項目からは作れない。
+    let other = f.photo("B.ARW", 2, None).master_variant_id;
+    assert!(matches!(
+        f.cat.create_snapshot_from_history(other, first, "x"),
+        Err(CatalogError::NotFound(_))
+    ));
+    assert!(matches!(
+        f.cat
+            .create_snapshot_from_history(v, HistoryEntryId::new(9999), "x"),
+        Err(CatalogError::NotFound(_))
+    ));
+    assert!(matches!(
+        f.cat.snapshot(SnapshotId::new(9999)),
+        Err(CatalogError::NotFound(_))
+    ));
+}
+
 #[test]
 fn virtual_copies_copy_settings_and_cannot_delete_master() {
     let mut f = Fixture::new();
@@ -338,6 +420,45 @@ fn reverting_to_default_settings_is_stored_compactly() {
     assert_eq!(hash, DevelopSettings::default().develop_hash_hex());
 }
 
+/// finish-detail より前の版が保存した設定（シャープの旧既定のディテール 0 を書いていたもの）を読むと、適用量が 0 なら
+/// 新しい既定のディテール 25 になる（genzo-model の migrate.rs。決定事項ログ No.142）。ほかの値は保つ。
+#[test]
+fn settings_saved_before_finish_detail_read_the_new_sharpening_detail_default() {
+    let mut f = Fixture::new();
+    let v = f.photo("A.ARW", 1, None).master_variant_id;
+    let w = f.photo("B.ARW", 2, None).master_variant_id;
+    // 旧版のシリアライザが書いた形（`presence`・`effects` がなく、シャープの 4 つの値を必ず書く）。
+    let old = |amount: f32| {
+        format!(
+            r#"{{"schema_version":2,"process_version":2,"exposure_ev":0.5,
+                "detail":{{"sharpening":{{"amount":{amount:.1},"radius":1.0,"detail":0.0,"masking":0.0}},
+                "noise_reduction":{{"luminance":0.0,"luminance_detail":50.0,"luminance_contrast":0.0,
+                "color":0.0,"color_detail":50.0}}}}}}"#
+        )
+    };
+    for (id, json) in [(v, old(0.0)), (w, old(40.0))] {
+        f.cat
+            .conn
+            .execute(
+                "UPDATE variant SET develop_json = ?2 WHERE id = ?1",
+                rusqlite::params![id.get(), json],
+            )
+            .unwrap();
+    }
+    let s = f.cat.develop_state(v).unwrap().settings;
+    assert_eq!(s, exposure(0.5));
+    assert_eq!(s.detail.sharpening.detail, 25.0);
+    // 適用量があれば、利用者が決めた値として保つ。
+    let s = f.cat.develop_settings(w).unwrap();
+    assert_eq!(s.detail.sharpening.amount, 40.0);
+    assert_eq!(s.detail.sharpening.detail, 0.0);
+    // 読み替えた設定を保存し直すと、新しい形で保存され、読み直しても変わらない。
+    let mut t = f.cat.develop_settings(v).unwrap();
+    t.exposure_ev = 0.6;
+    f.cat.save_develop(v, &t, "露光量").unwrap();
+    assert_eq!(f.cat.develop_settings(v).unwrap(), t);
+}
+
 #[test]
 fn batch_save_stores_different_settings_atomically() {
     let mut f = Fixture::new();
@@ -373,6 +494,46 @@ fn batch_save_stores_different_settings_atomically() {
         assert_eq!(f.cat.history(b).unwrap().len(), 2);
     }
     assert!(f.cat.save_develop_batch(&[], "空").unwrap().is_empty());
+}
+
+/// 履歴の名前を variant ごとに指定する一括の保存（DEV-30 の貼り付けで、処理バージョンも更新した写真）。
+#[test]
+fn labeled_batch_save_records_each_label_atomically() {
+    let mut f = Fixture::new();
+    let a = f.photo("A.ARW", 1, None).master_variant_id;
+    let b = f.photo("B.ARW", 2, None).master_variant_id;
+    let entries = f
+        .cat
+        .save_develop_labeled(&[
+            (a, exposure(0.5), "設定の貼り付け".to_owned()),
+            (
+                b,
+                exposure(-0.5),
+                "設定の貼り付け・処理バージョンを 2 に更新".to_owned(),
+            ),
+        ])
+        .unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(f.cat.develop_settings(b).unwrap(), exposure(-0.5));
+    assert_eq!(
+        labels(&f.cat, a),
+        vec![HISTORY_LABEL_IMPORT, "設定の貼り付け"]
+    );
+    assert_eq!(
+        labels(&f.cat, b),
+        vec![
+            HISTORY_LABEL_IMPORT,
+            "設定の貼り付け・処理バージョンを 2 に更新"
+        ]
+    );
+    // 1 件でも失敗したら、すべて取り消す。
+    let bad = [
+        (a, exposure(1.5), "x".to_owned()),
+        (VariantId::new(9999), exposure(1.0), "y".to_owned()),
+    ];
+    assert!(f.cat.save_develop_labeled(&bad).is_err());
+    assert_eq!(f.cat.develop_settings(a).unwrap(), exposure(0.5));
+    assert_eq!(f.cat.history(a).unwrap().len(), 2);
 }
 
 #[test]

@@ -1,8 +1,9 @@
-// 上の帯（カタログ名・表示モード・取り込み・書き出し・ジョブ・設定）。
+// 上の帯（カタログ名・表示モード（グリッド・ルーペ・比較・選別・現像）・取り込み・書き出し・ジョブ・設定）。
 
 import { JobsIndicator } from "../dialogs/JobsIndicator";
 import { comboLabel } from "../keyboard";
 import { actions, useApp } from "../state/app";
+import { openCompare, openSurvey } from "../state/compare";
 
 function baseName(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
@@ -27,6 +28,20 @@ export function TopBar() {
         </button>
         <button className={mode === "loupe" ? "on" : ""} onClick={() => actions.setMode("loupe")} title={`ルーペ（${comboLabel("e")}）`}>
           ルーペ
+        </button>
+        <button
+          className={mode === "compare" ? "on" : ""}
+          onClick={() => void openCompare()}
+          title={`比較表示: 選択と候補の 2 枚を並べる（${comboLabel("c")}）`}
+        >
+          比較
+        </button>
+        <button
+          className={mode === "survey" ? "on" : ""}
+          onClick={() => openSurvey()}
+          title={`選別表示: 選んだ写真を並べる（${comboLabel("n")}）`}
+        >
+          選別
         </button>
         <button className={mode === "develop" ? "on" : ""} onClick={() => actions.setMode("develop")} title={`現像（${comboLabel("d")}）`}>
           現像

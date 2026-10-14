@@ -7,6 +7,8 @@
 //! - テキスト検索（3.6 節）は、ファイル名とキャプションを NFKC ＋ 小文字化した列を対象に、
 //!   3 文字以上の語を FTS5（trigram）、1〜2 文字の語を `LIKE` で探す。複数の語は AND。
 //! - キーワードは子のキーワードを含めて探す（再帰 CTE）。フォルダは配下を含めるかを選べる。
+//! - コレクション（LIB-10）・スマートコレクション（LIB-11）で絞り込める（[`Filter::collection`]。条件は
+//!   検索のたびに SQL にする（`smart_sql.rs`）ので、写真の評価などが変われば結果も変わる）。
 //! - 動画の長さ・fps・コーデック（video_meta）と、寸法（長辺の画素数）で絞り込める（VID-03）。索引は
 //!   まだない（動画の件数が少ないうちは不要とみる。PoC-6 の実行計画で判断する）。
 //! - 絞り込みの候補（カメラ・レンズ・動画のコーデックと件数。[`Catalog::facets`]）は、[`Filter`] の
@@ -15,15 +17,16 @@
 
 use chrono::{DateTime, Utc};
 use genzo_model::{
-    AssetId, AssetKind, CaptureTime, ColorLabel, FileId, FileStatus, Flag, FolderId, KeywordId,
-    Orientation, Rating, VariantId,
+    AssetId, AssetKind, CaptureTime, CollectionId, ColorLabel, FileId, FileStatus, Flag, FolderId,
+    KeywordId, Orientation, Rating, SmartRule, StackId, VariantId,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, params_from_iter};
 
 use crate::catalog::Catalog;
 use crate::error::{CatalogError, Result};
-use crate::register::capture_from_columns;
+use crate::register::{CaptureColumns, capture_from_columns};
+use crate::stack::StackBadge;
 use crate::text::{LIKE_ESCAPE, parse_text_query};
 use crate::util::{i64_to_u32, ids_to_json, parse_enum, utc_to_db_string};
 
@@ -84,6 +87,12 @@ pub struct Filter {
     pub file_statuses: Option<Vec<FileStatus>>,
     /// マスターだけにする（仮想コピーを除く）。
     pub masters_only: bool,
+    /// コレクション（LIB-10・LIB-11）。手動のコレクションはメンバー、スマートコレクションは条件に一致する
+    /// もの、コレクションセットは中のコレクションのいずれかに一致するもの。削除されたコレクションは
+    /// どれにも一致しない。
+    pub collection: Option<CollectionId>,
+    /// スマートコレクションの条件（保存していないもの。条件の編集中の件数など。LIB-11）。
+    pub smart_rule: Option<SmartRule>,
 }
 
 /// 並べ替えの項目（LIB-08）。
@@ -173,40 +182,128 @@ pub struct VariantSummary {
     pub develop_hash: String,
     /// 処理バージョン。
     pub process_version: u32,
+    /// スタック（LIB-12）に入っていれば、その印（位置・写真の数・折りたたみ）。
+    pub stack: Option<StackBadge>,
 }
 
-/// 組み立てた検索の SQL とバインドする値。
-struct SearchSql {
-    sql: String,
-    values: Vec<Value>,
+/// 組み立てた検索の SQL とバインドする値（スマートコレクションの条件の変換（`smart_sql.rs`）も使う）。
+pub(crate) struct SearchSql {
+    pub(crate) sql: String,
+    pub(crate) values: Vec<Value>,
+    /// `WITH RECURSIVE` に並べる共通表式（キーワード・フォルダの階層）。
+    pub(crate) ctes: Vec<String>,
+    /// asset の列（撮影日時・カメラ・レンズ・種別・寸法）を使うか（使う場合だけ asset を結合する）。
+    pub(crate) needs_asset: bool,
+    /// 共通表式の名前の通し番号。
+    cte_seq: usize,
 }
 
 impl SearchSql {
+    fn new() -> Self {
+        Self {
+            sql: String::new(),
+            values: Vec::new(),
+            ctes: Vec::new(),
+            needs_asset: false,
+            cte_seq: 0,
+        }
+    }
+
     /// 値を追加して、その位置のプレースホルダ（`?N`）を返す。
-    fn bind(&mut self, v: impl Into<Value>) -> String {
+    pub(crate) fn bind(&mut self, v: impl Into<Value>) -> String {
         self.values.push(v.into());
         format!("?{}", self.values.len())
     }
 
     /// 値の列を追加して、`(?1, ?2, ...)` を返す。
-    fn bind_list<T: Into<Value>>(&mut self, items: impl IntoIterator<Item = T>) -> String {
+    pub(crate) fn bind_list<T: Into<Value>>(
+        &mut self,
+        items: impl IntoIterator<Item = T>,
+    ) -> String {
         let placeholders: Vec<String> = items.into_iter().map(|v| self.bind(v)).collect();
         format!("({})", placeholders.join(", "))
     }
+
+    /// 重ならない共通表式の名前（`kw0`・`ft1` など）。
+    pub(crate) fn cte_name(&mut self, prefix: &str) -> String {
+        let n = self.cte_seq;
+        self.cte_seq += 1;
+        format!("{prefix}{n}")
+    }
+
+    /// キーワード（子のキーワードを含む）が付いた variant の条件（`v.id IN (...)`）。
+    pub(crate) fn keyword_cond(&mut self, keyword: KeywordId) -> String {
+        let p = self.bind(keyword.get());
+        let name = self.cte_name("kw");
+        // UNION（重複を除く）なので、外部のツールで親子が循環していても止まる。
+        self.ctes.push(format!(
+            "{name}(id) AS (SELECT {p} UNION SELECT k.id FROM keyword k JOIN {name} ON k.parent_id = {name}.id)"
+        ));
+        format!(
+            "v.id IN (SELECT vk.variant_id FROM variant_keyword vk WHERE vk.keyword_id IN (SELECT id FROM {name}))"
+        )
+    }
+
+    /// フォルダ（配下を含めるか）の条件（`v.asset_id IN (...)`）。
+    pub(crate) fn folder_cond(&mut self, folder: FolderFilter) -> String {
+        let p = self.bind(folder.folder_id.get());
+        if folder.include_subfolders {
+            let name = self.cte_name("ft");
+            self.ctes.push(format!(
+                "{name}(id) AS (SELECT {p} UNION SELECT f.id FROM folder f JOIN {name} t ON f.parent_id = t.id)"
+            ));
+            format!(
+                "v.asset_id IN (SELECT fl.asset_id FROM file fl WHERE fl.folder_id IN (SELECT id FROM {name}))"
+            )
+        } else {
+            format!("v.asset_id IN (SELECT fl.asset_id FROM file fl WHERE fl.folder_id = {p})")
+        }
+    }
+
+    /// テキスト（3.6 節）の条件。検索語がなければ `None`。
+    pub(crate) fn text_cond(&mut self, text: &str) -> Option<String> {
+        let tq = parse_text_query(text);
+        let mut parts = Vec::new();
+        if let Some(m) = tq.fts_match {
+            let p = self.bind(m);
+            parts.push(format!(
+                "v.asset_id IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH {p})"
+            ));
+        }
+        if !tq.like_patterns.is_empty() {
+            let likes: Vec<String> = tq
+                .like_patterns
+                .into_iter()
+                .map(|pat| {
+                    let p = self.bind(pat);
+                    format!("t.text_norm LIKE {p} ESCAPE '{LIKE_ESCAPE}'")
+                })
+                .collect();
+            parts.push(format!(
+                "v.asset_id IN (SELECT t.asset_id FROM asset_text t WHERE {})",
+                likes.join(" AND ")
+            ));
+        }
+        match parts.len() {
+            0 => None,
+            1 => parts.pop(),
+            _ => Some(format!("({})", parts.join(" AND "))),
+        }
+    }
 }
 
-/// フィルターと並べ替えから SQL を組み立てる。
-fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
-    let mut q = SearchSql {
-        sql: String::new(),
-        values: Vec::new(),
-    };
-    let mut ctes: Vec<String> = Vec::new();
+/// フィルターと並べ替えから SQL を組み立てる。コレクション（[`Filter::collection`]）は、スマート
+/// コレクションの条件・セットの中身を `conn` で読んで SQL にする（`smart_sql.rs`）。
+pub(crate) fn build_search_sql(
+    conn: &Connection,
+    filter: &Filter,
+    sort: &Sort,
+) -> Result<SearchSql> {
+    let mut q = SearchSql::new();
     let mut conds: Vec<String> = Vec::new();
-    // asset の列（撮影日時・カメラ・レンズ・種別）を使う場合だけ asset を結合する。
+    // asset の列（撮影日時・カメラ・レンズ・種別）を使う場合だけ asset を結合する（q.needs_asset）。
     // asset の ID は variant.asset_id で足りる（外部キーで asset の存在は保証される）。
     // 評価・フラグだけの検索で、50 万件の variant ごとに asset を引かないため（PERF-07）。
-    let mut needs_asset = false;
 
     if let Some(min) = filter.rating_min {
         let p = q.bind(i64::from(min));
@@ -241,37 +338,37 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
     if let Some(from) = filter.captured_from {
         let p = q.bind(utc_to_db_string(from));
         conds.push(format!("a.captured_at_utc >= {p}"));
-        needs_asset = true;
+        q.needs_asset = true;
     }
     if let Some(until) = filter.captured_until {
         let p = q.bind(utc_to_db_string(until));
         conds.push(format!("a.captured_at_utc < {p}"));
-        needs_asset = true;
+        q.needs_asset = true;
     }
     if let Some(cameras) = &filter.cameras {
         let list = q.bind_list(cameras.iter().cloned());
         conds.push(format!("a.camera IN {list}"));
-        needs_asset = true;
+        q.needs_asset = true;
     }
     if let Some(lenses) = &filter.lenses {
         let list = q.bind_list(lenses.iter().cloned());
         conds.push(format!("a.lens IN {list}"));
-        needs_asset = true;
+        q.needs_asset = true;
     }
     if let Some(kind) = filter.kind {
         let p = q.bind(kind.as_str().to_owned());
         conds.push(format!("a.kind = {p}"));
-        needs_asset = true;
+        q.needs_asset = true;
     }
     if let Some(min) = filter.long_edge_min {
         let p = q.bind(i64::from(min));
         conds.push(format!("max(a.width, a.height) >= {p}"));
-        needs_asset = true;
+        q.needs_asset = true;
     }
     if let Some(max) = filter.long_edge_max {
         let p = q.bind(i64::from(max));
         conds.push(format!("max(a.width, a.height) <= {p}"));
-        needs_asset = true;
+        q.needs_asset = true;
     }
     // 動画の情報（VID-03）。video_meta の行のある asset だけが一致する（写真は除く）。
     let mut video_conds: Vec<String> = Vec::new();
@@ -296,53 +393,18 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
             video_conds.join(" AND ")
         ));
     }
-    if let Some(text) = &filter.text {
-        let tq = parse_text_query(text);
-        if let Some(m) = tq.fts_match {
-            let p = q.bind(m);
-            conds.push(format!(
-                "v.asset_id IN (SELECT rowid FROM asset_fts WHERE asset_fts MATCH {p})"
-            ));
-        }
-        if !tq.like_patterns.is_empty() {
-            let likes: Vec<String> = tq
-                .like_patterns
-                .into_iter()
-                .map(|pat| {
-                    let p = q.bind(pat);
-                    format!("t.text_norm LIKE {p} ESCAPE '{LIKE_ESCAPE}'")
-                })
-                .collect();
-            conds.push(format!(
-                "v.asset_id IN (SELECT t.asset_id FROM asset_text t WHERE {})",
-                likes.join(" AND ")
-            ));
-        }
+    if let Some(text) = &filter.text
+        && let Some(c) = q.text_cond(text)
+    {
+        conds.push(c);
     }
     if let Some(folder) = filter.folder {
-        let p = q.bind(folder.folder_id.get());
-        if folder.include_subfolders {
-            ctes.push(format!(
-                "folder_tree(id) AS (SELECT {p} UNION SELECT f.id FROM folder f JOIN folder_tree t ON f.parent_id = t.id)"
-            ));
-            conds.push(
-                "v.asset_id IN (SELECT fl.asset_id FROM file fl WHERE fl.folder_id IN (SELECT id FROM folder_tree))"
-                    .to_owned(),
-            );
-        } else {
-            conds.push(format!(
-                "v.asset_id IN (SELECT fl.asset_id FROM file fl WHERE fl.folder_id = {p})"
-            ));
-        }
+        let c = q.folder_cond(folder);
+        conds.push(c);
     }
-    for (i, kw) in filter.keywords.iter().enumerate() {
-        let p = q.bind(kw.get());
-        ctes.push(format!(
-            "kw{i}(id) AS (SELECT {p} UNION SELECT k.id FROM keyword k JOIN kw{i} ON k.parent_id = kw{i}.id)"
-        ));
-        conds.push(format!(
-            "v.id IN (SELECT vk.variant_id FROM variant_keyword vk WHERE vk.keyword_id IN (SELECT id FROM kw{i}))"
-        ));
+    for kw in &filter.keywords {
+        let c = q.keyword_cond(*kw);
+        conds.push(c);
     }
     if let Some(statuses) = &filter.file_statuses {
         let list = q.bind_list(statuses.iter().map(|s| s.as_str().to_owned()));
@@ -350,6 +412,15 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
     }
     if filter.masters_only {
         conds.push("v.is_master = 1".to_owned());
+    }
+    // コレクション（LIB-10・LIB-11）と、保存していない条件（スマートコレクションの編集中の件数など）。
+    if let Some(id) = filter.collection {
+        let c = crate::smart_sql::collection_predicate(conn, &mut q, id, &mut Vec::new())?;
+        conds.push(c);
+    }
+    if let Some(rule) = &filter.smart_rule {
+        let c = crate::smart_sql::rule_predicate(conn, &mut q, rule, &mut Vec::new())?;
+        conds.push(c);
     }
 
     let dir = match sort.direction {
@@ -362,17 +433,17 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
         SortKey::Rating => format!("v.rating {dir}, v.id ASC"),
         SortKey::ImportOrder => format!("v.asset_id {dir}, v.id ASC"),
     };
-    needs_asset |= sort.key == SortKey::CaptureTime;
+    q.needs_asset |= sort.key == SortKey::CaptureTime;
     let needs_primary_file = sort.key == SortKey::FileName || filter.file_statuses.is_some();
 
     let mut sql = String::new();
-    if !ctes.is_empty() {
+    if !q.ctes.is_empty() {
         sql.push_str("WITH RECURSIVE ");
-        sql.push_str(&ctes.join(", "));
+        sql.push_str(&q.ctes.join(", "));
         sql.push(' ');
     }
     sql.push_str("SELECT v.id FROM variant v");
-    if needs_asset {
+    if q.needs_asset {
         sql.push_str(" JOIN asset a ON a.id = v.asset_id");
     }
     if needs_primary_file {
@@ -385,13 +456,13 @@ fn build_search_sql(filter: &Filter, sort: &Sort) -> SearchSql {
     sql.push_str(" ORDER BY ");
     sql.push_str(&order);
     q.sql = sql;
-    q
+    Ok(q)
 }
 
 impl Catalog {
     /// 条件に合う variant の id を、並べ替えた順にすべて返す（3.2 節）。
     pub fn search(&self, filter: &Filter, sort: &Sort) -> Result<Vec<VariantId>> {
-        let q = build_search_sql(filter, sort);
+        let q = build_search_sql(&self.conn, filter, sort)?;
         let mut stmt = self.conn.prepare(&q.sql)?;
         let rows = stmt.query_map(params_from_iter(q.values.iter()), |row| {
             row.get::<_, i64>(0)
@@ -405,7 +476,7 @@ impl Catalog {
 
     /// 条件に合う variant の数。
     pub fn count(&self, filter: &Filter) -> Result<u64> {
-        let q = build_search_sql(filter, &Sort::default());
+        let q = build_search_sql(&self.conn, filter, &Sort::default())?;
         let sql = format!("SELECT count(*) FROM ({})", q.sql);
         let n: i64 = self
             .conn
@@ -415,7 +486,7 @@ impl Catalog {
 
     /// 検索の実行計画（`EXPLAIN QUERY PLAN` の各行の説明）。PoC-6 の確認用。
     pub fn explain_search(&self, filter: &Filter, sort: &Sort) -> Result<Vec<String>> {
-        let q = build_search_sql(filter, sort);
+        let q = build_search_sql(&self.conn, filter, sort)?;
         let sql = format!("EXPLAIN QUERY PLAN {}", q.sql);
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(q.values.iter()), |row| {
@@ -532,11 +603,20 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
                 a.time_correction_s, a.captured_at_utc, a.camera, a.lens, a.width, a.height,
                 a.orientation,
                 pf.id, pf.name, pf.folder_id, pf.status, pf.revision,
-                EXISTS(SELECT 1 FROM file s WHERE s.asset_id = a.id AND s.role = 'sidecar_jpeg')
+                EXISTS(SELECT 1 FROM file s WHERE s.asset_id = a.id AND s.role = 'sidecar_jpeg'),
+                sm.stack_id, st.collapsed,
+                (SELECT count(*) FROM stack_member c WHERE c.stack_id = sm.stack_id),
+                (SELECT count(*) FROM stack_member o
+                  WHERE o.stack_id = sm.stack_id
+                    AND (o.position < sm.position
+                         OR (o.position = sm.position AND o.variant_id < sm.variant_id))) + 1,
+                a.tz_basis
          FROM json_each(?1) j
          JOIN variant v ON v.id = j.value
          JOIN asset a ON a.id = v.asset_id
          LEFT JOIN file pf ON pf.asset_id = a.id AND pf.role = 'primary'
+         LEFT JOIN stack_member sm ON sm.variant_id = v.id
+         LEFT JOIN stack st ON st.id = sm.stack_id
          ORDER BY j.key",
     )?;
     let mut rows = stmt.query([ids_to_json(ids)])?;
@@ -557,6 +637,15 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
             )));
         };
         let status: String = row.get(24)?;
+        let stack = match row.get::<_, Option<i64>>(27)? {
+            Some(stack_id) => Some(StackBadge {
+                stack_id: StackId::new(stack_id),
+                collapsed: row.get::<_, Option<bool>>(28)?.unwrap_or(true),
+                count: i64_to_u32(row.get(29)?, "スタックの写真の数")?,
+                position: i64_to_u32(row.get(30)?, "スタックの中の位置")?,
+            }),
+            None => None,
+        };
         out.push(VariantSummary {
             variant_id: VariantId::new(variant_id),
             asset_id: AssetId::new(row.get(1)?),
@@ -572,14 +661,15 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
             rating: Rating::try_from(rating).map_err(|e| CatalogError::Corrupt(e.to_string()))?,
             flag: Flag::try_from(flag).map_err(|e| CatalogError::Corrupt(e.to_string()))?,
             color_label: color_label.as_deref().map(parse_enum).transpose()?,
-            capture: capture_from_columns(
-                row.get(10)?,
-                row.get(11)?,
-                &tz_source,
-                row.get(13)?,
-                row.get(14)?,
-                utc.as_deref(),
-            )?,
+            capture: capture_from_columns(CaptureColumns {
+                raw: row.get(10)?,
+                offset: row.get(11)?,
+                tz_source: &tz_source,
+                tz_assumed: row.get(13)?,
+                basis: row.get(31)?,
+                correction_s: row.get(14)?,
+                utc: utc.as_deref(),
+            })?,
             camera: row.get(16)?,
             lens: row.get(17)?,
             width: row
@@ -598,6 +688,7 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
                 })?,
             develop_hash: row.get(7)?,
             process_version: i64_to_u32(row.get(8)?, "process_version")?,
+            stack,
         });
     }
     Ok(out)
@@ -607,6 +698,11 @@ fn variant_summaries(conn: &Connection, ids: &[VariantId]) -> Result<Vec<Variant
 mod tests {
     use super::*;
 
+    /// 表のない接続（コレクションを使わない条件の SQL の組み立てには表が要らない）。
+    fn mem() -> Connection {
+        Connection::open_in_memory().unwrap()
+    }
+
     #[test]
     fn user_text_is_bound_not_embedded() {
         let filter = Filter {
@@ -614,7 +710,7 @@ mod tests {
             cameras: Some(vec!["x' OR 1=1".to_owned()]),
             ..Default::default()
         };
-        let q = build_search_sql(&filter, &Sort::default());
+        let q = build_search_sql(&mem(), &filter, &Sort::default()).unwrap();
         assert!(!q.sql.contains("DROP"));
         assert!(!q.sql.contains("OR 1=1"));
         assert!(!q.sql.contains("京都"));
@@ -625,9 +721,11 @@ mod tests {
     fn null_capture_times_sort_last_in_both_directions() {
         for direction in [SortDirection::Ascending, SortDirection::Descending] {
             let q = build_search_sql(
+                &mem(),
                 &Filter::default(),
                 &Sort::new(SortKey::CaptureTime, direction),
-            );
+            )
+            .unwrap();
             assert!(q.sql.contains("NULLS LAST, v.id ASC"), "{}", q.sql);
         }
     }
@@ -635,7 +733,10 @@ mod tests {
     #[test]
     fn asset_is_joined_only_when_its_columns_are_used() {
         let joined = |filter: &Filter, sort: Sort| {
-            build_search_sql(filter, &sort).sql.contains("JOIN asset a")
+            build_search_sql(&mem(), filter, &sort)
+                .unwrap()
+                .sql
+                .contains("JOIN asset a")
         };
         let rating = Sort::new(SortKey::Rating, SortDirection::Descending);
         // 評価・フラグ・テキスト・フォルダ・キーワードと、評価順・登録順・ファイル名順では結合しない。
@@ -694,7 +795,7 @@ mod tests {
             ..Default::default()
         };
         assert!(!joined(&video_only, rating));
-        let q = build_search_sql(&video_only, &rating);
+        let q = build_search_sql(&mem(), &video_only, &rating).unwrap();
         assert!(
             !q.sql.contains("HEVC") && !q.sql.contains("hevc"),
             "{}",
@@ -704,12 +805,14 @@ mod tests {
 
     #[test]
     fn primary_file_is_joined_only_when_needed() {
-        let q = build_search_sql(&Filter::default(), &Sort::default());
+        let q = build_search_sql(&mem(), &Filter::default(), &Sort::default()).unwrap();
         assert!(!q.sql.contains("JOIN file pf"));
         let q = build_search_sql(
+            &mem(),
             &Filter::default(),
             &Sort::new(SortKey::FileName, SortDirection::Ascending),
-        );
+        )
+        .unwrap();
         assert!(q.sql.contains("JOIN file pf"));
     }
 }

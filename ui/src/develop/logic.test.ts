@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { DevelopSettings, HistogramData, HistoryItem } from "../api/types";
+import { defaultColor } from "./colorLogic";
+import { defaultEffects, defaultPresence, defaultSharpening } from "./detailLogic";
 import { historyAvailability, historyRows, redoAvailable } from "./historyMath";
 import { activatesOnEnter } from "./keyTargets";
 import { clipIndicators, clippingOverlay, histogramHeights, histogramScale } from "./pixels";
@@ -14,7 +16,15 @@ import {
   sameShown,
   temperatureToPosition,
 } from "./scales";
-import { effectiveWb, resetAll, wbFromMode, wbMode } from "./settingsLogic";
+import {
+  defaultHighlightRecovery,
+  defaultLens,
+  defaultNoiseReduction,
+  effectiveWb,
+  resetAll,
+  wbFromMode,
+  wbMode,
+} from "./settingsLogic";
 import { clampCenter, fitBox, zoomOrigin } from "./zoomMath";
 
 describe("色温度の目盛り（対数）", () => {
@@ -169,7 +179,7 @@ describe("WB の選択とリセット", () => {
     expect(wbMode({ custom: { temperature_k: 4000, tint: 0 } })).toBe("custom");
     expect(wbMode({ preset: "flash" })).toBe("flash");
   });
-  it("すべてリセット: 版・外部データ・部分補正・レンズ・ディテールは保つ", () => {
+  it("すべてリセット: 版・外部データは保ち、マスク（部分補正）は除き、レンズ補正・ディテール・効果は既定に戻す（項目のない古い設定でも）", () => {
     const s = {
       schema_version: 3,
       process_version: 2,
@@ -187,16 +197,33 @@ describe("WB の選択とリセット", () => {
         green: [],
         blue: [],
       },
-      color: { saturation: 20, vibrance: 10 },
+      color: {
+        ...defaultColor(),
+        saturation: 20,
+        vibrance: 10,
+        black_white: { ...defaultColor().black_white, enabled: true },
+        grading: { ...defaultColor().grading, balance: 30 },
+      },
       geometry: { crop: { left: 0.1, top: 0.1, right: 0.9, bottom: 0.9 }, angle_deg: 2, aspect: "original" },
-      lens: { profile_enabled: true, distortion_scale: 100, vignetting_scale: 100, remove_chromatic_aberration: true },
+      lens: {
+        profile_enabled: true,
+        distortion_scale: 80,
+        vignetting_scale: 100,
+        remove_chromatic_aberration: true,
+        distortion: 10,
+        vignetting_amount: -20,
+        vignetting_midpoint: 30,
+        ca_red_cyan: 5,
+        ca_blue_yellow: 0,
+      },
       detail: {
         sharpening: { amount: 40, radius: 1, detail: 25, masking: 0 },
-        noise_reduction: { luminance: 10, color: 25 },
+        noise_reduction: { luminance: 10, luminance_detail: 20, luminance_contrast: 5, color: 25, color_detail: 50 },
       },
+      highlight_recovery: { method: "reconstruct", amount: 80 },
       masks: [{ any: 1 }],
       render_deps: { camera_profile: { id: "x", sha256: "y" }, lens_profile: null, raw_decoder: "z" },
-    } as DevelopSettings;
+    } as unknown as DevelopSettings;
     const r = resetAll(s);
     expect(r.white_balance).toBe("as_shot");
     expect(r.exposure_ev).toBe(0);
@@ -204,14 +231,22 @@ describe("WB の選択とリセット", () => {
     expect(r.tone).toEqual({ highlights: 0, shadows: 0, whites: 0, blacks: 0 });
     expect(r.tone_curve.luma).toEqual([]);
     expect(r.tone_curve.parametric.highlights).toBe(0);
-    expect(r.color).toEqual({ saturation: 0, vibrance: 0 });
+    // 色（カラーミキサー・カラーグレーディング・白黒を含む）は既定に戻す。
+    expect(r.color).toEqual(defaultColor());
+    expect(r.color.black_white.enabled).toBe(false);
     expect(r.geometry).toEqual({ crop: { left: 0, top: 0, right: 1, bottom: 1 }, angle_deg: 0, aspect: null });
     expect(r.schema_version).toBe(3);
     expect(r.process_version).toBe(2);
     expect(r.render_deps).toBe(s.render_deps);
-    expect(r.masks).toBe(s.masks);
-    expect(r.lens).toBe(s.lens);
-    expect(r.detail).toBe(s.detail);
+    // マスクは現像のパネルで見えるので、除く（DEV-18）。
+    expect(r.masks).toEqual([]);
+    expect(r.lens).toEqual(defaultLens());
+    // ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果は既定に戻す。
+    expect(r.highlight_recovery).toEqual(defaultHighlightRecovery());
+    expect(r.detail.noise_reduction).toEqual(defaultNoiseReduction());
+    expect(r.detail.sharpening).toEqual(defaultSharpening());
+    expect(r.presence).toEqual(defaultPresence());
+    expect(r.effects).toEqual(defaultEffects());
   });
 });
 

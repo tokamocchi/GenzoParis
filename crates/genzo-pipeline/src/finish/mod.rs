@@ -2,19 +2,22 @@
 //!
 //! | ステージ | モジュール | 型 | ID | 契約（入力 → 出力） | 設計書 |
 //! |---|---|---|---|---|---|
-//! | 9. ジオメトリ（向き・回転・切り抜き） | [`geometry`] | [`GeometryStage`] | `finish.geometry` | B2（S の格子）→ B2（C の格子） | 2.1 節・2.7 節、DEV-15 |
+//! | 9. ジオメトリ（向き・回転・歪曲補正・切り抜き） | [`geometry`] | [`GeometryStage`] | `finish.geometry` | B2（S の格子）→ B2（C の格子） | 2.1 節・2.7 節、DEV-15・DEV-14 |
 //! | 10. 露光量 | [`exposure`] | [`ExposureStage`] | `finish.exposure` | B2 → B2 | DEV-04、IQ-02 |
+//! | 10 の後. カメラプロファイルのルックテーブル（処理バージョン 2） | [`look`] | [`ProfileLookTableStage`] | `finish.profile_look_table` | B2 → B2 | DEV-17 |
 //! | 10 の後. コントラスト | [`exposure`] | [`ContrastStage`] | `finish.contrast` | B2 → B2 | DEV-04（仮置き） |
 //! | 11. トーン（ハイライト・シャドウ・白・黒） | [`tone`] | [`ToneStage`] | `finish.tone` | B2 → B2（ガイドを使う） | DEV-05、2.7 節、PoC-5 |
-//! | 12. テクスチャ・明瞭度・かすみの除去（v1） | [`reserved`] | [`TextureStage`] | `finish.texture` | B2 → B2（予約） | DEV-11 |
-//! | 13. 色（彩度・自然な彩度） | [`color`] | [`ColorStage`] | `finish.color` | B2 → B2 | DEV-08 |
-//! | 14. シャープ（v1） | [`reserved`] | [`SharpenStage`] | `finish.sharpen` | B2 → B2（予約） | DEV-12 |
+//! | 12. テクスチャ・明瞭度・かすみの除去（処理バージョン 2） | [`presence`] | [`TextureStage`] | `finish.texture` | B2 → B2（明瞭度・かすみの除去はガイドを使う。周辺の画素を使う） | DEV-11、2.7 節 |
+//! | 13. 色（彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒。後の 3 つは処理バージョン 2） | [`color`] | [`ColorStage`] | `finish.color` | B2 → B2 | DEV-08・DEV-09・DEV-10・DEV-25 |
+//! | 14. シャープ（処理バージョン 2） | [`sharpen`] | [`SharpenStage`] | `finish.sharpen` | B2 → B2（周辺の画素を使う） | DEV-12 |
 //! | 15. シーン → ディスプレイ変換 | [`scene_to_display`] | [`SceneToDisplayStage`] | `finish.scene_to_display` | B2 → B3 | 2.6 節「トーンの圧縮」 |
+//! | 15 の後. 独自のルック（3D LUT。処理バージョン 2） | [`look`] | [`LookStage`] | `finish.look` | B3 → B3 | DEV-17 |
 //! | 16. トーンカーブ | [`tone_curve`] | [`ToneCurveStage`] | `finish.tone_curve` | B3 → B3 | DEV-07、2.6 節 |
+//! | 16 の後. 効果（切り抜き後の周辺光量補正・粒子。処理バージョン 2） | [`effects`] | [`EffectsStage`] | `finish.effects` | B3 → B3 | DEV-24 |
 //! | 17a. 画面 | [`output`] | [`DisplayStage`] | `output.display` | B3 → B4a | 2.6 節、5 章 |
 //! | 17b. 書き出し・キャッシュ | [`output`] | [`ExportStage`] | `output.export.*`・`output.cache.display_p3` | B3 → B4b / B5 | 2.6 節、IQ-06・IQ-08 |
 //! | 17c. ヒストグラム | [`output`] | [`Histogram`] | — | B4a / B4b / B5 → 度数 | DEV-26 |
-//! | 段階 B. ガイド | [`crate::guide`] | [`crate::guide::compute_guide`] | — | B2（A1）→ log2 の輝度 | 2.7 節 |
+//! | 段階 B. ガイド | [`crate::guide`] | [`crate::guide::compute_guide`] | — | B2（A1）→ log2 の輝度（処理バージョン 2 のかすみの除去ではかすみの推定も。[`crate::haze`]） | 2.7 節 |
 //!
 //! どのステージも段階 C（genzo-model の `Phase::C`）。ガイドだけが段階 B（`Phase::B`）。
 //!
@@ -22,7 +25,8 @@
 //!
 //! ステージ 9 だけが格子を変える: 入力は [`StageContext::sensor_grid`]（S の向きの格子。段階 A1 の
 //! プレビューやフル解像度のタイル）で、出力は C の格子（[`GeometryPlan`]）。ステージ 10〜17 は
-//! C の格子の上の画素ごとの処理（ステージ 11 はガイドを G の座標で引く）。タイルの範囲（[`Roi`]）は、
+//! C の格子の上の処理（ステージ 11・12 はガイドを G の座標で引く。ステージ 12 のテクスチャ・明瞭度と 14 は周辺の
+//! 画素を使い、`input_roi` でガウスの半径の余白を求める。[`frequency`]）。タイルの範囲（[`Roi`]）は、
 //! ステージ 9 の入力は S の格子、それより後は C の格子の座標。ステージ 9 を飛ばす場合（回転・
 //! 切り抜きなし、向きが通常）は C の格子 = S の格子。
 //!
@@ -42,29 +46,38 @@
 //! - 出力の NaN・無限大は [`run_stage_cpu`] が 0 に置き換える（2.6 節）。
 
 pub mod color;
+pub mod effects;
 pub mod exposure;
+pub mod frequency;
 pub mod geometry;
+pub mod look;
 pub mod output;
+pub mod presence;
 pub mod reserved;
 pub mod scene_to_display;
+pub mod sharpen;
 pub mod tone;
 pub mod tone_curve;
+
+use std::sync::Arc;
 
 use genzo_color::RgbColorSpace;
 use genzo_model::{DevelopSettings, RenderQuality};
 use rayon::prelude::*;
 
 pub use self::color::ColorStage;
+pub use self::effects::EffectsStage;
 pub use self::exposure::{ContrastStage, ExposureStage};
 pub use self::geometry::{GeometryPlan, GeometryStage, constrain_crop};
+pub use self::look::{LookStage, ProfileLookTableStage};
 pub use self::output::{
     DisplayStage, DisplayTransform, Dither, ExportStage, ExportTransform, Histogram, quantize_u8,
     quantize_u16,
 };
-pub use self::reserved::{
-    SharpenStage, TextureStage, UnimplementedSetting, unimplemented_settings,
-};
+pub use self::presence::TextureStage;
+pub use self::reserved::{UnimplementedSetting, unimplemented_settings};
 pub use self::scene_to_display::SceneToDisplayStage;
+pub use self::sharpen::SharpenStage;
 pub use self::tone::ToneStage;
 pub use self::tone_curve::ToneCurveStage;
 
@@ -72,6 +85,7 @@ use crate::border::mirror_cover;
 use crate::coords::{CoordinateFrames, SensorGrid};
 use crate::error::{PipelineError, Result};
 use crate::image::{ImageTile, Roi};
+use crate::local::{LocalField, LocalPlan};
 use crate::sensor::A1Image;
 use crate::stage::{Stage, StageContext, StageParams, run_stage_cpu};
 use crate::version::ProcessVersion;
@@ -135,17 +149,20 @@ pub(crate) fn map_pixels(
 }
 
 /// シーンの処理（ステージ 9〜16）の組み込みのステージ（処理の順）。
-pub fn scene_stages() -> [&'static dyn Stage; 9] {
+pub fn scene_stages() -> [&'static dyn Stage; 12] {
     [
         &GeometryStage,
         &ExposureStage,
+        &ProfileLookTableStage,
         &ContrastStage,
         &ToneStage,
         &TextureStage,
         &ColorStage,
         &SharpenStage,
         &SceneToDisplayStage,
+        &LookStage,
         &ToneCurveStage,
+        &EffectsStage,
     ]
 }
 
@@ -153,6 +170,9 @@ pub fn scene_stages() -> [&'static dyn Stage; 9] {
 ///
 /// - 処理バージョンは丸める前の値で確かめる（未知の版はエラー）。
 /// - `frames`（S の寸法と向き）に、設定の角度補正（丸めた値）を回転として加える。
+/// - 処理バージョン 2 では、`frames` のプロファイルの歪曲（[`CoordinateFrames::lens_geometry`]）と設定の
+///   レンズ補正（適用量・手動の歪曲）から歪曲補正（[`CoordinateFrames::distortion`]）を作って加える
+///   （[`crate::lens::RadialDistortion::for_settings`]。版 1 では加えない）。
 /// - `grid` はステージ 9 の入力の格子。`resolution_scale` は格子の長辺の倍率
 ///   （[`SensorGrid::resolution_scale`]）。
 /// - ガイドは [`StageContext::with_guide`] で、入力の種類（RAW 以外か）は
@@ -165,12 +185,25 @@ pub fn finish_context<'a>(
 ) -> Result<StageContext<'a>> {
     let version = ProcessVersion::from_u32(settings.process_version)?;
     let s = settings.normalized();
-    let frames = frames.with_rotation(f64::from(s.geometry.angle_deg))?;
+    let frames = stage_c_frames(frames, version, f64::from(s.geometry.angle_deg), &s.lens)?;
     let grid = SensorGrid::new(grid.width, grid.height, grid.extent)?;
     Ok(StageContext::new(version, frames)
         .with_sensor_grid(grid)
         .with_resolution_scale(grid.resolution_scale())
         .with_quality(quality))
+}
+
+/// 段階 B・C の座標系: `frames`（段階 A1 の座標系。回転なし）に回転と歪曲補正を加えたもの
+/// （[`finish_context`] とガイド（[`crate::guide::compute_guide`]）が同じものを作るための共通の関数）。
+pub fn stage_c_frames(
+    frames: CoordinateFrames,
+    version: ProcessVersion,
+    rotation_deg: f64,
+    lens: &genzo_model::LensCorrection,
+) -> Result<CoordinateFrames> {
+    let frames = frames.with_rotation(rotation_deg)?;
+    let distortion = crate::lens::RadialDistortion::for_settings(&frames, version, lens);
+    Ok(frames.with_distortion(distortion))
 }
 
 impl A1Image {
@@ -194,6 +227,7 @@ impl A1Image {
 pub struct FinishPlan {
     stages: Vec<(&'static dyn Stage, StageParams)>,
     geometry: GeometryPlan,
+    local: Option<Arc<LocalPlan>>,
 }
 
 impl std::fmt::Debug for FinishPlan {
@@ -201,6 +235,7 @@ impl std::fmt::Debug for FinishPlan {
         f.debug_struct("FinishPlan")
             .field("stages", &self.active_stage_ids())
             .field("output_size", &self.output_size())
+            .field("local", &self.local.as_ref().map(|l| l.slots))
             .finish()
     }
 }
@@ -215,7 +250,23 @@ impl FinishPlan {
                 stages.push((stage, p));
             }
         }
-        Ok(Self { stages, geometry })
+        // ローカル補正（処理バージョン 2。DEV-18）。局所の値を使うステージがなければ作らない。
+        let local = match ctx.process_version {
+            ProcessVersion::V1 => None,
+            ProcessVersion::V2 => LocalPlan::new(&settings.normalized(), ctx, &geometry)?
+                .filter(|_| stages.iter().any(|(s, _)| s.id() != GeometryStage::ID))
+                .map(Arc::new),
+        };
+        Ok(Self {
+            stages,
+            geometry,
+            local,
+        })
+    }
+
+    /// ローカル補正の計画（有効なマスクがなければ `None`。[`crate::local`]）。
+    pub fn local(&self) -> Option<&Arc<LocalPlan>> {
+        self.local.as_ref()
     }
 
     /// ジオメトリ（C の格子と S の格子の対応）。
@@ -266,7 +317,7 @@ impl FinishPlan {
         let rois = self.stage_rois(ctx, output_roi);
         let grid = ctx.sensor_grid;
         let first = rois[0];
-        let mut tile = if source.roi.contains_roi(&first) {
+        let tile = if source.roi.contains_roi(&first) {
             source.crop(first)?
         } else {
             let cover =
@@ -282,9 +333,34 @@ impl FinishPlan {
             }
             source.gather_mirror(first, grid.width, grid.height)?
         };
+        self.run_stages(ctx, &rois, tile)
+    }
+
+    /// 有効なステージを順に実行する（`rois` は [`stage_rois`](Self::stage_rois) の結果、`input` は最初のステージの
+    /// 入力で `rois[0]` を覆うこと）。ローカル補正があれば、ステージ 9 の後（ステージ 9 を飛ばすときは最初）に
+    /// 基準の画像から局所の値の面を作り（[`LocalPlan::field`]）、後のステージの文脈に付ける。置き換えた NaN・
+    /// 無限大の数も返す。
+    pub fn run_stages(
+        &self,
+        ctx: &StageContext<'_>,
+        rois: &[Roi],
+        input: ImageTile,
+    ) -> Result<(ImageTile, u64)> {
+        let mut tile = input;
         let mut replaced = 0;
+        let mut field: Option<LocalField> = None;
         for ((stage, p), roi) in self.stages.iter().zip(&rois[1..]) {
-            let (next, n) = run_stage_cpu(*stage, ctx, &tile, *roi, p)?;
+            if field.is_none()
+                && stage.id() != GeometryStage::ID
+                && let Some(local) = &self.local
+            {
+                field = Some(local.field(&tile)?);
+            }
+            let c = match &field {
+                Some(f) => ctx.with_local(f),
+                None => *ctx,
+            };
+            let (next, n) = run_stage_cpu(*stage, &c, &tile, *roi, p)?;
             tile = next;
             replaced += n;
         }
@@ -326,13 +402,16 @@ mod tests {
             [
                 "finish.geometry",
                 "finish.exposure",
+                "finish.profile_look_table",
                 "finish.contrast",
                 "finish.tone",
                 "finish.texture",
                 "finish.color",
                 "finish.sharpen",
                 "finish.scene_to_display",
+                "finish.look",
                 "finish.tone_curve",
+                "finish.effects",
             ]
         );
         for s in scene_stages() {

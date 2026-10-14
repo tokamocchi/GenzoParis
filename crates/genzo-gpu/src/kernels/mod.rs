@@ -10,7 +10,8 @@
 //!     定数など）。**16 進の浮動小数点の表記**（`0x1.0d01c6p-2f`）で書くので、10 進への丸めの差が出ず、
 //!     CPU 版の値とビット単位で同じになる。
 //! - バインディングはすべてのカーネルで同じ配置（0: 入力、1: 出力、2: パラメータ、3: 原子的な
-//!   カウンター（`[0]` は置き換えた NaN・無限大の数）、4: 補助の入力（LUT・ガイドなど）、5: 補助の出力）。
+//!   カウンター（`[0]` は置き換えた NaN・無限大の数）、4: 補助の入力（LUT・ガイドなど）、5: 補助の出力、6: ローカル補正の
+//!   局所の値の面（`local.wgsl`。DEV-18））。
 //!   使わないものは小さな空のバッファを結び付ける。
 //! - パイプラインは最初に使うときにコンパイルして、[`KernelCache`] に保持する。
 //!
@@ -27,6 +28,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
+use genzo_color::dcp::HUE_SHIFT_TO_SECTORS;
 use genzo_color::oklab::{
     BT2020_TO_OKLAB_LMS_F32, OKLAB_LMS_TO_BT2020_F32, OKLAB_M2_F32, OKLAB_M2_INV_F32,
 };
@@ -35,14 +37,26 @@ use genzo_color::transfer::{
     SRGB_INV_GAMMA_F32, SRGB_LINEAR_SLOPE_F32, SRGB_OFFSET_F32,
 };
 use genzo_pipeline::Roi;
-use genzo_pipeline::finish::color::{SKIN_PROTECTION, VIBRANCE_CHROMA_REF, VIBRANCE_MAX};
-use genzo_pipeline::finish::exposure::CONTRAST_CHROMA_GAIN_MAX;
+use genzo_pipeline::finish::color::{SKIN_PROTECTION, VIBRANCE_CHROMA_REF, VIBRANCE_MAX, poly};
+use genzo_pipeline::finish::effects::{
+    GRAIN_MAX_SPAN, VIGNETTE_DARK_MAX, VIGNETTE_HL_HI, VIGNETTE_HL_LO, VIGNETTE_LIGHT_MAX,
+};
+use genzo_pipeline::finish::exposure::{CONTRAST_CHROMA_GAIN_MAX, CONTRAST_STRENGTH};
+use genzo_pipeline::finish::frequency::LUMA_LOG_OFFSET;
+use genzo_pipeline::finish::presence::{
+    CLARITY_GAIN, CLARITY_LIMIT, CLARITY_MID_WIDTH, DEHAZE_ADD_FLOOR, DEHAZE_ADD_MAX, DEHAZE_OMEGA,
+    DEHAZE_T_MIN, TEXTURE_GAIN, TEXTURE_LIMIT,
+};
+use genzo_pipeline::finish::sharpen::SHARPEN_GAIN;
 use genzo_pipeline::finish::tone::{
     BLACKS_CENTER_EV, BLACKS_MAX_EV, BLACKS_WIDTH_EV, HIGHLIGHTS_CENTER_EV, HIGHLIGHTS_MAX_EV,
     HIGHLIGHTS_WIDTH_EV, SHADOWS_CENTER_EV, SHADOWS_MAX_EV, SHADOWS_WIDTH_EV, WHITES_CENTER_EV,
     WHITES_MAX_EV, WHITES_WIDTH_EV,
 };
 use genzo_pipeline::finish::{BT2020_LUMINANCE, LOG2_CEILING, LOG2_MIDDLE_GRAY, MIDDLE_GRAY};
+use genzo_pipeline::local::{
+    COLOR_L_FLOOR, LOCAL_EXPOSURE_LIMIT, LOCAL_TEMPERATURE_EV, LOCAL_TINT_EV,
+};
 use genzo_pipeline::sanitize::LOG_FLOOR;
 
 use crate::context::GpuContext;
@@ -58,6 +72,12 @@ const HISTOGRAM: &str = include_str!("../shaders/histogram.wgsl");
 const QUANTIZE: &str = include_str!("../shaders/quantize.wgsl");
 const SENSOR: &str = include_str!("../shaders/sensor.wgsl");
 const RESAMPLE: &str = include_str!("../shaders/resample.wgsl");
+const DENOISE: &str = include_str!("../shaders/denoise.wgsl");
+const NOISE: &str = include_str!("../shaders/noise.wgsl");
+const DETAIL: &str = include_str!("../shaders/detail.wgsl");
+const LUT3D: &str = include_str!("../shaders/lut3d.wgsl");
+const PROFILE: &str = include_str!("../shaders/profile.wgsl");
+const LOCAL: &str = include_str!("../shaders/local.wgsl");
 
 /// 座標を i32 にするときの切り詰めの範囲（2^30。CPU 版は i64 で 2^40。極端な座標でだけ結果が違う）。
 pub(crate) const COORD_LIMIT: f32 = (1u32 << 30) as f32;
@@ -86,11 +106,13 @@ pub(crate) enum Module {
     Quantize,
     Sensor,
     Resample,
+    Denoise,
+    Profile,
 }
 
 impl Module {
     #[cfg(test)]
-    pub(crate) const ALL: [Module; 7] = [
+    pub(crate) const ALL: [Module; 9] = [
         Module::Finish,
         Module::Output,
         Module::Geometry,
@@ -98,6 +120,8 @@ impl Module {
         Module::Quantize,
         Module::Sensor,
         Module::Resample,
+        Module::Denoise,
+        Module::Profile,
     ];
 
     fn label(self) -> &'static str {
@@ -109,18 +133,22 @@ impl Module {
             Module::Quantize => "genzo-gpu.quantize",
             Module::Sensor => "genzo-gpu.sensor",
             Module::Resample => "genzo-gpu.resample",
+            Module::Denoise => "genzo-gpu.denoise",
+            Module::Profile => "genzo-gpu.profile",
         }
     }
 
     fn parts(self) -> &'static [&'static str] {
         match self {
-            Module::Finish => &[COMMON, PIXEL_IO, COLOR_LIB, FINISH],
-            Module::Output => &[COMMON, PIXEL_IO, COLOR_LIB, OUTPUT],
+            Module::Finish => &[COMMON, PIXEL_IO, COLOR_LIB, FINISH, NOISE, DETAIL, LOCAL],
+            Module::Output => &[COMMON, PIXEL_IO, COLOR_LIB, LUT3D, OUTPUT],
             Module::Geometry => &[COMMON, PIXEL_IO, GEOMETRY],
             Module::Histogram => &[COMMON, HISTOGRAM],
-            Module::Quantize => &[COMMON, QUANTIZE],
+            Module::Quantize => &[COMMON, NOISE, QUANTIZE],
             Module::Sensor => &[COMMON, SENSOR],
             Module::Resample => &[COMMON, PIXEL_IO, RESAMPLE],
+            Module::Denoise => &[COMMON, PIXEL_IO, DENOISE],
+            Module::Profile => &[COMMON, PIXEL_IO, COLOR_LIB, LUT3D, PROFILE],
         }
     }
 
@@ -148,6 +176,16 @@ impl Module {
                 ("SKIN_COS_W", 1),
                 ("NEUTRAL_A", 1),
                 ("NEUTRAL_B", 1),
+                ("COLOR_FLAGS", 1),
+                ("HUE_C", 9),
+                ("HUE_INV", 8),
+                ("HSL_H", 8),
+                ("HSL_S", 8),
+                ("HSL_L", 8),
+                ("BW_MIX", 8),
+                ("CG_TINT", 8),
+                ("CG_EV", 4),
+                ("CG_ZONE", 7),
                 ("S2D_MODE", 1),
                 ("S2D_FLOOR_RATIO", 1),
                 ("CURVE_FLAGS", 1),
@@ -157,6 +195,57 @@ impl Module {
                 ("LUT_INV", 4),
                 ("BLACK_LIFT", 1),
                 ("RATIO_MIN", 1),
+                // ステージ 12・14・16 の効果（detail.wgsl）。
+                ("BLUR_R", 1),
+                ("PLANE_X", 1),
+                ("PLANE_Y", 1),
+                ("PLANE_W", 1),
+                ("PR_FLAGS", 1),
+                ("PR_TEX", 1),
+                ("PR_CLA", 1),
+                ("PR_DEHAZE", 1),
+                ("PR_AIR", 3),
+                ("HAZE_OFF", 1),
+                ("SH_AMOUNT", 1),
+                ("SH_THRESHOLD", 1),
+                ("SH_LIMIT", 1),
+                ("SH_MASK", 1),
+                ("SH_GSCALE", 1),
+                ("FX_FLAGS", 1),
+                ("VG_CENTER", 2),
+                ("VG_INV", 2),
+                ("VG_EXP", 1),
+                ("VG_INV_CORNER", 1),
+                ("VG_EDGE", 2),
+                ("VG_AMOUNT", 1),
+                ("VG_HL", 1),
+                ("GR_SEED", 1),
+                ("GR_SALT", 1),
+                ("GR_ORIGIN", 2),
+                ("GR_INV_DENSITY", 2),
+                ("GR_INV_CELL", 2),
+                ("GR_W", 2),
+                ("GR_STRENGTH", 1),
+                // ローカル補正（local.wgsl。処理バージョン 2。DEV-18）。
+                ("PR_HAZE_AIR", 3),
+                ("LOCAL_FLAGS", 1),
+                ("LOCAL_X", 1),
+                ("LOCAL_Y", 1),
+                ("LOCAL_W", 1),
+                ("LOCAL_N", 1),
+                ("LOCAL_SLOT", 13),
+                ("LOCAL_EV", 1),
+                ("LOCAL_CU", 1),
+                ("LOCAL_U3", 3),
+                ("LOCAL_OX", 1),
+                ("LOCAL_OY", 1),
+                ("LOCAL_SX", 1),
+                ("LOCAL_SY", 1),
+                ("LOCAL_GAIN", 1),
+                ("LOCAL_RANGE", 1),
+                ("LOCAL_PLANES", 1),
+                ("LOCAL_MASKS", 1),
+                ("LOCAL_DATA", 1),
             ],
             Module::Output => &[
                 ("W2D", 9),
@@ -172,6 +261,16 @@ impl Module {
                 ("CROP_Y", 1),
                 ("GRID_W", 1),
                 ("GRID_H", 1),
+                ("WARP", 1),
+                ("PRE", 6),
+                ("POST", 6),
+                ("INV_R2", 1),
+                ("LUT_OFF", 3),
+                ("LUT_LEN", 3),
+                ("LUT_INV", 3),
+                ("CENTER", 2),
+                ("SPG", 1),
+                ("LFLAGS", 1),
             ],
             Module::Histogram => &[("HLUMA", 3)],
             Module::Quantize => &[
@@ -194,8 +293,36 @@ impl Module {
                 ("CLIP_MODE", 1),
                 ("RADIUS", 1),
                 ("FLAGS_OUT", 1),
+                ("HR_MODE", 1),
+                ("HR_AMOUNT", 1),
+                ("HR_INV_W2", 3),
+                ("HR_INV_R1", 1),
+                ("HR_R1", 1),
+                ("HR_RADIUS", 1),
+                ("HR_CONF_W", 1),
             ],
             Module::Resample => &[("MAT", 9), ("TAP_OFF", 1)],
+            Module::Denoise => &[
+                ("HOLE", 1),
+                ("MASK", 1),
+                ("T_LUMA", 1),
+                ("T_CHROMA", 1),
+                ("AUX_X", 1),
+                ("AUX_Y", 1),
+                ("AUX_W", 1),
+                ("EPS", 1),
+            ],
+            Module::Profile => &[
+                ("MAT", 9),
+                ("MAT2", 9),
+                ("HSV_DIMS", 3),
+                ("HSV_SRGB", 1),
+                ("HSV_HSCALE", 1),
+                ("LUT_N", 1),
+                ("DOMAIN_MIN", 3),
+                ("DOMAIN_SCALE", 3),
+                ("AMOUNT", 1),
+            ],
         }
     }
 
@@ -242,18 +369,34 @@ pub(crate) enum Kernel {
     Display,
     Export,
     Geometry,
+    LensCorrection,
     Histogram,
     Quantize,
     Normalize,
     WhiteBalance,
+    HighlightRecovery,
     Half2x2,
+    NrForward,
+    NrSmoothH,
+    NrSmoothV,
+    NrDetail,
+    NrInverse,
     ColorMatrix,
     DownscaleH,
     DownscaleV,
+    LumaLog,
+    BlurH,
+    BlurV,
+    Presence,
+    Sharpen,
+    Effects,
+    HsvTable,
+    Look,
+    Local,
 }
 
 impl Kernel {
-    pub(crate) const ALL: [Kernel; 17] = [
+    pub(crate) const ALL: [Kernel; 33] = [
         Kernel::Exposure,
         Kernel::Contrast,
         Kernel::Tone,
@@ -263,14 +406,30 @@ impl Kernel {
         Kernel::Display,
         Kernel::Export,
         Kernel::Geometry,
+        Kernel::LensCorrection,
         Kernel::Histogram,
         Kernel::Quantize,
         Kernel::Normalize,
         Kernel::WhiteBalance,
+        Kernel::HighlightRecovery,
         Kernel::Half2x2,
+        Kernel::NrForward,
+        Kernel::NrSmoothH,
+        Kernel::NrSmoothV,
+        Kernel::NrDetail,
+        Kernel::NrInverse,
         Kernel::ColorMatrix,
         Kernel::DownscaleH,
         Kernel::DownscaleV,
+        Kernel::LumaLog,
+        Kernel::BlurH,
+        Kernel::BlurV,
+        Kernel::Presence,
+        Kernel::Sharpen,
+        Kernel::Effects,
+        Kernel::HsvTable,
+        Kernel::Look,
+        Kernel::Local,
     ];
 
     pub(crate) fn module(self) -> Module {
@@ -280,13 +439,29 @@ impl Kernel {
             | Kernel::Tone
             | Kernel::Color
             | Kernel::SceneToDisplay
-            | Kernel::ToneCurve => Module::Finish,
+            | Kernel::ToneCurve
+            | Kernel::LumaLog
+            | Kernel::BlurH
+            | Kernel::BlurV
+            | Kernel::Presence
+            | Kernel::Sharpen
+            | Kernel::Effects
+            | Kernel::Local => Module::Finish,
             Kernel::Display | Kernel::Export => Module::Output,
-            Kernel::Geometry => Module::Geometry,
+            Kernel::Geometry | Kernel::LensCorrection => Module::Geometry,
             Kernel::Histogram => Module::Histogram,
             Kernel::Quantize => Module::Quantize,
-            Kernel::Normalize | Kernel::WhiteBalance | Kernel::Half2x2 => Module::Sensor,
+            Kernel::Normalize
+            | Kernel::WhiteBalance
+            | Kernel::HighlightRecovery
+            | Kernel::Half2x2 => Module::Sensor,
+            Kernel::NrForward
+            | Kernel::NrSmoothH
+            | Kernel::NrSmoothV
+            | Kernel::NrDetail
+            | Kernel::NrInverse => Module::Denoise,
             Kernel::ColorMatrix | Kernel::DownscaleH | Kernel::DownscaleV => Module::Resample,
+            Kernel::HsvTable | Kernel::Look => Module::Profile,
         }
     }
 
@@ -301,12 +476,28 @@ impl Kernel {
             Kernel::Display => "display_main",
             Kernel::Export => "export_main",
             Kernel::Geometry | Kernel::Histogram | Kernel::Quantize => "main",
+            Kernel::LensCorrection => "lens_main",
             Kernel::Normalize => "normalize_main",
             Kernel::WhiteBalance => "white_balance_main",
+            Kernel::HighlightRecovery => "highlight_main",
             Kernel::Half2x2 => "half_main",
+            Kernel::NrForward => "nr_forward_main",
+            Kernel::NrSmoothH => "nr_smooth_h_main",
+            Kernel::NrSmoothV => "nr_smooth_v_main",
+            Kernel::NrDetail => "nr_detail_main",
+            Kernel::NrInverse => "nr_inverse_main",
             Kernel::ColorMatrix => "color_matrix_main",
             Kernel::DownscaleH => "downscale_h_main",
             Kernel::DownscaleV => "downscale_v_main",
+            Kernel::LumaLog => "luma_log_main",
+            Kernel::BlurH => "blur_h_main",
+            Kernel::BlurV => "blur_v_main",
+            Kernel::Presence => "presence_main",
+            Kernel::Sharpen => "sharpen_main",
+            Kernel::Effects => "effects_main",
+            Kernel::HsvTable => "hsv_table_main",
+            Kernel::Look => "look_main",
+            Kernel::Local => "local_main",
         }
     }
 
@@ -314,7 +505,14 @@ impl Kernel {
     pub(crate) fn counts_non_finite(self) -> bool {
         !matches!(
             self,
-            Kernel::Histogram | Kernel::Quantize | Kernel::DownscaleH | Kernel::DownscaleV
+            Kernel::Histogram
+                | Kernel::Quantize
+                | Kernel::DownscaleH
+                | Kernel::DownscaleV
+                | Kernel::LumaLog
+                | Kernel::BlurH
+                | Kernel::BlurV
+                | Kernel::Local
         )
     }
 
@@ -344,6 +542,16 @@ impl Kernel {
                 "SKIN_COS_W",
                 "NEUTRAL_A",
                 "NEUTRAL_B",
+                "COLOR_FLAGS",
+                "HUE_C",
+                "HUE_INV",
+                "HSL_H",
+                "HSL_S",
+                "HSL_L",
+                "BW_MIX",
+                "CG_TINT",
+                "CG_EV",
+                "CG_ZONE",
             ],
             Kernel::SceneToDisplay => &[
                 "S2D_MODE",
@@ -364,7 +572,14 @@ impl Kernel {
             ],
             Kernel::Display => &["W2D", "D2W", "GC_LUMA", "LUT_N"],
             Kernel::Export => &["MAT", "GC_LUMA", "TRANSFER"],
-            Kernel::Geometry => &["AFF", "CROP_X", "CROP_Y", "GRID_W", "GRID_H"],
+            Kernel::Geometry => &[
+                "AFF", "CROP_X", "CROP_Y", "GRID_W", "GRID_H", "WARP", "PRE", "POST", "INV_R2",
+                "LUT_OFF", "LUT_LEN", "LUT_INV",
+            ],
+            Kernel::LensCorrection => &[
+                "GRID_W", "GRID_H", "INV_R2", "LUT_OFF", "LUT_LEN", "LUT_INV", "CENTER", "SPG",
+                "LFLAGS",
+            ],
             Kernel::Histogram => &["HLUMA"],
             Kernel::Quantize => &[
                 "QBITS",
@@ -383,9 +598,104 @@ impl Kernel {
                 "RADIUS",
                 "FLAGS_OUT",
             ],
+            Kernel::HighlightRecovery => &[
+                "CFA",
+                "CLIP_LEVEL",
+                "CLIP_MODE",
+                "RADIUS",
+                "HR_MODE",
+                "HR_AMOUNT",
+                "HR_INV_W2",
+                "HR_INV_R1",
+                "HR_R1",
+                "HR_RADIUS",
+                "HR_CONF_W",
+            ],
             Kernel::Half2x2 => &["CFA"],
+            Kernel::NrForward => &["EPS"],
+            Kernel::NrSmoothH | Kernel::NrSmoothV => &["HOLE", "MASK"],
+            Kernel::NrDetail => &["T_LUMA", "T_CHROMA", "AUX_X", "AUX_Y", "AUX_W"],
+            Kernel::NrInverse => &["AUX_X", "AUX_Y", "AUX_W", "EPS"],
             Kernel::ColorMatrix => &["MAT"],
             Kernel::DownscaleH | Kernel::DownscaleV => &["TAP_OFF"],
+            Kernel::LumaLog => &[],
+            Kernel::BlurH | Kernel::BlurV => &["BLUR_R"],
+            Kernel::Presence => &[
+                "PR_FLAGS",
+                "PR_TEX",
+                "PR_CLA",
+                "PR_DEHAZE",
+                "PR_AIR",
+                "HAZE_OFF",
+                "PLANE_X",
+                "PLANE_Y",
+                "PLANE_W",
+                "TONE_H",
+                "TONE_S",
+                "TONE_W",
+                "TONE_B",
+                "TONE_EV",
+                "GAMMA",
+                "GUIDE_OX",
+                "GUIDE_OY",
+                "GUIDE_SX",
+                "GUIDE_SY",
+                "GUIDE_W",
+                "GUIDE_H",
+            ],
+            Kernel::Sharpen => &[
+                "SH_AMOUNT",
+                "SH_THRESHOLD",
+                "SH_LIMIT",
+                "SH_MASK",
+                "SH_GSCALE",
+                "PLANE_X",
+                "PLANE_Y",
+                "PLANE_W",
+            ],
+            Kernel::Effects => &[
+                "FX_FLAGS",
+                "VG_CENTER",
+                "VG_INV",
+                "VG_EXP",
+                "VG_INV_CORNER",
+                "VG_EDGE",
+                "VG_AMOUNT",
+                "VG_HL",
+                "GR_SEED",
+                "GR_SALT",
+                "GR_ORIGIN",
+                "GR_INV_DENSITY",
+                "GR_INV_CELL",
+                "GR_W",
+                "GR_STRENGTH",
+            ],
+            Kernel::HsvTable => &["MAT", "MAT2", "HSV_DIMS", "HSV_SRGB", "HSV_HSCALE"],
+            Kernel::Local => &[
+                "LOCAL_OX",
+                "LOCAL_OY",
+                "LOCAL_SX",
+                "LOCAL_SY",
+                "LOCAL_GAIN",
+                "LOCAL_RANGE",
+                "LOCAL_PLANES",
+                "LOCAL_MASKS",
+                "LOCAL_DATA",
+                "S2D_MODE",
+                "S2D_FLOOR_RATIO",
+                "LUT_OFF",
+                "LUT_LEN",
+                "LUT_LO",
+                "LUT_INV",
+            ],
+            Kernel::Look => &[
+                "MAT",
+                "MAT2",
+                "LUT_N",
+                "DOMAIN_MIN",
+                "DOMAIN_SCALE",
+                "AMOUNT",
+            ],
         }
     }
 }
@@ -423,6 +733,7 @@ fn wgsl_rows(out: &mut String, name: &str, rows: [[f32; 3]; 3]) {
 pub(crate) fn shared_constants() -> Vec<(&'static str, f32)> {
     vec![
         ("LUMA_R", BT2020_LUMINANCE[0]),
+        ("HSV_DEG_TO_H", HUE_SHIFT_TO_SECTORS),
         ("LUMA_G", BT2020_LUMINANCE[1]),
         ("LUMA_B", BT2020_LUMINANCE[2]),
         ("LOG_FLOOR", LOG_FLOOR),
@@ -456,8 +767,48 @@ pub(crate) fn shared_constants() -> Vec<(&'static str, f32)> {
         ("VIBRANCE_MAX", VIBRANCE_MAX),
         ("VIBRANCE_CHROMA_REF", VIBRANCE_CHROMA_REF),
         ("SKIN_PROTECTION", SKIN_PROTECTION),
+        ("POLY_TAN_PI_12", poly::TAN_PI_12),
+        ("POLY_SQRT3", poly::SQRT3),
+        ("POLY_FRAC_PI_6", poly::FRAC_PI_6),
+        ("POLY_FRAC_PI_2", poly::FRAC_PI_2),
+        ("POLY_PI", poly::PI),
+        ("POLY_TAU", poly::TAU),
+        ("POLY_INV3", poly::INV3),
+        ("POLY_INV5", poly::INV5),
+        ("POLY_INV7", poly::INV7),
+        ("POLY_INV9", poly::INV9),
+        ("POLY_INV11", poly::INV11),
+        ("POLY_INV6", poly::INV6),
+        ("POLY_INV120", poly::INV120),
+        ("POLY_INV5040", poly::INV5040),
+        ("POLY_INV362880", poly::INV362880),
+        ("POLY_INV24", poly::INV24),
+        ("POLY_INV720", poly::INV720),
+        ("POLY_INV40320", poly::INV40320),
+        ("POLY_INV_CHROMA_RAMP", poly::INV_CHROMA_RAMP),
         ("COORD_LIMIT", COORD_LIMIT),
         ("DITHER_SCALE", DITHER_SCALE),
+        ("LUMA_LOG_OFFSET", LUMA_LOG_OFFSET),
+        ("TEXTURE_LIMIT", TEXTURE_LIMIT),
+        ("CLARITY_LIMIT", CLARITY_LIMIT),
+        ("CLARITY_MID_WIDTH", CLARITY_MID_WIDTH),
+        ("DEHAZE_OMEGA", DEHAZE_OMEGA),
+        ("DEHAZE_T_MIN", DEHAZE_T_MIN),
+        ("DEHAZE_ADD_MAX", DEHAZE_ADD_MAX),
+        ("DEHAZE_ADD_FLOOR", DEHAZE_ADD_FLOOR),
+        ("VIGNETTE_DARK_MAX", VIGNETTE_DARK_MAX),
+        ("VIGNETTE_LIGHT_MAX", VIGNETTE_LIGHT_MAX),
+        ("VIGNETTE_HL_LO", VIGNETTE_HL_LO),
+        ("VIGNETTE_HL_HI", VIGNETTE_HL_HI),
+        ("GRAIN_MAX_SPAN", GRAIN_MAX_SPAN),
+        ("CONTRAST_STRENGTH", CONTRAST_STRENGTH),
+        ("TEXTURE_GAIN", TEXTURE_GAIN),
+        ("CLARITY_GAIN", CLARITY_GAIN),
+        ("SHARPEN_GAIN", SHARPEN_GAIN),
+        ("COLOR_L_FLOOR", COLOR_L_FLOOR),
+        ("LOCAL_EXPOSURE_LIMIT", LOCAL_EXPOSURE_LIMIT),
+        ("LOCAL_TEMPERATURE_EV", LOCAL_TEMPERATURE_EV),
+        ("LOCAL_TINT_EV", LOCAL_TINT_EV),
     ]
 }
 
@@ -573,6 +924,12 @@ impl Params {
         self
     }
 
+    pub(crate) fn i32s(&mut self, name: &str, v: &[i32]) -> &mut Self {
+        let words: Vec<u32> = v.iter().map(|x| *x as u32).collect();
+        self.put(name, &words);
+        self
+    }
+
     /// 行列（行優先の 9 個）。
     pub(crate) fn mat(&mut self, name: &str, rows: [[f32; 3]; 3]) -> &mut Self {
         self.f32s(name, rows.as_flattened())
@@ -606,6 +963,8 @@ pub(crate) struct Dispatch<'a> {
     pub(crate) dst: &'a wgpu::Buffer,
     pub(crate) aux: Option<&'a wgpu::Buffer>,
     pub(crate) aux_out: Option<&'a wgpu::Buffer>,
+    /// ローカル補正の局所の値の面（binding 6。使わなければ空のバッファ）。
+    pub(crate) local: Option<&'a wgpu::Buffer>,
     /// スレッドの数（x, y）。ワークグループの数はこれをワークグループの大きさで割って切り上げる。
     pub(crate) threads: (u32, u32),
 }
@@ -643,6 +1002,7 @@ impl KernelCache {
                     entry(3, false),
                     entry(4, true),
                     entry(5, false),
+                    entry(6, true),
                 ],
             });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -768,6 +1128,11 @@ impl<'g> Batch<'g> {
         })
     }
 
+    /// GPU（バッファの確保に使う）。
+    pub(crate) fn gpu(&self) -> &'g GpuContext {
+        self.gpu
+    }
+
     /// カーネルを 1 回実行するコマンドを記録する。
     pub(crate) fn dispatch(&mut self, d: Dispatch<'_>) -> Result<()> {
         let (tx, ty) = d.threads;
@@ -790,6 +1155,7 @@ impl<'g> Batch<'g> {
             .create_storage_init("genzo-gpu.params", bytemuck::cast_slice(&d.params))?;
         let aux = d.aux.unwrap_or(&self.kernels.dummy_ro);
         let aux_out = d.aux_out.unwrap_or(&self.kernels.dummy_rw);
+        let local = d.local.unwrap_or(&self.kernels.dummy_ro);
         let gpu = self.gpu;
         let layout = &self.kernels.layout;
         let stats = &self.stats;
@@ -822,6 +1188,10 @@ impl<'g> Batch<'g> {
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: aux_out.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: local.as_entire_binding(),
                     },
                 ],
             });

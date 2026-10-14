@@ -50,7 +50,7 @@ impl DemosaicMethod {
     /// 処理バージョンと品質から決まる方式（v1: 最終品質は RCD、簡易は 2 × 2。2.2 節）。
     pub const fn for_quality(version: ProcessVersion, quality: RenderQuality) -> Self {
         match version {
-            ProcessVersion::V1 => match quality {
+            ProcessVersion::V1 | ProcessVersion::V2 => match quality {
                 RenderQuality::Final => DemosaicMethod::Rcd,
                 RenderQuality::Draft => DemosaicMethod::Half2x2,
             },

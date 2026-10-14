@@ -23,6 +23,16 @@ pub fn path_key(s: &str) -> String {
     nfc.to_lowercase()
 }
 
+/// NFC に正規化した文字列（大文字・小文字は変えない。取り込みのリネームで作るファイル名など、OS に渡す名前を
+/// 正規化の違いで別の名前にしないため。IMP-03）。
+pub fn nfc(s: &str) -> String {
+    if is_nfc_quick(s.chars()) == IsNormalized::Yes {
+        s.to_owned()
+    } else {
+        s.nfc().collect()
+    }
+}
+
 /// 検索のキー（NFKC ＋ 小文字化。3.6 節）。
 pub fn search_key(s: &str) -> String {
     let nfkc: String = if is_nfkc_quick(s.chars()) == IsNormalized::Yes {
@@ -155,6 +165,13 @@ mod tests {
         assert_eq!(path_key("DSC00001.ARW"), "dsc00001.arw");
         // 全角英字は NFC では変わらない（パスとしては別の名前）。
         assert_ne!(path_key("ＡＢＣ"), path_key("abc"));
+    }
+
+    #[test]
+    fn nfc_keeps_case_and_composes() {
+        assert_eq!(nfc("\u{304b}\u{3099}.JPG"), "\u{304c}.JPG");
+        assert_eq!(nfc("DSC00001.ARW"), "DSC00001.ARW");
+        assert_eq!(nfc("ＡＢＣ"), "ＡＢＣ");
     }
 
     #[test]

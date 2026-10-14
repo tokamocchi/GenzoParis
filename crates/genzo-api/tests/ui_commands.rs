@@ -1,7 +1,8 @@
 //! M4（UI）のために足したコマンドの結合テスト: 絞り込みの候補（[`genzo_api::Core::facets`]）、
 //! 切り抜きの編集中の表示（[`genzo_api::Core::set_develop_view`]）とフル解像度の出力の寸法
 //! （[`genzo_api::FrameInfo::output_width`]）、描画が実際に使う切り抜き（[`genzo_api::Core::constrain_crop`]）、
-//! WB のスポイト（DEV-03。[`genzo_api::Core::white_balance_at`]）。
+//! WB のスポイト（DEV-03。[`genzo_api::Core::white_balance_at`]）、カタログの構造（ORG-07。
+//! [`genzo_api::Core::catalog_schema`]）。
 
 mod common;
 
@@ -130,6 +131,55 @@ fn facets_list_values_usable_in_filters() {
         serde_json::json!([{"value": "GenzoTest Synthetic", "count": 2}])
     );
     assert_eq!(json["ok"]["codecs"], serde_json::json!([]));
+    core.close().unwrap();
+}
+
+/// カタログの構造（ORG-07）: 表・列・公開ビュー・作った SQL を返す。JSON のコマンドでも同じ形。
+#[test]
+fn catalog_schema_lists_tables_and_public_views() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (32, 24), 1, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let schema = core.catalog_schema().unwrap();
+    assert_eq!(
+        schema.schema_version,
+        core.catalog_stats().unwrap().schema_version
+    );
+    assert_eq!(schema.application_id, genzo_catalog::CATALOG_APPLICATION_ID);
+    // 版 7 で photo_collections_v1（LIB-10）、版 9 で photo_stacks_v1（LIB-12）、版 10 で photo_files_v1
+    // （ORG-03・IMP-06）を足した。
+    assert_eq!(
+        schema.public_views,
+        vec![
+            "photos_v1",
+            "photo_keywords_v1",
+            "photo_collections_v1",
+            "photo_stacks_v1",
+            "photo_files_v1"
+        ]
+    );
+    let photos = schema
+        .tables
+        .iter()
+        .find(|t| t.name == "photos_v1")
+        .unwrap();
+    assert_eq!(photos.kind, "view");
+    assert!(photos.columns.iter().any(|c| c.name == "file_name"));
+    let variant = schema.tables.iter().find(|t| t.name == "variant").unwrap();
+    assert!(
+        variant
+            .columns
+            .iter()
+            .any(|c| c.name == "rating" && c.not_null)
+    );
+    assert!(schema.objects.iter().any(|o| o.kind == "index"
+        && o.name == "asset_captured_at"
+        && o.sql.starts_with("CREATE INDEX")));
+    let json: serde_json::Value =
+        serde_json::from_str(&core.execute_json(r#"{"type":"catalog_schema"}"#)).unwrap();
+    assert_eq!(json["ok"]["type"], "catalog_schema");
+    assert_eq!(json["ok"]["public_views"][0], "photos_v1");
     core.close().unwrap();
 }
 

@@ -20,10 +20,15 @@
 //!   閉じ直せない最後の機会（drop など）に保存できなければ、警告して設定を捨て、カタログに「正常に終了した」
 //!   印を付けずに閉じる（[`shutdown`]）。
 //! - Undo / Redo（DEV-27）はカタログの履歴で行うので、再起動の後もできる。
-//! - 設定のコピーと複数の variant への一括適用（DEV-30。[`Core::paste_settings`]）、仮想コピーの作成
-//!   （LIB-13。[`Core::create_virtual_copy`]）。
+//! - 設定のコピーと複数の variant への一括適用（DEV-30。[`Core::paste_settings`]・[`Core::paste_settings_with`]）、
+//!   仮想コピーの作成（LIB-13。[`Core::create_virtual_copy`]）。貼り付けは、貼り付け先の処理バージョンを
+//!   変えない（利用者が選んだときだけ上げる。[`PasteVersion`]）。版 1 と 2 の写真の間でも、選んだ項目だけを
+//!   写せる。
+//! - 処理バージョンの更新（DATA-09。現像中の写真は [`Core::upgrade_process_version`]、選んだ写真をまとめて
+//!   [`Core::upgrade_process_versions`]。v1 の機能は処理バージョン 2 から）。
 //! - 切り抜きの編集の支え（DEV-15）: 切り抜く前の全体の表示（[`Core::set_develop_view`]）と、描画が実際に
 //!   使う切り抜き（[`Core::constrain_crop`]）。WB のスポイト（DEV-03。[`Core::white_balance_at`]）。
+//! - ビフォー / アフターの表示のビフォー（DEV-31。[`Core::set_before`]）はセッションに持つ（`before` の doc）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,8 +50,9 @@ use crate::events::{CatalogChange, Event, WarningCode};
 use crate::previews::{load_source, schedule_regenerate, variant_file};
 use crate::render::display_target;
 use crate::types::{
-    DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem, PickedWhiteBalance,
-    SettingGroups, SourceInfo,
+    DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem, MaskOverlayFrame,
+    MaskOverlayInfo, PasteReport, PasteVersion, PickedMaskColor, PickedWhiteBalance, SettingGroups,
+    SourceInfo,
 };
 
 /// 自動保存に失敗したときに、もう一度試すまでの時間（**仮置き**: 10 秒。ディスクの容量不足などで
@@ -60,18 +66,30 @@ const PREVIEW_SLOT: &str = "develop-preview";
 pub const HISTORY_LABEL_PASTE: &str = "設定の貼り付け";
 /// Undo / Redo の前に保存待ちの変更を保存したときなどの、変更の名前（変わった項目が分からないとき）。
 pub const HISTORY_LABEL_GENERIC: &str = "現像設定の変更";
+/// 白黒にしたときの履歴の名前（DEV-25。画面の V キー）。
+pub const HISTORY_LABEL_BLACK_WHITE: &str = "白黒に変換";
+/// 白黒からカラーに戻したときの履歴の名前（DEV-25）。
+pub const HISTORY_LABEL_COLOR: &str = "カラーに変換";
+/// 処理バージョンの更新（[`Core::upgrade_process_version`]）の履歴の名前の前半（後に「2 に更新」が付く。
+/// [`upgrade_process_label`]）。
+pub const HISTORY_LABEL_UPGRADE_PROCESS: &str = "処理バージョンを";
+
+/// 処理バージョンを `version` に更新したときの履歴の名前（「処理バージョンを 2 に更新」。CLI も使う）。
+pub fn upgrade_process_label(version: u32) -> String {
+    format!("{HISTORY_LABEL_UPGRADE_PROCESS} {version} に更新")
+}
 
 /// 現像のセッション。
 pub(crate) struct Session {
-    variant_id: VariantId,
+    pub(crate) variant_id: VariantId,
     file_revision: u32,
-    source: PhotoSource,
+    pub(crate) source: PhotoSource,
     source_info: SourceInfo,
     /// 実際に使う外部データ（RAW のカメラ行列・デコーダ。`deps` の doc）。設定の `render_deps` は常にこの値
     /// にする（利用者の設定では変えない）。
-    render_deps: genzo_model::RenderDeps,
+    pub(crate) render_deps: genzo_model::RenderDeps,
     /// 現在の設定（最新の要求）。
-    settings: DevelopSettings,
+    pub(crate) settings: DevelopSettings,
     /// 最後に保存した設定。
     saved: DevelopSettings,
     /// `saved` の写しの番号（[`DevelopShared::next_save_seq`]。古い写しの保存の結果で上書きしない）。
@@ -79,7 +97,7 @@ pub(crate) struct Session {
     /// 設定の世代（変えるたびに増える。コアの中で通しの番号で、開き直しても 1 に戻らない）。
     generation: u64,
     /// このセッションを開いたときの世代（これより前の世代の描画は、前のセッションのもの）。
-    first_generation: u64,
+    pub(crate) first_generation: u64,
     /// 最後の変更の時刻（自動保存の起点）。
     last_change: Instant,
     /// 最初の未保存の変更の時刻（自動保存の最大の待ち時間の起点。保存したら `None`）。
@@ -93,9 +111,11 @@ pub(crate) struct Session {
     /// 最後に要求した描画の品質。
     requested_quality: RenderQuality,
     /// 切り抜く前の全体の表示か（[`Core::set_develop_view`]。写真を開き直すと `false`）。
-    uncropped: bool,
+    pub(crate) uncropped: bool,
     /// 最新の描画の結果。
     frame: Option<Arc<DevelopFrame>>,
+    /// ビフォー / アフターの表示のビフォー（DEV-31。[`Core::set_before`]。写真を開き直すと `None`）。
+    pub(crate) before: Option<crate::before::BeforeState>,
 }
 
 impl Session {
@@ -130,6 +150,8 @@ pub(crate) struct DevelopShared {
     save_seq: AtomicU64,
     /// 表示範囲の描画（[`Core::render_region`]。`region` の doc）。
     pub region: Mutex<crate::region::RegionState>,
+    /// ビフォーの表示範囲の描画（[`Core::render_before_region`]。DEV-31）。
+    pub region_before: Mutex<crate::region::RegionState>,
 }
 
 /// state のロックを外して書く保存（[`save_unlocked`]）の追い越しの記録（[`DevelopShared::save_record`]）。
@@ -223,7 +245,7 @@ impl DevelopShared {
     /// セッションで遅れて終わった描画（大きい世代）が新しいセッションのプレビューになり、その後の
     /// 新しい描画が「古い」として捨てられる（6.2 節・4.1 節）。UI がイベントの世代で新旧を比べるときも
     /// 取り違えない。
-    fn next_generation(&self) -> u64 {
+    pub(crate) fn next_generation(&self) -> u64 {
         self.last_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 
@@ -267,11 +289,14 @@ fn accepts_frame(
 }
 
 /// 変わった項目から履歴の名前を作る（DEV-27。「露光量 +0.30」など）。CLI が設定を保存するときの
-/// 履歴の名前にも使う（[`Core::paste_settings_with_label`]）。
+/// 履歴の名前にも使う（[`Core::paste_settings_with`]）。
 pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     let mut parts: Vec<String> = Vec::new();
     if old.white_balance != new.white_balance {
         parts.push("ホワイトバランス".to_owned());
+    }
+    if old.highlight_recovery != new.highlight_recovery {
+        parts.push("ハイライト復元".to_owned());
     }
     if old.exposure_ev != new.exposure_ev {
         parts.push(format!("露光量 {:+.2}", new.exposure_ev));
@@ -292,16 +317,47 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     if t.0.blacks != t.1.blacks {
         parts.push(format!("黒レベル {:+.0}", t.1.blacks));
     }
+    let pr = (&old.presence, &new.presence);
+    if pr.0.texture != pr.1.texture {
+        parts.push(format!("テクスチャ {:+.0}", pr.1.texture));
+    }
+    if pr.0.clarity != pr.1.clarity {
+        parts.push(format!("明瞭度 {:+.0}", pr.1.clarity));
+    }
+    if pr.0.dehaze != pr.1.dehaze {
+        parts.push(format!("かすみの除去 {:+.0}", pr.1.dehaze));
+    }
     if old.tone_curve != new.tone_curve {
         parts.push("トーンカーブ".to_owned());
     }
-    if old.color.saturation != new.color.saturation {
-        parts.push(format!("彩度 {:+.0}", new.color.saturation));
+    let (c_old, c_new) = (&old.color, &new.color);
+    let before_color = parts.len();
+    if c_old.black_white.enabled != c_new.black_white.enabled {
+        parts.push(
+            if c_new.black_white.enabled {
+                HISTORY_LABEL_BLACK_WHITE
+            } else {
+                HISTORY_LABEL_COLOR
+            }
+            .to_owned(),
+        );
     }
-    if old.color.vibrance != new.color.vibrance {
-        parts.push(format!("自然な彩度 {:+.0}", new.color.vibrance));
+    if c_old.saturation != c_new.saturation {
+        parts.push(format!("彩度 {:+.0}", c_new.saturation));
     }
-    if old.color != new.color && !parts.iter().any(|p| p.contains("彩度")) {
+    if c_old.vibrance != c_new.vibrance {
+        parts.push(format!("自然な彩度 {:+.0}", c_new.vibrance));
+    }
+    if c_old.mixer != c_new.mixer {
+        parts.push("カラーミキサー".to_owned());
+    }
+    if c_old.black_white.mix != c_new.black_white.mix {
+        parts.push("白黒ミキサー".to_owned());
+    }
+    if c_old.grading != c_new.grading {
+        parts.push("カラーグレーディング".to_owned());
+    }
+    if c_old != c_new && parts.len() == before_color {
         parts.push("色".to_owned());
     }
     if old.geometry != new.geometry {
@@ -310,13 +366,60 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     if old.lens != new.lens {
         parts.push("レンズ補正".to_owned());
     }
-    if old.detail != new.detail {
-        parts.push("ディテール".to_owned());
+    let (nr_old, nr_new) = (&old.detail.noise_reduction, &new.detail.noise_reduction);
+    if nr_old.luminance != nr_new.luminance {
+        parts.push(format!("輝度ノイズの軽減 {:.0}", nr_new.luminance));
+    }
+    if nr_old.color != nr_new.color {
+        parts.push(format!("カラーノイズの軽減 {:.0}", nr_new.color));
+    }
+    if nr_old != nr_new && nr_old.luminance == nr_new.luminance && nr_old.color == nr_new.color {
+        parts.push("ノイズ軽減".to_owned());
+    }
+    let (sh_old, sh_new) = (&old.detail.sharpening, &new.detail.sharpening);
+    if sh_old.amount != sh_new.amount {
+        parts.push(format!("シャープ {:.0}", sh_new.amount));
+    } else if sh_old != sh_new {
+        parts.push("シャープ".to_owned());
+    }
+    let (fx_old, fx_new) = (&old.effects, &new.effects);
+    if fx_old.vignette.amount != fx_new.vignette.amount {
+        parts.push(format!("周辺光量 {:+.0}", fx_new.vignette.amount));
+    } else if fx_old.vignette != fx_new.vignette {
+        parts.push("周辺光量".to_owned());
+    }
+    if fx_old.grain.amount != fx_new.grain.amount {
+        parts.push(format!("粒子 {:.0}", fx_new.grain.amount));
+    } else if fx_old.grain != fx_new.grain {
+        parts.push("粒子".to_owned());
+    }
+    let (pf_old, pf_new) = (&old.profile, &new.profile);
+    if pf_old.camera != pf_new.camera {
+        parts.push(match &pf_new.camera {
+            Some(id) => format!("プロファイル「{id}」"),
+            None => "プロファイル（標準）".to_owned(),
+        });
+    }
+    if pf_old.look != pf_new.look {
+        parts.push(match &pf_new.look {
+            Some(id) => format!("ルック「{id}」"),
+            None => "ルックなし".to_owned(),
+        });
+    } else if pf_old.look_amount != pf_new.look_amount {
+        parts.push(format!("ルックの適用量 {:.0}", pf_new.look_amount));
     }
     if old.masks != new.masks {
-        parts.push("ローカル補正".to_owned());
+        parts.push(describe_masks(&old.masks, &new.masks));
     }
-    if old.process_version != new.process_version || old.render_deps != new.render_deps {
+    // 外部データのうち、カメラプロファイル・ルックの参照は設定の ID に付いて変わる（上の名前で表す）。
+    let raw_deps = |d: &genzo_model::RenderDeps| genzo_model::RenderDeps {
+        profile: None,
+        look: None,
+        ..d.clone()
+    };
+    if old.process_version != new.process_version
+        || raw_deps(&old.render_deps) != raw_deps(&new.render_deps)
+    {
         parts.push("処理バージョン".to_owned());
     }
     match parts.len() {
@@ -324,6 +427,79 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
         1..=3 => parts.join("・"),
         _ => format!("{}ほか", parts[..3].join("・")),
     }
+}
+
+/// マスクの表示の名前（名前がなければ「マスク 1」など、1 から数えた番号）。
+pub fn mask_display_name(m: &genzo_model::LocalAdjustment, index: usize) -> String {
+    if m.name.trim().is_empty() {
+        format!("マスク {}", index + 1)
+    } else {
+        m.name.clone()
+    }
+}
+
+/// マスクの変更の履歴の名前（DEV-18。「マスクを追加」「マスク「空」の露光量 +0.50」など）。
+fn describe_masks(
+    old: &[genzo_model::LocalAdjustment],
+    new: &[genzo_model::LocalAdjustment],
+) -> String {
+    use genzo_model::LocalDelta;
+    if new.len() > old.len() {
+        return "マスクを追加".to_owned();
+    }
+    if new.len() < old.len() {
+        return "マスクを削除".to_owned();
+    }
+    let Some((i, (a, b))) = old.iter().zip(new).enumerate().find(|(_, (a, b))| a != b) else {
+        return "マスク".to_owned();
+    };
+    let name = mask_display_name(b, i);
+    if a.enabled != b.enabled {
+        return format!(
+            "マスク「{name}」を{}",
+            if b.enabled {
+                "有効にする"
+            } else {
+                "無効にする"
+            }
+        );
+    }
+    if a.delta != b.delta {
+        const LABELS: [&str; LocalDelta::LEN] = [
+            "色温度",
+            "色かぶり補正",
+            "露光量",
+            "コントラスト",
+            "ハイライト",
+            "シャドウ",
+            "白レベル",
+            "黒レベル",
+            "テクスチャ",
+            "明瞭度",
+            "かすみの除去",
+            "彩度",
+            "シャープ",
+        ];
+        let (va, vb) = (a.delta.values(), b.delta.values());
+        let changed: Vec<String> = (0..LocalDelta::LEN)
+            .filter(|&k| va[k] != vb[k])
+            .map(|k| {
+                if LocalDelta::NAMES[k] == "exposure_ev" {
+                    format!("{} {:+.2}", LABELS[k], vb[k])
+                } else {
+                    format!("{} {:+.0}", LABELS[k], vb[k])
+                }
+            })
+            .collect();
+        return match changed.len() {
+            1 | 2 => format!("マスク「{name}」の{}", changed.join("・")),
+            _ => format!("マスク「{name}」の調整"),
+        };
+    }
+    if a.name != b.name {
+        return format!("マスクの名前「{name}」");
+    }
+    format!("マスク「{name}」の範囲")
 }
 
 /// 保存待ちの変更を保存する（呼び出し側が state のロックを持つ。写真を開く・一括適用・Undo / Redo・
@@ -460,7 +636,21 @@ pub(crate) fn session_source(
         .map(|s| (s.source.clone(), s.render_deps.clone()))
 }
 
-/// 描画を投入する（「最新の 1 件だけ」）。
+/// 現像中の写真の入力が `id`（ファイルとそのリビジョン）なら、その入力と外部データ（比較表示が、現像中の写真と
+/// 同じファイル（仮想コピー）を展開し直さないため。`view` の doc）。
+pub(crate) fn session_source_of_file(
+    inner: &Inner,
+    id: genzo_pipeline::SourceId,
+) -> Option<(PhotoSource, genzo_model::RenderDeps)> {
+    let state = inner.develop.state.lock();
+    state
+        .as_ref()
+        .filter(|s| s.source.id == id)
+        .map(|s| (s.source.clone(), s.render_deps.clone()))
+}
+
+/// 描画を投入する（「最新の 1 件だけ」）。ビフォーを設定していれば、必要ならビフォーも描き直す
+/// （アフターの後に投入する。`before` の doc）。
 fn submit_render(inner: &Arc<Inner>, s: &mut Session, quality: RenderQuality) {
     s.requested_quality = quality;
     let job = RenderJob {
@@ -470,6 +660,7 @@ fn submit_render(inner: &Arc<Inner>, s: &mut Session, quality: RenderQuality) {
         generation: s.generation,
         quality,
         uncropped: s.uncropped,
+        histogram: true,
     };
     let weak = Arc::downgrade(inner);
     let _ = inner.interactive.submit_latest_with(
@@ -494,29 +685,34 @@ fn submit_render(inner: &Arc<Inner>, s: &mut Session, quality: RenderQuality) {
             Ok(())
         },
     );
+    crate::before::maybe_submit(inner, s);
 }
 
 /// 描画の要求（セッションの状態の写し）。
-struct RenderJob {
-    variant_id: VariantId,
-    source: PhotoSource,
-    settings: DevelopSettings,
-    generation: u64,
-    quality: RenderQuality,
+pub(crate) struct RenderJob {
+    pub(crate) variant_id: VariantId,
+    pub(crate) source: PhotoSource,
+    pub(crate) settings: DevelopSettings,
+    pub(crate) generation: u64,
+    pub(crate) quality: RenderQuality,
     /// 切り抜く前の全体を描くか（[`Core::set_develop_view`]）。
-    uncropped: bool,
+    pub(crate) uncropped: bool,
+    /// ヒストグラム（17c）を求めるか（ビフォーの描画では求めない）。
+    pub(crate) histogram: bool,
 }
 
 /// プレビューを描く（17a・17c まで）。
 ///
 /// 切り抜く前の全体の表示（[`Core::set_develop_view`]）では、設定の切り抜きを使わず G の外接矩形の全体を
 /// 描く（回転で画像の外になった四隅は黒で塗り、ヒストグラムに数えない。[`FrameInfo::uncropped`]）。
-fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFrame, ApiError> {
+pub(crate) fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFrame, ApiError> {
     let (target, assumed_srgb) = display_target(inner);
-    let request = PreviewRequest::new(job.quality, inner.engine.config().preview_long_edge)
+    let mut request = PreviewRequest::new(job.quality, inner.engine.config().preview_long_edge)
         .with_output(target)
-        .with_histogram()
         .with_uncropped(job.uncropped);
+    if job.histogram {
+        request = request.with_histogram();
+    }
     let r = inner.render_preview(&job.source, &job.settings, &request, Some(job.variant_id))?;
     // 表示範囲の描画（render_region）と同じ格子の、フル解像度の出力の寸法。
     let (output_width, output_height) =
@@ -554,6 +750,7 @@ fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFrame, ApiError
             uncropped: job.uncropped,
             output_width,
             output_height,
+            g_bounds: Some(r.g_bounds),
         },
         b3: Arc::new(r.b3),
         display_rgb8: Arc::new(display_rgb8),
@@ -592,10 +789,33 @@ fn publish_frame(inner: &Inner, frame: DevelopFrame) {
     inner.develop.cv.notify_all();
 }
 
-/// 画面のプロファイルを変えたときなど、現在の設定で描き直す。
+/// 画面のプロファイルを変えたときなど、現在の設定で描き直す（ビフォーも描き直す）。
 pub(crate) fn rerender(inner: &Arc<Inner>) {
     let mut state = inner.develop.state.lock();
     if let Some(s) = state.as_mut() {
+        if let Some(b) = s.before.as_mut() {
+            b.force_redraw();
+        }
+        redraw(inner, s);
+    }
+}
+
+/// 取り込んだカメラプロファイル・ルックが変わった（取り込み・置き換え・除く。DEV-17）ので、現像中の写真の設定の
+/// 参照（`render_deps.profile`・`render_deps.look`）を今引けるものにして描き直す（メモリの中だけ。保存された値は、
+/// 次に保存したときに記録する。開いたときに空の参照を埋めるのと同じ）。
+pub(crate) fn refresh_profiles(inner: &Arc<Inner>) {
+    let mut state = inner.develop.state.lock();
+    if let Some(s) = state.as_mut() {
+        let settings = crate::deps::with_render_deps(&inner.engine, &s.settings, &s.render_deps);
+        let saved = crate::deps::with_render_deps(&inner.engine, &s.saved, &s.render_deps);
+        if settings == s.settings && saved == s.saved {
+            return;
+        }
+        s.settings = settings;
+        s.saved = saved;
+        if let Some(b) = s.before.as_mut() {
+            b.force_redraw();
+        }
         redraw(inner, s);
     }
 }
@@ -625,6 +845,9 @@ pub(crate) struct SessionSnapshot {
     /// まだ描けていなければ `None`）。表示を切り替えた直後は、新しい表示のプレビューが届くまで
     /// [`uncropped`](Self::uncropped) と違う。
     pub frame_uncropped: Option<bool>,
+    /// ビフォーで実際に描く設定（DEV-31。`before` の `effective_settings`。ビフォーを設定していなければ
+    /// `None`）。
+    pub before_settings: Option<DevelopSettings>,
 }
 
 /// 表示範囲の描画・WB のスポイトなどに使う、現像中の写真の状態の写し。`variant_id` の写真を開いて
@@ -644,6 +867,9 @@ pub(crate) fn session_snapshot(
         generation: s.generation,
         uncropped: s.uncropped,
         frame_uncropped: s.frame.as_ref().map(|f| f.info.uncropped),
+        before_settings: s.before.as_ref().map(|b| {
+            crate::before::effective_settings(&inner.engine, b.base(), &s.settings, &s.render_deps)
+        }),
     })
 }
 
@@ -655,10 +881,42 @@ fn pick_view(requested: Option<bool>, frame: Option<bool>, current: bool) -> boo
     requested.or(frame).unwrap_or(current)
 }
 
+/// 処理バージョンの番号を、このアプリが知っている版にする（知らない版は [`ApiError::InvalidArgument`]。
+/// `whose` はエラーの文の「〜の処理バージョン」の前の部分。例: `"variant 3 の"`）。
+fn known_process_version(
+    version: u32,
+    whose: &str,
+) -> Result<genzo_pipeline::ProcessVersion, ApiError> {
+    genzo_pipeline::ProcessVersion::from_u32(version).map_err(|_| {
+        ApiError::InvalidArgument(format!(
+            "{whose}処理バージョン {version} は、このアプリでは扱えません（対応は {} まで）",
+            genzo_model::CURRENT_PROCESS_VERSION
+        ))
+    })
+}
+
+/// 設定に、その処理バージョンでは使われず、最新の版に更新すると使われる項目の値があるか（版 1 の写真の
+/// レンズ補正など。genzo-pipeline の `finish::unimplemented_settings` で比べる）。
+pub(crate) fn unused_until_upgrade(settings: &DevelopSettings) -> bool {
+    let latest = genzo_model::CURRENT_PROCESS_VERSION;
+    if settings.process_version >= latest {
+        return false;
+    }
+    let upgraded = DevelopSettings {
+        process_version: latest,
+        ..settings.clone()
+    };
+    genzo_pipeline::finish::unimplemented_settings(settings).len()
+        > genzo_pipeline::finish::unimplemented_settings(&upgraded).len()
+}
+
 /// 動画の variant が含まれていればエラーにする（動画には現像設定を保存しない。implementation_status の
 /// No.31。動画は現像できず（[`Core::open_develop`] の doc）、保存した設定は使われないため、一括適用や
 /// CLI の `develop set` で誤って保存しないようにする）。
-fn reject_videos(c: &genzo_catalog::Catalog, targets: &[VariantId]) -> Result<(), ApiError> {
+pub(crate) fn reject_videos(
+    c: &genzo_catalog::Catalog,
+    targets: &[VariantId],
+) -> Result<(), ApiError> {
     if let Some(v) = c
         .variant_summaries(targets)?
         .iter()
@@ -668,6 +926,21 @@ fn reject_videos(c: &genzo_catalog::Catalog, targets: &[VariantId]) -> Result<()
             "動画（variant {}）には現像設定を保存できません（動画はカタログの管理だけ）",
             v.variant_id
         )));
+    }
+    Ok(())
+}
+
+/// 現像中の写真が `variant_id` なら、ドラッグを終えたものとして保存待ちの変更を保存する（今の状態からスナップショット
+/// を作る前など。DEV-28）。`state` は `inner.develop.state` のロックの中身（ロックの順序は state → カタログ）。
+pub(crate) fn save_session_of(
+    inner: &Arc<Inner>,
+    state: &mut Option<Session>,
+    variant_id: VariantId,
+) -> Result<(), ApiError> {
+    if let Some(s) = state.as_mut().filter(|s| s.variant_id == variant_id) {
+        s.dragging = false;
+        s.drag_base_a1 = None;
+        save_locked(inner, s, None)?;
     }
     Ok(())
 }
@@ -826,6 +1099,8 @@ fn state_of(s: &Session, can_undo: bool, can_redo: bool) -> DevelopState {
         dirty: s.dirty(),
         dragging: s.dragging,
         source: s.source_info.clone(),
+        before: crate::before::info_of(s),
+        latest_process_version: genzo_model::CURRENT_PROCESS_VERSION,
     }
 }
 
@@ -903,15 +1178,18 @@ impl Core {
         // 外部データ（render_deps）は実際に使う値にする。保存された値が空なら、ここで埋める（メモリの中だけ。
         // 次に保存したときに記録する）。違えば警告する（`deps` の doc）。
         let deps = loaded.render_deps;
-        if crate::deps::recorded_deps_differ(&dstate.settings.render_deps, &deps) {
+        let settings = crate::deps::with_render_deps(&inner.engine, &dstate.settings, &deps);
+        if crate::deps::recorded_deps_differ(&dstate.settings.render_deps, &settings.render_deps) {
             inner.events.warn(
                 WarningCode::RenderDepsChanged,
-                crate::deps::deps_changed_message(&dstate.settings.render_deps, &deps),
+                crate::deps::deps_changed_message(
+                    &dstate.settings.render_deps,
+                    &settings.render_deps,
+                ),
                 Some(variant_id),
                 None,
             );
         }
-        let settings = crate::deps::with_render_deps(&dstate.settings, &deps);
         let generation = inner.develop.next_generation();
         let mut session = Session {
             variant_id,
@@ -932,6 +1210,7 @@ impl Core {
             requested_quality: RenderQuality::Final,
             uncropped: false,
             frame: None,
+            before: None,
         };
         submit_render(inner, &mut session, RenderQuality::Final);
         let out = state_of(&session, dstate.can_undo, dstate.can_redo);
@@ -985,7 +1264,7 @@ impl Core {
         }
         let was_dirty = s.dirty();
         // 外部データ（render_deps）はセッションの値のまま（利用者の設定では変えない。`deps` の doc）。
-        s.settings = crate::deps::with_render_deps(settings, &s.render_deps);
+        s.settings = crate::deps::with_render_deps(&inner.engine, settings, &s.render_deps);
         s.generation = inner.develop.next_generation();
         s.last_change = Instant::now();
         s.retry_after = None;
@@ -1045,6 +1324,41 @@ impl Core {
         Ok(state_of(s, d.can_undo, d.can_redo))
     }
 
+    /// 現像中の写真の処理バージョンを、このアプリの最新（[`genzo_model::CURRENT_PROCESS_VERSION`]）に
+    /// 更新する（DATA-09: 新しいアルゴリズムは、利用者が明示的に更新した写真にだけ使う。v1 の機能（レンズ
+    /// 補正など）は処理バージョン 2 から適用する）。設定のほかの値は変えない。履歴に 1 件
+    /// （[`HISTORY_LABEL_UPGRADE_PROCESS`]）記録してすぐに保存し、描き直す（Undo で戻せる）。すでに最新なら
+    /// 何もしない。ドラッグ中なら、ドラッグを終えたものとして扱う。
+    pub fn upgrade_process_version(&self) -> Result<DevelopState, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let mut state = inner.develop.state.lock();
+        let s = state.as_mut().ok_or(ApiError::NoDevelopSession)?;
+        let v = s.variant_id;
+        let latest = genzo_model::CURRENT_PROCESS_VERSION;
+        if s.settings.process_version < latest {
+            s.dragging = false;
+            s.drag_base_a1 = None;
+            s.settings.process_version = latest;
+            s.generation = inner.develop.next_generation();
+            s.last_change = Instant::now();
+            s.retry_after = None;
+            if s.first_unsaved_change.is_none() {
+                s.first_unsaved_change = Some(s.last_change);
+            }
+            let quality = s.source.effective_quality(RenderQuality::Final);
+            submit_render(inner, s, quality);
+            inner.develop.cv.notify_all();
+            save_unlocked(inner, &mut state, Some(&upgrade_process_label(latest)))?;
+        }
+        let d = MutexGuard::unlocked(&mut state, || inner.with_catalog(|c| c.develop_state(v)))?;
+        let s = state
+            .as_ref()
+            .filter(|s| s.variant_id == v)
+            .ok_or(ApiError::NoDevelopSession)?;
+        Ok(state_of(s, d.can_undo, d.can_redo))
+    }
+
     /// 保存待ちの変更をすぐに保存する（保存したら `true`）。
     pub fn flush_develop(&self) -> Result<bool, ApiError> {
         let inner = &self.inner;
@@ -1087,6 +1401,7 @@ impl Core {
                 generation: s.generation,
                 quality: RenderQuality::Final,
                 uncropped: s.uncropped,
+                histogram: true,
             }
         };
         let frame = render_frame(inner, &job)?;
@@ -1202,7 +1517,8 @@ impl Core {
         };
         if let Some(settings) = &result {
             if let Some(s) = state.as_mut().filter(|s| s.variant_id == variant_id) {
-                let settings = crate::deps::with_render_deps(settings, &s.render_deps);
+                let settings =
+                    crate::deps::with_render_deps(&inner.engine, settings, &s.render_deps);
                 s.settings = settings.clone();
                 s.saved = settings;
                 s.saved_seq = seq;
@@ -1243,6 +1559,10 @@ impl Core {
     /// 設定を複数の variant にまとめて適用する（DEV-30。1 つのトランザクションで、それぞれに履歴を
     /// 1 件記録する）。`groups` で写す項目を選べる（既定はすべて）。適用した variant の数を返す。
     ///
+    /// **貼り付け先の処理バージョンは変えない**（[`PasteVersion::Keep`]。DATA-09）。版を更新しながら貼り付けるには
+    /// [`Core::paste_settings_with`]。処理バージョン 1 と 2 の写真の間でも、選んだ項目だけを写せる
+    /// （[`PasteVersion`] の doc）。
+    ///
     /// 現像中の写真が含まれていれば、保存待ちの変更を先に保存し、適用した設定で描き直す。動画の variant が
     /// 含まれていれば [`ApiError::InvalidArgument`] で、何も保存しない（動画には現像設定を保存しない。
     /// implementation_status の No.31）。
@@ -1252,23 +1572,125 @@ impl Core {
         targets: &[VariantId],
         groups: SettingGroups,
     ) -> Result<usize, ApiError> {
-        self.paste_settings_with_label(source, targets, groups, HISTORY_LABEL_PASTE)
+        let report = self.paste_settings_with(
+            source,
+            targets,
+            groups,
+            PasteVersion::Keep,
+            HISTORY_LABEL_PASTE,
+        )?;
+        Ok(report.count as usize)
     }
 
-    /// [`Core::paste_settings`] と同じ処理で、履歴の名前を `label` にする（CLI の `develop set` /
-    /// `develop reset` が、写真を開かずに設定を保存するときに使う。名前は [`describe_change`] で作れる）。
-    pub fn paste_settings_with_label(
+    /// [`Core::paste_settings`] と同じ処理で、貼り付け先の処理バージョンの扱い（`version`）と履歴の名前
+    /// （`label`）を指定する（画面の貼り付けのダイアログ・CLI の `develop copy` / `develop set` /
+    /// `develop reset`。CLI は写真を開かずに設定を保存するときに使い、名前は [`describe_change`] で作れる）。
+    ///
+    /// - [`PasteVersion::Upgrade`] で処理バージョンを上げた写真の履歴の名前は「`label`・処理バージョンを 2 に更新」
+    ///   にする（[`upgrade_process_label`]。[`PasteVersion::Source`] では `label` のまま）。
+    /// - 貼り付け元と貼り付け先の版で項目の意味が違う（genzo-pipeline の `ProcessVersion::shares_settings_with`
+    ///   が偽）・貼り付け先の版をこのアプリが知らない（新しいアプリで現像した写真）ときは
+    ///   [`ApiError::InvalidArgument`] で、何も保存しない。
+    pub fn paste_settings_with(
         &self,
         source: &DevelopSettings,
         targets: &[VariantId],
         groups: SettingGroups,
+        version: PasteVersion,
         label: &str,
-    ) -> Result<usize, ApiError> {
+    ) -> Result<PasteReport, ApiError> {
+        source.validate().map_err(genzo_model::DevelopError::from)?;
+        let source_version = known_process_version(source.process_version, "貼り付け元の設定の")?;
+        let mut report = PasteReport::default();
+        let ids = self.apply_to_variants(targets, false, |v, current| {
+            let target_version =
+                known_process_version(current.process_version, &format!("variant {v} の"))?;
+            if !target_version.shares_settings_with(source_version) {
+                return Err(ApiError::InvalidArgument(format!(
+                    "処理バージョン {} の設定は、処理バージョン {} の variant {v} には貼り付けられません（項目の意味が違います）",
+                    source.process_version, current.process_version
+                )));
+            }
+            let mut merged = groups.merge(source, current);
+            merged.process_version = match version {
+                PasteVersion::Keep => current.process_version,
+                PasteVersion::Upgrade => current.process_version.max(source.process_version),
+                PasteVersion::Source => source.process_version,
+            };
+            let upgraded = merged.process_version > current.process_version;
+            if upgraded {
+                report.upgraded += 1;
+            }
+            // 上げた写真の履歴の名前に、更新したことを足す（`Source` は呼び出し側の名前のまま。CLI の
+            // `develop set` の名前（`describe_change`）には「処理バージョン」が入る）。
+            let label = if upgraded && version == PasteVersion::Upgrade {
+                format!("{label}・{}", upgrade_process_label(merged.process_version))
+            } else {
+                label.to_owned()
+            };
+            if unused_until_upgrade(&merged) {
+                report.needs_upgrade += 1;
+            }
+            Ok(Some((merged, label)))
+        })?;
+        report.count = ids.len() as u64;
+        Ok(report)
+    }
+
+    /// 選んだ写真の処理バージョンを、このアプリの最新（[`genzo_model::CURRENT_PROCESS_VERSION`]）にまとめて
+    /// 更新する（DATA-09 の明示的な更新。ライブラリの写真の右クリックのメニュー・CLI の `develop upgrade`）。
+    /// 更新した variant の数を返す。
+    ///
+    /// - 設定のほかの値は変えない。1 つのトランザクションで、それぞれの履歴に「処理バージョンを 2 に更新」
+    ///   （[`upgrade_process_label`]）を 1 件記録する（Undo で戻せる）。
+    /// - すでに最新の写真・動画（現像設定がない）は飛ばす（数に入れない。エラーにしない）。
+    /// - 現像中の写真が含まれていれば、保存待ちの変更を先に保存し、更新した設定で描き直す
+    ///   （[`Core::upgrade_process_version`] と同じ結果）。
+    pub fn upgrade_process_versions(&self, targets: &[VariantId]) -> Result<usize, ApiError> {
+        let latest = genzo_model::CURRENT_PROCESS_VERSION;
+        let label = upgrade_process_label(latest);
+        let ids = self.apply_to_variants(targets, true, |_, current| {
+            Ok((current.process_version < latest).then(|| {
+                (
+                    DevelopSettings {
+                        process_version: latest,
+                        ..current.clone()
+                    },
+                    label.clone(),
+                )
+            }))
+        })?;
+        Ok(ids.len())
+    }
+
+    /// 選んだ variant の設定を、それぞれの今の設定から `change` で作って保存する（DEV-30 の貼り付けと
+    /// 処理バージョンの一括の更新の共通の処理）。`targets` の重なりは 1 つにする（`change` は variant ごとに
+    /// 1 回）。`change` が `None` を返した variant は保存しない。保存した variant（昇順）を返す。
+    ///
+    /// - 現像中の写真が含まれていれば、保存待ちの変更を先に保存してから今の設定を読み、保存した設定で描き直す。
+    /// - 1 つのトランザクションで保存する（1 件でも失敗したら、何も保存しない）。外部データ（`render_deps`）は
+    ///   貼り付け先の値のまま（現像中の写真なら、実際に使っている値）。
+    /// - 動画の variant: `skip_videos` なら飛ばし、そうでなければ [`ApiError::InvalidArgument`]。
+    pub(crate) fn apply_to_variants(
+        &self,
+        targets: &[VariantId],
+        skip_videos: bool,
+        mut change: impl FnMut(
+            VariantId,
+            &DevelopSettings,
+        ) -> Result<Option<(DevelopSettings, String)>, ApiError>,
+    ) -> Result<Vec<VariantId>, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
-        source.validate().map_err(genzo_model::DevelopError::from)?;
+        // 重なりは 1 回だけ（`change` を 1 回だけ呼ぶ。順序は保つ）。
+        let mut seen = std::collections::HashSet::new();
+        let targets: Vec<VariantId> = targets
+            .iter()
+            .copied()
+            .filter(|v| seen.insert(*v))
+            .collect();
         if targets.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         let mut state = inner.develop.state.lock();
         if let Some(s) = state.as_mut().filter(|s| targets.contains(&s.variant_id)) {
@@ -1282,38 +1704,49 @@ impl Core {
         let session_deps = state
             .as_ref()
             .map(|s| (s.variant_id, s.render_deps.clone()));
-        let applied: Vec<(VariantId, DevelopSettings)> = inner.with_catalog_api(|c| {
-            reject_videos(c, targets)?;
+        let applied: Vec<(VariantId, DevelopSettings, String)> = inner.with_catalog_api(|c| {
+            let videos: Vec<VariantId> = if skip_videos {
+                c.variant_summaries(&targets)?
+                    .into_iter()
+                    .filter(|s| s.kind == genzo_model::AssetKind::Video)
+                    .map(|s| s.variant_id)
+                    .collect()
+            } else {
+                reject_videos(c, &targets)?;
+                Vec::new()
+            };
             let mut items = Vec::with_capacity(targets.len());
-            for &v in targets {
+            for &v in targets.iter().filter(|v| !videos.contains(v)) {
                 let current = c.develop_settings(v)?;
-                if !groups.is_all() && current.process_version != source.process_version {
-                    return Err(ApiError::InvalidArgument(format!(
-                        "処理バージョンが違う variant {v} には、一部の項目だけを貼り付けられません（{} と {}）",
-                        current.process_version, source.process_version
-                    )));
-                }
+                let Some((new, label)) = change(v, &current)? else {
+                    continue;
+                };
                 let deps = match &session_deps {
                     Some((sv, d)) if *sv == v => d.clone(),
                     _ => current.render_deps.clone(),
                 };
                 items.push((
                     v,
-                    crate::deps::with_render_deps(&groups.merge(source, &current), &deps),
+                    crate::deps::with_render_deps(&inner.engine, &new, &deps),
+                    label,
                 ));
             }
-            c.save_develop_batch(&items, label)?;
+            if !items.is_empty() {
+                c.save_develop_labeled(&items)?;
+            }
             Ok(items)
         })?;
-        let mut ids: Vec<VariantId> = applied.iter().map(|(v, _)| *v).collect();
+        let mut ids: Vec<VariantId> = applied.iter().map(|(v, _, _)| *v).collect();
         ids.sort();
-        ids.dedup();
+        if ids.is_empty() {
+            return Ok(ids);
+        }
         // 書いた variant をすべて記録する（現像中の写真に限らない。現像していた写真の古い写しの保存が、
         // 現像のセッションが閉じた後で止まっていることもある）。
         inner.develop.record_written(&ids, seq);
         drop(write);
         if let Some(s) = state.as_mut()
-            && let Some((_, settings)) = applied.iter().find(|(v, _)| *v == s.variant_id)
+            && let Some((_, settings, _)) = applied.iter().find(|(v, _, _)| *v == s.variant_id)
         {
             s.settings = settings.clone();
             s.saved = settings.clone();
@@ -1323,10 +1756,12 @@ impl Core {
         }
         drop(state);
         after_develop_saved(inner, &ids);
-        Ok(ids.len())
+        Ok(ids)
     }
 
-    /// 仮想コピーを作る（LIB-13。元の variant の現在の現像設定をコピーする）。
+    /// 仮想コピーを作る（LIB-13。元の variant の現在の現像設定をコピーする）。作った仮想コピーは元の variant と
+    /// 同じスタック（LIB-12）に入る（genzo-catalog の `Catalog::create_virtual_copy`）ので、カタログの変更の
+    /// 知らせ（[`CatalogChange::VariantAdded`]）には、そのスタックの写真をすべて挙げる（印が変わるため）。
     pub fn create_virtual_copy(
         &self,
         variant_id: VariantId,
@@ -1336,14 +1771,26 @@ impl Core {
         inner.check_open()?;
         // 現像中の写真の保存待ちの変更を含めてコピーする。
         self.flush_develop()?;
-        let new_id = inner.with_catalog(|c| c.create_virtual_copy(variant_id, name))?;
+        let (new_id, stacked) = inner.with_catalog(|c| {
+            let id = c.create_virtual_copy(variant_id, name)?;
+            let members: Vec<VariantId> = c
+                .stacks_of_variants(&[id])?
+                .into_iter()
+                .flat_map(|s| s.members)
+                .collect();
+            Ok((id, members))
+        })?;
         // サムネイルは元の variant のものを写しておき、現像結果から作り直す。
         if let Ok(Some(t)) = inner.with_cache(|c| c.thumbs.get(variant_id)) {
             let _ = inner.with_cache(|c| c.thumbs.put(new_id, &t.cache_key, &t.jpeg));
         }
+        let mut changed = stacked;
+        if !changed.contains(&new_id) {
+            changed.push(new_id);
+        }
         inner.events.emit(Event::CatalogChanged {
             change: CatalogChange::VariantAdded,
-            variant_ids: vec![new_id],
+            variant_ids: changed,
             all: false,
         });
         crate::search::refresh(inner, &[]);
@@ -1425,6 +1872,95 @@ impl Core {
         Ok(PickedWhiteBalance {
             temperature_k: pick.temperature_k as f32,
             tint: pick.tint as f32,
+        })
+    }
+
+    /// 色域の範囲（DEV-19）のスポイト: プレビューの上の点の色（適用はしない。UI が見本の色として `set_settings` する）。
+    ///
+    /// - `x`・`y`・`uncropped`: [`Core::white_balance_at`] と同じ（プレビューの出力の画像の幅・高さに対する割合と、
+    ///   クリックした画像の [`FrameInfo::uncropped`]）。
+    /// - 今の設定（保存待ち・ドラッグ中の値を含む）の、ステージ 9 の出力（露光量の前。局所の値の面の基準の画像と同じ）の
+    ///   点のまわり（WB のスポイトと同じ割合の半径）の平均の OKLab と、点の G 座標を返す（genzo-pipeline の
+    ///   `Engine::mask_color_at`）。RAW 以外の写真でも使える。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。点が 0〜1 の外・暗すぎる点・
+    /// 画像の外の点は [`ApiError::InvalidArgument`]。
+    pub fn mask_color_at(
+        &self,
+        variant_id: VariantId,
+        x: f64,
+        y: f64,
+        uncropped: Option<bool>,
+    ) -> Result<PickedMaskColor, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let snap = session_snapshot(inner, variant_id)?;
+        let view = pick_view(uncropped, snap.frame_uncropped, snap.uncropped);
+        let pick = inner
+            .engine
+            .mask_color_at(
+                &snap.source,
+                &snap.settings,
+                (x, y),
+                inner.engine.config().preview_long_edge,
+                view,
+            )
+            .map_err(|e| match e {
+                genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
+                e => e.into(),
+            })?;
+        Ok(PickedMaskColor {
+            x: pick.x as f32,
+            y: pick.y as f32,
+            lab: pick.lab,
+        })
+    }
+
+    /// マスクの重ねて表示（O キー。DEV-18）: マスク `index`（今の設定の `masks` の番号）の重みの画像。
+    ///
+    /// 同じ表示（`uncropped`。省略時は最新に公開したプレビューの表示）のプレビューと同じ格子なので、UI はプレビューに
+    /// そのまま重ねられる（genzo-pipeline の `Engine::mask_overlay`。範囲マスクはステージ 9 の出力で決まる）。差分が 0・
+    /// 無効のマスクも求められる。処理バージョン 1 の写真でも求められる（描画には使われない）。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。番号が範囲の外なら
+    /// [`ApiError::InvalidArgument`]。
+    pub fn mask_overlay(
+        &self,
+        variant_id: VariantId,
+        index: usize,
+        uncropped: Option<bool>,
+    ) -> Result<MaskOverlayFrame, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let snap = session_snapshot(inner, variant_id)?;
+        let view = pick_view(uncropped, snap.frame_uncropped, snap.uncropped);
+        let o = inner
+            .engine
+            .mask_overlay(
+                &snap.source,
+                &snap.settings,
+                index,
+                inner.engine.config().preview_long_edge,
+                view,
+            )
+            .map_err(|e| match e {
+                genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
+                e => e.into(),
+            })?;
+        Ok(MaskOverlayFrame {
+            info: MaskOverlayInfo {
+                variant_id,
+                generation: snap.generation,
+                index,
+                width: o.width,
+                height: o.height,
+                uncropped: view,
+            },
+            weights: o
+                .weights
+                .iter()
+                .map(|w| (w.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect(),
         })
     }
 
@@ -1537,6 +2073,9 @@ mod tests {
                 height: 1,
                 decoder: None,
                 as_shot_white_balance: None,
+                lens_correction: None,
+                lens_correction_note: None,
+                camera: None,
             },
             render_deps: genzo_model::RenderDeps::default(),
             settings: DevelopSettings::default(),
@@ -1552,6 +2091,7 @@ mod tests {
             requested_quality: RenderQuality::Final,
             uncropped: false,
             frame: None,
+            before: None,
         };
         let (delay, max) = (Duration::from_secs(1), Duration::from_secs(3));
         let ms = Duration::from_millis;
@@ -1671,5 +2211,66 @@ mod tests {
         b.contrast = 5.0;
         assert!(describe_change(&a, &b).ends_with("ほか"));
         assert_eq!(describe_change(&a, &a), HISTORY_LABEL_GENERIC);
+        // ハイライト復元・ノイズ軽減（DEV-06・DEV-13）。
+        let mut c = a.clone();
+        c.highlight_recovery.method = genzo_model::HighlightMethod::Reconstruct;
+        assert_eq!(describe_change(&a, &c), "ハイライト復元");
+        let mut d = a.clone();
+        d.detail.noise_reduction.luminance = 25.0;
+        d.detail.noise_reduction.color = 40.0;
+        assert_eq!(
+            describe_change(&a, &d),
+            "輝度ノイズの軽減 25・カラーノイズの軽減 40"
+        );
+        let mut e = a.clone();
+        e.detail.noise_reduction.color_detail = 70.0;
+        assert_eq!(describe_change(&a, &e), "ノイズ軽減");
+        let mut f = a.clone();
+        f.detail.sharpening.amount = 30.0;
+        assert_eq!(describe_change(&a, &f), "シャープ 30");
+        // テクスチャ・明瞭度・かすみの除去（DEV-11）・シャープ（DEV-12）・効果（DEV-24）。
+        let mut p = a.clone();
+        p.presence.texture = 20.0;
+        p.presence.dehaze = -10.0;
+        assert_eq!(describe_change(&a, &p), "テクスチャ +20・かすみの除去 -10");
+        let mut q = a.clone();
+        q.detail.sharpening.masking = 40.0;
+        q.effects.vignette.amount = -30.0;
+        q.effects.grain.size = 60.0;
+        assert_eq!(describe_change(&a, &q), "シャープ・周辺光量 -30・粒子");
+        // カラーミキサー・白黒・カラーグレーディング（DEV-09・DEV-25・DEV-10）。
+        let mut g = a.clone();
+        g.color.black_white.enabled = true;
+        assert_eq!(describe_change(&a, &g), HISTORY_LABEL_BLACK_WHITE);
+        assert_eq!(describe_change(&g, &a), HISTORY_LABEL_COLOR);
+        let mut h = g.clone();
+        h.color.black_white.mix.blue = -30.0;
+        assert_eq!(describe_change(&g, &h), "白黒ミキサー");
+        let mut i = a.clone();
+        i.color.mixer.orange.luminance = 20.0;
+        i.color.grading.shadows.saturation = 15.0;
+        assert_eq!(
+            describe_change(&a, &i),
+            "カラーミキサー・カラーグレーディング"
+        );
+        // カメラプロファイル・ルック（DEV-17）。参照（render_deps）の変化は「処理バージョン」にしない。
+        let mut j = a.clone();
+        j.profile.camera = Some("Sony ILCE-7M4 標準".into());
+        j.profile.look = Some("film".into());
+        j.render_deps.profile = Some(genzo_model::DataRef::new(
+            "dcp:Sony ILCE-7M4 標準",
+            "ab".repeat(32),
+        ));
+        assert_eq!(
+            describe_change(&a, &j),
+            "プロファイル「Sony ILCE-7M4 標準」・ルック「film」"
+        );
+        let mut k = j.clone();
+        k.profile.look_amount = 40.0;
+        assert_eq!(describe_change(&j, &k), "ルックの適用量 40");
+        assert_eq!(describe_change(&j, &a), "プロファイル（標準）・ルックなし");
+        let mut l = a.clone();
+        l.render_deps.raw_decoder = "libraw-x".into();
+        assert_eq!(describe_change(&a, &l), "処理バージョン");
     }
 }

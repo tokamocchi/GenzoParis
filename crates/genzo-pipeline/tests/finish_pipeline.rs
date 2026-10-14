@@ -756,15 +756,25 @@ fn a1_preview_end_to_end() {
 fn unknown_process_versions_are_rejected() {
     let img = scene(8, 8);
     let s = DevelopSettings {
-        process_version: 2,
+        process_version: 3,
         ..Default::default()
     };
     let f = frames(&img, Orientation::Normal);
     assert!(matches!(
         finish_context(&s, f, SensorGrid::full_resolution(&f), RenderQuality::Final),
-        Err(PipelineError::UnsupportedProcessVersion { found: 2, .. })
+        Err(PipelineError::UnsupportedProcessVersion { found: 3, .. })
     ));
     assert!(GuideSpec::from_settings(&s).is_err());
+    // 版 1・2 は使える。
+    for v in [1, 2] {
+        let s = DevelopSettings {
+            process_version: v,
+            ..Default::default()
+        };
+        assert!(
+            finish_context(&s, f, SensorGrid::full_resolution(&f), RenderQuality::Final).is_ok()
+        );
+    }
 }
 
 #[test]

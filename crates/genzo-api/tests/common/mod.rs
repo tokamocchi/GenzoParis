@@ -117,6 +117,8 @@ impl Env {
         std::fs::create_dir_all(self.dir.path().join("shm")).unwrap();
         c.worker_timeouts = Some(JobTimeouts::uniform(TEST_JOB_TIMEOUT));
         c.worker_startup_timeout = Some(TEST_JOB_TIMEOUT);
+        // プリセット（DEV-29・EXP-02）は、利用者のアプリのデータのフォルダではなく一時フォルダに置く。
+        c.presets_dir = Some(self.dir.path().join("presets"));
         c
     }
 
@@ -316,6 +318,20 @@ pub fn make_dng(path: &Path, datetime_exif: &str) -> bool {
 /// [`make_dng`] と同じだが、埋め込みのプレビューを付けるかを選べる（付けなければ、埋め込みのサムネイルの
 /// ない RAW になる）。
 pub fn make_dng_with(path: &Path, datetime_exif: &str, with_preview: bool) -> bool {
+    make_dng_full(path, datetime_exif, with_preview, None)
+}
+
+/// 埋め込みのレンズ補正の情報（DEV-14）付きの合成 DNG（[`make_dng`] と同じ。プレビュー付き）。
+pub fn make_dng_with_lens(path: &Path, lens: genzo_raw::LensCorrectionData) -> bool {
+    make_dng_full(path, "2024:05:01 08:00:00", true, Some(lens))
+}
+
+fn make_dng_full(
+    path: &Path,
+    datetime_exif: &str,
+    with_preview: bool,
+    lens: Option<genzo_raw::LensCorrectionData>,
+) -> bool {
     if !genzo_raw::LIBRAW_ENABLED {
         eprintln!("LibRaw が無効な build のため、DNG の部分を飛ばす");
         return false;
@@ -357,6 +373,7 @@ pub fn make_dng_with(path: &Path, datetime_exif: &str, with_preview: bool) -> bo
             height: h,
             data: jpeg,
         }),
+        lens_correction: lens,
         ..Default::default()
     };
     genzo_raw::dng::write_file(path, &raw, &options).unwrap();

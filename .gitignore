@@ -23,5 +23,8 @@ bench-results/
 /ui/node_modules/
 /ui/dist/
 
+# E2E の出力（e2e/run.sh の既定の出力のフォルダ。画面とログ）
+/e2e/out/
+
 # Claude Code の作業用の worktree（並列の作業で一時的に作る）
 /.claude/worktrees/

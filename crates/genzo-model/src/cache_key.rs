@@ -93,7 +93,8 @@ const DOMAIN: &[u8] = b"genzo.cache_key.v1\0";
 
 impl CacheKey {
     /// 現像設定からキーを作る。`develop_hash` は `format.kind` の段階までのハッシュ、
-    /// `process_version` と `render_deps_hash` は丸めた設定から取る。
+    /// `process_version` と `render_deps_hash` は丸めた設定から取る（`render_deps_hash` は段階までのもの。ルックは
+    /// 段階 C だけ。[`RenderDeps::hash_for_phase`](crate::RenderDeps::hash_for_phase)）。
     pub fn for_settings(
         file_id: FileId,
         file_revision: u32,
@@ -107,7 +108,7 @@ impl CacheKey {
             file_id,
             file_revision,
             process_version: normalized.process_version,
-            render_deps_hash: normalized.render_deps.hash(),
+            render_deps_hash: normalized.render_deps.hash_for_phase(format.kind.phase()),
             develop_hash: normalized.hash_for_phase(format.kind.phase()),
             size,
             quality,
@@ -199,7 +200,7 @@ mod tests {
         k.file_revision = 2;
         variants.push(k);
         let mut k = base;
-        k.process_version = 2;
+        k.process_version = base.process_version + 1;
         variants.push(k);
         let mut k = base;
         k.render_deps_hash[0] ^= 1;

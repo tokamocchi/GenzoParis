@@ -837,6 +837,7 @@ fn raw_decode_hitting_the_memory_limit_is_an_ordinary_error() {
             model: Some("Synth-1".to_owned()),
             ..Default::default()
         },
+        lens_correction: None,
     };
     let dng = root.path().join("big.dng");
     genzo_raw::dng::write_file(&dng, &raw, &Default::default()).unwrap();

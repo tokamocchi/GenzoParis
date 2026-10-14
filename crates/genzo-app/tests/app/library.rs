@@ -275,3 +275,661 @@ pub fn previews_are_not_cached_long_when_settings_go_back() {
     ok(&state, json!({"type": "close_develop"}));
     state.close_catalog(false).unwrap();
 }
+
+/// (b) キーワード・コレクション・スマートコレクション（LIB-09〜11）の JSON のコマンドが、アプリの
+/// `core_execute` の経路（`execute_command`）で通り、カタログの変更のイベントが送り先に届く。
+pub fn keywords_and_collections_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("整理");
+    write_image(&photos.join("A.jpg"), (48, 32), 1);
+    write_image(&photos.join("B.jpg"), (48, 32), 2);
+    state.open_catalog(&env.catalog("整理.db"), true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let a = by_name(&items, "A.jpg").variant_id.get();
+    let b = by_name(&items, "B.jpg").variant_id.get();
+    let mark = env.events.mark();
+    let r = ok(
+        &state,
+        json!({"type": "add_keywords", "variant_ids": [a, b], "paths": [["場所", "京都"]]}),
+    );
+    assert!(matches!(r, Response::Updated { count: 2 }), "{r:?}");
+    env.events.wait_for(mark, "キーワードの変更", |e| {
+        matches!(
+            e,
+            Event::CatalogChanged {
+                change: CatalogChange::Keywords,
+                ..
+            }
+        )
+    });
+    let Response::Keywords { keywords } = ok(&state, json!({"type": "keyword_tree"})) else {
+        panic!("キーワードの一覧ではない");
+    };
+    let place = keywords
+        .iter()
+        .find(|k| k.name == "場所")
+        .unwrap()
+        .keyword_id;
+    let Response::CollectionCreated { collection_id } = ok(
+        &state,
+        json!({"type": "create_collection", "name": "お気に入り", "kind": "manual", "variant_ids": [a]}),
+    ) else {
+        panic!("コレクションを作った応答ではない");
+    };
+    let rule = json!({"version": 1, "match": "all", "rules": [
+        {"type": "keyword", "op": "has", "keyword_id": place},
+        {"type": "collection", "op": "not_in", "collection_id": collection_id}
+    ]});
+    let Response::CollectionCreated {
+        collection_id: smart,
+    } = ok(
+        &state,
+        json!({"type": "create_collection", "name": "まだ選んでいない京都", "kind": "smart", "rule": rule}),
+    )
+    else {
+        panic!("スマートコレクションを作った応答ではない");
+    };
+    // スマートコレクションで検索すると、B だけ（A はコレクションに入っている）。
+    let Response::Search(s) = ok(
+        &state,
+        json!({"type": "search", "filter": {"collection_id": smart}}),
+    ) else {
+        panic!("検索の応答ではない");
+    };
+    assert_eq!(s.count, 1);
+    let Response::Count { count } = ok(
+        &state,
+        json!({"type": "count", "filter": {"keywords": [place]}}),
+    ) else {
+        panic!("数の応答ではない");
+    };
+    assert_eq!(count, 2);
+    let Response::Collections { collections } =
+        ok(&state, json!({"type": "collections", "with_counts": true}))
+    else {
+        panic!("コレクションの一覧ではない");
+    };
+    assert_eq!(collections.len(), 2);
+    assert!(
+        collections.iter().all(|c| c.count == Some(1)),
+        "{collections:?}"
+    );
+    // 名前の重なりは conflict。
+    let err = crate::support::exec(
+        &state,
+        json!({"type": "create_collection", "name": "ＯＫＩＮＩＩＲＩ", "kind": "set"}),
+    );
+    assert!(err.is_ok(), "別の名前なら作れる");
+    crate::support::assert_kind(
+        crate::support::exec(
+            &state,
+            json!({"type": "create_collection", "name": "お気に入り", "kind": "set"}),
+        ),
+        genzo_api::ErrorKind::Conflict,
+    );
+    state.close_catalog(false).unwrap();
+}
+
+/// (b) スタック（LIB-12）・仮想コピー（LIB-13）の JSON のコマンドが、アプリの `core_execute` の経路
+/// （`execute_command`）で通り、検索の応答・イベントに折りたたんだスタックの隠した写真の数が載る。
+pub fn stacks_and_virtual_copies_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("連写");
+    for (i, n) in ["A.jpg", "B.jpg", "C.jpg"].iter().enumerate() {
+        write_image(&photos.join(n), (48, 32), i as u8);
+    }
+    state.open_catalog(&env.catalog("連写.db"), true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let id = |n: &str| by_name(&items, n).variant_id.get();
+    let (a, b, c) = (id("A.jpg"), id("B.jpg"), id("C.jpg"));
+    let mark = env.events.mark();
+    let Response::Stack(stack) = ok(
+        &state,
+        json!({"type": "create_stack", "variant_ids": [a, b], "top": b}),
+    ) else {
+        panic!("スタックの応答ではない");
+    };
+    assert_eq!(stack.top_variant_id, VariantId::new(b));
+    assert!(stack.collapsed);
+    env.events.wait_for(mark, "スタックの変更", |e| {
+        matches!(
+            e,
+            Event::CatalogChanged {
+                change: CatalogChange::Stacks,
+                ..
+            }
+        )
+    });
+    // 折りたたんだスタックは 1 枚に数え、隠した写真の数を返す。
+    let Response::Search(s) = ok(&state, json!({"type": "search"})) else {
+        panic!("検索の応答ではない");
+    };
+    assert_eq!((s.count, s.hidden), (2, 1));
+    let Response::Range(r) = ok(
+        &state,
+        json!({"type": "range", "generation": s.generation, "start": 0, "len": 10}),
+    ) else {
+        panic!("範囲の応答ではない");
+    };
+    let top = r
+        .items
+        .iter()
+        .find(|i| i.variant_id == VariantId::new(b))
+        .unwrap();
+    let badge = top.stack.unwrap();
+    assert_eq!((badge.position, badge.count, badge.collapsed), (1, 2, true));
+    // 展開を保存すると、作り直しの世代でスタックの写真が並ぶ。
+    let mark = env.events.mark();
+    let r = ok(
+        &state,
+        json!({"type": "set_stacks_collapsed", "stack_ids": [stack.stack_id.get()], "collapsed": false}),
+    );
+    assert!(matches!(r, Response::Updated { count: 1 }), "{r:?}");
+    env.events.wait_for(mark, "作り直した検索結果", |e| {
+        matches!(
+            e,
+            Event::SearchUpdated {
+                count: 3,
+                hidden: 0,
+                ..
+            }
+        )
+    });
+    // 仮想コピー: 作る・名前の変更・マスターにする。
+    let Response::VariantCreated { variant_id: copy } = ok(
+        &state,
+        json!({"type": "create_virtual_copy", "variant_id": c, "name": null}),
+    ) else {
+        panic!("仮想コピーの応答ではない");
+    };
+    ok(
+        &state,
+        json!({"type": "rename_virtual_copy", "variant_id": copy.get(), "name": "白黒"}),
+    );
+    let r = ok(
+        &state,
+        json!({"type": "set_as_master", "variant_id": copy.get()}),
+    );
+    assert_eq!(
+        r,
+        Response::MasterChanged {
+            previous_master: VariantId::new(c)
+        }
+    );
+    let Response::Details(d) = ok(&state, json!({"type": "variant_details", "variant_id": c}))
+    else {
+        panic!("詳細の応答ではない");
+    };
+    assert!(!d.summary.is_master);
+    assert_eq!(d.summary.variant_name.as_deref(), Some("白黒"));
+    assert_eq!(d.variants.len(), 2);
+    assert_eq!(d.stack.as_ref().map(|s| s.members.len()), Some(2));
+    crate::support::assert_kind(
+        crate::support::exec(&state, json!({"type": "create_stack", "variant_ids": [a]})),
+        genzo_api::ErrorKind::InvalidInput,
+    );
+    state.close_catalog(false).unwrap();
+}
+
+/// (b) ファイルの内容による同一性（ORG-03・IMP-04）と RAW と JPEG の扱い（IMP-06）: アプリはカタログを開いて
+/// いる間、内容のハッシュをバックグラウンドで計算する（取り込みの後）。取り込みの設定（重複と思われるもの・
+/// RAW と JPEG）の JSON のコマンドが `core_execute` の経路で通り、状況・重複の組を読める。
+pub fn content_identity_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let first = env.photos("一 回目");
+    let second = env.photos("二 回目");
+    write_image(&first.join("海.jpg"), (48, 32), 1);
+    write_image(&first.join("山.jpg"), (48, 32), 2);
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::copy(first.join("海.jpg"), second.join("海 の コピー.jpg")).unwrap();
+    state.open_catalog(&env.catalog("同一性.db"), true).unwrap();
+    let mark = env.events.mark();
+    let report = import(&state, &first);
+    assert_eq!(report.added, 2, "{report:?}");
+    // 取り込みの後に、内容のハッシュの計算がバックグラウンドで動いて終わる。
+    env.events
+        .wait_for(mark, "内容のハッシュの計算の終わり", |e| {
+            matches!(
+                e,
+                Event::JobFinished {
+                    kind: JobKind::HashFiles,
+                    state: JobState::Succeeded,
+                    ..
+                }
+            )
+        });
+    let Response::ContentHashStatus(st) = ok(&state, json!({"type": "content_hash_status"})) else {
+        panic!("状況の応答ではない");
+    };
+    assert_eq!((st.files, st.hashed, st.pending), (2, 2, 0), "{st:?}");
+    // 既定では、同じ内容のファイルを取り込まない。
+    let r = import(&state, &second);
+    assert_eq!((r.added, r.duplicates.len()), (0, 1), "{r:?}");
+    assert!(r.duplicates[0].skipped);
+    // 取り込む設定を指定すると、別の写真として登録する。
+    let Response::JobStarted { job_id } = ok(
+        &state,
+        json!({"type": "import_folder", "path": second, "recursive": true,
+               "options": {"skip_duplicates": false, "separate_raw_jpeg": true}}),
+    ) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    let Some(genzo_api::JobResult::Import(r)) = info.result else {
+        panic!("{info:?}");
+    };
+    assert_eq!(r.added, 1, "{r:?}");
+    assert!(!r.skip_duplicates && r.separate_raw_jpeg);
+    let Response::DuplicateGroups(g) = ok(&state, json!({"type": "duplicate_groups", "limit": 10}))
+    else {
+        panic!("重複の組の応答ではない");
+    };
+    assert_eq!((g.total, g.groups[0].files.len()), (1, 2));
+    // 設定（取り込みの既定・バックグラウンドの計算）は get_settings・update_settings で読み書きできる。
+    let Response::CoreSettings(s) = ok(
+        &state,
+        json!({"type": "update_settings", "update": {"import_skip_duplicates": false, "hash_network_volumes": true}}),
+    ) else {
+        panic!("設定の応答ではない");
+    };
+    assert!(!s.import_skip_duplicates && s.hash_network_volumes && s.hash_in_background);
+    state.close_catalog(false).unwrap();
+}
+
+/// コピー取り込み（IMP-02・IMP-03・IMP-05）を画面と同じ JSON のコマンドで行う: 名前の例、日付別のフォルダへの
+/// コピーとリネーム、まとめて付けるキーワード・作成者。取り込みのダイアログの設定はアプリの設定に保存され、
+/// 開き直しても残る（カタログによらない）。
+pub fn copy_import_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let card = env.photos("SD カード");
+    write_image(
+        &card.join("DCIM").join("100MSDCF").join("DSC 1.jpg"),
+        (48, 32),
+        1,
+    );
+    write_image(
+        &card.join("DCIM").join("100MSDCF").join("DSC 2.jpg"),
+        (48, 32),
+        2,
+    );
+    let dest = env.photos("写真 ライブラリ");
+    std::fs::create_dir_all(&dest).unwrap();
+    state.open_catalog(&env.catalog("コピー.db"), true).unwrap();
+    // 名前の例（カタログ・ファイルは使わない）。
+    let Response::NamePreview(p) = ok(
+        &state,
+        json!({"type": "import_name_preview", "copy": {"destination": dest,
+               "folder_rule": "year_date", "rename": {"template": "{date}-{seq}"}}}),
+    ) else {
+        panic!("名前の例の応答ではない");
+    };
+    assert_eq!(
+        p.examples[0].destination,
+        "2026/2026-10-13/20261013-0001.ARW"
+    );
+    // コピー取り込み（撮影日時のない画像は、ファイルの更新日時で日付を決める）。
+    let Response::JobStarted { job_id } = ok(
+        &state,
+        json!({"type": "import_folder", "path": card, "recursive": true,
+               "options": {"copy": {"destination": dest, "folder_rule": "single",
+                                    "rename": {"template": "旅行-{seq}", "sequence_digits": 2}},
+                           "metadata": {"keywords": [["旅行", "京都"]], "fields": {"creator": "岡本"}}}}),
+    ) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    let Some(genzo_api::JobResult::Import(r)) = info.result else {
+        panic!("{info:?}");
+    };
+    assert_eq!((r.added, r.tagged), (2, 2), "{r:?}");
+    let copy = r.copy.as_deref().unwrap();
+    assert_eq!(copy.copied.len(), 2);
+    assert_eq!(copy.dated_by_file_time, 2);
+    let mut names: Vec<String> = std::fs::read_dir(&dest)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["旅行-01.jpg", "旅行-02.jpg"]);
+    let items = all_items(&state);
+    let Response::Details(d) = ok(
+        &state,
+        json!({"type": "variant_details", "variant_id": by_name(&items, "旅行-01.jpg").variant_id}),
+    ) else {
+        panic!("詳細の応答ではない");
+    };
+    assert_eq!(d.metadata.creator.as_deref(), Some("岡本"));
+    // 取り込みのダイアログの設定をアプリに保存する。
+    let mut prefs = genzo_app::settings::ImportPreferences {
+        copy: true,
+        destination: Some(dest.clone()),
+        folder_rule: genzo_api::FolderRule::Single,
+        rename: true,
+        ..Default::default()
+    };
+    prefs.rename_rule.template = "旅行-{seq}".to_owned();
+    let saved = state.update_settings(|s| s.import = prefs.clone()).unwrap();
+    assert_eq!(saved.import, prefs);
+    state.close_catalog(false).unwrap();
+    let again = env.state();
+    assert_eq!(again.settings().import, prefs);
+}
+
+/// 撮影日時の一括修正（LIB-16）とタイムライン（ORG-01）を画面と同じ JSON のコマンドで行う: 機材の一覧・見込み・
+/// 修正・履歴・取り消し・タイムライン。撮影日時のない画像（image crate で書いたもの）なので、修正では変わらない
+/// （撮影日時の分からない写真は変えない）。
+pub fn capture_times_and_timeline_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("時刻");
+    write_image(&photos.join("A.jpg"), (48, 32), 1);
+    write_image(&photos.join("B.png"), (48, 32), 2);
+    state.open_catalog(&env.catalog("時刻.db"), true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let a = by_name(&items, "A.jpg").variant_id;
+    let Response::CaptureDevices { devices } = ok(&state, json!({"type": "capture_devices"}))
+    else {
+        panic!("機材の一覧の応答ではない");
+    };
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].key.camera, None);
+    assert_eq!((devices[0].assets, devices[0].with_time), (2, 0));
+    let Response::CaptureDevice(key) = ok(
+        &state,
+        json!({"type": "capture_device_of", "variant_id": a}),
+    ) else {
+        panic!("写真の機材の応答ではない");
+    };
+    assert_eq!(key, devices[0].key);
+    let target =
+        json!({"kind": "devices", "devices": [{"camera": null, "serial": null, "kind": "photo"}]});
+    let Response::CaptureTimePlan(p) = ok(
+        &state,
+        json!({"type": "plan_capture_time_edit", "target": target, "edit": {"kind": "shift", "seconds": 60}}),
+    ) else {
+        panic!("見込みの応答ではない");
+    };
+    assert_eq!((p.assets, p.changed, p.without_time), (2, 0, 2));
+    let Response::CaptureTimePlan(r) = ok(
+        &state,
+        json!({"type": "edit_capture_times", "target": {"kind": "variants", "variant_ids": [a]},
+               "edit": {"kind": "set_zone", "offset_minutes": 120, "mode": "keep_instant"}}),
+    ) else {
+        panic!("修正の応答ではない");
+    };
+    assert_eq!((r.changed, r.edit_id), (0, None));
+    let Response::CaptureTimeEdits { edits } = ok(&state, json!({"type": "capture_time_edits"}))
+    else {
+        panic!("履歴の応答ではない");
+    };
+    assert!(edits.is_empty());
+    let Response::CaptureTimeUndone { undone } =
+        ok(&state, json!({"type": "undo_capture_time_edit"}))
+    else {
+        panic!("取り消しの応答ではない");
+    };
+    assert!(undone.is_none());
+    // タイムライン: 撮影日時のない 2 枚の 1 つのまとまり。
+    let Response::Search(s) = ok(
+        &state,
+        json!({"type": "search", "filter": {}, "sort": {"key": "capture_time", "direction": "ascending"}}),
+    ) else {
+        panic!("検索の応答ではない");
+    };
+    let Response::Timeline(t) = ok(
+        &state,
+        json!({"type": "timeline", "generation": s.generation, "gap_seconds": 3600}),
+    ) else {
+        panic!("タイムラインの応答ではない");
+    };
+    assert_eq!(t.groups.len(), 1);
+    assert_eq!((t.groups[0].count, t.days, t.without_time), (2, 0, 2));
+    assert_eq!(t.groups[0].day, None);
+}
+
+/// (v1 の files) アプリの中でのファイル操作・ボリューム・見つからない写真（FILE-02〜FILE-04）を、画面と同じ
+/// `core_execute` の JSON のコマンドで使う: ボリュームの一覧・フォルダの作成・写真の移動の予定と実行（ジョブ）・
+/// 名前の変更・見つからない写真の確認と、絞り込み・再リンクの候補と結び付け直し・フォルダの名前の変更。
+pub fn files_volumes_and_relink_through_the_app() {
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("ファイル 操作");
+    write_image(&photos.join("A.jpg"), (48, 32), 1);
+    write_image(&photos.join("B.png"), (48, 32), 2);
+    state
+        .open_catalog(&env.catalog("ファイル.db"), true)
+        .unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let a = by_name(&items, "A.jpg").variant_id.get();
+    let b = by_name(&items, "B.png").variant_id.get();
+    let Response::Volumes { volumes } = ok(&state, json!({"type": "volumes", "refresh": true}))
+    else {
+        panic!("ボリュームの一覧の応答ではない");
+    };
+    assert!(!volumes.is_empty());
+    assert!(volumes.iter().all(|v| v.online));
+    let Response::Folders { folders } = ok(&state, json!({"type": "folders"})) else {
+        panic!("フォルダの一覧の応答ではない");
+    };
+    let top = folders
+        .iter()
+        .find(|f| f.path.as_deref() == Some(photos.as_path()))
+        .unwrap();
+    assert!(top.online && !top.missing);
+    // フォルダを作って、写真を移す。
+    let Response::Folder(made) = ok(
+        &state,
+        json!({"type": "create_folder", "parent_id": top.folder_id, "name": "選別 済み"}),
+    ) else {
+        panic!("フォルダの応答ではない");
+    };
+    assert!(photos.join("選別 済み").is_dir());
+    let Response::MovePlan(plan) = ok(
+        &state,
+        json!({"type": "plan_move_files", "variant_ids": [a], "dest_folder": made.folder_id}),
+    ) else {
+        panic!("移動の予定の応答ではない");
+    };
+    assert_eq!(plan.movable, 1);
+    let Response::JobStarted { job_id } = ok(
+        &state,
+        json!({"type": "move_files", "variant_ids": [a], "dest_folder": made.folder_id}),
+    ) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    assert_eq!(info.state, JobState::Succeeded, "{info:?}");
+    assert!(photos.join("選別 済み").join("A.jpg").exists());
+    // 名前の変更（1 枚の写真の名前）。
+    let Response::FilesMoved(r) = ok(
+        &state,
+        json!({"type": "rename_files", "variant_ids": [a], "spec": {"kind": "name", "name": "京都 の 朝"}}),
+    ) else {
+        panic!("名前の変更の応答ではない");
+    };
+    assert_eq!(r.photos, 1);
+    assert!(photos.join("選別 済み").join("京都 の 朝.jpg").exists());
+    // アプリの外で B を移すと、確かめたときに見つからない印が付き、絞り込みで探せる。
+    let outside = env.root().join("外");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::rename(photos.join("B.png"), outside.join("B.png")).unwrap();
+    let Response::JobStarted { job_id } = ok(&state, json!({"type": "check_missing"})) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    assert_eq!(info.state, JobState::Succeeded, "{info:?}");
+    let Response::Count { count } = ok(
+        &state,
+        json!({"type": "count", "filter": {"file_statuses": ["missing"]}}),
+    ) else {
+        panic!("件数の応答ではない");
+    };
+    assert_eq!(count, 1);
+    let Response::JobStarted { job_id } = ok(
+        &state,
+        json!({"type": "find_relink_candidates", "variant_ids": [b], "search_dir": outside}),
+    ) else {
+        panic!("ジョブの応答ではない");
+    };
+    let info = crate::support::wait_job(&state, job_id);
+    let Some(genzo_api::JobResult::RelinkCandidates(found)) = info.result else {
+        panic!("候補の結果ではない: {info:?}");
+    };
+    let target = &found.targets[0];
+    assert_eq!(target.candidates.len(), 1);
+    let Response::Relinked(r) = ok(
+        &state,
+        json!({"type": "relink_files", "links": [{"file_id": target.file_id, "path": target.candidates[0].path}]}),
+    ) else {
+        panic!("再リンクの応答ではない");
+    };
+    assert_eq!(r.linked.len(), 1);
+    let Response::Count { count } = ok(
+        &state,
+        json!({"type": "count", "filter": {"file_statuses": ["missing"]}}),
+    ) else {
+        panic!("件数の応答ではない");
+    };
+    assert_eq!(count, 0);
+    // フォルダの名前の変更。
+    let Response::Folder(renamed) = ok(
+        &state,
+        json!({"type": "rename_folder", "folder_id": made.folder_id, "name": "選別"}),
+    ) else {
+        panic!("フォルダの応答ではない");
+    };
+    assert_eq!(renamed.folder_id, made.folder_id);
+    assert!(photos.join("選別").join("京都 の 朝.jpg").exists());
+    // 写真の登録されていないフォルダは、カタログから除ける（ディスクのフォルダはそのまま）。
+    let Response::Folder(empty) = ok(
+        &state,
+        json!({"type": "create_folder", "parent_id": top.folder_id, "name": "空"}),
+    ) else {
+        panic!("フォルダの応答ではない");
+    };
+    let Response::Updated { count } = ok(
+        &state,
+        json!({"type": "remove_folder", "folder_id": empty.folder_id}),
+    ) else {
+        panic!("件数の応答ではない");
+    };
+    assert_eq!(count, 1);
+    assert!(photos.join("空").is_dir());
+}
+
+/// 動画の再生（VID-04）: `genzo://video/{id}` は、カタログに登録された動画の元のファイルを Range の要求に応えて
+/// 返す（写真・ない ID は 404。パスは受け取らない）。再生用のファイルは作るまで 404 で、作った後は H.264 の MP4。
+/// ffmpeg がなければ飛ばす。
+pub fn videos_are_streamed_only_from_the_catalog() {
+    let tools = genzo_app::tools::locate(None);
+    let Some(ffmpeg) = tools.ffmpeg.clone().filter(|_| tools.ffprobe.is_some()) else {
+        eprintln!("ffmpeg / ffprobe がないため、動画の部分を飛ばす");
+        return;
+    };
+    let env = Env::new();
+    let state = env.state();
+    let photos = env.photos("動画 の フォルダ");
+    std::fs::create_dir_all(&photos).unwrap();
+    let video_path = photos.join("旅 の 動画.mov");
+    let made = std::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
+        .args(["-f", "lavfi", "-i", "testsrc=duration=1:size=96x64:rate=10"])
+        .args(["-pix_fmt", "yuv420p", "-c:v", "mpeg4"])
+        .arg(&video_path)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !made {
+        eprintln!("テスト用の動画を作れないため、飛ばす");
+        return;
+    }
+    write_image(&photos.join("写真.jpg"), (64, 48), 3);
+    let original = std::fs::read(&video_path).unwrap();
+    state.open_catalog(&env.catalog("動画.db"), true).unwrap();
+    import(&state, &photos);
+    let items = all_items(&state);
+    let video = by_name(&items, "旅 の 動画.mov").variant_id.get();
+    let photo = by_name(&items, "写真.jpg").variant_id.get();
+
+    // 範囲の要求に 206 で、元のファイルの内容を返す。
+    let route = |path: &str| protocol::parse(path).unwrap();
+    let r = protocol::reply_media(
+        &state,
+        route(&format!("/video/{video}")),
+        Some("bytes=0-1"),
+        false,
+    );
+    assert_eq!(r.status, 206, "{:?}", r.headers);
+    assert_eq!(r.content_type, "video/quicktime");
+    assert_eq!(r.body, &original[..2]);
+    assert_eq!(
+        r.header("Content-Range"),
+        Some(format!("bytes 0-1/{}", original.len()).as_str())
+    );
+    // 範囲がなければ（小さいファイルなので）全体を 200 で。
+    let r = protocol::reply(&state, &format!("/video/{video}"), None);
+    assert_eq!((r.status, r.body.as_slice()), (200, original.as_slice()));
+    // 写真・ない ID・形の違う URI は返さない。
+    assert_eq!(
+        protocol::reply(&state, &format!("/video/{photo}"), None).status,
+        404
+    );
+    assert_eq!(protocol::reply(&state, "/video/999999", None).status, 404);
+    assert_eq!(
+        protocol::reply(&state, "/video/..%2F..%2Fetc%2Fpasswd", None).status,
+        400
+    );
+    // 再生用のファイルは、作るまで 404。
+    assert_eq!(
+        protocol::reply(&state, &format!("/video-proxy/{video}"), None).status,
+        404
+    );
+
+    // 再生の情報（core_execute の JSON）。
+    let info = match ok(
+        &state,
+        json!({"type": "video_playback", "variant_id": video}),
+    ) {
+        Response::VideoPlayback(p) => p,
+        other => panic!("{other:?}"),
+    };
+    assert!(info.available, "{info:?}");
+    assert_eq!(info.content_type, "video/quicktime");
+    if let Some(reason) = &info.proxy_unavailable {
+        eprintln!("再生用のファイルを作れないため、ここまで: {reason}");
+        return;
+    }
+    let job = match ok(
+        &state,
+        json!({"type": "create_video_proxy", "variant_id": video}),
+    ) {
+        Response::JobStarted { job_id } => job_id,
+        other => panic!("{other:?}"),
+    };
+    let done = crate::support::wait_job(&state, job);
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    let r = protocol::reply_media(
+        &state,
+        route(&format!("/video-proxy/{video}")),
+        Some("bytes=0-"),
+        false,
+    );
+    assert_eq!((r.status, r.content_type), (206, "video/mp4"));
+    // MP4 の先頭の箱（ftyp）。
+    assert_eq!(&r.body[4..8], b"ftyp");
+    assert_eq!(std::fs::read(&video_path).unwrap(), original);
+    state.close_catalog(false).unwrap();
+    // 閉じた後は 503。
+    assert_eq!(
+        protocol::reply(&state, &format!("/video/{video}"), None).status,
+        503
+    );
+}

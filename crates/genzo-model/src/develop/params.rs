@@ -60,6 +60,10 @@ pub mod ranges {
     pub const ANGLE_DEG: ValueRange = ValueRange::new(-45.0, 45.0);
     /// レンズ補正の適用量（%。100 でプロファイルどおり）。
     pub const LENS_SCALE: ValueRange = ValueRange::new(0.0, 200.0);
+    /// レンズ補正の手動のスライダー（歪曲・周辺減光の量・色収差。-100〜+100）。
+    pub const LENS_MANUAL: ValueRange = ValueRange::new(-100.0, 100.0);
+    /// 手動の周辺減光の中点（0〜100）。
+    pub const LENS_MIDPOINT: ValueRange = ValueRange::new(0.0, 100.0);
     /// シャープの適用量。
     pub const SHARPEN_AMOUNT: ValueRange = ValueRange::new(0.0, 150.0);
     /// シャープの半径。
@@ -70,6 +74,14 @@ pub mod ranges {
     pub const MASK_RADIUS: ValueRange = ValueRange::new(0.0, 2.0);
     /// 円形マスクの回転（度）。
     pub const MASK_ANGLE_DEG: ValueRange = ValueRange::new(-180.0, 180.0);
+    /// ブラシの大きさ（半径。G 座標。外接矩形の長辺を 1 とする。DEV-18）。
+    pub const BRUSH_SIZE: ValueRange = ValueRange::new(0.0005, 0.5);
+    /// 色域の範囲の見本の色の OKLab の L（露光量の前のシーンリニアの値から求めるので 1 を超えうる。DEV-19）。
+    pub const MASK_LAB_L: ValueRange = ValueRange::new(0.0, 10.0);
+    /// 色域の範囲の見本の色の OKLab の a・b。
+    pub const MASK_LAB_AB: ValueRange = ValueRange::new(-4.0, 4.0);
+    /// カラーグレーディングの色相（度。0〜360。0 と 360 は同じ色相）。
+    pub const HUE_DEG: ValueRange = ValueRange::new(0.0, 360.0);
 }
 
 /// トーンカーブ 1 本あたりの点の数の上限。
@@ -78,8 +90,6 @@ pub const MAX_CURVE_POINTS: usize = 64;
 pub const MIN_CROP_SIZE: f32 = 0.001;
 /// 縦横比の各項の上限。
 pub const MAX_ASPECT_TERM: u32 = 65_535;
-/// ローカル補正（マスク）の数の上限。
-pub const MAX_MASKS: usize = 100;
 
 /// ホワイトバランス（DEV-03。04 の 2.1 節のステージ 3）。
 ///
@@ -261,9 +271,12 @@ impl ToneCurve {
     }
 }
 
-/// 彩度・自然な彩度（DEV-08。04 の 2.1 節のステージ 13）。各 -100〜+100。
+/// 色（04 の 2.1 節のステージ 13）: 彩度・自然な彩度（DEV-08。各 -100〜+100）、HSL / カラーミキサー（DEV-09）、
+/// カラーグレーディング（DEV-10）、白黒（DEV-25）。
 ///
-/// HSL・カラーグレーディング（v1）は、必要になったときに項目を追加する。
+/// カラーミキサー・カラーグレーディング・白黒は v1 の機能で、処理バージョン 2 から適用する（版 1 の写真に値があれば
+/// 無視して知らせる。genzo-pipeline の `finish::unimplemented_settings`）。式は genzo-pipeline の `finish::color`。
+/// 白黒のときは、彩度・自然な彩度・カラーミキサーを使わない（値は保つ。白黒ミキサー [`BlackWhite::mix`] を使う）。
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorParams {
@@ -271,6 +284,261 @@ pub struct ColorParams {
     pub saturation: f32,
     /// 自然な彩度。
     pub vibrance: f32,
+    /// HSL / カラーミキサー（色相の帯ごとの色相・彩度・輝度。DEV-09。v1）。
+    pub mixer: ColorMixer,
+    /// カラーグレーディング（シャドウ・中間調・ハイライト・全体の色付け。DEV-10。v1）。
+    pub grading: ColorGrading,
+    /// 白黒（DEV-25。v1）。
+    pub black_white: BlackWhite,
+}
+
+impl ColorParams {
+    /// 結果に影響しない設定か（彩度・自然な彩度が 0 で、カラーミキサー・カラーグレーディングが何もせず、白黒でない）。
+    pub fn is_neutral(&self) -> bool {
+        self.saturation == 0.0
+            && self.vibrance == 0.0
+            && self.mixer.is_neutral()
+            && self.grading.is_neutral()
+            && !self.black_white.enabled
+    }
+}
+
+/// カラーミキサー・白黒ミキサーの色相の帯（DEV-09・DEV-25）。
+///
+/// 帯の中心は、sRGB の色相環（HSV の色相）の 0°・30°・60°・120°・180°・240°・270°・300° の鮮やかな色の、OKLCh の
+/// 色相（genzo-pipeline の `finish::color::HUE_BAND_CENTERS_DEG`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HueBand {
+    /// レッド。
+    Red,
+    /// オレンジ。
+    Orange,
+    /// イエロー。
+    Yellow,
+    /// グリーン。
+    Green,
+    /// アクア。
+    Aqua,
+    /// ブルー。
+    Blue,
+    /// パープル。
+    Purple,
+    /// マゼンタ。
+    Magenta,
+}
+
+impl HueBand {
+    /// すべての帯（色相の順）。
+    pub const ALL: [HueBand; 8] = [
+        HueBand::Red,
+        HueBand::Orange,
+        HueBand::Yellow,
+        HueBand::Green,
+        HueBand::Aqua,
+        HueBand::Blue,
+        HueBand::Purple,
+        HueBand::Magenta,
+    ];
+
+    /// JSON の名前（`"red"` など）。
+    pub const fn key(self) -> &'static str {
+        match self {
+            HueBand::Red => "red",
+            HueBand::Orange => "orange",
+            HueBand::Yellow => "yellow",
+            HueBand::Green => "green",
+            HueBand::Aqua => "aqua",
+            HueBand::Blue => "blue",
+            HueBand::Purple => "purple",
+            HueBand::Magenta => "magenta",
+        }
+    }
+
+    /// 名前（`"red"` など）から引く。
+    pub fn from_key(key: &str) -> Option<HueBand> {
+        HueBand::ALL.into_iter().find(|b| b.key() == key)
+    }
+}
+
+/// 色相の帯ごとの値（8 個。JSON では帯の名前のオブジェクト `{"red": ..., "orange": ..., ...}`）。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HueBands<T> {
+    /// レッド。
+    pub red: T,
+    /// オレンジ。
+    pub orange: T,
+    /// イエロー。
+    pub yellow: T,
+    /// グリーン。
+    pub green: T,
+    /// アクア。
+    pub aqua: T,
+    /// ブルー。
+    pub blue: T,
+    /// パープル。
+    pub purple: T,
+    /// マゼンタ。
+    pub magenta: T,
+}
+
+impl<T: Copy> HueBands<T> {
+    /// 帯 `band` の値。
+    pub fn get(&self, band: HueBand) -> T {
+        self.values()[band as usize]
+    }
+
+    /// 帯の順（[`HueBand::ALL`]）の値。
+    pub fn values(&self) -> [T; 8] {
+        [
+            self.red,
+            self.orange,
+            self.yellow,
+            self.green,
+            self.aqua,
+            self.blue,
+            self.purple,
+            self.magenta,
+        ]
+    }
+
+    /// 帯の順の値から作る。
+    pub fn from_values(v: [T; 8]) -> Self {
+        let [red, orange, yellow, green, aqua, blue, purple, magenta] = v;
+        Self {
+            red,
+            orange,
+            yellow,
+            green,
+            aqua,
+            blue,
+            purple,
+            magenta,
+        }
+    }
+}
+
+impl<T> HueBands<T> {
+    /// 帯 `band` の値への可変参照。
+    pub fn get_mut(&mut self, band: HueBand) -> &mut T {
+        match band {
+            HueBand::Red => &mut self.red,
+            HueBand::Orange => &mut self.orange,
+            HueBand::Yellow => &mut self.yellow,
+            HueBand::Green => &mut self.green,
+            HueBand::Aqua => &mut self.aqua,
+            HueBand::Blue => &mut self.blue,
+            HueBand::Purple => &mut self.purple,
+            HueBand::Magenta => &mut self.magenta,
+        }
+    }
+}
+
+/// カラーミキサーの 1 つの帯の調整（各 -100〜+100）。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HslAdjustment {
+    /// 色相（正で色相環の正の向き（例: レッドをオレンジへ）に回す）。
+    pub hue: f32,
+    /// 彩度（-100 で無彩色、+100 で 2 倍）。
+    pub saturation: f32,
+    /// 輝度（正で明るく。その色の画素の露光量を変えるのと同じ）。
+    pub luminance: f32,
+}
+
+impl HslAdjustment {
+    /// 何もしないか。
+    pub fn is_zero(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// HSL / カラーミキサー（DEV-09。v1）。8 つの色相の帯ごとの色相・彩度・輝度。
+pub type ColorMixer = HueBands<HslAdjustment>;
+
+impl ColorMixer {
+    /// 何もしないか（すべての帯が 0）。
+    pub fn is_neutral(&self) -> bool {
+        self.values().iter().all(HslAdjustment::is_zero)
+    }
+}
+
+/// カラーグレーディングの 1 つの範囲（色相環）の色付け（DEV-10）。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GradingWheel {
+    /// 色付けの色相（度。0〜360。sRGB の色相環（HSV の色相）で、0 がレッド・120 がグリーン・240 がブルー）。
+    pub hue: f32,
+    /// 色付けの強さ（0〜100。0 なら色相は効かない）。
+    pub saturation: f32,
+    /// 輝度（-100〜+100。正でその範囲を明るく）。
+    pub luminance: f32,
+}
+
+impl GradingWheel {
+    /// 何もしないか（強さと輝度が 0。色相は強さが 0 なら効かない）。
+    pub fn is_neutral(&self) -> bool {
+        self.saturation == 0.0 && self.luminance == 0.0
+    }
+}
+
+/// カラーグレーディング（DEV-10。v1）。シャドウ・中間調・ハイライト・全体の色付けと、範囲の重なり（ブレンド）・
+/// 境目（バランス）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorGrading {
+    /// シャドウ。
+    pub shadows: GradingWheel,
+    /// 中間調。
+    pub midtones: GradingWheel,
+    /// ハイライト。
+    pub highlights: GradingWheel,
+    /// 全体（すべての画素に同じように効く）。
+    pub global: GradingWheel,
+    /// ブレンド（0〜100。既定 50）。大きいほど範囲どうしが広く重なる。
+    pub blending: f32,
+    /// バランス（-100〜+100。既定 0）。正でハイライトの範囲を広げ（境目を暗い側へ）、負でシャドウの範囲を広げる。
+    pub balance: f32,
+}
+
+impl ColorGrading {
+    /// ブレンドの既定値。
+    pub const DEFAULT_BLENDING: f32 = 50.0;
+
+    /// 何もしないか（4 つの範囲がどれも何もしない。ブレンド・バランスは範囲の重みを変えるだけなので見ない）。
+    pub fn is_neutral(&self) -> bool {
+        self.wheels().iter().all(GradingWheel::is_neutral)
+    }
+
+    /// シャドウ・中間調・ハイライト・全体の順の色相環。
+    pub fn wheels(&self) -> [GradingWheel; 4] {
+        [self.shadows, self.midtones, self.highlights, self.global]
+    }
+}
+
+impl Default for ColorGrading {
+    fn default() -> Self {
+        Self {
+            shadows: GradingWheel::default(),
+            midtones: GradingWheel::default(),
+            highlights: GradingWheel::default(),
+            global: GradingWheel::default(),
+            blending: Self::DEFAULT_BLENDING,
+            balance: 0.0,
+        }
+    }
+}
+
+/// 白黒（DEV-25。v1）。既定はカラー（白黒にしない）。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlackWhite {
+    /// 白黒にする（画面の V キー）。
+    pub enabled: bool,
+    /// 白黒ミキサー（色相の帯ごとの明るさ。各 -100〜+100。正でその色の画素を明るい灰色にする）。すべて 0 なら、
+    /// 知覚的な明るさ（OKLab の L）を保った灰色にする。
+    pub mix: HueBands<f32>,
 }
 
 /// 切り抜きの範囲（DEV-15）。
@@ -376,11 +644,15 @@ pub struct Geometry {
     pub aspect: Option<AspectRatio>,
 }
 
-/// レンズ補正（DEV-14。v1）。既定は無効。
+/// レンズ補正（DEV-14。v1。処理バージョン 2 から適用する）。既定は無効。
 ///
-/// 補正のデータは [`RenderDeps::lens_profile`] で参照する。
-/// 周辺減光と倍率色収差はステージ 7（段階 A1）、歪曲補正はステージ 9（ジオメトリ。段階 C で、
-/// ガイドの段階 B にも影響する）で適用する（04 の 2.1 節・2.7 節）。
+/// - **プロファイルによる補正**: RAW に埋め込まれた補正の情報（Sony の ARW のタグ・DNG の opcode。
+///   genzo-raw の `lens`）を使う。どの情報を使ったかは [`RenderDeps::lens_profile`] に記録する。
+///   lensfun などの外部のデータは使わない（利用者の決定）。
+/// - **手動の補正**: 補正の情報がない写真（と、プロファイルの補正に重ねる微調整）のためのスライダー。
+///
+/// 周辺減光と倍率色収差はステージ 7（段階 A1。カメラ RGB）、歪曲補正はステージ 9（ジオメトリ。段階 C で、
+/// ガイドの段階 B にも影響する）で適用する（04 の 2.1 節・2.7 節）。式は genzo-pipeline の `lens`。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LensCorrection {
@@ -390,14 +662,35 @@ pub struct LensCorrection {
     pub distortion_scale: f32,
     /// 周辺減光補正の適用量（%。0〜200、100 でプロファイルどおり）。
     pub vignetting_scale: f32,
-    /// 倍率色収差を除去する。
+    /// 倍率色収差を除去する（プロファイルの色収差の情報を使う）。
     pub remove_chromatic_aberration: bool,
+    /// 手動の歪曲補正（-100〜+100）。正で樽型の歪曲（線が外へふくらむ）を、負で糸巻き型の歪曲を補正する。
+    pub distortion: f32,
+    /// 手動の周辺減光の補正量（-100〜+100）。正で四隅を明るくし、負で暗くする。
+    pub vignetting_amount: f32,
+    /// 手動の周辺減光の中点（0〜100。既定 50）。小さいほど中心に近い位置から補正する。
+    pub vignetting_midpoint: f32,
+    /// 手動の倍率色収差の補正の赤 / シアン（-100〜+100）。正で赤のチャンネルの像を大きくする。
+    pub ca_red_cyan: f32,
+    /// 手動の倍率色収差の補正の青 / 黄（-100〜+100）。正で青のチャンネルの像を大きくする。
+    pub ca_blue_yellow: f32,
 }
 
 impl LensCorrection {
-    /// 補正を何もしない設定か。
+    /// 手動の周辺減光の中点の既定値。
+    pub const DEFAULT_VIGNETTING_MIDPOINT: f32 = 50.0;
+
+    /// 補正を何もしない設定か（結果が補正なしと同じかどうかは、写真の補正の情報にもよる）。
     pub fn is_disabled(&self) -> bool {
-        !self.profile_enabled && !self.remove_chromatic_aberration
+        !self.profile_enabled && !self.remove_chromatic_aberration && !self.has_manual()
+    }
+
+    /// 手動の補正のどれかが 0 でないか（中点は量が 0 なら効かないので見ない）。
+    pub fn has_manual(&self) -> bool {
+        self.distortion != 0.0
+            || self.vignetting_amount != 0.0
+            || self.ca_red_cyan != 0.0
+            || self.ca_blue_yellow != 0.0
     }
 }
 
@@ -408,43 +701,324 @@ impl Default for LensCorrection {
             distortion_scale: 100.0,
             vignetting_scale: 100.0,
             remove_chromatic_aberration: false,
+            distortion: 0.0,
+            vignetting_amount: 0.0,
+            vignetting_midpoint: Self::DEFAULT_VIGNETTING_MIDPOINT,
+            ca_red_cyan: 0.0,
+            ca_blue_yellow: 0.0,
         }
     }
 }
 
-/// シャープ（DEV-12。v1。04 の 2.1 節のステージ 14）。既定は適用量 0（何もしない）。
+/// シャープ（DEV-12。v1。04 の 2.1 節のステージ 14。処理バージョン 2 から適用する）。既定は適用量 0（何もしない）。
+///
+/// 式は genzo-pipeline の `finish::sharpen`（アンシャープマスク。輝度だけにかける）。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Sharpening {
     /// 適用量（0〜150）。
     pub amount: f32,
-    /// 半径（0.5〜3.0）。解像度に依存させない定義（04 の 1.1 節の 5.）への換算は実装時に決める。
+    /// 半径（0.5〜3.0）。**写真のフル解像度の画素**（G の画素。既定の切り抜きの範囲の画素）で表し、パイプラインは
+    /// G の長辺に対する割合に直して、プレビューでは縮小率で換算する（04 の 1.1 節の 5.・2.7 節。決定事項ログ No.138）。
     pub radius: f32,
-    /// ディテール（0〜100）。
+    /// ディテール（0〜100。既定 25）。小さいほど細かい模様（小さな明暗の差）を強めず、輪郭のにじみ（ハロー）を抑える。
     pub detail: f32,
-    /// マスク（0〜100）。
+    /// マスク（0〜100。既定 0）。大きいほど、輪郭のない平らな部分（空・肌）にかけない。
     pub masking: f32,
+}
+
+impl Sharpening {
+    /// 半径の既定値（画素）。
+    pub const DEFAULT_RADIUS: f32 = 1.0;
+    /// ディテールの既定値。
+    pub const DEFAULT_DETAIL: f32 = 25.0;
+
+    /// 何もしない（適用量が 0）か。
+    pub fn is_disabled(&self) -> bool {
+        self.amount == 0.0
+    }
 }
 
 impl Default for Sharpening {
     fn default() -> Self {
         Self {
             amount: 0.0,
-            radius: 1.0,
-            detail: 0.0,
+            radius: Self::DEFAULT_RADIUS,
+            detail: Self::DEFAULT_DETAIL,
             masking: 0.0,
         }
     }
 }
 
-/// ノイズ軽減（DEV-13。v1。04 の 2.1 節のステージ 6）。既定は 0（何もしない）。
+/// テクスチャ・明瞭度・かすみの除去（DEV-11。v1。04 の 2.1 節のステージ 12。処理バージョン 2 から適用する）。
+/// 各 −100〜+100、既定 0（何もしない）。
+///
+/// 正の値で強め、負の値で弱める（テクスチャ・明瞭度の負は細部をなめらかにし、かすみの除去の負はかすみを足す）。
+/// 式は genzo-pipeline の `finish::presence`（明瞭度とかすみの除去は段階 B のガイドの値を使う）。
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PresenceParams {
+    /// テクスチャ（中くらいの細部の明暗）。
+    pub texture: f32,
+    /// 明瞭度（大きめの範囲の明暗の差）。
+    pub clarity: f32,
+    /// かすみの除去。
+    pub dehaze: f32,
+}
+
+impl PresenceParams {
+    /// 3 つとも 0（何もしない）か。
+    pub fn is_neutral(&self) -> bool {
+        self.texture == 0.0 && self.clarity == 0.0 && self.dehaze == 0.0
+    }
+}
+
+/// 切り抜き後の周辺光量補正（効果。DEV-24。v1。04 の 2.1 節のステージ 16。処理バージョン 2 から適用する）。
+///
+/// 切り抜いた後の画像の四隅を暗く（量が負）・明るく（量が正）する作品づくりの効果（レンズの周辺減光の補正
+/// （`lens.vignetting_amount`）とは別）。既定は量 0（何もしない）。式は genzo-pipeline の `finish::effects`。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PostCropVignette {
+    /// 量（−100〜+100）。負で暗く、正で明るくする。
+    pub amount: f32,
+    /// 中点（0〜100。既定 50）。小さいほど中心の近くから効く。
+    pub midpoint: f32,
+    /// 丸み（−100〜+100。既定 0）。0 で画像の縦横比に合わせた楕円、+100 で円、負で角の丸い四角に近づく。
+    pub roundness: f32,
+    /// ぼかし（0〜100。既定 50）。境目の幅。
+    pub feather: f32,
+    /// ハイライトの保護（0〜100。既定 0）。暗くするとき、明るい部分の効きを弱める。
+    pub highlights: f32,
+}
+
+impl PostCropVignette {
+    /// 中点の既定値。
+    pub const DEFAULT_MIDPOINT: f32 = 50.0;
+    /// ぼかしの既定値。
+    pub const DEFAULT_FEATHER: f32 = 50.0;
+
+    /// 何もしない（量が 0）か。
+    pub fn is_neutral(&self) -> bool {
+        self.amount == 0.0
+    }
+}
+
+impl Default for PostCropVignette {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            midpoint: Self::DEFAULT_MIDPOINT,
+            roundness: 0.0,
+            feather: Self::DEFAULT_FEATHER,
+            highlights: 0.0,
+        }
+    }
+}
+
+/// 粒子（効果。DEV-24。v1。04 の 2.1 節のステージ 16。処理バージョン 2 から適用する）。既定は量 0（何もしない）。
+///
+/// 模様は写真と画像の上の位置（G の座標）だけで決まり、プレビューと書き出しで同じになる（縮小のプレビューは、
+/// フル解像度の模様を画素の範囲で平均したもの）。式は genzo-pipeline の `finish::effects`。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Grain {
+    /// 量（0〜100）。
+    pub amount: f32,
+    /// 大きさ（0〜100。既定 25）。
+    pub size: f32,
+    /// 粗さ（0〜100。既定 50）。大きいほど、粒の大きさが不ぞろいになる（大きな粒が混ざる）。
+    pub roughness: f32,
+}
+
+impl Grain {
+    /// 大きさの既定値。
+    pub const DEFAULT_SIZE: f32 = 25.0;
+    /// 粗さの既定値。
+    pub const DEFAULT_ROUGHNESS: f32 = 50.0;
+
+    /// 何もしない（量が 0）か。
+    pub fn is_neutral(&self) -> bool {
+        self.amount == 0.0
+    }
+}
+
+impl Default for Grain {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            size: Self::DEFAULT_SIZE,
+            roughness: Self::DEFAULT_ROUGHNESS,
+        }
+    }
+}
+
+/// 効果（切り抜き後の周辺光量補正・粒子。DEV-24。v1）。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EffectsParams {
+    /// 切り抜き後の周辺光量補正。
+    pub vignette: PostCropVignette,
+    /// 粒子。
+    pub grain: Grain,
+}
+
+impl EffectsParams {
+    /// 何もしない設定か。
+    pub fn is_neutral(&self) -> bool {
+        self.vignette.is_neutral() && self.grain.is_neutral()
+    }
+}
+
+/// カメラプロファイル・ルックの ID の文字数の上限（[`is_valid_profile_id`]）。
+pub const MAX_PROFILE_ID_CHARS: usize = 200;
+
+/// カメラプロファイル・ルックの ID として使える文字列か（1〜[`MAX_PROFILE_ID_CHARS`] 文字、制御文字を含まない、
+/// 前後に空白がない）。
+pub fn is_valid_profile_id(id: &str) -> bool {
+    let n = id.chars().count();
+    (1..=MAX_PROFILE_ID_CHARS).contains(&n) && !id.chars().any(char::is_control) && id.trim() == id
+}
+
+/// カメラプロファイル・ルック（DEV-17。v1。04 の 2.1 節のステージ 8 と、段階 C のルックテーブル・ルック。処理
+/// バージョン 2 から適用する）。
+///
+/// プロファイル（DCP）とルック（3D LUT。.cube）は、利用者が取り込んだもの（genzo-api の `profiles`。カタログの
+/// データのフォルダの `profiles`）を ID で指す。使ったファイルの内容は [`RenderDeps::profile`]・
+/// [`RenderDeps::look`] に記録し、変わったら警告する（レビュー R-08）。既定は標準（RAW のカメラ行列。今までどおり）
+/// でルックなし（何もしない）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileSettings {
+    /// カメラプロファイル（DCP）の ID。`None` は標準（RAW のカメラ行列）。RAW 以外の写真には使わない。
+    pub camera: Option<String>,
+    /// ルック（3D LUT。.cube）の ID。`None` はなし。
+    pub look: Option<String>,
+    /// ルックの適用量（%。0〜100。既定 100）。
+    pub look_amount: f32,
+}
+
+impl Default for ProfileSettings {
+    fn default() -> Self {
+        Self {
+            camera: None,
+            look: None,
+            look_amount: Self::DEFAULT_LOOK_AMOUNT,
+        }
+    }
+}
+
+impl ProfileSettings {
+    /// ルックの適用量の既定値。
+    pub const DEFAULT_LOOK_AMOUNT: f32 = 100.0;
+
+    /// ルックが効くか（ルックがあり、適用量が 0 でない）。
+    pub fn look_is_active(&self) -> bool {
+        self.look.is_some() && self.look_amount > 0.0
+    }
+
+    /// 何もしない（標準のプロファイルで、ルックが効かない）か。
+    pub fn is_neutral(&self) -> bool {
+        self.camera.is_none() && !self.look_is_active()
+    }
+}
+
+/// ハイライト復元の方式（DEV-06。v1。04 の 2.1 節のステージ 4。処理バージョン 2 から適用する）。
+///
+/// JSON では `"clip"`・`"neutral"`・`"reconstruct"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HighlightMethod {
+    /// 白で切りそろえる（復元しない）。飽和した画素の近傍を、すべてのチャンネルが飽和する値で切りそろえる
+    /// （処理バージョン 1 と同じ。genzo-pipeline の `sensor::wb` の飽和の切りそろえ）。
+    #[default]
+    Clip,
+    /// 明るさだけを復元する（無彩色）。飽和したチャンネルを、飽和していないチャンネルの値と飽和の値の大きい方に
+    /// する（色は推定しない）。
+    Neutral,
+    /// 色を保って復元する。飽和したチャンネルを、近傍の飽和していない画素の色の比から再構成する。
+    Reconstruct,
+}
+
+impl HighlightMethod {
+    /// すべての方式。
+    pub const ALL: [HighlightMethod; 3] = [
+        HighlightMethod::Clip,
+        HighlightMethod::Neutral,
+        HighlightMethod::Reconstruct,
+    ];
+}
+
+/// ハイライト復元（DEV-06。v1。04 の 2.1 節のステージ 4。処理バージョン 2 から適用する）。
+///
+/// 既定は「白で切りそろえる」（復元しない。処理バージョン 1 と同じ結果。決定事項ログ No.126）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HighlightRecovery {
+    /// 方式。
+    pub method: HighlightMethod,
+    /// 量（0〜100。既定 100）。0 で切りそろえ（[`HighlightMethod::Clip`]）と同じ結果、100 で方式どおりに
+    /// 復元する。[`HighlightMethod::Clip`] では使わない。
+    pub amount: f32,
+}
+
+impl HighlightRecovery {
+    /// 量の既定値。
+    pub const DEFAULT_AMOUNT: f32 = 100.0;
+
+    /// 復元しない（切りそろえと同じ結果になる）設定か。
+    pub fn is_disabled(&self) -> bool {
+        self.method == HighlightMethod::Clip || self.amount == 0.0
+    }
+}
+
+impl Default for HighlightRecovery {
+    fn default() -> Self {
+        Self {
+            method: HighlightMethod::Clip,
+            amount: Self::DEFAULT_AMOUNT,
+        }
+    }
+}
+
+/// ノイズ軽減（DEV-13。v1。04 の 2.1 節のステージ 6。処理バージョン 2 から適用する）。既定は量が 0（何もしない）。
+///
+/// 「ディテール」「コントラスト」は量が 0 なら効かない。式は genzo-pipeline の `sensor::denoise`。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NoiseReduction {
     /// 輝度ノイズの軽減（0〜100）。
     pub luminance: f32,
+    /// 輝度ノイズの軽減のディテール（0〜100。既定 50）。大きいほど細かい模様を残す（細かい段の軽減を弱める）。
+    pub luminance_detail: f32,
+    /// 輝度ノイズの軽減のコントラスト（0〜100。既定 0）。大きいほど大きな模様の明暗を残す（粗い段の軽減を弱める）。
+    pub luminance_contrast: f32,
     /// 色ノイズの軽減（0〜100）。
     pub color: f32,
+    /// 色ノイズの軽減のディテール（0〜100。既定 50）。大きいほど細かい色の境界を残す（細かい段の軽減を弱める）。
+    pub color_detail: f32,
+}
+
+impl NoiseReduction {
+    /// ディテールの既定値（輝度・色）。
+    pub const DEFAULT_DETAIL: f32 = 50.0;
+
+    /// 量がどちらも 0（何もしない）か。
+    pub fn is_disabled(&self) -> bool {
+        self.luminance == 0.0 && self.color == 0.0
+    }
+}
+
+impl Default for NoiseReduction {
+    fn default() -> Self {
+        Self {
+            luminance: 0.0,
+            luminance_detail: Self::DEFAULT_DETAIL,
+            luminance_contrast: 0.0,
+            color: 0.0,
+            color_detail: Self::DEFAULT_DETAIL,
+        }
+    }
 }
 
 /// ディテール（シャープ・ノイズ軽減。v1）。
@@ -462,99 +1036,8 @@ pub struct DetailParams {
 impl DetailParams {
     /// 何もしない設定か。
     pub fn is_neutral(&self) -> bool {
-        self.sharpening.amount == 0.0
-            && self.noise_reduction.luminance == 0.0
-            && self.noise_reduction.color == 0.0
+        self.sharpening.is_disabled() && self.noise_reduction.is_disabled()
     }
-}
-
-/// マスクの形（DEV-18。v1。仮の定義で、v1 の実装時に見直す）。
-///
-/// 位置と半径は 04 の 2.7 節の G 座標（外接矩形の長辺を 1 とする座標）で表す。
-/// [`CropRect`]（各軸の割合）とは異なり縦横の尺度が同じなので、`rx == ry` の円形マスクは
-/// 画像の縦横比によらず円になる。切り抜きを変えてもマスクの位置は変わらない。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaskShape {
-    /// 線形グラデーション。(x0, y0) で効果 100%、(x1, y1) で 0%。
-    Linear {
-        /// 始点の x。
-        x0: f32,
-        /// 始点の y。
-        y0: f32,
-        /// 終点の x。
-        x1: f32,
-        /// 終点の y。
-        y1: f32,
-    },
-    /// 円形グラデーション。
-    Radial {
-        /// 中心の x。
-        cx: f32,
-        /// 中心の y。
-        cy: f32,
-        /// 横方向の半径。
-        rx: f32,
-        /// 縦方向の半径。
-        ry: f32,
-        /// 回転（度）。
-        angle_deg: f32,
-        /// ぼかし（0〜100）。
-        feather: f32,
-        /// 内側と外側を反転する。
-        invert: bool,
-    },
-}
-
-/// ローカル補正の調整値の差分（ステージ 10〜14 にマスクの値で重み付けして適用する。04 の 2.1 節）。
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LocalDelta {
-    /// 露光量（EV）。
-    pub exposure_ev: f32,
-    /// コントラスト。
-    pub contrast: f32,
-    /// ハイライト。
-    pub highlights: f32,
-    /// シャドウ。
-    pub shadows: f32,
-    /// 白レベル。
-    pub whites: f32,
-    /// 黒レベル。
-    pub blacks: f32,
-    /// 彩度。
-    pub saturation: f32,
-}
-
-impl LocalDelta {
-    /// すべての差分が 0 か。
-    pub fn is_zero(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
-/// ローカル補正（マスク）1 つ分（DEV-18。v1。仮の定義で、v1 の実装時に見直す）。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct LocalAdjustment {
-    /// 有効か。
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// マスクの形。
-    pub mask: MaskShape,
-    /// 調整値の差分。
-    #[serde(default)]
-    pub delta: LocalDelta,
-}
-
-impl LocalAdjustment {
-    /// 結果に影響しない（無効、または差分がすべて 0）か。
-    pub fn is_neutral(&self) -> bool {
-        !self.enabled || self.delta.is_zero()
-    }
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// 結果に影響する外部データの参照（04 の 2.5 節。レビュー R-08）。
@@ -583,10 +1066,20 @@ impl DataRef {
 pub struct RenderDeps {
     /// カメラ行列・プロファイル。RAW 以外の入力では空のままでよい。
     pub camera_profile: DataRef,
-    /// レンズ補正のデータ。
+    /// レンズ補正のデータ（埋め込みの補正の情報。ID は出どころと機種・レンズ、SHA-256 は情報の内容。
+    /// genzo-api の `deps`）。補正の情報のない写真・RAW 以外は `None`。
     pub lens_profile: Option<DataRef>,
     /// RAW デコーダとその設定（例: `"libraw-0.21.2"`）。
     pub raw_decoder: String,
+    /// カメラプロファイル（DCP。DEV-17）。ID は `dcp:<プロファイルの ID>`、SHA-256 はファイルの内容。標準（RAW の
+    /// カメラ行列。そのときの行列は [`camera_profile`](Self::camera_profile)）・RAW 以外・見つからないときは `None`。
+    /// ステージ 3 の色温度 ⇔ WB の係数の変換は、プロファイルを使っても `camera_profile` の行列のまま。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<DataRef>,
+    /// ルック（3D LUT。DEV-17）。ID は `cube:<ルックの ID>`、SHA-256 はファイルの内容。使わない・見つからないときは
+    /// `None`。段階 C だけに影響する（[`RenderDeps::hash_for_phase`]）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub look: Option<DataRef>,
 }
 
 #[cfg(test)]
@@ -707,14 +1200,5 @@ mod tests {
             serde_json::to_string(&AspectRatio::Ratio { w: 3, h: 2 }).unwrap(),
             r#"{"ratio":{"w":3,"h":2}}"#
         );
-    }
-
-    #[test]
-    fn local_adjustment_defaults() {
-        let adj: LocalAdjustment =
-            serde_json::from_str(r#"{"mask":{"linear":{"x0":0,"y0":0,"x1":0,"y1":1}}}"#).unwrap();
-        assert!(adj.enabled);
-        assert!(adj.delta.is_zero());
-        assert!(adj.is_neutral());
     }
 }

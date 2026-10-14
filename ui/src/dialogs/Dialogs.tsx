@@ -5,17 +5,45 @@ import { useEffect, useState } from "react";
 
 import * as appApi from "../api/app";
 import { actions, appStore, useApp } from "../state/app";
+import { CaptureTimeDialog } from "./CaptureTimeDialog";
 import { CloseFailedDialog } from "./CloseFailedDialog";
+import { CrashReportsDialog } from "./CrashReportsDialog";
 import { DeleteDialog } from "./DeleteDialog";
 import "./dialogs.css";
 import { ExportDialog } from "./ExportDialog";
+import {
+  FolderNameDialog,
+  MoveFilesDialog,
+  MoveFolderDialog,
+  RelinkDialog,
+  RelocateFolderDialog,
+  RemoveFolderDialog,
+  RenameFilesDialog,
+} from "./FileDialogs";
 import { ImportDialog } from "./ImportDialog";
 import { offerImportFolders } from "./importDrop";
 import { splitDroppedPaths } from "./importLogic";
 import { listenDragDrop } from "./native";
-import { PasteSettingsDialog } from "./PasteSettingsDialog";
+import {
+  AddToCollectionDialog,
+  CollectionDeleteDialog,
+  CollectionDialog,
+  KeywordDeleteDialog,
+  KeywordDialog,
+} from "./OrganizeDialogs";
+import { PasteSettingsDialog, UpgradeProcessDialog } from "./PasteSettingsDialog";
+import {
+  ApplyPresetDialog,
+  DevelopPresetDialog,
+  PresetDeleteDialog,
+  PresetNameDialog,
+  SnapshotNameDialog,
+} from "./PresetDialogs";
+import { ProfileBrowserDialog } from "./ProfileBrowserDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
+import { SmartCollectionDialog } from "./SmartCollectionDialog";
+import { AutoStackDialog, VirtualCopyNameDialog } from "./StackDialogs";
 
 /** ドロップを受け付けるか（カタログを開いていて、ほかのダイアログを開いていない）。 */
 function canAcceptDrop(): boolean {
@@ -93,6 +121,9 @@ export function Dialogs() {
     case "paste_settings":
       body = <PasteSettingsDialog targets={dialog.targets} />;
       break;
+    case "upgrade_process":
+      body = <UpgradeProcessDialog targets={dialog.targets} />;
+      break;
     case "settings":
       body = <SettingsDialog tab={dialog.tab} />;
       break;
@@ -102,6 +133,99 @@ export function Dialogs() {
     case "close_failed":
       // 理由が変わったら出し直す（再試行の結果など）。
       body = <CloseFailedDialog key={JSON.stringify(dialog.failure)} failure={dialog.failure} quitting={dialog.quitting} />;
+      break;
+    case "crash_reports":
+      body = <CrashReportsDialog reports={dialog.reports} />;
+      break;
+    case "keyword":
+      body = <KeywordDialog mode={dialog.mode} keywordId={dialog.keywordId} parentId={dialog.parentId} />;
+      break;
+    case "keyword_delete":
+      body = <KeywordDeleteDialog keywordId={dialog.keywordId} />;
+      break;
+    case "collection":
+      body = (
+        <CollectionDialog
+          mode={dialog.mode}
+          collectionKind={dialog.collectionKind}
+          collectionId={dialog.collectionId}
+          parentId={dialog.parentId}
+          variantIds={dialog.variantIds}
+        />
+      );
+      break;
+    case "collection_delete":
+      body = <CollectionDeleteDialog collectionId={dialog.collectionId} />;
+      break;
+    case "smart_collection":
+      body = <SmartCollectionDialog collectionId={dialog.collectionId} parentId={dialog.parentId} />;
+      break;
+    case "add_to_collection":
+      body = <AddToCollectionDialog variantIds={dialog.variantIds} />;
+      break;
+    case "virtual_copy_name":
+      body = <VirtualCopyNameDialog variantId={dialog.variantId} />;
+      break;
+    case "auto_stack":
+      body = <AutoStackDialog />;
+      break;
+    case "capture_time":
+      body = <CaptureTimeDialog variantIds={dialog.variantIds} current={dialog.current} />;
+      break;
+    case "move_files":
+      body = <MoveFilesDialog variantIds={dialog.variantIds} destFolder={dialog.destFolder} />;
+      break;
+    case "rename_files":
+      body = <RenameFilesDialog variantIds={dialog.variantIds} />;
+      break;
+    case "folder_name":
+      body = <FolderNameDialog mode={dialog.mode} folderId={dialog.folderId} currentName={dialog.currentName} />;
+      break;
+    case "move_folder":
+      body = <MoveFolderDialog folderId={dialog.folderId} />;
+      break;
+    case "relink":
+      body = <RelinkDialog variantIds={dialog.variantIds} />;
+      break;
+    case "relocate_folder":
+      body = <RelocateFolderDialog folderId={dialog.folderId} />;
+      break;
+    case "remove_folder":
+      body = <RemoveFolderDialog folderId={dialog.folderId} />;
+      break;
+    case "profiles":
+      body = <ProfileBrowserDialog />;
+      break;
+    case "snapshot_name":
+      body = (
+        <SnapshotNameDialog
+          mode={dialog.mode}
+          variantId={dialog.variantId}
+          snapshotId={dialog.snapshotId}
+          entryId={dialog.entryId}
+          currentName={dialog.currentName}
+        />
+      );
+      break;
+    case "develop_preset":
+      body = <DevelopPresetDialog mode={dialog.mode} variantId={dialog.variantId} presetId={dialog.presetId} />;
+      break;
+    case "apply_preset":
+      body = <ApplyPresetDialog targets={dialog.targets} presetId={dialog.presetId} />;
+      break;
+    case "preset_name":
+      body = (
+        <PresetNameDialog
+          mode={dialog.mode}
+          presetKind={dialog.presetKind}
+          presetId={dialog.presetId}
+          folder={dialog.folder}
+          currentName={dialog.currentName}
+        />
+      );
+      break;
+    case "preset_delete":
+      body = <PresetDeleteDialog presetKind={dialog.presetKind} presetId={dialog.presetId} name={dialog.name} />;
       break;
     case undefined:
       break;

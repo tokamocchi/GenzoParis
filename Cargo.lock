@@ -1334,6 +1334,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "font-types"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8eb065f3251655b3c90e22e5e363f310fc5332fb3402e37bbc94752283248f6"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1581,6 +1590,7 @@ dependencies = [
  "genzo-worker",
  "image",
  "kamadak-exif",
+ "libc",
  "parking_lot",
  "same-file",
  "serde",
@@ -1589,6 +1599,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "tracing-subscriber",
  "trash",
  "windows-sys 0.61.2",
 ]
@@ -1615,7 +1626,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1643,6 +1653,7 @@ dependencies = [
  "ctrlc",
  "genzo-api",
  "genzo-catalog",
+ "genzo-color",
  "genzo-gpu",
  "genzo-jobs",
  "genzo-media",
@@ -1712,9 +1723,11 @@ dependencies = [
  "same-file",
  "serde",
  "serde_json",
+ "skrifa",
  "tempfile",
  "thiserror 2.0.21",
  "tiff",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1787,12 +1800,14 @@ dependencies = [
  "genzo-media",
  "genzo-model",
  "genzo-raw",
+ "image",
  "libc",
  "memmap2",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -3729,6 +3744,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "read-fonts"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5a0cf4bb6cbce4c29756270d189a5e400ac05e91192161d83a0bcb6e68492e8"
+dependencies = [
+ "bytemuck",
+ "font-types",
+ "once_cell",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4249,6 +4275,16 @@ name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
+
+[[package]]
+name = "skrifa"
+version = "0.47.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "526e654b303ff4ad73a5a40b25de2b3ce3d039c5e3b6da5f89ae6e57004cb40f"
+dependencies = [
+ "bytemuck",
+ "read-fonts",
+]
 
 [[package]]
 name = "slab"

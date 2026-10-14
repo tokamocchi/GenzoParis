@@ -140,3 +140,134 @@ fn half_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dst_f32[o + 1u] = rgb.y;
     dst_f32[o + 2u] = rgb.z;
 }
+
+// ---------------------------------------------------------------------------
+// ステージ 4: ハイライト復元（sensor::highlight::recover_highlights。処理バージョン 2）。入力は WB を掛けた CFA
+// （切りそろえていない B1 の値。binding 0 を f32 として読む）と飽和の印（aux_words）、出力は CFA と飽和の印（aux_out。
+// そのまま写す）。飽和した画素ごとに、自分の 2 × 2 の組の推定（そのチャンネル）を CPU 版と同じ式・順序で計算する。
+// ---------------------------------------------------------------------------
+
+struct HrQuad {
+    v: vec3<f32>,
+    clipped: vec3<u32>,
+}
+
+fn hr_comp(v: vec3<f32>, c: u32) -> f32 {
+    return select(select(v.z, v.y, c == 1u), v.x, c == 0u);
+}
+
+fn hr_flag(v: vec3<u32>, c: u32) -> u32 {
+    return select(select(v.z, v.y, c == 1u), v.x, c == 0u);
+}
+
+// 全体での組の座標 (qx, qy)（S の (2qx, 2qy) から始まる 2 × 2）の値（R・G（2 つの平均）・B）と飽和。入力のタイルが
+// 含むこと。
+fn hr_quad(qx: i32, qy: i32) -> HrQuad {
+    var v = array<f32, 3>(0.0, 0.0, 0.0);
+    var c = array<u32, 3>(0u, 0u, 0u);
+    var g = 0.0;
+    for (var dy = 0; dy < 2; dy = dy + 1) {
+        for (var dx = 0; dx < 2; dx = dx + 1) {
+            let gx = 2 * qx + dx;
+            let gy = 2 * qy + dy;
+            let li = u32(gy - pi(P_IN_Y)) * pu(P_IN_W) + u32(gx - pi(P_IN_X));
+            let k = cfa_index(gx, gy);
+            // 色の番号（R = 0, G1 = 1, B = 2, G2 = 3）→ RGB のチャンネル。
+            var ch = k;
+            if (k == 3u) {
+                ch = 1u;
+            }
+            let x = cfa_in_value(li);
+            if (ch == 1u) {
+                g = g + x;
+            } else {
+                v[ch] = x;
+            }
+            c[ch] = c[ch] | aux_words[li];
+        }
+    }
+    v[1] = g * 0.5;
+    return HrQuad(vec3<f32>(v[0], v[1], v[2]), vec3<u32>(c[0], c[1], c[2]));
+}
+
+// 組 (qx, qy) の、飽和したチャンネル c の推定（CPU 版の estimate と同じ式・順序）。
+fn hr_estimate(qx: i32, qy: i32, c: u32) -> f32 {
+    let q = hr_quad(qx, qy);
+    let n = max(max(q.v.x, q.v.y), q.v.z);
+    let any_unclipped = q.clipped.x == 0u || q.clipped.y == 0u || q.clipped.z == 0u;
+    let lb = hr_comp(q.v, c);
+    if (pu(P_HR_MODE) == 0u || !any_unclipped) {
+        return n;
+    }
+    let r = pi(P_HR_RADIUS);
+    let r1 = pf(P_HR_R1);
+    let inv_r1 = pf(P_HR_INV_R1);
+    var num = 0.0;
+    var den = 0.0;
+    for (var dy = -r; dy <= r; dy = dy + 1) {
+        for (var dx = -r; dx <= r; dx = dx + 1) {
+            let nb = hr_quad(qx + dx, qy + dy);
+            if (hr_flag(nb.clipped, c) != 0u) {
+                continue;
+            }
+            let d = f32(max(abs(dx), abs(dy)));
+            let s = (r1 - d) * inv_r1;
+            for (var u = 0u; u < 3u; u = u + 1u) {
+                if (u == c || hr_flag(q.clipped, u) != 0u || hr_flag(nb.clipped, u) != 0u) {
+                    continue;
+                }
+                let t = s * hr_comp(nb.v, u) * pf(P_HR_INV_W2 + u);
+                num = num + t * hr_comp(nb.v, c) * hr_comp(q.v, u);
+                den = den + t * hr_comp(nb.v, u);
+            }
+        }
+    }
+    if (den > 0.0) {
+        let conf = min(den / pf(P_HR_CONF_W), 1.0);
+        let e = num / den;
+        return max(lb, conf * e + (1.0 - conf) * n);
+    }
+    return n;
+}
+
+@compute @workgroup_size(8, 8)
+fn highlight_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (!sensor_in_output(gid)) {
+        return;
+    }
+    let gx = pi(P_OUT_X) + i32(gid.x);
+    let gy = pi(P_OUT_Y) + i32(gid.y);
+    let lx = gx - pi(P_IN_X);
+    let ly = gy - pi(P_IN_Y);
+    let li = u32(ly) * pu(P_IN_W) + u32(lx);
+    let x = cfa_in_value(li);
+    var recon = x;
+    if (aux_words[li] != 0u) {
+        let k = cfa_index(gx, gy);
+        var ch = k;
+        if (k == 3u) {
+            ch = 1u;
+        }
+        // 組の座標は S の座標の半分の切り捨て（負の座標でも 2 で割った商を下に丸める）。
+        let qx = (gx - (gx & 1)) / 2;
+        let qy = (gy - (gy & 1)) / 2;
+        recon = max(x, hr_estimate(qx, qy, ch));
+    }
+    let amount = pf(P_HR_AMOUNT);
+    var v = recon;
+    if (amount < 1.0) {
+        let mode = pu(P_CLIP_MODE);
+        var clipped = mode == 2u;
+        if (mode == 1u) {
+            clipped = near_saturated(lx, ly, pi(P_RADIUS));
+        }
+        var base = x;
+        if (clipped) {
+            base = min(x, pf(P_CLIP_LEVEL));
+        }
+        v = base + amount * (recon - base);
+    }
+    let o = out_index(gid);
+    dst_f32[o] = sanitize1(v);
+    aux_out[o] = aux_words[li];
+}

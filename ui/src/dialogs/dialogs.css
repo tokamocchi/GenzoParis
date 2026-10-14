@@ -6,6 +6,9 @@
 .dlg-section {
   margin: 10px 0 14px;
 }
+.dialog-actions .spacer {
+  flex: 1;
+}
 .dlg-section > h3 {
   margin: 0 0 6px;
   font-size: 12px;
@@ -157,6 +160,20 @@
 }
 .dlg-list-item.selected {
   background: var(--bg-4);
+}
+/* 縦に並べる項目（内容が同じファイルの組。SettingsIdentity.tsx）。 */
+.dlg-list-item.column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+.dlg-list-item.column .dlg-row {
+  margin: 0;
+}
+/* 1 行の説明（内容のハッシュの状況）。 */
+.dlg-kv-line {
+  margin: 2px 0;
+  font-size: 12px;
 }
 /* キーボードで選べる項目（button。バックアップの一覧）。 */
 button.dlg-list-item {
@@ -478,4 +495,162 @@ button.dlg-list-item:focus-visible {
   pointer-events: none;
   font-size: 16px;
   color: var(--fg-0);
+}
+/* カタログの構造の SQL（設定の「カタログ」。ORG-07）。 */
+.dlg-pre {
+  max-height: 260px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre;
+  user-select: text;
+}
+
+/* 設定の「表示」: ルーペ上の撮影情報の項目（LIB-17） */
+.info-items {
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 12px;
+}
+.info-items th,
+.info-items td {
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.info-items th:not(:first-child),
+.info-items td:not(:first-child) {
+  text-align: center;
+}
+
+/* スマートコレクションの条件の編集（SmartCollectionDialog） */
+.smart-editor {
+  max-height: 52vh;
+  overflow: auto;
+  margin: 8px 0;
+}
+.smart-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.smart-group.nested {
+  margin: 4px 0 2px 16px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--bg-0);
+  border-radius: var(--radius);
+}
+.smart-group-head,
+.smart-row-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.smart-group-head .spacer,
+.smart-row-line .spacer {
+  flex: 1;
+}
+.smart-row {
+  padding: 2px 0;
+}
+.smart-row input[type="text"] {
+  min-width: 180px;
+}
+.smart-number {
+  width: 80px;
+}
+.smart-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.smart-problems {
+  margin: 6px 0;
+  padding-left: 18px;
+  color: var(--warn);
+}
+.smart-count {
+  margin-right: auto;
+  color: var(--fg-1);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 取り込み（コピー・名前・付けるもの） */
+
+.import-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.import-preview {
+  margin: 8px 0 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+  font-size: 12px;
+}
+.import-preview-row {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.import-tags {
+  margin: 10px 0 12px;
+}
+.import-tags > summary,
+.import-tag-group > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.import-tag-group {
+  margin: 6px 0 6px 12px;
+}
+.import-tag-group textarea {
+  resize: vertical;
+}
+
+/* 書き出しプリセット（EXP-02） */
+.export-presets {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+.export-preset-edit {
+  margin: 6px 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* 書き出しの透かし（EXP-03）: 位置の 3 × 3 のボタンと見本。 */
+.export-anchors {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(3.5em, auto));
+  gap: 4px;
+  justify-content: start;
+}
+.export-watermark-preview {
+  margin: 4px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.export-watermark-preview img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--line-strong);
+  align-self: flex-start;
 }

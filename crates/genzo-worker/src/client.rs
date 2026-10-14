@@ -34,6 +34,13 @@
 //!
 //! 再起動はその場で行う（対話用のワーカーを常に待機させておくため。1.2 節）。再起動に失敗した
 //! 場合は、次の依頼のときにもう一度起動を試みる。
+//!
+//! 記録（SYS-07）: タイムアウト・異常終了・不正な応答・不正なバッファ・起動の失敗は、本体の tracing の
+//! ログに書く（異常終了は error の水準で、ジョブの種類・ファイル・終了状態・標準エラー出力の末尾を付ける）。
+//! ワーカーの標準エラー出力（LibRaw の警告・パニックの内容とバックトレースなど）は、行ごとに info の水準で
+//! 本体のログに転送する（target は `genzo_worker::stderr`。1 つのワーカーのプロセスで
+//! [`STDERR_LOG_LINES`] 行まで）。本体（アプリ・CLI）は、このログをログのフォルダのファイルに残す
+//! （genzo-api の `logging`）。
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -53,7 +60,8 @@ use crate::limits::MIN_MEMORY_LIMIT_BYTES;
 use crate::protocol::{
     GarbageMode, Job, JobKind, JobOutput, LineRead, LinearImageInfo, MAX_LINE_BYTES, OversizeMode,
     PROTOCOL_VERSION, PhotoProbe, PongInfo, RawFrameInfo, Request, Response, ShmRef, ThumbnailInfo,
-    ThumbnailSource, VideoFrameInfo, WorkerError, WorkerErrorKind, read_line_limited,
+    ThumbnailSource, VideoFrameInfo, WatermarkRequest, WorkerError, WorkerErrorKind,
+    read_line_limited,
 };
 use crate::shm::{BufferError, PayloadKind, SHM_HEADER_LEN, ShmArena, ShmBuffer};
 use crate::tree::ProcessTree;
@@ -81,6 +89,9 @@ pub const DEFAULT_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(20);
 /// （20 秒）と、代表フレーム・先頭のフレームの 2 回の ffmpeg（各 30 秒）の合計より長くする。
 /// PERF-11（1 本あたり 2 秒）とは別の、ハングへの備え。PoC-7 で見直す）。
 pub const DEFAULT_VIDEO_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(90);
+/// [`Job::RenderWatermark`] のタイムアウトの既定値（**仮置き**: 30 秒。透かしの画像のデコード・フォントの文字の
+/// ラスタライズは通常 1 秒より短い。画像のデコードと同じ値にした）。
+pub const DEFAULT_RENDER_WATERMARK_TIMEOUT: Duration = Duration::from_secs(30);
 /// テスト用のジョブのタイムアウトの既定値（**仮置き**: 10 秒）。
 pub const DEFAULT_TEST_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`Job::Shutdown`] の応答と終了を待つ時間の既定値（**仮置き**: 5 秒）。
@@ -110,6 +121,9 @@ pub const INITIAL_IMAGE_SHM_BYTES: u64 = 64 * 1024 * 1024;
 /// サムネイルの共有メモリの最初の大きさ（**仮置き**: 4 MiB。L1（長辺 2560px、品質 85）の
 /// JPEG は 1〜2 MB 程度の見込み）。
 pub const INITIAL_THUMBNAIL_SHM_BYTES: u64 = 4 * 1024 * 1024;
+/// 透かし（[`Job::RenderWatermark`]）の共有メモリの最初の大きさ（**仮置き**: 8 MiB。約 100 万画素の RGBA 16bit。
+/// 長辺 2048 の写真の右下の文字なら十分。大きな透かしは確保し直す）。
+pub const INITIAL_WATERMARK_SHM_BYTES: u64 = 8 * 1024 * 1024;
 /// テスト用のジョブの共有メモリの大きさ。
 const TEST_HOOK_SHM_BYTES: u64 = 64 * 1024;
 
@@ -125,6 +139,8 @@ pub struct InitialShmBytes {
     pub image: u64,
     /// [`Job::Thumbnail`]・[`Job::VideoThumbnail`]。
     pub thumbnail: u64,
+    /// [`Job::RenderWatermark`]。
+    pub watermark: u64,
 }
 
 impl Default for InitialShmBytes {
@@ -133,12 +149,19 @@ impl Default for InitialShmBytes {
             raw: INITIAL_RAW_SHM_BYTES,
             image: INITIAL_IMAGE_SHM_BYTES,
             thumbnail: INITIAL_THUMBNAIL_SHM_BYTES,
+            watermark: INITIAL_WATERMARK_SHM_BYTES,
         }
     }
 }
 
 /// 標準エラー出力のうち残す末尾のバイト数（異常終了の説明に付ける）。
 pub const STDERR_TAIL_BYTES: usize = 8 * 1024;
+
+/// ワーカーの標準エラー出力のうち、本体のログに転送する行の数の上限（ワーカーのプロセスごと。**仮置き**。
+/// 壊れたファイルで警告が続いても、ログを埋めないため。異常終了の記録には、これとは別に末尾を付ける）。
+pub const STDERR_LOG_LINES: usize = 200;
+/// 本体のログに転送する 1 行の長さの上限（バイト。超えた分は切る）。
+const STDERR_LOG_LINE_BYTES: usize = 1024;
 
 /// 異常終了したワーカーの終了を待つ時間（出力が閉じた後）。
 const CRASH_REAP_GRACE: Duration = Duration::from_secs(2);
@@ -181,6 +204,8 @@ pub struct JobTimeouts {
     pub thumbnail: Duration,
     /// [`Job::VideoThumbnail`]。
     pub video_thumbnail: Duration,
+    /// [`Job::RenderWatermark`]。
+    pub render_watermark: Duration,
     /// テスト用のジョブ。
     pub test_hook: Duration,
     /// [`Job::Shutdown`]（応答と終了を待つ時間）。
@@ -197,6 +222,7 @@ impl Default for JobTimeouts {
             decode_image: DEFAULT_DECODE_IMAGE_TIMEOUT,
             thumbnail: DEFAULT_THUMBNAIL_TIMEOUT,
             video_thumbnail: DEFAULT_VIDEO_THUMBNAIL_TIMEOUT,
+            render_watermark: DEFAULT_RENDER_WATERMARK_TIMEOUT,
             test_hook: DEFAULT_TEST_HOOK_TIMEOUT,
             shutdown: DEFAULT_SHUTDOWN_TIMEOUT,
         }
@@ -214,6 +240,7 @@ impl JobTimeouts {
             decode_image: timeout,
             thumbnail: timeout,
             video_thumbnail: timeout,
+            render_watermark: timeout,
             test_hook: timeout,
             shutdown: timeout,
         }
@@ -230,11 +257,12 @@ impl JobTimeouts {
             JobKind::DecodeImage => self.decode_image,
             JobKind::Thumbnail => self.thumbnail,
             JobKind::VideoThumbnail => self.video_thumbnail,
+            JobKind::RenderWatermark => self.render_watermark,
             JobKind::TestHook => self.test_hook,
         }
     }
 
-    fn all(&self) -> [Duration; 9] {
+    fn all(&self) -> [Duration; 10] {
         [
             self.ping,
             self.probe_photo,
@@ -243,6 +271,7 @@ impl JobTimeouts {
             self.decode_image,
             self.thumbnail,
             self.video_thumbnail,
+            self.render_watermark,
             self.test_hook,
             self.shutdown,
         ]
@@ -482,6 +511,9 @@ pub struct RawFrame {
     pub decoder_id: Option<String>,
     /// `image.cam_xyz` の出どころ（render_deps の記録用。分からなければ `None`）。
     pub cam_xyz_source: Option<genzo_raw::CamXyzSource>,
+    /// 埋め込みのレンズ補正の情報が読めない・不正だったときの理由（DEV-14。そのときは
+    /// `image.lens_correction` は `None`。長さと制御文字は整えてある）。読めた・なかった場合は `None`。
+    pub lens_correction_note: Option<String>,
 }
 
 /// [`WorkerClient::decode_image`] の結果（リニア BT.2020。04 の 2.6 節の B2）。
@@ -520,6 +552,17 @@ pub struct Thumbnail {
     pub source: ThumbnailSource,
     /// 動画の場合の付随情報。
     pub video: Option<VideoFrameInfo>,
+}
+
+/// [`WorkerClient::render_watermark`] の結果（EXP-03）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatermarkImage {
+    /// 透かしの画素（RGBA の 16bit。RGB は出力の色空間に符号化した値）。
+    pub bitmap: genzo_media::watermark::WatermarkBitmap,
+    /// フォントにない文字（`.notdef` で描いた。重ならない）。
+    pub missing: Vec<char>,
+    /// 収めるために文字の大きさを縮めたか。
+    pub shrunk: bool,
 }
 
 /// テスト用の口（[`WorkerClient::run_test_hook`]）。
@@ -795,25 +838,115 @@ fn read_stdout(stdout: impl Read, tx: Sender<ReaderEvent>) {
     }
 }
 
-/// 標準エラー出力を最後まで読み、末尾だけ残す。
-fn read_stderr(mut stderr: impl Read, tail: Arc<Mutex<Vec<u8>>>, done: Sender<()>) {
+/// 標準エラー出力を最後まで読み、末尾だけ残す。行ごとに本体のログにも転送する（[`StderrForwarder`]）。
+fn read_stderr(
+    mut stderr: impl Read,
+    tail: Arc<Mutex<Vec<u8>>>,
+    done: Sender<()>,
+    mut forward: StderrForwarder,
+) {
     let mut buf = [0u8; 4096];
     loop {
         match stderr.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let mut t = tail
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                t.extend_from_slice(&buf[..n]);
-                if t.len() > STDERR_TAIL_BYTES {
-                    let cut = t.len() - STDERR_TAIL_BYTES;
-                    t.drain(..cut);
+                {
+                    let mut t = tail
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    t.extend_from_slice(&buf[..n]);
+                    if t.len() > STDERR_TAIL_BYTES {
+                        let cut = t.len() - STDERR_TAIL_BYTES;
+                        t.drain(..cut);
+                    }
                 }
+                forward.feed(&buf[..n]);
             }
         }
     }
+    forward.finish();
     let _ = done.send(());
+}
+
+/// ワーカーの標準エラー出力を、行ごとに本体の tracing のログ（info。target は `genzo_worker::stderr`）に
+/// 転送する。1 つのワーカーのプロセスで [`STDERR_LOG_LINES`] 行まで（超えたら 1 回だけ知らせて、以降は
+/// 転送しない）。空の行は転送しない。
+struct StderrForwarder {
+    label: String,
+    pid: u32,
+    pending: Vec<u8>,
+    lines: usize,
+    /// 転送した行（テスト用。`None` なら記録しない）。
+    #[cfg(test)]
+    sent: Option<Vec<String>>,
+}
+
+impl StderrForwarder {
+    fn new(label: &str, pid: u32) -> Self {
+        Self {
+            label: label.to_owned(),
+            pid,
+            pending: Vec::new(),
+            lines: 0,
+            #[cfg(test)]
+            sent: None,
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) {
+        self.pending.extend_from_slice(chunk);
+        while let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=pos).collect();
+            self.emit(&line[..line.len() - 1]);
+        }
+        // 改行のない長い出力は、ためすぎないうちに 1 行として出す。
+        if self.pending.len() > STDERR_LOG_LINE_BYTES * 4 {
+            let line = std::mem::take(&mut self.pending);
+            self.emit(&line);
+        }
+    }
+
+    fn finish(&mut self) {
+        if !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            self.emit(&line);
+        }
+    }
+
+    fn emit(&mut self, line: &[u8]) {
+        let text = String::from_utf8_lossy(line);
+        let mut text = text.trim_end_matches('\r').to_owned();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.lines += 1;
+        if self.lines > STDERR_LOG_LINES + 1 {
+            return;
+        }
+        if self.lines == STDERR_LOG_LINES + 1 {
+            text = format!(
+                "（このワーカーの標準エラー出力は {STDERR_LOG_LINES} 行を超えたので、以降はログに残しません。\
+                 異常終了の記録には末尾を付けます）"
+            );
+        } else if text.len() > STDERR_LOG_LINE_BYTES {
+            let mut cut = STDERR_LOG_LINE_BYTES;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+            text.push('…');
+        }
+        tracing::info!(
+            target: "genzo_worker::stderr",
+            worker = %self.label,
+            pid = self.pid,
+            "{text}"
+        );
+        #[cfg(test)]
+        if let Some(sent) = self.sent.as_mut() {
+            sent.push(text);
+        }
+    }
 }
 
 /// 1 つのワーカープロセスとのやり取りを管理する。
@@ -827,8 +960,8 @@ pub struct WorkerClient {
     process: Option<WorkerProcess>,
     next_id: u64,
     stats: WorkerStats,
-    /// 種類ごとの、直近に必要だった共有メモリの大きさ（CFA, RGB, JPEG の順）。
-    last_required: [u64; 3],
+    /// 種類ごとの、直近に必要だった共有メモリの大きさ（CFA, RGB, JPEG, RGBA の順）。
+    last_required: [u64; 4],
     label: String,
 }
 
@@ -868,7 +1001,7 @@ impl WorkerClient {
             process: None,
             next_id: 1,
             stats: WorkerStats::default(),
-            last_required: [0; 3],
+            last_required: [0; 4],
             label,
         };
         client.process = Some(client.start()?);
@@ -994,9 +1127,10 @@ impl WorkerClient {
             .name(format!("genzo-worker-{}-stdout", self.label))
             .spawn(move || read_stdout(stdout, tx))
             .map_err(|e| spawn_err(format!("読み取りのスレッドを作れない: {e}")))?;
+        let forward = StderrForwarder::new(&self.label, proc.pid);
         thread::Builder::new()
             .name(format!("genzo-worker-{}-stderr", self.label))
-            .spawn(move || read_stderr(stderr, tail, done_tx))
+            .spawn(move || read_stderr(stderr, tail, done_tx, forward))
             .map_err(|e| spawn_err(format!("読み取りのスレッドを作れない: {e}")))?;
 
         let request = Request {
@@ -1043,7 +1177,10 @@ impl WorkerClient {
     /// 起動していなければ起動する。
     fn ensure_running(&mut self) -> Result<(), WorkerClientError> {
         if self.process.is_none() {
-            self.process = Some(self.start()?);
+            let started = self.start().inspect_err(|e| {
+                tracing::warn!(worker = %self.label, error = %e, "ワーカーを起動できません");
+            })?;
+            self.process = Some(started);
         }
         Ok(())
     }
@@ -1054,7 +1191,17 @@ impl WorkerClient {
             p.kill();
         }
         self.stats.restarts += 1;
-        self.process = self.start().ok();
+        self.process = match self.start() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(
+                    worker = %self.label,
+                    error = %e,
+                    "ワーカーを起動し直せません（次の依頼のときにもう一度試みます）"
+                );
+                None
+            }
+        };
     }
 
     /// ワーカーを再起動する（強制終了してから起動する）。
@@ -1078,6 +1225,8 @@ impl WorkerClient {
         }
         self.ensure_running()?;
         let kind = job.kind();
+        // 記録に使う（依頼を送ると job は手放す）。
+        let path = job.path().map(Path::to_path_buf);
         let timeout = self.config.timeouts.for_kind(kind);
         let id = self.next_id;
         self.next_id += 1;
@@ -1096,6 +1245,13 @@ impl WorkerClient {
             }
             Exchange::Timeout => {
                 self.stats.timeouts += 1;
+                tracing::warn!(
+                    worker = %self.label,
+                    job = ?kind,
+                    path = ?path,
+                    timeout = ?timeout,
+                    "ワーカーの応答がタイムアウトしたため、強制終了して起動し直します"
+                );
                 self.recycle();
                 Err(WorkerClientError::Timeout { kind, timeout })
             }
@@ -1114,8 +1270,17 @@ impl WorkerClient {
                 drop(p);
                 self.recycle();
                 let status = status.map_or_else(|| "不明".to_owned(), |s| s.to_string());
+                let detail = format!("{detail}。終了状態: {status}");
+                tracing::error!(
+                    worker = %self.label,
+                    job = ?kind,
+                    path = ?path,
+                    detail = %detail,
+                    stderr_tail = %stderr_tail,
+                    "ワーカーが異常終了しました（起動し直しました）"
+                );
                 Err(WorkerClientError::Crashed {
-                    detail: format!("{detail}。終了状態: {status}"),
+                    detail,
                     stderr_tail,
                 })
             }
@@ -1125,6 +1290,7 @@ impl WorkerClient {
 
     fn protocol_error<T>(&mut self, msg: String) -> Result<T, WorkerClientError> {
         self.stats.protocol_errors += 1;
+        tracing::warn!(worker = %self.label, error = %msg, "ワーカーの応答が不正なため、起動し直します");
         self.recycle();
         Err(WorkerClientError::Protocol(msg))
     }
@@ -1169,6 +1335,7 @@ impl WorkerClient {
             PayloadKind::CfaU16 => 0,
             PayloadKind::RgbF32 => 1,
             PayloadKind::Jpeg => 2,
+            PayloadKind::RgbaU16 => 3,
         }
     }
 
@@ -1178,6 +1345,7 @@ impl WorkerClient {
             PayloadKind::CfaU16 => initial.raw,
             PayloadKind::RgbF32 => initial.image,
             PayloadKind::Jpeg => initial.thumbnail,
+            PayloadKind::RgbaU16 => initial.watermark,
         };
         base.max(self.last_required[Self::kind_index(kind)])
     }
@@ -1188,6 +1356,7 @@ impl WorkerClient {
             PayloadKind::CfaU16 => MAX_PIXELS * 2,
             PayloadKind::RgbF32 => MAX_IMAGE_PIXELS * 12,
             PayloadKind::Jpeg => MAX_THUMBNAIL_JPEG_BYTES,
+            PayloadKind::RgbaU16 => genzo_media::watermark::MAX_WATERMARK_PIXELS * 8,
         };
         SHM_HEADER_LEN as u64 + data
     }
@@ -1241,6 +1410,11 @@ impl WorkerClient {
     /// 検証に失敗したバッファ: 破棄し、ワーカーを再起動する。
     fn invalid_buffer<T>(&mut self, e: BufferError) -> Result<T, WorkerClientError> {
         self.stats.invalid_buffers += 1;
+        tracing::warn!(
+            worker = %self.label,
+            error = %e,
+            "ワーカーが返したバッファが不正なため、破棄して起動し直します"
+        );
         self.recycle();
         Err(WorkerClientError::InvalidBuffer(e))
     }
@@ -1252,6 +1426,7 @@ impl WorkerClient {
     ) -> Result<RawFrame, WorkerClientError> {
         let decoder_id = info.decoder_id.clone();
         let cam_xyz_source = info.cam_xyz_source;
+        let lens_correction_note = validate::sanitize_note(info.lens_correction_note.clone());
         let image = buffer
             .open_payload(PayloadKind::CfaU16, self.config.verify_checksum)
             .and_then(|p| validate::raw_image(&p, info));
@@ -1260,6 +1435,7 @@ impl WorkerClient {
                 image,
                 decoder_id,
                 cam_xyz_source,
+                lens_correction_note,
             }),
             Err(e) => self.invalid_buffer(e),
         }
@@ -1457,6 +1633,42 @@ impl WorkerClient {
         self.thumbnail_job(true, path, spec, cancel)
     }
 
+    /// 書き出しの透かしを作る（EXP-03。透かしの画像・フォントのファイルはワーカーが読む。SEC-05）。
+    ///
+    /// 結果の寸法が依頼の上限（＋ 文字の外接矩形の余裕の 2 画素）を超える・画素の長さが合わない・アルファでない値が
+    /// 入っているなどの不正な結果は、[`WorkerClientError::InvalidBuffer`]（ワーカーを起動し直す）。
+    pub fn render_watermark(
+        &mut self,
+        request: &WatermarkRequest,
+        cancel: &CancellationToken,
+    ) -> Result<WatermarkImage, WorkerClientError> {
+        if let Some(p) = request.problem() {
+            return Err(WorkerClientError::InvalidArgument(p));
+        }
+        let path = request.content.file().to_path_buf();
+        self.file_job(&path, JobKind::RenderWatermark, |c| {
+            let (out, buffer) =
+                c.shm_job(PayloadKind::RgbaU16, cancel, |shm| Job::RenderWatermark {
+                    request: request.clone(),
+                    shm,
+                })?;
+            let JobOutput::Watermark(info) = out else {
+                return c.unexpected(&out);
+            };
+            let bitmap = buffer
+                .open_payload(PayloadKind::RgbaU16, c.config.verify_checksum)
+                .and_then(|p| validate::watermark(&p, &info, request));
+            match bitmap {
+                Ok(bitmap) => Ok(WatermarkImage {
+                    bitmap,
+                    missing: validate::sanitize_missing(&info.missing),
+                    shrunk: info.shrunk,
+                }),
+                Err(e) => c.invalid_buffer(e),
+            }
+        })
+    }
+
     /// テスト用の口を実行する（ワーカーを `test_hooks` 付きで起動した場合だけ動く）。
     ///
     /// `track_path` を渡すと、そのファイルのジョブとして失敗を記録する（スキップの確認用）。
@@ -1574,6 +1786,52 @@ impl WorkerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn forwarder() -> StderrForwarder {
+        let mut f = StderrForwarder::new("batch-0", 42);
+        f.sent = Some(Vec::new());
+        f
+    }
+
+    #[test]
+    fn stderr_is_forwarded_line_by_line() {
+        let mut f = forwarder();
+        // 行の途中で読み取りが分かれても、行ごとに転送する。空の行・CR は転送しない。
+        f.feed(b"DSC00001.ARW: data corr");
+        f.feed(b"upted at 1234\r\n\n  \nthread 'main' panicked");
+        assert_eq!(
+            f.sent.as_deref().unwrap(),
+            ["DSC00001.ARW: data corrupted at 1234"]
+        );
+        // 最後の改行のない行は、読み終えたときに転送する。
+        f.finish();
+        assert_eq!(
+            f.sent.as_deref().unwrap(),
+            [
+                "DSC00001.ARW: data corrupted at 1234",
+                "thread 'main' panicked"
+            ]
+        );
+    }
+
+    #[test]
+    fn stderr_forwarding_is_limited_per_process() {
+        let mut f = forwarder();
+        for i in 0..STDERR_LOG_LINES + 10 {
+            f.feed(format!("警告 {i}\n").as_bytes());
+        }
+        let sent = f.sent.as_deref().unwrap();
+        assert_eq!(sent.len(), STDERR_LOG_LINES + 1);
+        assert_eq!(sent[0], "警告 0");
+        assert!(sent[STDERR_LOG_LINES].contains("以降はログに残しません"));
+        // 長い行は切る（文字の境目で）。改行のない長い出力もためすぎない。
+        let mut f = forwarder();
+        f.feed(&"あ".repeat(2000).into_bytes());
+        let sent = f.sent.as_deref().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].len() <= STDERR_LOG_LINE_BYTES + '…'.len_utf8());
+        assert!(sent[0].ends_with('…'));
+    }
 
     #[test]
     fn timeouts_by_kind() {

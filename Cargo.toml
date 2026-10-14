@@ -51,6 +51,12 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 tiff = "0.11.3"
 png = "0.18.1"
 kamadak-exif = "0.6.1"
+# フォントのファイル（TrueType・OpenType・そのコレクション）の解析。透かしの文字（EXP-03）の形を読む。描画（ラスタライズ）は
+# genzo-media の自前のコード。Google Fonts の fontations の crate（read-fonts・font-types を使う）。以前の ttf-parser は
+# 保守の終了（RUSTSEC-2026-0192）のため置き換えた（決定事項ログ No.173）。使うのは std だけ（既定の autohint_shaping は
+# 自動ヒンティングの機能で、ヒンティングをしないので使わない）。0.48.0 は公開から 2 週間たっていないため 0.47.0。
+# docs/third_party.md。
+skrifa = { version = "0.47.0", default-features = false, features = ["std"] }
 
 # カタログ（SQLite を同梱してビルドする。backup はオンラインバックアップ API 用。04 の 3.4 節）
 rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }

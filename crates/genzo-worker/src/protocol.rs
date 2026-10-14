@@ -19,7 +19,7 @@ use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use genzo_media::{VideoColorHandling, VideoProbe};
-use genzo_model::PhotoMetadata;
+use genzo_model::{Align, OutputColorSpace, PhotoMetadata, WatermarkContent};
 use genzo_raw::CfaPattern;
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// - 2: [`RawFrameInfo`] に飽和の閾値（`saturation_level`）と既定の切り抜き（`default_crop`）を
 ///   加えた（実機の ARW の不具合 A-2・A-3）。
-pub const PROTOCOL_VERSION: u32 = 2;
+/// - 3（2026-10-14）: 透かしを作るジョブ（[`Job::RenderWatermark`]。EXP-03）を加えた。
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// 1 行（1 メッセージ）の長さの上限（バイト。改行を除く）。
 ///
@@ -153,6 +154,14 @@ pub enum Job {
         /// 書き込む共有メモリ。
         shm: ShmRef,
     },
+    /// 書き出しの透かし（EXP-03）を作り、RGBA（16bit。出力の色空間に符号化した値、アルファは乗算していない）を
+    /// 共有メモリに書く（透かしの画像・フォントのファイルを読む。`genzo_media::watermark`）。
+    RenderWatermark {
+        /// 何をどの大きさで作るか。
+        request: WatermarkRequest,
+        /// 書き込む共有メモリ。
+        shm: ShmRef,
+    },
     /// テスト用: 共有メモリ（あれば）の途中まで書いてから、即座に異常終了する（abort）。
     TestCrash {
         /// 書き込む共有メモリ（任意）。
@@ -213,6 +222,7 @@ impl Job {
             Job::DecodeImage { .. } => JobKind::DecodeImage,
             Job::Thumbnail { .. } => JobKind::Thumbnail,
             Job::VideoThumbnail { .. } => JobKind::VideoThumbnail,
+            Job::RenderWatermark { .. } => JobKind::RenderWatermark,
             Job::TestCrash { .. }
             | Job::TestHang { .. }
             | Job::TestGarbage { .. }
@@ -231,6 +241,7 @@ impl Job {
             | Job::DecodeImage { path, .. }
             | Job::Thumbnail { path, .. }
             | Job::VideoThumbnail { path, .. } => Some(path),
+            Job::RenderWatermark { request, .. } => Some(request.content.file()),
             _ => None,
         }
     }
@@ -256,8 +267,75 @@ pub enum JobKind {
     Thumbnail,
     /// [`Job::VideoThumbnail`]。
     VideoThumbnail,
+    /// [`Job::RenderWatermark`]。
+    RenderWatermark,
     /// テスト用のジョブ（`Test*`）。
     TestHook,
+}
+
+/// [`Job::RenderWatermark`] の依頼（大きさは本体が書き出す画像の寸法から決める。`genzo_media::watermark::WatermarkGeometry`）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WatermarkRequest {
+    /// 中身（文字とフォントのファイル、または画像のファイル）。
+    pub content: WatermarkContent,
+    /// 大きさ（画素。文字は文字の大きさ（em）、画像は幅）。
+    pub size_px: u32,
+    /// 幅の上限（画素。収まらなければ縦横比を保って縮める）。
+    pub max_width: u32,
+    /// 高さの上限（画素）。
+    pub max_height: u32,
+    /// 文字の行の揃え。
+    pub align: Align,
+    /// 出力の色空間（透かしの色をこの色空間で符号化する）。
+    pub color_space: OutputColorSpace,
+}
+
+impl WatermarkRequest {
+    /// 大きさ・上限の上限（画素。書き出しの長辺の上限と同じ）。
+    pub const MAX_EDGE: u32 = genzo_model::ExportSize::MAX_LONG_EDGE;
+
+    /// 値を確かめる（問題があれば理由）。
+    pub fn problem(&self) -> Option<String> {
+        for (what, v) in [
+            ("大きさ", self.size_px),
+            ("幅の上限", self.max_width),
+            ("高さの上限", self.max_height),
+        ] {
+            if !(1..=Self::MAX_EDGE).contains(&v) {
+                return Some(format!(
+                    "透かしの{what}は 1〜{} 画素（{v}）",
+                    Self::MAX_EDGE
+                ));
+            }
+        }
+        if u64::from(self.max_width) * u64::from(self.max_height) > genzo_media::MAX_IMAGE_PIXELS {
+            return Some(format!(
+                "透かしの上限の寸法が大きすぎる（{}×{}）",
+                self.max_width, self.max_height
+            ));
+        }
+        None
+    }
+}
+
+/// [`Job::RenderWatermark`] の付随情報（画素は共有メモリ）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatermarkInfo {
+    /// 幅。
+    pub width: u32,
+    /// 高さ。
+    pub height: u32,
+    /// フォントにない文字（文字の透かし。重ならない。[`WatermarkInfo::MAX_MISSING_CHARS`] 文字まで）。
+    #[serde(default)]
+    pub missing: String,
+    /// 収めるために文字の大きさを縮めたか。
+    #[serde(default)]
+    pub shrunk: bool,
+}
+
+impl WatermarkInfo {
+    /// フォントにない文字を知らせる数の上限。
+    pub const MAX_MISSING_CHARS: usize = 32;
 }
 
 /// 共有メモリ（本体が確保したファイル）の場所と大きさ（[`crate::shm`]）。
@@ -323,6 +401,8 @@ pub enum JobOutput {
     Image(LinearImageInfo),
     /// [`Job::Thumbnail`]・[`Job::VideoThumbnail`] の結果（JPEG は共有メモリ）。
     Thumbnail(ThumbnailInfo),
+    /// [`Job::RenderWatermark`] の結果（RGBA は共有メモリ）。
+    Watermark(WatermarkInfo),
     /// [`Job::TestAllocate`] の結果。
     Allocated {
         /// 確保できた量（バイト）。
@@ -446,6 +526,15 @@ pub struct RawFrameInfo {
     /// `render_deps.camera_profile` の記録用）。古いワーカーの応答にはない（`None`）。
     #[serde(default)]
     pub cam_xyz_source: Option<genzo_raw::CamXyzSource>,
+    /// 埋め込みのレンズ補正の情報（DEV-14。`genzo_raw::RawImage::lens_correction`）。本体は
+    /// `RawImage::validate` で値を確かめる。古いワーカーの応答・情報のない RAW では `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_correction: Option<genzo_raw::LensCorrectionData>,
+    /// 埋め込みのレンズ補正の情報が読めない・不正だったときの理由（`genzo_raw::RawDetails::lens_correction_note`。
+    /// そのときは `lens_correction` を `None` にして展開は続ける）。本体は画面・CLI に出す（長さと制御文字は
+    /// 本体が整える）。読めた・なかった・古いワーカーの応答では `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_correction_note: Option<String>,
 }
 
 /// [`Job::DecodeImage`] の付随情報（画素は共有メモリ）。
@@ -729,6 +818,22 @@ mod tests {
                 quality: None,
                 shm: shm(),
             },
+            Job::RenderWatermark {
+                request: WatermarkRequest {
+                    content: WatermarkContent::Text {
+                        text: "© 2026".into(),
+                        font: "/f/a.ttc".into(),
+                        font_index: 1,
+                        color: genzo_model::RgbColor::WHITE,
+                    },
+                    size_px: 120,
+                    max_width: 5000,
+                    max_height: 3000,
+                    align: Align::End,
+                    color_space: OutputColorSpace::DisplayP3,
+                },
+                shm: shm(),
+            },
             Job::TestCrash {
                 shm: Some(shm()),
                 leave_child: true,
@@ -847,6 +952,8 @@ mod tests {
                 metadata: PhotoMetadata::default(),
                 decoder_id: None,
                 cam_xyz_source: Some(genzo_raw::CamXyzSource::LibRawTable),
+                lens_correction_note: None,
+                lens_correction: None,
             }),
             JobOutput::Image(LinearImageInfo {
                 format: PhotoFormat::Png,
@@ -871,6 +978,12 @@ mod tests {
                     position_ms: 300,
                     color: VideoColorHandling::HdrNotToneMapped,
                 }),
+            }),
+            JobOutput::Watermark(WatermarkInfo {
+                width: 640,
+                height: 80,
+                missing: "漢".into(),
+                shrunk: true,
             }),
             JobOutput::Allocated { bytes: 7 },
             JobOutput::Spawned { pid: 42 },

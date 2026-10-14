@@ -8,11 +8,17 @@
 use std::fmt;
 
 use super::DevelopSettings;
+use super::masks::{
+    BrushStroke, LocalAdjustment, LocalDelta, MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES,
+    MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS,
+    MaskShape,
+};
 use super::params::{
-    AspectRatio, ColorParams, CropRect, CurvePoint, DataRef, DetailParams, Geometry,
-    LensCorrection, LocalAdjustment, LocalDelta, MAX_ASPECT_TERM, MAX_CURVE_POINTS, MAX_MASKS,
-    MIN_CROP_SIZE, MaskShape, ParametricCurve, RenderDeps, ToneCurve, ToneParams, ValueRange,
-    WhiteBalance, ranges,
+    AspectRatio, BlackWhite, ColorGrading, ColorMixer, ColorParams, CropRect, CurvePoint, DataRef,
+    DetailParams, EffectsParams, Geometry, GradingWheel, Grain, HighlightRecovery, HueBand,
+    LensCorrection, MAX_ASPECT_TERM, MAX_CURVE_POINTS, MIN_CROP_SIZE, NoiseReduction,
+    ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings, RenderDeps, Sharpening,
+    ToneCurve, ToneParams, ValueRange, WhiteBalance, is_valid_profile_id, ranges,
 };
 use crate::{CURRENT_PROCESS_VERSION, CURRENT_SCHEMA_VERSION};
 
@@ -158,15 +164,19 @@ impl DevelopSettings {
             1,
             CURRENT_PROCESS_VERSION,
         );
+        self.profile.check(&mut c);
         check_white_balance(&self.white_balance, &mut c);
+        self.highlight_recovery.check(&mut c);
         c.range("exposure_ev", self.exposure_ev, ranges::EXPOSURE_EV);
         c.range("contrast", self.contrast, ranges::SLIDER);
         self.tone.check(&mut c);
+        self.presence.check(&mut c);
         self.tone_curve.check(&mut c);
         self.color.check(&mut c);
         self.geometry.check(&mut c);
         self.lens.check(&mut c);
         self.detail.check(&mut c);
+        self.effects.check(&mut c);
         if self.masks.len() > MAX_MASKS {
             c.invalid(
                 "masks",
@@ -174,6 +184,13 @@ impl DevelopSettings {
                     "マスクが多すぎます（{} 個。上限 {MAX_MASKS}）",
                     self.masks.len()
                 ),
+            );
+        }
+        let points: usize = self.masks.iter().map(LocalAdjustment::brush_points).sum();
+        if points > MAX_TOTAL_BRUSH_POINTS {
+            c.invalid(
+                "masks",
+                format!("ブラシの点が多すぎます（{points} 個。上限 {MAX_TOTAL_BRUSH_POINTS}）"),
             );
         }
         for (i, m) in self.masks.iter().enumerate() {
@@ -200,6 +217,7 @@ impl DevelopSettings {
     ///   その軸を全体に戻す。
     /// - 縦横比の項が 0 や上限を超える場合は、指定なし（自由）にする。
     /// - マスクは上限を超えた分を捨てる。
+    /// - カメラプロファイル・ルックの ID が不正（空・長すぎる・制御文字・前後の空白）なら、指定なしにする。
     /// - SHA-256 の 16 進数は小文字にする。
     ///
     /// 丸めた結果は必ず [`validate`](Self::validate) を通る（render_deps の SHA-256 の形が
@@ -208,18 +226,23 @@ impl DevelopSettings {
         let mut s = self.clone();
         s.schema_version = CURRENT_SCHEMA_VERSION;
         s.process_version = s.process_version.clamp(1, CURRENT_PROCESS_VERSION);
+        s.profile.normalize();
         normalize_white_balance(&mut s.white_balance);
+        s.highlight_recovery.normalize();
         clamp0(&mut s.exposure_ev, ranges::EXPOSURE_EV);
         clamp0(&mut s.contrast, ranges::SLIDER);
         s.tone.normalize();
+        s.presence.normalize();
         s.tone_curve.normalize();
         s.color.normalize();
         s.geometry.normalize();
         s.lens.normalize();
         s.detail.normalize();
+        s.effects.normalize();
         s.masks.truncate(MAX_MASKS);
+        let mut budget = MAX_TOTAL_BRUSH_POINTS;
         for m in &mut s.masks {
-            m.normalize();
+            m.normalize(&mut budget);
         }
         s.render_deps.normalize();
         s
@@ -268,6 +291,20 @@ impl ToneParams {
             &mut self.whites,
             &mut self.blacks,
         ] {
+            clamp0(v, ranges::SLIDER);
+        }
+    }
+}
+
+impl PresenceParams {
+    fn check(&self, c: &mut Checker) {
+        c.range("presence.texture", self.texture, ranges::SLIDER);
+        c.range("presence.clarity", self.clarity, ranges::SLIDER);
+        c.range("presence.dehaze", self.dehaze, ranges::SLIDER);
+    }
+
+    fn normalize(&mut self) {
+        for v in [&mut self.texture, &mut self.clarity, &mut self.dehaze] {
             clamp0(v, ranges::SLIDER);
         }
     }
@@ -367,11 +404,102 @@ impl ColorParams {
     fn check(&self, c: &mut Checker) {
         c.range("color.saturation", self.saturation, ranges::SLIDER);
         c.range("color.vibrance", self.vibrance, ranges::SLIDER);
+        self.mixer.check(c);
+        self.grading.check(c);
+        self.black_white.check(c);
     }
 
     fn normalize(&mut self) {
         clamp0(&mut self.saturation, ranges::SLIDER);
         clamp0(&mut self.vibrance, ranges::SLIDER);
+        self.mixer.normalize();
+        self.grading.normalize();
+        self.black_white.normalize();
+    }
+}
+
+impl ColorMixer {
+    fn check(&self, c: &mut Checker) {
+        for band in HueBand::ALL {
+            let a = self.get(band);
+            let p = format!("color.mixer.{}", band.key());
+            c.range(format!("{p}.hue"), a.hue, ranges::SLIDER);
+            c.range(format!("{p}.saturation"), a.saturation, ranges::SLIDER);
+            c.range(format!("{p}.luminance"), a.luminance, ranges::SLIDER);
+        }
+    }
+
+    fn normalize(&mut self) {
+        for band in HueBand::ALL {
+            let a = self.get_mut(band);
+            clamp0(&mut a.hue, ranges::SLIDER);
+            clamp0(&mut a.saturation, ranges::SLIDER);
+            clamp0(&mut a.luminance, ranges::SLIDER);
+        }
+    }
+}
+
+impl GradingWheel {
+    fn check(&self, path: &str, c: &mut Checker) {
+        c.range(format!("{path}.hue"), self.hue, ranges::HUE_DEG);
+        c.range(
+            format!("{path}.saturation"),
+            self.saturation,
+            ranges::AMOUNT_0_100,
+        );
+        c.range(format!("{path}.luminance"), self.luminance, ranges::SLIDER);
+    }
+
+    fn normalize(&mut self) {
+        clamp0(&mut self.hue, ranges::HUE_DEG);
+        clamp0(&mut self.saturation, ranges::AMOUNT_0_100);
+        clamp0(&mut self.luminance, ranges::SLIDER);
+    }
+}
+
+impl ColorGrading {
+    fn check(&self, c: &mut Checker) {
+        self.shadows.check("color.grading.shadows", c);
+        self.midtones.check("color.grading.midtones", c);
+        self.highlights.check("color.grading.highlights", c);
+        self.global.check("color.grading.global", c);
+        c.range(
+            "color.grading.blending",
+            self.blending,
+            ranges::AMOUNT_0_100,
+        );
+        c.range("color.grading.balance", self.balance, ranges::SLIDER);
+    }
+
+    fn normalize(&mut self) {
+        for w in [
+            &mut self.shadows,
+            &mut self.midtones,
+            &mut self.highlights,
+            &mut self.global,
+        ] {
+            w.normalize();
+        }
+        self.blending = ranges::AMOUNT_0_100.clamp_or(self.blending, Self::DEFAULT_BLENDING);
+        clamp0(&mut self.balance, ranges::SLIDER);
+    }
+}
+
+impl BlackWhite {
+    fn check(&self, c: &mut Checker) {
+        for band in HueBand::ALL {
+            c.range(
+                format!("color.black_white.mix.{}", band.key()),
+                self.mix.get(band),
+                ranges::SLIDER,
+            );
+        }
+    }
+
+    fn normalize(&mut self) {
+        for band in HueBand::ALL {
+            clamp0(self.mix.get_mut(band), ranges::SLIDER);
+        }
     }
 }
 
@@ -460,6 +588,19 @@ impl LensCorrection {
             self.vignetting_scale,
             ranges::LENS_SCALE,
         );
+        for (name, v) in [
+            ("lens.distortion", self.distortion),
+            ("lens.vignetting_amount", self.vignetting_amount),
+            ("lens.ca_red_cyan", self.ca_red_cyan),
+            ("lens.ca_blue_yellow", self.ca_blue_yellow),
+        ] {
+            c.range(name, v, ranges::LENS_MANUAL);
+        }
+        c.range(
+            "lens.vignetting_midpoint",
+            self.vignetting_midpoint,
+            ranges::LENS_MIDPOINT,
+        );
     }
 
     fn normalize(&mut self) {
@@ -468,6 +609,16 @@ impl LensCorrection {
             ranges::LENS_SCALE.clamp_or(self.distortion_scale, d.distortion_scale);
         self.vignetting_scale =
             ranges::LENS_SCALE.clamp_or(self.vignetting_scale, d.vignetting_scale);
+        for v in [
+            &mut self.distortion,
+            &mut self.vignetting_amount,
+            &mut self.ca_red_cyan,
+            &mut self.ca_blue_yellow,
+        ] {
+            *v = ranges::LENS_MANUAL.clamp_or(*v, 0.0);
+        }
+        self.vignetting_midpoint =
+            ranges::LENS_MIDPOINT.clamp_or(self.vignetting_midpoint, d.vignetting_midpoint);
     }
 }
 
@@ -479,39 +630,188 @@ impl DetailParams {
         c.range("detail.sharpening.detail", s.detail, ranges::AMOUNT_0_100);
         c.range("detail.sharpening.masking", s.masking, ranges::AMOUNT_0_100);
         let n = &self.noise_reduction;
-        c.range(
-            "detail.noise_reduction.luminance",
-            n.luminance,
-            ranges::AMOUNT_0_100,
-        );
-        c.range(
-            "detail.noise_reduction.color",
-            n.color,
-            ranges::AMOUNT_0_100,
-        );
+        for (name, v) in [
+            ("detail.noise_reduction.luminance", n.luminance),
+            (
+                "detail.noise_reduction.luminance_detail",
+                n.luminance_detail,
+            ),
+            (
+                "detail.noise_reduction.luminance_contrast",
+                n.luminance_contrast,
+            ),
+            ("detail.noise_reduction.color", n.color),
+            ("detail.noise_reduction.color_detail", n.color_detail),
+        ] {
+            c.range(name, v, ranges::AMOUNT_0_100);
+        }
     }
 
     fn normalize(&mut self) {
         let s = &mut self.sharpening;
         clamp0(&mut s.amount, ranges::SHARPEN_AMOUNT);
-        s.radius = ranges::SHARPEN_RADIUS.clamp_or(s.radius, 1.0);
-        clamp0(&mut s.detail, ranges::AMOUNT_0_100);
+        s.radius = ranges::SHARPEN_RADIUS.clamp_or(s.radius, Sharpening::DEFAULT_RADIUS);
+        s.detail = ranges::AMOUNT_0_100.clamp_or(s.detail, Sharpening::DEFAULT_DETAIL);
         clamp0(&mut s.masking, ranges::AMOUNT_0_100);
-        let n = &mut self.noise_reduction;
-        clamp0(&mut n.luminance, ranges::AMOUNT_0_100);
-        clamp0(&mut n.color, ranges::AMOUNT_0_100);
+        self.noise_reduction.normalize();
+    }
+}
+
+impl ProfileSettings {
+    fn check(&self, c: &mut Checker) {
+        for (field, id) in [
+            ("profile.camera", &self.camera),
+            ("profile.look", &self.look),
+        ] {
+            if let Some(id) = id
+                && !is_valid_profile_id(id)
+            {
+                c.invalid(
+                    field,
+                    format!(
+                        "ID は 1〜{} 文字で、制御文字・前後の空白を含まない文字列で指定してください",
+                        super::params::MAX_PROFILE_ID_CHARS
+                    ),
+                );
+            }
+        }
+        c.range(
+            "profile.look_amount",
+            self.look_amount,
+            ranges::AMOUNT_0_100,
+        );
+    }
+
+    fn normalize(&mut self) {
+        for id in [&mut self.camera, &mut self.look] {
+            if id.as_deref().is_some_and(|s| !is_valid_profile_id(s)) {
+                *id = None;
+            }
+        }
+        self.look_amount =
+            ranges::AMOUNT_0_100.clamp_or(self.look_amount, Self::DEFAULT_LOOK_AMOUNT);
+    }
+}
+
+impl EffectsParams {
+    fn check(&self, c: &mut Checker) {
+        let v = &self.vignette;
+        c.range("effects.vignette.amount", v.amount, ranges::SLIDER);
+        c.range(
+            "effects.vignette.midpoint",
+            v.midpoint,
+            ranges::AMOUNT_0_100,
+        );
+        c.range("effects.vignette.roundness", v.roundness, ranges::SLIDER);
+        c.range("effects.vignette.feather", v.feather, ranges::AMOUNT_0_100);
+        c.range(
+            "effects.vignette.highlights",
+            v.highlights,
+            ranges::AMOUNT_0_100,
+        );
+        let g = &self.grain;
+        c.range("effects.grain.amount", g.amount, ranges::AMOUNT_0_100);
+        c.range("effects.grain.size", g.size, ranges::AMOUNT_0_100);
+        c.range("effects.grain.roughness", g.roughness, ranges::AMOUNT_0_100);
+    }
+
+    fn normalize(&mut self) {
+        let r = ranges::AMOUNT_0_100;
+        let v = &mut self.vignette;
+        clamp0(&mut v.amount, ranges::SLIDER);
+        v.midpoint = r.clamp_or(v.midpoint, PostCropVignette::DEFAULT_MIDPOINT);
+        clamp0(&mut v.roundness, ranges::SLIDER);
+        v.feather = r.clamp_or(v.feather, PostCropVignette::DEFAULT_FEATHER);
+        clamp0(&mut v.highlights, r);
+        let g = &mut self.grain;
+        clamp0(&mut g.amount, r);
+        g.size = r.clamp_or(g.size, Grain::DEFAULT_SIZE);
+        g.roughness = r.clamp_or(g.roughness, Grain::DEFAULT_ROUGHNESS);
+    }
+}
+
+impl NoiseReduction {
+    fn normalize(&mut self) {
+        let r = ranges::AMOUNT_0_100;
+        clamp0(&mut self.luminance, r);
+        self.luminance_detail = r.clamp_or(self.luminance_detail, Self::DEFAULT_DETAIL);
+        clamp0(&mut self.luminance_contrast, r);
+        clamp0(&mut self.color, r);
+        self.color_detail = r.clamp_or(self.color_detail, Self::DEFAULT_DETAIL);
+    }
+}
+
+impl HighlightRecovery {
+    fn check(&self, c: &mut Checker) {
+        c.range(
+            "highlight_recovery.amount",
+            self.amount,
+            ranges::AMOUNT_0_100,
+        );
+    }
+
+    fn normalize(&mut self) {
+        self.amount = ranges::AMOUNT_0_100.clamp_or(self.amount, Self::DEFAULT_AMOUNT);
     }
 }
 
 impl LocalAdjustment {
     fn check(&self, path: &str, c: &mut Checker) {
-        match self.mask {
+        let chars = self.name.chars().count();
+        if chars > MAX_MASK_NAME_CHARS {
+            c.invalid(
+                format!("{path}.name"),
+                format!("名前が長すぎます（{chars} 文字。上限 {MAX_MASK_NAME_CHARS}）"),
+            );
+        }
+        if self.name.chars().any(char::is_control) {
+            c.invalid(format!("{path}.name"), "名前に制御文字があります");
+        }
+        if self.components.len() > MAX_MASK_COMPONENTS {
+            c.invalid(
+                format!("{path}.components"),
+                format!(
+                    "部品が多すぎます（{} 個。上限 {MAX_MASK_COMPONENTS}）",
+                    self.components.len()
+                ),
+            );
+        }
+        for (i, comp) in self.components.iter().enumerate() {
+            comp.shape
+                .check(&format!("{path}.components[{i}].shape"), c);
+        }
+        self.delta.check(&format!("{path}.delta"), c);
+    }
+
+    /// 丸める（ブラシの点の数の残り `budget` を使い、減らす）。
+    fn normalize(&mut self, budget: &mut usize) {
+        if self.name.chars().count() > MAX_MASK_NAME_CHARS
+            || self.name.chars().any(char::is_control)
+        {
+            self.name = self
+                .name
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(MAX_MASK_NAME_CHARS)
+                .collect();
+        }
+        self.components.truncate(MAX_MASK_COMPONENTS);
+        for comp in &mut self.components {
+            comp.shape.normalize(budget);
+        }
+        self.delta.normalize();
+    }
+}
+
+impl MaskShape {
+    fn check(&self, p: &str, c: &mut Checker) {
+        match self {
             MaskShape::Linear { x0, y0, x1, y1 } => {
-                let p = format!("{path}.mask.linear");
-                c.range(format!("{p}.x0"), x0, ranges::MASK_COORD);
-                c.range(format!("{p}.y0"), y0, ranges::MASK_COORD);
-                c.range(format!("{p}.x1"), x1, ranges::MASK_COORD);
-                c.range(format!("{p}.y1"), y1, ranges::MASK_COORD);
+                let p = format!("{p}.linear");
+                c.range(format!("{p}.x0"), *x0, ranges::MASK_COORD);
+                c.range(format!("{p}.y0"), *y0, ranges::MASK_COORD);
+                c.range(format!("{p}.x1"), *x1, ranges::MASK_COORD);
+                c.range(format!("{p}.y1"), *y1, ranges::MASK_COORD);
             }
             MaskShape::Radial {
                 cx,
@@ -520,22 +820,100 @@ impl LocalAdjustment {
                 ry,
                 angle_deg,
                 feather,
-                invert: _,
             } => {
-                let p = format!("{path}.mask.radial");
-                c.range(format!("{p}.cx"), cx, ranges::MASK_COORD);
-                c.range(format!("{p}.cy"), cy, ranges::MASK_COORD);
-                c.range(format!("{p}.rx"), rx, ranges::MASK_RADIUS);
-                c.range(format!("{p}.ry"), ry, ranges::MASK_RADIUS);
-                c.range(format!("{p}.angle_deg"), angle_deg, ranges::MASK_ANGLE_DEG);
-                c.range(format!("{p}.feather"), feather, ranges::AMOUNT_0_100);
+                let p = format!("{p}.radial");
+                c.range(format!("{p}.cx"), *cx, ranges::MASK_COORD);
+                c.range(format!("{p}.cy"), *cy, ranges::MASK_COORD);
+                c.range(format!("{p}.rx"), *rx, ranges::MASK_RADIUS);
+                c.range(format!("{p}.ry"), *ry, ranges::MASK_RADIUS);
+                c.range(format!("{p}.angle_deg"), *angle_deg, ranges::MASK_ANGLE_DEG);
+                c.range(format!("{p}.feather"), *feather, ranges::AMOUNT_0_100);
+            }
+            MaskShape::Brush { strokes } => {
+                let p = format!("{p}.brush");
+                if strokes.len() > MAX_BRUSH_STROKES {
+                    c.invalid(
+                        format!("{p}.strokes"),
+                        format!(
+                            "ストロークが多すぎます（{} 本。上限 {MAX_BRUSH_STROKES}）",
+                            strokes.len()
+                        ),
+                    );
+                }
+                for (i, s) in strokes.iter().enumerate() {
+                    let q = format!("{p}.strokes[{i}]");
+                    c.range(format!("{q}.size"), s.size, ranges::BRUSH_SIZE);
+                    c.range(format!("{q}.feather"), s.feather, ranges::AMOUNT_0_100);
+                    c.range(format!("{q}.flow"), s.flow, ranges::AMOUNT_0_100);
+                    c.range(format!("{q}.density"), s.density, ranges::AMOUNT_0_100);
+                    if s.points.is_empty() {
+                        c.invalid(format!("{q}.points"), "点がありません");
+                    }
+                    if s.points.len() > MAX_STROKE_POINTS {
+                        c.invalid(
+                            format!("{q}.points"),
+                            format!(
+                                "点が多すぎます（{} 個。上限 {MAX_STROKE_POINTS}）",
+                                s.points.len()
+                            ),
+                        );
+                    }
+                    // 点はたくさんあるので、問題のある最初の点だけを報告する。
+                    if let Some((k, [x, y])) = s.points.iter().enumerate().find(|(_, [x, y])| {
+                        !(ranges::MASK_COORD.contains(*x) && ranges::MASK_COORD.contains(*y))
+                    }) {
+                        c.range(format!("{q}.points[{k}][0]"), *x, ranges::MASK_COORD);
+                        c.range(format!("{q}.points[{k}][1]"), *y, ranges::MASK_COORD);
+                    }
+                }
+            }
+            MaskShape::ColorRange { samples, amount } => {
+                let p = format!("{p}.color_range");
+                if samples.is_empty() {
+                    c.invalid(format!("{p}.samples"), "見本の色がありません");
+                }
+                if samples.len() > MAX_COLOR_SAMPLES {
+                    c.invalid(
+                        format!("{p}.samples"),
+                        format!(
+                            "見本の色が多すぎます（{} 個。上限 {MAX_COLOR_SAMPLES}）",
+                            samples.len()
+                        ),
+                    );
+                }
+                for (i, s) in samples.iter().enumerate() {
+                    let q = format!("{p}.samples[{i}]");
+                    c.range(format!("{q}.x"), s.x, ranges::MASK_COORD);
+                    c.range(format!("{q}.y"), s.y, ranges::MASK_COORD);
+                    c.range(format!("{q}.lab[0]"), s.lab[0], ranges::MASK_LAB_L);
+                    c.range(format!("{q}.lab[1]"), s.lab[1], ranges::MASK_LAB_AB);
+                    c.range(format!("{q}.lab[2]"), s.lab[2], ranges::MASK_LAB_AB);
+                }
+                c.range(format!("{p}.amount"), *amount, ranges::AMOUNT_0_100);
+            }
+            MaskShape::LuminanceRange {
+                min,
+                max,
+                smoothness,
+            } => {
+                let p = format!("{p}.luminance_range");
+                c.range(format!("{p}.min"), *min, ranges::AMOUNT_0_100);
+                c.range(format!("{p}.max"), *max, ranges::AMOUNT_0_100);
+                c.range(format!("{p}.smoothness"), *smoothness, ranges::AMOUNT_0_100);
+                if min > max {
+                    c.invalid(
+                        format!("{p}.min"),
+                        format!("下端 {min} が上端 {max} より大きい"),
+                    );
+                }
             }
         }
-        self.delta.check(&format!("{path}.delta"), c);
     }
 
-    fn normalize(&mut self) {
-        match &mut self.mask {
+    /// 丸める。ブラシの点は、有限でない点を除いて範囲に丸め、上限（本数・1 本の点の数・全体の点の数 `budget`）を
+    /// 超えた分を除く（点のなくなったストロークも除く）。色域の範囲の見本の色は上限まで。
+    fn normalize(&mut self, budget: &mut usize) {
+        match self {
             MaskShape::Linear { x0, y0, x1, y1 } => {
                 for v in [x0, y0, x1, y1] {
                     clamp0(v, ranges::MASK_COORD);
@@ -548,50 +926,81 @@ impl LocalAdjustment {
                 ry,
                 angle_deg,
                 feather,
-                invert: _,
             } => {
                 clamp0(cx, ranges::MASK_COORD);
                 clamp0(cy, ranges::MASK_COORD);
                 clamp0(rx, ranges::MASK_RADIUS);
                 clamp0(ry, ranges::MASK_RADIUS);
                 clamp0(angle_deg, ranges::MASK_ANGLE_DEG);
-                clamp0(feather, ranges::AMOUNT_0_100);
+                *feather = ranges::AMOUNT_0_100.clamp_or(*feather, 50.0);
+            }
+            MaskShape::Brush { strokes } => {
+                strokes.truncate(MAX_BRUSH_STROKES);
+                for s in strokes.iter_mut() {
+                    s.size = ranges::BRUSH_SIZE.clamp_or(s.size, BrushStroke::DEFAULT_SIZE);
+                    s.feather =
+                        ranges::AMOUNT_0_100.clamp_or(s.feather, BrushStroke::DEFAULT_FEATHER);
+                    s.flow = ranges::AMOUNT_0_100.clamp_or(s.flow, BrushStroke::DEFAULT_FLOW);
+                    s.density =
+                        ranges::AMOUNT_0_100.clamp_or(s.density, BrushStroke::DEFAULT_DENSITY);
+                    s.points.retain(|[x, y]| x.is_finite() && y.is_finite());
+                    let keep = s.points.len().min(MAX_STROKE_POINTS).min(*budget);
+                    s.points.truncate(keep);
+                    *budget -= keep;
+                    for [x, y] in &mut s.points {
+                        clamp0(x, ranges::MASK_COORD);
+                        clamp0(y, ranges::MASK_COORD);
+                    }
+                }
+                strokes.retain(|s| !s.points.is_empty());
+            }
+            MaskShape::ColorRange { samples, amount } => {
+                samples.truncate(MAX_COLOR_SAMPLES);
+                for s in samples.iter_mut() {
+                    clamp0(&mut s.x, ranges::MASK_COORD);
+                    clamp0(&mut s.y, ranges::MASK_COORD);
+                    clamp0(&mut s.lab[0], ranges::MASK_LAB_L);
+                    clamp0(&mut s.lab[1], ranges::MASK_LAB_AB);
+                    clamp0(&mut s.lab[2], ranges::MASK_LAB_AB);
+                }
+                *amount = ranges::AMOUNT_0_100.clamp_or(*amount, 50.0);
+            }
+            MaskShape::LuminanceRange {
+                min,
+                max,
+                smoothness,
+            } => {
+                clamp0(min, ranges::AMOUNT_0_100);
+                *max = ranges::AMOUNT_0_100.clamp_or(*max, 100.0);
+                *smoothness = ranges::AMOUNT_0_100.clamp_or(*smoothness, 50.0);
+                if *min > *max {
+                    std::mem::swap(min, max);
+                }
             }
         }
-        self.delta.normalize();
     }
 }
 
 impl LocalDelta {
     fn check(&self, path: &str, c: &mut Checker) {
-        c.range(
-            format!("{path}.exposure_ev"),
-            self.exposure_ev,
-            ranges::EXPOSURE_EV,
-        );
-        for (name, v) in [
-            ("contrast", self.contrast),
-            ("highlights", self.highlights),
-            ("shadows", self.shadows),
-            ("whites", self.whites),
-            ("blacks", self.blacks),
-            ("saturation", self.saturation),
-        ] {
-            c.range(format!("{path}.{name}"), v, ranges::SLIDER);
+        for (name, v) in LocalDelta::NAMES.iter().zip(self.values()) {
+            let range = if *name == "exposure_ev" {
+                ranges::EXPOSURE_EV
+            } else {
+                ranges::SLIDER
+            };
+            c.range(format!("{path}.{name}"), v, range);
         }
     }
 
     fn normalize(&mut self) {
-        clamp0(&mut self.exposure_ev, ranges::EXPOSURE_EV);
-        for v in [
-            &mut self.contrast,
-            &mut self.highlights,
-            &mut self.shadows,
-            &mut self.whites,
-            &mut self.blacks,
-            &mut self.saturation,
-        ] {
-            clamp0(v, ranges::SLIDER);
+        for (name, v) in LocalDelta::NAMES.iter().zip(self.values_mut()) {
+            let range = if *name == "exposure_ev" {
+                ranges::EXPOSURE_EV
+            } else {
+                ranges::SLIDER
+            };
+            clamp0(v, range);
         }
     }
 }
@@ -603,12 +1012,21 @@ impl RenderDeps {
         if let Some(lens) = &self.lens_profile {
             lens.check("render_deps.lens_profile.sha256", c);
         }
+        if let Some(p) = &self.profile {
+            p.check("render_deps.profile.sha256", c);
+        }
+        if let Some(l) = &self.look {
+            l.check("render_deps.look.sha256", c);
+        }
     }
 
     pub(crate) fn normalize(&mut self) {
         self.camera_profile.normalize();
-        if let Some(lens) = &mut self.lens_profile {
-            lens.normalize();
+        for d in [&mut self.lens_profile, &mut self.profile, &mut self.look]
+            .into_iter()
+            .flatten()
+        {
+            d.normalize();
         }
     }
 }
@@ -639,6 +1057,7 @@ fn is_sha256_hex_or_empty(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::develop::masks::{MaskComponent, MaskMode};
     use crate::develop::params::{AspectRatio, CurvePoint, WbPreset};
 
     fn issue_fields(s: &DevelopSettings) -> Vec<String> {
@@ -863,26 +1282,129 @@ mod tests {
     fn masks_are_checked() {
         let mut s = DevelopSettings::default();
         s.masks.push(LocalAdjustment {
-            enabled: true,
-            mask: MaskShape::Radial {
+            delta: LocalDelta {
+                exposure_ev: 9.0,
+                ..Default::default()
+            },
+            ..LocalAdjustment::new(MaskComponent::add(MaskShape::Radial {
                 cx: 0.5,
                 cy: 0.5,
                 rx: 3.0,
                 ry: 0.2,
                 angle_deg: 0.0,
                 feather: 50.0,
-                invert: false,
-            },
-            delta: LocalDelta {
-                exposure_ev: 9.0,
-                ..Default::default()
-            },
+            }))
         });
         assert_eq!(
             issue_fields(&s),
-            ["masks[0].mask.radial.rx", "masks[0].delta.exposure_ev"]
+            [
+                "masks[0].components[0].shape.radial.rx",
+                "masks[0].delta.exposure_ev"
+            ]
         );
         s.normalized().validate().unwrap();
+    }
+
+    #[test]
+    fn brush_and_range_masks_are_checked_and_normalized() {
+        let mut s = DevelopSettings::default();
+        let stroke = BrushStroke {
+            size: 0.0,
+            points: vec![[0.1, 0.2], [f32::NAN, 0.3], [5.0, 0.4]],
+            ..Default::default()
+        };
+        let mut m = LocalAdjustment::new(MaskComponent::add(MaskShape::Brush {
+            strokes: vec![stroke, BrushStroke::default()],
+        }));
+        m.components.push(MaskComponent {
+            mode: MaskMode::Intersect,
+            invert: false,
+            shape: MaskShape::ColorRange {
+                samples: vec![],
+                amount: 120.0,
+            },
+        });
+        m.components.push(MaskComponent {
+            mode: MaskMode::Intersect,
+            invert: true,
+            shape: MaskShape::LuminanceRange {
+                min: 80.0,
+                max: 20.0,
+                smoothness: 50.0,
+            },
+        });
+        m.name = "空\u{7}".to_owned();
+        m.delta.dehaze = 30.0;
+        s.masks.push(m);
+        assert_eq!(
+            issue_fields(&s),
+            [
+                "masks[0].name",
+                "masks[0].components[0].shape.brush.strokes[0].size",
+                "masks[0].components[0].shape.brush.strokes[0].points[1][0]",
+                "masks[0].components[0].shape.brush.strokes[1].points",
+                "masks[0].components[1].shape.color_range.samples",
+                "masks[0].components[1].shape.color_range.amount",
+                "masks[0].components[2].shape.luminance_range.min",
+            ]
+        );
+        let n = s.normalized();
+        let nm = &n.masks[0];
+        assert_eq!(nm.name, "空");
+        let MaskShape::Brush { strokes } = &nm.components[0].shape else {
+            panic!()
+        };
+        // 有限でない点を除き、範囲に丸め、点のないストロークを除く。
+        assert_eq!(strokes.len(), 1);
+        assert_eq!(strokes[0].points, vec![[0.1, 0.2], [2.0, 0.4]]);
+        assert_eq!(strokes[0].size, ranges::BRUSH_SIZE.min);
+        assert_eq!(
+            nm.components[2].shape,
+            MaskShape::LuminanceRange {
+                min: 20.0,
+                max: 80.0,
+                smoothness: 50.0
+            }
+        );
+        // 見本の色のない色域の範囲は、丸めても残る（検証のエラーのまま。画面は見本を選んでから作る）。
+        assert_eq!(
+            issue_fields(&n),
+            ["masks[0].components[1].shape.color_range.samples"]
+        );
+    }
+
+    #[test]
+    fn brush_point_limits_are_enforced() {
+        let mut s = DevelopSettings::default();
+        let stroke = |n: usize| BrushStroke {
+            points: vec![[0.5, 0.5]; n],
+            ..Default::default()
+        };
+        let strokes: Vec<_> = (0..30).map(|_| stroke(MAX_STROKE_POINTS)).collect();
+        s.masks
+            .push(LocalAdjustment::new(MaskComponent::add(MaskShape::Brush {
+                strokes,
+            })));
+        assert_eq!(
+            s.masks[0].brush_points(),
+            30 * MAX_STROKE_POINTS,
+            "上限を超える"
+        );
+        assert_eq!(issue_fields(&s), ["masks"]);
+        let n = s.normalized();
+        assert_eq!(n.masks[0].brush_points(), MAX_TOTAL_BRUSH_POINTS);
+        n.validate().unwrap();
+        // 1 本の点の上限。
+        let mut t = DevelopSettings::default();
+        t.masks
+            .push(LocalAdjustment::new(MaskComponent::add(MaskShape::Brush {
+                strokes: vec![stroke(MAX_STROKE_POINTS + 1)],
+            })));
+        assert_eq!(
+            issue_fields(&t),
+            ["masks[0].components[0].shape.brush.strokes[0].points"]
+        );
+        assert_eq!(t.normalized().masks[0].brush_points(), MAX_STROKE_POINTS);
     }
 
     #[test]

@@ -9,8 +9,10 @@
 //!   ファイルを内容が同じまま読み直せた場合も、メタデータを保存し直して [`RegisterStatus::Updated`] を
 //!   返す（`revision` はそのまま）。
 //! - 同じフォルダで拡張子だけが違う RAW と JPEG は、同じ asset にまとめる（JPEG は
-//!   `role = sidecar_jpeg`。IMP-06 の基本の扱い）。JPEG を先に登録していた場合は、RAW を
+//!   `role = sidecar_jpeg`。IMP-06。04 の 3.11 節）。JPEG を先に登録していた場合は、RAW を
 //!   登録したときに JPEG を `sidecar_jpeg` に変えて同じ asset に入れる（評価やキーワードは残る）。
+//!   [`RegisterOptions::pair_raw_jpeg`] を `false` にすると、まとめずに別々の asset にする（新しく登録する
+//!   ファイルだけに効く。登録済みのペアは分けない）。
 //! - 多数のファイルは [`Catalog::register_batch`] で 1 つのトランザクションにまとめる。
 //!   途中で失敗した場合はバッチ全体が取り消されるので、同じバッチをもう一度登録すればよい
 //!   （登録済みのものは [`RegisterStatus::Unchanged`] になる）。
@@ -18,8 +20,8 @@
 use std::path::{Component, Path};
 
 use genzo_model::{
-    AssetId, AssetKind, CaptureTime, FileId, FileRole, FileStatus, FolderId, PhotoMetadata,
-    TzSource, VariantId, VideoMetadata, VolumeId,
+    AssetId, AssetKind, CaptureTime, FileId, FileRole, FileStatus, FolderId, MetadataField,
+    PhotoMetadata, VariantId, VideoMetadata, VolumeId,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -27,6 +29,8 @@ use crate::catalog::Catalog;
 use crate::develop::{HISTORY_LABEL_IMPORT, insert_variant, new_variant_develop};
 use crate::error::{CatalogError, Result};
 use crate::hash::{FileFacts, is_hex64};
+use crate::iptc::{normalize_changes, set_asset_metadata_tx};
+use crate::keyword::{add_keywords_tx, check_keyword_path, ensure_keyword_tx};
 use crate::text::{path_key, searchable_text};
 use crate::util::{i64_to_u32, now_utc_string, parse_enum, u64_to_i64};
 
@@ -64,7 +68,7 @@ pub fn pair_class(name: &str) -> PairClass {
 }
 
 /// 名前を「拡張子を除いた部分」と拡張子に分ける（どちらも空でない場合だけ）。
-fn split_stem(name: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_stem(name: &str) -> Option<(&str, &str)> {
     let (stem, ext) = name.rsplit_once('.')?;
     (!stem.is_empty() && !ext.is_empty()).then_some((stem, ext))
 }
@@ -249,6 +253,68 @@ impl RegisterFile {
     }
 }
 
+/// 登録の設定（[`Catalog::register_batch_with`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterOptions {
+    /// 同じフォルダで拡張子だけが違う RAW と JPEG を、同じ asset（1 枚の写真）にまとめるか（IMP-06）。
+    /// `false` なら、新しく登録するファイルを別々の asset にする（登録済みのペアは分けない）。既定は `true`。
+    pub pair_raw_jpeg: bool,
+}
+
+impl Default for RegisterOptions {
+    fn default() -> Self {
+        Self {
+            pair_raw_jpeg: true,
+        }
+    }
+}
+
+/// 取り込みで新しく登録した写真にまとめて付けるもの（IMP-05。[`Catalog::register_batch_tagged`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImportTags {
+    /// キーワードの階層のパス（`[["場所", "京都"], ["家族"]]`。なければ作る）。
+    pub keyword_paths: Vec<Vec<String>>,
+    /// 説明のメタデータ（項目と値。値は genzo-model の `normalize_metadata_value` で整え、空なら付けない）。
+    pub metadata: Vec<(MetadataField, String)>,
+}
+
+impl ImportTags {
+    /// 付けるものがないか。
+    pub fn is_empty(&self) -> bool {
+        self.keyword_paths.is_empty() && self.metadata.iter().all(|(_, v)| v.trim().is_empty())
+    }
+
+    /// 作らずに確かめる（キーワードの名前の規則・メタデータの値。取り込みを始める前に誤りを知らせるため）。
+    pub fn validate(&self) -> Result<()> {
+        for p in &self.keyword_paths {
+            check_keyword_path(p)?;
+        }
+        self.normalized_metadata().map(|_| ())
+    }
+
+    /// 整えたメタデータ（空の値は除く）。
+    fn normalized_metadata(&self) -> Result<Vec<(MetadataField, Option<String>)>> {
+        let changes: Vec<(MetadataField, Option<&str>)> = self
+            .metadata
+            .iter()
+            .map(|(f, v)| (*f, Some(v.as_str())))
+            .collect();
+        Ok(normalize_changes(&changes)?
+            .into_iter()
+            .filter(|(_, v)| v.is_some())
+            .collect())
+    }
+}
+
+/// 取り込みでまとめて付けた結果（[`Catalog::register_batch_tagged`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TagOutcome {
+    /// キーワード・メタデータを付けた写真（asset。RAW と JPEG のペアは 1 つ）の数。
+    pub assets: u64,
+    /// 新しく付けた（写真, キーワード）の組の数。
+    pub keyword_links: u64,
+}
+
 /// 登録の結果の種類。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterStatus {
@@ -376,32 +442,107 @@ impl Catalog {
         Ok(out.pop().expect("1 件の要求には 1 件の結果がある"))
     }
 
-    /// 複数のファイルを 1 つのトランザクションで登録する。結果は要求と同じ順に返す。
+    /// 複数のファイルを 1 つのトランザクションで登録する（既定の設定。RAW と JPEG はまとめる）。結果は要求と
+    /// 同じ順に返す。
     ///
     /// どれか 1 件でも失敗したらバッチ全体を取り消す（DATA-02）。RAW と JPEG のペアを
     /// まとめやすくするため、内部では RAW を先、JPEG を後に処理する。
     pub fn register_batch(&mut self, requests: &[RegisterFile]) -> Result<Vec<RegisterOutcome>> {
-        for r in requests {
-            r.validate()?;
-        }
-        let mut order: Vec<usize> = (0..requests.len()).collect();
-        order.sort_by_key(|&i| match pair_class(&requests[i].name) {
-            PairClass::Raw => 0,
-            PairClass::Other => 1,
-            PairClass::Jpeg => 2,
-        });
-        let now = now_utc_string();
+        self.register_batch_with(requests, &RegisterOptions::default())
+    }
+
+    /// 設定 `options` で、複数のファイルを 1 つのトランザクションで登録する（[`Catalog::register_batch`]）。
+    pub fn register_batch_with(
+        &mut self,
+        requests: &[RegisterFile],
+        options: &RegisterOptions,
+    ) -> Result<Vec<RegisterOutcome>> {
         let tx = self.conn.transaction()?;
-        let mut results: Vec<Option<RegisterOutcome>> = vec![None; requests.len()];
-        for i in order {
-            results[i] = Some(register_one(&tx, &requests[i], &now)?);
+        let out = register_batch_tx(&tx, requests, options)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// 設定 `options` で複数のファイルを登録し、**このバッチで新しく作った写真**（[`RegisterStatus::Added`] で
+    /// `paired` でないファイルの asset）に `tags`（キーワード・説明のメタデータ）を付ける（IMP-05）。すべて 1 つの
+    /// トランザクションで、どれかが失敗したら登録もキーワードの作成も残さない。
+    ///
+    /// キーワードはマスターの variant に付け、メタデータは asset に付ける（RAW と JPEG のペアは 1 つの写真）。
+    /// 内容が変わった・変化のないファイルの写真（取り込み直し）と、登録済みの写真に組として足したファイル
+    /// （登録済みの RAW の隣の新しい JPEG・登録済みの JPEG に足した RAW）の写真には付けない。新しく作った写真が
+    /// なければキーワードも作らない。メタデータは `tags` に値のある項目だけを書き、ほかの項目は変えない。
+    pub fn register_batch_tagged(
+        &mut self,
+        requests: &[RegisterFile],
+        options: &RegisterOptions,
+        tags: &ImportTags,
+    ) -> Result<(Vec<RegisterOutcome>, TagOutcome)> {
+        let metadata = tags.normalized_metadata()?;
+        for p in &tags.keyword_paths {
+            check_keyword_path(p)?;
+        }
+        let tx = self.conn.transaction()?;
+        let out = register_batch_tx(&tx, requests, options)?;
+        // このバッチで作った写真（組にせずに登録したファイルの asset）だけ。組として既存の写真に入れた
+        // ファイル（`paired`）も Added になるが、その写真が前からあれば付けない（登録済みの写真は変えない）。
+        // 同じバッチで作った写真に入れた JPEG は、その写真が既に含まれる。
+        let mut assets: Vec<AssetId> = Vec::new();
+        let mut variants: Vec<VariantId> = Vec::new();
+        for o in out
+            .iter()
+            .filter(|o| o.status == RegisterStatus::Added && !o.paired)
+        {
+            if !assets.contains(&o.asset_id) {
+                assets.push(o.asset_id);
+                variants.push(o.master_variant_id);
+            }
+        }
+        let mut tagged = TagOutcome::default();
+        if !assets.is_empty() && (!tags.keyword_paths.is_empty() || !metadata.is_empty()) {
+            let mut keyword_ids = Vec::new();
+            for path in &tags.keyword_paths {
+                let mut parent = None;
+                for name in path {
+                    parent = Some(ensure_keyword_tx(&tx, parent, name)?);
+                }
+                let id = parent.expect("パスは空でない（check_keyword_path で確かめた）");
+                if !keyword_ids.contains(&id) {
+                    keyword_ids.push(id);
+                }
+            }
+            tagged.keyword_links = add_keywords_tx(&tx, &variants, &keyword_ids)? as u64;
+            set_asset_metadata_tx(&tx, &assets, &metadata)?;
+            tagged.assets = assets.len() as u64;
         }
         tx.commit()?;
-        Ok(results
-            .into_iter()
-            .map(|r| r.expect("すべての要求を処理した"))
-            .collect())
+        Ok((out, tagged))
     }
+}
+
+/// トランザクションの中で、複数のファイルを登録する（RAW を先、JPEG を後に処理する。結果は要求の順）。
+fn register_batch_tx(
+    tx: &Transaction<'_>,
+    requests: &[RegisterFile],
+    options: &RegisterOptions,
+) -> Result<Vec<RegisterOutcome>> {
+    for r in requests {
+        r.validate()?;
+    }
+    let mut order: Vec<usize> = (0..requests.len()).collect();
+    order.sort_by_key(|&i| match pair_class(&requests[i].name) {
+        PairClass::Raw => 0,
+        PairClass::Other => 1,
+        PairClass::Jpeg => 2,
+    });
+    let now = now_utc_string();
+    let mut results: Vec<Option<RegisterOutcome>> = vec![None; requests.len()];
+    for i in order {
+        results[i] = Some(register_one(tx, &requests[i], &now, options)?);
+    }
+    Ok(results
+        .into_iter()
+        .map(|r| r.expect("すべての要求を処理した"))
+        .collect())
 }
 
 fn folder_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Folder> {
@@ -466,7 +607,12 @@ struct ExistingFile {
     status_reason: Option<String>,
 }
 
-fn register_one(tx: &Transaction<'_>, req: &RegisterFile, now: &str) -> Result<RegisterOutcome> {
+fn register_one(
+    tx: &Transaction<'_>,
+    req: &RegisterFile,
+    now: &str,
+    options: &RegisterOptions,
+) -> Result<RegisterOutcome> {
     let name_key = path_key(&req.name);
     let existing = tx
         .prepare_cached(
@@ -511,7 +657,8 @@ fn register_one(tx: &Transaction<'_>, req: &RegisterFile, now: &str) -> Result<R
     let class = pair_class(&req.name);
 
     // JPEG: 同じフォルダに同じ名前の RAW があれば、その asset の sidecar_jpeg にする。
-    if req.kind == AssetKind::Photo
+    if options.pair_raw_jpeg
+        && req.kind == AssetKind::Photo
         && class == PairClass::Jpeg
         && let Some((raw_asset, _)) =
             find_pair_partner(tx, req.folder_id, &name_key, PairClass::Raw)?
@@ -540,7 +687,8 @@ fn register_one(tx: &Transaction<'_>, req: &RegisterFile, now: &str) -> Result<R
     }
 
     // RAW: 同じフォルダに同じ名前の JPEG だけの asset があれば、それに RAW を加えて主とする。
-    if req.kind == AssetKind::Photo
+    if options.pair_raw_jpeg
+        && req.kind == AssetKind::Photo
         && class == PairClass::Raw
         && let Some((jpeg_asset, jpeg_file)) =
             find_pair_partner(tx, req.folder_id, &name_key, PairClass::Jpeg)?
@@ -793,14 +941,36 @@ pub(crate) fn master_variant(tx: &rusqlite::Connection, asset_id: i64) -> Result
         })
 }
 
+/// 版 11（[`crate::CAPTURE_TIME_EDITS_SCHEMA_VERSION`]）より前のスキーマに、その列がないためのエラーか。
+///
+/// 移行の前の版で開いた試験用のカタログ（`testing::open_at_version`）に登録するときだけ起きる。アプリが開く
+/// カタログは、開くときに最新の版へ移行している（`asset_iptc` の表がない場合と同じ扱い。refresh_asset_text）。
+pub(crate) fn is_missing_v11_column(e: &rusqlite::Error) -> bool {
+    let message = match e {
+        rusqlite::Error::SqliteFailure(_, Some(m)) => m.as_str(),
+        rusqlite::Error::SqlInputError { msg, .. } => msg.as_str(),
+        _ => return false,
+    };
+    message.contains("no such column: tz_basis")
+        || message.contains("no such column: camera_serial")
+}
+
 /// asset の撮影日時の列を読む。
 pub(crate) fn load_capture(conn: &rusqlite::Connection, asset_id: i64) -> Result<CaptureTime> {
-    let row = conn
-        .prepare_cached(
+    let sql = |basis: &str| {
+        format!(
             "SELECT captured_at_raw, captured_offset, tz_source, tz_assumed, time_correction_s,
-                    captured_at_utc
-             FROM asset WHERE id = ?1",
-        )?
+                    captured_at_utc, {basis}
+             FROM asset WHERE id = ?1"
+        )
+    };
+    let mut stmt = match conn.prepare_cached(&sql("tz_basis")) {
+        Ok(stmt) => stmt,
+        // 版 11 より前のスキーマ（試験用のカタログ）。計算に使うオフセットはない。
+        Err(e) if is_missing_v11_column(&e) => conn.prepare_cached(&sql("NULL"))?,
+        Err(e) => return Err(e.into()),
+    };
+    let row = stmt
         .query_row([asset_id], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
@@ -809,51 +979,51 @@ pub(crate) fn load_capture(conn: &rusqlite::Connection, asset_id: i64) -> Result
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })
         .optional()?
         .ok_or_else(|| CatalogError::NotFound(format!("asset {asset_id}")))?;
-    capture_from_columns(row.0, row.1, &row.2, row.3, row.4, row.5.as_deref())
-}
-
-/// asset の撮影日時の列から [`CaptureTime`] を作る。
-pub(crate) fn capture_from_columns(
-    raw: Option<String>,
-    offset: Option<String>,
-    tz_source: &str,
-    tz_assumed: Option<String>,
-    correction_s: i64,
-    utc: Option<&str>,
-) -> Result<CaptureTime> {
-    Ok(CaptureTime {
-        raw,
-        offset,
-        tz_source: parse_enum(tz_source)?,
-        tz_assumed,
-        correction_s,
-        utc: utc.map(crate::util::parse_db_utc).transpose()?,
+    capture_from_columns(CaptureColumns {
+        raw: row.0,
+        offset: row.1,
+        tz_source: &row.2,
+        tz_assumed: row.3,
+        basis: row.6,
+        correction_s: row.4,
+        utc: row.5.as_deref(),
     })
 }
 
-/// 内容が変わったファイルの新しい撮影日時に、ユーザーの修正（タイムゾーンの指定・時計のずれの補正。
-/// LIB-16）を引き継ぐ。
+/// asset の撮影日時の列（`captured_at_raw`・`captured_offset`・`tz_source`・`tz_assumed`・`tz_basis`・
+/// `time_correction_s`・`captured_at_utc`）。
+pub(crate) struct CaptureColumns<'a> {
+    pub raw: Option<String>,
+    pub offset: Option<String>,
+    pub tz_source: &'a str,
+    pub tz_assumed: Option<String>,
+    pub basis: Option<String>,
+    pub correction_s: i64,
+    pub utc: Option<&'a str>,
+}
+
+/// asset の撮影日時の列から [`CaptureTime`] を作る。
+pub(crate) fn capture_from_columns(c: CaptureColumns<'_>) -> Result<CaptureTime> {
+    Ok(CaptureTime {
+        raw: c.raw,
+        offset: c.offset,
+        tz_source: parse_enum(c.tz_source)?,
+        tz_assumed: c.tz_assumed,
+        basis: c.basis,
+        correction_s: c.correction_s,
+        utc: c.utc.map(crate::util::parse_db_utc).transpose()?,
+    })
+}
+
+/// 内容が変わったファイルの新しい撮影日時に、ユーザーの修正（タイムゾーンの指定とその読み方・時計のずれの
+/// 補正。LIB-16）を引き継ぐ（genzo-model の `CaptureTime::with_user_changes_of`）。
 fn carry_over_user_corrections(previous: &CaptureTime, new: &CaptureTime) -> CaptureTime {
-    let mut out = new.clone();
-    if previous.tz_source == TzSource::UserSet
-        && let Some(offset) = previous
-            .tz_assumed
-            .as_deref()
-            .and_then(|s| genzo_model::capture_time::parse_offset(s).ok())
-        && let Ok(c) = out.with_user_offset(offset)
-    {
-        out = c;
-    }
-    if previous.correction_s != 0
-        && let Ok(c) = out.with_correction(previous.correction_s)
-    {
-        out = c;
-    }
-    out
+    new.with_user_changes_of(previous)
 }
 
 /// asset のメタデータ（撮影情報・寸法・撮影日時・動画の情報）を、登録の要求の内容で書く。
@@ -898,6 +1068,15 @@ fn update_asset_metadata(
         cols.gps_lat,
         cols.gps_lon,
     ])?;
+    // 版 11 の列（UTC の計算に使ったオフセット・本体のシリアル番号）。版 11 より前のスキーマ（試験用の
+    // カタログ）では書かない（値は NULL のはずなので失うものはない）。
+    match tx.prepare_cached("UPDATE asset SET tz_basis = ?2, camera_serial = ?3 WHERE id = ?1") {
+        Ok(mut stmt) => {
+            stmt.execute(params![asset_id, capture.basis, cols.camera_serial])?;
+        }
+        Err(e) if is_missing_v11_column(&e) => {}
+        Err(e) => return Err(e.into()),
+    }
     if let MediaMetadata::Video(v) = &req.metadata {
         tx.prepare_cached(
             "INSERT INTO video_meta(asset_id, duration_s, fps, codec, bit_depth, color_transfer,
@@ -924,6 +1103,8 @@ fn update_asset_metadata(
 /// asset のテーブルに入れる撮影情報の列。
 struct AssetColumns {
     camera: Option<String>,
+    /// 本体のシリアル番号（LIB-16 の機材の区別）。
+    camera_serial: Option<String>,
     lens: Option<String>,
     iso: Option<i64>,
     aperture: Option<f64>,
@@ -944,6 +1125,7 @@ impl AssetColumns {
                 let gps = p.gps.filter(|g| g.is_valid());
                 Self {
                     camera: p.camera_name(),
+                    camera_serial: genzo_model::normalize_serial(p.body_serial.as_deref()),
                     lens: p
                         .lens
                         .as_deref()
@@ -962,6 +1144,8 @@ impl AssetColumns {
                 }
             }
             MediaMetadata::Video(v) => Self {
+                // 機材のタグ（Apple の端末など。記録しない機材が多い）。LIB-16 の機材の区別・カメラの絞り込みに使う。
+                camera: v.camera_name(),
                 width: v.width.map(i64::from),
                 height: v.height.map(i64::from),
                 ..Self::empty()
@@ -973,6 +1157,7 @@ impl AssetColumns {
     fn empty() -> Self {
         Self {
             camera: None,
+            camera_serial: None,
             lens: None,
             iso: None,
             aperture: None,
@@ -987,7 +1172,9 @@ impl AssetColumns {
     }
 }
 
-/// asset のテキスト検索の対象（ファイル名とキャプション）を作り直す（3.6 節）。
+/// asset のテキスト検索の対象（ファイル名・キャプションと、説明のメタデータのうち検索の対象の項目
+/// （タイトル・作成者・撮影場所など。genzo-model の `MetadataField::searchable`。LIB-15））を作り直す
+/// （3.6 節）。
 ///
 /// 内容が変わらなければ書き込まない（FTS の索引を無駄に更新しないため）。
 pub(crate) fn refresh_asset_text(conn: &rusqlite::Connection, asset_id: i64) -> Result<()> {
@@ -1000,7 +1187,43 @@ pub(crate) fn refresh_asset_text(conn: &rusqlite::Connection, asset_id: i64) -> 
     let caption: Option<String> = conn
         .prepare_cached("SELECT caption FROM asset WHERE id = ?1")?
         .query_row([asset_id], |row| row.get(0))?;
-    let text = searchable_text(names.iter().map(String::as_str).chain(caption.as_deref()));
+    // 検索の対象の説明のメタデータ（キャプション以外。MetadataField::ALL の順）。
+    let fields: Vec<genzo_model::MetadataField> = crate::iptc::iptc_columns()
+        .filter(|f| f.searchable())
+        .collect();
+    let sql = format!(
+        "SELECT {} FROM asset_iptc WHERE asset_id = ?1",
+        fields
+            .iter()
+            .map(|f| f.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let iptc: Vec<Option<String>> = match conn.prepare_cached(&sql) {
+        Ok(mut stmt) => stmt
+            .query_row([asset_id], |row| {
+                (0..fields.len())
+                    .map(|i| row.get::<_, Option<String>>(i))
+                    .collect()
+            })
+            .optional()?
+            .unwrap_or_default(),
+        // 版 6 より前のスキーマ（移行の前の版で開いた試験用のカタログ。`testing::open_at_version`）には
+        // 表がない。アプリが開くカタログは、開くときに最新の版へ移行している。
+        Err(rusqlite::Error::SqliteFailure(_, Some(m)))
+            if m.contains("no such table: asset_iptc") =>
+        {
+            Vec::new()
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let text = searchable_text(
+        names
+            .iter()
+            .map(String::as_str)
+            .chain(caption.as_deref())
+            .chain(iptc.iter().filter_map(|v| v.as_deref())),
+    );
     conn.prepare_cached(
         "INSERT INTO asset_text(asset_id, text_norm) VALUES (?1, ?2)
          ON CONFLICT(asset_id) DO UPDATE SET text_norm = excluded.text_norm
@@ -1067,7 +1290,7 @@ mod tests {
             .unwrap();
         let new = CaptureTime::resolve(Some("2024:05:01 12:00:30"), None, jst).unwrap();
         let merged = carry_over_user_corrections(&previous, &new);
-        assert_eq!(merged.tz_source, TzSource::UserSet);
+        assert_eq!(merged.tz_source, genzo_model::TzSource::UserSet);
         assert_eq!(merged.correction_s, 60);
         assert_eq!(
             merged.utc_db_string().as_deref(),

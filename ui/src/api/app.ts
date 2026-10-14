@@ -9,10 +9,13 @@ import type {
   BackupEntry,
   CatalogFileState,
   CatalogStatus,
+  ClearReport,
   CloseFailure,
   DisplayInfo,
   DisplayTarget,
   ExternalTools,
+  ImportPreferences,
+  LogFolderInfo,
   RestoreOutcome,
   VariantId,
 } from "./types";
@@ -38,6 +41,9 @@ export const restoreCatalog = (catalogPath: string, backup: string) =>
   call<RestoreOutcome>("restore_catalog", { catalogPath, backup });
 export const updateAppSettings = (update: AppSettingsUpdate) =>
   call<AppSettings>("update_app_settings", { update });
+/** 取り込みのダイアログの設定を保存する（次に開いたときの初めの値。IMP-02・IMP-03・IMP-05）。 */
+export const saveImportPreferences = (preferences: ImportPreferences) =>
+  call<AppSettings>("save_import_preferences", { preferences });
 export const locateTools = (dir: string | null) => call<ExternalTools>("locate_tools", { dir });
 /** パスの種類（フォルダ・ファイル・ない）。ドロップしたものからフォルダを選ぶのに使う。 */
 export const pathKinds = (paths: string[]) => call<("dir" | "file" | "missing")[]>("path_kinds", { paths });
@@ -45,6 +51,17 @@ export const revealVariantFile = (variantId: VariantId) =>
   call<void>("reveal_variant_file", { variantId });
 export const openVariantFile = (variantId: VariantId) =>
   call<void>("open_variant_file", { variantId });
+
+// ログ・クラッシュレポート（SYS-07。ローカルだけ。外部へは送信しない）
+export const logFolderInfo = () => call<LogFolderInfo>("log_folder_info");
+export const openLogFolder = () => call<void>("open_log_folder");
+export const clearLogs = () => call<ClearReport>("clear_logs");
+/** 画面のエラーをアプリのログに残す（失敗しても何もしない。ログのためにエラーを重ねない）。 */
+export function reportUiError(message: string, detail: string | null): void {
+  bridge()
+    .invoke<void>("report_ui_error", { message, detail })
+    .catch(() => undefined);
+}
 
 /** 閉じる・終了の結果（失敗は CloseFailure。カタログが開いたままなら still_open）。 */
 export type CloseResult = { ok: true } | { ok: false; failure: CloseFailure };

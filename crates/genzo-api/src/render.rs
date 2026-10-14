@@ -114,6 +114,8 @@ pub(crate) struct Rendered {
     pub backend: RenderBackend,
     pub quality: genzo_model::RenderQuality,
     pub warnings: Vec<String>,
+    /// 出力の画像の縁の G 座標（左・上・右・下。genzo-pipeline の `local::g_bounds`。マスクの位置を画面に描くため）。
+    pub g_bounds: [f64; 4],
 }
 
 impl Inner {
@@ -227,6 +229,7 @@ impl Inner {
                             backend: RenderBackend::Gpu,
                             quality: r.quality,
                             warnings: warning_texts(&r.warnings, &r.unimplemented),
+                            g_bounds: genzo_pipeline::local::g_bounds(&r.geometry),
                         });
                     }
                     self.gpu_failed("GPU 版が B3 を返さなかった", variant_id);
@@ -250,6 +253,7 @@ impl Inner {
             backend: RenderBackend::Cpu,
             quality: r.quality,
             warnings: warning_texts(&r.warnings, &r.unimplemented),
+            g_bounds: genzo_pipeline::local::g_bounds(&r.geometry),
         })
     }
 

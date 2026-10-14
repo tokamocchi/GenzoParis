@@ -112,6 +112,15 @@ pub fn open_creates_catalog_data_dir_and_remembers_it() {
     );
     assert_kind(commands::develop_frame_bytes(&state), ErrorKind::Closed);
     assert_kind(commands::region_frame_bytes(&state), ErrorKind::Closed);
+    assert_kind(commands::before_frame_bytes(&state), ErrorKind::Closed);
+    assert_kind(
+        commands::before_region_frame_bytes(&state),
+        ErrorKind::Closed,
+    );
+    assert_kind(
+        commands::view_region_frame_bytes(&state, 0),
+        ErrorKind::Closed,
+    );
     assert_eq!(protocol::reply(&state, "/thumb/1", None).status, 503);
     assert_eq!(protocol::reply(&state, "/preview/1", None).status, 503);
     state.close_catalog(false).unwrap();

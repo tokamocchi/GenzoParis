@@ -1,7 +1,9 @@
 // 現像設定の貼り付け（一括適用。DEV-30）のダイアログ: コピーした設定のうち、選んだ項目を選んだ写真へ写す。
+// 処理バージョンをまとめて更新するダイアログ（DATA-09。写真の右クリックのメニュー）も置く。
 //
 // 選んだ項目はブラウザに保存して次に使う。現像中の写真が貼り付け先に入っていれば、現像の送信の列に入れて
-// 順序を保ち（送信待ちの値で上書きしない）、貼り付けた後にコアの状態を読み直す。
+// 順序を保ち（送信待ちの値で上書きしない）、貼り付けた後にコアの状態を読み直す。貼り付けは貼り付け先の処理
+// バージョンを変えない（「処理バージョンが古い写真は更新する」を選んだときだけ上げる。pasteLogic.ts の doc）。
 
 import { useMemo, useState } from "react";
 
@@ -18,7 +20,11 @@ import {
   PASTE_GROUP_ITEMS,
   type PasteSelection,
   anySelected,
+  canOfferProcessUpgrade,
+  describePasteReport,
+  describeProcessUpgrade,
   preparePasteTargets,
+  processUpgradeOption,
   restorePasteSelection,
   toSettingGroups,
 } from "./pasteLogic";
@@ -36,6 +42,8 @@ function* knownSummaries(): Generator<LoadedItem> {
 export function PasteSettingsDialog(props: { targets: VariantId[] }) {
   const clipboard = useApp((s) => s.clipboard);
   const [sel, setSel] = useState<PasteSelection>(() => restorePasteSelection(loadStored(STORE_KEY)));
+  // 処理バージョンを上げるか（DATA-09 の明示的な更新。既定はオフで、保存しない）。
+  const [upgrade, setUpgrade] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
 
@@ -49,6 +57,8 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
   const sourceName = clipboard ? (source?.file_name ?? `ID ${clipboard.from}`) : null;
   // 動画には現像設定がない（コピーしても既定の設定になる）ので、貼り付けない。
   const sourceIsVideo = source?.kind === "video";
+  const sourceVersion = clipboard?.settings.process_version ?? 1;
+  const offerUpgrade = canOfferProcessUpgrade(sourceVersion);
 
   const toggle = (key: keyof PasteSelection, v: boolean) => {
     const next = { ...sel, [key]: v };
@@ -65,12 +75,13 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
     const developing = developStore.get().variantId;
     const includesDeveloping = developing !== null && ids.includes(developing);
     try {
-      let count = 0;
+      let report = { count: 0, upgraded: 0, needs_upgrade: 0 };
       let failure: unknown = null;
+      const version = offerUpgrade && upgrade ? "upgrade" : "keep";
       // 失敗は列の外で扱う（列の中で投げると、現像の画面のエラーとして出てしまう）。
       const run = async () => {
         try {
-          count = await core.pasteSettings(clipboard.settings, ids, groups);
+          report = await core.pasteSettings(clipboard.settings, ids, groups, version);
         } catch (e) {
           failure = e;
         }
@@ -81,7 +92,9 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
       if (failure !== null) throw failure;
       if (includesDeveloping) await reloadState();
       actions.closeDialog();
-      actions.notify("success", `${formatCount(count)} 枚に現像設定を貼り付けました`);
+      const done = describePasteReport(report, sourceVersion);
+      actions.notify("success", done.message);
+      if (done.warning !== null) actions.notify("warning", done.warning);
     } catch (e) {
       setError(toApiError(e).info);
     } finally {
@@ -146,6 +159,23 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
             ))}
             {!anySelected(sel) && <div className="dlg-field-error">項目を 1 つ以上選んでください</div>}
           </div>
+          {offerUpgrade && (
+            <div className="dlg-section">
+              <h3>処理バージョン</h3>
+              <label className="dlg-check">
+                <input
+                  type="checkbox"
+                  checked={upgrade}
+                  disabled={busy}
+                  onChange={(e) => setUpgrade(e.target.checked)}
+                />
+                <span>
+                  {processUpgradeOption(sourceVersion).label}
+                  <span className="desc">{processUpgradeOption(sourceVersion).detail}</span>
+                </span>
+              </label>
+            </div>
+          )}
           {notes.length > 0 && <div className="dlg-note">{notes.join("\n")}</div>}
           {prepared.ids.length === 0 && <div className="dlg-warn">貼り付け先の写真がありません。</div>}
           <div className="dlg-note">
@@ -154,6 +184,81 @@ export function PasteSettingsDialog(props: { targets: VariantId[] }) {
         </>
       )}
       <ErrorBox error={error} title="貼り付けられません" />
+    </Dialog>
+  );
+}
+
+/**
+ * 選んだ写真の処理バージョンをまとめて最新に更新するダイアログ（DATA-09。写真の右クリックのメニューの
+ * 「処理バージョンを最新に更新…」）。すでに最新の写真・動画はコアが飛ばす。現像中の写真が含まれていれば、
+ * 貼り付けと同じく現像の送信の列に入れて順序を保ち、更新した後にコアの状態を読み直す。
+ */
+export function UpgradeProcessDialog(props: { targets: VariantId[] }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  const ids = useMemo(() => [...new Set(props.targets)], [props.targets]);
+
+  const ok = async () => {
+    if (ids.length === 0) return;
+    setBusy(true);
+    setError(null);
+    const developing = developStore.get().variantId;
+    const includesDeveloping = developing !== null && ids.includes(developing);
+    try {
+      let updated = 0;
+      let failure: unknown = null;
+      const run = async () => {
+        try {
+          updated = await core.upgradeProcessVersions(ids);
+        } catch (e) {
+          failure = e;
+        }
+      };
+      if (includesDeveloping) await enqueue(run);
+      else await run();
+      if (failure !== null) throw failure;
+      if (includesDeveloping) await reloadState();
+      actions.closeDialog();
+      const done = describeProcessUpgrade(updated, ids.length);
+      actions.notify(done.level, done.message);
+    } catch (e) {
+      setError(toApiError(e).info);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      title={`処理バージョンを最新に更新（${formatCount(ids.length)} 枚）`}
+      width={520}
+      onClose={actions.closeDialog}
+      busy={busy}
+      actions={
+        <>
+          <button className="btn" onClick={actions.closeDialog} disabled={busy}>
+            キャンセル
+          </button>
+          <button className="btn primary" onClick={() => void ok()} disabled={busy || ids.length === 0}>
+            {busy ? "更新中…" : "更新する"}
+          </button>
+        </>
+      }
+    >
+      <p style={{ marginTop: 0 }}>
+        選んだ写真の処理バージョンを、このアプリの最新に更新します。すでに最新の写真と動画はそのままです。
+      </p>
+      <div className="dlg-note">
+        処理バージョン 2 から、レンズ補正・ハイライト復元・ノイズ軽減・カメラプロファイル・ルック・カラーミキサー・
+        カラーグレーディング・白黒・テクスチャ・明瞭度・かすみの除去・シャープ・効果・マスク（部分補正）が使えます。
+        これらを使っていない写真の見え方は変わりません。処理バージョン 1 のときに使われていなかった値がある写真（貼り付けたレンズ補正など）は、見え方が
+        変わります。ほかの設定は変えません。
+      </div>
+      <div className="dlg-note">
+        それぞれの写真の履歴に 1 件（「処理バージョンを 2 に更新」など）記録します（現像の画面の履歴から元に戻せます）。
+        元のファイルは変更しません。
+      </div>
+      <ErrorBox error={error} title="更新できません" />
     </Dialog>
   );
 }

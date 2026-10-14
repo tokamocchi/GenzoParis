@@ -1,5 +1,5 @@
-//! `genzo` の結合テスト（実際の実行ファイルを `env!("CARGO_BIN_EXE_genzo")` で動かす。ORG-05・MAINT-01、
-//! 05 の 2.4 節「回帰テストと CLI が CI で動く」）。
+//! `genzo` の結合テスト（実際の実行ファイルを `env!("CARGO_BIN_EXE_genzo")`（Unix ではその実体。
+//! [`resolve_genzo`]）で動かす。ORG-05・MAINT-01、05 の 2.4 節「回帰テストと CLI が CI で動く」）。
 //!
 //! - 合成の画像（JPEG・PNG・TIFF）、ffmpeg があれば動画、LibRaw が有効な build なら合成 DNG のフォルダで、
 //!   init → import → search → rate → search --min-rating → develop set → export（ICC と GPS の有無）→
@@ -13,12 +13,293 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use genzo_media::{ExifData, FfmpegTools, RgbImage8};
 use genzo_model::{GpsCoord, OutputColorSpace};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const GENZO: &str = env!("CARGO_BIN_EXE_genzo");
+
+/// テストで動かす `genzo` の実行ファイル（[`resolve_genzo`]。テストのプロセスで最初に使うときに 1 回だけ
+/// 決める）。
+fn genzo_exe() -> &'static Path {
+    static EXE: OnceLock<PathBuf> = OnceLock::new();
+    EXE.get_or_init(resolve_genzo)
+}
+
+/// `genzo` を起動する [`Command`]（実行ファイルは [`genzo_exe`]）。Unix ではプログラムの名前（`argv[0]`）を
+/// `genzo` にする（clap の使い方・版の表示はこの名前を使う。実体の名前 `genzo-<ハッシュ>` を出さない）。
+fn genzo_command() -> Command {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut cmd = Command::new(genzo_exe());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.arg0("genzo");
+    }
+    cmd
+}
+
+/// テストで動かす `genzo` の実行ファイルを決める。
+///
+/// cargo の作る [`GENZO`]（`target/debug/genzo`）は、実体（`target/debug/deps/genzo-<ハッシュ>`。ハッシュは
+/// 機能フラグなどで決まる）へのハードリンク（作れなければコピー）で、`target/` を共有する別の cargo が機能
+/// フラグの違う build（LibRaw の有無が違うもの）で差し替えることがある（テストの前にも途中にも。検証の
+/// ラウンドで実際に起きた）。実体はハッシュが違うので差し替わらない。そこで Unix では、LibRaw の有無
+/// （[`binary_has_libraw`]）がテストの build と同じ実体を、
+///
+/// 1. [`GENZO`] と同じファイル（デバイスと i ノードが同じ）の実体
+/// 2. ほかの実体（更新の新しい順。テストの前に [`GENZO`] が差し替わっていたとき）
+///
+/// の順に探して使う（テストの途中で [`GENZO`] が差し替わっても影響しない。ワーカーも本体の実行ファイル
+/// 自身なので同じ実体が動く）。見つからなければ [`GENZO`] を使う（食い違いは [`genzo_with`] などが原因を
+/// 示して止める）。Windows では [`GENZO`] をそのまま使う（`argv[0]` を変えられないため）。
+fn resolve_genzo() -> PathBuf {
+    let built = PathBuf::from(GENZO);
+    #[cfg(unix)]
+    if let Some(found) = matching_deps_binary(&built) {
+        return found;
+    }
+    built
+}
+
+/// [`resolve_genzo`] の Unix の部分: LibRaw の有無がテストの build と同じ実体。
+#[cfg(unix)]
+fn matching_deps_binary(built: &Path) -> Option<PathBuf> {
+    let want = genzo_raw::LIBRAW_ENABLED;
+    let found = pick_matching(deps_candidates(built)?, want, binary_has_libraw)?;
+    if !found.same {
+        eprintln!(
+            "{} の LibRaw の有無がテストの build（{want}）と違う（target/ を共有する別の cargo が差し替えたと\
+             みられる）。代わりに、LibRaw の有無が同じ実体 {} を使う",
+            built.display(),
+            found.path.display()
+        );
+    }
+    Some(found.path)
+}
+
+/// [`resolve_genzo`] の候補の実行ファイル。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Candidate {
+    /// `GENZO` と同じファイルか（`GENZO` そのものを含む）。
+    same: bool,
+    /// 更新日時。
+    modified: std::time::SystemTime,
+    path: PathBuf,
+}
+
+/// `built`（`target/debug/genzo`）の隣の `deps` にある `genzo` の実体（[`is_genzo_deps_binary`]）。`built` と
+/// 同じファイル（デバイスと i ノードが同じ）に `same` を付ける。どれも同じでなければ（cargo がハードリンク
+/// でなくコピーした）、`built` そのものを `same` として加える。`deps` を読めなければ `None`。
+#[cfg(unix)]
+fn deps_candidates(built: &Path) -> Option<Vec<Candidate>> {
+    use std::os::unix::fs::MetadataExt;
+    let built_id = std::fs::metadata(built).ok().map(|m| (m.dev(), m.ino()));
+    let mut found: Vec<Candidate> = std::fs::read_dir(built.parent()?.join("deps"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| is_genzo_deps_binary(&e.file_name().to_string_lossy()))
+        .filter_map(|e| {
+            let m = e.metadata().ok().filter(std::fs::Metadata::is_file)?;
+            Some(Candidate {
+                same: built_id == Some((m.dev(), m.ino())),
+                modified: m.modified().ok()?,
+                path: e.path(),
+            })
+        })
+        .collect();
+    if !found.iter().any(|c| c.same) {
+        found.push(Candidate {
+            same: true,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            path: built.to_path_buf(),
+        });
+    }
+    Some(found)
+}
+
+/// 候補を `GENZO` と同じものを先に、ほかは更新の新しい順に並べ、LibRaw の有無（`probe`。起動できなければ
+/// `None`）が `want` の最初のもの。調べるのは [`MAX_PROBES`] 個まで（1 つにつきワーカーを 1 回起動する）。
+fn pick_matching(
+    mut candidates: Vec<Candidate>,
+    want: bool,
+    mut probe: impl FnMut(&Path) -> Option<bool>,
+) -> Option<Candidate> {
+    candidates.sort_by(|a, b| {
+        b.same
+            .cmp(&a.same)
+            .then_with(|| b.modified.cmp(&a.modified))
+    });
+    candidates
+        .into_iter()
+        .take(MAX_PROBES)
+        .find(|c| probe(&c.path) == Some(want))
+}
+
+/// [`pick_matching`] で調べる候補の数の上限。
+const MAX_PROBES: usize = 6;
+
+/// cargo の実体の `genzo` の名前（`genzo-<16 桁の 16 進>`。Windows は `.exe` 付き）か（`.d`・`.pdb` などは
+/// 除く）。
+fn is_genzo_deps_binary(name: &str) -> bool {
+    name.strip_suffix(std::env::consts::EXE_SUFFIX)
+        .and_then(|n| n.strip_prefix("genzo-"))
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// 実行ファイルの `genzo` をワーカーとして起動し（`genzo __worker`）、LibRaw の有無を尋ねる（ping の応答の
+/// `raw_decoder`。`genzo bench` の入力の選び方と同じ）。起動・握手できなければ `None`。
+fn binary_has_libraw(exe: &Path) -> Option<bool> {
+    let mut client = genzo_worker::WorkerClient::spawn(genzo_worker::WorkerConfig {
+        executable: Some(exe.to_path_buf()),
+        args: vec![genzo_worker::WORKER_SUBCOMMAND.into()],
+        ..genzo_worker::WorkerConfig::default()
+    })
+    .ok()?;
+    let has = client.ping().ok().map(|p| p.raw_decoder.is_some());
+    let _ = client.shutdown();
+    has
+}
+
+#[test]
+fn deps_binaries_of_genzo_are_recognized_by_name() {
+    let exe = std::env::consts::EXE_SUFFIX;
+    assert!(is_genzo_deps_binary(&format!(
+        "genzo-37ef6aeb00bf8433{exe}"
+    )));
+    for name in [
+        "genzo".to_owned(),
+        format!("genzo{exe}"),
+        "genzo-37ef6aeb00bf8433.d".to_owned(),
+        "genzo-37ef6aeb00bf8433.pdb".to_owned(),
+        format!("genzo-37ef6aeb00bf843{exe}"),
+        format!("genzo-37ef6aeb00bf843z{exe}"),
+        format!("genzo_worker-37ef6aeb00bf8433{exe}"),
+        format!("genzo-api-worker-37ef6aeb00bf8433{exe}"),
+        "libgenzo_cli-37ef6aeb00bf8433.rlib".to_owned(),
+    ] {
+        assert!(!is_genzo_deps_binary(&name), "{name}");
+    }
+}
+
+/// テストで動かす `genzo`（[`genzo_exe`]）の LibRaw の有無が、テストの build と同じ（Unix では
+/// [`resolve_genzo`] が同じものを選ぶ。Windows では [`GENZO`] がそのまま同じであること）。
+#[test]
+fn the_genzo_used_by_the_tests_matches_the_test_build() {
+    assert_eq!(
+        binary_has_libraw(genzo_exe()),
+        Some(genzo_raw::LIBRAW_ENABLED),
+        "{BINARY_MISMATCH_HINT}: {}",
+        genzo_exe().display()
+    );
+    #[cfg(unix)]
+    assert!(
+        is_genzo_deps_binary(&genzo_exe().file_name().unwrap().to_string_lossy())
+            || genzo_exe() == Path::new(GENZO),
+        "{}",
+        genzo_exe().display()
+    );
+}
+
+/// [`pick_matching`]: `GENZO` と同じものが合えばそれ、食い違えばほかの新しい順で LibRaw の有無が同じもの、
+/// 起動できないもの（`None`）は飛ばす、調べるのは [`MAX_PROBES`] 個まで。
+#[test]
+fn the_matching_genzo_binary_is_picked() {
+    use std::time::{Duration, SystemTime};
+    let at = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
+    let c = |same: bool, t: u64, name: &str| Candidate {
+        same,
+        modified: at(t),
+        path: PathBuf::from(name),
+    };
+    let candidates = vec![
+        c(false, 30, "newer-no-libraw"),
+        c(false, 10, "older-libraw"),
+        c(true, 20, "built"),
+        c(false, 25, "broken"),
+        c(false, 20, "same-time-libraw"),
+    ];
+    // 調べた順を記録する。
+    let has = |order: &mut Vec<String>, p: &Path| {
+        let name = p.to_string_lossy().into_owned();
+        order.push(name.clone());
+        match name.as_str() {
+            "built" | "older-libraw" | "same-time-libraw" => Some(true),
+            "newer-no-libraw" => Some(false),
+            _ => None,
+        }
+    };
+    // GENZO と同じものが合えば、ほかは調べない。
+    let mut order = Vec::new();
+    let got = pick_matching(candidates.clone(), true, |p| has(&mut order, p)).unwrap();
+    assert_eq!(got.path, Path::new("built"));
+    assert_eq!(order, ["built"]);
+    // GENZO が食い違えば（差し替わっていた）、ほかを新しい順に調べ、起動できないものは飛ばす。
+    let mut order = Vec::new();
+    let got = pick_matching(candidates.clone(), false, |p| has(&mut order, p)).unwrap();
+    assert_eq!(got.path, Path::new("newer-no-libraw"));
+    assert!(!got.same);
+    assert_eq!(order, ["built", "newer-no-libraw"]);
+    let without_built: Vec<Candidate> = candidates.iter().filter(|c| !c.same).cloned().collect();
+    let mut order = Vec::new();
+    let got = pick_matching(without_built, true, |p| has(&mut order, p)).unwrap();
+    assert_eq!(got.path, Path::new("same-time-libraw"));
+    assert_eq!(order, ["newer-no-libraw", "broken", "same-time-libraw"]);
+    // どれも合わなければ None。調べるのは MAX_PROBES 個まで。
+    let many: Vec<Candidate> = (0..MAX_PROBES as u64 + 3)
+        .map(|i| c(false, i, &format!("x{i}")))
+        .collect();
+    let mut probes = 0;
+    assert_eq!(
+        pick_matching(many, true, |_| {
+            probes += 1;
+            Some(false)
+        }),
+        None
+    );
+    assert_eq!(probes, MAX_PROBES);
+}
+
+/// [`deps_candidates`]: `deps` の `genzo` の実体だけを集め、`built` と同じファイル（ハードリンク）に `same` を
+/// 付ける。同じものがなければ（コピー）`built` そのものを加える。
+#[cfg(unix)]
+#[test]
+fn deps_candidates_mark_the_hard_link_of_the_built_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let deps = dir.path().join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    let a = deps.join("genzo-0123456789abcdef");
+    let b = deps.join("genzo-fedcba9876543210");
+    std::fs::write(&a, b"a").unwrap();
+    std::fs::write(&b, b"b").unwrap();
+    for other in ["genzo-0123456789abcdef.d", "genzo_worker-0123456789abcdef"] {
+        std::fs::write(deps.join(other), b"x").unwrap();
+    }
+    std::fs::create_dir_all(deps.join("genzo-aaaaaaaaaaaaaaaa")).unwrap();
+    let sorted = |mut v: Vec<Candidate>| {
+        v.sort_by(|x, y| x.path.cmp(&y.path));
+        v.into_iter().map(|c| (c.same, c.path)).collect::<Vec<_>>()
+    };
+    // cargo と同じくハードリンクした。
+    let built = dir.path().join("genzo");
+    std::fs::hard_link(&b, &built).unwrap();
+    assert_eq!(
+        sorted(deps_candidates(&built).unwrap()),
+        [(false, a.clone()), (true, b.clone())]
+    );
+    // コピーした（同じファイルの実体がない）。
+    std::fs::remove_file(&built).unwrap();
+    std::fs::copy(&b, &built).unwrap();
+    assert_eq!(
+        sorted(deps_candidates(&built).unwrap()),
+        [(false, a), (false, b), (true, built.clone())]
+    );
+    // deps がない。
+    std::fs::remove_dir_all(&deps).unwrap();
+    assert_eq!(deps_candidates(&built), None);
+}
 
 /// CI のランナーか（環境変数 `CI` が空でなく、`0`・`false` でない）。
 fn on_ci() -> bool {
@@ -46,14 +327,30 @@ impl Run {
     }
 }
 
-/// `genzo` を実行する（環境変数のカタログ・データのフォルダ・ログの指定は引き継がない）。
+/// テストの `genzo` のログのフォルダ（ファイルには書かないので作られない。パニックしたときだけ、クラッシュ
+/// レポートがここにできる。利用者のログのフォルダには書かない）。
+fn test_log_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("genzo-cli-test-logs-{}", std::process::id()))
+}
+
+/// テストの `genzo` のプリセット（DEV-29・EXP-02）のフォルダ（利用者のアプリのデータのフォルダには書かない。
+/// プリセットを作るテストは [`Env`] の一時フォルダを `--presets-dir` で指定する）。
+fn test_presets_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("genzo-cli-test-presets-{}", std::process::id()))
+}
+
+/// `genzo` を実行する（環境変数のカタログ・データのフォルダ・ログ・プリセットの指定は引き継がない）。ログの
+/// ファイルには書かない（`GENZO_LOG_FILE=off`。ログを確かめるテストは `env` で上書きする）。
 fn genzo_with(args: &[&str], env: &[(&str, &Path)], stdin: Option<&str>) -> Run {
-    let mut cmd = Command::new(GENZO);
+    let mut cmd = genzo_command();
     cmd.args(args)
         .env_remove("GENZO_CATALOG")
         .env_remove("GENZO_DATA_DIR")
         .env_remove("GENZO_LOG")
         .env_remove("GENZO_BENCH_DIR")
+        .env("GENZO_LOG_DIR", test_log_dir())
+        .env("GENZO_LOG_FILE", "off")
+        .env("GENZO_PRESETS_DIR", test_presets_dir())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if stdin.is_some() {
@@ -78,11 +375,63 @@ fn genzo_with(args: &[&str], env: &[(&str, &Path)], stdin: Option<&str>) -> Run 
             .unwrap();
     }
     let out = child.wait_with_output().unwrap();
-    Run {
+    let run = Run {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    };
+    if libraw_missing_in_binary(genzo_raw::LIBRAW_ENABLED, &run) {
+        panic!(
+            "{BINARY_MISMATCH_HINT}（テストの build は LibRaw が有効なのに、genzo が「LibRaw が無効」と\
+             答えた）\n引数: {args:?}\nstdout: {}\nstderr: {}",
+            run.stdout, run.stderr
+        );
     }
+    run
+}
+
+/// LibRaw が無効な build の genzo-raw が返すエラーの文言の先頭（genzo-raw の decode.rs の `LIBRAW_DISABLED`）。
+const LIBRAW_DISABLED_MARK: &str = "この build では LibRaw が無効です";
+
+/// テストの build と [`GENZO`] の実行ファイルで、LibRaw の有無が食い違うときの説明。
+const BINARY_MISMATCH_HINT: &str = "テストの build と genzo の実行ファイル（CARGO_BIN_EXE_genzo）で、\
+     LibRaw の有無が食い違っている可能性がある。target/ を共有する別の cargo（機能フラグ libraw の違う \
+     build）が target/debug/genzo を上書きすると起きる（コードの不具合ではない。resolve_genzo で LibRaw の有無の\
+     同じ実体を探したが、見つからなかった）。その build が終わってから再実行する";
+
+/// テストの build では LibRaw が有効なのに、`genzo`（ワーカーを含む）が「LibRaw が無効」と答えたか。
+///
+/// cargo は同じ機能フラグでテストと実行ファイルを作るので、通常は起きない。`target/` を共有する別の cargo が
+/// 実行ファイルを上書きしても、[`resolve_genzo`] が LibRaw の有無の同じ実体を選ぶ。それでも食い違ったとき
+/// （同じ実体が見つからない・Windows）に、原因の分かりにくい失敗（取り込みのエラー・終了コードの食い違い）に
+/// なるので、ここで原因を示して止める。
+fn libraw_missing_in_binary(test_build_has_libraw: bool, run: &Run) -> bool {
+    test_build_has_libraw
+        && (run.stdout.contains(LIBRAW_DISABLED_MARK) || run.stderr.contains(LIBRAW_DISABLED_MARK))
+}
+
+#[test]
+fn libraw_mismatch_between_the_test_and_the_binary_is_detected() {
+    let disabled = Run {
+        code: 1,
+        stdout: format!("{{\"reason\":\"対応していない RAW です: {LIBRAW_DISABLED_MARK}（…）\"}}"),
+        stderr: String::new(),
+    };
+    let ok = Run {
+        code: 0,
+        stdout: "{}".to_owned(),
+        stderr: String::new(),
+    };
+    assert!(libraw_missing_in_binary(true, &disabled));
+    // テストの build も LibRaw が無効なら、食い違いではない（DNG の部分は飛ばす）。
+    assert!(!libraw_missing_in_binary(false, &disabled));
+    assert!(!libraw_missing_in_binary(true, &ok));
+    let stderr_only = Run {
+        code: 1,
+        stdout: String::new(),
+        stderr: format!("エラー: {LIBRAW_DISABLED_MARK}"),
+    };
+    assert!(libraw_missing_in_binary(true, &stderr_only));
 }
 
 /// テストの環境（一時フォルダ・写真のフォルダ・カタログ）。
@@ -116,8 +465,17 @@ impl Env {
 
     fn run_stdin(&self, args: &[&str], stdin: Option<&str>) -> Run {
         let catalog = self.catalog.to_string_lossy().into_owned();
+        let presets = self.path("presets").to_string_lossy().into_owned();
         let mut all: Vec<&str> = args.to_vec();
-        all.extend(["--catalog", &catalog, "--gpu", "off", "--quiet"]);
+        all.extend([
+            "--catalog",
+            &catalog,
+            "--gpu",
+            "off",
+            "--quiet",
+            "--presets-dir",
+            &presets,
+        ]);
         genzo_with(&all, &[], stdin)
     }
 
@@ -229,6 +587,15 @@ fn make_dng(path: &Path) -> bool {
 
 /// [`make_dng`] に、既定の切り抜き（DefaultCropOrigin / DefaultCropSize。有効画素の座標）を付ける。
 fn make_dng_with_crop(path: &Path, default_crop: Option<genzo_raw::PixelRect>) -> bool {
+    make_dng_with(path, default_crop, None)
+}
+
+/// [`make_dng_with_crop`] に、埋め込みのレンズ補正の情報（DNG の opcode。DEV-14）を付ける。
+fn make_dng_with(
+    path: &Path,
+    default_crop: Option<genzo_raw::PixelRect>,
+    lens: Option<genzo_raw::LensCorrectionData>,
+) -> bool {
     if !genzo_raw::LIBRAW_ENABLED {
         eprintln!("LibRaw が無効な build のため、DNG の部分を飛ばす");
         return false;
@@ -275,6 +642,7 @@ fn make_dng_with_crop(path: &Path, default_crop: Option<genzo_raw::PixelRect>) -
             height: h,
             data: jpeg,
         }),
+        lens_correction: lens,
         ..Default::default()
     };
     genzo_raw::dng::write_file(path, &raw, &options).unwrap();
@@ -691,12 +1059,25 @@ fn end_to_end_catalog_workflow() {
     assert_eq!(r.code, genzo_cli::EXIT_PARTIAL as i32, "{}", r.stdout);
     assert_eq!(r.json()["report"]["failed"], 1);
     if video {
+        // 動画は元のファイルのままコピーする（EXP-05）。--remove-gps・--skip-videos では書き出さない。
         let v = id_of(&all, "V.mp4");
         let r = env.json(&["export", &v.to_string(), "--out", out_dir.to_str().unwrap()]);
+        assert_eq!(r["report"]["copied"], 1, "{r}");
+        let copied = PathBuf::from(r["report"]["items"][0]["outcome"]["path"].as_str().unwrap());
         assert_eq!(
-            r["report"]["skipped"], 1,
-            "動画は書き出さない（EXP-05 は v1）"
+            std::fs::read(&copied).unwrap(),
+            std::fs::read(p.join("sub").join("V.mp4")).unwrap()
         );
+        for flag in ["--remove-gps", "--skip-videos"] {
+            let r = env.json(&[
+                "export",
+                &v.to_string(),
+                "--out",
+                out_dir.to_str().unwrap(),
+                flag,
+            ]);
+            assert_eq!(r["report"]["skipped"], 1, "{flag}: {r}");
+        }
     }
     if dng {
         let rid = id_of(&all, "R.dng");
@@ -910,6 +1291,1353 @@ fn partial_failures_exit_with_3() {
     assert_eq!(r.code, 0, "{}", r.stderr);
 }
 
+/// `develop set` のハイライト復元・ノイズ軽減のオプション（DEV-06・DEV-13）: JSON の後に当て、範囲の外はエラー、
+/// 処理バージョン 1 の写真では「使われない」と知らせる。履歴の名前は変わった項目。
+#[test]
+fn develop_highlight_and_noise_reduction_options() {
+    let env = Env::new();
+    write_plain(&env.photos.join("A.png"), (60, 40));
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.png").to_string();
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--highlight-recovery",
+        "reconstruct",
+        "--highlight-amount",
+        "70",
+        "--nr-luminance",
+        "25",
+        "--nr-luminance-detail",
+        "40",
+        "--nr-luminance-contrast",
+        "10",
+        "--nr-color",
+        "30",
+        "--nr-color-detail",
+        "60",
+    ]);
+    assert_eq!(set["changed"], true);
+    let hr = &set["settings"]["highlight_recovery"];
+    assert_eq!(hr["method"], "reconstruct");
+    assert_eq!(hr["amount"], 70.0);
+    let nr = &set["settings"]["detail"]["noise_reduction"];
+    assert_eq!(nr["luminance"], 25.0);
+    assert_eq!(nr["luminance_detail"], 40.0);
+    assert_eq!(nr["luminance_contrast"], 10.0);
+    assert_eq!(nr["color"], 30.0);
+    assert_eq!(nr["color_detail"], 60.0);
+    let history = env.json(&["develop", "history", &a]);
+    let last = history.as_array().unwrap().last().unwrap()["label"].clone();
+    assert_eq!(
+        last,
+        "ハイライト復元・輝度ノイズの軽減 25・カラーノイズの軽減 30"
+    );
+    // JSON の後にオプションを当てる。
+    let r = env.run_stdin(
+        &[
+            "develop",
+            "set",
+            &a,
+            "--json",
+            "-",
+            "--nr-color",
+            "5",
+            "--json",
+        ],
+        Some(r#"{"detail": {"noise_reduction": {"color": 50, "luminance": 0}}}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["detail"]["noise_reduction"]["color"], 5.0);
+    assert_eq!(got["detail"]["noise_reduction"]["luminance"], 0.0);
+    // 範囲の外・知らない方式はエラー（設定は変わらない）。
+    let r = env.run(&["develop", "set", &a, "--nr-luminance", "101"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--highlight-recovery", "magic"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(
+        env.json(&["develop", "get", &a])["highlight_recovery"]["method"],
+        "reconstruct"
+    );
+    // 処理バージョン 1 の写真では知らせる。
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--nr-luminance", "35"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("ハイライト復元・ノイズ軽減は使われません"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// `develop set` のレンズ補正のオプション・`develop upgrade`（処理バージョンの更新）・`develop source`（元の
+/// 画像の情報と埋め込みのレンズ補正の情報）（DEV-14・DATA-09）。
+#[test]
+fn develop_lens_options_upgrade_and_source() {
+    let env = Env::new();
+    write_plain(&env.photos.join("A.png"), (60, 40));
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.png").to_string();
+    // 新しく取り込んだ写真は最新の処理バージョン。
+    assert_eq!(env.json(&["develop", "get", &a])["process_version"], 2);
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--lens-profile",
+        "on",
+        "--distortion",
+        "-20",
+        "--vignetting-midpoint",
+        "30",
+    ]);
+    assert_eq!(set["changed"], true);
+    let lens = &set["settings"]["lens"];
+    assert_eq!(lens["profile_enabled"], true);
+    assert_eq!(lens["distortion"], -20.0);
+    assert_eq!(lens["vignetting_midpoint"], 30.0);
+    assert_eq!(
+        lens["vignetting_amount"], 0.0,
+        "指定しない項目は今の値のまま"
+    );
+    // JSON とオプションを一緒に使うと、JSON の後にオプションを当てる。
+    let r = env.run_stdin(
+        &[
+            "develop",
+            "set",
+            &a,
+            "--json",
+            "-",
+            "--ca-red-cyan",
+            "15",
+            "--json",
+        ],
+        Some(r#"{"lens": {"ca_red_cyan": 5, "ca_blue_yellow": -5}, "exposure_ev": 0.25}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["lens"]["ca_red_cyan"], 15.0);
+    assert_eq!(got["lens"]["ca_blue_yellow"], -5.0);
+    assert_eq!(got["lens"]["distortion"], -20.0);
+    assert_eq!(got["exposure_ev"], 0.25);
+    // 範囲の外はエラー（設定は変わらない）。値の誤りは使い方の誤り。
+    let r = env.run(&["develop", "set", &a, "--distortion", "150"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--lens-profile", "maybe"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(
+        env.json(&["develop", "get", &a])["lens"]["distortion"],
+        -20.0
+    );
+    // すでに最新なら何もしない。
+    let up = env.json(&["develop", "upgrade", &a]);
+    assert_eq!(up["changed"], false);
+    // 処理バージョン 1 の写真では、レンズ補正を変えると「使われない」と知らせ、upgrade で更新する。
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--vignetting", "30"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("レンズ補正は使われません"),
+        "{}",
+        r.stderr
+    );
+    let up = env.json(&["develop", "upgrade", &a]);
+    assert_eq!(up["changed"], true);
+    assert_eq!(up["settings"]["process_version"], 2);
+    assert_eq!(
+        up["settings"]["lens"]["vignetting_amount"], 30.0,
+        "ほかの設定は変えない"
+    );
+    let history = env.json(&["develop", "history", &a]);
+    let last = history.as_array().unwrap().last().unwrap()["label"].clone();
+    assert_eq!(last, "処理バージョンを 2 に更新");
+    // 元の画像の情報（RAW 以外なので、埋め込みのレンズ補正の情報はない）。
+    let src = env.json(&["develop", "source", &a]);
+    assert_eq!(src["source"]["is_raw"], false);
+    assert_eq!(src["source"]["width"], 60);
+    assert!(src["source"]["lens_correction"].is_null(), "{src}");
+    assert_eq!(src["process_version"], 2);
+    assert_eq!(src["latest_process_version"], 2);
+    let text = env.run(&["develop", "source", &a]);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(text.stdout.contains("レンズ補正の情報"), "{}", text.stdout);
+    assert!(text.stdout.contains("RAW 以外"), "{}", text.stdout);
+
+    // LibRaw が有効な build なら、埋め込みのレンズ補正の情報（DNG の opcode）のある RAW でも確かめる。
+    let lens = genzo_raw::LensCorrectionData::DngOpcode(genzo_raw::DngLensCorrection {
+        warp: None,
+        vignette: Some(genzo_raw::DngVignetteRadial {
+            k: [0.5, 0.0, 0.0, 0.0, 0.0],
+            center: [0.5, 0.5],
+        }),
+    });
+    let raws = env.path("raws");
+    std::fs::create_dir_all(&raws).unwrap();
+    if !make_dng_with(&raws.join("L.dng"), None, Some(lens)) {
+        return;
+    }
+    env.json(&["import", raws.to_str().unwrap()]);
+    let l = id_of(&env.json(&["search"]), "L.dng").to_string();
+    let src = env.json(&["develop", "source", &l]);
+    assert_eq!(src["source"]["is_raw"], true);
+    let info = &src["source"]["lens_correction"];
+    assert_eq!(info["source"], "dng_opcode", "{src}");
+    assert_eq!(info["vignetting"], true);
+    assert_eq!(info["distortion"], false);
+    let set = env.json(&["develop", "set", &l, "--lens-profile", "on"]);
+    assert_eq!(set["settings"]["lens"]["profile_enabled"], true);
+}
+
+/// 処理バージョン 1 と 2 の写真の間の `develop copy`・`develop set --replace`・`develop upgrade` に ID を複数
+/// （DEV-30・DATA-09。検証の指摘）: コピー先の版は変えず（`--upgrade-process-version` のときだけ上げる）、使われない
+/// 項目を警告する。`--replace` も、JSON に書かなければ今の版のまま。
+#[test]
+fn develop_copy_and_upgrade_between_process_versions() {
+    let env = Env::new();
+    // 内容が同じファイルは重複として取り込まないので、別の内容にする。
+    for (i, name) in ["A.jpg", "B.jpg", "C.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (40, 30), i as u8 + 1, None, false);
+    }
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b, c) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+        id_of(&search, "C.jpg").to_string(),
+    );
+    // A・C を版 1 にする（JSON に書いた版は、そのまま保存する）。
+    for v in [&a, &c] {
+        let r = env.run_stdin(
+            &["develop", "set", v, "--json", "-"],
+            Some(r#"{"process_version": 1}"#),
+        );
+        assert_eq!(r.code, 0, "{}", r.stderr);
+    }
+    // JSON で版を上げても、履歴の名前は変わった項目だけ（「処理バージョン」を重ねない）。
+    let r = env.run_stdin(
+        &["develop", "set", &c, "--json", "-"],
+        Some(r#"{"process_version": 2}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let history = env.json(&["develop", "history", &c]);
+    assert_eq!(
+        history.as_array().unwrap().last().unwrap()["label"],
+        "処理バージョン"
+    );
+    let r = env.run_stdin(
+        &["develop", "set", &c, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    // --replace でも、JSON に版を書かなければ版 1 のまま（オプションだけでも）。
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-", "--replace"],
+        Some(r#"{"exposure_ev": 0.5}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(env.json(&["develop", "get", &a])["process_version"], 1);
+    let set = env.json(&["develop", "set", &a, "--vignetting", "10", "--replace"]);
+    assert_eq!(set["settings"]["process_version"], 1);
+    // 版 2 の B の設定（レンズ補正）を、一部の項目だけ版 1 の A へ: 貼り付けられ、A は版 1 のまま。
+    env.json(&["develop", "set", &b, "--distortion", "-20"]);
+    let r = env.run(&[
+        "develop",
+        "copy",
+        &b,
+        "--to",
+        &a,
+        "--groups",
+        "lens,basic-tone",
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let copied: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(copied["updated"], 1);
+    assert_eq!(copied["upgraded"], 0);
+    assert_eq!(copied["needs_upgrade"], 1);
+    assert!(
+        r.stderr.contains("処理バージョンが古いため"),
+        "{}",
+        r.stderr
+    );
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["process_version"], 1);
+    assert_eq!(got["lens"]["distortion"], -20.0);
+    // すべての項目でも、コピー先の版のまま。
+    env.json(&["develop", "copy", &b, "--to", &a]);
+    assert_eq!(env.json(&["develop", "get", &a])["process_version"], 1);
+    // 版 1 の設定を版 2 の写真へ: 版 2 のまま（下げない）。
+    env.json(&[
+        "develop",
+        "copy",
+        &c,
+        "--to",
+        &b,
+        "--upgrade-process-version",
+    ]);
+    assert_eq!(env.json(&["develop", "get", &b])["process_version"], 2);
+    // --upgrade-process-version で、古い写真だけを上げる。
+    let up = env.json(&[
+        "develop",
+        "copy",
+        &b,
+        "--to",
+        &a,
+        "--groups",
+        "lens",
+        "--upgrade-process-version",
+    ]);
+    assert_eq!(up["upgraded"], 1);
+    assert_eq!(up["needs_upgrade"], 0);
+    assert_eq!(env.json(&["develop", "get", &a])["process_version"], 2);
+    let history = env.json(&["develop", "history", &a]);
+    let last = history.as_array().unwrap().last().unwrap()["label"].clone();
+    assert_eq!(last, "設定の貼り付け・処理バージョンを 2 に更新");
+    // develop upgrade に ID を複数: 最新でない写真だけを更新する。
+    let up = env.json(&["develop", "upgrade", &a, &b, &c]);
+    assert_eq!(up, serde_json::json!({"updated": 1}));
+    assert_eq!(env.json(&["develop", "get", &c])["process_version"], 2);
+    let text = env.run(&["develop", "upgrade", &a, &c]);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(
+        text.stdout.contains("0 件の処理バージョンを 2 に更新"),
+        "{}",
+        text.stdout
+    );
+}
+
+/// スナップショット（DEV-28）・現像プリセット（DEV-29）・書き出しプリセットとファイル名の規則（EXP-02）の
+/// サブコマンド（`develop snapshot`・`preset`・`export --preset`）。
+#[test]
+fn snapshots_presets_and_export_naming() {
+    let env = Env::new();
+    write_jpeg(
+        &env.photos.join("A.jpg"),
+        (40, 30),
+        1,
+        Some("2024-05-01 10:00:00"),
+        false,
+    );
+    write_jpeg(
+        &env.photos.join("B.jpg"),
+        (40, 30),
+        2,
+        Some("2024-05-02 11:00:00"),
+        false,
+    );
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+    );
+
+    // --- スナップショット ---
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"exposure_ev": 0.5}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let snap = env.json(&["develop", "snapshot", "create", &a, "明るめ"]);
+    assert_eq!(snap["name"], "明るめ");
+    assert_eq!(snap["process_version"], 2);
+    let snap_id = snap["id"].as_i64().unwrap().to_string();
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"exposure_ev": -1.0}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    // 履歴の項目からも作れる。
+    let history = env.json(&["develop", "history", &a]);
+    let first = history[0]["id"].as_i64().unwrap().to_string();
+    let initial = env.json(&[
+        "develop",
+        "snapshot",
+        "create",
+        &a,
+        "読み込み直後",
+        "--from-history",
+        &first,
+    ]);
+    let list = env.json(&["develop", "snapshot", "list", &a]);
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    let applied = env.json(&["develop", "snapshot", "apply", &snap_id]);
+    assert_eq!(applied["settings"]["exposure_ev"], 0.5);
+    let history = env.json(&["develop", "history", &a]);
+    assert_eq!(
+        history.as_array().unwrap().last().unwrap()["label"],
+        "スナップショット「明るめ」を適用"
+    );
+    let renamed = env.json(&["develop", "snapshot", "rename", &snap_id, "+0.5"]);
+    assert_eq!(renamed["name"], "+0.5");
+    let initial_id = initial["id"].as_i64().unwrap().to_string();
+    env.json(&["develop", "snapshot", "delete", &initial_id]);
+    assert_eq!(
+        env.json(&["develop", "snapshot", "list", &a])
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let text = env.run(&["develop", "snapshot", "list", &a]);
+    assert!(text.stdout.contains("+0.5"), "{}", text.stdout);
+    assert_eq!(env.run(&["develop", "snapshot", "apply", "999"]).code, 1);
+
+    // --- 現像プリセット ---
+    let p = env.json(&[
+        "preset",
+        "create-develop",
+        "明るく",
+        "--from",
+        &a,
+        "--groups",
+        "basic-tone",
+        "--folder",
+        "基本",
+    ]);
+    assert_eq!(p["preset"]["folder"], "基本");
+    assert_eq!(p["preset"]["groups"]["basic_tone"], true);
+    assert_eq!(p["preset"]["groups"]["white_balance"], false);
+    let listed = env.json(&["preset", "list"]);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    // ファイルは --presets-dir の develop/<ID>.json。
+    let id = p["preset"]["id"].as_str().unwrap().to_owned();
+    assert!(
+        env.path("presets")
+            .join("develop")
+            .join(format!("{id}.json"))
+            .is_file()
+    );
+    let applied = env.json(&["preset", "apply", "明るく", "--to", &b]);
+    assert_eq!(applied["updated"], 1);
+    assert_eq!(env.json(&["develop", "get", &b])["exposure_ev"], 0.5);
+    let history = env.json(&["develop", "history", &b]);
+    assert_eq!(
+        history.as_array().unwrap().last().unwrap()["label"],
+        "プリセット「明るく」を適用"
+    );
+    let shown = env.json(&["preset", "show", &id]);
+    assert_eq!(shown["settings"]["exposure_ev"], 0.5);
+    let moved = env.json(&["preset", "move", "明るく", "--to", ""]);
+    assert_eq!(moved["preset"]["folder"], "");
+    let renamed = env.json(&["preset", "rename", "明るく", "明るく 2"]);
+    assert_eq!(renamed["preset"]["name"], "明るく 2");
+    // 同じ名前は作れない（終了コード 1）。
+    let dup = env.run(&[
+        "preset",
+        "create-develop",
+        "明るく 2",
+        "--from",
+        &a,
+        "--json",
+    ]);
+    assert_eq!(dup.code, 1, "{}", dup.stdout);
+    assert_eq!(dup.json()["error"]["kind"], "conflict");
+
+    // --- 書き出しプリセットとファイル名 ---
+    let out = env.path("out");
+    let created = env.json(&[
+        "preset",
+        "create-export",
+        "Web",
+        "--format",
+        "png8",
+        "--long-edge",
+        "32",
+        "--dest",
+        out.to_str().unwrap(),
+        "--rename",
+        "{date}_{seq}",
+        "--seq-digits",
+        "2",
+    ]);
+    assert_eq!(created["preset"]["export"]["export"]["format"], "png8");
+    let exported = env.json(&["export", &a, &b, "--preset", "Web"]);
+    assert_eq!(exported["preset"]["name"], "Web");
+    let items = exported["report"]["items"].as_array().unwrap();
+    let names: Vec<String> = items
+        .iter()
+        .map(|i| {
+            PathBuf::from(i["outcome"]["path"].as_str().unwrap())
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(names, vec!["20240501_01.png", "20240502_02.png"]);
+    let img = image::open(out.join("20240501_01.png")).unwrap();
+    assert_eq!((img.width(), img.height()), (32, 24));
+    // オプションが優先する（--out・--keep-names・--format）。
+    let other = env.path("other");
+    let exported = env.json(&[
+        "export",
+        &a,
+        "--preset",
+        "Web",
+        "--out",
+        other.to_str().unwrap(),
+        "--keep-names",
+        "--format",
+        "jpeg",
+    ]);
+    assert_eq!(
+        written_path(&exported).file_name().unwrap(),
+        std::ffi::OsStr::new("A.jpg")
+    );
+    // --rename だけでも（プリセットなし）。
+    let exported = env.json(&[
+        "export",
+        &b,
+        "--out",
+        other.to_str().unwrap(),
+        "--rename",
+        "{name}-{text}",
+        "--text",
+        "京都",
+    ]);
+    assert_eq!(
+        written_path(&exported).file_name().unwrap(),
+        std::ffi::OsStr::new("B-京都.jpg")
+    );
+    // 書き出し先がない・規則が正しくない・--text だけは使い方の誤り。
+    assert_eq!(env.run(&["export", &a]).code, 2);
+    assert_eq!(
+        env.run(&[
+            "export",
+            &a,
+            "--out",
+            other.to_str().unwrap(),
+            "--rename",
+            "{date"
+        ])
+        .code,
+        2
+    );
+    assert_eq!(
+        env.run(&[
+            "export",
+            &a,
+            "--out",
+            other.to_str().unwrap(),
+            "--text",
+            "x"
+        ])
+        .code,
+        2
+    );
+
+    // --- ファイルへの書き出しと読み込み ---
+    let files = env.path("files");
+    std::fs::create_dir_all(&files).unwrap();
+    let written = env.json(&[
+        "preset",
+        "export-files",
+        "Web",
+        "明るく 2",
+        "--out",
+        files.to_str().unwrap(),
+    ]);
+    let written: Vec<String> = written["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(written.len(), 2);
+    let r = env.run(&[
+        "preset",
+        "import",
+        &written[0],
+        files.join("none.json").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    let imported = r.json();
+    assert_eq!(imported["imported"][0]["name"], "Web (2)");
+    assert_eq!(imported["failed"].as_array().unwrap().len(), 1);
+    env.json(&["preset", "delete", "Web (2)"]);
+    let dir = env.json(&["preset", "dir"]);
+    assert_eq!(
+        PathBuf::from(dir["dir"].as_str().unwrap()),
+        env.path("presets")
+    );
+}
+
+/// 書き出した画像（8bit の RGB に直したもの）の、`(x, y)` から `n × n` 画素の平均の明るさ（R・G・B の平均）。
+/// 書き出しの仕上げ（出力シャープ・透かし。EXP-03）と書き出しプリセットへの保存、透かしの見本・フォントのフォルダ。
+#[test]
+fn export_output_sharpening_watermark_and_preview() {
+    let env = Env::new();
+    write_plain(&env.photos.join("P.png"), (60, 40));
+    let font = env.path("test.ttf");
+    std::fs::write(&font, genzo_media::testing::test_font()).unwrap();
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let p = id_of(&search, "P.png").to_string();
+    let out = env.path("out");
+
+    // 出力シャープ・解像度・文字の透かし（右下・白）。
+    let r = env.json(&[
+        "export",
+        &p,
+        "--out",
+        out.to_str().unwrap(),
+        "--format",
+        "png8",
+        "--ppi",
+        "300",
+        "--output-sharpen",
+        "matte",
+        "--sharpen-amount",
+        "high",
+        "--watermark-text",
+        "AB",
+        "--watermark-font",
+        font.to_str().unwrap(),
+        "--watermark-size",
+        "25",
+        "--watermark-opacity",
+        "100",
+        "--watermark-margin",
+        "0",
+    ]);
+    assert_eq!(r["report"]["written"], 1, "{r}");
+    let s = &r["settings"];
+    assert_eq!(s["resolution_ppi"], 300);
+    assert_eq!(s["output_sharpening"]["media"], "matte_paper");
+    assert_eq!(s["output_sharpening"]["amount"], "high");
+    assert_eq!(s["watermark"]["content"]["text"]["text"], "AB");
+    assert_eq!(s["watermark"]["anchor"], "bottom_right");
+    let img = image::open(written_path(&r)).unwrap().to_rgb8();
+    assert_eq!(img.dimensions(), (60, 40));
+    // 文字の大きさ 10 画素の「AB」が右下にある（白い画素がある）。左上には描かない。
+    let white = |x0: u32, y0: u32, x1: u32, y1: u32| {
+        (y0..y1).any(|y| (x0..x1).any(|x| img.get_pixel(x, y).0 == [255, 255, 255]))
+    };
+    assert!(white(40, 28, 60, 40));
+    assert!(!white(0, 0, 20, 12));
+
+    // 使い方の誤り（文字だけでフォントがない・中身なしの調整・出力シャープなしの適用量）は 2。
+    for args in [
+        vec!["--watermark-text", "A"],
+        vec!["--watermark-size", "10"],
+        vec!["--sharpen-amount", "low"],
+    ] {
+        let mut a = vec!["export", p.as_str(), "--out", out.to_str().unwrap()];
+        a.extend(args.iter().copied());
+        let r = env.run(&a);
+        assert_eq!(
+            r.code,
+            genzo_cli::EXIT_USAGE as i32,
+            "{args:?}: {}",
+            r.stderr
+        );
+    }
+
+    // 書き出しプリセットに保存して使い、一部だけ変える。
+    let created = env.json(&[
+        "preset",
+        "create-export",
+        "透かし付き",
+        "--format",
+        "png8",
+        "--output-sharpen",
+        "screen",
+        "--watermark-text",
+        "A",
+        "--watermark-font",
+        font.to_str().unwrap(),
+        "--watermark-position",
+        "top-left",
+        "--skip-videos",
+    ]);
+    let saved = &created["preset"]["export"]["export"];
+    assert_eq!(saved["watermark"]["anchor"], "top_left");
+    assert_eq!(saved["videos"], "skip");
+    assert_eq!(saved["output_sharpening"]["media"], "screen");
+    let r = env.json(&[
+        "export",
+        &p,
+        "--preset",
+        "透かし付き",
+        "--out",
+        env.path("out2").to_str().unwrap(),
+        "--watermark-opacity",
+        "30",
+    ]);
+    assert_eq!(r["settings"]["watermark"]["opacity"], 30);
+    assert_eq!(r["settings"]["watermark"]["anchor"], "top_left");
+    assert_eq!(r["settings"]["videos"], "skip");
+    let r = env.json(&[
+        "export",
+        &p,
+        "--preset",
+        "透かし付き",
+        "--out",
+        env.path("out3").to_str().unwrap(),
+        "--no-watermark",
+        "--no-output-sharpen",
+    ]);
+    assert!(r["settings"]["watermark"].is_null());
+    assert!(r["settings"]["output_sharpening"].is_null());
+
+    // 別の OS で作った書き出しプリセット（書き出し先・フォントのパスがこの OS の絶対パスでない）も読み込んで使える。
+    // パスは使わずに警告し、書き出し先は --out、フォントは --watermark-font で指定する（検証のラウンド 1 の指摘）。
+    let (dest, other_font) = if cfg!(windows) {
+        ("/Users/a/out", "/Library/Fonts/A.ttf")
+    } else {
+        ("C:\\Users\\a\\out", "C:\\Windows\\Fonts\\meiryo.ttc")
+    };
+    let foreign = env.path("winpreset.json");
+    let json = serde_json::json!({
+        "format": "genzoparis-preset", "format_version": 1, "kind": "export",
+        "id": "0123456789abcdef", "name": "別の OS", "folder": "",
+        "settings": {
+            "export": {"format": "png8", "watermark": {
+                "content": {"text": {"text": "A", "font": other_font}}, "size": 10}},
+            "destination": dest, "file_naming": null
+        }
+    });
+    std::fs::write(&foreign, json.to_string()).unwrap();
+    let imported = env.json(&["preset", "import", foreign.to_str().unwrap()]);
+    assert_eq!(imported["imported"][0]["name"], "別の OS", "{imported}");
+    let warnings = imported["imported"][0]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 2, "{imported}");
+    // フォントを選ばなければ使い方の誤り（書き出し先もない）。
+    let r = env.run(&["export", &p, "--preset", "別の OS"]);
+    assert_eq!(r.code, genzo_cli::EXIT_USAGE as i32, "{}", r.stderr);
+    let r = env.run(&[
+        "export",
+        &p,
+        "--preset",
+        "別の OS",
+        "--out",
+        env.path("out4").to_str().unwrap(),
+        "--watermark-font",
+        font.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stderr.contains("この PC のパスではない"), "{}", r.stderr);
+    assert_eq!(r.json()["report"]["written"], 1);
+
+    // 見本（カタログは使わない）。同じ名前があれば連番。
+    let preview = env.path("preview.png");
+    for expected in ["preview.png", "preview-1.png"] {
+        let r = env.json(&[
+            "watermark",
+            "preview",
+            "--out",
+            preview.to_str().unwrap(),
+            "--width",
+            "300",
+            "--height",
+            "200",
+            "--watermark-text",
+            "A漢",
+            "--watermark-font",
+            font.to_str().unwrap(),
+        ]);
+        let written = PathBuf::from(r["output"].as_str().unwrap());
+        assert_eq!(written.file_name().unwrap(), std::ffi::OsStr::new(expected));
+        assert!(r["warnings"][0].as_str().unwrap().contains('漢'), "{r}");
+        let img = image::open(&written).unwrap();
+        assert_eq!((img.width(), img.height()), (300, 200));
+    }
+    let dirs = env.json(&["watermark", "font-dirs"]);
+    assert!(dirs["dirs"].is_array());
+}
+
+fn mean_luma(img: &image::RgbImage, (x0, y0): (u32, u32), n: u32) -> f64 {
+    let mut sum = 0.0;
+    for y in y0..y0 + n {
+        for x in x0..x0 + n {
+            let p = img.get_pixel(x, y).0;
+            sum += (f64::from(p[0]) + f64::from(p[1]) + f64::from(p[2])) / 3.0;
+        }
+    }
+    sum / f64::from(n * n)
+}
+
+/// 写真を PNG に書き出して、8bit の RGB で読む（書き出し先は `<一時フォルダ>/<名前>`）。
+fn export_png(env: &Env, id: &str, name: &str) -> image::RgbImage {
+    let out = env.path(name);
+    let e = env.json(&[
+        "export",
+        id,
+        "--out",
+        out.to_str().unwrap(),
+        "--format",
+        "png16",
+    ]);
+    image::open(written_path(&e)).unwrap().to_rgb8()
+}
+
+/// `develop mask`（ローカル補正。DEV-18・DEV-19）: 追加（円形・輝度・色域のスポイト・標準入力のブラシ）・部品の
+/// 追加と削除・調整と有効の変更・重ねて表示の PNG・色のスポイト・削除。書き出しで、マスクの中だけが明るくなる。
+/// 番号の誤り・形の指定の誤りは終了コードで知らせる。
+#[test]
+fn develop_masks_are_added_changed_and_removed() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (90, 60), 4, None, false);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.jpg").to_string();
+    let label = || {
+        let history = env.json(&["develop", "history", &a]);
+        history.as_array().unwrap().last().unwrap()["label"].clone()
+    };
+    assert_eq!(
+        env.json(&["develop", "mask", "list", &a])["masks"],
+        json!([])
+    );
+    let before = export_png(&env, &a, "out-before");
+    // 90 × 60 の画像の G 座標は (0, 0)〜(1, 0.6667)。左上に半径 0.12 の円（ぼかしなし）で +1 EV。
+    let added = env.json(&[
+        "develop",
+        "mask",
+        "add",
+        &a,
+        "--radial",
+        "0.2,0.2,0.12,0.12,0,0",
+        "--exposure",
+        "1",
+        "--name",
+        "左上",
+    ]);
+    assert_eq!(added["changed"], true);
+    let m = &added["masks"][0];
+    assert_eq!(m["number"], 1);
+    assert_eq!(m["display_name"], "左上");
+    assert_eq!(m["components"][0]["mode"], "add");
+    assert_eq!(m["components"][0]["shape"]["radial"]["rx"], json!(0.12));
+    assert_eq!(m["delta"]["exposure_ev"], 1.0);
+    assert_eq!(label(), "マスクを追加");
+    let after = export_png(&env, &a, "out-mask");
+    let n = 6;
+    let inside = (18 - n / 2, 18 - n / 2);
+    let outside = (90 - n, 60 - n);
+    let (i0, i1) = (mean_luma(&before, inside, n), mean_luma(&after, inside, n));
+    assert!(i1 > i0 + 10.0, "マスクの中: {i0:.2} → {i1:.2}");
+    let (o0, o1) = (
+        mean_luma(&before, outside, n),
+        mean_luma(&after, outside, n),
+    );
+    assert!((o1 - o0).abs() < 0.5, "マスクの外: {o0:.2} → {o1:.2}");
+    // 輝度の範囲を交差で足す（既定の合成は交差）。
+    let part = env.json(&[
+        "develop",
+        "mask",
+        "add-part",
+        &a,
+        "1",
+        "--luminance",
+        "0,60,10",
+    ]);
+    let c = &part["masks"][0]["components"][1];
+    assert_eq!(c["mode"], "intersect");
+    assert_eq!(
+        c["shape"]["luminance_range"],
+        json!({"min": 0.0, "max": 60.0, "smoothness": 10.0})
+    );
+    assert_eq!(label(), "マスク「左上」の範囲");
+    // 調整と有効の変更。
+    let set = env.json(&[
+        "develop",
+        "mask",
+        "set",
+        &a,
+        "1",
+        "--exposure",
+        "-0.5",
+        "--dehaze",
+        "20",
+    ]);
+    assert_eq!(set["masks"][0]["delta"]["exposure_ev"], -0.5);
+    assert_eq!(set["masks"][0]["delta"]["dehaze"], 20.0);
+    assert_eq!(label(), "マスク「左上」の露光量 -0.50・かすみの除去 +20");
+    env.json(&["develop", "mask", "set", &a, "1", "--enabled", "off"]);
+    assert_eq!(label(), "マスク「左上」を無効にする");
+    env.json(&["develop", "mask", "set", &a, "1", "--enabled", "on"]);
+    // 重ねて表示の PNG（プレビューの大きさ。円の中が白、外が黒）。
+    env.json(&["develop", "mask", "remove-part", &a, "1", "2"]);
+    let png = env.path("overlay.png");
+    let o = env.json(&[
+        "develop",
+        "mask",
+        "overlay",
+        &a,
+        "1",
+        "--out",
+        png.to_str().unwrap(),
+    ]);
+    let img = image::open(&png).unwrap().to_rgb8();
+    assert_eq!(
+        (img.width(), img.height()),
+        (
+            o["overlay"]["width"].as_u64().unwrap() as u32,
+            o["overlay"]["height"].as_u64().unwrap() as u32
+        )
+    );
+    let (w, h) = img.dimensions();
+    assert_eq!(img.get_pixel(w * 2 / 10, h * 3 / 10).0, [255, 255, 255]);
+    assert_eq!(img.get_pixel(w - 2, h - 2).0, [0, 0, 0]);
+    assert!(o["covered_pixels"].as_u64().unwrap() > 0);
+    // 既にあるファイルには書かない（使い方の誤り）。
+    let again = env.run(&[
+        "develop",
+        "mask",
+        "overlay",
+        &a,
+        "1",
+        "--out",
+        png.to_str().unwrap(),
+    ]);
+    assert_eq!(again.code, 2, "{}", again.stderr);
+    // 色のスポイト: 点の G 座標と OKLab。
+    let pick = env.json(&[
+        "develop",
+        "mask",
+        "pick-color",
+        &a,
+        "--x",
+        "0.5",
+        "--y",
+        "0.5",
+    ]);
+    assert!((pick["x"].as_f64().unwrap() - 0.5).abs() < 0.02, "{pick}");
+    assert!(
+        (pick["y"].as_f64().unwrap() - 1.0 / 3.0).abs() < 0.02,
+        "{pick}"
+    );
+    assert!(pick["lab"][0].as_f64().unwrap() > 0.0);
+    // 色域のマスク（見本 2 つ・許容量 30）。
+    let color = env.json(&[
+        "develop",
+        "mask",
+        "add",
+        &a,
+        "--color-at",
+        "0.5,0.5",
+        "--color-at",
+        "0.2,0.2",
+        "--color-amount",
+        "30",
+    ]);
+    let cr = &color["masks"][1]["components"][0];
+    assert_eq!(cr["mode"], "intersect");
+    assert_eq!(
+        cr["shape"]["color_range"]["samples"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(cr["shape"]["color_range"]["amount"], 30.0);
+    assert_eq!(color["masks"][1]["display_name"], "マスク 2");
+    // 標準入力のブラシ。
+    let brush = env.run_stdin(
+        &["develop", "mask", "add", &a, "--brush", "-", "--json"],
+        Some(r#"[{"size": 0.05, "points": [[0.5, 0.3], [0.6, 0.3]]}, {"erase": true, "points": [[0.55, 0.3]]}]"#),
+    );
+    assert_eq!(brush.code, 0, "{}", brush.stderr);
+    let strokes = &brush.json()["masks"][2]["components"][0]["shape"]["brush"]["strokes"];
+    assert_eq!(strokes.as_array().unwrap().len(), 2);
+    assert_eq!(strokes[1]["erase"], true);
+    assert_eq!(strokes[1]["size"], json!(0.05));
+    // 一覧（人が読む表）。
+    let table = env.run(&["develop", "mask", "list", &a]);
+    assert_eq!(table.code, 0, "{}", table.stderr);
+    assert!(table.stdout.contains("左上"), "{}", table.stdout);
+    assert!(
+        table.stdout.contains("色域 2 色（交差）"),
+        "{}",
+        table.stdout
+    );
+    assert!(table.stdout.contains("ブラシ 2 本"), "{}", table.stdout);
+    // 削除。
+    let removed = env.json(&["develop", "mask", "remove", &a, "2"]);
+    assert_eq!(removed["masks"].as_array().unwrap().len(), 2);
+    assert_eq!(label(), "マスクを削除");
+    // 誤り: 番号が範囲の外（入力の誤り 1）・形がない・形が 2 つ・0 番（使い方の誤り 2）・値の範囲の外（1）。
+    assert_eq!(
+        env.run(&["develop", "mask", "set", &a, "5", "--exposure", "1"])
+            .code,
+        1
+    );
+    assert_eq!(env.run(&["develop", "mask", "add", &a]).code, 2);
+    assert_eq!(
+        env.run(&[
+            "develop",
+            "mask",
+            "add",
+            &a,
+            "--linear",
+            "0,0,1,1",
+            "--luminance",
+            "0,50"
+        ])
+        .code,
+        2
+    );
+    assert_eq!(env.run(&["develop", "mask", "remove", &a, "0"]).code, 2);
+    assert_eq!(
+        env.run(&["develop", "mask", "set", &a, "1", "--exposure", "9"])
+            .code,
+        1
+    );
+    assert_eq!(
+        env.json(&["develop", "mask", "list", &a])["masks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+/// `develop set` の白黒・カラーミキサー・カラーグレーディングのオプション（DEV-25・DEV-09・DEV-10）: 保存・
+/// 履歴の名前・書き出し（白黒は R = G = B）・範囲の外の値のエラー・処理バージョン 1 の写真での警告。
+#[test]
+fn develop_black_white_mixer_and_grading_options() {
+    let env = Env::new();
+    for (i, name) in ["A.jpg", "B.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (90, 60), i as u8 + 1, None, false);
+    }
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+    );
+    // 白黒と白黒ミキサー（同じ帯を繰り返したら後の値）。
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--black-white",
+        "on",
+        "--bw-mix",
+        "blue=-30",
+        "--bw-mix",
+        "red=20",
+        "--bw-mix",
+        "blue=-35",
+    ]);
+    assert_eq!(set["changed"], true);
+    let bw = &set["settings"]["color"]["black_white"];
+    assert_eq!(bw["enabled"], true);
+    assert_eq!(bw["mix"]["blue"], -35.0);
+    assert_eq!(bw["mix"]["red"], 20.0);
+    assert_eq!(bw["mix"]["green"], 0.0);
+    let label = |v: &str| {
+        let history = env.json(&["develop", "history", v]);
+        history.as_array().unwrap().last().unwrap()["label"].clone()
+    };
+    assert_eq!(label(&a), "白黒に変換・白黒ミキサー");
+    // 書き出した画像は灰色（R = G = B。色の変換の丸めの 1 段まで）。
+    let img = export_png(&env, &a, "out-bw");
+    let max_diff = img
+        .pixels()
+        .map(|p| {
+            let [r, g, b] = p.0;
+            r.abs_diff(g).max(g.abs_diff(b))
+        })
+        .max()
+        .unwrap();
+    assert!(max_diff <= 1, "白黒の書き出しに色が残っている: {max_diff}");
+    // カラーに戻す（白黒ミキサーの値は保つ）。
+    let set = env.json(&["develop", "set", &a, "--black-white", "off"]);
+    assert_eq!(set["settings"]["color"]["black_white"]["enabled"], false);
+    assert_eq!(
+        set["settings"]["color"]["black_white"]["mix"]["blue"],
+        -35.0
+    );
+    assert_eq!(label(&a), "カラーに変換");
+    // カラーミキサーとカラーグレーディング（輝度を省くと 0）。
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--hsl-hue",
+        "orange=10",
+        "--hsl-saturation",
+        "blue=-40",
+        "--hsl-luminance",
+        "green=15",
+        "--grading-shadows",
+        "220,30",
+        "--grading-midtones",
+        "40,10,-5",
+        "--grading-highlights",
+        "60,20",
+        "--grading-global",
+        "0,5",
+        "--grading-blending",
+        "70",
+        "--grading-balance",
+        "-20",
+    ]);
+    let c = &set["settings"]["color"];
+    assert_eq!(c["mixer"]["orange"]["hue"], 10.0);
+    assert_eq!(c["mixer"]["blue"]["saturation"], -40.0);
+    assert_eq!(c["mixer"]["green"]["luminance"], 15.0);
+    assert_eq!(c["mixer"]["red"]["hue"], 0.0);
+    let g = &c["grading"];
+    assert_eq!(
+        g["shadows"],
+        serde_json::json!({"hue": 220.0, "saturation": 30.0, "luminance": 0.0})
+    );
+    assert_eq!(g["midtones"]["luminance"], -5.0);
+    assert_eq!(g["highlights"]["hue"], 60.0);
+    assert_eq!(g["global"]["saturation"], 5.0);
+    assert_eq!(g["blending"], 70.0);
+    assert_eq!(g["balance"], -20.0);
+    assert_eq!(label(&a), "カラーミキサー・カラーグレーディング");
+    // JSON の後にオプションを当てる。
+    let r = env.run_stdin(
+        &[
+            "develop",
+            "set",
+            &a,
+            "--json",
+            "-",
+            "--grading-balance",
+            "15",
+        ],
+        Some(r#"{"color": {"grading": {"balance": 50, "blending": 30}}}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["color"]["grading"]["balance"], 15.0);
+    assert_eq!(got["color"]["grading"]["blending"], 30.0);
+    // 範囲の外の値はエラー（設定は変わらない）。形の誤り・知らない帯は使い方の誤り。
+    let r = env.run(&["develop", "set", &a, "--grading-shadows", "400,10"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--hsl-hue", "orange=150"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    for bad in [
+        ["--hsl-hue", "cyan=10"],
+        ["--bw-mix", "blue"],
+        ["--grading-global", "10"],
+    ] {
+        let r = env.run(&["develop", "set", &a, bad[0], bad[1]]);
+        assert_eq!(r.code, 2, "{bad:?}: {}", r.stderr);
+    }
+    assert_eq!(env.json(&["develop", "get", &a]), got);
+    // 処理バージョン 1 の写真では知らせる（保存はする）。
+    let r = env.run_stdin(
+        &["develop", "set", &b, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &b, "--black-white", "on"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("白黒・カラーミキサー・カラーグレーディングは使われません"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(
+        env.json(&["develop", "get", &b])["color"]["black_white"]["enabled"],
+        true
+    );
+}
+
+/// `develop set` のテクスチャ・明瞭度・かすみの除去・シャープ・効果のオプション（DEV-11・DEV-12・DEV-24）: 保存・
+/// 履歴の名前・書き出し（切り抜き後の周辺光量補正で四隅が暗くなる）・範囲の外の値のエラー・`develop copy --groups
+/// presence,effects`・処理バージョン 1 の写真での警告。
+#[test]
+fn develop_presence_sharpening_and_effects_options() {
+    let env = Env::new();
+    for (i, name) in ["A.jpg", "B.jpg", "C.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (90, 60), i as u8 + 1, None, false);
+    }
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b, c) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+        id_of(&search, "C.jpg").to_string(),
+    );
+    let label = |v: &str| {
+        let history = env.json(&["develop", "history", v]);
+        history.as_array().unwrap().last().unwrap()["label"].clone()
+    };
+    // 切り抜き後の周辺光量補正（暗く）: 四隅が暗くなり、中央はほとんど変わらない。
+    let before = export_png(&env, &a, "out-before");
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--vignette-amount",
+        "-60",
+        "--vignette-midpoint",
+        "40",
+        "--vignette-roundness",
+        "20",
+        "--vignette-feather",
+        "60",
+        "--vignette-highlights",
+        "10",
+    ]);
+    let v = &set["settings"]["effects"]["vignette"];
+    assert_eq!(v["amount"], -60.0);
+    assert_eq!(v["midpoint"], 40.0);
+    assert_eq!(v["roundness"], 20.0);
+    assert_eq!(v["feather"], 60.0);
+    assert_eq!(v["highlights"], 10.0);
+    assert_eq!(label(&a), "周辺光量 -60");
+    let after = export_png(&env, &a, "out-vignette");
+    assert_eq!(after.dimensions(), before.dimensions());
+    let (w, h) = after.dimensions();
+    let n = 6;
+    for corner in [(0, 0), (w - n, 0), (0, h - n), (w - n, h - n)] {
+        let (l0, l1) = (mean_luma(&before, corner, n), mean_luma(&after, corner, n));
+        assert!(l1 < l0 - 5.0, "{corner:?}: {l0:.2} → {l1:.2}");
+    }
+    let center = (w / 2 - n / 2, h / 2 - n / 2);
+    let (l0, l1) = (mean_luma(&before, center, n), mean_luma(&after, center, n));
+    assert!((l1 - l0).abs() < 1.5, "中央: {l0:.2} → {l1:.2}");
+    // テクスチャ・明瞭度・かすみの除去・シャープ（指定しない項目は今の値のまま）。
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--texture",
+        "20",
+        "--clarity",
+        "40",
+        "--dehaze",
+        "-30",
+        "--sharpen-amount",
+        "60",
+        "--sharpen-radius",
+        "1.5",
+        "--sharpen-masking",
+        "10",
+    ]);
+    let s = &set["settings"];
+    assert_eq!(
+        s["presence"],
+        serde_json::json!({"texture": 20.0, "clarity": 40.0, "dehaze": -30.0})
+    );
+    let sh = &s["detail"]["sharpening"];
+    assert_eq!(sh["amount"], 60.0);
+    assert_eq!(sh["radius"], 1.5);
+    assert_eq!(sh["detail"], 25.0, "指定しない項目は既定のまま");
+    assert_eq!(sh["masking"], 10.0);
+    assert_eq!(s["effects"]["vignette"]["amount"], -60.0);
+    assert_eq!(
+        label(&a),
+        "テクスチャ +20・明瞭度 +40・かすみの除去 -30ほか"
+    );
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--sharpen-detail",
+        "40",
+        "--grain-amount",
+        "25",
+        "--grain-size",
+        "40",
+        "--grain-roughness",
+        "70",
+    ]);
+    let s = &set["settings"];
+    assert_eq!(s["detail"]["sharpening"]["detail"], 40.0);
+    assert_eq!(
+        s["effects"]["grain"],
+        serde_json::json!({"amount": 25.0, "size": 40.0, "roughness": 70.0})
+    );
+    assert_eq!(label(&a), "シャープ・粒子 25");
+    // 粒子を足した写真も書き出せる（JSON の後にオプションを当てる）。
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-", "--texture", "5"],
+        Some(r#"{"presence": {"texture": 50, "clarity": 10}}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["presence"]["texture"], 5.0);
+    assert_eq!(got["presence"]["clarity"], 10.0);
+    let grain = export_png(&env, &a, "out-grain");
+    assert_eq!(grain.dimensions(), (w, h));
+    // 範囲の外の値はエラー（設定は変わらない）。数でない値は使い方の誤り。
+    for bad in [
+        ["--clarity", "101"],
+        ["--sharpen-radius", "0.1"],
+        ["--sharpen-amount", "151"],
+        ["--vignette-amount", "-101"],
+        ["--grain-size", "120"],
+    ] {
+        let r = env.run(&["develop", "set", &a, bad[0], bad[1]]);
+        assert_eq!(r.code, 1, "{bad:?}: {}", r.stderr);
+    }
+    let r = env.run(&["develop", "set", &a, "--dehaze", "much"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(env.json(&["develop", "get", &a]), got);
+    // develop copy --groups presence,effects: 外観と効果だけを写す（シャープは「ディテール」なので写さない）。
+    let copied = env.json(&[
+        "develop",
+        "copy",
+        &a,
+        "--to",
+        &b,
+        "--groups",
+        "presence,effects",
+    ]);
+    assert_eq!(copied["updated"], 1);
+    assert_eq!(copied["needs_upgrade"], 0);
+    let got_b = env.json(&["develop", "get", &b]);
+    assert_eq!(got_b["presence"], got["presence"]);
+    assert_eq!(got_b["effects"], got["effects"]);
+    assert_eq!(got_b["detail"]["sharpening"]["amount"], 0.0);
+    assert_eq!(got_b["detail"]["sharpening"]["detail"], 25.0);
+    // 処理バージョン 1 の写真: 設定すると知らせ、写すと使われない写真の数を返す。
+    let r = env.run_stdin(
+        &["develop", "set", &c, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &c, "--clarity", "10"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("テクスチャ・明瞭度・かすみの除去・シャープ・効果は使われません"),
+        "{}",
+        r.stderr
+    );
+    let r = env.run(&[
+        "develop", "copy", &a, "--to", &c, "--groups", "effects", "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let copied: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(copied["needs_upgrade"], 1);
+    let got_c = env.json(&["develop", "get", &c]);
+    assert_eq!(got_c["process_version"], 1);
+    assert_eq!(got_c["effects"], got["effects"]);
+}
+
 /// `develop region`: 表示範囲を描いて PNG に書く（コア API の render_region。No.52）。既にあるファイルには
 /// 書かない（使い方の誤り）。範囲は画像の内側に収める。
 #[test]
@@ -1019,6 +2747,61 @@ fn develop_region_writes_the_rendered_region_as_png() {
     assert_eq!(r.code, 1, "{}", r.stdout);
     assert_eq!(r.json()["error"]["kind"], "invalid_input");
     assert!(!none.exists());
+    assert_eq!(hashes(&env.photos), before, "元ファイルは変わらない");
+}
+
+/// `develop compare`（LIB-03）: 2 枚の写真の同じ割合の中心・同じ画素の大きさの範囲を、比較表示の面に描いて
+/// PNG に書く（現像のセッションは開かない）。3 枚以上・既にあるファイルは使い方の誤り。
+#[test]
+fn develop_compare_renders_the_same_region_of_two_photos() {
+    let env = Env::new();
+    write_plain(&env.photos.join("A.png"), (120, 80));
+    write_plain(&env.photos.join("B.png"), (60, 40));
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let all = env.json(&["search"]);
+    let a = id_of(&all, "A.png").to_string();
+    let b = id_of(&all, "B.png").to_string();
+    let dir = env.path("比較");
+    let args = |extra: &[&str]| {
+        let mut v = vec![
+            "develop",
+            "compare",
+            "--cx",
+            "0.5",
+            "--cy",
+            "0.5",
+            "--width",
+            "30",
+            "--height",
+            "20",
+            "--out-dir",
+            dir.to_str().unwrap(),
+        ];
+        v.extend_from_slice(extra);
+        v.into_iter().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let owned = args(&[&a, &b]);
+    let r = env.json(&owned.iter().map(String::as_str).collect::<Vec<_>>());
+    let panes = r["panes"].as_array().unwrap();
+    assert_eq!(panes.len(), 2, "{r}");
+    // 中心は写真ごとの割合（120 × 80 の中央と 60 × 40 の中央）、大きさは同じ画素。
+    assert_eq!(panes[0]["region"]["x"], 45, "{r}");
+    assert_eq!(panes[0]["region"]["y"], 30, "{r}");
+    assert_eq!(panes[1]["region"]["x"], 15, "{r}");
+    assert_eq!(panes[1]["region"]["y"], 10, "{r}");
+    assert_eq!(panes[1]["pane"], 1, "{r}");
+    for (pane, id) in [(0, &a), (1, &b)] {
+        let img = image::open(dir.join(format!("compare-{pane}-{id}.png"))).unwrap();
+        assert_eq!((img.width(), img.height()), (30, 20));
+    }
+    // 既にあるファイルには書かない。3 枚以上は比べない。
+    let again = env.run(&owned.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(again.code, 2, "{}", again.stderr);
+    let three = args(&[&a, &b, &a]);
+    let r = env.run(&three.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(r.code, 2, "{}", r.stderr);
     assert_eq!(hashes(&env.photos), before, "元ファイルは変わらない");
 }
 
@@ -1299,7 +3082,12 @@ fn bench_records_results_and_compares_with_the_previous_run() {
     } else {
         "in_memory"
     };
-    assert_eq!(reports[0]["result"]["notes"]["input"], expected_input);
+    // 食い違ったら、実行ファイルの上書き（BINARY_MISMATCH_HINT）も疑う（ワーカーの ping で入力を選ぶので、
+    // LibRaw の文言は出力に出ない）。
+    assert_eq!(
+        reports[0]["result"]["notes"]["input"], expected_input,
+        "{BINARY_MISMATCH_HINT}"
+    );
     // 2 回目は前回と比べる（悪化したかどうかは時間で変わるので、終了コードとの対応だけを確かめる）。
     let r = run(&args("preview", "30"));
     let v = r.json();
@@ -1386,6 +3174,49 @@ fn bench_records_results_and_compares_with_the_previous_run() {
         None,
     );
     assert_eq!(r.code, 2);
+
+    // `develop set` と同じ色・外観・シャープ・効果のオプションを計測の設定に当て、記録に残す（DEV-09〜DEV-12・
+    // DEV-24・DEV-25。決定事項ログ No.142）。
+    let mut a = args("preview", "1");
+    a.extend(
+        [
+            "--clarity",
+            "30",
+            "--grain-amount",
+            "25",
+            "--sharpen-amount",
+            "60",
+            "--black-white",
+            "on",
+            "--hsl-saturation",
+            "blue=-20",
+        ]
+        .map(str::to_owned),
+    );
+    let r = run(&a);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let v = r.json();
+    let reports = v["reports"].as_array().unwrap();
+    assert!(!reports.is_empty());
+    for rep in reports {
+        let s = &rep["result"]["develop"]["settings"];
+        assert_eq!(s["presence"]["clarity"].as_f64(), Some(30.0), "{rep}");
+        assert_eq!(s["effects"]["grain"]["amount"].as_f64(), Some(25.0));
+        assert_eq!(s["detail"]["sharpening"]["amount"].as_f64(), Some(60.0));
+        assert_eq!(s["color"]["black_white"]["enabled"], true);
+        assert_eq!(
+            s["color"]["mixer"]["blue"]["saturation"].as_f64(),
+            Some(-20.0)
+        );
+        // 基準の設定（露光量など）は保つ。
+        assert_eq!(s["exposure_ev"].as_f64(), Some(0.5));
+        assert!(rep["comparison"].is_null(), "設定が違う記録とは比べない");
+    }
+    // 範囲の外の値は、計測の前にエラーにする。
+    let mut a = args("preview", "1");
+    a.extend(["--dehaze", "150"].map(str::to_owned));
+    let r = run(&a);
+    assert_eq!(r.code, 1, "{}", r.stderr);
 }
 
 /// ゴミ箱への移動（`--yes`）。OS のゴミ箱を汚さないよう、Linux で XDG_DATA_HOME を一時フォルダにして
@@ -1745,7 +3576,7 @@ mod ctrl_c {
         /// 指定し、GPU は使わない。`--quiet` は付けないので、進捗が標準エラーに出る）。
         fn spawn(env: &Env, args: &[&str]) -> Self {
             let catalog = env.catalog.to_string_lossy().into_owned();
-            let mut child = Command::new(GENZO)
+            let mut child = genzo_command()
                 .args(args)
                 .args(["--catalog", &catalog, "--gpu", "off"])
                 .env_remove("GENZO_CATALOG")
@@ -1866,12 +3697,13 @@ mod ctrl_c {
         }
     }
 
-    /// 取り込みの対象の、小さな JPEG を `n` 枚作る。
+    /// 取り込みの対象の、小さな JPEG を `n` 枚作る（すべて内容が違う。同じ内容のファイルは、取り込みが重複
+    /// として登録しないため（IMP-04）。色の種は 256 通りなので、256 枚ごとに幅を変える）。
     fn photos(env: &Env, n: usize) {
         for i in 0..n {
             write_jpeg(
                 &env.photos.join(format!("P{i:03}.jpg")),
-                (32, 24),
+                (32 + (i / 256) as u32, 24),
                 i as u8,
                 None,
                 false,
@@ -2072,4 +3904,1542 @@ mod ctrl_c {
             "カタログは作らない（開く前に終わった）"
         );
     }
+}
+
+/// ログ（SYS-07）: `cli.log` に書き、`log info` で場所と中身を表示し、`log clear` で消す。`--no-log-file` では
+/// ファイルに書かない。ほかのファイルは消さない。
+#[test]
+fn logs_are_written_listed_and_cleared() {
+    let env = Env::new();
+    let logs = env.path("logs");
+    let logs_s = logs.to_str().unwrap().to_owned();
+    let file_on = [("GENZO_LOG_FILE", Path::new("info"))];
+    let catalog = env.catalog.to_string_lossy().into_owned();
+    let init = genzo_with(
+        &[
+            "catalog",
+            "init",
+            "--catalog",
+            &catalog,
+            "--log-dir",
+            &logs_s,
+            "--gpu",
+            "off",
+        ],
+        &file_on,
+        None,
+    );
+    assert_eq!(init.code, 0, "{}", init.stderr);
+    let log = std::fs::read_to_string(logs.join("cli.log")).unwrap();
+    assert!(log.contains("起動しました"), "{log}");
+    assert!(log.contains("コマンドを実行します"), "{log}");
+    // サブコマンドの名前と引数の数だけを書き、引数の値（パス・メタデータの値など）は書かない。
+    assert!(log.contains("command=catalog init"), "{log}");
+    assert!(log.contains("args=8"), "{log}");
+    assert!(!log.contains("--log-dir"), "{log}");
+
+    // クラッシュレポート（ほかのプロセスのもの）と、利用者のファイル。
+    std::fs::create_dir_all(logs.join("crash")).unwrap();
+    std::fs::write(
+        logs.join("crash")
+            .join("crash-20261001T000000000Z-app-1.txt"),
+        "内容: テストのパニック\n",
+    )
+    .unwrap();
+    std::fs::write(logs.join("memo.txt"), "利用者のファイル").unwrap();
+
+    let info = genzo_with(
+        &["log", "info", "--json", "--log-dir", &logs_s],
+        &file_on,
+        None,
+    );
+    assert_eq!(info.code, 0, "{}", info.stderr);
+    let info = info.json();
+    assert_eq!(info["dir"], logs_s.as_str());
+    assert_eq!(info["file_enabled"], true);
+    assert!(info["current_file"].as_str().unwrap().ends_with("cli.log"));
+    let names: Vec<&str> = info["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["cli.log"]);
+    assert_eq!(info["crash_reports"][0]["message"], "テストのパニック");
+    // 人が読む表示。
+    let human = genzo_with(&["log", "info", "--log-dir", &logs_s], &file_on, None);
+    assert!(
+        human.stdout.contains("外部へは送信しません"),
+        "{}",
+        human.stdout
+    );
+    assert!(human.stdout.contains("crash-20261001T000000000Z-app-1.txt"));
+
+    let cleared = genzo_with(
+        &["log", "clear", "--json", "--log-dir", &logs_s],
+        &file_on,
+        None,
+    );
+    assert_eq!(cleared.code, 0, "{}", cleared.stderr);
+    let cleared = cleared.json();
+    // 書いている途中の cli.log は空にし、クラッシュレポートは消す。
+    assert_eq!(cleared["cleared"]["truncated"], 1);
+    assert_eq!(cleared["cleared"]["removed"], 1);
+    assert!(
+        !logs
+            .join("crash")
+            .join("crash-20261001T000000000Z-app-1.txt")
+            .exists()
+    );
+    assert!(logs.join("memo.txt").exists(), "利用者のファイルは消さない");
+    let log = std::fs::read_to_string(logs.join("cli.log")).unwrap();
+    assert!(!log.contains("catalog init"), "{log}");
+
+    // --no-log-file ではファイルに書かない。
+    let quiet_dir = env.path("logs-off");
+    let off = genzo_with(
+        &[
+            "log",
+            "info",
+            "--json",
+            "--no-log-file",
+            "--log-dir",
+            quiet_dir.to_str().unwrap(),
+        ],
+        &file_on,
+        None,
+    );
+    assert_eq!(off.code, 0, "{}", off.stderr);
+    let off = off.json();
+    assert_eq!(off["file_enabled"], false);
+    assert_eq!(off["exists"], false);
+    assert!(off["current_file"].is_null());
+    assert!(!quiet_dir.join("cli.log").exists());
+}
+
+/// カタログの構造（ORG-07）: 表・列・公開ビューと、作る SQL。
+#[test]
+fn catalog_schema_lists_tables_views_and_sql() {
+    let env = Env::new();
+    env.json(&["catalog", "init"]);
+    let schema = env.json(&["catalog", "schema"]);
+    assert_eq!(
+        schema["public_views"],
+        serde_json::json!([
+            "photos_v1",
+            "photo_keywords_v1",
+            "photo_collections_v1",
+            "photo_stacks_v1",
+            "photo_files_v1"
+        ])
+    );
+    let tables: Vec<&str> = schema["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for t in ["asset", "variant", "file", "photos_v1", "asset_fts"] {
+        assert!(tables.contains(&t), "{t}: {tables:?}");
+    }
+    assert!(schema["schema_version"].as_u64().unwrap() >= 5);
+    let human = env.run(&["catalog", "schema"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.contains("photos_v1（公開ビュー）"),
+        "{}",
+        human.stdout
+    );
+    assert!(human.stdout.contains("読み取り専用"), "{}", human.stdout);
+    let sql = env.run(&["catalog", "schema", "--sql"]);
+    assert_eq!(sql.code, 0, "{}", sql.stderr);
+    assert!(sql.stdout.contains("CREATE TABLE asset"), "{}", sql.stdout);
+    assert!(
+        sql.stdout.contains("CREATE VIEW photos_v1"),
+        "{}",
+        sql.stdout
+    );
+}
+
+/// `metadata`（LIB-15）: --set・--clear で一括で変え、引数なしで項目ごとの値（複数の値）を表示する。
+/// `show` にも出る。テキスト検索の対象になる。元ファイルは変えない。
+#[test]
+fn metadata_sets_clears_and_summarizes() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 1, None, false);
+    write_jpeg(&env.photos.join("B.jpg"), (64, 48), 2, None, false);
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let all = env.json(&["search"]);
+    let a = id_of(&all, "A.jpg").to_string();
+    let b = id_of(&all, "B.jpg").to_string();
+
+    let r = env.json(&[
+        "metadata",
+        &a,
+        &b,
+        "--set",
+        "creator=山田 太郎",
+        "--set",
+        "copyright-status=copyrighted",
+        "--set",
+        "title=清水寺",
+    ]);
+    assert_eq!(r["updated"], 2);
+    env.json(&["metadata", &b, "--clear", "title", "--set", "city=京都市"]);
+    let s = env.json(&["metadata", &a, &b]);
+    assert_eq!(s["assets"], 2);
+    let field = |name: &str| -> Value {
+        s["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["field"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(field("creator")["value"], "山田 太郎");
+    assert_eq!(field("copyright_status")["value"], "copyrighted");
+    assert_eq!(field("title")["mixed"], true);
+    // 人が読む形（複数の値・表示名）。
+    let human = env.run(&["metadata", &a, &b]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(human.stdout.contains("（複数の値）"), "{}", human.stdout);
+    assert!(human.stdout.contains("作成者"), "{}", human.stdout);
+    // show（JSON と表）。
+    let shown = env.json(&["show", &a]);
+    assert_eq!(shown["details"]["metadata"]["title"], "清水寺");
+    let shown_b = env.run(&["show", &b]);
+    assert!(
+        shown_b.stdout.contains("撮影場所の市区町村"),
+        "{}",
+        shown_b.stdout
+    );
+    // テキスト検索。
+    assert_eq!(
+        names(&env.json(&["search", "--text", "清水寺"])),
+        vec!["A.jpg"]
+    );
+    // 使い方の誤り（知らない項目・同じ項目に --set と --clear・形の誤り）は 2。
+    for bad in [
+        vec!["metadata", a.as_str(), "--set", "nope=x"],
+        vec![
+            "metadata",
+            a.as_str(),
+            "--set",
+            "title=x",
+            "--clear",
+            "title",
+        ],
+        vec!["metadata", a.as_str(), "--set", "title"],
+    ] {
+        let r = env.run(&bad);
+        assert_eq!(r.code, 2, "{bad:?}: {}", r.stderr);
+    }
+    // 値が不正（著作権の状態）なら 1 で、何も変えない。
+    let r = env.run(&["metadata", &a, "--set", "copyright_status=maybe", "--json"]);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(r.json()["error"]["kind"], "invalid_input");
+    assert_eq!(hashes(&env.photos), before, "元ファイルは変えない");
+}
+
+/// `develop before`（DEV-31）: ビフォー（取り込んだ直後の設定。切り抜きは今の設定と同じ）とアフターのプレビューを
+/// 同じ寸法で PNG に書く。`develop region --before` はビフォーの設定で表示範囲を描く。
+#[test]
+fn develop_before_writes_the_before_and_after_previews() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (120, 80), 3, None, false);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.jpg").to_string();
+    env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"exposure_ev": 2.0, "geometry": {"crop": {"left": 0.5, "top": 0.0, "right": 1.0, "bottom": 1.0}}}"#),
+    );
+    let bpath = env.path("before.png");
+    let apath = env.path("after.png");
+    let r = env.json(&[
+        "develop",
+        "before",
+        &a,
+        "--out",
+        bpath.to_str().unwrap(),
+        "--after",
+        apath.to_str().unwrap(),
+    ]);
+    assert_eq!(r["before"]["label"], "読み込み", "{r}");
+    assert_eq!(r["before"]["source"]["kind"], "initial");
+    let b = image::open(&bpath).unwrap().to_rgb8();
+    let af = image::open(&apath).unwrap().to_rgb8();
+    assert_eq!(b.dimensions(), af.dimensions(), "切り抜きは同じ");
+    assert_eq!(b.width(), 60, "右半分に切り抜いた幅");
+    let mean = |img: &image::RgbImage| {
+        img.as_raw().iter().map(|&x| u64::from(x)).sum::<u64>() as f64 / img.as_raw().len() as f64
+    };
+    assert!(mean(&b) + 10.0 < mean(&af), "ビフォーは露光量 +2 の前");
+    // 今の設定の写しならアフターと同じ。
+    let cpath = env.path("current.png");
+    env.json(&[
+        "develop",
+        "before",
+        &a,
+        "--source",
+        "current",
+        "--out",
+        cpath.to_str().unwrap(),
+    ]);
+    assert_eq!(image::open(&cpath).unwrap().to_rgb8(), af);
+    // 表示範囲（ビフォー）。
+    let rpath = env.path("region-before.png");
+    let r = env.json(&[
+        "develop",
+        "region",
+        &a,
+        "--x",
+        "0",
+        "--y",
+        "0",
+        "--width",
+        "20",
+        "--height",
+        "20",
+        "--before",
+        "initial",
+        "--out",
+        rpath.to_str().unwrap(),
+    ]);
+    assert_eq!(r["region"]["before"], true, "{r}");
+    assert_eq!(r["region"]["full_width"], 60);
+    // 使い方の誤り（既にあるファイル・出どころの形）。
+    let again = env.run(&["develop", "before", &a, "--out", bpath.to_str().unwrap()]);
+    assert_eq!(again.code, 2, "{}", again.stderr);
+    let bad = env.run(&[
+        "develop",
+        "before",
+        &a,
+        "--source",
+        "yesterday",
+        "--out",
+        "x.png",
+    ]);
+    assert_eq!(bad.code, 2, "{}", bad.stderr);
+    // この写真の履歴にない項目は 1（not_found）。
+    let missing = env.run(&[
+        "develop",
+        "before",
+        &a,
+        "--source",
+        "history:99999",
+        "--out",
+        env.path("m.png").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(missing.code, 1, "{}", missing.stdout);
+    assert_eq!(missing.json()["error"]["kind"], "not_found");
+}
+
+/// `keyword`・`collection`・`search --keyword / --collection / --rule`（LIB-09〜11）: 付ける・一覧・親で絞り込む・
+/// コレクションに入れる・スマートコレクション・書き出しの XMP・使い方の誤り。元ファイルは変えない。
+#[test]
+fn keywords_and_collections_organize_photos() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 1, None, false);
+    write_jpeg(&env.photos.join("B.jpg"), (64, 48), 2, None, false);
+    write_jpeg(&env.photos.join("C.jpg"), (64, 48), 3, None, false);
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let all = env.json(&["search"]);
+    let a = id_of(&all, "A.jpg").to_string();
+    let b = id_of(&all, "B.jpg").to_string();
+    let c = id_of(&all, "C.jpg").to_string();
+
+    // キーワード: 付ける（なければ作る）・一覧・親で絞り込む（下の階層を含む）。
+    let r = env.json(&[
+        "keyword",
+        "add",
+        &a,
+        &b,
+        "-k",
+        "場所 > 京都 > 祇園",
+        "-k",
+        "家族",
+    ]);
+    assert_eq!(r["updated"], 4);
+    env.json(&["keyword", "add", &c, "--keyword", "場所>東京"]);
+    let list = env.json(&["keyword", "list"]);
+    let kws = list["keywords"].as_array().unwrap();
+    assert_eq!(kws.len(), 5);
+    let gion = kws.iter().find(|k| k["name"] == "祇園").unwrap();
+    assert_eq!(gion["path"], serde_json::json!(["場所", "京都", "祇園"]));
+    assert_eq!(gion["photo_count"], 2);
+    assert_eq!(
+        names(&env.json(&["search", "--keyword", "場所"])),
+        vec!["A.jpg", "B.jpg", "C.jpg"]
+    );
+    assert_eq!(
+        names(&env.json(&["search", "--keyword", "場所>京都", "--keyword", "家族"])),
+        vec!["A.jpg", "B.jpg"]
+    );
+    let id_kw = format!("id:{}", gion["keyword_id"]);
+    assert_eq!(names(&env.json(&["search", "--keyword", &id_kw])).len(), 2);
+    let shown = env.json(&["keyword", "show", &a, &c]);
+    assert_eq!(shown["variants"], 2);
+    let human = env.run(&["keyword", "list"]);
+    assert!(
+        human.stdout.contains("場所 > 京都 > 祇園"),
+        "{}",
+        human.stdout
+    );
+    // 名前の変更・移動・書き出しの印・外す。
+    env.json(&["keyword", "rename", "場所>東京", "Tokyo"]);
+    env.json(&["keyword", "move", "家族", "--to", "場所"]);
+    env.json(&["keyword", "export", "場所>家族", "--off"]);
+    let r = env.json(&["keyword", "remove", &b, "-k", "場所>家族"]);
+    assert_eq!(r["updated"], 1);
+
+    // コレクション: セットの中に作って写真を入れる・絞り込む・外す。
+    let set =
+        env.json(&["collection", "create", "旅行", "--kind", "set"])["collection_id"].to_string();
+    let col = env.json(&[
+        "collection",
+        "create",
+        "京都 2024",
+        "--in",
+        &set,
+        "--add",
+        &a,
+        &b,
+    ])["collection_id"]
+        .to_string();
+    assert_eq!(
+        names(&env.json(&["search", "--collection", &col])),
+        vec!["A.jpg", "B.jpg"]
+    );
+    env.json(&["collection", "remove", &col, &b]);
+    assert_eq!(
+        names(&env.json(&["search", "--collection", &set])),
+        vec!["A.jpg"]
+    );
+    env.json(&["collection", "add", &col, &c]);
+
+    // スマートコレクション: 条件のファイル（BOM 付き）。★3 以上 かつ キーワード「場所」。
+    env.json(&["rate", &c, "4"]);
+    let place_id = kws.iter().find(|k| k["name"] == "場所").unwrap()["keyword_id"].clone();
+    let rule = env.path("rule.json");
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(
+        serde_json::json!({
+            "version": 1, "match": "all",
+            "rules": [
+                {"type": "rating", "op": "gte", "value": 3},
+                {"type": "keyword", "op": "has", "keyword_id": place_id}
+            ]
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    std::fs::write(&rule, bytes).unwrap();
+    let rule_path = rule.to_str().unwrap();
+    assert_eq!(
+        names(&env.json(&["search", "--rule", rule_path])),
+        vec!["C.jpg"]
+    );
+    let smart =
+        env.json(&["collection", "create", "よい場所", "--rule", rule_path])["collection_id"]
+            .to_string();
+    assert_eq!(
+        names(&env.json(&["search", "--collection", &smart])),
+        vec!["C.jpg"]
+    );
+    // 評価を変えると結果が変わる（自動で更新される）。
+    env.json(&["rate", &a, "5"]);
+    assert_eq!(
+        names(&env.json(&["search", "--collection", &smart])),
+        vec!["A.jpg", "C.jpg"]
+    );
+    let shown_rule = env.json(&["collection", "rule", &smart]);
+    assert_eq!(shown_rule["rules"][0]["type"], "rating");
+    let list = env.json(&["collection", "list"]);
+    let smart_row = list["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| {
+            c["collection_id"]
+                .as_i64()
+                .map(|n| n.to_string())
+                .as_deref()
+                == Some(smart.as_str())
+        })
+        .unwrap()
+        .clone();
+    assert_eq!(smart_row["count"], 2);
+    let human = env.run(&["collection", "list"]);
+    assert!(
+        human.stdout.contains("旅行 > 京都 2024"),
+        "{}",
+        human.stdout
+    );
+
+    // 書き出しの XMP にキーワードが入る（書き出さないキーワードは入らない。--remove-keywords で入らない）。
+    let out1 = env.path("out1");
+    let e = env.json(&["export", &a, "--out", out1.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&std::fs::read(written_path(&e)).unwrap()).into_owned();
+    assert!(
+        text.contains("<rdf:li>祇園</rdf:li>") && text.contains("<rdf:li>場所</rdf:li>"),
+        "XMP"
+    );
+    assert!(
+        !text.contains("<rdf:li>家族</rdf:li>"),
+        "書き出さないキーワード"
+    );
+    let out2 = env.path("out2");
+    let e = env.json(&[
+        "export",
+        &a,
+        "--out",
+        out2.to_str().unwrap(),
+        "--remove-keywords",
+    ]);
+    let text = String::from_utf8_lossy(&std::fs::read(written_path(&e)).unwrap()).into_owned();
+    assert!(!text.contains("dc:subject"));
+
+    // 使い方の誤り（ないキーワード・空のパス・--add をセットに）は 2、コアのエラー（循環）は 1。
+    for bad in [
+        vec!["search", "--keyword", "大阪"],
+        vec!["keyword", "remove", a.as_str(), "-k", "id:999"],
+        vec!["keyword", "add", a.as_str(), "-k", " > "],
+        vec![
+            "collection",
+            "create",
+            "x",
+            "--kind",
+            "set",
+            "--add",
+            a.as_str(),
+        ],
+        vec!["collection", "add", "abc", a.as_str()],
+    ] {
+        let r = env.run(&bad);
+        assert_eq!(r.code, 2, "{bad:?}: {} {}", r.stdout, r.stderr);
+    }
+    let cyclic = env.path("cyclic.json");
+    std::fs::write(
+        &cyclic,
+        format!(r#"{{"version":1,"match":"all","rules":[{{"type":"collection","op":"in","collection_id":{smart}}}]}}"#),
+    )
+    .unwrap();
+    let r = env.run(&[
+        "collection",
+        "rule",
+        &smart,
+        "--set",
+        cyclic.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(r.json()["error"]["kind"], "invalid_input");
+
+    // 削除（写真は消えない）。
+    let r = env.json(&["collection", "delete", &set]);
+    assert_eq!(r["deleted"], 2);
+    let r = env.json(&["keyword", "delete", "場所"]);
+    assert_eq!(r["deleted"], 5);
+    assert_eq!(names(&env.json(&["search"])).len(), 3);
+    assert_eq!(hashes(&env.photos), before, "元ファイルは変えない");
+}
+
+/// `stack`（LIB-12）と仮想コピーの `develop virtual-copy / rename-copy / make-master`（LIB-13）: 撮影時刻の間隔に
+/// よる自動スタック（見込みと実行）、折りたたんだスタックの search の並び（隠した写真の数と --expand-stacks）、
+/// 一番上の写真・外す・解除、仮想コピーは元の写真のスタックに入る。元ファイルは変えない。
+#[test]
+fn stacks_and_virtual_copies_from_the_cli() {
+    let env = Env::new();
+    for (i, n) in ["A0.jpg", "A1.jpg", "A2.jpg"].iter().enumerate() {
+        let when = format!("2024-05-01 12:00:0{i}");
+        write_jpeg(&env.photos.join(n), (64, 48), i as u8, Some(&when), false);
+    }
+    write_jpeg(
+        &env.photos.join("B.jpg"),
+        (64, 48),
+        9,
+        Some("2024-05-01 13:00:00"),
+        false,
+    );
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let all = env.json(&["search"]);
+    let a0 = id_of(&all, "A0.jpg").to_string();
+    let a1 = id_of(&all, "A1.jpg").to_string();
+    let a2 = id_of(&all, "A2.jpg").to_string();
+    let b = id_of(&all, "B.jpg").to_string();
+
+    // 自動スタック: 見込み（何も変えない）と実行。
+    let dry = env.json(&["stack", "auto", "--gap", "2", "--dry-run"]);
+    assert_eq!(
+        (dry["stacks"].as_u64(), dry["photos"].as_u64()),
+        (Some(1), Some(3))
+    );
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(env.json(&["search"])["count"], 4);
+    let made = env.json(&["stack", "auto", "--gap", "2"]);
+    assert_eq!(made["stacks"], 1);
+    // 折りたたんだスタックは一番上の写真だけ。隠した写真の数を返す。
+    let r = env.json(&["search"]);
+    assert_eq!(
+        (r["count"].as_u64(), r["hidden_in_stacks"].as_u64()),
+        (Some(2), Some(2))
+    );
+    assert_eq!(names(&r), vec!["A0.jpg", "B.jpg"]);
+    assert_eq!(items(&r)[0]["stack"]["count"], 3);
+    assert_eq!(env.json(&["search", "--expand-stacks"])["count"], 4);
+    let human = env.run(&["search"]);
+    assert!(
+        human.stdout.contains("3 枚（折りたたみ）"),
+        "{}",
+        human.stdout
+    );
+    assert!(human.stdout.contains("--expand-stacks"), "{}", human.stdout);
+    // 表示・一番上・展開。
+    let shown = env.json(&["stack", "show", &a1]);
+    let stack = shown["stacks"][0]["stack_id"].to_string();
+    assert_eq!(shown["stacks"][0]["top_variant_id"].to_string(), a0);
+    let top = env.json(&["stack", "top", &a2]);
+    assert_eq!(top["top_variant_id"].to_string(), a2);
+    assert_eq!(env.json(&["stack", "expand", &stack])["count"], 1);
+    // 並びの順（names は名前の順に並べ替えるので使わない）: スタックは一番上の写真の位置に、スタックの順で。
+    let r = env.json(&["search"]);
+    let order: Vec<&str> = items(&r)
+        .iter()
+        .map(|i| i["file_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, vec!["A2.jpg", "A0.jpg", "A1.jpg", "B.jpg"]);
+    // 外す・足す・解除。
+    assert_eq!(env.json(&["stack", "remove", &a0])["count"], 1);
+    assert_eq!(env.json(&["stack", "add", &stack, &b])["count"], 1);
+    let st = env.json(&["stack", "show", &b]);
+    assert_eq!(st["stacks"][0]["members"].as_array().unwrap().len(), 3);
+    assert_eq!(env.json(&["stack", "unstack", &b])["count"], 1);
+    assert_eq!(
+        env.json(&["stack", "show", &b])["stacks"],
+        serde_json::json!([])
+    );
+    // 作る（2 枚以上。1 枚は使い方の誤り）・すべて折りたたむ。
+    let created = env.json(&["stack", "create", &a0, &a1, "--top", &a1]);
+    assert_eq!(created["top_variant_id"].to_string(), a1);
+    assert_eq!(env.run(&["stack", "create", &a0]).code, 2);
+    env.json(&["stack", "collapse", "--all"]);
+
+    // 仮想コピー: 元の写真のスタックに入る（展開する）・名前の変更・マスターにする。
+    let vc = env.json(&["develop", "virtual-copy", &b, "--name", "白黒"]);
+    let copy = vc["variant_id"].to_string();
+    let st = env.json(&["stack", "show", &copy]);
+    assert_eq!(st["stacks"][0]["members"].as_array().unwrap().len(), 2);
+    assert_eq!(st["stacks"][0]["collapsed"], false);
+    env.json(&["develop", "rename-copy", &copy, "夕景"]);
+    let shown = env.run(&["show", &copy]);
+    assert!(shown.stdout.contains("夕景"), "{}", shown.stdout);
+    assert!(
+        shown.stdout.contains("マスター・仮想コピー"),
+        "{}",
+        shown.stdout
+    );
+    let mm = env.json(&["develop", "make-master", &copy]);
+    assert_eq!(mm["previous_master"].to_string(), b);
+    let r = env.json(&["search", "--masters-only", "--expand-stacks"]);
+    let ids: Vec<i64> = items(&r)
+        .iter()
+        .map(|v| v["variant_id"].as_i64().unwrap())
+        .collect();
+    assert!(ids.contains(&copy.parse().unwrap()) && !ids.contains(&b.parse().unwrap()));
+    // マスターの名前は変えられない（入力の誤り）。
+    let bad = env.run(&["develop", "rename-copy", &copy, "x"]);
+    assert_eq!(bad.code, 1, "{}", bad.stderr);
+    // 元ファイルは変えない。
+    assert_eq!(hashes(&env.photos), before);
+}
+
+/// ファイルの内容による同一性（ORG-03・IMP-04）と RAW と JPEG のペア（IMP-06）: 取り込みの重複の扱い
+/// （既定は取り込まない・--keep-duplicates）・RAW と JPEG を別々に取り込む・`hash compute / status /
+/// duplicates / identify`。元ファイルは変えない。
+#[test]
+fn content_identity_and_raw_jpeg_pairs_from_the_cli() {
+    let env = Env::new();
+    let a = env.photos.join("a");
+    let b = env.photos.join("b");
+    let c = env.photos.join("c");
+    for d in [&a, &b, &c] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    write_jpeg(
+        &a.join("A.jpg"),
+        (64, 48),
+        1,
+        Some("2024-05-01 12:00:00"),
+        false,
+    );
+    // RAW と JPEG のペアの代わりに、同じ名前の DNG（LibRaw がなくても登録できる）と JPEG。
+    std::fs::write(a.join("X.dng"), b"not really a dng").unwrap();
+    write_jpeg(&a.join("X.jpg"), (32, 24), 2, None, false);
+    std::fs::copy(a.join("A.jpg"), b.join("B.jpg")).unwrap();
+    std::fs::write(c.join("Y.dng"), b"another fake dng").unwrap();
+    write_jpeg(&c.join("Y.jpg"), (32, 24), 3, None, false);
+    let before = hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    let r = env.json(&["import", a.to_str().unwrap()]);
+    assert_eq!(
+        (r["added"].as_u64(), r["paired"].as_u64()),
+        (Some(3), Some(1))
+    );
+    assert_eq!(env.json(&["search"])["count"], 2, "X.dng と X.jpg は 1 枚");
+
+    // 同じ内容の B.jpg は、既定では取り込まない（結果に同じ内容のファイルを挙げる）。
+    let r = env.json(&["import", b.to_str().unwrap()]);
+    assert_eq!(r["added"], 0);
+    assert_eq!(r["duplicates"][0]["skipped"], true);
+    assert_eq!(
+        r["duplicates"][0]["existing_path"].as_str().unwrap(),
+        a.join("A.jpg").to_str().unwrap()
+    );
+    let human = env.run(&["import", b.to_str().unwrap()]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.contains("重複のため取り込まなかったファイル"),
+        "{}",
+        human.stdout
+    );
+    // 取り込む指定では、別の写真として登録する。
+    let r = env.json(&["import", b.to_str().unwrap(), "--keep-duplicates"]);
+    assert_eq!(r["added"], 1);
+    assert_eq!(r["duplicates"][0]["skipped"], false);
+    // RAW と JPEG を別々に取り込む指定。
+    let r = env.json(&["import", c.to_str().unwrap(), "--separate-raw-jpeg"]);
+    assert_eq!(
+        (r["added"].as_u64(), r["paired"].as_u64()),
+        (Some(2), Some(0))
+    );
+    assert_eq!(env.json(&["search"])["count"], 5);
+
+    // 内容のハッシュ: 重複の確認で求めた 2 件のほかは、hash compute で計算する。
+    let st = env.json(&["hash", "status"]);
+    assert_eq!(
+        (st["files"].as_u64(), st["hashed"].as_u64()),
+        (Some(6), Some(2))
+    );
+    let done = env.json(&["hash", "compute"]);
+    assert_eq!(done["hashed"], 4);
+    assert_eq!(done["failed_count"], 0);
+    let st = env.json(&["hash", "status"]);
+    assert_eq!(
+        (st["pending"].as_u64(), st["duplicate_groups"].as_u64()),
+        (Some(0), Some(1))
+    );
+    let dups = env.json(&["hash", "duplicates"]);
+    assert_eq!(dups["total"], 1);
+    assert_eq!(dups["groups"][0]["files"].as_array().unwrap().len(), 2);
+    let human = env.run(&["hash", "duplicates"]);
+    assert!(human.stdout.contains("1 組"), "{}", human.stdout);
+    // 場所・名前によらない識別。
+    let elsewhere = env.path("elsewhere.jpg");
+    std::fs::copy(a.join("A.jpg"), &elsewhere).unwrap();
+    let id = env.json(&["hash", "identify", elsewhere.to_str().unwrap()]);
+    assert_eq!(id["matches"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        id["full_hash"].as_str().unwrap(),
+        genzo_catalog::full_hash(&elsewhere).unwrap()
+    );
+    // 反対の指定は使い方の誤り。
+    let bad = env.run(&[
+        "import",
+        b.to_str().unwrap(),
+        "--keep-duplicates",
+        "--skip-duplicates",
+    ]);
+    assert_eq!(bad.code, 2, "{}", bad.stderr);
+    assert_eq!(hashes(&env.photos), before);
+}
+
+/// コピー取り込み（IMP-02）・リネーム規則（IMP-03）・取り込み時のキーワードと説明のメタデータ（IMP-05）:
+/// `import --copy-to --folders --rename --text --seq-start --seq-digits --keyword --meta --dry-run`。
+/// 元のファイルは変えない（DATA-01）。
+#[test]
+fn copy_import_with_rename_and_metadata_from_the_cli() {
+    let env = Env::new();
+    let card = env.path("card");
+    std::fs::create_dir_all(card.join("DCIM")).unwrap();
+    write_jpeg(
+        &card.join("DCIM/A.JPG"),
+        (64, 48),
+        1,
+        Some("2026-10-13 14:30:52"),
+        false,
+    );
+    write_jpeg(
+        &card.join("DCIM/B.JPG"),
+        (64, 48),
+        2,
+        Some("2026-10-14 09:05:00"),
+        false,
+    );
+    let dest = env.photos.join("library");
+    std::fs::create_dir_all(&dest).unwrap();
+    let before = hashes(&card);
+    env.json(&["catalog", "init"]);
+    let card_s = card.to_str().unwrap();
+    let dest_s = dest.to_str().unwrap();
+    let common = [
+        "import",
+        card_s,
+        "--copy-to",
+        dest_s,
+        "--folders",
+        "year-month-day",
+        "--rename",
+        "{date}_{text}-{seq}",
+        "--text",
+        "京都",
+        "--seq-start",
+        "5",
+        "--seq-digits",
+        "2",
+    ];
+    // 名前を決めるだけ（コピー・登録しない）。
+    let mut dry: Vec<&str> = common.to_vec();
+    dry.push("--dry-run");
+    let plan = env.json(&dry);
+    assert_eq!(plan["copy"]["dry_run"], true);
+    let planned: Vec<String> = plan["copy"]["copied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["destination"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        planned,
+        // 区切りは OS のもの（Windows は \）なので、部分ごとに join して組み立てる。
+        vec![
+            dest.join("2026")
+                .join("10")
+                .join("13")
+                .join("20261013_京都-05.JPG")
+                .to_string_lossy()
+                .into_owned(),
+            dest.join("2026")
+                .join("10")
+                .join("14")
+                .join("20261014_京都-06.JPG")
+                .to_string_lossy()
+                .into_owned(),
+        ]
+    );
+    assert!(std::fs::read_dir(&dest).unwrap().next().is_none());
+    let human = env.run(&dry);
+    assert!(human.stdout.contains("の予定"), "{}", human.stdout);
+    // コピーして取り込み、キーワードと作成者を付ける。
+    let mut run: Vec<&str> = common.to_vec();
+    run.extend([
+        "--keyword",
+        "場所>京都",
+        "--keyword",
+        "家族",
+        "--meta",
+        "creator=山田 太郎",
+    ]);
+    let r = env.json(&run);
+    assert_eq!(r["added"], 2);
+    assert_eq!(r["tagged"], 2);
+    assert_eq!(r["copy"]["next_sequence"], 7);
+    assert!(dest.join("2026/10/13/20261013_京都-05.JPG").is_file());
+    assert!(dest.join("2026/10/14/20261014_京都-06.JPG").is_file());
+    assert_eq!(hashes(&card), before);
+    let found = env.json(&["search", "--keyword", "場所>京都"]);
+    assert_eq!(found["count"], 2);
+    let id = id_of(&found, "20261013_京都-05.JPG");
+    let show = env.json(&["metadata", &id.to_string()]);
+    assert!(show.to_string().contains("山田 太郎"), "{show}");
+    // 同じカードをもう一度: 重複として何もコピーしない（人の読む形）。
+    let again = env.run(&common);
+    assert_eq!(again.code, 0, "{}", again.stderr);
+    assert!(again.stdout.contains("コピー先"), "{}", again.stdout);
+    assert!(again.stdout.contains("重複のため取り込まなかったファイル"));
+    // 使い方の誤り: --rename は --copy-to と一緒に、規則の名前、テンプレートの誤り（コアが断る）。
+    let no_copy = env.run(&["import", card_s, "--rename", "{seq}"]);
+    assert_eq!(no_copy.code, 2, "{}", no_copy.stderr);
+    let bad_rule = env.run(&["import", card_s, "--copy-to", dest_s, "--folders", "weekly"]);
+    assert_eq!(bad_rule.code, 2, "{}", bad_rule.stderr);
+    let bad_template = env.run(&["import", card_s, "--copy-to", dest_s, "--rename", "{oops}"]);
+    assert_ne!(bad_template.code, 0);
+    assert!(
+        bad_template.stderr.contains("oops"),
+        "{}",
+        bad_template.stderr
+    );
+    assert_eq!(hashes(&card), before);
+}
+
+/// `time`（LIB-16）と `timeline`（ORG-01）: 機材の一覧・基準の写真に合わせる（見込み・実行）・タイムゾーン・
+/// 履歴・元に戻す・タイムラインの表。元ファイルは変わらない。
+#[test]
+fn time_commands_correct_capture_times_and_timeline_groups_them() {
+    let env = Env::new();
+    write_jpeg(
+        &env.photos.join("A.jpg"),
+        (64, 48),
+        1,
+        Some("2024-05-01 10:00:00"),
+        false,
+    );
+    write_jpeg(
+        &env.photos.join("B.jpg"),
+        (64, 48),
+        2,
+        Some("2024-05-01 10:20:00"),
+        false,
+    );
+    write_jpeg(
+        &env.photos.join("C.jpg"),
+        (64, 48),
+        3,
+        Some("2024-05-02 09:00:00"),
+        false,
+    );
+    let before = hashes(&env.photos);
+    let photos = env.photos.to_string_lossy().into_owned();
+    env.json(&["catalog", "init"]);
+    env.json(&["import", &photos]);
+    let found = env.json(&["search"]);
+    let a = id_of(&found, "A.jpg").to_string();
+    let b = id_of(&found, "B.jpg").to_string();
+
+    let devices = env.json(&["time", "devices"]);
+    assert_eq!(devices["devices"][0]["camera"], "GenzoTest Synthetic");
+    assert_eq!(devices["devices"][0]["assets"], 3);
+    let human = env.run(&["time", "devices"]);
+    assert!(
+        human.stdout.contains("GenzoTest Synthetic"),
+        "{}",
+        human.stdout
+    );
+
+    // A の正しい時刻は 10:05:30（同じ機材の 3 枚を 5 分 30 秒ずらす）。見込みでは変えない。
+    let dry = env.json(&["time", "sync", &a, "2024-05-01 10:05:30", "--dry-run"]);
+    assert_eq!(dry["plan"]["shift_seconds"], 330);
+    assert_eq!(dry["plan"]["changed"], 3);
+    let show = env.json(&["show", &a]);
+    assert!(show.to_string().contains("10:00:00"), "{show}");
+    let r = env.run(&["time", "sync", &a, "2024-05-01 10:05:30"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("ずらす量: +5 分 30 秒"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("3 枚の撮影日時を変えました"),
+        "{}",
+        r.stdout
+    );
+
+    // B だけをパリの時刻で表示（撮影した瞬間はそのまま）。
+    let z = env.json(&["time", "zone", "+02:00", "--keep-instant", &b]);
+    assert_eq!(z["plan"]["changed"], 1);
+    assert_eq!(z["plan"]["examples"][0]["after"]["tz_assumed"], "+02:00");
+    // ずらす量の書き方の誤り・対象なし・タイムゾーンの書き方の誤り。
+    assert_eq!(env.run(&["time", "shift", "1x", &a]).code, 2);
+    assert_eq!(env.run(&["time", "shift", "+1h"]).code, 2);
+    assert_eq!(env.run(&["time", "zone", "JST", &a]).code, 2);
+    // 負の量も値として読む。
+    let back = env.json(&["time", "shift", "-30s", "--device-of", &a, "--dry-run"]);
+    assert_eq!(back["plan"]["shift_seconds"], -30);
+
+    let history = env.json(&["time", "history"]);
+    assert_eq!(history["edits"].as_array().unwrap().len(), 2);
+    assert_eq!(history["edits"][0]["kind"], "set_zone");
+    let undo = env.run(&["time", "undo"]);
+    assert!(undo.stdout.contains("取り消しました"), "{}", undo.stdout);
+
+    // タイムライン: 5/1 の 2 枚（間隔 20 分）と 5/2 の 1 枚。
+    let t = env.json(&["timeline", "--gap", "1h"]);
+    let groups = t["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{t}");
+    assert_eq!(groups[0]["day"], "2024-05-01");
+    assert_eq!(groups[0]["count"], 2);
+    assert_eq!(groups[0]["first"], "2024-05-01T10:05:30");
+    assert_eq!(groups[1]["day"], "2024-05-02");
+    let human = env.run(&["timeline", "--gap", "10m"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(human.stdout.contains("2024-05-01"), "{}", human.stdout);
+    assert!(
+        human.stdout.contains("3 件・2 日・3 のまとまり"),
+        "{}",
+        human.stdout
+    );
+    assert_eq!(env.run(&["timeline", "--gap", "2d"]).code, 2);
+    assert_eq!(hashes(&env.photos), before);
+}
+
+/// フォルダの一覧の中で、パスが `dir` のフォルダの ID。
+fn folder_id_of(env: &Env, dir: &Path) -> i64 {
+    let list = env.json(&["folder", "list"]);
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"].as_str() == dir.to_str())
+        .unwrap_or_else(|| panic!("{} がない: {list}", dir.display()))["folder_id"]
+        .as_i64()
+        .unwrap()
+}
+
+/// ファイルの内容のハッシュの多重集合（場所によらない。移動・名前の変更で内容が変わらないことの確認）。
+fn content_hashes(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = hashes(dir).into_values().collect();
+    v.sort();
+    v
+}
+
+/// ボリューム（FILE-03）・アプリの中でのファイル操作（FILE-02）・見つからない写真（FILE-04）:
+/// `volume list`・`folder list / create / rename / move / remove / relocate`・`file move / rename`・
+/// `missing check / relink / link`・`search --missing`。ファイルの内容は変えない（DATA-01）。
+#[test]
+fn files_folders_and_missing_photos_from_the_cli() {
+    let env = Env::new();
+    let a = env.photos.join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    write_jpeg(
+        &a.join("A.jpg"),
+        (64, 48),
+        1,
+        Some("2024-05-01 12:00:00"),
+        false,
+    );
+    std::fs::write(a.join("X.dng"), b"not really a dng").unwrap();
+    write_jpeg(&a.join("X.jpg"), (32, 24), 2, None, false);
+    let contents = content_hashes(&env.photos);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", a.to_str().unwrap()]);
+    let s = env.json(&["search"]);
+    let (id_a, id_x) = (id_of(&s, "A.jpg"), id_of(&s, "X.dng"));
+
+    let volumes = env.json(&["volume", "list", "--refresh"]);
+    assert!(!volumes.as_array().unwrap().is_empty(), "{volumes}");
+    assert!(volumes[0]["online"].as_bool().unwrap(), "{volumes}");
+
+    // フォルダを作り、写真を移す（予定 → 実行）。
+    let sub = a.join("選別済み");
+    let created = env.json(&["folder", "create", a.to_str().unwrap(), "選別済み"]);
+    assert_eq!(created["path"].as_str(), sub.to_str());
+    assert!(sub.is_dir());
+    let sub_id = folder_id_of(&env, &sub).to_string();
+    let plan = env.json(&[
+        "file",
+        "move",
+        &id_a.to_string(),
+        &id_x.to_string(),
+        "--to",
+        &sub_id,
+        "--dry-run",
+    ]);
+    assert_eq!(plan["movable"], 2, "{plan}");
+    assert!(a.join("A.jpg").is_file(), "予定では移さない");
+    let r = env.json(&[
+        "file",
+        "move",
+        &id_a.to_string(),
+        &id_x.to_string(),
+        "--to",
+        sub.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        (r["photos"].as_u64(), r["moved"].as_array().unwrap().len()),
+        (Some(2), 3),
+        "{r}"
+    );
+    for n in ["A.jpg", "X.dng", "X.jpg"] {
+        assert!(sub.join(n).is_file(), "{n}");
+        assert!(!a.join(n).exists(), "{n}");
+    }
+    // 同じフォルダへは移せない（飛ばして終了コード 3）。
+    let again = env.run(&["file", "move", &id_a.to_string(), "--to", &sub_id]);
+    assert_eq!(again.code, 3, "{}", again.stdout);
+    assert!(
+        again.stdout.contains("0 枚の写真を移しました"),
+        "{}",
+        again.stdout
+    );
+
+    // 名前の変更: 1 枚の名前（RAW と組の JPEG も）・テンプレート。
+    let plan = env.json(&[
+        "file",
+        "rename",
+        &id_x.to_string(),
+        "--name",
+        "京都",
+        "--dry-run",
+    ]);
+    assert_eq!(plan["renamable"], 1, "{plan}");
+    env.json(&["file", "rename", &id_x.to_string(), "--name", "京都"]);
+    assert!(sub.join("京都.dng").is_file() && sub.join("京都.jpg").is_file());
+    env.json(&[
+        "file",
+        "rename",
+        &id_a.to_string(),
+        "--template",
+        "{text}-{seq}",
+        "--text",
+        "旅",
+        "--seq-digits",
+        "2",
+    ]);
+    assert!(sub.join("旅-01.jpg").is_file());
+    assert_eq!(names(&env.json(&["search"])), ["京都.dng", "旅-01.jpg"]);
+    // --name と --template のどちらもなければ使い方の誤り。名前に使えない文字はエラー。
+    assert_eq!(env.run(&["file", "rename", &id_a.to_string()]).code, 2);
+    assert_eq!(
+        env.run(&["file", "rename", &id_a.to_string(), "--name", "a/b"])
+            .code,
+        1
+    );
+
+    // フォルダの名前の変更と移動（中の写真の場所も変わる）。
+    env.json(&["folder", "rename", &sub_id, "残す"]);
+    let kept = a.join("残す");
+    assert!(kept.join("旅-01.jpg").is_file());
+    env.json(&["folder", "create", env.photos.to_str().unwrap(), "b"]);
+    let b = env.photos.join("b");
+    env.json(&[
+        "folder",
+        "move",
+        kept.to_str().unwrap(),
+        b.to_str().unwrap(),
+    ]);
+    let moved = b.join("残す");
+    assert!(moved.join("旅-01.jpg").is_file());
+    assert_eq!(env.run(&["missing", "check"]).code, 0);
+
+    // 見つからない写真: カタログの外で移すと見つからない印が付き、探して結び付け直せる。
+    let elsewhere = env.path("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::rename(moved.join("旅-01.jpg"), elsewhere.join("旅-01.jpg")).unwrap();
+    let check = env.run(&["missing", "check", "--json"]);
+    assert_eq!(check.code, 3, "{}", check.stderr);
+    assert_eq!(check.json()["newly_missing"], 1);
+    assert_eq!(env.json(&["search", "--missing"])["count"], 1);
+    let dry = env.json(&[
+        "missing",
+        "relink",
+        "--in",
+        elsewhere.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(dry["chosen"].as_array().unwrap().len(), 1, "{dry}");
+    assert!(dry["report"].is_null());
+    let done = env.json(&["missing", "relink", "--in", elsewhere.to_str().unwrap()]);
+    assert_eq!(
+        done["report"]["linked"].as_array().unwrap().len(),
+        1,
+        "{done}"
+    );
+    assert_eq!(env.json(&["search", "--missing"])["count"], 0);
+
+    // 1 つのファイルを結び付け直す（ファイルの ID は relink --dry-run で見られる）。
+    std::fs::rename(elsewhere.join("旅-01.jpg"), env.path("旅-01.jpg")).unwrap();
+    assert_eq!(env.run(&["missing", "check"]).code, 3);
+    let dry = env.json(&[
+        "missing",
+        "relink",
+        "--in",
+        env.path("").to_str().unwrap(),
+        "--no-recursive",
+        "--dry-run",
+    ]);
+    let file_id = dry["search"]["targets"][0]["file_id"]
+        .as_i64()
+        .unwrap()
+        .to_string();
+    let linked = env.json(&[
+        "missing",
+        "link",
+        &file_id,
+        env.path("旅-01.jpg").to_str().unwrap(),
+    ]);
+    assert_eq!(linked["linked"].as_array().unwrap().len(), 1, "{linked}");
+
+    // フォルダの場所の指定し直し（OS の側で名前を変えたフォルダ。カタログの中だけを変える）。
+    let renamed = env.photos.join("b-moved");
+    std::fs::rename(&b, &renamed).unwrap();
+    assert_eq!(env.run(&["missing", "check"]).code, 3);
+    let plan = env.json(&[
+        "folder",
+        "relocate",
+        moved.to_str().unwrap(),
+        renamed.join("残す").to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(
+        (
+            plan["plan"]["files"].as_u64(),
+            plan["plan"]["found"].as_u64()
+        ),
+        (Some(2), Some(2)),
+        "{plan}"
+    );
+    env.json(&[
+        "folder",
+        "relocate",
+        moved.to_str().unwrap(),
+        renamed.join("残す").to_str().unwrap(),
+    ]);
+    let check = env.run(&["missing", "check", "--json"]);
+    assert_eq!(check.code, 0, "{}", check.stdout);
+    assert_eq!(check.json()["missing"], 0);
+    // 見つからないまま残った空のフォルダ（OS の側で名前を変えた b）は、カタログから除ける。写真の登録された
+    // フォルダは除かない（終了コード 1）。ディスクには触れない。
+    assert_eq!(check.json()["missing_folders"], 1, "{}", check.stdout);
+    let refused = env.run(&["folder", "remove", renamed.join("残す").to_str().unwrap()]);
+    assert_eq!(refused.code, 1, "{}", refused.stdout);
+    assert!(
+        refused.stderr.contains("写真のファイル"),
+        "{}",
+        refused.stderr
+    );
+    let removed = env.run(&["folder", "remove", b.to_str().unwrap()]);
+    assert_eq!(removed.code, 0, "{}", removed.stderr);
+    assert!(
+        removed.stdout.contains("カタログから除きました"),
+        "{}",
+        removed.stdout
+    );
+    assert!(renamed.join("残す").join("京都.dng").is_file());
+    let check = env.json(&["missing", "check"]);
+    assert_eq!(check["missing_folders"], 0, "{check}");
+    assert_eq!(env.run(&["folder", "remove", b.to_str().unwrap()]).code, 1);
+
+    // 人が読む出力。
+    let human = env.run(&["folder", "list"]);
+    assert!(human.stdout.contains("残す"), "{}", human.stdout);
+    let human = env.run(&["volume", "list"]);
+    assert!(human.stdout.contains("つながっている"), "{}", human.stdout);
+    // 内容は変わらない（場所と名前だけが変わる）。
+    let mut now = content_hashes(&env.photos);
+    now.extend(content_hashes(&elsewhere));
+    now.push(genzo_testkit::record::sha256_file_hex(env.path("旅-01.jpg")).unwrap());
+    now.sort();
+    assert_eq!(now, contents);
+}
+
+/// `video info / proxy / cache / clear`（VID-04）: 再生の情報と配信するファイル、再生用のファイルの作成（あれば
+/// 作らない）、写真は作れず終了コード 3、キャッシュの状況と消去。元の動画は変わらない。ffmpeg がなければ飛ばす。
+#[test]
+fn video_commands_report_playback_and_make_proxies() {
+    let env = Env::new();
+    if !make_video(&env.photos.join("V.mov")) {
+        return;
+    }
+    write_jpeg(&env.photos.join("P.jpg"), (64, 48), 1, None, false);
+    let before = hashes(&env.photos);
+    let photos = env.photos.to_string_lossy().into_owned();
+    env.json(&["catalog", "init"]);
+    env.json(&["import", &photos]);
+    let found = env.json(&["search"]);
+    let v = id_of(&found, "V.mov").to_string();
+    let p = id_of(&found, "P.jpg").to_string();
+
+    let info = env.json(&["video", "info", &v]);
+    assert_eq!(info["playback"]["available"], true, "{info}");
+    assert_eq!(info["playback"]["content_type"], "video/quicktime");
+    assert!(info["playback"]["proxy"].is_null());
+    assert!(
+        info["stream"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("V.mov")),
+        "{info}"
+    );
+    assert!(info["proxy_stream"].is_null());
+    if !info["playback"]["proxy_unavailable"].is_null() {
+        eprintln!("再生用のファイルを作れないため、ここまで: {info}");
+        return;
+    }
+    let human = env.run(&["video", "info", &v]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.contains("配信する元のファイル"),
+        "{}",
+        human.stdout
+    );
+
+    // 作る（2 回目は作らずに今のものを使う）。写真は作れない（終了コード 3）。
+    let made = env.json(&["video", "proxy", &v]);
+    assert_eq!(made["proxies"][0]["ok"], true, "{made}");
+    assert_eq!(made["proxies"][0]["report"]["reused"], false);
+    let again = env.json(&["video", "proxy", &v]);
+    assert_eq!(again["proxies"][0]["report"]["reused"], true, "{again}");
+    let mixed = env.run(&["video", "proxy", &v, &p, "--json"]);
+    assert_eq!(mixed.code, 3, "{}\n{}", mixed.stdout, mixed.stderr);
+    let mixed = mixed.json();
+    assert_eq!(mixed["proxies"][0]["ok"], true);
+    assert_eq!(mixed["proxies"][1]["ok"], false);
+
+    let info = env.json(&["video", "info", &v]);
+    assert!(
+        info["playback"]["proxy"]["size"].as_u64().unwrap() > 0,
+        "{info}"
+    );
+    assert!(
+        info["proxy_stream"]
+            .as_str()
+            .is_some_and(|s| s.ends_with(".mp4")),
+        "{info}"
+    );
+    let cache = env.json(&["video", "cache"]);
+    assert_eq!(cache["count"], 1, "{cache}");
+    let cleared = env.json(&["video", "clear"]);
+    assert_eq!(
+        (cleared["removed"].as_u64(), cleared["count"].as_u64()),
+        (Some(1), Some(0))
+    );
+    // 写真の再生の情報はエラー（不正な値）。
+    let r = env.run(&["video", "info", &p, "--json"]);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(r.json()["error"]["kind"], "invalid_input");
+    assert_eq!(hashes(&env.photos), before);
+}
+
+/// 合成のカメラプロファイル（DCP。光源 1 つ）。
+fn write_test_dcp(path: &Path, model: &str) {
+    let profile = genzo_color::DcpProfile {
+        name: Some(format!("{model} テスト")),
+        unique_camera_model: Some(model.to_owned()),
+        calibration_illuminants: [Some(21), None],
+        color_matrices: [
+            Some(genzo_color::Mat3::from_rows([
+                [0.7424, -0.2329, -0.0466],
+                [-0.4598, 1.2471, 0.2347],
+                [-0.0715, 0.1505, 0.6066],
+            ])),
+            None,
+        ],
+        tone_curve: Some(vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]]),
+        ..Default::default()
+    };
+    std::fs::write(path, profile.to_bytes()).unwrap();
+}
+
+/// 合成の 3D LUT（大きさ 2。赤を強め、青を弱める）。
+fn write_test_cube(path: &Path) {
+    let mut text = String::from("TITLE \"テストのルック\"\nLUT_3D_SIZE 2\n");
+    for b in [0.0f32, 1.0] {
+        for g in [0.0f32, 1.0] {
+            for r in [0.0f32, 1.0] {
+                text.push_str(&format!("{} {g} {}\n", (r * 1.5).min(1.0), b * 0.7));
+            }
+        }
+    }
+    std::fs::write(path, text).unwrap();
+}
+
+/// カメラプロファイル・ルック（DEV-17）: `profile inspect / import / list / show / remove`、`develop set --profile /
+/// --look / --look-amount`（取り込んでいない ID は警告）、`develop copy --groups profile`、`render --cube`・`--dcp`
+/// （種類の違うファイルは使い方の誤り）。取り込みで元のファイルは変えない。
+#[test]
+fn profile_import_list_develop_and_render_options() {
+    let env = Env::new();
+    for (i, name) in ["A.jpg", "B.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (90, 60), i as u8 + 1, None, false);
+    }
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+    );
+    let src = env.path("profiles-src");
+    std::fs::create_dir_all(&src).unwrap();
+    let dcp = src.join("テスト機 標準.dcp");
+    write_test_dcp(&dcp, "Test Camera X1");
+    let cube = src.join("film.cube");
+    write_test_cube(&cube);
+    let bad = src.join("壊れた.dcp");
+    std::fs::write(&bad, b"not a dcp").unwrap();
+    let before_src = hashes(&src);
+
+    // 取り込まずに確かめる（カタログは使わない）。
+    let r = genzo_with(
+        &[
+            "profile",
+            "inspect",
+            dcp.to_str().unwrap(),
+            "--camera",
+            "test camera x1",
+            "--json",
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["kind"], "camera");
+    assert_eq!(v["id"], "テスト機 標準");
+    assert_eq!(v["matches_camera"], true);
+    assert!(
+        v["notes"][0].as_str().unwrap().contains("トーンカーブ"),
+        "{v}"
+    );
+
+    // 取り込み（壊れたファイルがあれば終了コード 3）。
+    let r = env.run(&[
+        "profile",
+        "import",
+        dcp.to_str().unwrap(),
+        cube.to_str().unwrap(),
+        bad.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["imported"].as_array().unwrap().len(), 2);
+    assert_eq!(v["failed"].as_array().unwrap().len(), 1);
+    assert_eq!(hashes(&src), before_src, "元のファイルは変えない");
+    let list = env.json(&["profile", "list", "--camera", "Test Camera X1"]);
+    let profiles = list["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2, "{list}");
+    assert_eq!(profiles[0]["matches_camera"], true);
+    let looks = env.json(&["profile", "list", "--kind", "look"]);
+    assert_eq!(looks["profiles"].as_array().unwrap().len(), 1);
+    assert_eq!(looks["profiles"][0]["name"], "テストのルック");
+    let show = env.json(&["profile", "show", "look", "film"]);
+    assert_eq!(show["sha256"].as_str().unwrap().len(), 64);
+    let text = env.run(&["profile", "list"]);
+    assert_eq!(text.code, 0);
+    assert!(text.stdout.contains("film"), "{}", text.stdout);
+
+    // 現像設定に指定する（RAW 以外の写真でもルックは使われる）。
+    let plain = export_png(&env, &a, "out-plain");
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--look",
+        "film",
+        "--look-amount",
+        "80",
+    ]);
+    assert_eq!(set["settings"]["profile"]["look"], "film");
+    assert_eq!(set["settings"]["profile"]["look_amount"], 80.0);
+    assert_eq!(
+        set["settings"]["render_deps"]["look"]["sha256"], show["sha256"],
+        "使ったファイルの内容を記録する"
+    );
+    let history = env.json(&["develop", "history", &a]);
+    assert_eq!(
+        history.as_array().unwrap().last().unwrap()["label"],
+        "ルック「film」"
+    );
+    let looked = export_png(&env, &a, "out-look");
+    assert_eq!(looked.dimensions(), plain.dimensions());
+    let (w, h) = looked.dimensions();
+    let center = (w / 2 - 3, h / 2 - 3);
+    assert_ne!(
+        mean_luma(&plain, center, 6).to_bits(),
+        mean_luma(&looked, center, 6).to_bits()
+    );
+    // 取り込んでいない ID は警告する（保存はする）。
+    let r = env.run(&["develop", "set", &b, "--look", "ない"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stderr.contains("取り込まれていません"), "{}", r.stderr);
+    let r = env.run(&[
+        "develop",
+        "set",
+        &b,
+        "--look",
+        "none",
+        "--look-amount",
+        "101",
+    ]);
+    assert_eq!(r.code, 1, "範囲の外: {}", r.stderr);
+    // 項目を選んで写す。
+    env.json(&["develop", "copy", &a, "--to", &b, "--groups", "profile"]);
+    let got = env.json(&["develop", "get", &b]);
+    assert_eq!(got["profile"]["look"], "film");
+    assert_eq!(got["profile"]["look_amount"], 80.0);
+    assert_eq!(got["exposure_ev"], 0.0);
+    // 標準の色・ルックなしに戻す。
+    let set = env.json(&[
+        "develop",
+        "set",
+        &b,
+        "--profile",
+        "standard",
+        "--look",
+        "none",
+    ]);
+    assert!(set["settings"]["profile"]["look"].is_null());
+    assert!(set["settings"]["profile"]["camera"].is_null());
+
+    // 除く（2 回目は見つからない）。
+    env.json(&["profile", "remove", "look", "film"]);
+    let r = env.run(&["profile", "remove", "look", "film"]);
+    assert_eq!(r.code, 1);
+    assert_eq!(
+        env.json(&["profile", "list"])["profiles"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // カタログなしの render: ファイルのルックを使う。種類の違うファイルは使い方の誤り。
+    let jpg = env.photos.join("A.jpg");
+    let out = env.path("render-look.png");
+    let r = genzo_with(
+        &[
+            "render",
+            jpg.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--cube",
+            cube.to_str().unwrap(),
+            "--look-amount",
+            "50",
+            "--gpu",
+            "off",
+            "--json",
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["settings"]["profile"]["look"], "film");
+    assert_eq!(v["settings"]["profile"]["look_amount"], 50.0);
+    assert!(out.exists());
+    let r = genzo_with(
+        &[
+            "render",
+            jpg.to_str().unwrap(),
+            "--out",
+            env.path("render-dcp.png").to_str().unwrap(),
+            "--dcp",
+            dcp.to_str().unwrap(),
+            "--gpu",
+            "off",
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stderr.contains("RAW 以外"), "{}", r.stderr);
+    let r = genzo_with(
+        &[
+            "render",
+            jpg.to_str().unwrap(),
+            "--out",
+            env.path("render-bad.png").to_str().unwrap(),
+            "--dcp",
+            cube.to_str().unwrap(),
+        ],
+        &[],
+        None,
+    );
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(hashes(&src), before_src);
 }

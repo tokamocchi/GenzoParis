@@ -304,7 +304,7 @@ impl Stage for ToneCurveStage {
         ctx: &StageContext<'_>,
     ) -> Result<Option<StageParams>> {
         match ctx.process_version {
-            ProcessVersion::V1 => Ok(ToneCurveParams::from_curve(
+            ProcessVersion::V1 | ProcessVersion::V2 => Ok(ToneCurveParams::from_curve(
                 &settings.normalized().tone_curve,
             )?
             .map(StageParams::new)),
@@ -322,7 +322,9 @@ impl Stage for ToneCurveStage {
     ) -> Result<()> {
         let p = params.expect::<ToneCurveParams>(Self::ID)?;
         match ctx.process_version {
-            ProcessVersion::V1 => map_pixels(input, output, |_, _, c| p.apply(c)),
+            ProcessVersion::V1 | ProcessVersion::V2 => {
+                map_pixels(input, output, |_, _, c| p.apply(c))
+            }
         }
     }
 }

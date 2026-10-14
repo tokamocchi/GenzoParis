@@ -253,6 +253,8 @@ pub(crate) struct MetaSnapshot {
     pub datetime_original: Option<String>,
     pub subsec_time_original: Option<String>,
     pub offset_time_original: Option<String>,
+    /// 本体のシリアル番号（LibRaw の `shootinginfo.BodySerial`。LIB-16 の機材の区別）。
+    pub body_serial: Option<String>,
     pub gps: GpsSnapshot,
     pub flip: i32,
     pub width: u32,
@@ -696,6 +698,7 @@ pub(crate) fn photo_metadata(m: &MetaSnapshot) -> (PhotoMetadata, CaptureTimeSou
         orientation: orientation_from_flip(m.flip),
         gps: gps_from_snapshot(&m.gps),
         capture,
+        body_serial: genzo_model::normalize_serial(m.body_serial.as_deref()),
     };
     (meta, source)
 }
@@ -733,6 +736,7 @@ pub(crate) fn build_decoded(
         as_shot_wb,
         cam_xyz,
         metadata,
+        lens_correction: None,
     };
     image.validate()?;
     let dng_color_matrices = c
@@ -781,6 +785,7 @@ pub(crate) fn build_decoded(
         input_size: range.input_size,
         data_range_checked: decoder.data_range_checked,
         saturation_level,
+        lens_correction_note: None,
     };
     Ok(DecodedRaw { image, details })
 }
@@ -1282,9 +1287,11 @@ mod tests {
             flip: 6,
             width: 7028,
             height: 4688,
+            body_serial: Some(" 5012345 ".to_owned()),
             ..Default::default()
         };
         let (p, _) = photo_metadata(&m);
+        assert_eq!(p.body_serial.as_deref(), Some("5012345"));
         assert_eq!(p.make.as_deref(), Some("SONY"));
         assert_eq!(p.model.as_deref(), Some("ILCE-7M4"));
         assert_eq!(p.lens.as_deref(), Some("FE 24-70mm F2.8 GM II"));

@@ -142,6 +142,7 @@ typedef struct genzo_lr_meta {
   int32_t flip;
   uint32_t width;
   uint32_t height;
+  char body_serial[64]; /* imgdata.shootinginfo.BodySerial（Exif の BodySerialNumber など） */
 } genzo_lr_meta;
 
 /* 埋め込みサムネイル（imgdata.thumbnail。unpack_thumb の後）。 */

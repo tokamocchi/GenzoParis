@@ -1270,7 +1270,7 @@ fn render_deps_of_raw_photos_are_recorded() {
     match common::wait_ok(&core, job) {
         genzo_api::JobResult::Export(r) => match &r.items[0].outcome {
             genzo_api::ExportOutcome::Written { render_deps, .. } => {
-                assert_eq!(render_deps.as_ref(), Some(&deps));
+                assert_eq!(render_deps.as_deref(), Some(&deps));
             }
             other => panic!("{other:?}"),
         },
@@ -1687,6 +1687,7 @@ fn a_failed_settings_update_does_not_leave_part_of_it_in_the_catalog() {
         preview_cache_bytes: Some(before.preview_cache_bytes + 50_000_000),
         default_export_color_space: Some(OutputColorSpace::AdobeRgb),
         default_utc_offset_minutes: Some(before.default_utc_offset_minutes + 60),
+        ..Default::default()
     };
     assert_ne!(
         update.default_export_color_space,
@@ -2458,6 +2459,7 @@ fn a_file_name_not_in_utf8_does_not_break_the_json_of_the_results() {
         .execute(Command::ImportFolder {
             path: env.photos.clone(),
             recursive: true,
+            options: Default::default(),
         })
         .unwrap()
     {

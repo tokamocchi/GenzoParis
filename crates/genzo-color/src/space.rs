@@ -127,6 +127,14 @@ pub const ADOBE_RGB_PRIMARIES: RgbPrimaries = RgbPrimaries {
     blue: Xy::new(0.1500, 0.0600),
 };
 
+/// ROMM RGB（ProPhoto RGB）の原色（ISO 22028-2。白色点は D50）。カメラプロファイル（DCP）の色相・彩度のマップと
+/// ルックテーブルを当てる色空間（DNG の仕様の「リニアの ProPhoto RGB」。[`crate::dcp`]）。
+pub const PROPHOTO_PRIMARIES: RgbPrimaries = RgbPrimaries {
+    red: Xy::new(0.7347, 0.2653),
+    green: Xy::new(0.1596, 0.8404),
+    blue: Xy::new(0.0366, 0.0001),
+};
+
 /// y で割る（Y = 1 の XYZ）。const fn 用。y の検査は呼び出し側で行う。
 const fn xy_to_xyz_const(xy: Xy, big_y: f64) -> [f64; 3] {
     [
@@ -205,6 +213,12 @@ pub const XYZ_TO_DISPLAY_P3: Mat3 = expect_const(DISPLAY_P3_TO_XYZ.checked_inver
 pub const ADOBE_RGB_TO_XYZ: Mat3 = expect_const(rgb_to_xyz_matrix_const(ADOBE_RGB_PRIMARIES, D65));
 /// XYZ → リニア Adobe RGB (1998)（D65）。
 pub const XYZ_TO_ADOBE_RGB: Mat3 = expect_const(ADOBE_RGB_TO_XYZ.checked_inverse());
+
+/// リニア ProPhoto RGB（D50）→ XYZ（D50）。
+pub const PROPHOTO_TO_XYZ_D50: Mat3 =
+    expect_const(rgb_to_xyz_matrix_const(PROPHOTO_PRIMARIES, D50));
+/// XYZ（D50）→ リニア ProPhoto RGB（D50）。
+pub const XYZ_D50_TO_PROPHOTO: Mat3 = expect_const(PROPHOTO_TO_XYZ_D50.checked_inverse());
 
 /// RGB の色空間（原色・白色点・伝達関数の組）。
 ///

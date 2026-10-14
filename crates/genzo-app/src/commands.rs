@@ -8,11 +8,14 @@
 //! 決定事項ログ No.36）。失敗は genzo-api の `ErrorInfo`（JSON）で返す。
 //!
 //! Tauri の状態（`State`）を使わない処理の本体（[`execute_command`]・[`develop_frame_bytes`]・
-//! [`region_frame_bytes`]）は別の関数にして、結合テスト（`tests/app`）から [`AppState`] で直接呼ぶ。
+//! [`region_frame_bytes`]・[`before_frame_bytes`]・[`before_region_frame_bytes`]・
+//! [`view_region_frame_bytes`]・[`mask_overlay_frame_bytes`]）は別の関数にして、結合テスト（`tests/app`）から
+//! [`AppState`] で直接呼ぶ。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use genzo_api::logging::{ClearReport, CrashReportSummary, LogFolderInfo, LogStatus};
 use genzo_api::{
     BackupEntry, Command, DisplayInfo, ErrorInfo, ErrorKind, GpuMode, Response, VariantId,
 };
@@ -64,6 +67,11 @@ pub struct AppStatus {
     pub catalog: Option<CatalogStatus>,
     /// 今の設定で見つかる ffmpeg・ffprobe。
     pub tools: ExternalTools,
+    /// ログ（ログのフォルダ・今のファイル・初期化の問題。SYS-07）。
+    pub logs: LogStatus,
+    /// 前回までに保存したアプリのクラッシュレポートのうち、まだ知らせていないもの（新しい順。起動して最初の
+    /// 1 回だけ。画面は知らせのダイアログを出す。送信はしない）。
+    pub crash_reports: Vec<CrashReportSummary>,
 }
 
 fn default_catalog(app: &AppHandle) -> Option<PathBuf> {
@@ -135,6 +143,8 @@ pub async fn app_status(app: AppHandle, state: Shared<'_>) -> Result<AppStatus, 
                 "linux"
             },
             notice: state.take_settings_notice(),
+            logs: state.logs().status().clone(),
+            crash_reports: state.logs().take_crash_reports(),
             catalog: state.status()?,
             settings,
             default_catalog,
@@ -261,6 +271,80 @@ pub fn region_frame_bytes(state: &AppState) -> Result<Vec<u8>, ErrorInfo> {
     }
 }
 
+/// ビフォー / アフターの表示（DEV-31）のビフォーの最新のプレビューを [`frames`] の形のバイト列にする
+/// （[`before_frame`] の本体。ビフォーを設定していない・まだなければ空）。ヘッダーは `FrameInfo`。
+pub fn before_frame_bytes(state: &AppState) -> Result<Vec<u8>, ErrorInfo> {
+    let core = state.core()?;
+    match core.before_frame() {
+        Some(f) => frames::encode(&f.info, f.info.width, f.info.height, &f.display_rgb8)
+            .ok_or_else(|| {
+                error(
+                    ErrorKind::Internal,
+                    "ビフォーの画素の長さが合いません",
+                    None,
+                )
+            }),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// ビフォーの表示範囲の描画の最新の結果を [`frames`] の形のバイト列にする（[`before_region_frame`] の本体。
+/// まだなければ空）。ヘッダーは `RegionInfo`（`before` が真）。
+pub fn before_region_frame_bytes(state: &AppState) -> Result<Vec<u8>, ErrorInfo> {
+    let core = state.core()?;
+    match core.before_region_frame() {
+        Some(f) => frames::encode(&f.info, f.info.width, f.info.height, &f.display_rgb8)
+            .ok_or_else(|| {
+                error(
+                    ErrorKind::Internal,
+                    "ビフォーの表示範囲の画素の長さが合いません",
+                    None,
+                )
+            }),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// 比較表示（LIB-03）の面 `pane` の表示範囲の描画の最新の結果を [`frames`] の形のバイト列にする
+/// （[`view_region_frame`] の本体。まだない・面が範囲の外なら空）。ヘッダーは `RegionInfo`（`pane` が入る）。
+pub fn view_region_frame_bytes(state: &AppState, pane: u32) -> Result<Vec<u8>, ErrorInfo> {
+    let core = state.core()?;
+    match core.view_region_frame(pane) {
+        Some(f) => frames::encode(&f.info, f.info.width, f.info.height, &f.display_rgb8)
+            .ok_or_else(|| {
+                error(
+                    ErrorKind::Internal,
+                    "比較表示の表示範囲の画素の長さが合いません",
+                    None,
+                )
+            }),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// 現像中の写真のマスク `index` の重み（DEV-18・DEV-19 のマスクの重ねて表示）を [`frames`] の形のバイト列に
+/// する（[`mask_overlay_frame`] の本体）。ヘッダーは `MaskOverlayInfo`、画素は重み（0〜255）を R・G・B に
+/// 同じ値で入れる（プレビューと同じ格子。`uncropped` は `pick_white_balance` と同じ）。
+pub fn mask_overlay_frame_bytes(
+    state: &AppState,
+    variant_id: VariantId,
+    index: usize,
+    uncropped: Option<bool>,
+) -> Result<Vec<u8>, ErrorInfo> {
+    let core = state.core()?;
+    let o = core
+        .mask_overlay(variant_id, index, uncropped)
+        .map_err(|e| e.info())?;
+    let rgb: Vec<u8> = o.weights.iter().flat_map(|&w| [w, w, w]).collect();
+    frames::encode(&o.info, o.info.width, o.info.height, &rgb).ok_or_else(|| {
+        error(
+            ErrorKind::Internal,
+            "マスクの重ねて表示の画素の長さが合いません",
+            None,
+        )
+    })
+}
+
 /// 現像中の写真の最新のプレビュー（[`frames`] の形のバイト列。まだなければ空）。
 #[tauri::command]
 pub async fn develop_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, ErrorInfo> {
@@ -273,6 +357,46 @@ pub async fn develop_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, Er
 pub async fn region_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, ErrorInfo> {
     let state = Arc::clone(&state);
     blocking(move || region_frame_bytes(&state).map(tauri::ipc::Response::new)).await
+}
+
+/// ビフォーの最新のプレビュー（[`frames`] の形のバイト列。まだなければ空。DEV-31）。
+#[tauri::command]
+pub async fn before_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || before_frame_bytes(&state).map(tauri::ipc::Response::new)).await
+}
+
+/// ビフォーの表示範囲の描画の最新の結果（[`frames`] の形のバイト列。まだなければ空。DEV-31）。
+#[tauri::command]
+pub async fn before_region_frame(state: Shared<'_>) -> Result<tauri::ipc::Response, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || before_region_frame_bytes(&state).map(tauri::ipc::Response::new)).await
+}
+
+/// 比較表示（LIB-03）の面 `pane` の表示範囲の描画の最新の結果（[`frames`] の形のバイト列。まだなければ空）。
+#[tauri::command]
+pub async fn view_region_frame(
+    state: Shared<'_>,
+    pane: u32,
+) -> Result<tauri::ipc::Response, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || view_region_frame_bytes(&state, pane).map(tauri::ipc::Response::new)).await
+}
+
+/// 現像中の写真のマスク `index` の重み（[`frames`] の形のバイト列。DEV-18・DEV-19）。
+#[tauri::command]
+pub async fn mask_overlay_frame(
+    state: Shared<'_>,
+    variant_id: VariantId,
+    index: usize,
+    uncropped: Option<bool>,
+) -> Result<tauri::ipc::Response, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        mask_overlay_frame_bytes(&state, variant_id, index, uncropped)
+            .map(tauri::ipc::Response::new)
+    })
+    .await
 }
 
 /// 画面の色空間（canvas が Display P3 を使えるか）。
@@ -329,6 +453,21 @@ pub async fn update_app_settings(
             s.ffmpeg_dir = update.ffmpeg_dir.filter(|p| !p.as_os_str().is_empty());
             s.gpu = update.gpu;
             s.backup_on_close = update.backup_on_close;
+        })
+    })
+    .await
+}
+
+/// 取り込みのダイアログの設定を保存する（取り込みを始めたとき。次に開いたときの初めの値にする）。
+#[tauri::command]
+pub async fn save_import_preferences(
+    state: Shared<'_>,
+    preferences: crate::settings::ImportPreferences,
+) -> Result<AppSettings, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        state.update_settings(|s| {
+            s.import = preferences;
         })
     })
     .await
@@ -422,7 +561,8 @@ fn openable_media(path: &Path) -> bool {
         && !path.is_dir()
 }
 
-/// 元ファイルを OS の既定のアプリで開く（動画の再生など。VID-04 は v1 のため OS のアプリを使う）。
+/// 元ファイルを OS の既定のアプリで開く（アプリの中で再生できない動画を OS のプレイヤーで見るなど。アプリの中の再生
+/// （VID-04）は `genzo://video` と画面の `video` 要素。protocol.rs）。
 /// 取り込む対象の拡張子の写真・動画だけを開く（`openable_media`）。
 #[tauri::command]
 pub async fn open_variant_file(
@@ -454,6 +594,46 @@ pub async fn open_variant_file(
             })
     })
     .await
+}
+
+/// ログのフォルダの中身（ログのファイル・クラッシュレポート・合計の大きさ。SYS-07）。
+#[tauri::command]
+pub async fn log_folder_info(state: Shared<'_>) -> Result<LogFolderInfo, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || state.logs().folder_info()).await
+}
+
+/// ログのフォルダを OS のファイル管理（エクスプローラー・Finder）で開く（なければ作ってから）。
+#[tauri::command]
+pub async fn open_log_folder(app: AppHandle, state: Shared<'_>) -> Result<(), ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let dir = state.logs().ensure_dir()?;
+        app.opener()
+            .open_path(dir.to_string_lossy(), None::<&str>)
+            .map_err(|e| {
+                error(
+                    ErrorKind::FileAccess,
+                    format!("ログのフォルダ {} を開けません: {e}", dir.display()),
+                    None,
+                )
+            })
+    })
+    .await
+}
+
+/// ログとクラッシュレポートを消す（書いている途中のログは空にする）。
+#[tauri::command]
+pub async fn clear_logs(state: Shared<'_>) -> Result<ClearReport, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || state.logs().clear()).await
+}
+
+/// 画面のエラー（JavaScript の例外・処理されなかった Promise の失敗）をアプリのログに残す（1 回の起動で
+/// 件数の上限まで。[`crate::logs::AppLogs::record_ui_error`]）。
+#[tauri::command]
+pub fn report_ui_error(state: Shared<'_>, message: String, detail: Option<String>) {
+    state.logs().record_ui_error(&message, detail.as_deref());
 }
 
 /// 画面が終了の要求（lib.rs の `QUIT_REQUESTED_EVENT`。値は要求の番号）を受け取ったと答える。答えがあれば、

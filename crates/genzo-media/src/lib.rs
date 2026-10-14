@@ -10,15 +10,21 @@
 //! | [`export`] | 書き出し（JPEG / TIFF 16bit / PNG 8・16bit、ICC と Exif の埋め込み、GPS の削除） | EXP-01・EXP-04、IQ-06、SEC-03、2.4 節 |
 //! | [`jpeg`]・[`png_io`]・[`tiff_io`] | 各形式のエンコードとメタデータの埋め込み | EXP-01、IQ-06 |
 //! | [`exif_write`]・[`exif_read`] | Exif の書き出し（最小限の TIFF の構造を自前で書く）と読み取り（kamadak-exif） | EXP-04、LIB-14 |
+//! | [`xmp_write`] | 書き出すファイルの XMP（カタログで編集した説明のメタデータ。UTF-8） | LIB-15、EXP-04 |
 //! | [`video`] | ffprobe / ffmpeg（子プロセス）による動画のメタデータとサムネイル | VID-02・VID-03、IQ-09、PoC-7 |
-//! | [`process`] | 子プロセスのタイムアウト付きの実行 | 1.2 節、6.3 節 |
+//! | [`video_proxy`] | 動画の再生用のファイル（WebView で再生できない動画を、利用者の ffmpeg で H.264 ＋ AAC の MP4 に変換する。進捗・取り消し・出力の確認） | VID-04、4.2 節 |
+//! | [`process`] | 子プロセスのタイムアウト付きの実行と、進捗を読みながらの取り消しできる実行 | 1.2 節、6.3 節 |
 //! | [`safe_write`] | 原本を上書きせず、不完全なファイルを残さない書き出し | 6.4 節（レビュー R-06） |
+//! | [`watermark`] | 透かし（画像・文字の透かしを作る（ワーカーで使う）・大きさと位置・合成） | EXP-03、2.4 節 |
 //!
 //! - 元のファイルは読み取り専用で開く（DATA-01）。書き出しは一時ファイルを経由し、原本と同じ
 //!   ファイルへの書き出しを拒否する（6.4 節）。
 //! - 信頼できない入力のデコード（画像のデコード・ffmpeg の実行）はワーカープロセスで行う
 //!   （04 の 1.1 節・1.2 節、SEC-05）。この crate の関数は、壊れた入力に対してパニックせず
 //!   エラーを返すことと、画素数・確保量・出力の大きさ・時間に上限を設けることを担う。
+//!   例外は動画の再生用のファイルの変換（[`video_proxy`]）で、長くかかる（ワーカーの 1 つを数分ふさがない
+//!   ため）ので、本体が ffmpeg を直接の子プロセスとして動かす。デコードは ffmpeg のプロセスの中で行われ、
+//!   本体のプロセスは進捗の行と ffprobe の JSON しか読まない（決定事項ログ No.117）。
 //!
 //! # 例
 //!
@@ -45,8 +51,15 @@
 //! assert_eq!((thumb.width, thumb.height), (64, 32));
 //! # Ok::<(), genzo_media::MediaError>(())
 //! ```
+//!
+//! # unsafe
+//!
+//! この crate は `unsafe` を使わない（`#![deny(unsafe_code)]`）。例外は Windows の上書きしない名前の変更
+//! （[`rename`] の Windows 用の `rename_no_replace`。`MoveFileExW` の呼び出し 1 か所）だけで、その関数にだけ
+//! `#[allow(unsafe_code)]` を付けて SAFETY のコメントを書く。デコード・エンコードなど信頼できない入力を扱う
+//! コードには使わない（決定事項ログ No.172）。
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod buffer;
 pub mod cache;
@@ -61,10 +74,19 @@ pub mod orientation;
 pub mod png_io;
 pub mod process;
 mod profiles;
+pub mod rename;
 pub mod resize;
 pub mod safe_write;
 pub mod tiff_io;
 pub mod video;
+pub mod video_proxy;
+pub mod watermark;
+pub mod xmp_write;
+
+// 他の crate の結合テスト（機能フラグ `test-support`）と、この crate のテストが使う（テストのフォント）。
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod testing;
 
 pub use buffer::{DynRgbImage, MAX_IMAGE_PIXELS, RgbImage, RgbImage8, RgbImage16, Sample};
 pub use cache::{
@@ -72,8 +94,9 @@ pub use cache::{
     cache_jpeg_from_encoded, render_cache_jpeg, render_cache_rgb,
 };
 pub use decode::{
-    DecodedImage, ImageFileFormat, ImageInfo, SourceProfile, SrgbAssumption, decode_image_bytes,
-    decode_image_file, open_read_only, probe_image_bytes, probe_image_file,
+    DecodedImage, DecodedRgba, ImageFileFormat, ImageInfo, SourceProfile, SrgbAssumption,
+    decode_image_bytes, decode_image_file, decode_image_rgba_bytes, open_read_only,
+    probe_image_bytes, probe_image_file,
 };
 pub use error::{MediaError, Result};
 pub use exif_read::AdobeRgbBasis;
@@ -82,7 +105,13 @@ pub use export::{
     EXPORT_ICC_VERSION, encode_export, export_icc_profile, export_image, standard_profile_for,
 };
 pub use orientation::{apply_orientation, apply_orientation_dyn};
+pub use rename::{RENAME_TEMP_PREFIX, case_rename_temp_path, rename_case_safe, rename_no_replace};
 pub use safe_write::{
     Destination, ProtectedFiles, WriteOutcome, resolve_destination, write_atomically,
 };
 pub use video::{FfmpegTools, VideoColorHandling, VideoProbe, VideoThumbnail, parse_ffprobe_json};
+pub use video_proxy::{
+    PROXY_FORMAT_VERSION, PROXY_LONG_EDGE, ProxyEncoder, default_proxy_threads, pick_proxy_encoder,
+    verify_proxy,
+};
+pub use xmp_write::xmp_packet;

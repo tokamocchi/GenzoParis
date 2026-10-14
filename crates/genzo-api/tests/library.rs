@@ -387,7 +387,7 @@ fn filters_generations_and_marks() {
     let ev = drain(&events);
     assert!(ev.iter().any(|e| matches!(
         e,
-        Event::SearchUpdated { generation, count: 4 } if *generation == cur.generation
+        Event::SearchUpdated { generation, count: 4, .. } if *generation == cur.generation
     )));
     // 古い世代は Stale。選択中の variant は id で位置を求め直せる。
     assert!(matches!(
@@ -416,6 +416,15 @@ fn filters_generations_and_marks() {
 /// ファイルの状態の確認（3.3 節）: なくなったファイルは missing、戻れば ok。
 #[test]
 fn missing_files_are_detected_and_restored() {
+    // 失敗したときに、確かめられなかったファイルの理由（warn のログ）がテストの出力に出るようにする。
+    // check_files はこのスレッドで動くので、このスレッドだけの記録先にする（全体の記録先は、ほかのテストや
+    // ログの初期化が先に決めていることがある）。
+    let _log = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::DEBUG)
+            .finish(),
+    );
     let env = Env::new();
     let a = env.photos.join("A.jpg");
     write_jpeg(&a, (32, 24), 1, None);

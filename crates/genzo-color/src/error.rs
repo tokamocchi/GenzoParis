@@ -123,6 +123,23 @@ pub enum ColorError {
         /// 理由。
         reason: &'static str,
     },
+
+    /// カメラプロファイル（DCP）として読めない・使えない（[`crate::dcp`]）。
+    #[error("カメラプロファイル（DCP）を読めません: {reason}")]
+    DcpInvalid {
+        /// 理由。
+        reason: String,
+    },
+
+    /// 3D LUT のファイル（.cube）として読めない・使えない（[`crate::cube`]）。`line` は 1 から数えた行の番号
+    /// （行によらない誤りは `None`）。
+    #[error("3D LUT（.cube）を読めません{}: {reason}", line.map(|l| format!("（{l} 行目）")).unwrap_or_default())]
+    CubeInvalid {
+        /// 行の番号（1 から）。
+        line: Option<usize>,
+        /// 理由。
+        reason: String,
+    },
 }
 
 /// genzo-color の `Result`。

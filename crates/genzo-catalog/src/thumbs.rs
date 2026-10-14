@@ -102,6 +102,11 @@ impl ThumbStore {
         self.conn.close().map_err(|(_, e)| CatalogError::Sqlite(e))
     }
 
+    /// サムネイル DB の構造（表・列・索引。docs/catalog_schema.md の確認用）。読むだけ。
+    pub fn describe_schema(&self) -> Result<crate::SchemaDescription> {
+        schema::describe_schema(&self.conn)
+    }
+
     /// 接続の設定を読む（テスト・診断用）。
     pub fn connection_settings(&self) -> Result<crate::ConnectionSettings> {
         crate::catalog::connection_settings(&self.conn)

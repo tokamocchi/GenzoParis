@@ -5,7 +5,8 @@
 //! | S：センサー座標 | CFA の画素の座標（フル解像度。RAW の有効画素の全体）。**センサー処理（ステージ 2〜8、段階 A1）の出力はこの向き**。デモザイクは有効画素の全体で行う |
 //! | 既定の切り抜き | S の中の矩形（[`CoordinateFrames::default_crop`]。RAW の DefaultCrop。genzo-raw の `RawImage::default_crop`）。カメラの JPEG と同じ範囲で、O・G の基準の枠（「画像全体」）になる。ない場合は S の全体 |
 //! | O：向きを反映した座標 | S の既定の切り抜きの範囲に RAW の向き（[`Orientation`]）を反映した画素の座標（左上は既定の切り抜きの左上の画素）。画素の並べ替えと平行移動だけ（補間なし） |
-//! | G：ジオメトリ補正後の全体 | O にレンズの歪曲補正と回転（ステージ 9）を適用した、切り抜く前の画像全体。G の外接矩形の長辺を 1 とした値 |
+//! | D：歪曲補正後の枠（この crate の名前） | O にレンズの歪曲補正（v1。[`crate::lens::RadialDistortion`]）を適用した、回転の前の画像。枠は O と同じ大きさで、O の内側から取れる最大の範囲に自動で拡大・縮小する。歪曲補正がなければ O そのもの |
+//! | G：ジオメトリ補正後の全体 | D（O にレンズの歪曲補正）に回転（ステージ 9）を適用した、切り抜く前の画像全体。G の外接矩形の長辺を 1 とした値 |
 //! | C：出力座標 | 切り抜いた後の画像。C → G（切り抜き）→ O → S の順にたどる |
 //!
 //! # 既定の切り抜き（実機の ARW の不具合 A-2）
@@ -34,8 +35,14 @@
 //!   外接矩形の寸法は `(ow·|cos θ| + oh·|sin θ|, ow·|sin θ| + oh·|cos θ|)`
 //!   （[`CoordinateFrames::g_size_px`]）。外接矩形の中心は O の中心に対応する。
 //!   回転が 0 なら G は O そのもの（計算も丸めなしで一致させる）。
-//! - **歪曲補正**（v1）: G → O の変換に加える。そのときはアフィン変換でなくなるので、ステージ 9 は
-//!   画素ごとに式を評価する形に変える（[`crate::finish::geometry`]）。
+//! - **歪曲補正**（v1。処理バージョン 2。DEV-14）: G → D（回転）の後の D → O（半径方向の写像。
+//!   [`CoordinateFrames::distortion`]）。そのときは G → S がアフィン変換でなくなるので、ステージ 9 は
+//!   画素ごとに「G の格子 → D（アフィン）→ 半径方向の倍率（表）→ 入力の格子（アフィン）」を評価する
+//!   （[`crate::finish::geometry`]）。D は O と同じ大きさの枠で、画像のない部分を持たない（[`crate::lens`] の
+//!   「歪曲の後の枠」）。そのため、回転の外接矩形・切り抜きの制限・切り抜く前の全体の表示の「画像の外」は
+//!   D の枠で判定する（[`CoordinateFrames::g_to_undistorted`]）。プロファイルの歪曲（写真ごとに決まる）は
+//!   [`CoordinateFrames::lens_geometry`] に入れて段階 A1 から段階 B・C へ渡し、適用量・手動の補正と合わせた
+//!   写像は段階 B・C の文脈で作る（[`crate::finish::finish_context`]・[`crate::guide::compute_guide`]）。
 //! - **切り抜き**: genzo-model の `CropRect`（G の外接矩形の各軸の割合）。C の格子との対応は
 //!   [`crate::finish::geometry::GeometryPlan`] が決める。
 //! - **回転は段階 B の項目**: 回転を変えると G が変わるのでガイドを作り直す（2.7 節の表）。
@@ -58,6 +65,7 @@ use genzo_raw::PixelRect;
 
 use crate::error::{PipelineError, Result};
 use crate::image::Roi;
+use crate::lens::{ProfileDistortion, RadialDistortion};
 
 /// S（向きを反映する前）と O（向きを反映した後）の対応（連続座標のアフィン変換）。
 ///
@@ -106,8 +114,8 @@ impl OrientationMap {
 /// [`crate::stage::StageContext`] が持つ。
 ///
 /// 既定の切り抜きは [`with_default_crop`](Self::with_default_crop)、回転は
-/// [`with_rotation`](Self::with_rotation) で加える（既定は S の全体と 0。モジュールの doc の
-/// 「G の定義」「既定の切り抜き」）。歪曲補正（v1）はまだ持たない。
+/// [`with_rotation`](Self::with_rotation)、歪曲補正は [`with_distortion`](Self::with_distortion) で加える
+/// （既定は S の全体と 0 となし。モジュールの doc の「G の定義」「既定の切り抜き」）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CoordinateFrames {
     /// S の幅（センサーのフル解像度。RAW 以外の入力では元の画像の幅）。
@@ -121,8 +129,14 @@ pub struct CoordinateFrames {
     /// RAW の向き（S → O）。
     pub orientation: Orientation,
     /// 角度補正（度。genzo-model の `Geometry::angle_deg`）。正の値で画面上の反時計回り。
-    /// G は O をその中心のまわりにこの角度だけ回転したもの。センサー処理（段階 A1）の文脈では 0。
+    /// G は D（歪曲補正の後。なければ O）をその中心のまわりにこの角度だけ回転したもの。センサー処理
+    /// （段階 A1）の文脈では 0。
     pub rotation_deg: f64,
+    /// RAW に埋め込まれたプロファイルの歪曲（写真ごとに決まる。適用量・手動の補正は含まない）。
+    /// 段階 A1 から段階 B・C へ渡し、[`distortion`](Self::distortion) を作るのに使う。なければ `None`。
+    pub lens_geometry: Option<ProfileDistortion>,
+    /// ステージ 9 の歪曲補正（D → O。段階 B・C の文脈で設定から作る。版 1・補正なしは `None`）。
+    pub distortion: Option<RadialDistortion>,
 }
 
 impl CoordinateFrames {
@@ -140,7 +154,21 @@ impl CoordinateFrames {
             default_crop: PixelRect::full(sensor_width, sensor_height),
             orientation,
             rotation_deg: 0.0,
+            lens_geometry: None,
+            distortion: None,
         })
+    }
+
+    /// プロファイルの歪曲（[`lens_geometry`](Self::lens_geometry)）を設定したもの。
+    pub fn with_lens_geometry(mut self, lens_geometry: Option<ProfileDistortion>) -> Self {
+        self.lens_geometry = lens_geometry;
+        self
+    }
+
+    /// 歪曲補正（[`distortion`](Self::distortion)）を設定したもの。
+    pub fn with_distortion(mut self, distortion: Option<RadialDistortion>) -> Self {
+        self.distortion = distortion;
+        self
     }
 
     /// 既定の切り抜き（S の画素の範囲）を設定したもの。`None` は S の全体。S からはみ出す・幅か
@@ -255,8 +283,28 @@ impl CoordinateFrames {
         (ow * c + oh * s, ow * s + oh * c)
     }
 
-    /// 連続座標で O → G（O の中心のまわりに回転し、外接矩形の左上を原点にする）。
+    /// 連続座標で O → G（歪曲補正の逆で D にし、D の中心のまわりに回転して、外接矩形の左上を原点に
+    /// する）。歪曲補正がなければ D = O。
     pub fn oriented_to_g(&self, u: f64, v: f64) -> (f64, f64) {
+        let (u, v) = match &self.distortion {
+            Some(d) => d.oriented_to_undistorted(u, v),
+            None => (u, v),
+        };
+        self.undistorted_to_g(u, v)
+    }
+
+    /// 連続座標で G → O（[`oriented_to_g`](Self::oriented_to_g) の逆）。
+    pub fn g_to_oriented(&self, gx: f64, gy: f64) -> (f64, f64) {
+        let (u, v) = self.g_to_undistorted(gx, gy);
+        match &self.distortion {
+            Some(d) => d.undistorted_to_oriented(u, v),
+            None => (u, v),
+        }
+    }
+
+    /// 連続座標で D → G（D の中心のまわりに回転し、外接矩形の左上を原点にする）。D は O と同じ大きさの
+    /// 枠（歪曲補正がなければ O）。
+    pub fn undistorted_to_g(&self, u: f64, v: f64) -> (f64, f64) {
         if self.rotation_deg == 0.0 {
             return (u, v);
         }
@@ -267,8 +315,9 @@ impl CoordinateFrames {
         (c * dx + s * dy + gw * 0.5, -s * dx + c * dy + gh * 0.5)
     }
 
-    /// 連続座標で G → O（[`oriented_to_g`](Self::oriented_to_g) の逆）。
-    pub fn g_to_oriented(&self, gx: f64, gy: f64) -> (f64, f64) {
+    /// 連続座標で G → D（[`undistorted_to_g`](Self::undistorted_to_g) の逆。回転だけ）。D の枠
+    /// `[0, ow] × [0, oh]`（O の寸法）の内側が画像のある部分。
+    pub fn g_to_undistorted(&self, gx: f64, gy: f64) -> (f64, f64) {
         if self.rotation_deg == 0.0 {
             return (gx, gy);
         }
@@ -294,8 +343,36 @@ impl CoordinateFrames {
         self.oriented_to_g(u, v)
     }
 
+    /// G → D の変換（回転だけ）をアフィン変換 `[u, v] = m · [gx, gy] + t` として返す（行ごとに
+    /// `[[m00, m01, t0], [m10, m11, t1]]`）。回転が 0 なら厳密に恒等。
+    pub fn g_to_undistorted_affine(&self) -> [[f64; 3]; 2] {
+        if self.rotation_deg == 0.0 {
+            return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        }
+        let (c, s) = self.rotation_cos_sin();
+        let (ow, oh) = self.oriented_size();
+        let (gw, gh) = self.g_size_px();
+        let (gcx, gcy) = (gw * 0.5, gh * 0.5);
+        let (ocx, ocy) = (f64::from(ow) * 0.5, f64::from(oh) * 0.5);
+        [
+            [c, -s, ocx - (c * gcx - s * gcy)],
+            [s, c, ocy - (s * gcx + c * gcy)],
+        ]
+    }
+
+    /// O → S の変換をアフィン変換として返す（向きと既定の切り抜きの位置。要素は −1・0・1 と整数）。
+    pub fn oriented_to_sensor_affine(&self) -> [[f64; 3]; 2] {
+        let m = self.map();
+        [
+            [m.m[0][0], m.m[0][1], m.t[0]],
+            [m.m[1][0], m.m[1][1], m.t[1]],
+        ]
+    }
+
     /// G → S の変換をアフィン変換 `[x, y] = m · [gx, gy] + t` として返す（`[m, t]` を行ごとに
-    /// `[[m00, m01, t0], [m10, m11, t1]]`）。歪曲補正がない間は G → S はアフィン変換。
+    /// `[[m00, m01, t0], [m10, m11, t1]]`）。**歪曲補正（[`distortion`](Self::distortion)）は含まない**
+    /// （G → D → S。歪曲補正があるときの G → S はアフィン変換ではないので、[`g_to_sensor`](Self::g_to_sensor)
+    /// か、ステージ 9 の計画の式を使う）。
     ///
     /// 行列は記号的に合成する（回転が 0 で向きが通常なら、厳密に単位行列と既定の切り抜きの左上）。
     pub fn g_to_sensor_affine(&self) -> [[f64; 3]; 2] {

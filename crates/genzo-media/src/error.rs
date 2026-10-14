@@ -139,6 +139,10 @@ pub enum MediaError {
         /// 理由。
         reason: String,
     },
+
+    /// 取り消された（長く動く外部プログラムを止めた。[`crate::process::run_streaming`]）。
+    #[error("処理は取り消されました")]
+    Cancelled,
 }
 
 fn display_path(path: &Option<PathBuf>) -> String {

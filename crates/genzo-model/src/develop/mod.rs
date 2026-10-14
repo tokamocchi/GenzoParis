@@ -5,17 +5,25 @@
 //! カタログには [`DevelopSettings::to_json`] の JSON を 1 列に保存する（`variant.develop_json`）。
 
 mod hash;
+mod masks;
 pub mod migrate;
 mod params;
 mod validate;
 
 use serde::{Deserialize, Serialize};
 
+pub use masks::{
+    BrushStroke, ColorSample, LocalAdjustment, LocalDelta, MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES,
+    MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS,
+    MaskComponent, MaskMode, MaskShape,
+};
 pub use params::{
-    AspectRatio, ColorParams, CropRect, CurvePoint, DataRef, DetailParams, Geometry,
-    LensCorrection, LocalAdjustment, LocalDelta, MAX_ASPECT_TERM, MAX_CURVE_POINTS, MAX_MASKS,
-    MIN_CROP_SIZE, MaskShape, NoiseReduction, ParametricCurve, RenderDeps, Sharpening, ToneCurve,
-    ToneParams, ValueRange, WbPreset, WhiteBalance, ranges,
+    AspectRatio, BlackWhite, ColorGrading, ColorMixer, ColorParams, CropRect, CurvePoint, DataRef,
+    DetailParams, EffectsParams, Geometry, GradingWheel, Grain, HighlightMethod, HighlightRecovery,
+    HslAdjustment, HueBand, HueBands, LensCorrection, MAX_ASPECT_TERM, MAX_CURVE_POINTS,
+    MAX_PROFILE_ID_CHARS, MIN_CROP_SIZE, NoiseReduction, ParametricCurve, PostCropVignette,
+    PresenceParams, ProfileSettings, RenderDeps, Sharpening, ToneCurve, ToneParams, ValueRange,
+    WbPreset, WhiteBalance, is_valid_profile_id, ranges,
 };
 pub use validate::{FieldIssue, IssueKind, ValidationError};
 
@@ -36,17 +44,23 @@ pub struct DevelopSettings {
     pub schema_version: u32,
     /// 処理アルゴリズムのバージョン。値が同じなら、アプリを更新しても結果は変わらない（IQ-08）。
     pub process_version: u32,
+    /// カメラプロファイル・ルック（DEV-17。v1。既定は標準でルックなし）。
+    pub profile: ProfileSettings,
     /// ホワイトバランス（DEV-03）。
     pub white_balance: WhiteBalance,
+    /// ハイライト復元（DEV-06。v1。既定は復元しない（白で切りそろえる））。
+    pub highlight_recovery: HighlightRecovery,
     /// 露光量（EV。-5〜+5。DEV-04）。
     pub exposure_ev: f32,
     /// コントラスト（-100〜+100。DEV-04）。
     pub contrast: f32,
     /// ハイライト・シャドウ・白・黒（DEV-05）。
     pub tone: ToneParams,
+    /// テクスチャ・明瞭度・かすみの除去（DEV-11。v1。既定は 0）。
+    pub presence: PresenceParams,
     /// トーンカーブ（DEV-07）。
     pub tone_curve: ToneCurve,
-    /// 彩度・自然な彩度（DEV-08）。
+    /// 彩度・自然な彩度（DEV-08）・カラーミキサー（DEV-09）・カラーグレーディング（DEV-10）・白黒（DEV-25）。
     pub color: ColorParams,
     /// 切り抜き・角度補正（DEV-15）。
     pub geometry: Geometry,
@@ -54,6 +68,8 @@ pub struct DevelopSettings {
     pub lens: LensCorrection,
     /// シャープ・ノイズ軽減（DEV-12・DEV-13。v1。既定は 0）。
     pub detail: DetailParams,
+    /// 効果（切り抜き後の周辺光量補正・粒子。DEV-24。v1。既定は 0）。
+    pub effects: EffectsParams,
     /// ローカル補正（DEV-18。v1。既定は空）。
     pub masks: Vec<LocalAdjustment>,
     /// 現像結果に影響する外部データの識別子と内容のハッシュ（レビュー R-08）。
@@ -66,15 +82,19 @@ impl Default for DevelopSettings {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             process_version: CURRENT_PROCESS_VERSION,
+            profile: ProfileSettings::default(),
             white_balance: WhiteBalance::default(),
+            highlight_recovery: HighlightRecovery::default(),
             exposure_ev: 0.0,
             contrast: 0.0,
             tone: ToneParams::default(),
+            presence: PresenceParams::default(),
             tone_curve: ToneCurve::default(),
             color: ColorParams::default(),
             geometry: Geometry::default(),
             lens: LensCorrection::default(),
             detail: DetailParams::default(),
+            effects: EffectsParams::default(),
             masks: Vec::new(),
             render_deps: RenderDeps::default(),
         }
@@ -170,15 +190,19 @@ impl DevelopSettings {
     pub fn is_neutral(&self) -> bool {
         let s = self.normalized();
         s.white_balance == WhiteBalance::AsShot
+            && s.profile.is_neutral()
+            && s.highlight_recovery.is_disabled()
             && s.exposure_ev == 0.0
             && s.contrast == 0.0
             && s.tone == ToneParams::default()
+            && s.presence.is_neutral()
             && s.tone_curve.is_identity()
-            && s.color == ColorParams::default()
+            && s.color.is_neutral()
             && s.geometry.crop.is_full()
             && s.geometry.angle_deg == 0.0
             && s.lens.is_disabled()
             && s.detail.is_neutral()
+            && s.effects.is_neutral()
             && s.masks.iter().all(LocalAdjustment::is_neutral)
     }
 }
@@ -224,7 +248,7 @@ mod tests {
     #[test]
     fn missing_fields_take_defaults() {
         let s = DevelopSettings::from_json(
-            r#"{"schema_version": 1, "process_version": 1, "exposure_ev": 1.5, "tone": {"shadows": 20}}"#,
+            r#"{"schema_version": 2, "process_version": 1, "exposure_ev": 1.5, "tone": {"shadows": 20}}"#,
         )
         .unwrap();
         assert_eq!(s.exposure_ev, 1.5);
@@ -237,16 +261,492 @@ mod tests {
 
     #[test]
     fn missing_process_version_uses_the_schema_default_not_current() {
+        // v1 のスキーマの JSON は処理バージョン 1（MVP の写真の結果を変えない。IQ-08）。
         let s = DevelopSettings::from_json(r#"{"schema_version": 1}"#).unwrap();
         assert_eq!(s.process_version, 1);
+        assert_eq!(
+            s,
+            DevelopSettings {
+                process_version: 1,
+                ..Default::default()
+            }
+        );
+        let s = DevelopSettings::from_json(r#"{"schema_version": 2}"#).unwrap();
+        assert_eq!(s.process_version, 2);
         assert_eq!(s, DevelopSettings::default());
     }
 
     #[test]
     fn unknown_fields_are_ignored() {
         let s =
-            DevelopSettings::from_json(r#"{"schema_version": 1, "future_option": true}"#).unwrap();
+            DevelopSettings::from_json(r#"{"schema_version": 2, "future_option": true}"#).unwrap();
         assert_eq!(s, DevelopSettings::default());
+    }
+
+    #[test]
+    fn current_versions() {
+        // 新しく現像する写真は処理バージョン 2（v1 の機能のステージ。決定事項ログ No.120）。
+        let s = DevelopSettings::default();
+        assert_eq!(s.schema_version, 2);
+        assert_eq!(s.process_version, 2);
+        // 版 1 の設定も読める（既存の写真）。
+        let v1 =
+            DevelopSettings::from_json(r#"{"schema_version": 2, "process_version": 1}"#).unwrap();
+        assert_eq!(v1.process_version, 1);
+        v1.validate().unwrap();
+    }
+
+    #[test]
+    fn manual_lens_corrections_are_not_neutral() {
+        assert!(DevelopSettings::default().lens.is_disabled());
+        for f in [
+            |l: &mut LensCorrection| l.distortion = 10.0,
+            |l: &mut LensCorrection| l.vignetting_amount = -5.0,
+            |l: &mut LensCorrection| l.ca_red_cyan = 1.0,
+            |l: &mut LensCorrection| l.ca_blue_yellow = -1.0,
+            |l: &mut LensCorrection| l.profile_enabled = true,
+            |l: &mut LensCorrection| l.remove_chromatic_aberration = true,
+        ] {
+            let mut s = DevelopSettings::default();
+            f(&mut s.lens);
+            assert!(!s.is_neutral(), "{:?}", s.lens);
+        }
+        // 中点だけを変えても（量が 0 なので）補正はない。
+        let mut s = DevelopSettings::default();
+        s.lens.vignetting_midpoint = 10.0;
+        assert!(s.lens.is_disabled() && s.is_neutral());
+    }
+
+    #[test]
+    fn lens_values_are_validated_and_normalized() {
+        let mut s = DevelopSettings::default();
+        s.lens.distortion = 150.0;
+        s.lens.vignetting_midpoint = f32::NAN;
+        s.lens.ca_blue_yellow = -101.0;
+        let err = s.validate().unwrap_err();
+        assert!(err.has_field("lens.distortion"));
+        assert!(err.has_field("lens.vignetting_midpoint"));
+        assert!(err.has_field("lens.ca_blue_yellow"));
+        let n = s.normalized();
+        assert_eq!(n.lens.distortion, 100.0);
+        assert_eq!(n.lens.vignetting_midpoint, 50.0);
+        assert_eq!(n.lens.ca_blue_yellow, -100.0);
+        n.validate().unwrap();
+    }
+
+    #[test]
+    fn highlight_recovery_and_noise_reduction_defaults_and_json() {
+        // 既定は復元しない・ノイズ軽減の量 0（処理バージョン 1 と同じ結果。決定事項ログ No.126・127）。
+        let s = DevelopSettings::default();
+        assert_eq!(s.highlight_recovery.method, HighlightMethod::Clip);
+        assert_eq!(s.highlight_recovery.amount, 100.0);
+        assert!(s.highlight_recovery.is_disabled());
+        let nr = s.detail.noise_reduction;
+        assert_eq!(
+            (nr.luminance, nr.luminance_detail, nr.luminance_contrast),
+            (0.0, 50.0, 0.0)
+        );
+        assert_eq!((nr.color, nr.color_detail), (0.0, 50.0));
+        assert!(nr.is_disabled());
+        // JSON の形。
+        let hr = HighlightRecovery {
+            method: HighlightMethod::Reconstruct,
+            amount: 80.0,
+        };
+        assert_eq!(
+            serde_json::to_string(&hr).unwrap(),
+            r#"{"method":"reconstruct","amount":80.0}"#
+        );
+        // 項目のない JSON（レンズ補正のパッケージまでのスキーマの版 2）は既定値で補う。
+        let s = DevelopSettings::from_json(
+            r#"{"schema_version": 2, "detail": {"noise_reduction": {"luminance": 30}}, "highlight_recovery": {"method": "neutral"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.detail.noise_reduction.luminance, 30.0);
+        assert_eq!(s.detail.noise_reduction.luminance_detail, 50.0);
+        assert_eq!(s.detail.noise_reduction.color_detail, 50.0);
+        assert_eq!(s.highlight_recovery.method, HighlightMethod::Neutral);
+        assert_eq!(s.highlight_recovery.amount, 100.0);
+        assert!(!s.is_neutral());
+        // 量が 0 なら復元しない（切りそろえと同じ）。
+        let z = DevelopSettings {
+            highlight_recovery: HighlightRecovery {
+                method: HighlightMethod::Reconstruct,
+                amount: 0.0,
+            },
+            ..Default::default()
+        };
+        assert!(z.highlight_recovery.is_disabled() && z.is_neutral());
+        // ノイズ軽減のディテール・コントラストだけを変えても（量が 0 なので）何もしない。
+        let mut d = DevelopSettings::default();
+        d.detail.noise_reduction.luminance_detail = 10.0;
+        d.detail.noise_reduction.luminance_contrast = 80.0;
+        d.detail.noise_reduction.color_detail = 90.0;
+        assert!(d.is_neutral());
+    }
+
+    #[test]
+    fn highlight_and_noise_values_are_validated_and_normalized() {
+        let mut s = DevelopSettings::default();
+        s.highlight_recovery.amount = 150.0;
+        s.detail.noise_reduction.luminance_detail = f32::NAN;
+        s.detail.noise_reduction.luminance_contrast = -1.0;
+        s.detail.noise_reduction.color_detail = 101.0;
+        let err = s.validate().unwrap_err();
+        for f in [
+            "highlight_recovery.amount",
+            "detail.noise_reduction.luminance_detail",
+            "detail.noise_reduction.luminance_contrast",
+            "detail.noise_reduction.color_detail",
+        ] {
+            assert!(err.has_field(f), "{f}: {err}");
+        }
+        let n = s.normalized();
+        assert_eq!(n.highlight_recovery.amount, 100.0);
+        assert_eq!(n.detail.noise_reduction.luminance_detail, 50.0);
+        assert_eq!(n.detail.noise_reduction.luminance_contrast, 0.0);
+        assert_eq!(n.detail.noise_reduction.color_detail, 100.0);
+        n.validate().unwrap();
+        // 量の NaN は既定値（100）に丸める。
+        let mut h = DevelopSettings::default();
+        h.highlight_recovery.amount = f32::NAN;
+        assert_eq!(h.normalized().highlight_recovery.amount, 100.0);
+        // 未知の方式は JSON の読み込みでエラー。
+        assert!(matches!(
+            DevelopSettings::from_json(
+                r#"{"schema_version": 2, "highlight_recovery": {"method": "magic"}}"#
+            ),
+            Err(DevelopError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn color_mixer_grading_and_black_white_defaults_and_json() {
+        // 既定は何もしない（カラー・ミキサー 0・グレーディング 0。処理バージョン 1 と同じ結果）。
+        let s = DevelopSettings::default();
+        assert!(s.color.is_neutral());
+        assert!(!s.color.black_white.enabled);
+        assert_eq!(s.color.grading.blending, 50.0);
+        assert_eq!(s.color.grading.balance, 0.0);
+        assert!(s.color.mixer.is_neutral() && s.color.grading.is_neutral());
+        // 帯の名前と順。
+        let keys: Vec<_> = HueBand::ALL.iter().map(|b| b.key()).collect();
+        assert_eq!(
+            keys,
+            [
+                "red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta"
+            ]
+        );
+        for b in HueBand::ALL {
+            assert_eq!(HueBand::from_key(b.key()), Some(b));
+            assert_eq!(
+                serde_json::to_string(&b).unwrap(),
+                format!("\"{}\"", b.key())
+            );
+        }
+        assert_eq!(HueBand::from_key("cyan"), None);
+        // HueBands の値の順と取り出し。
+        let mut m = HueBands::<f32>::from_values([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(m.get(HueBand::Aqua), 5.0);
+        *m.get_mut(HueBand::Magenta) = -1.0;
+        assert_eq!(m.values()[7], -1.0);
+        assert_eq!(m.magenta, -1.0);
+        // JSON の形（帯の名前のオブジェクト）。項目のない JSON（レンズ補正・ハイライト復元のパッケージまでの
+        // スキーマの版 2）は既定値で補う。
+        let s = DevelopSettings::from_json(
+            r#"{"schema_version": 2, "color": {"saturation": 10,
+                "mixer": {"blue": {"luminance": -30}},
+                "grading": {"shadows": {"hue": 220, "saturation": 25}, "balance": -10},
+                "black_white": {"mix": {"red": 15}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.color.saturation, 10.0);
+        assert_eq!(s.color.mixer.blue.luminance, -30.0);
+        assert_eq!(s.color.mixer.blue.hue, 0.0);
+        assert!(s.color.mixer.red.is_zero());
+        assert_eq!(s.color.grading.shadows.hue, 220.0);
+        assert_eq!(s.color.grading.shadows.saturation, 25.0);
+        assert_eq!(s.color.grading.blending, 50.0);
+        assert_eq!(s.color.grading.balance, -10.0);
+        assert!(!s.color.black_white.enabled);
+        assert_eq!(s.color.black_white.mix.red, 15.0);
+        assert!(!s.is_neutral());
+        let back = DevelopSettings::from_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!(back, s);
+        let json = serde_json::to_value(s.color).unwrap();
+        assert_eq!(json["mixer"]["blue"]["luminance"], -30.0);
+        assert_eq!(json["black_white"]["mix"]["red"], 15.0);
+        // スキーマの版 1 の JSON（彩度だけ）も読める。
+        let v1 = DevelopSettings::from_json(r#"{"schema_version": 1, "color": {"vibrance": 5}}"#)
+            .unwrap();
+        assert_eq!(v1.color.vibrance, 5.0);
+        assert!(v1.color.mixer.is_neutral() && v1.color.grading.is_neutral());
+        assert!(!v1.color.black_white.enabled);
+    }
+
+    #[test]
+    fn color_neutral_detection_ignores_values_that_have_no_effect() {
+        // 強さが 0 の色相・ブレンド・バランス、カラーのときの白黒ミキサーは効かない。
+        let mut s = DevelopSettings::default();
+        s.color.grading.shadows.hue = 200.0;
+        s.color.grading.blending = 80.0;
+        s.color.grading.balance = -50.0;
+        s.color.black_white.mix.blue = 40.0;
+        assert!(s.color.is_neutral() && s.is_neutral());
+        for f in [
+            |c: &mut ColorParams| c.mixer.orange.hue = 5.0,
+            |c: &mut ColorParams| c.mixer.green.saturation = -5.0,
+            |c: &mut ColorParams| c.mixer.magenta.luminance = 1.0,
+            |c: &mut ColorParams| c.grading.global.saturation = 1.0,
+            |c: &mut ColorParams| c.grading.highlights.luminance = -1.0,
+            |c: &mut ColorParams| c.black_white.enabled = true,
+        ] {
+            let mut t = DevelopSettings::default();
+            f(&mut t.color);
+            assert!(!t.color.is_neutral() && !t.is_neutral(), "{:?}", t.color);
+        }
+    }
+
+    #[test]
+    fn color_values_are_validated_and_normalized() {
+        let mut s = DevelopSettings::default();
+        s.color.mixer.red.hue = 101.0;
+        s.color.mixer.purple.luminance = f32::NAN;
+        s.color.grading.midtones.hue = 361.0;
+        s.color.grading.highlights.saturation = -1.0;
+        s.color.grading.global.luminance = 150.0;
+        s.color.grading.blending = f32::NAN;
+        s.color.grading.balance = -101.0;
+        s.color.black_white.mix.aqua = 200.0;
+        let err = s.validate().unwrap_err();
+        for f in [
+            "color.mixer.red.hue",
+            "color.mixer.purple.luminance",
+            "color.grading.midtones.hue",
+            "color.grading.highlights.saturation",
+            "color.grading.global.luminance",
+            "color.grading.blending",
+            "color.grading.balance",
+            "color.black_white.mix.aqua",
+        ] {
+            assert!(err.has_field(f), "{f}: {err}");
+        }
+        let n = s.normalized();
+        assert_eq!(n.color.mixer.red.hue, 100.0);
+        assert_eq!(n.color.mixer.purple.luminance, 0.0);
+        assert_eq!(n.color.grading.midtones.hue, 360.0);
+        assert_eq!(n.color.grading.highlights.saturation, 0.0);
+        assert_eq!(n.color.grading.global.luminance, 100.0);
+        // ブレンドの NaN は既定値（50）に丸める。
+        assert_eq!(n.color.grading.blending, 50.0);
+        assert_eq!(n.color.grading.balance, -100.0);
+        assert_eq!(n.color.black_white.mix.aqua, 100.0);
+        n.validate().unwrap();
+    }
+
+    #[test]
+    fn presence_sharpening_and_effects_defaults_and_json() {
+        // 既定は何もしない（処理バージョン 1 と同じ結果）。
+        let s = DevelopSettings::default();
+        assert!(s.presence.is_neutral() && s.effects.is_neutral() && s.detail.is_neutral());
+        assert_eq!(s.detail.sharpening.radius, 1.0);
+        assert_eq!(s.detail.sharpening.detail, 25.0);
+        assert_eq!(s.effects.vignette.midpoint, 50.0);
+        assert_eq!(s.effects.vignette.feather, 50.0);
+        assert_eq!(s.effects.grain.size, 25.0);
+        assert_eq!(s.effects.grain.roughness, 50.0);
+        assert!(s.is_neutral());
+        // 項目のない JSON（カラーミキサーのパッケージまでのスキーマの版 2）は既定値で補う。
+        let s = DevelopSettings::from_json(
+            r#"{"schema_version": 2, "presence": {"clarity": 35},
+                "detail": {"sharpening": {"amount": 60, "masking": 40}},
+                "effects": {"vignette": {"amount": -25, "roundness": 30}, "grain": {"amount": 20}}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.presence.clarity, 35.0);
+        assert_eq!((s.presence.texture, s.presence.dehaze), (0.0, 0.0));
+        assert_eq!(s.detail.sharpening.amount, 60.0);
+        assert_eq!(s.detail.sharpening.detail, 25.0);
+        assert_eq!(s.detail.sharpening.masking, 40.0);
+        assert_eq!(s.effects.vignette.amount, -25.0);
+        assert_eq!(s.effects.vignette.roundness, 30.0);
+        assert_eq!(s.effects.vignette.midpoint, 50.0);
+        assert_eq!(s.effects.grain.amount, 20.0);
+        assert_eq!(s.effects.grain.size, 25.0);
+        assert!(!s.is_neutral());
+        let back = DevelopSettings::from_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!(back, s);
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["presence"]["clarity"], 35.0);
+        assert_eq!(json["effects"]["vignette"]["amount"], -25.0);
+        assert_eq!(json["effects"]["grain"]["roughness"], 50.0);
+        // finish-detail より前の版の JSON（シャープの旧既定のディテール 0 を保存していたもの）は、適用量が 0 なら
+        // 新しい既定の 25 に読み替える（migrate.rs の read_changed_defaults_in_v2）。適用量があれば値を保つ。
+        for schema in [1, 2] {
+            let old = DevelopSettings::from_json(&format!(
+                r#"{{"schema_version": {schema}, "process_version": {schema},
+                    "detail": {{"sharpening": {{"amount": 0.0, "radius": 1.0, "detail": 0.0, "masking": 0.0}}}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(old.detail.sharpening, Sharpening::default());
+            assert!(old.presence.is_neutral() && old.effects.is_neutral());
+            assert!(old.is_neutral());
+            // 既定の設定と同じになる（カタログでは「変更なし」になる）。
+            let default = DevelopSettings {
+                process_version: schema,
+                ..DevelopSettings::default()
+            };
+            assert_eq!(old, default);
+        }
+        let v1 = DevelopSettings::from_json(
+            r#"{"schema_version": 1, "detail": {"sharpening": {"amount": 40, "radius": 1, "detail": 0, "masking": 0}}}"#,
+        )
+        .unwrap();
+        assert_eq!(v1.detail.sharpening.detail, 0.0);
+        assert_eq!(v1.detail.sharpening.amount, 40.0);
+        // 新しい版が保存した値（`presence` がある）は、適用量 0・ディテール 0 でも保つ（読み直して変わらない）。
+        let mut s0 = DevelopSettings::default();
+        s0.detail.sharpening.detail = 0.0;
+        let back = DevelopSettings::from_json(&s0.to_json().unwrap()).unwrap();
+        assert_eq!(back, s0);
+        // 量が 0 なら、ほかの値（中点・丸み・大きさなど）は効かない。
+        let mut q = DevelopSettings::default();
+        q.effects.vignette.roundness = 80.0;
+        q.effects.vignette.highlights = 50.0;
+        q.effects.grain.size = 90.0;
+        q.detail.sharpening.radius = 2.5;
+        assert!(q.is_neutral());
+        for f in [
+            |s: &mut DevelopSettings| s.presence.texture = 1.0,
+            |s: &mut DevelopSettings| s.presence.clarity = -1.0,
+            |s: &mut DevelopSettings| s.presence.dehaze = 1.0,
+            |s: &mut DevelopSettings| s.detail.sharpening.amount = 1.0,
+            |s: &mut DevelopSettings| s.effects.vignette.amount = -1.0,
+            |s: &mut DevelopSettings| s.effects.grain.amount = 1.0,
+        ] {
+            let mut t = DevelopSettings::default();
+            f(&mut t);
+            assert!(!t.is_neutral(), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn presence_sharpening_and_effects_are_validated_and_normalized() {
+        let mut s = DevelopSettings::default();
+        s.presence.texture = 101.0;
+        s.presence.clarity = f32::NAN;
+        s.presence.dehaze = -150.0;
+        s.detail.sharpening.detail = f32::NAN;
+        s.effects.vignette.amount = -101.0;
+        s.effects.vignette.midpoint = f32::NAN;
+        s.effects.vignette.roundness = 200.0;
+        s.effects.vignette.feather = -1.0;
+        s.effects.vignette.highlights = 101.0;
+        s.effects.grain.amount = 120.0;
+        s.effects.grain.size = f32::NAN;
+        s.effects.grain.roughness = -5.0;
+        let err = s.validate().unwrap_err();
+        for f in [
+            "presence.texture",
+            "presence.clarity",
+            "presence.dehaze",
+            "detail.sharpening.detail",
+            "effects.vignette.amount",
+            "effects.vignette.midpoint",
+            "effects.vignette.roundness",
+            "effects.vignette.feather",
+            "effects.vignette.highlights",
+            "effects.grain.amount",
+            "effects.grain.size",
+            "effects.grain.roughness",
+        ] {
+            assert!(err.has_field(f), "{f}: {err}");
+        }
+        let n = s.normalized();
+        assert_eq!(n.presence.texture, 100.0);
+        assert_eq!(n.presence.clarity, 0.0);
+        assert_eq!(n.presence.dehaze, -100.0);
+        // NaN は既定値に丸める。
+        assert_eq!(n.detail.sharpening.detail, 25.0);
+        assert_eq!(n.effects.vignette.amount, -100.0);
+        assert_eq!(n.effects.vignette.midpoint, 50.0);
+        assert_eq!(n.effects.vignette.roundness, 100.0);
+        assert_eq!(n.effects.vignette.feather, 0.0);
+        assert_eq!(n.effects.vignette.highlights, 100.0);
+        assert_eq!(n.effects.grain.amount, 100.0);
+        assert_eq!(n.effects.grain.size, 25.0);
+        assert_eq!(n.effects.grain.roughness, 0.0);
+        n.validate().unwrap();
+    }
+
+    #[test]
+    fn profile_defaults_json_and_validation() {
+        // 既定は標準のプロファイル・ルックなし・適用量 100（何もしない）。
+        let s = DevelopSettings::default();
+        assert_eq!(s.profile, ProfileSettings::default());
+        assert_eq!(s.profile.look_amount, 100.0);
+        assert!(s.profile.is_neutral() && s.is_neutral());
+        // 項目のない JSON（効果のパッケージまでのスキーマの版 2）は既定値で補う。
+        let s = DevelopSettings::from_json(
+            r#"{"schema_version": 2, "profile": {"camera": "Sony ILCE-7M4 テスト", "look": "film"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.profile.camera.as_deref(), Some("Sony ILCE-7M4 テスト"));
+        assert_eq!(s.profile.look.as_deref(), Some("film"));
+        assert_eq!(s.profile.look_amount, 100.0);
+        assert!(!s.is_neutral());
+        let back = DevelopSettings::from_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!(back, s);
+        // render_deps のプロファイル・ルックは書いて読み直せる（ないときは書かない）。
+        let mut d = DevelopSettings::default();
+        d.render_deps.profile = Some(DataRef::new("dcp:a", "AB".repeat(32)));
+        d.render_deps.look = Some(DataRef::new("cube:b", ""));
+        let n = d.normalized();
+        assert_eq!(
+            n.render_deps.profile.as_ref().unwrap().sha256,
+            "ab".repeat(32)
+        );
+        let back = DevelopSettings::from_json(&n.to_json().unwrap()).unwrap();
+        assert_eq!(back.render_deps, n.render_deps);
+        let json = serde_json::to_value(DevelopSettings::default()).unwrap();
+        assert!(json["render_deps"].get("profile").is_none());
+        assert!(json["render_deps"].get("look").is_none());
+        // 適用量 0 のルックは効かない。
+        let mut z = DevelopSettings::default();
+        z.profile.look = Some("film".into());
+        z.profile.look_amount = 0.0;
+        assert!(!z.profile.look_is_active() && z.is_neutral());
+        // 不正な ID・範囲外の適用量は検証で見つけ、丸めると指定なし・範囲の端になる。
+        let mut bad = DevelopSettings::default();
+        bad.profile.camera = Some(String::new());
+        bad.profile.look = Some(" 前後に空白 ".into());
+        bad.profile.look_amount = 150.0;
+        let err = bad.validate().unwrap_err();
+        for f in ["profile.camera", "profile.look", "profile.look_amount"] {
+            assert!(err.has_field(f), "{f}: {err}");
+        }
+        let n = bad.normalized();
+        assert_eq!(n.profile.camera, None);
+        assert_eq!(n.profile.look, None);
+        assert_eq!(n.profile.look_amount, 100.0);
+        n.validate().unwrap();
+        let mut long = DevelopSettings::default();
+        long.profile.camera = Some("あ".repeat(MAX_PROFILE_ID_CHARS + 1));
+        assert!(long.validate().is_err());
+        long.profile.camera = Some("あ".repeat(MAX_PROFILE_ID_CHARS));
+        long.validate().unwrap();
+        assert!(!is_valid_profile_id("a\u{1}b"));
+        let mut nan = DevelopSettings::default();
+        nan.profile.look_amount = f32::NAN;
+        assert_eq!(nan.normalized().profile.look_amount, 100.0);
+        let mut bad_hash = DevelopSettings::default();
+        bad_hash.render_deps.look = Some(DataRef::new("cube:x", "xyz"));
+        assert!(
+            bad_hash
+                .validate()
+                .unwrap_err()
+                .has_field("render_deps.look.sha256")
+        );
     }
 
     #[test]
@@ -256,15 +756,15 @@ mod tests {
             Err(DevelopError::MissingSchemaVersion)
         ));
         assert!(matches!(
-            DevelopSettings::from_json(r#"{"schema_version": 2}"#),
+            DevelopSettings::from_json(r#"{"schema_version": 3}"#),
             Err(DevelopError::FutureSchemaVersion {
-                found: 2,
-                supported: 1
+                found: 3,
+                supported: 2
             })
         ));
         assert!(matches!(
-            DevelopSettings::from_json(r#"{"schema_version": 1, "process_version": 2}"#),
-            Err(DevelopError::UnsupportedProcessVersion { found: 2, .. })
+            DevelopSettings::from_json(r#"{"schema_version": 2, "process_version": 3}"#),
+            Err(DevelopError::UnsupportedProcessVersion { found: 3, .. })
         ));
         assert!(matches!(
             DevelopSettings::from_json(r#"{"schema_version": 1, "process_version": 0}"#),
@@ -301,7 +801,7 @@ mod tests {
 
     #[test]
     fn from_json_does_not_reject_out_of_range_values() {
-        let s = DevelopSettings::from_json(r#"{"schema_version": 1, "exposure_ev": 9.0}"#).unwrap();
+        let s = DevelopSettings::from_json(r#"{"schema_version": 2, "exposure_ev": 9.0}"#).unwrap();
         assert!(s.validate().is_err());
         assert_eq!(s.normalized().exposure_ev, 5.0);
     }
@@ -332,17 +832,16 @@ mod tests {
 
         let mut mask = DevelopSettings::default();
         mask.masks.push(LocalAdjustment {
-            enabled: true,
-            mask: MaskShape::Linear {
-                x0: 0.0,
-                y0: 0.0,
-                x1: 0.0,
-                y1: 1.0,
-            },
             delta: LocalDelta {
                 exposure_ev: 0.3,
                 ..Default::default()
             },
+            ..LocalAdjustment::new(MaskComponent::add(MaskShape::Linear {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 0.0,
+                y1: 1.0,
+            }))
         });
         assert!(!mask.is_neutral());
         mask.masks[0].enabled = false;
@@ -387,7 +886,8 @@ mod proptests {
             tint in any_f32(),
             luma in any_points(),
             red in any_points(),
-            pv in 0u32..4,
+            pv in 0u32..5,
+            extra in prop::array::uniform6(any_f32()),
         ) -> DevelopSettings {
             let mut s = DevelopSettings {
                 process_version: pv,
@@ -402,11 +902,70 @@ mod proptests {
             s.geometry.crop = CropRect { left: crop[0], top: crop[1], right: crop[2], bottom: crop[3] };
             s.tone_curve.luma = luma;
             s.tone_curve.red = red;
+            s.highlight_recovery = HighlightRecovery { method: HighlightMethod::Reconstruct, amount: extra[5] };
+            s.detail.noise_reduction = NoiseReduction {
+                luminance: extra[0],
+                luminance_detail: extra[1],
+                luminance_contrast: extra[2],
+                color: extra[3],
+                color_detail: extra[4],
+            };
+            s
+        }
+    }
+
+    prop_compose! {
+        /// 色（カラーミキサー・カラーグレーディング・白黒）だけを変えた設定（上の戦略に足すとテストのスタックが
+        /// あふれるため分けた）。
+        fn any_color_settings()(
+            col in prop::array::uniform8(any_f32()),
+            bw in any::<bool>(),
+        ) -> DevelopSettings {
+            let mut s = DevelopSettings::default();
+            s.color.mixer.red.hue = col[0];
+            s.color.mixer.aqua.saturation = col[1];
+            s.color.mixer.blue.luminance = col[2];
+            s.color.grading.shadows.hue = col[3];
+            s.color.grading.highlights.saturation = col[4];
+            s.color.grading.blending = col[5];
+            s.color.grading.balance = col[6];
+            s.color.black_white = BlackWhite { enabled: bw, mix: HueBands::from_values([col[7]; 8]) };
+            s
+        }
+    }
+
+    prop_compose! {
+        /// テクスチャ・明瞭度・かすみの除去・シャープ・効果だけを変えた設定（上の戦略に足すとテストのスタックが
+        /// あふれるため分けた）。
+        fn any_detail_settings()(
+            v in prop::array::uniform12(any_f32()),
+        ) -> DevelopSettings {
+            let mut s = DevelopSettings {
+                presence: PresenceParams { texture: v[0], clarity: v[1], dehaze: v[2] },
+                ..Default::default()
+            };
+            s.detail.sharpening = Sharpening { amount: v[3], radius: v[4], detail: v[5], masking: v[6] };
+            s.effects.vignette.amount = v[7];
+            s.effects.vignette.midpoint = v[8];
+            s.effects.vignette.roundness = v[9];
+            s.effects.grain.amount = v[10];
+            s.effects.grain.size = v[11];
             s
         }
     }
 
     proptest! {
+        #[test]
+        fn normalized_detail_settings_are_valid_and_round_trip(s in any_detail_settings()) {
+            let n = s.normalized();
+            prop_assert!(n.validate().is_ok(), "{:?}", n.validate());
+            prop_assert_eq!(n.normalized(), n.clone());
+            let back = DevelopSettings::from_json(&n.to_json().unwrap()).unwrap();
+            prop_assert_eq!(back.develop_hash(), n.develop_hash());
+            prop_assert_eq!(back, n);
+            prop_assert_eq!(s.develop_hash(), s.normalized().develop_hash());
+        }
+
         #[test]
         fn normalized_settings_are_always_valid(s in any_settings()) {
             let n = s.normalized();
@@ -420,6 +979,17 @@ mod proptests {
             let back = DevelopSettings::from_json(&n.to_json().unwrap()).unwrap();
             prop_assert_eq!(back.develop_hash(), n.develop_hash());
             prop_assert_eq!(back, n);
+        }
+
+        #[test]
+        fn normalized_color_settings_are_valid_and_round_trip(s in any_color_settings()) {
+            let n = s.normalized();
+            prop_assert!(n.validate().is_ok(), "{:?}", n.validate());
+            prop_assert_eq!(n.normalized(), n.clone());
+            let back = DevelopSettings::from_json(&n.to_json().unwrap()).unwrap();
+            prop_assert_eq!(back.develop_hash(), n.develop_hash());
+            prop_assert_eq!(back, n);
+            prop_assert_eq!(s.develop_hash(), s.normalized().develop_hash());
         }
 
         #[test]

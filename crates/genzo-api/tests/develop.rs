@@ -6,8 +6,8 @@ mod common;
 
 use common::{Env, WAIT_LIMIT, all_items, by_name, drain, hashes, import, wait_until, write_jpeg};
 use genzo_api::{
-    ApiError, DevelopSettings, Event, GpuMode, HISTORY_LABEL_PASTE, JobResult, RenderBackend,
-    RenderQuality, SettingGroups, VariantId,
+    ApiError, DevelopSettings, Event, GpuMode, HISTORY_LABEL_BLACK_WHITE, HISTORY_LABEL_PASTE,
+    JobResult, PasteReport, PasteVersion, RenderBackend, RenderQuality, SettingGroups, VariantId,
 };
 use genzo_model::{CropRect, WhiteBalance};
 
@@ -595,6 +595,218 @@ fn pending_changes_are_saved_as_one_entry() {
     core.close().unwrap();
 }
 
+/// 処理バージョン 1 と 2 の写真が混ざったカタログでの設定の貼り付け（DEV-30・DATA-09。検証の指摘: 一部の
+/// 項目の貼り付けは版が違うと必ず失敗し、すべての項目では貼り付け先の版が黙って貼り付け元の版になっていた）。
+///
+/// - 画面の既定の選択（切り抜きと角度を除く）でも、版の違う写真へ貼り付けられ、貼り付け先の版は変わらない
+///   （すべての項目でも）。版 1 の写真に写した版 2 の項目は保存し、使われないことを数で知らせる。
+/// - 利用者が選んだときだけ、古い写真を貼り付け元の版に上げる（履歴の名前に残り、Undo で戻せる）。新しい版の
+///   写真を下げることはない。
+#[test]
+fn paste_between_process_versions_keeps_the_target_version() {
+    let env = Env::new();
+    for (i, name) in ["A.jpg", "B.jpg", "C.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (48, 32), i as u8 + 1, None);
+    }
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let (a, b, c) = (
+        by_name(&items, "A.jpg").variant_id,
+        by_name(&items, "B.jpg").variant_id,
+        by_name(&items, "C.jpg").variant_id,
+    );
+    // A を版 1 にする（MVP で現像した写真）。B・C は新しく取り込んだ版 2。
+    let a_v1 = DevelopSettings {
+        process_version: 1,
+        ..core.develop_settings(a).unwrap()
+    };
+    core.paste_settings_with(
+        &a_v1,
+        &[a],
+        SettingGroups::ALL,
+        PasteVersion::Source,
+        "版 1",
+    )
+    .unwrap();
+    assert_eq!(core.develop_settings(a).unwrap().process_version, 1);
+    let mut src = core.develop_settings(b).unwrap();
+    assert_eq!(src.process_version, 2);
+    src.exposure_ev = 0.5;
+    src.lens.distortion = -20.0;
+    let ui_default = SettingGroups {
+        geometry: false,
+        ..SettingGroups::ALL
+    };
+    let report = core
+        .paste_settings_with(
+            &src,
+            &[a, c],
+            ui_default,
+            PasteVersion::Keep,
+            HISTORY_LABEL_PASTE,
+        )
+        .unwrap();
+    assert_eq!(
+        report,
+        PasteReport {
+            count: 2,
+            upgraded: 0,
+            needs_upgrade: 1,
+            skipped_videos: 0,
+        }
+    );
+    let got = core.develop_settings(a).unwrap();
+    assert_eq!(got.process_version, 1, "版 1 のまま");
+    assert_eq!(got.exposure_ev, 0.5);
+    assert_eq!(
+        got.lens.distortion, -20.0,
+        "値は保存する（版を更新すると使われる）"
+    );
+    assert_eq!(labels(&core, a).last().unwrap(), HISTORY_LABEL_PASTE);
+    // すべての項目でも、貼り付け先の版のまま（paste_settings は版を変えない）。
+    core.paste_settings(&src, &[a], SettingGroups::ALL).unwrap();
+    assert_eq!(core.develop_settings(a).unwrap().process_version, 1);
+    // 逆向き（版 1 の設定を版 2 の写真へ）も、版 2 のまま（下げない）。
+    let from_v1 = core.develop_settings(a).unwrap();
+    for version in [PasteVersion::Keep, PasteVersion::Upgrade] {
+        let r = core
+            .paste_settings_with(
+                &from_v1,
+                &[c],
+                SettingGroups::ALL,
+                version,
+                HISTORY_LABEL_PASTE,
+            )
+            .unwrap();
+        assert_eq!(r.upgraded, 0, "{version:?}");
+        assert_eq!(core.develop_settings(c).unwrap().process_version, 2);
+    }
+    // 選んだときだけ上げる。上げた写真の履歴の名前に残る。
+    let report = core
+        .paste_settings_with(
+            &src,
+            &[a, c],
+            ui_default,
+            PasteVersion::Upgrade,
+            HISTORY_LABEL_PASTE,
+        )
+        .unwrap();
+    assert_eq!(
+        report,
+        PasteReport {
+            count: 2,
+            upgraded: 1,
+            needs_upgrade: 0,
+            skipped_videos: 0,
+        }
+    );
+    assert_eq!(core.develop_settings(a).unwrap().process_version, 2);
+    assert_eq!(
+        labels(&core, a).last().unwrap(),
+        "設定の貼り付け・処理バージョンを 2 に更新"
+    );
+    assert_eq!(labels(&core, c).last().unwrap(), HISTORY_LABEL_PASTE);
+    // Undo で版 1 に戻る。
+    assert_eq!(core.undo(a).unwrap().unwrap().process_version, 1);
+    // コマンドの形: 省略すると版を変えず、結果は pasted。
+    let json = core.execute_json(
+        &serde_json::json!({
+            "type": "paste_settings",
+            "settings": src,
+            "targets": [a],
+            "groups": ui_default,
+        })
+        .to_string(),
+    );
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["ok"]["type"], "pasted", "{value}");
+    assert_eq!(value["ok"]["count"], 1);
+    assert_eq!(value["ok"]["upgraded"], 0);
+    assert_eq!(value["ok"]["needs_upgrade"], 1);
+    assert_eq!(core.develop_settings(a).unwrap().process_version, 1);
+    core.close().unwrap();
+}
+
+/// 選んだ写真の処理バージョンをまとめて更新する（DATA-09。ライブラリの右クリックのメニュー・CLI の
+/// `develop upgrade`）: 最新でない写真だけを、ほかの値を変えずに更新し、履歴に残す（Undo で戻せる）。現像中の
+/// 写真は保存待ちの変更を先に保存してから更新し、セッションの設定も更新する。動画は飛ばす。
+#[test]
+fn upgrade_process_versions_updates_only_older_photos() {
+    let env = Env::new();
+    for (i, name) in ["A.jpg", "B.jpg", "C.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (48, 32), i as u8 + 1, None);
+    }
+    let has_video = common::make_video(&env.photos.join("V.mp4"), "2024-05-01T09:00:00Z");
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let id = |n: &str| by_name(&items, n).variant_id;
+    let (a, b, c) = (id("A.jpg"), id("B.jpg"), id("C.jpg"));
+    for v in [a, b] {
+        let s = DevelopSettings {
+            process_version: 1,
+            exposure_ev: 0.25,
+            ..core.develop_settings(v).unwrap()
+        };
+        core.paste_settings_with(&s, &[v], SettingGroups::ALL, PasteVersion::Source, "版 1")
+            .unwrap();
+    }
+    // A を現像中にして、保存待ちの変更を作る。
+    let state = core.open_develop(a).unwrap();
+    assert_eq!(state.settings.process_version, 1);
+    let mut pending = state.settings.clone();
+    pending.contrast = 15.0;
+    core.set_settings(&pending, false).unwrap();
+    let mut targets = vec![a, b, c, a];
+    if has_video {
+        targets.push(id("V.mp4"));
+    }
+    assert_eq!(core.upgrade_process_versions(&targets).unwrap(), 2);
+    for v in [a, b, c] {
+        let s = core.develop_settings(v).unwrap();
+        assert_eq!(s.process_version, 2, "{v}");
+    }
+    let a_saved = core.develop_settings(a).unwrap();
+    assert_eq!(a_saved.contrast, 15.0, "保存待ちの変更は先に保存した");
+    assert_eq!(a_saved.exposure_ev, 0.25, "ほかの値は変えない");
+    assert_eq!(
+        labels(&core, a).last().unwrap(),
+        "処理バージョンを 2 に更新"
+    );
+    assert_eq!(
+        labels(&core, b).last().unwrap(),
+        "処理バージョンを 2 に更新"
+    );
+    assert_ne!(
+        labels(&core, c).last().unwrap(),
+        "処理バージョンを 2 に更新",
+        "最新の写真は記録しない"
+    );
+    // 現像のセッションの設定も更新した。
+    assert_eq!(
+        core.develop_state()
+            .unwrap()
+            .unwrap()
+            .settings
+            .process_version,
+        2
+    );
+    // もう一度は何もしない。Undo で戻せる。
+    assert_eq!(core.upgrade_process_versions(&[a, b, c]).unwrap(), 0);
+    assert_eq!(core.undo(b).unwrap().unwrap().process_version, 1);
+    // コマンドの形。
+    let json = core.execute_json(
+        &serde_json::json!({"type": "upgrade_process_versions", "variant_ids": [b]}).to_string(),
+    );
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        value["ok"],
+        serde_json::json!({"type": "updated", "count": 1})
+    );
+    core.close().unwrap();
+}
+
 /// 写真を開かずに設定を保存する（CLI の `develop set`・`develop reset`）: 履歴の名前を指定でき、
 /// カタログの件数（[`genzo_api::Core::catalog_stats`]）に履歴が数えられる。
 #[test]
@@ -621,8 +833,15 @@ fn settings_saved_with_label_and_catalog_stats() {
     let label = genzo_api::describe_change(&old, &new);
     assert_eq!(label, "露光量 +0.40");
     assert_eq!(
-        core.paste_settings_with_label(&new, &[v], SettingGroups::default(), &label)
-            .unwrap(),
+        core.paste_settings_with(
+            &new,
+            &[v],
+            SettingGroups::default(),
+            PasteVersion::Source,
+            &label
+        )
+        .unwrap()
+        .count,
         1
     );
     assert_eq!(core.develop_settings(v).unwrap(), new);
@@ -642,4 +861,731 @@ fn settings_saved_with_label_and_catalog_stats() {
         before,
         "元ファイルは変わらない（DATA-01）"
     );
+}
+
+/// レンズ補正（DEV-14）: 埋め込みの補正の情報を画面に知らせ、使った情報を render_deps に記録し、プロファイル
+/// の補正で描く。版 1 の写真では適用せずに知らせ、「処理バージョンを更新」で版 2 にできる（DATA-09。履歴に
+/// 残り、Undo で戻せる）。
+#[test]
+fn lens_correction_and_process_version_upgrade() {
+    use genzo_raw::{DngLensCorrection, DngVignetteRadial, DngWarpPlane, DngWarpRectilinear};
+    let env = Env::new();
+    let lens = genzo_raw::LensCorrectionData::DngOpcode(DngLensCorrection {
+        warp: Some(DngWarpRectilinear {
+            planes: vec![DngWarpPlane {
+                kr: [1.0, -0.04, 0.0, 0.0],
+                kt: [0.0, 0.0],
+            }],
+            center: [0.5, 0.5],
+        }),
+        vignette: Some(DngVignetteRadial {
+            k: [0.5, 0.0, 0.0, 0.0, 0.0],
+            center: [0.5, 0.5],
+        }),
+    });
+    if !common::make_dng_with_lens(&env.photos.join("L.dng"), lens) {
+        return;
+    }
+    let core = env.open();
+    import(&core, &env.photos);
+    let v = all_items(&core)[0].variant_id;
+    let state = core.open_develop(v).unwrap();
+    let info = state.source.lens_correction.clone().expect("補正の情報");
+    assert_eq!(info.source, "dng_opcode");
+    assert!(info.distortion && info.vignetting && !info.chromatic_aberration);
+    assert_eq!(state.latest_process_version, 2);
+    assert_eq!(state.settings.process_version, 2);
+    let deps = state
+        .settings
+        .render_deps
+        .lens_profile
+        .clone()
+        .expect("記録");
+    assert!(deps.id.starts_with("dng_opcode:"), "{deps:?}");
+
+    // プロファイルの補正で描ける（警告なし）。保存すると使った情報も記録される。
+    let mut s = state.settings.clone();
+    s.lens.profile_enabled = true;
+    core.set_settings(&s, false).unwrap();
+    let frame = core.render_develop().unwrap();
+    assert!(frame.warnings.is_empty(), "{:?}", frame.warnings);
+    core.flush_develop().unwrap();
+    let saved = core.develop_settings(v).unwrap();
+    assert_eq!(saved.render_deps.lens_profile, Some(deps));
+    assert!(labels(&core, v).last().unwrap().contains("レンズ補正"));
+
+    // 版 1 の写真（MVP で現像した写真）では適用せず、警告で知らせる。
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..s.clone()
+    };
+    core.set_settings(&v1, false).unwrap();
+    core.flush_develop().unwrap();
+    let frame = core.render_develop().unwrap();
+    assert!(
+        frame
+            .warnings
+            .iter()
+            .any(|w| w.contains("処理バージョンを更新")),
+        "{:?}",
+        frame.warnings
+    );
+    // 処理バージョンの更新: ほかの値は変えず、履歴に残してすぐに保存する。
+    let up = core.upgrade_process_version().unwrap();
+    assert_eq!(up.settings.process_version, 2);
+    assert!(up.settings.lens.profile_enabled);
+    assert!(!up.dirty);
+    assert_eq!(core.develop_settings(v).unwrap().process_version, 2);
+    assert_eq!(
+        labels(&core, v).last().unwrap(),
+        "処理バージョンを 2 に更新"
+    );
+    assert!(core.render_develop().unwrap().warnings.is_empty());
+    // もう最新なので何もしない（履歴を増やさない）。
+    let n = labels(&core, v).len();
+    core.upgrade_process_version().unwrap();
+    assert_eq!(labels(&core, v).len(), n);
+    // Undo で版 1 に戻る。
+    let back = core.undo(v).unwrap().unwrap();
+    assert_eq!(back.process_version, 1);
+}
+
+/// 埋め込みのレンズ補正の情報が壊れている RAW（DEV-14）: 写真は開け、補正の情報は使わず、理由を
+/// `SourceInfo::lens_correction_note` で知らせる（検証の指摘: 理由がワーカーで捨てられ、画面では「情報が
+/// ない」と区別できなかった）。LibRaw が有効な build だけ。
+#[test]
+fn broken_lens_correction_is_reported_in_source_info() {
+    use genzo_raw::{DngLensCorrection, DngWarpPlane, DngWarpRectilinear};
+    let env = Env::new();
+    let plane = |k0: f64| DngWarpPlane {
+        kr: [k0, 0.0, 0.0, 0.0],
+        kt: [0.0, 0.0],
+    };
+    let lens = genzo_raw::LensCorrectionData::DngOpcode(DngLensCorrection {
+        warp: Some(DngWarpRectilinear {
+            planes: vec![plane(1.0), plane(1e-5), plane(1.0)],
+            center: [0.5, 0.5],
+        }),
+        vignette: None,
+    });
+    if !common::make_dng_with_lens(&env.photos.join("B.dng"), lens) {
+        return;
+    }
+    let core = env.open();
+    import(&core, &env.photos);
+    let v = all_items(&core)[0].variant_id;
+    let state = core.open_develop(v).unwrap();
+    assert!(state.source.is_raw);
+    assert_eq!(state.source.lens_correction, None);
+    let note = state.source.lens_correction_note.clone().expect("理由");
+    assert!(note.contains("WarpRectilinear"), "{note}");
+    assert_eq!(state.settings.render_deps.lens_profile, None);
+    core.close().unwrap();
+}
+
+/// ハイライト復元（DEV-06）・ノイズ軽減（DEV-13）: RAW の版 2 の写真では警告なしに描け、履歴に項目の名前が残る。
+/// 版 1 の写真では適用せずに知らせる。RAW 以外の写真では使われないことを知らせる。
+#[test]
+fn highlight_recovery_and_noise_reduction_are_applied_or_reported() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("J.jpg"), (64, 48), 3, None);
+    let has_raw = common::make_dng(&env.photos.join("R.dng"), "2024:05:01 08:00:00");
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let id_of = |name: &str| {
+        items
+            .iter()
+            .find(|i| i.file_name == name)
+            .map(|i| i.variant_id)
+    };
+    let with_sensor = |base: &DevelopSettings| {
+        let mut s = base.clone();
+        s.highlight_recovery.method = genzo_model::HighlightMethod::Reconstruct;
+        s.detail.noise_reduction.luminance = 30.0;
+        s.detail.noise_reduction.color = 40.0;
+        s
+    };
+    // RAW 以外: 使われないことを知らせる。
+    let j = id_of("J.jpg").unwrap();
+    let state = core.open_develop(j).unwrap();
+    core.set_settings(&with_sensor(&state.settings), false)
+        .unwrap();
+    let frame = core.render_develop().unwrap();
+    for w in [
+        "RAW 以外の写真では、ハイライト復元は使われません",
+        "RAW 以外の写真では、ノイズ軽減は使われません",
+    ] {
+        assert!(
+            frame.warnings.iter().any(|x| x == w),
+            "{:?}",
+            frame.warnings
+        );
+    }
+    core.flush_develop().unwrap();
+    assert_eq!(
+        labels(&core, j).last().unwrap(),
+        "ハイライト復元・輝度ノイズの軽減 30・カラーノイズの軽減 40"
+    );
+    if !has_raw {
+        core.close().unwrap();
+        return;
+    }
+    // RAW の版 2: 警告なしで描ける。
+    let r = id_of("R.dng").unwrap();
+    let state = core.open_develop(r).unwrap();
+    assert_eq!(state.settings.process_version, 2);
+    let s = with_sensor(&state.settings);
+    core.set_settings(&s, false).unwrap();
+    let frame = core.render_develop().unwrap();
+    assert!(frame.warnings.is_empty(), "{:?}", frame.warnings);
+    // 版 1 の写真では適用せず、更新を促す。
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..s
+    };
+    core.set_settings(&v1, false).unwrap();
+    let frame = core.render_develop().unwrap();
+    for w in ["ハイライト復元", "ノイズ軽減"] {
+        assert!(
+            frame
+                .warnings
+                .iter()
+                .any(|x| x.contains(w) && x.contains("処理バージョンを更新")),
+            "{w}: {:?}",
+            frame.warnings
+        );
+    }
+    core.close().unwrap();
+}
+
+/// カラーミキサー・カラーグレーディング・白黒（DEV-09・DEV-10・DEV-25）: 版 2 の写真では警告なしに描け、白黒は灰色に
+/// なり、履歴に項目の名前が残る。版 1 の写真では適用せずに知らせ、一括適用では使われない写真の数を返す（DATA-09）。
+#[test]
+fn color_mixer_grading_and_black_white_are_applied_or_reported() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
+    write_jpeg(&env.photos.join("B.jpg"), (64, 48), 4, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let (a, b) = (
+        by_name(&items, "A.jpg").variant_id,
+        by_name(&items, "B.jpg").variant_id,
+    );
+    let state = core.open_develop(a).unwrap();
+    assert_eq!(state.settings.process_version, 2);
+    // 白黒（V キー）: 灰色になる。
+    let mut s = state.settings.clone();
+    s.color.black_white.enabled = true;
+    core.set_settings(&s, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let frame = core.develop_frame().expect("描いたプレビュー");
+    for p in frame.b3.image.data() {
+        let m = p[1].abs().max(1e-3);
+        assert!(
+            (p[0] - p[1]).abs() <= 2e-5 * m && (p[2] - p[1]).abs() <= 2e-5 * m,
+            "{p:?}"
+        );
+    }
+    core.flush_develop().unwrap();
+    assert_eq!(labels(&core, a).last().unwrap(), HISTORY_LABEL_BLACK_WHITE);
+    // 白黒ミキサーとカラーグレーディング（白黒の色付け）。
+    s.color.black_white.mix.orange = 40.0;
+    s.color.grading.shadows.hue = 220.0;
+    s.color.grading.shadows.saturation = 30.0;
+    core.set_settings(&s, false).unwrap();
+    assert!(core.render_develop().unwrap().warnings.is_empty());
+    core.flush_develop().unwrap();
+    assert_eq!(
+        labels(&core, a).last().unwrap(),
+        "白黒ミキサー・カラーグレーディング"
+    );
+    core.close_develop().unwrap();
+
+    // 版 1 の写真へ「色」だけを写す: 値は保存するが使われないので数で知らせる。開くと警告が出る。
+    let b_v1 = DevelopSettings {
+        process_version: 1,
+        ..core.develop_settings(b).unwrap()
+    };
+    core.paste_settings_with(
+        &b_v1,
+        &[b],
+        SettingGroups::ALL,
+        PasteVersion::Source,
+        "版 1",
+    )
+    .unwrap();
+    let color_only = SettingGroups {
+        white_balance: false,
+        basic_tone: false,
+        presence: false,
+        tone_curve: false,
+        color: true,
+        geometry: false,
+        lens: false,
+        detail: false,
+        effects: false,
+        profile: false,
+        masks: false,
+    };
+    let report = core
+        .paste_settings_with(
+            &s,
+            &[b],
+            color_only,
+            PasteVersion::Keep,
+            HISTORY_LABEL_PASTE,
+        )
+        .unwrap();
+    assert_eq!(
+        report,
+        PasteReport {
+            count: 1,
+            upgraded: 0,
+            needs_upgrade: 1,
+            skipped_videos: 0,
+        }
+    );
+    let got = core.develop_settings(b).unwrap();
+    assert_eq!(got.process_version, 1);
+    assert_eq!(got.color, s.color);
+    core.open_develop(b).unwrap();
+    let info = core.render_develop().unwrap();
+    for what in ["白黒", "カラーグレーディング"] {
+        assert!(
+            info.warnings
+                .iter()
+                .any(|w| w.contains(what) && w.contains("処理バージョンを更新")),
+            "{what}: {:?}",
+            info.warnings
+        );
+    }
+    core.close().unwrap();
+}
+
+/// テクスチャ・明瞭度・かすみの除去（DEV-11）・シャープ（DEV-12）・効果（DEV-24）: 版 2 の写真では警告なしに描け
+/// （RAW 以外の写真にも使える）、プレビューが変わり、履歴に項目の名前が残る。版 1 の写真では適用せずに知らせ、一括適用
+/// では「外観」「効果」を別の項目として選べ、使われない写真の数を返す（DATA-09）。
+#[test]
+fn presence_sharpening_and_effects_are_applied_or_reported() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
+    write_jpeg(&env.photos.join("B.jpg"), (64, 48), 4, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let (a, b) = (
+        by_name(&items, "A.jpg").variant_id,
+        by_name(&items, "B.jpg").variant_id,
+    );
+    let state = core.open_develop(a).unwrap();
+    assert_eq!(state.settings.process_version, 2);
+    assert!(core.render_develop().unwrap().warnings.is_empty());
+    let before = core
+        .develop_frame()
+        .expect("描いたプレビュー")
+        .b3
+        .image
+        .clone();
+    let mut s = state.settings.clone();
+    s.presence.clarity = 40.0;
+    s.presence.dehaze = 30.0;
+    s.detail.sharpening.amount = 60.0;
+    s.effects.vignette.amount = -50.0;
+    s.effects.grain.amount = 30.0;
+    core.set_settings(&s, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let after = core
+        .develop_frame()
+        .expect("描いたプレビュー")
+        .b3
+        .image
+        .clone();
+    assert_eq!(after.dimensions(), before.dimensions());
+    let changed = after
+        .data()
+        .iter()
+        .zip(before.data())
+        .filter(|(p, q)| p != q)
+        .count();
+    assert!(changed > after.data().len() / 2, "{changed}");
+    core.flush_develop().unwrap();
+    assert_eq!(
+        labels(&core, a).last().unwrap(),
+        "明瞭度 +40・かすみの除去 +30・シャープ 60ほか"
+    );
+    core.close_develop().unwrap();
+
+    // 版 1 の写真へ「外観」「効果」だけを写す: 値は保存するが使われないので数で知らせる。開くと警告が出る。
+    let b_v1 = DevelopSettings {
+        process_version: 1,
+        ..core.develop_settings(b).unwrap()
+    };
+    core.paste_settings_with(
+        &b_v1,
+        &[b],
+        SettingGroups::ALL,
+        PasteVersion::Source,
+        "版 1",
+    )
+    .unwrap();
+    let groups = SettingGroups {
+        white_balance: false,
+        basic_tone: false,
+        presence: true,
+        tone_curve: false,
+        color: false,
+        geometry: false,
+        lens: false,
+        detail: false,
+        effects: true,
+        profile: false,
+        masks: false,
+    };
+    let report = core
+        .paste_settings_with(&s, &[b], groups, PasteVersion::Keep, HISTORY_LABEL_PASTE)
+        .unwrap();
+    assert_eq!(
+        report,
+        PasteReport {
+            count: 1,
+            upgraded: 0,
+            needs_upgrade: 1,
+            skipped_videos: 0,
+        }
+    );
+    let got = core.develop_settings(b).unwrap();
+    assert_eq!(got.process_version, 1);
+    assert_eq!(got.presence, s.presence);
+    assert_eq!(got.effects, s.effects);
+    // ディテール（シャープ）は選ばなかったので写らない。
+    assert_eq!(got.detail.sharpening.amount, 0.0);
+    core.open_develop(b).unwrap();
+    let info = core.render_develop().unwrap();
+    for what in ["明瞭度", "周辺光量", "粒子"] {
+        assert!(
+            info.warnings
+                .iter()
+                .any(|w| w.contains(what) && w.contains("処理バージョンを更新")),
+            "{what}: {:?}",
+            info.warnings
+        );
+    }
+    core.close().unwrap();
+}
+
+/// 合成のカメラプロファイル（DCP。光源 2 つ）。`scale` で行列を少し変える（置き換えの確認用）。
+fn test_dcp(model: &str, scale: f64) -> Vec<u8> {
+    use genzo_color::Mat3;
+    let cm = |k: f64| {
+        Mat3::from_rows([
+            [0.7424 * k, -0.2329, -0.0466],
+            [-0.4598, 1.2471, 0.2347],
+            [-0.0715, 0.1505, 0.6066],
+        ])
+    };
+    genzo_color::DcpProfile {
+        name: Some(format!("{model} テスト")),
+        unique_camera_model: Some(model.to_owned()),
+        calibration_illuminants: [Some(17), Some(21)],
+        color_matrices: [Some(cm(1.08 * scale)), Some(cm(scale))],
+        ..Default::default()
+    }
+    .to_bytes()
+}
+
+/// 合成の 3D LUT（大きさ 2。`k` で赤を強める）。
+fn test_cube(title: &str, k: f32) -> String {
+    let mut text = format!("TITLE \"{title}\"\nLUT_3D_SIZE 2\n");
+    for b in [0.0f32, 1.0] {
+        for g in [0.0f32, 1.0] {
+            for r in [0.0f32, 1.0] {
+                text.push_str(&format!("{} {g} {}\n", (r * k).min(1.0), b * 0.8));
+            }
+        }
+    }
+    text
+}
+
+/// カメラプロファイル・ルック（DEV-17）: 取り込み・一覧・ルックの適用と記録（render_deps）・置き換えた後に開くと
+/// 警告・除くと「見つからない」・RAW 以外ではカメラプロファイルを使わないと知らせる・版 1 では適用しない。
+/// LibRaw が有効なら、RAW にカメラプロファイルを当てて記録する。
+#[test]
+fn camera_profiles_and_looks_are_applied_recorded_and_reported() {
+    use genzo_api::{ProfileKind, WarningCode};
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
+    let has_raw = common::make_dng(&env.photos.join("R.dng"), "2024:05:01 08:00:00");
+    let src = env.dir.path().join("profiles-src");
+    std::fs::create_dir_all(&src).unwrap();
+    let model = format!(
+        "{} {}",
+        genzo_testkit::bayer::SYNTHETIC_MAKE,
+        genzo_testkit::bayer::SYNTHETIC_MODEL
+    );
+    let dcp = src.join("合成 標準.dcp");
+    std::fs::write(&dcp, test_dcp(&model, 1.0)).unwrap();
+    let cube = src.join("film.cube");
+    std::fs::write(&cube, test_cube("フィルム", 1.6)).unwrap();
+    let core = env.open();
+    let events = core.subscribe();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let a = by_name(&items, "A.jpg").variant_id;
+
+    // 取り込み（元のファイルは変えない）。
+    let before_src = hashes(&src);
+    let report = core
+        .import_profiles(&[dcp.clone(), cube.clone()], false)
+        .unwrap();
+    assert_eq!(report.imported.len(), 2, "{report:?}");
+    assert_eq!(hashes(&src), before_src);
+    let list = core.list_profiles(Some(&model)).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].kind, ProfileKind::Camera);
+    assert_eq!(list[0].id, "合成 標準");
+    assert_eq!(list[0].matches_camera, Some(true));
+    assert!(list[0].description.contains("光源 2 つ"), "{:?}", list[0]);
+    let look = list[1].clone();
+    assert_eq!((look.kind, look.id.as_str()), (ProfileKind::Look, "film"));
+    assert!(
+        core.profiles_dir()
+            .join(format!("{}.cube", look.sha256))
+            .exists()
+    );
+
+    // RAW 以外の写真: ルックは使える。カメラプロファイルは使わないと知らせる。
+    let state = core.open_develop(a).unwrap();
+    assert_eq!(state.source.camera, None);
+    assert!(core.render_develop().unwrap().warnings.is_empty());
+    let plain = core.develop_frame().unwrap().b3.image.clone();
+    let mut s = state.settings.clone();
+    s.profile.look = Some("film".into());
+    core.set_settings(&s, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let looked = core.develop_frame().unwrap().b3.image.clone();
+    let changed = looked
+        .data()
+        .iter()
+        .zip(plain.data())
+        .filter(|(p, q)| p != q)
+        .count();
+    assert!(changed > looked.data().len() / 4, "{changed}");
+    // 適用量 0 は使わない（元と同じ）。
+    let mut zero = s.clone();
+    zero.profile.look_amount = 0.0;
+    core.set_settings(&zero, false).unwrap();
+    core.render_develop().unwrap();
+    assert_eq!(core.develop_frame().unwrap().b3.image.data(), plain.data());
+    core.set_settings(&s, false).unwrap();
+    core.flush_develop().unwrap();
+    let saved = core.develop_settings(a).unwrap();
+    let rec = saved.render_deps.look.clone().expect("ルックの記録");
+    assert_eq!(rec.id, "cube:film");
+    assert_eq!(rec.sha256, look.sha256);
+    assert_eq!(labels(&core, a).last().unwrap(), "ルック「film」");
+    let mut cam = s.clone();
+    cam.profile.camera = Some("合成 標準".into());
+    core.set_settings(&cam, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(
+        info.warnings.iter().any(|w| w.contains("RAW 以外")),
+        "{:?}",
+        info.warnings
+    );
+    core.set_settings(&s, false).unwrap();
+    core.close_develop().unwrap();
+
+    // 置き換えると、次に開いたときに「内容が違う」と知らせる（R-08）。
+    std::fs::write(&cube, test_cube("フィルム 2", 1.3)).unwrap();
+    let r = core
+        .import_profiles(std::slice::from_ref(&cube), false)
+        .unwrap();
+    assert_eq!(r.failed.len(), 1, "置き換えるときだけ");
+    let r = core
+        .import_profiles(std::slice::from_ref(&cube), true)
+        .unwrap();
+    assert_eq!(r.replaced.len(), 1);
+    drain(&events);
+    core.open_develop(a).unwrap();
+    let warned = drain(&events).into_iter().any(|e| {
+        matches!(
+            e,
+            Event::Warning { code: WarningCode::RenderDepsChanged, message, .. }
+                if message.contains("ルック「film」")
+        )
+    });
+    assert!(warned);
+    core.close_develop().unwrap();
+
+    // 除くと「見つからない」（ルックなしで描く）。
+    core.remove_profile(ProfileKind::Look, "film").unwrap();
+    assert!(matches!(
+        core.remove_profile(ProfileKind::Look, "film"),
+        Err(ApiError::NotFound(_))
+    ));
+    core.open_develop(a).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(
+        info.warnings
+            .iter()
+            .any(|w| w.contains("ルックが見つからない")),
+        "{:?}",
+        info.warnings
+    );
+    assert_eq!(core.develop_frame().unwrap().b3.image.data(), plain.data());
+    // 版 1 の写真では適用しない（処理バージョンを更新すると使える）。
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..s.clone()
+    };
+    core.set_settings(&v1, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(
+        info.warnings
+            .iter()
+            .any(|w| w.contains("ルックはこの処理バージョンでは適用されません")),
+        "{:?}",
+        info.warnings
+    );
+    core.close_develop().unwrap();
+
+    if !has_raw {
+        return;
+    }
+    // RAW: 機種が合うカメラプロファイルを当てて記録する（警告なし）。
+    let r = by_name(&items, "R.dng").variant_id;
+    let state = core.open_develop(r).unwrap();
+    assert_eq!(state.source.camera.as_deref(), Some(model.as_str()));
+    core.render_develop().unwrap();
+    let standard = core.develop_frame().unwrap().b3.image.clone();
+    let mut s = state.settings.clone();
+    s.profile.camera = Some("合成 標準".into());
+    core.set_settings(&s, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let profiled = core.develop_frame().unwrap().b3.image.clone();
+    assert_ne!(profiled.data(), standard.data());
+    core.flush_develop().unwrap();
+    let saved = core.develop_settings(r).unwrap();
+    assert_eq!(
+        saved.render_deps.profile.as_ref().map(|p| p.id.as_str()),
+        Some("dcp:合成 標準")
+    );
+    assert!(saved.render_deps.raw_decoder.starts_with("libraw"));
+    core.close_develop().unwrap();
+    core.close().unwrap();
+}
+
+/// ローカル補正（マスク。DEV-18・DEV-19）: 描画に効く・履歴の名前・プレビューの G 座標の範囲・重ねて表示・色域の
+/// スポイト・版 1 の写真では使わず知らせる。
+#[test]
+fn masks_are_applied_overlaid_and_picked() {
+    use genzo_model::{
+        ColorSample, LocalAdjustment, LocalDelta, MaskComponent, MaskMode, MaskShape,
+    };
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let a = by_name(&items, "A.jpg").variant_id;
+    let state = core.open_develop(a).unwrap();
+    assert_eq!(state.settings.process_version, 2);
+    let base = core.render_develop().unwrap();
+    // 64 × 48 の画像の G 座標は (0, 0)〜(1, 0.75)。
+    let g = base.g_bounds.expect("G 座標の範囲");
+    assert!(
+        (g[2] - 1.0).abs() < 1e-9 && (g[3] - 0.75).abs() < 1e-9,
+        "{g:?}"
+    );
+    let before = core.develop_frame().unwrap().b3.image.clone();
+    let mut s = state.settings.clone();
+    s.masks.push(LocalAdjustment {
+        name: "左上".to_owned(),
+        ..LocalAdjustment::new(MaskComponent::add(MaskShape::Radial {
+            cx: 0.25,
+            cy: 0.2,
+            rx: 0.15,
+            ry: 0.15,
+            angle_deg: 0.0,
+            feather: 0.0,
+        }))
+    });
+    core.set_settings(&s, false).unwrap();
+    core.flush_develop().unwrap();
+    assert_eq!(labels(&core, a).last().unwrap(), "マスクを追加");
+    // 差分 0 のマスクは描画を変えないが、重ねて表示はできる。
+    let o = core.mask_overlay(a, 0, None).unwrap();
+    assert_eq!(
+        (o.info.width, o.info.height),
+        (before.width(), before.height())
+    );
+    let at = |o: &genzo_api::MaskOverlayFrame, x: u32, y: u32| {
+        o.weights[(y * o.info.width + x) as usize]
+    };
+    assert_eq!(at(&o, 16, 13), 255);
+    assert_eq!(at(&o, 60, 44), 0);
+    assert!(matches!(
+        core.mask_overlay(a, 3, None),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    s.masks[0].delta = LocalDelta {
+        exposure_ev: 1.0,
+        ..Default::default()
+    };
+    core.set_settings(&s, false).unwrap();
+    core.render_develop().unwrap();
+    let after = core.develop_frame().unwrap().b3.image.clone();
+    // マスクの中は明るく、外は変わらない。
+    let (p0, p1) = (before.pixel(16, 13).unwrap(), after.pixel(16, 13).unwrap());
+    assert!(p1[1] > p0[1] * 1.5, "{p0:?} {p1:?}");
+    assert_eq!(before.pixel(60, 44), after.pixel(60, 44));
+    core.flush_develop().unwrap();
+    assert_eq!(
+        labels(&core, a).last().unwrap(),
+        "マスク「左上」の露光量 +1.00"
+    );
+    // 色域のスポイト: 点の G 座標と OKLab（見本の色として使える）。
+    let pick = core.mask_color_at(a, 0.25, 0.5, None).unwrap();
+    assert!(
+        (pick.x - 0.25).abs() < 0.02 && (pick.y - 0.375).abs() < 0.02,
+        "{pick:?}"
+    );
+    assert!(pick.lab[0] > 0.0);
+    s.masks[0].components.push(MaskComponent {
+        mode: MaskMode::Intersect,
+        invert: false,
+        shape: MaskShape::ColorRange {
+            samples: vec![ColorSample {
+                x: pick.x,
+                y: pick.y,
+                lab: pick.lab,
+            }],
+            amount: 40.0,
+        },
+    });
+    core.set_settings(&s, false).unwrap();
+    core.flush_develop().unwrap();
+    assert_eq!(labels(&core, a).last().unwrap(), "マスク「左上」の範囲");
+    assert!(core.mask_color_at(a, 1.5, 0.5, None).is_err());
+    // 版 1 の写真では使わず、知らせる。
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..s.clone()
+    };
+    core.set_settings(&v1, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(
+        info.warnings
+            .iter()
+            .any(|w| w.contains("ローカル補正") && w.contains("処理バージョンを更新")),
+        "{:?}",
+        info.warnings
+    );
+    core.close().unwrap();
 }

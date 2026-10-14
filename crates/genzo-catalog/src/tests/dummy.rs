@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use super::Fixture;
-use crate::{DummySpec, Filter, Sort, SortDirection, SortKey, populate_dummy};
+use crate::{Catalog, DummySpec, Filter, Sort, SortDirection, SortKey, populate_dummy};
 
 #[test]
 fn dummy_population_works_with_thousands_of_assets() {
@@ -195,6 +195,146 @@ fn poc6_scale_measurement() {
             Sort::new(SortKey::Rating, SortDirection::Descending),
         ),
     ];
+    // キーワード・コレクション・スマートコレクション（LIB-09〜11）。手動のコレクションに 1 万件を入れ、
+    // スマートコレクションの代表的な条件で計測する。
+    let all_ids = f.cat.search(&Filter::default(), &Sort::default()).unwrap();
+    let place = f
+        .cat
+        .find_keywords("場所", crate::KeywordMatch::Exact)
+        .unwrap()[0]
+        .id;
+    let family = f
+        .cat
+        .find_keywords("家族", crate::KeywordMatch::Exact)
+        .unwrap()[0]
+        .id;
+    let set = f
+        .cat
+        .create_collection(None, "旅行", genzo_model::CollectionKind::Set, None)
+        .unwrap();
+    let manual = f
+        .cat
+        .create_collection(
+            Some(set),
+            "選んだ写真",
+            genzo_model::CollectionKind::Manual,
+            None,
+        )
+        .unwrap();
+    let step = (all_ids.len() / 10_000).max(1);
+    let members: Vec<_> = all_ids.iter().step_by(step).copied().take(10_000).collect();
+    let t = Instant::now();
+    f.cat.add_to_collection(manual, &members).unwrap();
+    eprintln!(
+        "コレクションに {} 件を入れる: {:?}",
+        members.len(),
+        t.elapsed()
+    );
+    use genzo_model::{MatchMode, SmartCondition as C, SmartRule};
+    let good_place = SmartRule::new(
+        MatchMode::All,
+        vec![
+            C::Rating {
+                op: genzo_model::NumberOp::Gte,
+                value: genzo_model::Rating::new(3).unwrap(),
+            },
+            C::Keyword {
+                op: genzo_model::KeywordOp::Has,
+                keyword_id: Some(place),
+            },
+        ],
+    );
+    let smart = f
+        .cat
+        .create_collection(
+            Some(set),
+            "★3 以上の場所",
+            genzo_model::CollectionKind::Smart,
+            Some(&good_place),
+        )
+        .unwrap();
+    let any_group = SmartRule::new(
+        MatchMode::All,
+        vec![
+            C::Group {
+                match_mode: MatchMode::Any,
+                rules: vec![
+                    C::Flag {
+                        op: genzo_model::EqualityOp::Is,
+                        value: genzo_model::Flag::Picked,
+                    },
+                    C::Keyword {
+                        op: genzo_model::KeywordOp::Has,
+                        keyword_id: Some(family),
+                    },
+                    C::Camera {
+                        op: genzo_model::TextOp::Contains,
+                        value: "7C".to_owned(),
+                    },
+                ],
+            },
+            C::CaptureTime {
+                op: genzo_model::DateOp::Range,
+                from: Some(jst(2020, 1, 1)),
+                until: Some(jst(2023, 1, 1)),
+                days: None,
+            },
+            C::Text {
+                op: genzo_model::ContainsOp::NotContains,
+                value: "京都".to_owned(),
+            },
+        ],
+    );
+    let t = Instant::now();
+    let tree = f.cat.keyword_tree().unwrap();
+    eprintln!(
+        "キーワードの一覧（{} 件と件数）: {:?}",
+        tree.len(),
+        t.elapsed()
+    );
+    let t = Instant::now();
+    let cols = f.cat.collections().unwrap();
+    eprintln!("コレクションの一覧（{} 件）: {:?}", cols.len(), t.elapsed());
+    let mut cases = cases;
+    for (label, filter) in [
+        (
+            "キーワード「場所」（子を含む）",
+            Filter {
+                keywords: vec![place],
+                ..Default::default()
+            },
+        ),
+        (
+            "手動のコレクション（1 万件）",
+            Filter {
+                collection: Some(manual),
+                ..Default::default()
+            },
+        ),
+        (
+            "スマート: ★3 以上 かつ キーワード「場所」",
+            Filter {
+                collection: Some(smart),
+                ..Default::default()
+            },
+        ),
+        (
+            "スマート: （採用 または 家族 または カメラに 7C）かつ 期間 3 年 かつ テキストに「京都」を含まない",
+            Filter {
+                smart_rule: Some(any_group),
+                ..Default::default()
+            },
+        ),
+        (
+            "コレクションセット（手動 ＋ スマート）",
+            Filter {
+                collection: Some(set),
+                ..Default::default()
+            },
+        ),
+    ] {
+        cases.push((label, filter, Sort::default()));
+    }
     for (label, filter, sort) in &cases {
         // 1 回目はキャッシュの温め。2 回目を計測する。
         f.cat.search(filter, sort).unwrap();
@@ -224,6 +364,57 @@ fn poc6_scale_measurement() {
         for line in plan {
             eprintln!("    {label}: {line}");
         }
+    }
+    // スタック（LIB-12）: 連写（同じ撮影日時。`DummySpec::burst_ratio`）を撮影時刻の間隔 1 秒で自動スタックに
+    // し、スタックでまとめた検索（折りたたみ・すべて展開）の時間を、まとめない検索と比べる。
+    let t = Instant::now();
+    let preview = f
+        .cat
+        .auto_stack(&Filter::default(), std::time::Duration::from_secs(1), true)
+        .unwrap();
+    eprintln!(
+        "自動スタックの見込み（間隔 1 秒）: {preview:?}、{:?}",
+        t.elapsed()
+    );
+    let t = Instant::now();
+    let made = f
+        .cat
+        .auto_stack(&Filter::default(), std::time::Duration::from_secs(1), false)
+        .unwrap();
+    eprintln!(
+        "自動スタックを作る: {} 個・{} 枚、{:?}",
+        made.stacks,
+        made.photos,
+        t.elapsed()
+    );
+    // スタックの所属: 読み直す時間（カタログが変わった後の最初の検索）と、覚えたものを使う時間（変わって
+    // いない間の検索）。読み取り専用の接続（検索結果の作り直しと同じ）で計測する。
+    let reader = Catalog::open_read_only(f.catalog_path()).unwrap();
+    let t = Instant::now();
+    let layout = reader.stack_layout().unwrap();
+    eprintln!(
+        "スタックの所属を読む（{} 枚。読み直し）: {:?}",
+        layout.member_count(),
+        t.elapsed()
+    );
+    let t = Instant::now();
+    reader.stack_layout().unwrap();
+    eprintln!("スタックの所属（覚えたものを使う）: {:?}", t.elapsed());
+    for (label, expand) in [("折りたたみ", false), ("すべて展開", true)] {
+        f.cat
+            .search_stacked(&Filter::default(), &Sort::default(), expand)
+            .unwrap();
+        let t = Instant::now();
+        let g = f
+            .cat
+            .search_stacked(&Filter::default(), &Sort::default(), expand)
+            .unwrap();
+        eprintln!(
+            "スタックでまとめた検索（{label}・全件・撮影日時順）: {} 件（隠した写真 {} 枚）、{:?}",
+            g.ids.len(),
+            g.hidden,
+            t.elapsed()
+        );
     }
     let ids = f.cat.search(&Filter::default(), &Sort::default()).unwrap();
     let t = Instant::now();

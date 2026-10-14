@@ -8,8 +8,11 @@
 //!    ディザリングはしない（8bit の書き出しでも、パイプラインから 16bit で渡せば、縮小の後に 1 回だけ
 //!    8bit に丸めることになる）。
 //! 2. ビット数を形式に合わせる（JPEG・PNG 8bit は 8bit、TIFF・PNG 16bit は 16bit）。
-//! 3. 出力の色空間の ICC プロファイル（[`export_icc_profile`]）と Exif を埋め込む（IQ-06・EXP-04）。
-//!    GPS は `settings.remove_gps = false` のときだけ書く（SEC-03）。
+//! 3. 出力の色空間の ICC プロファイル（[`export_icc_profile`]）と Exif を埋め込む（IQ-06・EXP-04）。解像度
+//!    （`settings.resolution_ppi`。EXP-03）は Exif の XResolution・YResolution（TIFF は IFD0）と PNG の pHYs に書く。
+//!    GPS は `settings.remove_gps = false` のときだけ書く（SEC-03）。カタログで編集した説明の
+//!    メタデータ（LIB-15。[`ExifData::descriptive`]）があれば、XMP（[`crate::xmp_write`]）も埋め込む
+//!    （JPEG は APP1、PNG は iTXt、TIFF はタグ 700）。
 //! 4. 安全に書き出す（原本の照合・一時ファイル・名前の変更。[`crate::safe_write`]）。
 //!
 //! を行う。
@@ -23,8 +26,8 @@ use genzo_model::{ExportFormat, ExportSettings, OutputColorSpace};
 use crate::buffer::DynRgbImage;
 use crate::error::{MediaError, Result};
 use crate::exif_write::{ByteOrder, ExifData, ExifImageInfo, build_ifds, encode_exif_tiff};
-use crate::jpeg::encode_jpeg;
-use crate::png_io::encode_png_to;
+use crate::jpeg::{encode_jpeg, insert_jpeg_xmp};
+use crate::png_io::{PngMetadata, encode_png_with_metadata_to};
 use crate::resize::downscale_encoded;
 use crate::safe_write::{ProtectedFiles, WriteOutcome, write_atomically};
 use crate::tiff_io::encode_tiff16_to;
@@ -55,11 +58,16 @@ pub fn export_icc_profile(space: OutputColorSpace) -> Result<IccProfile> {
 /// 書き出しの前処理（寸法とビット数）を済ませた画像を、形式に合わせて `w` に書く。
 ///
 /// `exif` が `Some` なら Exif を書く。GPS を書くかどうかは `exif` の内容に従う（設定の
-/// `remove_gps` の適用は [`encode_export`]・[`export_image`] が行う）。
+/// `remove_gps` の適用は [`encode_export`]・[`export_image`] が行う）。`exif` の説明のメタデータ
+/// （[`ExifData::descriptive`]）に値があれば XMP も書く（JPEG で XMP が大きすぎれば
+/// [`MediaError::TooLarge`]。[`insert_jpeg_xmp`]）。
+///
+/// `resolution_ppi` は解像度（Exif の XResolution・YResolution と、PNG の pHYs に書く。画素数は変えない）。
 pub fn encode_export_to<W: Write + std::io::Seek>(
     image: &DynRgbImage,
     format: ExportFormat,
     color_space: OutputColorSpace,
+    resolution_ppi: u32,
     exif: Option<&ExifData>,
     w: &mut W,
 ) -> Result<()> {
@@ -72,6 +80,7 @@ pub fn encode_export_to<W: Write + std::io::Seek>(
                 width,
                 height,
                 color_space,
+                resolution_ppi,
             },
         )
     });
@@ -80,33 +89,33 @@ pub fn encode_export_to<W: Write + std::io::Seek>(
         .as_ref()
         .map(|i| encode_exif_tiff(i, ByteOrder::Big))
         .transpose()?;
+    let xmp = exif.and_then(|e| crate::xmp_write::xmp_packet(&e.descriptive, &e.keywords));
     match format {
         ExportFormat::Jpeg { quality } => {
-            let bytes = encode_jpeg(
+            let mut bytes = encode_jpeg(
                 &image.to_rgb8(),
                 quality,
                 Some(icc.as_bytes()),
                 exif_tiff.as_deref(),
             )?;
+            if let Some(x) = &xmp {
+                bytes = insert_jpeg_xmp(&bytes, x.as_bytes())?;
+            }
             w.write_all(&bytes).map_err(MediaError::io_no_path)
         }
         ExportFormat::Png8 | ExportFormat::Png16 => {
             // BufWriter は drop のときの書き込みの失敗を無視するので、最後に明示的に flush する。
             let mut bw = BufWriter::new(w);
+            let meta = PngMetadata {
+                icc: Some(icc.as_bytes()),
+                exif_tiff: exif_tiff.as_deref(),
+                xmp: xmp.as_deref(),
+                resolution_ppi: Some(resolution_ppi),
+            };
             if format == ExportFormat::Png8 {
-                encode_png_to(
-                    &image.to_rgb8(),
-                    Some(icc.as_bytes()),
-                    exif_tiff.as_deref(),
-                    &mut bw,
-                )?;
+                encode_png_with_metadata_to(&image.to_rgb8(), &meta, &mut bw)?;
             } else {
-                encode_png_to(
-                    &image.to_rgb16(),
-                    Some(icc.as_bytes()),
-                    exif_tiff.as_deref(),
-                    &mut bw,
-                )?;
+                encode_png_with_metadata_to(&image.to_rgb16(), &meta, &mut bw)?;
             }
             bw.flush().map_err(MediaError::io_no_path)
         }
@@ -116,6 +125,7 @@ pub fn encode_export_to<W: Write + std::io::Seek>(
                 &image.to_rgb16(),
                 Some(icc.as_bytes()),
                 ifds.as_ref(),
+                xmp.as_deref().map(str::as_bytes),
                 &mut bw,
             )?;
             bw.flush().map_err(MediaError::io_no_path)
@@ -141,14 +151,17 @@ pub fn fit_to_export_size<'a>(
     )?))
 }
 
-/// 書き出す Exif（`remove_gps` を適用したもの）。
+/// 書き出す Exif・XMP（`remove_gps`・`remove_keywords` を適用したもの）。
 fn exif_for(settings: &ExportSettings, exif: Option<&ExifData>) -> Option<ExifData> {
     exif.map(|e| {
+        let mut e = e.clone();
         if settings.remove_gps {
-            e.clone().without_gps()
-        } else {
-            e.clone()
+            e = e.without_gps();
         }
+        if settings.remove_keywords {
+            e = e.without_keywords();
+        }
+        e
     })
 }
 
@@ -166,6 +179,7 @@ pub fn encode_export(
         &fitted,
         settings.format,
         settings.color_space,
+        settings.resolution_ppi,
         exif.as_ref(),
         &mut cur,
     )?;
@@ -193,6 +207,7 @@ pub fn export_image(
             &fitted,
             settings.format,
             settings.color_space,
+            settings.resolution_ppi,
             exif.as_ref(),
             file,
         )
@@ -202,7 +217,7 @@ pub fn export_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::RgbImage16;
+    use crate::buffer::{RgbImage8, RgbImage16};
     use genzo_model::{ExportSize, GpsCoord};
 
     #[test]
@@ -241,6 +256,187 @@ mod tests {
             encode_export(&img, &s, None),
             Err(MediaError::InvalidExportSettings(_))
         ));
+    }
+
+    /// 書き出したファイルから XMP のパケットを取り出す（形式ごとの入れ場所）。
+    fn extracted_xmp(format: ExportFormat, bytes: &[u8]) -> Option<String> {
+        use crate::xmp_write::{TIFF_TAG_XMP, XMP_JPEG_SIGNATURE, XMP_PNG_KEYWORD};
+        match format {
+            ExportFormat::Jpeg { .. } => crate::jpeg::jpeg_header_segments(bytes)
+                .unwrap()
+                .into_iter()
+                .find(|s| s.marker == 0xE1 && s.data.starts_with(XMP_JPEG_SIGNATURE))
+                .map(|s| String::from_utf8(s.data[XMP_JPEG_SIGNATURE.len()..].to_vec()).unwrap()),
+            ExportFormat::Png8 | ExportFormat::Png16 => {
+                let reader = png::Decoder::new(std::io::Cursor::new(bytes))
+                    .read_info()
+                    .unwrap();
+                reader
+                    .info()
+                    .utf8_text
+                    .iter()
+                    .find(|c| c.keyword == XMP_PNG_KEYWORD)
+                    .map(|c| c.get_text().unwrap())
+            }
+            ExportFormat::Tiff16 => {
+                let mut dec = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes)).unwrap();
+                dec.find_tag(tiff::tags::Tag::from_u16_exhaustive(TIFF_TAG_XMP))
+                    .unwrap()
+                    .map(|v| String::from_utf8(v.into_u8_vec().unwrap()).unwrap())
+            }
+        }
+    }
+
+    #[test]
+    fn descriptive_metadata_goes_into_xmp_and_ascii_exif_in_every_format() {
+        let img =
+            DynRgbImage::Rgb16(RgbImage16::from_fn(8, 6, |x, _| [x as u16 * 900, 0, 0]).unwrap());
+        let exif = ExifData {
+            make: Some("SONY".to_owned()),
+            ..Default::default()
+        }
+        .with_descriptive(genzo_model::IptcMetadata {
+            title: Some("清水寺".to_owned()),
+            creator: Some("Taro Yamada".to_owned()),
+            copyright: Some("© 2024 山田太郎".to_owned()),
+            creator_email: Some("taro@example.com".to_owned()),
+            ..Default::default()
+        });
+        for format in [
+            ExportFormat::Jpeg { quality: 90 },
+            ExportFormat::Png8,
+            ExportFormat::Png16,
+            ExportFormat::Tiff16,
+        ] {
+            let s = ExportSettings {
+                format,
+                ..Default::default()
+            };
+            let bytes = encode_export(&img, &s, Some(&exif)).unwrap();
+            let xmp = extracted_xmp(format, &bytes).unwrap_or_else(|| panic!("{format:?}"));
+            crate::xmp_write::tests::assert_well_formed(&xmp);
+            assert!(
+                xmp.contains("清水寺") && xmp.contains("© 2024 山田太郎"),
+                "{format:?}"
+            );
+            assert!(xmp.contains("<Iptc4xmpCore:CiEmailWork>taro@example.com<"));
+            // Exif は ASCII で表せる作成者だけ（著作権表示は日本語を含むので書かない）。
+            let e = exif::Reader::new()
+                .read_from_container(&mut std::io::Cursor::new(&bytes))
+                .unwrap();
+            assert!(
+                e.get_field(exif::Tag::Artist, exif::In::PRIMARY).is_some(),
+                "{format:?}"
+            );
+            assert!(
+                e.get_field(exif::Tag::Copyright, exif::In::PRIMARY)
+                    .is_none()
+            );
+            // 画像として読める。
+            image::load_from_memory(&bytes).unwrap();
+        }
+        // 説明のメタデータがなければ XMP を書かない。
+        let plain = ExifData::default();
+        for format in [
+            ExportFormat::Jpeg { quality: 90 },
+            ExportFormat::Png8,
+            ExportFormat::Tiff16,
+        ] {
+            let s = ExportSettings {
+                format,
+                ..Default::default()
+            };
+            let bytes = encode_export(&img, &s, Some(&plain)).unwrap();
+            assert_eq!(extracted_xmp(format, &bytes), None, "{format:?}");
+        }
+    }
+
+    #[test]
+    fn keywords_go_into_xmp_unless_removed() {
+        let img = DynRgbImage::Rgb8(RgbImage8::from_fn(8, 6, |x, _| [x as u8 * 30, 0, 0]).unwrap());
+        let exif = ExifData::default().with_keywords(vec!["京都".to_owned(), "場所".to_owned()]);
+        for format in [
+            ExportFormat::Jpeg { quality: 90 },
+            ExportFormat::Png8,
+            ExportFormat::Tiff16,
+        ] {
+            let s = ExportSettings {
+                format,
+                ..Default::default()
+            };
+            let bytes = encode_export(&img, &s, Some(&exif)).unwrap();
+            let xmp = extracted_xmp(format, &bytes).unwrap_or_else(|| panic!("{format:?}"));
+            crate::xmp_write::tests::assert_well_formed(&xmp);
+            assert!(
+                xmp.contains("<dc:subject>") && xmp.contains("<rdf:li>京都</rdf:li>"),
+                "{format:?}: {xmp}"
+            );
+            // 書かない設定なら、キーワードだけの XMP は書かない。
+            let s = ExportSettings {
+                format,
+                remove_keywords: true,
+                ..Default::default()
+            };
+            let bytes = encode_export(&img, &s, Some(&exif)).unwrap();
+            assert_eq!(extracted_xmp(format, &bytes), None, "{format:?}");
+        }
+        // 説明のメタデータは、キーワードを書かない設定でも書く。
+        let both = exif.with_descriptive(genzo_model::IptcMetadata {
+            title: Some("清水寺".to_owned()),
+            ..Default::default()
+        });
+        let s = ExportSettings {
+            remove_keywords: true,
+            ..Default::default()
+        };
+        let bytes = encode_export(&img, &s, Some(&both)).unwrap();
+        let xmp = extracted_xmp(s.format, &bytes).unwrap();
+        assert!(
+            xmp.contains("清水寺") && !xmp.contains("dc:subject"),
+            "{xmp}"
+        );
+    }
+
+    /// 解像度（EXP-03）は Exif の XResolution・YResolution と PNG の pHYs に書く（画素数は変えない）。
+    #[test]
+    fn resolution_is_written_to_exif_and_png() {
+        let img = DynRgbImage::Rgb8(RgbImage8::from_fn(8, 6, |x, _| [x as u8 * 30, 0, 0]).unwrap());
+        for format in [
+            ExportFormat::Jpeg { quality: 90 },
+            ExportFormat::Png8,
+            ExportFormat::Png16,
+            ExportFormat::Tiff16,
+        ] {
+            for ppi in [72u32, 300] {
+                let s = ExportSettings {
+                    format,
+                    resolution_ppi: ppi,
+                    ..Default::default()
+                };
+                let bytes = encode_export(&img, &s, Some(&ExifData::default())).unwrap();
+                let e = exif::Reader::new()
+                    .read_from_container(&mut std::io::Cursor::new(&bytes))
+                    .unwrap();
+                let x = e
+                    .get_field(exif::Tag::XResolution, exif::In::PRIMARY)
+                    .unwrap();
+                match &x.value {
+                    exif::Value::Rational(v) => assert_eq!((v[0].num, v[0].denom), (ppi, 1)),
+                    other => panic!("{other:?}"),
+                }
+                if matches!(format, ExportFormat::Png8 | ExportFormat::Png16) {
+                    let reader = png::Decoder::new(std::io::Cursor::new(&bytes))
+                        .read_info()
+                        .unwrap();
+                    let d = reader.info().pixel_dims.unwrap();
+                    assert_eq!(d.unit, png::Unit::Meter);
+                    // 300 ppi = 11811 画素 / m、72 ppi = 2835 画素 / m。
+                    assert_eq!(d.xppu, if ppi == 300 { 11_811 } else { 2_835 });
+                }
+                let decoded = image::load_from_memory(&bytes).unwrap();
+                assert_eq!((decoded.width(), decoded.height()), (8, 6));
+            }
+        }
     }
 
     #[test]
