@@ -302,7 +302,10 @@ impl Core {
                     changed_assets.push(f.asset_id);
                 }
                 // 読めない（状態を確かめられない・ハッシュを求められない）ファイルは、今の状態のまま。
-                Err(ApiError::FileAccess { .. }) => report.ok += 1,
+                Err(ApiError::FileAccess { path, message }) => {
+                    tracing::warn!(path = %path.display(), %message, "ファイルを確かめられません（状態は変えない）");
+                    report.ok += 1;
+                }
                 Err(e) => return Err(e),
             }
         }

@@ -416,6 +416,8 @@ fn filters_generations_and_marks() {
 /// ファイルの状態の確認（3.3 節）: なくなったファイルは missing、戻れば ok。
 #[test]
 fn missing_files_are_detected_and_restored() {
+    // 失敗したときに、確かめられなかったファイルの理由（warn のログ）がテストの出力に出るようにする。
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let env = Env::new();
     let a = env.photos.join("A.jpg");
     write_jpeg(&a, (32, 24), 1, None);
