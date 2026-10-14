@@ -953,6 +953,9 @@ impl Core {
         if variant_ids.is_empty() {
             return Err(ApiError::InvalidArgument("写真を選んでください".to_owned()));
         }
+        // 確かめてからジョブを登録するまで、ファイル操作の排他を持つ（取り込みの受け付けと同じ。ほかの移動・
+        // 取り込みと同時に始めない。PR #4 の Codex の指摘）。ジョブは別のスレッドで、この排他を放した後に動く。
+        let _ops = inner.file_ops.lock();
         ensure_no_conflicting_jobs(inner, None)?;
         // 移動先を確かめる（つながっていない・見つからなければ、ジョブを始めずにエラー）。
         inner.with_catalog_api(|c| folder_dir(c, dest_folder))?;

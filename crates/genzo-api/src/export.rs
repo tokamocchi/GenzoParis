@@ -254,10 +254,16 @@ fn plan_names(
             .map(|s| (s.variant_id, s))
             .collect();
         let mut seen = HashSet::new();
+        // 動画は元のファイルをコピーするので、同じファイル（仮想コピー）は 1 回だけにする（連番を、実際に
+        // 書き出すものにだけ振る。PR #4 の Codex の指摘）。
+        let mut video_files = HashSet::new();
         let mut rows = Vec::new();
         for v in variant_ids {
             let Some(s) = by_id.get(v) else { continue };
             if (s.kind == AssetKind::Video && !videos) || !seen.insert(*v) {
+                continue;
+            }
+            if s.kind == AssetKind::Video && !video_files.insert(s.file_id) {
                 continue;
             }
             let when = s.capture.local().map(|t| t.naive_local());

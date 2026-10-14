@@ -329,6 +329,9 @@ impl Core {
             .plans
             .remove(&plan_id)
             .ok_or_else(|| ApiError::NotFound(format!("削除の計画 {plan_id}")))?;
+        // 写真の移動・名前の変更（FILE-02）と重ならないよう、ファイル操作の排他を持ったまま確かめて実行する
+        // （移動の途中のファイルを、カタログの古い場所で「見つからない」として消さない。PR #4 の Codex の指摘）。
+        let _ops = inner.file_ops.lock();
         // 計画の後にカタログが変わっていないか確かめる。
         let current = inner.with_catalog_api(|c| match plan.kind {
             DeleteKind::VirtualCopies => {
