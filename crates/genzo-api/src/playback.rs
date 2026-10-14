@@ -559,20 +559,27 @@ fn run_proxy_job(
         if ctx.is_cancelled() {
             return Err(ApiError::Cancelled);
         }
-        inner.with_proxies(|cache| {
-            let dest = cache.path_for(file.file_id, &key);
-            fs::rename(&tmp, &dest)?;
-            sync_dir(cache.dir());
-            let evicted = cache.evict_to(cache.capacity(), Some(&dest))?;
-            if evicted.removed > 0 {
-                tracing::info!(
-                    removed = evicted.removed,
-                    freed = evicted.freed_bytes,
-                    "再生用のファイルを上限まで減らした"
-                );
-            }
-            Ok((dest, size))
-        })
+        inner
+            .with_proxies(|cache| {
+                // 取り消しの確認は、キャッシュの排他の中でも行う（clear_video_proxies は取り消してから排他を取る
+                // ので、消した後に公開しない。PR #4 の Codex の指摘）。
+                if ctx.is_cancelled() {
+                    return Ok(None);
+                }
+                let dest = cache.path_for(file.file_id, &key);
+                fs::rename(&tmp, &dest)?;
+                sync_dir(cache.dir());
+                let evicted = cache.evict_to(cache.capacity(), Some(&dest))?;
+                if evicted.removed > 0 {
+                    tracing::info!(
+                        removed = evicted.removed,
+                        freed = evicted.freed_bytes,
+                        "再生用のファイルを上限まで減らした"
+                    );
+                }
+                Ok(Some((dest, size)))
+            })?
+            .ok_or(ApiError::Cancelled)
     };
     let (dest, size) = match publish() {
         Ok(v) => v,
