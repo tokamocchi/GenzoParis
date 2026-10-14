@@ -4719,11 +4719,18 @@ fn copy_import_with_rename_and_metadata_from_the_cli() {
         .collect();
     assert_eq!(
         planned,
+        // 区切りは OS のもの（Windows は \）なので、部分ごとに join して組み立てる。
         vec![
-            dest.join("2026/10/13/20261013_京都-05.JPG")
+            dest.join("2026")
+                .join("10")
+                .join("13")
+                .join("20261013_京都-05.JPG")
                 .to_string_lossy()
                 .into_owned(),
-            dest.join("2026/10/14/20261014_京都-06.JPG")
+            dest.join("2026")
+                .join("10")
+                .join("14")
+                .join("20261014_京都-06.JPG")
                 .to_string_lossy()
                 .into_owned(),
         ]
