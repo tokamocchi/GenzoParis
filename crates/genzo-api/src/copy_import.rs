@@ -1235,7 +1235,9 @@ pub(crate) fn run_copy_import(
                 }
             }
             m.full_hash = own;
-            seen.add(m.cand.path.clone(), m.facts.clone(), m.full_hash.clone());
+            // 重複の判定の記録（`seen`）には、コピー・登録の場所を決められた後に足す（下の place_group の
+            // 成功のとき）。先に足すと、このグループのコピーが失敗したときに、後の同じ内容のファイルが
+            // 「重複」として飛ばされ、どちらも取り込まれない（PR #4 の Codex の指摘）。
             if let Some(existing) = &m.duplicate_of {
                 // 登録済みのファイルと同じ内容だが、取り込む設定（skip_duplicates が偽）。
                 report.duplicates.push(DuplicateFile {
@@ -1287,6 +1289,11 @@ pub(crate) fn run_copy_import(
         match state.place_group(group.members, &folder_rel, &stem) {
             Ok(placed) => {
                 for mut p in placed {
+                    seen.add(
+                        p.source.cand.path.clone(),
+                        p.source.facts.clone(),
+                        p.source.full_hash.clone(),
+                    );
                     copied_dest.insert(p.source.cand.path.clone(), p.dest_path.clone());
                     p.dated_by_file_time = dated_by_file_time;
                     pending.placed.push(p);
