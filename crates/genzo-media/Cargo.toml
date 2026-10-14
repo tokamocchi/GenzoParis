@@ -8,6 +8,12 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# 他の crate の結合テストで、透かしの文字のテストに使うフォントを作る関数（`testing`）。配布するビルドでは使わない
+# （genzo-worker・genzo-api・genzo-cli の dev-dependencies だけで有効にする）。
+test-support = []
+
 [dependencies]
 genzo-model.workspace = true
 genzo-color.workspace = true
@@ -15,6 +21,7 @@ image.workspace = true
 tiff.workspace = true
 png.workspace = true
 kamadak-exif.workspace = true
+ttf-parser.workspace = true
 same-file.workspace = true
 tempfile.workspace = true
 serde.workspace = true

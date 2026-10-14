@@ -41,6 +41,13 @@ crossbeam-channel.workspace = true
 # crate は増えない）。
 tracing.workspace = true
 
+[dev-dependencies]
+# 透かしの文字のテスト（EXP-03）に使うフォントを作る（`genzo_media::testing`。workspace の crate で、新しい crate は
+# 増えない）。
+genzo-media = { workspace = true, features = ["test-support"] }
+# 透かしの画像のテストの入力（透明度のある PNG）。workspace の依存で、新しい crate は増えない。
+image.workspace = true
+
 # ワーカーのメモリの上限（setrlimit。Linux だけ。04 の 1.2 節、AR-10）と、ワーカーと孫プロセスを
 # プロセスグループでまとめて終わらせる（killpg。Linux・macOS。決定 No.12）。
 [target.'cfg(unix)'.dependencies]

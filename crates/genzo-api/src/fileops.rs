@@ -531,7 +531,11 @@ fn apply_photo(
                     Err(CopyFailure::Exists) => {
                         Err("移動先に同じ名前のものがあります（上書きしません）".to_owned())
                     }
-                    Err(CopyFailure::Failed(m) | CopyFailure::NoSpace(m)) => Err(m),
+                    Err(
+                        CopyFailure::Failed(m)
+                        | CopyFailure::WriteFailed(m)
+                        | CopyFailure::NoSpace(m),
+                    ) => Err(m),
                 }
             }
         };

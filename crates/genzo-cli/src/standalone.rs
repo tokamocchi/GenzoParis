@@ -408,7 +408,7 @@ pub fn render(g: &GlobalArgs, out: Output, a: RenderArgs) -> CliResult<Status> {
         source_height: loaded.size.1,
         is_raw: loaded.is_raw,
         decoder: loaded.decoder.clone(),
-        export,
+        export: export.clone(),
         settings,
         timings_ms: json!({
             "decode": t_decode.as_secs_f64() * 1e3,

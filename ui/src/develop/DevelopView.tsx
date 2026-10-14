@@ -81,6 +81,7 @@ import {
   setDraftCrop,
   setZoom,
   startCrop,
+  takeWantedBefore,
   toggleClipping,
   toggleCompareMode,
   toggleMaskOverlay,
@@ -877,7 +878,8 @@ function useBeforeForCompare(ready: boolean): void {
       return;
     }
     if (!hasBefore) {
-      void setBeforeSource({ kind: "initial" }).catch((e) => {
+      // 「ビフォーに設定」（スナップショット・履歴。DEV-28）で表示を始めたときは、選んだ出どころにする。
+      void setBeforeSource(takeWantedBefore() ?? { kind: "initial" }).catch((e) => {
         actions.reportError(e, "ビフォーを描けません");
         setCompareMode("off");
       });

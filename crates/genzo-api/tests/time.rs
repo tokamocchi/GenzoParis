@@ -139,6 +139,7 @@ fn syncing_a_device_to_a_reference_photo() {
         remove_gps: true,
         on_conflict: ConflictPolicy::Sequence,
         remove_keywords: false,
+        ..ExportSettings::default()
     };
     let job = core.export(&[a1], &settings, &out).unwrap();
     let JobResult::Export(r) = wait_ok(&core, job) else {

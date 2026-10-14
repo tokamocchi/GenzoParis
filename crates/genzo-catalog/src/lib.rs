@@ -99,7 +99,7 @@ pub use catalog::{
 pub use collection::{Collection, MAX_COLLECTION_DEPTH, MAX_COLLECTION_NAME_CHARS};
 pub use develop::{
     DevelopState, HISTORY_LABEL_IMPORT, HISTORY_LABEL_VIRTUAL_COPY, HistoryEntry,
-    MAX_VARIANT_NAME_CHARS, Snapshot, VariantInfo,
+    MAX_SNAPSHOT_NAME_CHARS, MAX_VARIANT_NAME_CHARS, Snapshot, VariantInfo,
 };
 pub use dummy::{DummyReport, DummySpec, populate_dummy};
 pub use error::{CatalogError, Result};

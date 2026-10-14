@@ -653,6 +653,7 @@ fn paste_between_process_versions_keeps_the_target_version() {
             count: 2,
             upgraded: 0,
             needs_upgrade: 1,
+            skipped_videos: 0,
         }
     );
     let got = core.develop_settings(a).unwrap();
@@ -697,6 +698,7 @@ fn paste_between_process_versions_keeps_the_target_version() {
             count: 2,
             upgraded: 1,
             needs_upgrade: 0,
+            skipped_videos: 0,
         }
     );
     assert_eq!(core.develop_settings(a).unwrap().process_version, 2);
@@ -1143,6 +1145,7 @@ fn color_mixer_grading_and_black_white_are_applied_or_reported() {
             count: 1,
             upgraded: 0,
             needs_upgrade: 1,
+            skipped_videos: 0,
         }
     );
     let got = core.develop_settings(b).unwrap();
@@ -1251,6 +1254,7 @@ fn presence_sharpening_and_effects_are_applied_or_reported() {
             count: 1,
             upgraded: 0,
             needs_upgrade: 1,
+            skipped_videos: 0,
         }
     );
     let got = core.develop_settings(b).unwrap();

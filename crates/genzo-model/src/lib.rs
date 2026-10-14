@@ -7,7 +7,7 @@
 //! - 写真・動画のメタデータ: [`PhotoMetadata`]、[`VideoMetadata`]
 //! - カタログの中で編集する説明のメタデータ（LIB-15。IPTC Core の主要な項目）: [`IptcMetadata`]
 //! - スマートコレクションの条件（LIB-11。版付きの JSON）: [`SmartRule`]
-//! - 書き出しの設定（EXP-01・EXP-04、6.4 節）: [`ExportSettings`]
+//! - 書き出しの設定（EXP-01・EXP-03・EXP-04・EXP-05、6.4 節）: [`ExportSettings`]（出力シャープ・透かし・動画の扱いを含む）
 //! - キャッシュキー（4.1 節）: [`CacheKey`]
 //! - ファイルの同期（fsync）の OS ごとの違い（6.4 節。指摘 F19）: [`fs_sync`]。書き出し
 //!   （genzo-media）・バックアップと L1（genzo-catalog）の両方が使うため、共通のこの crate に置く
@@ -43,7 +43,9 @@ pub use develop::{
     ToneCurve, ToneParams, ValidationError, WbPreset, WhiteBalance, is_valid_profile_id,
 };
 pub use export::{
-    ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize, OutputColorSpace,
+    Align, ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize,
+    OutputColorSpace, OutputSharpening, RgbColor, SharpenAmount, SharpenMedia, VideoExport,
+    Watermark, WatermarkAnchor, WatermarkContent,
 };
 pub use ids::{
     AssetId, CollectionId, FileId, FileOpId, FolderId, HistoryEntryId, KeywordId, SnapshotId,

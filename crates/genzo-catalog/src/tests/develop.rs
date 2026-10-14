@@ -1,7 +1,9 @@
 //! 現像設定・履歴・Undo / Redo・スナップショット・仮想コピー・一括適用のテスト
 //! （DEV-00、DEV-27、DEV-28、DEV-30、LIB-13）。
 
-use genzo_model::{CURRENT_PROCESS_VERSION, DevelopSettings, HistoryEntryId, VariantId};
+use genzo_model::{
+    CURRENT_PROCESS_VERSION, DevelopSettings, HistoryEntryId, SnapshotId, VariantId,
+};
 
 use super::Fixture;
 use crate::{Catalog, CatalogError, HISTORY_LABEL_IMPORT, HISTORY_LABEL_VIRTUAL_COPY};
@@ -212,6 +214,86 @@ fn snapshots_can_be_created_applied_and_deleted() {
     assert!(f.cat.apply_snapshot(v, snap).is_err());
     assert!(f.cat.create_snapshot(v, "  ").is_err());
     assert!(f.cat.create_snapshot(VariantId::new(9999), "x").is_err());
+}
+
+/// 履歴の段階からのスナップショット・名前の変更・名前の規則・処理バージョン（DEV-28）。
+#[test]
+fn snapshots_from_history_can_be_renamed_and_keep_their_process_version() {
+    let mut f = Fixture::new();
+    let v = f.photo("A.ARW", 1, None).master_variant_id;
+    let first = f
+        .cat
+        .save_develop(v, &exposure(0.4), "露光量 +0.40")
+        .unwrap();
+    f.cat
+        .save_develop(v, &exposure(1.2), "露光量 +1.20")
+        .unwrap();
+    // 版 1 の設定（処理バージョンを下げた履歴）。
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..exposure(-0.5)
+    };
+    f.cat.save_develop(v, &v1, "処理バージョン 1").unwrap();
+    let history_before = f.cat.history(v).unwrap();
+
+    // 履歴の段階から作る（今の設定・履歴の位置は変えない）。
+    let s1 = f
+        .cat
+        .create_snapshot_from_history(v, first, "途中")
+        .unwrap();
+    assert_eq!(f.cat.snapshot_settings(s1).unwrap(), exposure(0.4));
+    assert_eq!(f.cat.develop_settings(v).unwrap(), v1);
+    assert_eq!(f.cat.history(v).unwrap(), history_before);
+    // 今の状態から作る（処理バージョンも写す）。
+    let s2 = f.cat.create_snapshot(v, "版 1").unwrap();
+    let list = f.cat.snapshots(v).unwrap();
+    assert_eq!(
+        list.iter()
+            .map(|s| (s.id, s.process_version))
+            .collect::<Vec<_>>(),
+        vec![(s1, CURRENT_PROCESS_VERSION), (s2, 1)]
+    );
+    assert_eq!(f.cat.snapshot(s2).unwrap(), list[1]);
+
+    // 名前の変更（前後の空白を除く・同じ名前でもよい）。
+    f.cat.rename_snapshot(s1, " 版 1 ").unwrap();
+    assert_eq!(f.cat.snapshot(s1).unwrap().name, "版 1");
+    assert!(matches!(
+        f.cat.rename_snapshot(s1, "a\nb"),
+        Err(CatalogError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        f.cat
+            .rename_snapshot(s1, &"あ".repeat(crate::MAX_SNAPSHOT_NAME_CHARS + 1)),
+        Err(CatalogError::InvalidInput(_))
+    ));
+    f.cat
+        .rename_snapshot(s1, &"あ".repeat(crate::MAX_SNAPSHOT_NAME_CHARS))
+        .unwrap();
+    assert!(matches!(
+        f.cat.rename_snapshot(SnapshotId::new(9999), "x"),
+        Err(CatalogError::NotFound(_))
+    ));
+    assert!(matches!(
+        f.cat.create_snapshot(v, "改行\nあり"),
+        Err(CatalogError::InvalidInput(_))
+    ));
+
+    // ほかの写真の履歴の項目からは作れない。
+    let other = f.photo("B.ARW", 2, None).master_variant_id;
+    assert!(matches!(
+        f.cat.create_snapshot_from_history(other, first, "x"),
+        Err(CatalogError::NotFound(_))
+    ));
+    assert!(matches!(
+        f.cat
+            .create_snapshot_from_history(v, HistoryEntryId::new(9999), "x"),
+        Err(CatalogError::NotFound(_))
+    ));
+    assert!(matches!(
+        f.cat.snapshot(SnapshotId::new(9999)),
+        Err(CatalogError::NotFound(_))
+    ));
 }
 
 #[test]

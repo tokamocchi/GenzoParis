@@ -320,6 +320,7 @@ mod tests {
                 width: 10,
                 height: 10,
                 color_space: OutputColorSpace::Srgb,
+                resolution_ppi: crate::exif_write::EXPORT_RESOLUTION_PPI,
             },
         );
         encode_exif_tiff(&ifds, ByteOrder::Little).unwrap()

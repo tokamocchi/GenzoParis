@@ -5,9 +5,16 @@ import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { MOCK_CORE_SETTINGS, MOCK_CRASH_REPORT, MOCK_IMPORT_PREFERENCES, MOCK_LOG_STATUS } from "../api/mock";
+import {
+  MOCK_CORE_SETTINGS,
+  MOCK_CRASH_REPORT,
+  MOCK_IMPORT_PREFERENCES,
+  MOCK_LOG_STATUS,
+  mockExportPresets,
+} from "../api/mock";
 import type { AppStatus, CatalogStatus, DevelopSettings, ErrorInfo } from "../api/types";
 import { appStore } from "../state/app";
+import { presetsStore } from "../state/presets";
 import { CatalogErrorScreen } from "./CatalogErrorScreen";
 import { CloseFailedDialog } from "./CloseFailedDialog";
 import { CrashReportsDialog } from "./CrashReportsDialog";
@@ -177,6 +184,71 @@ describe("ダイアログ", () => {
     const html = render(createElement(ExportDialog, { variantIds: [1, 2, 3] }));
     expect(html).toContain("書き出し（3 枚）");
     expect(html).toContain("位置情報（GPS）を削除する");
+    // 書き出しプリセット（EXP-02）とファイル名。
+    expect(html).toContain("プリセット");
+    expect(html).toContain("新しく保存…");
+    expect(html).toContain("元のファイル名");
+    // 解像度・出力シャープ・透かし（EXP-03）と動画（EXP-05）。
+    expect(html).toContain("解像度");
+    expect(html).toContain("出力シャープ");
+    expect(html).toContain("透かし");
+    expect(html).toContain("動画を書き出す");
+  });
+
+  it("書き出し: プリセットの一覧（フォルダ・使えないものは最後に理由付きで）", () => {
+    const [web] = mockExportPresets();
+    presetsStore.set({
+      export: [
+        web,
+        { ...web, id: "00000000000000e2", name: "印刷", folder: "仕事" },
+        { ...web, id: "00000000000000e3", name: "未来", export: undefined, problem: "新しい版のアプリで作ったプリセットです" },
+      ],
+    });
+    try {
+      const html = render(createElement(ExportDialog, { variantIds: [1] }));
+      expect(html).toContain("Web 用");
+      expect(html).toContain('label="仕事"');
+      expect(html).toContain("印刷");
+      // 使えないプリセットも一覧に出す（選ぶと削除だけできる。決定事項ログ No.162）。
+      expect(html).toContain('label="使えないプリセット（削除だけできます）"');
+      expect(html).toContain("未来（使えません）");
+      expect(html).toContain('title="新しい版のアプリで作ったプリセットです"');
+    } finally {
+      presetsStore.set({ export: null });
+    }
+  });
+
+  it("書き出し: 選んだプリセットが使えない・別の OS のパスを使わない", () => {
+    const [web] = mockExportPresets();
+    const data = new Map<string, string>();
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, String(v)),
+      removeItem: (k: string) => void data.delete(k),
+    };
+    const remember = (presetId: string) =>
+      data.set("genzo.dialogs.export.last", JSON.stringify({ v: 1, form: {}, defaultColorSpace: "srgb", presetId }));
+    presetsStore.set({
+      export: [
+        { ...web, warnings: ["書き出し先のフォルダ（C:\\Users\\a\\out）は、この PC のパスではないため使いません"] },
+        { ...web, id: "00000000000000e3", name: "未来", export: undefined, problem: "新しい版のアプリで作ったプリセットです" },
+      ],
+    });
+    try {
+      // 前回選んだプリセットが、その後に使えなくなった: 理由と削除の案内を出す（入力は変えない）。
+      remember("00000000000000e3");
+      const broken = render(createElement(ExportDialog, { variantIds: [1] }));
+      expect(broken).toContain("書き出しプリセット「未来」は使えません: 新しい版のアプリで作ったプリセットです");
+      expect(broken).toContain("「削除…」で削除できます");
+      // 別の OS で作ったプリセット: 使わない値を知らせる。
+      remember(web.id);
+      const foreign = render(createElement(ExportDialog, { variantIds: [1] }));
+      expect(foreign).toContain("この PC のパスではないため使いません");
+      expect(foreign).not.toContain("は使えません:");
+    } finally {
+      delete (globalThis as { localStorage?: unknown }).localStorage;
+      presetsStore.set({ export: null });
+    }
   });
 
   it("削除", () => {

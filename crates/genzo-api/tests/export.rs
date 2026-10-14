@@ -76,6 +76,7 @@ fn export_formats_sizes_gps_and_original_protection() {
         remove_gps: true,
         on_conflict: ConflictPolicy::Sequence,
         remove_keywords: false,
+        ..ExportSettings::default()
     };
     let r = export(&core, &[v1, v2], &s, &out);
     assert_eq!((r.written, r.skipped, r.failed), (2, 0, 0), "{r:?}");
@@ -96,6 +97,7 @@ fn export_formats_sizes_gps_and_original_protection() {
         remove_gps: false,
         on_conflict: ConflictPolicy::Sequence,
         remove_keywords: false,
+        ..ExportSettings::default()
     };
     let r = export(&core, &[v1], &s2, &out);
     let tif = written_path(&r, 0);
@@ -114,6 +116,7 @@ fn export_formats_sizes_gps_and_original_protection() {
         remove_gps: true,
         on_conflict: ConflictPolicy::Sequence,
         remove_keywords: false,
+        ..ExportSettings::default()
     };
     let r = export(&core, &[v1], &s3, &out);
     let png = written_path(&r, 0);
@@ -129,7 +132,7 @@ fn export_formats_sizes_gps_and_original_protection() {
     // スキップ。
     let skip = ExportSettings {
         on_conflict: ConflictPolicy::Skip,
-        ..s
+        ..s.clone()
     };
     let r = export(&core, &[v1], &skip, &out);
     assert_eq!(r.skipped, 1);
@@ -140,7 +143,7 @@ fn export_formats_sizes_gps_and_original_protection() {
     // 上書き（原本ではない書き出し済みのファイルは置き換えられる）。
     let overwrite = ExportSettings {
         on_conflict: ConflictPolicy::Overwrite,
-        ..s
+        ..s.clone()
     };
     let r = export(&core, &[v1], &overwrite, &out);
     assert!(matches!(

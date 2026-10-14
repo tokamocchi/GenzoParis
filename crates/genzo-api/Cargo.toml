@@ -89,6 +89,9 @@ image.workspace = true
 kamadak-exif.workspace = true
 # 合成 DNG（ベイヤー配列のモザイク化と DNG の書き出し）。
 genzo-testkit.workspace = true
+# 透かしの文字のテスト（EXP-03）に使うフォントを作る（`genzo_media::testing`。workspace の crate で、新しい crate は
+# 増えない）。
+genzo-media = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

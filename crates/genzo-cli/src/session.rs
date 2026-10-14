@@ -108,6 +108,8 @@ impl Session {
         let mut config = CoreConfig::new(&catalog, data_dir(g, &catalog));
         config.worker = WorkerLaunch::current_exe();
         config.gpu = g.gpu.into();
+        // プリセット（DEV-29・EXP-02）のフォルダ（--presets-dir、GENZO_PRESETS_DIR、アプリと同じ場所）。
+        config.presets_dir = crate::presets_dir(g);
         if let Some(r) = opts.render_previews_after_import {
             config.render_previews_after_import = r;
         }

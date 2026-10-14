@@ -187,6 +187,7 @@ fn small_shared_memory_is_reallocated_once_and_remembered() {
         raw: SHM_HEADER_LEN as u64,
         image: SHM_HEADER_LEN as u64,
         thumbnail: SHM_HEADER_LEN as u64,
+        watermark: SHM_HEADER_LEN as u64,
     };
     let mut c = WorkerClient::spawn(cfg).unwrap();
     // 1 回目は「容量不足」と「確保し直した後」の 2 回の応答、2 回目は覚えた大きさで 1 回。

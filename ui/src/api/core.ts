@@ -93,6 +93,17 @@ import type {
   RelinkRequest,
   RelocatePlan,
   RenameSpec,
+  ExportFormat,
+  ExportPresetSettings,
+  PresetImportReport,
+  PresetInfo,
+  PresetKind,
+  RenameRule,
+  SnapshotId,
+  SnapshotInfo,
+  SnapshotSource,
+  Watermark,
+  WatermarkPreview,
 } from "./types";
 
 type ResponseOf<T extends Response["type"]> = Extract<Response, { type: T }>;
@@ -336,6 +347,93 @@ export const goToHistory = async (variant_id: VariantId, entry_id: HistoryEntryI
   (await execute({ type: "go_to_history", variant_id, entry_id }, "settings_or_none")).settings;
 export const history = async (variant_id: VariantId): Promise<HistoryItem[]> =>
   (await execute({ type: "history", variant_id }, "history")).entries;
+// --- スナップショット（DEV-28） ---
+/** 写真のスナップショットの一覧（作った順）。 */
+export const snapshots = async (variant_id: VariantId): Promise<SnapshotInfo[]> =>
+  (await execute({ type: "snapshots", variant_id }, "snapshots")).snapshots;
+/**
+ * スナップショットを作る（既定は今の状態。現像中の写真なら、コアが保存待ちの変更を保存してから写す。履歴の項目の
+ * 状態からも作れる）。
+ */
+export const createSnapshot = async (
+  variant_id: VariantId,
+  name: string,
+  source: SnapshotSource = { kind: "current" },
+): Promise<SnapshotInfo> =>
+  (await execute({ type: "create_snapshot", variant_id, name, source }, "snapshot")).snapshot;
+export const renameSnapshot = async (snapshot_id: SnapshotId, name: string): Promise<SnapshotInfo> =>
+  (await execute({ type: "rename_snapshot", snapshot_id, name }, "snapshot")).snapshot;
+export const deleteSnapshot = async (snapshot_id: SnapshotId) => {
+  await execute({ type: "delete_snapshot", snapshot_id }, "ok");
+};
+/** スナップショットをその写真に適用する（履歴に 1 件記録する）。適用した後の設定。 */
+export const applySnapshot = async (snapshot_id: SnapshotId): Promise<DevelopSettings> =>
+  (await execute({ type: "apply_snapshot", snapshot_id }, "settings")).settings;
+
+// --- プリセット（DEV-29・EXP-02） ---
+/** プリセットの一覧（フォルダ → 名前の順）と、プリセットのフォルダ。 */
+export const presets = async (kind: PresetKind): Promise<{ presets: PresetInfo[]; dir: string | null }> => {
+  const r = await execute({ type: "presets", kind }, "presets");
+  return { presets: r.presets, dir: r.dir };
+};
+/** 現像プリセットの設定（含めない項目は既定値）。 */
+export const developPresetSettings = async (preset_id: string): Promise<DevelopSettings> =>
+  (await execute({ type: "develop_preset_settings", preset_id }, "settings")).settings;
+/** 写真の今の設定（現像中なら保存待ちの変更を含む）から、`groups` の項目を含む現像プリセットを作る。 */
+export const createDevelopPreset = async (
+  name: string,
+  folder: string,
+  groups: SettingGroups,
+  variant_id: VariantId,
+): Promise<PresetInfo> =>
+  (await execute({ type: "create_develop_preset", name, folder, groups, variant_id }, "preset")).preset;
+/** 現像プリセットを写真の今の設定で置き換える（「今の設定で更新」）。 */
+export const updateDevelopPreset = async (
+  preset_id: string,
+  groups: SettingGroups,
+  variant_id: VariantId,
+): Promise<PresetInfo> =>
+  (await execute({ type: "update_develop_preset", preset_id, groups, variant_id }, "preset")).preset;
+/** 現像プリセットを選んだ写真に適用する（写真の処理バージョンは変えない。"upgrade" なら古い写真を上げる）。 */
+export const applyDevelopPreset = async (
+  preset_id: string,
+  targets: VariantId[],
+  processVersion: PasteVersion = "keep",
+): Promise<PasteReport> =>
+  strip(
+    await execute(
+      { type: "apply_develop_preset", preset_id, targets, process_version: processVersion },
+      "pasted",
+    ),
+  );
+export const createExportPreset = async (
+  name: string,
+  folder: string,
+  settings: ExportPresetSettings,
+): Promise<PresetInfo> =>
+  (await execute({ type: "create_export_preset", name, folder, settings }, "preset")).preset;
+export const updateExportPreset = async (preset_id: string, settings: ExportPresetSettings): Promise<PresetInfo> =>
+  (await execute({ type: "update_export_preset", preset_id, settings }, "preset")).preset;
+export const renamePreset = async (kind: PresetKind, preset_id: string, name: string): Promise<PresetInfo> =>
+  (await execute({ type: "rename_preset", kind, preset_id, name }, "preset")).preset;
+export const movePreset = async (kind: PresetKind, preset_id: string, folder: string): Promise<PresetInfo> =>
+  (await execute({ type: "move_preset", kind, preset_id, folder }, "preset")).preset;
+/** フォルダの名前を変える（そのフォルダのプリセットをすべて移す）。移した数。 */
+export const renamePresetFolder = async (kind: PresetKind, folder: string, name: string) =>
+  (await execute({ type: "rename_preset_folder", kind, folder, name }, "updated")).count;
+export const deletePreset = async (kind: PresetKind, preset_id: string) => {
+  await execute({ type: "delete_preset", kind, preset_id }, "ok");
+};
+/** プリセットのファイル（.json）を読み込む（元のファイルは変えない）。 */
+export const importPresets = async (paths: string[], kind: PresetKind | null): Promise<PresetImportReport> =>
+  strip(await execute({ type: "import_presets", paths, kind }, "preset_import"));
+/** プリセットをファイルに書き出す（上書きしない）。書いたファイル。 */
+export const exportPresetFiles = async (kind: PresetKind, preset_ids: string[], dest_dir: string): Promise<string[]> =>
+  (await execute({ type: "export_preset_files", kind, preset_ids, dest_dir }, "paths")).paths;
+/** 書き出しのファイル名の例（見本の写真）。 */
+export const exportNamePreview = async (file_naming: RenameRule | null, format: ExportFormat): Promise<NamePreview> =>
+  strip(await execute({ type: "export_name_preview", file_naming, format }, "name_preview"));
+
 export const copySettings = async (variant_id: VariantId): Promise<DevelopSettings> =>
   (await execute({ type: "copy_settings", variant_id }, "settings")).settings;
 /**
@@ -400,12 +498,28 @@ export const constrainCrop = async (
 ): Promise<CropRect> =>
   (await execute({ type: "constrain_crop", variant_id, crop, angle_deg }, "crop")).crop;
 
+/** 透かしの見本（EXP-03。灰色の濃淡の見本の画像に、書き出しと同じ計算で重ねた PNG）。 */
+export const watermarkPreview = async (watermark: Watermark, width?: number, height?: number): Promise<WatermarkPreview> =>
+  strip(await execute({ type: "watermark_preview", watermark, width, height }, "watermark_preview"));
+/** OS の既定のフォントのフォルダ（透かしのフォントを選ぶ最初の場所。あるものだけ）。 */
+export const systemFontDirs = async (): Promise<string[]> =>
+  (await execute({ type: "system_font_dirs" }, "paths")).paths;
+
 // --- 書き出し・削除 ---
 export const exportVariants = async (
   variant_ids: VariantId[],
   settings: ExportSettings,
   dest_dir: string,
-) => (await execute({ type: "export", variant_ids, settings, dest_dir }, "job_started")).job_id;
+  file_naming: RenameRule | null = null,
+) =>
+  (
+    await execute(
+      file_naming
+        ? { type: "export", variant_ids, settings, dest_dir, file_naming }
+        : { type: "export", variant_ids, settings, dest_dir },
+      "job_started",
+    )
+  ).job_id;
 export const planDelete = async (kind: DeleteKind, variant_ids: VariantId[]): Promise<DeletePlan> =>
   strip(await execute({ type: "plan_delete", kind, variant_ids }, "delete_plan"));
 export const executeDelete = async (plan_id: number): Promise<DeleteReport> =>

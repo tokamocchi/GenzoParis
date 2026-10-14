@@ -28,7 +28,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::catalog::Catalog;
 use crate::error::{CatalogError, Result};
-use crate::util::{checked_name, i64_to_u32, non_empty_name, now_utc_string, parse_db_utc};
+use crate::util::{checked_name, i64_to_u32, now_utc_string, parse_db_utc};
 
 /// マスターの variant を作ったとき（登録したとき）の履歴の名前。
 pub const HISTORY_LABEL_IMPORT: &str = "読み込み";
@@ -256,7 +256,12 @@ pub struct Snapshot {
     pub name: String,
     /// 作った日時。
     pub created_at: DateTime<Utc>,
+    /// 保存した設定の処理バージョン（作ったときの写真の版。今の写真の版と違うことがある）。
+    pub process_version: u32,
 }
+
+/// スナップショットの名前の文字数の上限（Unicode のスカラー値の数。**仮置き**: 200。仮想コピーの名前と同じ）。
+pub const MAX_SNAPSHOT_NAME_CHARS: usize = 200;
 
 /// 仮想コピーの名前の文字数の上限（Unicode のスカラー値の数。**仮置き**: 200。コレクションの名前と同じ）。
 pub const MAX_VARIANT_NAME_CHARS: usize = 200;
@@ -527,8 +532,11 @@ impl Catalog {
     }
 
     /// 現在の設定でスナップショットを作る（DEV-28）。
+    ///
+    /// 名前は前後の空白を除いて [`MAX_SNAPSHOT_NAME_CHARS`] 文字までで、改行・タブなどの制御文字は使えない。
+    /// 同じ写真のほかのスナップショットと同じ名前でもよい（Lightroom と同じ。作った日時で見分ける）。
     pub fn create_snapshot(&mut self, variant_id: VariantId, name: &str) -> Result<SnapshotId> {
-        let name = non_empty_name(name, "スナップショットの名前")?;
+        let name = checked_name(name, "スナップショットの名前", MAX_SNAPSHOT_NAME_CHARS)?;
         let now = now_utc_string();
         let changed = self.conn.execute(
             "INSERT INTO snapshot(variant_id, name, develop_json, process_version, created_at)
@@ -541,26 +549,96 @@ impl Catalog {
         Ok(SnapshotId::new(self.conn.last_insert_rowid()))
     }
 
+    /// 履歴の項目 `entry`（`variant_id` の履歴）の設定でスナップショットを作る（DEV-28。履歴のパネルの
+    /// 「この段階からスナップショットを作る」）。名前の規則は [`Catalog::create_snapshot`] と同じ。`entry` が
+    /// その写真の履歴になければ [`CatalogError::NotFound`]。今の設定・履歴の位置は変えない。
+    pub fn create_snapshot_from_history(
+        &mut self,
+        variant_id: VariantId,
+        entry: HistoryEntryId,
+        name: &str,
+    ) -> Result<SnapshotId> {
+        let name = checked_name(name, "スナップショットの名前", MAX_SNAPSHOT_NAME_CHARS)?;
+        let now = now_utc_string();
+        let changed = self.conn.execute(
+            "INSERT INTO snapshot(variant_id, name, develop_json, process_version, created_at)
+             SELECT variant_id, ?3, develop_json, process_version, ?4 FROM history_entry
+             WHERE id = ?2 AND variant_id = ?1",
+            params![variant_id.get(), entry.get(), name, now],
+        )?;
+        if changed == 0 {
+            return Err(CatalogError::NotFound(format!(
+                "履歴 {entry}（variant {variant_id} の履歴）"
+            )));
+        }
+        Ok(SnapshotId::new(self.conn.last_insert_rowid()))
+    }
+
+    /// スナップショットの名前を変える（規則は [`Catalog::create_snapshot`] と同じ）。
+    pub fn rename_snapshot(&mut self, snapshot: SnapshotId, name: &str) -> Result<()> {
+        let name = checked_name(name, "スナップショットの名前", MAX_SNAPSHOT_NAME_CHARS)?;
+        let n = self.conn.execute(
+            "UPDATE snapshot SET name = ?2 WHERE id = ?1",
+            params![snapshot.get(), name],
+        )?;
+        if n == 0 {
+            return Err(CatalogError::NotFound(format!(
+                "スナップショット {snapshot}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// スナップショットの 1 件（設定は含まない）。
+    pub fn snapshot(&self, snapshot: SnapshotId) -> Result<Snapshot> {
+        let row = self
+            .conn
+            .prepare_cached(
+                "SELECT variant_id, name, created_at, process_version FROM snapshot WHERE id = ?1",
+            )?
+            .query_row([snapshot.get()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .optional()?
+            .ok_or_else(|| CatalogError::NotFound(format!("スナップショット {snapshot}")))?;
+        let (variant_id, name, created_at, pv) = row;
+        Ok(Snapshot {
+            id: snapshot,
+            variant_id: VariantId::new(variant_id),
+            name,
+            created_at: parse_db_utc(&created_at)?,
+            process_version: i64_to_u32(pv, "process_version")?,
+        })
+    }
+
     /// variant のスナップショットの一覧（作った順）。
     pub fn snapshots(&self, variant_id: VariantId) -> Result<Vec<Snapshot>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, name, created_at FROM snapshot WHERE variant_id = ?1 ORDER BY id",
+            "SELECT id, name, created_at, process_version FROM snapshot WHERE variant_id = ?1
+             ORDER BY id",
         )?;
         let rows = stmt.query_map([variant_id.get()], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (id, name, created_at) = r?;
+            let (id, name, created_at, pv) = r?;
             out.push(Snapshot {
                 id: SnapshotId::new(id),
                 variant_id,
                 name,
                 created_at: parse_db_utc(&created_at)?,
+                process_version: i64_to_u32(pv, "process_version")?,
             });
         }
         Ok(out)

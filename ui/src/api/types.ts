@@ -675,6 +675,8 @@ export interface PasteReport {
   upgraded: number;
   /** 処理バージョンが古いため、写した項目の一部（レンズ補正など）が使われない写真の数。 */
   needs_upgrade: number;
+  /** 除いた動画の数（現像プリセットの適用。設定の貼り付けでは 0。古いコアは送らない）。 */
+  skipped_videos?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +687,54 @@ export type ExportFormat = { jpeg: { quality: number } } | "tiff16" | "png8" | "
 export type ExportSize = "original" | { long_edge: number };
 export type ConflictPolicy = "sequence" | "overwrite" | "skip";
 
+/** 出力シャープの対象（EXP-03。genzo-model の SharpenMedia）。 */
+export type SharpenMedia = "screen" | "matte_paper" | "glossy_paper";
+/** 出力シャープの適用量（genzo-model の SharpenAmount）。 */
+export type SharpenAmount = "low" | "standard" | "high";
+
+/** 出力シャープ（EXP-03。縮小の後に、出力の画素の大きさに合わせてかける）。 */
+export interface OutputSharpening {
+  media: SharpenMedia;
+  amount: SharpenAmount;
+}
+
+/** 透かしの位置（写真の 9 か所。genzo-model の WatermarkAnchor）。 */
+export type WatermarkAnchor =
+  | "top_left"
+  | "top"
+  | "top_right"
+  | "left"
+  | "center"
+  | "right"
+  | "bottom_left"
+  | "bottom"
+  | "bottom_right";
+
+/**
+ * 透かしの中身（genzo-model の WatermarkContent）。文字のフォントは利用者の OS のフォントのファイル（アプリは同梱
+ * しない）。色は sRGB の "#RRGGBB"。
+ */
+export type WatermarkContent =
+  | { text: { text: string; font: string; font_index?: number; color?: string } }
+  | { image: { path: string } };
+
+/**
+ * 透かし（EXP-03。genzo-model の Watermark）。大きさ（文字は文字の大きさ、画像は幅）・余白は写真の短辺に対する %。
+ */
+export interface Watermark {
+  content: WatermarkContent;
+  anchor?: WatermarkAnchor;
+  /** 1〜100 %。 */
+  size: number;
+  /** 1〜100 %（省略時 60）。 */
+  opacity?: number;
+  /** 0〜25 %（省略時 2）。 */
+  margin?: number;
+}
+
+/** 動画の書き出し（EXP-05。copy: 元のファイルのまま再エンコードせずにコピーする）。 */
+export type VideoExport = "copy" | "skip";
+
 export interface ExportSettings {
   format: ExportFormat;
   color_space: OutputColorSpace;
@@ -693,6 +743,26 @@ export interface ExportSettings {
   on_conflict: ConflictPolicy;
   /** キーワード（XMP の dc:subject）を書かない（LIB-09。省略時は書く）。 */
   remove_keywords?: boolean;
+  /** 解像度（ppi。1〜1200。省略時 72。EXP-03）。 */
+  resolution_ppi?: number;
+  /** 出力シャープ（EXP-03。null・省略ならかけない）。 */
+  output_sharpening?: OutputSharpening | null;
+  /** 透かし（EXP-03。null・省略なら付けない）。 */
+  watermark?: Watermark | null;
+  /** 動画の扱い（EXP-05。省略時 copy。GPS を削除する設定では書き出さない）。 */
+  videos?: VideoExport;
+}
+
+/** 透かしの見本（genzo-api の WatermarkPreview）。 */
+export interface WatermarkPreview {
+  width: number;
+  height: number;
+  /** PNG（sRGB）の base64。 */
+  png_base64: string;
+  mark_width: number;
+  mark_height: number;
+  /** フォントにない文字・縮めたなど。 */
+  warnings: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +971,7 @@ export type ExportOutcome =
       warnings: string[];
       render_deps: RenderDeps | null;
     }
+  | { status: "copied"; path: string; bytes: number; full_hash: string; warnings: string[] }
   | { status: "skipped"; reason: string; existing: string | null }
   | { status: "failed"; error: ErrorInfo };
 
@@ -913,6 +984,8 @@ export interface ExportReport {
   dest_dir: string;
   items: ExportItem[];
   written: number;
+  /** コピーした動画の数（EXP-05。古いコアの応答にはない）。 */
+  copied?: number;
   skipped: number;
   failed: number;
   cancelled: boolean;
@@ -1303,6 +1376,67 @@ export interface HistoryItem {
   created_at: string;
   label: string;
   is_current: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// スナップショット（DEV-28）・プリセット（DEV-29・EXP-02）
+// ---------------------------------------------------------------------------
+
+/** スナップショットの 1 件（genzo-api の SnapshotInfo）。 */
+export interface SnapshotInfo {
+  id: SnapshotId;
+  variant_id: VariantId;
+  name: string;
+  created_at: string;
+  /** 保存した設定の処理バージョン（適用すると写真もこの版になる）。 */
+  process_version: number;
+}
+
+/** スナップショットの出どころ（genzo-api の SnapshotSource。省略時は今の状態）。 */
+export type SnapshotSource = { kind: "current" } | { kind: "history"; entry_id: HistoryEntryId };
+
+/** プリセットの種類（genzo-api の PresetKind）。 */
+export type PresetKind = "develop" | "export";
+
+/**
+ * 書き出しプリセットの中身（EXP-02。genzo-api の ExportPresetSettings）。出力シャープ・透かし・解像度・動画（EXP-03・
+ * EXP-05）は export の中の項目（無い項目は既定値として読む）。
+ */
+export interface ExportPresetSettings {
+  export: ExportSettings;
+  /** 書き出し先のフォルダ（null なら書き出すときに選ぶ）。 */
+  destination: string | null;
+  /** ファイル名の規則（null なら元のファイル名。仮想コピーは名前を足す）。 */
+  file_naming: RenameRule | null;
+}
+
+/** プリセットの一覧の 1 件（genzo-api の PresetInfo）。 */
+export interface PresetInfo {
+  kind: PresetKind;
+  /** ID（16 桁の 16 進数）。 */
+  id: string;
+  name: string;
+  /** フォルダ（空ならフォルダなし）。 */
+  folder: string;
+  created_at: string | null;
+  updated_at: string | null;
+  format_version: number;
+  /** 使えない理由（新しい版のアプリで作った・壊れているなど）。使えるなら null。 */
+  problem: string | null;
+  /** 現像プリセット: 含める項目。 */
+  groups?: SettingGroups;
+  /** 現像プリセット: 作ったときの写真の処理バージョン。 */
+  process_version?: number;
+  /** 書き出しプリセット: 中身（この PC で使えないパス（別の OS のパス）は外したもの）。 */
+  export?: ExportPresetSettings;
+  /** 使えるが、一部の値を使わないことの知らせ（別の OS で作ったプリセットの書き出し先・透かしのファイルなど）。 */
+  warnings?: string[];
+}
+
+/** プリセットのファイルの読み込みの結果（genzo-api の PresetImportReport）。 */
+export interface PresetImportReport {
+  imported: PresetInfo[];
+  failed: { path: string; message: string }[];
 }
 
 export interface ClipCounts {
@@ -1725,6 +1859,29 @@ export type Command =
   | { type: "redo"; variant_id: VariantId }
   | { type: "go_to_history"; variant_id: VariantId; entry_id: HistoryEntryId }
   | { type: "history"; variant_id: VariantId }
+  // スナップショット（DEV-28。genzo-api の snapshots.rs）。
+  | { type: "snapshots"; variant_id: VariantId }
+  | { type: "create_snapshot"; variant_id: VariantId; name: string; source?: SnapshotSource }
+  | { type: "rename_snapshot"; snapshot_id: SnapshotId; name: string }
+  | { type: "delete_snapshot"; snapshot_id: SnapshotId }
+  | { type: "apply_snapshot"; snapshot_id: SnapshotId }
+  // プリセット（DEV-29・EXP-02。genzo-api の presets.rs）。
+  | { type: "presets"; kind: PresetKind }
+  | { type: "develop_preset_settings"; preset_id: string }
+  | { type: "create_develop_preset"; name: string; folder: string; groups: SettingGroups; variant_id: VariantId }
+  | { type: "update_develop_preset"; preset_id: string; groups: SettingGroups; variant_id: VariantId }
+  | { type: "apply_develop_preset"; preset_id: string; targets: VariantId[]; process_version?: PasteVersion }
+  | { type: "create_export_preset"; name: string; folder: string; settings: ExportPresetSettings }
+  | { type: "update_export_preset"; preset_id: string; settings: ExportPresetSettings }
+  | { type: "rename_preset"; kind: PresetKind; preset_id: string; name: string }
+  | { type: "move_preset"; kind: PresetKind; preset_id: string; folder: string }
+  | { type: "rename_preset_folder"; kind: PresetKind; folder: string; name: string }
+  | { type: "delete_preset"; kind: PresetKind; preset_id: string }
+  | { type: "import_presets"; paths: string[]; kind?: PresetKind | null }
+  | { type: "export_preset_files"; kind: PresetKind; preset_ids: string[]; dest_dir: string }
+  | { type: "export_name_preview"; file_naming: RenameRule | null; format: ExportFormat }
+  | { type: "watermark_preview"; watermark: Watermark; width?: number; height?: number }
+  | { type: "system_font_dirs" }
   | { type: "copy_settings"; variant_id: VariantId }
   | {
       type: "paste_settings";
@@ -1744,7 +1901,14 @@ export type Command =
       crop: CropRect;
       angle_deg: number;
     }
-  | { type: "export"; variant_ids: VariantId[]; settings: ExportSettings; dest_dir: string }
+  | {
+      type: "export";
+      variant_ids: VariantId[];
+      settings: ExportSettings;
+      dest_dir: string;
+      /** ファイル名の規則（EXP-02。省略・null なら元のファイル名）。 */
+      file_naming?: RenameRule | null;
+    }
   | { type: "plan_delete"; kind: DeleteKind; variant_ids: VariantId[] }
   | { type: "execute_delete"; plan_id: number }
   | { type: "get_settings" }
@@ -1832,6 +1996,12 @@ export type Response =
   | { type: "settings"; settings: DevelopSettings }
   | { type: "settings_or_none"; settings: DevelopSettings | null }
   | { type: "history"; entries: HistoryItem[] }
+  | { type: "snapshots"; snapshots: SnapshotInfo[] }
+  | { type: "snapshot"; snapshot: SnapshotInfo }
+  | { type: "presets"; presets: PresetInfo[]; dir: string | null }
+  | { type: "preset"; preset: PresetInfo }
+  | ({ type: "preset_import" } & PresetImportReport)
+  | { type: "paths"; paths: string[] }
   | { type: "variant_created"; variant_id: VariantId }
   | { type: "white_balance"; temperature_k: number; tint: number }
   | ({ type: "mask_color" } & PickedMaskColor)
@@ -1854,6 +2024,7 @@ export type Response =
   | ({ type: "duplicate_groups" } & DuplicateGroupList)
   | ({ type: "file_identity" } & FileIdentity)
   | ({ type: "name_preview" } & NamePreview)
+  | ({ type: "watermark_preview" } & WatermarkPreview)
   | ({ type: "video_playback" } & VideoPlayback)
   | ({ type: "video_proxy_cache" } & VideoProxyCacheStatus)
   | { type: "capture_devices"; devices: CaptureDevice[] }
@@ -2022,7 +2193,8 @@ export type WarningCode =
   | "render_deps_changed"
   | "import_copy_rolled_back"
   | "volumes_rebound"
-  | "move_source_left";
+  | "move_source_left"
+  | "video_copy";
 
 export type CoreEvent =
   | { type: "job_progress"; job_id: number; kind: JobKind; done: number; total: number }

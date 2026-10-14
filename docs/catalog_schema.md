@@ -403,7 +403,7 @@ GROUP BY full_hash HAVING count(*) > 1;
 
 ### `snapshot`
 
-スナップショット（DEV-28。v1 で使う）。
+スナップショット（DEV-28。2026-10-14 から使う。決定事項ログ No.164）。今の状態か履歴の項目の状態（`history_entry` の `develop_json`・`process_version` をそのまま写す）から作る。名前は 1〜200 文字で、同じ名前を許す。適用すると、設定と処理バージョンを variant に写して履歴に 1 件足す。
 
 | 列 | 型 | NULL | 既定値 | 意味 |
 |---|---|---|---|---|

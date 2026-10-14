@@ -31,6 +31,12 @@
 //! genzo develop mask add-part 12 1 --luminance 20,80          # マスク 1 に輝度範囲を交差させる
 //! genzo develop mask list 12 && genzo develop mask overlay 12 1 --out mask1.png
 //! echo '{"exposure_ev": 0.5}' | genzo develop set 12 --json -
+//! genzo develop snapshot create 12 "明るめ"                # スナップショット（DEV-28）
+//! genzo develop snapshot apply 3                          # 履歴に 1 件記録して戻す
+//! genzo preset create-develop "明るく" --from 12 --groups basic-tone,presence --folder 基本   # 現像プリセット（DEV-29）
+//! genzo preset apply "明るく" --to 13 14
+//! genzo preset create-export "Web 用" --format jpeg --long-edge 2048 --remove-gps --rename "{date}-{seq}"   # EXP-02
+//! genzo export 12 13 --preset "Web 用" --out ~/out
 //! genzo export 12 13 --out ~/out --format jpeg --quality 90 --long-edge 2048 --remove-gps
 //! genzo render DSC00001.ARW --out out.tif --settings settings.json   # カタログなし
 //! genzo render DSC00001.ARW --out out.jpg --dcp camera.dcp --cube film.cube   # ファイルのプロファイル・ルック
@@ -51,8 +57,8 @@
 //!   - 3 にするもの: 書き出し・削除・サムネイルの作り直しで一部が失敗した、取り込みで読めずに登録
 //!     できなかったファイルがある（メタデータを読めずに `status = error` で登録したものは 0）、写真の移動・
 //!     名前の変更・再リンクで一部の写真を飛ばした・失敗した、`missing check` で見つからない写真があった、
-//!     `catalog check` で問題が見つかった、`bench` で前回より悪化した（今回の回数が 1.8 節の規則を満たす
-//!     計測だけ）。問題の検出も「結果は出したが、問題がある」として 3 にまとめる（スクリプトは 3 を見て
+//!     `catalog check` で問題が見つかった、`profile import`・`preset import` で取り込めなかったファイルがある、
+//!     `bench` で前回より悪化した（今回の回数が 1.8 節の規則を満たす計測だけ）。問題の検出も「結果は出したが、問題がある」として 3 にまとめる（スクリプトは 3 を見て
 //!     結果の JSON を確かめる）。
 //!   - 1 にするもの: 処理できなかったエラーのほか、`trash` を `--yes` なしで中止した場合（端末では確認を
 //!     求める。何も実行していないので、一部の失敗ではない）。
@@ -81,10 +87,12 @@
 //! | `library` | `import`・`search`・`show`・`rate / flag / label / caption / metadata`・`thumbs`・`remove`・`trash` |
 //! | `organize` | `keyword list / add / remove / show / create / rename / move / delete / export`・`collection list / create / add / remove / rename / move / delete / rule`（LIB-09〜11）と、`search --keyword / --collection / --rule` の解釈 |
 //! | `stacks` | `stack create / add / remove / unstack / top / collapse / expand / show / auto`（LIB-12）と `develop rename-copy / make-master`（LIB-13） |
-//! | `develop` | `develop get / set / upgrade / source / reset / undo / redo / history / copy / virtual-copy / delete-copy / rename-copy / make-master / region / before / compare`（`set` のレンズ補正のオプション・`upgrade`・`source` は DEV-14・DATA-09） |
+//! | `develop` | `develop get / set / upgrade / source / reset / undo / redo / history / copy / virtual-copy / delete-copy / rename-copy / make-master / region / before / compare`（`set` のレンズ補正のオプション・`upgrade`・`source` は DEV-14・DATA-09）と `develop snapshot list / create / rename / delete / apply`（DEV-28） |
 //! | `masks` | `develop mask list / add / add-part / remove-part / set / remove / overlay / pick-color`（ローカル補正のマスク・部品・調整、重ねて表示の PNG、色域のスポイト。DEV-18・DEV-19） |
 //! | `profile` | `profile import / list / show / remove / inspect`（カメラプロファイル（DCP）・ルック（3D LUT の .cube）。DEV-17） |
-//! | `export` | `export` と書き出しの設定 |
+//! | `preset` | `preset dir / list / show / create-develop / update-develop / apply / create-export / update-export / rename / move / rename-folder / delete / import / export-files`（現像プリセット・書き出しプリセット。DEV-29・EXP-02。アプリと同じフォルダ（`--presets-dir`・`GENZO_PRESETS_DIR`）。写真の設定を使うものだけカタログを開く） |
+//! | `export` | `export` と書き出しの設定（`--preset` の書き出しプリセット・`--rename` などのファイル名の規則（EXP-02）・`--ppi`・`--output-sharpen`・`--watermark-*`（EXP-03）・`--skip-videos`（動画は既定で元のファイルのままコピーする。EXP-05）） |
+//! | `watermark` | `watermark preview / font-dirs`（透かしの見本の PNG・OS のフォントのフォルダ。カタログは使わない。EXP-03） |
 //! | `standalone` | カタログなしの `render`・`info`（ワーカーを直接使う） |
 //! | `bench` | `bench preview / export`（genzo-testkit の計測と記録。計測の設定に `develop set` と同じオプション・`--dcp`・`--cube`・`--masks`・`--sample-masks` を当てられる） |
 //! | `logs` | `log info / clear`（ログ・クラッシュレポート。カタログは使わない。SYS-07） |
@@ -138,12 +146,14 @@ mod logs;
 mod masks;
 mod organize;
 pub mod output;
+mod preset;
 mod profile;
 mod session;
 mod stacks;
 mod standalone;
 mod time;
 mod video;
+mod watermark;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -164,7 +174,7 @@ pub const EXIT_ERROR: u8 = 1;
 pub const EXIT_USAGE: u8 = 2;
 /// 終了コード: 結果は出したが、一部が失敗した・問題が見つかった（書き出し・削除・サムネイルの作り直しの
 /// 一部の失敗、取り込みで登録できなかったファイル、`catalog check` で見つかった問題、`bench` での悪化、
-/// `profile import` で取り込めなかったファイル。
+/// `profile import`・`preset import` で取り込めなかったファイル。
 /// implementation_status の No.30）。
 pub const EXIT_PARTIAL: u8 = 3;
 /// 終了コード: Ctrl+C で中断した（Unix の慣習の 128 + SIGINT。`interrupt` の doc）。
@@ -319,6 +329,15 @@ pub(crate) fn log_dir(g: &GlobalArgs) -> Option<std::path::PathBuf> {
         .or_else(genzo_api::logging::default_log_dir)
 }
 
+/// プリセット（DEV-29・EXP-02）のフォルダ（`--presets-dir`（相対パスは今のフォルダから）、なければ genzo-api の
+/// `default_presets_dir`: 環境変数 `GENZO_PRESETS_DIR`、なければアプリと同じ場所）。分からなければ `None`。
+pub(crate) fn presets_dir(g: &GlobalArgs) -> Option<std::path::PathBuf> {
+    g.presets_dir
+        .as_ref()
+        .map(|d| std::path::absolute(d).unwrap_or_else(|_| d.clone()))
+        .or_else(genzo_api::default_presets_dir)
+}
+
 /// 解釈した引数でコマンドを実行する。
 pub fn run(cli: Cli) -> CliResult<Status> {
     let g = cli.global;
@@ -347,8 +366,10 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         Command::Stack(c) => stacks::run(&g, out, c),
         Command::Develop(c) => develop::run(&g, out, c),
         Command::Profile(c) => profile::run(&g, out, c),
+        Command::Preset(c) => preset::run(&g, out, c),
         Command::Export(a) => export::run(&g, out, a),
         Command::Render(a) => standalone::render(&g, out, a),
+        Command::Watermark(c) => watermark::run(out, c),
         Command::Info { file } => standalone::info(out, &file),
         Command::Thumbs(c) => library::thumbs(&g, out, c),
         Command::Remove { variants } => {

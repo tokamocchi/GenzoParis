@@ -162,6 +162,7 @@ mod tests {
                 width: 33,
                 height: 17,
                 color_space: OutputColorSpace::AdobeRgb,
+                resolution_ppi: crate::exif_write::EXPORT_RESOLUTION_PPI,
             },
         );
         let bytes = encode_tiff16(&img, Some(&icc), Some(&ifds)).unwrap();

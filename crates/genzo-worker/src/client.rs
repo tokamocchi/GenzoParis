@@ -60,7 +60,8 @@ use crate::limits::MIN_MEMORY_LIMIT_BYTES;
 use crate::protocol::{
     GarbageMode, Job, JobKind, JobOutput, LineRead, LinearImageInfo, MAX_LINE_BYTES, OversizeMode,
     PROTOCOL_VERSION, PhotoProbe, PongInfo, RawFrameInfo, Request, Response, ShmRef, ThumbnailInfo,
-    ThumbnailSource, VideoFrameInfo, WorkerError, WorkerErrorKind, read_line_limited,
+    ThumbnailSource, VideoFrameInfo, WatermarkRequest, WorkerError, WorkerErrorKind,
+    read_line_limited,
 };
 use crate::shm::{BufferError, PayloadKind, SHM_HEADER_LEN, ShmArena, ShmBuffer};
 use crate::tree::ProcessTree;
@@ -88,6 +89,9 @@ pub const DEFAULT_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(20);
 /// （20 秒）と、代表フレーム・先頭のフレームの 2 回の ffmpeg（各 30 秒）の合計より長くする。
 /// PERF-11（1 本あたり 2 秒）とは別の、ハングへの備え。PoC-7 で見直す）。
 pub const DEFAULT_VIDEO_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(90);
+/// [`Job::RenderWatermark`] のタイムアウトの既定値（**仮置き**: 30 秒。透かしの画像のデコード・フォントの文字の
+/// ラスタライズは通常 1 秒より短い。画像のデコードと同じ値にした）。
+pub const DEFAULT_RENDER_WATERMARK_TIMEOUT: Duration = Duration::from_secs(30);
 /// テスト用のジョブのタイムアウトの既定値（**仮置き**: 10 秒）。
 pub const DEFAULT_TEST_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`Job::Shutdown`] の応答と終了を待つ時間の既定値（**仮置き**: 5 秒）。
@@ -117,6 +121,9 @@ pub const INITIAL_IMAGE_SHM_BYTES: u64 = 64 * 1024 * 1024;
 /// サムネイルの共有メモリの最初の大きさ（**仮置き**: 4 MiB。L1（長辺 2560px、品質 85）の
 /// JPEG は 1〜2 MB 程度の見込み）。
 pub const INITIAL_THUMBNAIL_SHM_BYTES: u64 = 4 * 1024 * 1024;
+/// 透かし（[`Job::RenderWatermark`]）の共有メモリの最初の大きさ（**仮置き**: 8 MiB。約 100 万画素の RGBA 16bit。
+/// 長辺 2048 の写真の右下の文字なら十分。大きな透かしは確保し直す）。
+pub const INITIAL_WATERMARK_SHM_BYTES: u64 = 8 * 1024 * 1024;
 /// テスト用のジョブの共有メモリの大きさ。
 const TEST_HOOK_SHM_BYTES: u64 = 64 * 1024;
 
@@ -132,6 +139,8 @@ pub struct InitialShmBytes {
     pub image: u64,
     /// [`Job::Thumbnail`]・[`Job::VideoThumbnail`]。
     pub thumbnail: u64,
+    /// [`Job::RenderWatermark`]。
+    pub watermark: u64,
 }
 
 impl Default for InitialShmBytes {
@@ -140,6 +149,7 @@ impl Default for InitialShmBytes {
             raw: INITIAL_RAW_SHM_BYTES,
             image: INITIAL_IMAGE_SHM_BYTES,
             thumbnail: INITIAL_THUMBNAIL_SHM_BYTES,
+            watermark: INITIAL_WATERMARK_SHM_BYTES,
         }
     }
 }
@@ -194,6 +204,8 @@ pub struct JobTimeouts {
     pub thumbnail: Duration,
     /// [`Job::VideoThumbnail`]。
     pub video_thumbnail: Duration,
+    /// [`Job::RenderWatermark`]。
+    pub render_watermark: Duration,
     /// テスト用のジョブ。
     pub test_hook: Duration,
     /// [`Job::Shutdown`]（応答と終了を待つ時間）。
@@ -210,6 +222,7 @@ impl Default for JobTimeouts {
             decode_image: DEFAULT_DECODE_IMAGE_TIMEOUT,
             thumbnail: DEFAULT_THUMBNAIL_TIMEOUT,
             video_thumbnail: DEFAULT_VIDEO_THUMBNAIL_TIMEOUT,
+            render_watermark: DEFAULT_RENDER_WATERMARK_TIMEOUT,
             test_hook: DEFAULT_TEST_HOOK_TIMEOUT,
             shutdown: DEFAULT_SHUTDOWN_TIMEOUT,
         }
@@ -227,6 +240,7 @@ impl JobTimeouts {
             decode_image: timeout,
             thumbnail: timeout,
             video_thumbnail: timeout,
+            render_watermark: timeout,
             test_hook: timeout,
             shutdown: timeout,
         }
@@ -243,11 +257,12 @@ impl JobTimeouts {
             JobKind::DecodeImage => self.decode_image,
             JobKind::Thumbnail => self.thumbnail,
             JobKind::VideoThumbnail => self.video_thumbnail,
+            JobKind::RenderWatermark => self.render_watermark,
             JobKind::TestHook => self.test_hook,
         }
     }
 
-    fn all(&self) -> [Duration; 9] {
+    fn all(&self) -> [Duration; 10] {
         [
             self.ping,
             self.probe_photo,
@@ -256,6 +271,7 @@ impl JobTimeouts {
             self.decode_image,
             self.thumbnail,
             self.video_thumbnail,
+            self.render_watermark,
             self.test_hook,
             self.shutdown,
         ]
@@ -536,6 +552,17 @@ pub struct Thumbnail {
     pub source: ThumbnailSource,
     /// 動画の場合の付随情報。
     pub video: Option<VideoFrameInfo>,
+}
+
+/// [`WorkerClient::render_watermark`] の結果（EXP-03）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatermarkImage {
+    /// 透かしの画素（RGBA の 16bit。RGB は出力の色空間に符号化した値）。
+    pub bitmap: genzo_media::watermark::WatermarkBitmap,
+    /// フォントにない文字（`.notdef` で描いた。重ならない）。
+    pub missing: Vec<char>,
+    /// 収めるために文字の大きさを縮めたか。
+    pub shrunk: bool,
 }
 
 /// テスト用の口（[`WorkerClient::run_test_hook`]）。
@@ -933,8 +960,8 @@ pub struct WorkerClient {
     process: Option<WorkerProcess>,
     next_id: u64,
     stats: WorkerStats,
-    /// 種類ごとの、直近に必要だった共有メモリの大きさ（CFA, RGB, JPEG の順）。
-    last_required: [u64; 3],
+    /// 種類ごとの、直近に必要だった共有メモリの大きさ（CFA, RGB, JPEG, RGBA の順）。
+    last_required: [u64; 4],
     label: String,
 }
 
@@ -974,7 +1001,7 @@ impl WorkerClient {
             process: None,
             next_id: 1,
             stats: WorkerStats::default(),
-            last_required: [0; 3],
+            last_required: [0; 4],
             label,
         };
         client.process = Some(client.start()?);
@@ -1308,6 +1335,7 @@ impl WorkerClient {
             PayloadKind::CfaU16 => 0,
             PayloadKind::RgbF32 => 1,
             PayloadKind::Jpeg => 2,
+            PayloadKind::RgbaU16 => 3,
         }
     }
 
@@ -1317,6 +1345,7 @@ impl WorkerClient {
             PayloadKind::CfaU16 => initial.raw,
             PayloadKind::RgbF32 => initial.image,
             PayloadKind::Jpeg => initial.thumbnail,
+            PayloadKind::RgbaU16 => initial.watermark,
         };
         base.max(self.last_required[Self::kind_index(kind)])
     }
@@ -1327,6 +1356,7 @@ impl WorkerClient {
             PayloadKind::CfaU16 => MAX_PIXELS * 2,
             PayloadKind::RgbF32 => MAX_IMAGE_PIXELS * 12,
             PayloadKind::Jpeg => MAX_THUMBNAIL_JPEG_BYTES,
+            PayloadKind::RgbaU16 => genzo_media::watermark::MAX_WATERMARK_PIXELS * 8,
         };
         SHM_HEADER_LEN as u64 + data
     }
@@ -1601,6 +1631,42 @@ impl WorkerClient {
         cancel: &CancellationToken,
     ) -> Result<Thumbnail, WorkerClientError> {
         self.thumbnail_job(true, path, spec, cancel)
+    }
+
+    /// 書き出しの透かしを作る（EXP-03。透かしの画像・フォントのファイルはワーカーが読む。SEC-05）。
+    ///
+    /// 結果の寸法が依頼の上限（＋ 文字の外接矩形の余裕の 2 画素）を超える・画素の長さが合わない・アルファでない値が
+    /// 入っているなどの不正な結果は、[`WorkerClientError::InvalidBuffer`]（ワーカーを起動し直す）。
+    pub fn render_watermark(
+        &mut self,
+        request: &WatermarkRequest,
+        cancel: &CancellationToken,
+    ) -> Result<WatermarkImage, WorkerClientError> {
+        if let Some(p) = request.problem() {
+            return Err(WorkerClientError::InvalidArgument(p));
+        }
+        let path = request.content.file().to_path_buf();
+        self.file_job(&path, JobKind::RenderWatermark, |c| {
+            let (out, buffer) =
+                c.shm_job(PayloadKind::RgbaU16, cancel, |shm| Job::RenderWatermark {
+                    request: request.clone(),
+                    shm,
+                })?;
+            let JobOutput::Watermark(info) = out else {
+                return c.unexpected(&out);
+            };
+            let bitmap = buffer
+                .open_payload(PayloadKind::RgbaU16, c.config.verify_checksum)
+                .and_then(|p| validate::watermark(&p, &info, request));
+            match bitmap {
+                Ok(bitmap) => Ok(WatermarkImage {
+                    bitmap,
+                    missing: validate::sanitize_missing(&info.missing),
+                    shrunk: info.shrunk,
+                }),
+                Err(e) => c.invalid_buffer(e),
+            }
+        })
     }
 
     /// テスト用の口を実行する（ワーカーを `test_hooks` 付きで起動した場合だけ動く）。

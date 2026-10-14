@@ -49,7 +49,7 @@ pub const EXIT_CODES_HELP: &str = "終了コード:
   3    結果は出したが、一部が失敗した・問題が見つかった（書き出し・削除・サムネイルの作り直しの一部の
        失敗、取り込みで登録できなかったファイル、写真の移動・名前の変更・再リンクで飛ばした・失敗した
        写真、catalog check で見つかった問題、missing check で見つかった見つからない写真、bench での悪化、
-       profile import で取り込めなかったファイル）
+       profile import・preset import で取り込めなかったファイル）
   130  Ctrl+C で中断した";
 
 /// 全体のオプション（どのサブコマンドの後にも書ける）。
@@ -78,6 +78,10 @@ pub struct GlobalArgs {
     /// GENZO_LOG_FILE=off と同じ
     #[arg(long, global = true)]
     pub no_log_file: bool,
+    /// プリセット（現像プリセット・書き出しプリセット。DEV-29・EXP-02）のフォルダ。省略時は環境変数
+    /// GENZO_PRESETS_DIR、それもなければアプリと同じ場所（genzo preset dir で表示）
+    #[arg(long, global = true, value_name = "DIR")]
+    pub presets_dir: Option<PathBuf>,
     /// 結果を JSON で出す（機械が読む用）
     #[arg(long, global = true)]
     pub json: bool,
@@ -191,10 +195,18 @@ pub enum Command {
     /// --profile`・`--look` に ID で指定する。Adobe のプロファイルなどは同梱しない（利用者が用意したファイルを使う）
     #[command(subcommand)]
     Profile(ProfileCommand),
+    /// 現像プリセット（DEV-29）・書き出しプリセット（EXP-02）: 一覧・作成・更新・適用・名前・フォルダ・削除・
+    /// ファイルの読み込みと書き出し。カタログをまたいで使うので、アプリと同じフォルダ（--presets-dir）に
+    /// 1 件 1 ファイルで置く。プリセットは ID（16 桁の 16 進数）か名前で指定する
+    #[command(subcommand)]
+    Preset(PresetCommand),
     /// 書き出す（P3 のジョブ。進捗は標準エラー）
     Export(ExportArgs),
     /// カタログなしで 1 つのファイルを現像して書き出す（ワーカーで展開する）
     Render(RenderArgs),
+    /// 透かしの見本・フォントのフォルダ（EXP-03。カタログは使わない）
+    #[command(subcommand)]
+    Watermark(WatermarkCommand),
     /// カタログなしでファイルのメタデータを表示する（ワーカーで読む）
     Info {
         /// 写真・動画のファイル
@@ -1397,12 +1409,277 @@ pub enum DevelopCommand {
     /// 比較表示（LIB-03）の同期ズームと同じ範囲を、2 枚までの写真について同時に描いて PNG に書く（コア API
     /// `render_view_region` を試す。範囲の中心は写真ごとの割合、大きさは出力の画素で、どの写真も同じ）
     Compare(CompareArgs),
+    /// スナップショット（DEV-28）: 一覧・作成（今の状態・履歴の項目の状態）・名前の変更・削除・適用（履歴に
+    /// 1 件記録する。処理バージョンも保存した版に戻す）。ビフォーに使うには develop before --source snapshot:<ID>
+    #[command(subcommand)]
+    Snapshot(SnapshotCommand),
     /// ローカル補正（マスク。DEV-18・DEV-19）: 一覧・追加・部品の追加と削除・名前と調整の変更・削除・重ねて
     /// 表示の PNG・色のスポイト。マスクと部品は 1 から数えた番号で指定する（`develop mask list` で見られる）。
     /// 位置・半径・ブラシの大きさは G 座標（ジオメトリ補正後・切り抜く前の全体の外接矩形の長辺を 1 とする。左上が
     /// 0,0）。処理バージョン 2 から使われる
     #[command(subcommand)]
     Mask(MaskCommand),
+}
+
+/// スナップショットの ID を解釈する（1 以上の整数）。
+pub fn parse_snapshot_id(s: &str) -> Result<SnapshotId, String> {
+    match s.trim().parse::<i64>() {
+        Ok(n) if n >= 1 => Ok(SnapshotId::new(n)),
+        _ => Err(format!("スナップショットの ID は 1 以上の整数です（{s}）")),
+    }
+}
+
+/// 履歴の項目の ID を解釈する（1 以上の整数。`develop history` で見られる）。
+pub fn parse_history_entry_id(s: &str) -> Result<HistoryEntryId, String> {
+    match s.trim().parse::<i64>() {
+        Ok(n) if n >= 1 => Ok(HistoryEntryId::new(n)),
+        _ => Err(format!("履歴の項目の ID は 1 以上の整数です（{s}）")),
+    }
+}
+
+/// `develop snapshot` のサブコマンド（DEV-28）。
+#[derive(Debug, Subcommand)]
+pub enum SnapshotCommand {
+    /// 写真のスナップショットの一覧（作った順）
+    List {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+    },
+    /// スナップショットを作る（既定は今の状態。名前は 200 文字まで。同じ名前でもよい）
+    Create {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// 名前
+        name: String,
+        /// 履歴の項目（develop history の ID）の状態から作る（今の設定・履歴の位置は変えない）
+        #[arg(long, value_name = "ID", value_parser = parse_history_entry_id)]
+        from_history: Option<HistoryEntryId>,
+    },
+    /// スナップショットの名前を変える
+    Rename {
+        /// スナップショットの ID
+        #[arg(value_parser = parse_snapshot_id)]
+        snapshot: SnapshotId,
+        /// 新しい名前
+        name: String,
+    },
+    /// スナップショットを削除する（写真の設定・履歴は変えない）
+    Delete {
+        /// スナップショットの ID
+        #[arg(value_parser = parse_snapshot_id)]
+        snapshot: SnapshotId,
+    },
+    /// スナップショットをその写真に適用する（履歴に「スナップショット「名前」を適用」を 1 件記録する。Undo で
+    /// 戻せる）
+    Apply {
+        /// スナップショットの ID
+        #[arg(value_parser = parse_snapshot_id)]
+        snapshot: SnapshotId,
+    },
+}
+
+/// プリセットの種類（DEV-29・EXP-02）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PresetKindArg {
+    /// 現像プリセット。
+    Develop,
+    /// 書き出しプリセット。
+    Export,
+}
+
+impl From<PresetKindArg> for genzo_api::PresetKind {
+    fn from(k: PresetKindArg) -> Self {
+        match k {
+            PresetKindArg::Develop => genzo_api::PresetKind::Develop,
+            PresetKindArg::Export => genzo_api::PresetKind::Export,
+        }
+    }
+}
+
+/// ファイル名の規則のオプション（`export`・`preset create-export`。EXP-02）。
+#[derive(Debug, Clone, Default, Args)]
+pub struct NamingArgs {
+    /// 書き出すファイルの名前のテンプレート（import --rename と同じ項目: {date} {time} {year} {month} {day}
+    /// {hour} {minute} {second} {seq} {name} {camera} {text}。例: "{date}-{seq}"。連番は指定した順。仮想コピーは
+    /// 「-名前」を足す）
+    #[arg(long, value_name = "TEMPLATE")]
+    pub rename: Option<String>,
+    /// テンプレートの {text} に入れる文字
+    #[arg(long, value_name = "TEXT")]
+    pub text: Option<String>,
+    /// 連番（{seq}）の開始番号（既定 1）
+    #[arg(long, value_name = "N")]
+    pub seq_start: Option<u32>,
+    /// 連番（{seq}）の桁数（1〜9。既定 4）
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=9))]
+    pub seq_digits: Option<u8>,
+}
+
+/// `preset` のサブコマンド（DEV-29・EXP-02）。
+#[derive(Debug, Subcommand)]
+pub enum PresetCommand {
+    /// プリセットのフォルダを表示する
+    Dir,
+    /// プリセットの一覧（フォルダ → 名前の順。使えないものは理由を付けて出す）
+    List {
+        /// 種類（省略時は両方）
+        #[arg(long, value_enum)]
+        kind: Option<PresetKindArg>,
+    },
+    /// プリセットの中身を表示する（現像プリセットは設定も。--json の settings はそのまま develop set に渡せる）
+    Show {
+        /// プリセット（ID か名前）
+        preset: String,
+        /// 種類（名前が両方の種類にあるときに指定する）
+        #[arg(long, value_enum)]
+        kind: Option<PresetKindArg>,
+        /// フォルダ（名前で指定するときに、同じ名前が複数のフォルダにあれば指定する）
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
+    },
+    /// 写真の今の設定から現像プリセットを作る（--groups で含める項目。省略時は切り抜きと角度・マスクを除くすべて）
+    CreateDevelop {
+        /// 名前（100 文字まで）
+        name: String,
+        /// 元にする写真（variant の ID）
+        #[arg(long, value_parser = parse_variant_id)]
+        from: VariantId,
+        /// フォルダ（省略時はフォルダなし）
+        #[arg(long, value_name = "FOLDER", default_value = "")]
+        folder: String,
+        /// 含める項目（カンマ区切り）
+        #[arg(long, value_enum, value_delimiter = ',')]
+        groups: Vec<GroupArg>,
+    },
+    /// 現像プリセットを写真の今の設定で置き換える（--groups の省略時は今の含める項目のまま）
+    UpdateDevelop {
+        /// プリセット（ID か名前）
+        preset: String,
+        /// 元にする写真（variant の ID）
+        #[arg(long, value_parser = parse_variant_id)]
+        from: VariantId,
+        /// 含める項目（カンマ区切り）
+        #[arg(long, value_enum, value_delimiter = ',')]
+        groups: Vec<GroupArg>,
+        /// フォルダ（名前で指定するとき）
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
+    },
+    /// 現像プリセットを写真に適用する（含める項目だけを写す。写真の処理バージョンは変えない。履歴に
+    /// 「プリセット「名前」を適用」を 1 件記録する。動画は除く）
+    Apply {
+        /// プリセット（ID か名前）
+        preset: String,
+        /// 適用先の variant の ID（複数可）
+        #[arg(long, required = true, num_args = 1.., value_parser = parse_variant_id)]
+        to: Vec<VariantId>,
+        /// プリセットより古い処理バージョンの写真は、プリセットの版に更新する（DATA-09）
+        #[arg(long)]
+        upgrade_process_version: bool,
+        /// フォルダ（名前で指定するとき）
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
+    },
+    /// 書き出しプリセットを作る（export と同じオプション。--dest で書き出し先を保存する（省略時は書き出すときに
+    /// 指定する））
+    CreateExport(Box<ExportPresetArgs>),
+    /// 書き出しプリセットの中身を置き換える（指定しなかった項目は既定値。今の中身は preset show で見られる）
+    UpdateExport(Box<ExportPresetArgs>),
+    /// プリセットの名前を変える
+    Rename {
+        /// プリセット（ID か名前）
+        preset: String,
+        /// 新しい名前
+        name: String,
+        /// 種類
+        #[arg(long, value_enum)]
+        kind: Option<PresetKindArg>,
+        /// フォルダ（名前で指定するとき）
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
+    },
+    /// プリセットを別のフォルダへ移す（空の名前 "" でフォルダなし）
+    Move {
+        /// プリセット（ID か名前）
+        preset: String,
+        /// 移す先のフォルダ
+        #[arg(long, value_name = "FOLDER")]
+        to: String,
+        /// 種類
+        #[arg(long, value_enum)]
+        kind: Option<PresetKindArg>,
+    },
+    /// フォルダの名前を変える（そのフォルダのプリセットをすべて移す）
+    RenameFolder {
+        /// 種類
+        #[arg(value_enum)]
+        kind: PresetKindArg,
+        /// 今のフォルダ
+        folder: String,
+        /// 新しい名前（"" でフォルダなし）
+        name: String,
+    },
+    /// プリセットを削除する（ファイルを消す）
+    Delete {
+        /// プリセット（ID か名前）
+        preset: String,
+        /// 種類
+        #[arg(long, value_enum)]
+        kind: Option<PresetKindArg>,
+        /// フォルダ（名前で指定するとき）
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
+    },
+    /// プリセットのファイル（.json）を読み込む（元のファイルは変えない。同じフォルダに同じ名前があれば
+    /// 「 (2)」などを付ける）。読み込めなかったファイルがあれば終了コード 3
+    Import {
+        /// ファイル（複数可）
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
+        /// 種類（指定するとその種類のファイルだけ）
+        #[arg(long, value_enum)]
+        kind: Option<PresetKindArg>,
+    },
+    /// プリセットをファイル（<名前>.json）に書き出す（ほかの PC へ渡す。同じ名前のファイルがあれば -1 などを
+    /// 付け、上書きしない）
+    ExportFiles {
+        /// プリセット（ID か名前。複数可）
+        #[arg(required = true, num_args = 1..)]
+        presets: Vec<String>,
+        /// 書き出し先のフォルダ（あるフォルダ）
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// 種類
+        #[arg(long, value_enum)]
+        kind: Option<PresetKindArg>,
+    },
+}
+
+/// `preset create-export`・`update-export` の引数（EXP-02）。
+#[derive(Debug, Args)]
+pub struct ExportPresetArgs {
+    /// 名前（create-export）またはプリセット（update-export。ID か名前）
+    pub name: String,
+    /// フォルダ（create-export は保存するフォルダ。update-export は名前で指定するときのフォルダ）
+    #[arg(long, value_name = "FOLDER")]
+    pub folder: Option<String>,
+    /// 書き出し先のフォルダ（保存する。省略時は書き出すときに --out で指定する）
+    #[arg(long, value_name = "DIR")]
+    pub dest: Option<PathBuf>,
+    /// 書き出しの設定。
+    #[command(flatten)]
+    pub opts: ExportOpts,
+    /// ファイル名の規則。
+    #[command(flatten)]
+    pub naming: NamingArgs,
+    /// 解像度・出力シャープ・動画（EXP-03・EXP-05）。
+    #[command(flatten)]
+    pub finish: FinishArgs,
+    /// 透かし（EXP-03）。
+    #[command(flatten)]
+    pub watermark: WatermarkArgs,
 }
 
 /// `develop mask` のサブコマンド（DEV-18・DEV-19）。
@@ -2310,9 +2587,10 @@ pub struct ExportOpts {
     /// 「書き出すファイルに含める」ものを書く）
     #[arg(long)]
     pub remove_keywords: bool,
-    /// 同じ名前のファイルがあるとき（連番を付ける / 上書きする / 飛ばす）
-    #[arg(long, value_enum, default_value_t = ConflictArg::Sequence)]
-    pub on_conflict: ConflictArg,
+    /// 同じ名前のファイルがあるとき（連番を付ける / 上書きする / 飛ばす。省略時は連番。export --preset では
+    /// プリセットの値）
+    #[arg(long, value_enum)]
+    pub on_conflict: Option<ConflictArg>,
 }
 
 /// `export` の引数。
@@ -2321,12 +2599,216 @@ pub struct ExportArgs {
     /// variant の ID（複数可）
     #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
     pub variants: Vec<VariantId>,
-    /// 書き出し先のフォルダ
+    /// 書き出し先のフォルダ（--preset に書き出し先があれば省略できる）
     #[arg(long, value_name = "DIR")]
-    pub out: PathBuf,
+    pub out: Option<PathBuf>,
+    /// 書き出しプリセット（EXP-02。ID か名前）。指定したオプションはプリセットの値より優先する（--remove-gps・
+    /// --remove-keywords はオンにするだけ）
+    #[arg(long, value_name = "PRESET")]
+    pub preset: Option<String>,
     /// 書き出しの設定。
     #[command(flatten)]
     pub opts: ExportOpts,
+    /// ファイル名の規則（EXP-02）。
+    #[command(flatten)]
+    pub naming: NamingArgs,
+    /// プリセットのファイル名の規則を使わず、元のファイル名で書き出す
+    #[arg(long, conflicts_with = "rename")]
+    pub keep_names: bool,
+    /// 解像度・出力シャープ・動画（EXP-03・EXP-05）。
+    #[command(flatten)]
+    pub finish: FinishArgs,
+    /// 透かし（EXP-03）。
+    #[command(flatten)]
+    pub watermark: WatermarkArgs,
+}
+
+/// 解像度・出力シャープ（EXP-03）・動画（EXP-05）のオプション（`export` と `preset create-export`・`update-export`）。
+#[derive(Debug, Clone, Default, Args)]
+pub struct FinishArgs {
+    /// 解像度（ppi。1〜1200。既定 72。Exif と PNG に書く（画素数は変えない）。印刷用の出力シャープの半径にも使う）
+    #[arg(long, value_name = "PPI", value_parser = clap::value_parser!(u32).range(1..=1200))]
+    pub ppi: Option<u32>,
+    /// 出力シャープの対象（縮小の後に、出力の画素の大きさに合わせてかける。screen: 画面 / matte: マット紙 /
+    /// glossy: 光沢紙。紙は --ppi で半径を決める）
+    #[arg(
+        long,
+        value_enum,
+        value_name = "MEDIA",
+        conflicts_with = "no_output_sharpen"
+    )]
+    pub output_sharpen: Option<SharpenMediaArg>,
+    /// 出力シャープの適用量（既定 standard）
+    #[arg(long, value_enum, value_name = "AMOUNT")]
+    pub sharpen_amount: Option<SharpenAmountArg>,
+    /// 出力シャープをかけない（プリセットの出力シャープを使わない）
+    #[arg(long)]
+    pub no_output_sharpen: bool,
+    /// 動画を書き出さない（既定は、元のファイルのまま再エンコードせずにコピーする。--remove-gps では書き出さない）
+    #[arg(long)]
+    pub skip_videos: bool,
+}
+
+/// 透かしのオプション（EXP-03。`export`・`preset create-export`・`update-export`・`watermark preview`）。
+#[derive(Debug, Clone, Default, Args)]
+pub struct WatermarkArgs {
+    /// 透かしの文字（\n で改行。5 行・200 文字まで）。--watermark-font でフォントを指定する
+    #[arg(long, value_name = "TEXT", conflicts_with = "watermark_image")]
+    pub watermark_text: Option<String>,
+    /// 透かしの文字のフォントのファイル（TrueType・OpenType・.ttc。アプリは同梱しない。OS のフォントのフォルダは
+    /// genzo watermark font-dirs）
+    #[arg(long, value_name = "FILE")]
+    pub watermark_font: Option<PathBuf>,
+    /// フォントのコレクション（.ttc）の中の番号（0 から。既定 0）
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(0..=255))]
+    pub watermark_font_index: Option<u32>,
+    /// 透かしの文字の色（#RRGGBB の sRGB。既定 #FFFFFF）
+    #[arg(long, value_name = "#RRGGBB", value_parser = parse_rgb_color)]
+    pub watermark_color: Option<genzo_model::RgbColor>,
+    /// 透かしの画像（PNG・JPEG・TIFF。PNG の透明度を使う）
+    #[arg(long, value_name = "FILE")]
+    pub watermark_image: Option<PathBuf>,
+    /// 透かしの位置（既定 bottom-right）
+    #[arg(long, value_enum, value_name = "POSITION")]
+    pub watermark_position: Option<WatermarkPositionArg>,
+    /// 透かしの大きさ（%。文字は文字の大きさ、画像は幅を、写真の短辺に対する割合で。1〜100。既定は文字 4・画像 20）
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub watermark_size: Option<u8>,
+    /// 透かしの不透明度（%。1〜100。既定 60）
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub watermark_opacity: Option<u8>,
+    /// 透かしの余白（%。写真の端から、短辺に対する割合で。0〜25。既定 2）
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(0..=25))]
+    pub watermark_margin: Option<u8>,
+    /// 透かしを付けない（プリセットの透かしを使わない）
+    #[arg(long, conflicts_with_all = ["watermark_text", "watermark_image"])]
+    pub no_watermark: bool,
+}
+
+impl WatermarkArgs {
+    /// 中身以外の透かしのオプション（フォント・色・位置・大きさ・不透明度・余白）を 1 つでも指定したか。
+    pub fn has_adjustments(&self) -> bool {
+        self.watermark_font.is_some()
+            || self.watermark_font_index.is_some()
+            || self.watermark_color.is_some()
+            || self.watermark_position.is_some()
+            || self.watermark_size.is_some()
+            || self.watermark_opacity.is_some()
+            || self.watermark_margin.is_some()
+    }
+}
+
+/// 出力シャープの対象。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SharpenMediaArg {
+    /// 画面。
+    Screen,
+    /// マット紙。
+    Matte,
+    /// 光沢紙。
+    Glossy,
+}
+
+impl From<SharpenMediaArg> for genzo_model::SharpenMedia {
+    fn from(m: SharpenMediaArg) -> Self {
+        match m {
+            SharpenMediaArg::Screen => Self::Screen,
+            SharpenMediaArg::Matte => Self::MattePaper,
+            SharpenMediaArg::Glossy => Self::GlossyPaper,
+        }
+    }
+}
+
+/// 出力シャープの適用量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SharpenAmountArg {
+    /// 弱。
+    Low,
+    /// 標準。
+    Standard,
+    /// 強。
+    High,
+}
+
+impl From<SharpenAmountArg> for genzo_model::SharpenAmount {
+    fn from(a: SharpenAmountArg) -> Self {
+        match a {
+            SharpenAmountArg::Low => Self::Low,
+            SharpenAmountArg::Standard => Self::Standard,
+            SharpenAmountArg::High => Self::High,
+        }
+    }
+}
+
+/// 透かしの位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum WatermarkPositionArg {
+    /// 左上。
+    TopLeft,
+    /// 上。
+    Top,
+    /// 右上。
+    TopRight,
+    /// 左。
+    Left,
+    /// 中央。
+    Center,
+    /// 右。
+    Right,
+    /// 左下。
+    BottomLeft,
+    /// 下。
+    Bottom,
+    /// 右下。
+    BottomRight,
+}
+
+impl From<WatermarkPositionArg> for genzo_model::WatermarkAnchor {
+    fn from(p: WatermarkPositionArg) -> Self {
+        match p {
+            WatermarkPositionArg::TopLeft => Self::TopLeft,
+            WatermarkPositionArg::Top => Self::Top,
+            WatermarkPositionArg::TopRight => Self::TopRight,
+            WatermarkPositionArg::Left => Self::Left,
+            WatermarkPositionArg::Center => Self::Center,
+            WatermarkPositionArg::Right => Self::Right,
+            WatermarkPositionArg::BottomLeft => Self::BottomLeft,
+            WatermarkPositionArg::Bottom => Self::Bottom,
+            WatermarkPositionArg::BottomRight => Self::BottomRight,
+        }
+    }
+}
+
+/// `#RRGGBB` を読む。
+fn parse_rgb_color(s: &str) -> Result<genzo_model::RgbColor, String> {
+    genzo_model::RgbColor::parse(s)
+        .ok_or_else(|| format!("色は #RRGGBB の形で指定してください（{s}）"))
+}
+
+/// `watermark` のサブコマンド（EXP-03。カタログは使わない）。
+#[derive(Debug, Subcommand)]
+pub enum WatermarkCommand {
+    /// 透かしの見本を PNG に書く（灰色の濃淡の見本の画像に、書き出しと同じ計算で重ねる。透かしはワーカーで作る）
+    Preview(WatermarkPreviewArgs),
+    /// OS の既定のフォントのフォルダ（透かしの文字のフォントを探す場所。あるものだけ）
+    FontDirs,
+}
+
+/// `watermark preview` の引数。
+#[derive(Debug, Args)]
+pub struct WatermarkPreviewArgs {
+    /// 書き出す PNG のファイル（同じ名前があれば連番を付ける）
+    #[arg(long, value_name = "FILE")]
+    pub out: PathBuf,
+    /// 見本の画像の幅（16〜2000。既定 600）
+    #[arg(long, value_parser = clap::value_parser!(u32).range(16..=2000))]
+    pub width: Option<u32>,
+    /// 見本の画像の高さ（16〜2000。既定 400）
+    #[arg(long, value_parser = clap::value_parser!(u32).range(16..=2000))]
+    pub height: Option<u32>,
+    /// 透かし。
+    #[command(flatten)]
+    pub watermark: WatermarkArgs,
 }
 
 /// `render` の引数。
@@ -3540,9 +4022,38 @@ mod tests {
         assert_eq!(e.opts.color_space, Some(ColorSpaceArg::P3));
         assert_eq!(e.opts.long_edge, Some(1024));
         assert!(e.opts.remove_gps);
-        assert_eq!(e.opts.on_conflict, ConflictArg::Overwrite);
+        assert_eq!(e.opts.on_conflict, Some(ConflictArg::Overwrite));
         assert!(parse(&["genzo", "export", "1", "--out", "o", "--quality", "0"]).is_err());
-        assert!(parse(&["genzo", "export", "1"]).is_err(), "--out は必須");
+        // --out は --preset に書き出し先があれば省略できる（なければ実行するときに使い方の誤り。export.rs）。
+        assert!(parse(&["genzo", "export", "1"]).is_ok());
+        let cli = parse(&[
+            "genzo",
+            "export",
+            "1",
+            "--preset",
+            "Web",
+            "--rename",
+            "{date}-{seq}",
+            "--text",
+            "旅",
+            "--seq-digits",
+            "3",
+        ])
+        .unwrap();
+        let Command::Export(e) = cli.command else {
+            panic!()
+        };
+        assert_eq!(e.preset.as_deref(), Some("Web"));
+        assert_eq!(e.out, None);
+        assert_eq!(e.opts.on_conflict, None);
+        assert_eq!(e.naming.rename.as_deref(), Some("{date}-{seq}"));
+        assert_eq!(e.naming.text.as_deref(), Some("旅"));
+        assert_eq!(e.naming.seq_digits, Some(3));
+        assert!(
+            parse(&["genzo", "export", "1", "--keep-names", "--rename", "{seq}"]).is_err(),
+            "--keep-names と --rename は一緒に使えない"
+        );
+        assert!(parse(&["genzo", "export", "1", "--seq-digits", "10"]).is_err());
         assert_eq!(
             FormatArg::from_extension(std::path::Path::new("a/B.JPEG")),
             Some(FormatArg::Jpeg)
@@ -3555,6 +4066,111 @@ mod tests {
             FormatArg::Jpeg.to_format(Some(75)),
             ExportFormat::Jpeg { quality: 75 }
         );
+    }
+
+    /// スナップショット（DEV-28）とプリセット（DEV-29・EXP-02）のサブコマンド。
+    #[test]
+    fn snapshot_and_preset_commands() {
+        let cli = parse(&[
+            "genzo",
+            "develop",
+            "snapshot",
+            "create",
+            "3",
+            "途中",
+            "--from-history",
+            "12",
+        ])
+        .unwrap();
+        let Command::Develop(DevelopCommand::Snapshot(SnapshotCommand::Create {
+            variant,
+            name,
+            from_history,
+        })) = cli.command
+        else {
+            panic!()
+        };
+        assert_eq!(variant, VariantId::new(3));
+        assert_eq!(name, "途中");
+        assert_eq!(from_history, Some(HistoryEntryId::new(12)));
+        assert!(parse(&["genzo", "develop", "snapshot", "apply", "0"]).is_err());
+        assert!(parse(&["genzo", "develop", "snapshot", "rename", "2", "新しい名前"]).is_ok());
+
+        let cli = parse(&[
+            "genzo",
+            "--presets-dir",
+            "p",
+            "preset",
+            "create-develop",
+            "明るく",
+            "--from",
+            "1",
+            "--groups",
+            "basic-tone,presence",
+            "--folder",
+            "基本",
+        ])
+        .unwrap();
+        assert_eq!(cli.global.presets_dir, Some(PathBuf::from("p")));
+        let Command::Preset(PresetCommand::CreateDevelop {
+            name,
+            from,
+            folder,
+            groups,
+        }) = cli.command
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (name.as_str(), from, folder.as_str()),
+            ("明るく", VariantId::new(1), "基本")
+        );
+        assert_eq!(groups, vec![GroupArg::BasicTone, GroupArg::Presence]);
+        let cli = parse(&[
+            "genzo",
+            "preset",
+            "apply",
+            "明るく",
+            "--to",
+            "1",
+            "2",
+            "--upgrade-process-version",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Preset(PresetCommand::Apply { ref to, upgrade_process_version: true, .. }) if to.len() == 2
+        ));
+        assert!(
+            parse(&["genzo", "preset", "apply", "明るく"]).is_err(),
+            "--to は必須"
+        );
+        let cli = parse(&[
+            "genzo",
+            "preset",
+            "create-export",
+            "Web",
+            "--format",
+            "png8",
+            "--long-edge",
+            "2048",
+            "--dest",
+            "/out",
+            "--rename",
+            "{date}-{seq}",
+        ])
+        .unwrap();
+        let Command::Preset(PresetCommand::CreateExport(a)) = cli.command else {
+            panic!()
+        };
+        assert_eq!(a.name, "Web");
+        assert_eq!(a.dest, Some(PathBuf::from("/out")));
+        assert_eq!(a.opts.format, Some(FormatArg::Png8));
+        assert_eq!(a.naming.rename.as_deref(), Some("{date}-{seq}"));
+        assert!(parse(&["genzo", "preset", "list", "--kind", "export"]).is_ok());
+        assert!(parse(&["genzo", "preset", "list", "--kind", "other"]).is_err());
+        assert!(parse(&["genzo", "preset", "export-files", "a", "b", "--out", "d"]).is_ok());
+        assert!(parse(&["genzo", "preset", "rename-folder", "develop", "旧", ""]).is_ok());
     }
 
     #[test]

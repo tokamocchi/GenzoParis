@@ -49,6 +49,7 @@
 //! | [`finish::output`] | ステージ 17a 画面・17b 書き出し（量子化とディザリング）・17c ヒストグラム | 2.6 節・DEV-26 |
 //! | [`finish::reserved`] | v1 のステージの ID（4・6・7。実装は [`sensor::highlight`]・[`sensor::denoise`]・[`lens`]）と、処理バージョンで無視する設定の一覧 | 2.1 節 |
 //! | [`engine`] | エンジン: 段階 A0 / A1 / B のキャッシュ（[`Engine`]・ヒット・ミスの回数）、プレビュー（[`Engine::render_preview`]）、等倍・書き出しのタイル処理（[`FullResolutionJob`]）、ルーペの範囲（[`Engine::render_region`]）、書き出し（[`Engine::export`]）、取り消し（[`RenderControl`]）、切り抜く前の全体の表示（[`PreviewRequest::uncropped`]・[`Engine::full_resolution_with`]）、WB のスポイト（[`Engine::white_balance_at`]）、マスクの重ねて表示・色域のスポイト（[`Engine::mask_overlay`]・[`Engine::mask_color_at`]） | 2.2 節・2.4 節・2.7 節・4.1 節・6.1 節、DEV-03・DEV-15 |
+//! | [`output_sharpen`] | 書き出しの仕上げの出力シャープ（EXP-03。縮小の後の、出力の色空間に符号化した 16bit の画素に、出力の画素の大きさに合わせてかける。DEV-12 の部品を使う） | 2.4 節 |
 //! | [`input`] | RAW 以外の入力: 符号化した RGB と ICC からリニア BT.2020（B2）へ（[`working_image_from_encoded`]） | 2.6 節 |
 //!
 //! # データの流れ
@@ -269,6 +270,7 @@ pub mod input;
 pub mod interp;
 pub mod lens;
 pub mod local;
+pub mod output_sharpen;
 pub mod profile;
 pub mod registry;
 pub mod resample;

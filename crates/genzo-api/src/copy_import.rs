@@ -395,13 +395,18 @@ enum GroupFailure {
     Fatal(String),
 }
 
-/// 1 ファイルのコピーの失敗（写真の移動（FILE-02。`fileops`）でも使う）。
+/// 1 ファイルのコピーの失敗（写真の移動（FILE-02。`fileops`）・動画の書き出し（EXP-05。`export`）でも使う）。
 #[derive(Debug)]
 pub(crate) enum CopyFailure {
     Cancelled,
     /// 確定の前に同じ名前ができていた。
     Exists,
+    /// 元のファイルの側の失敗（開けない・読めない・途中で変わった）。
     Failed(String),
+    /// コピー先の側の失敗（一時ファイル・フォルダを作れない、書けない、確定・読み直し・照合ができない。空きが足りない
+    /// のは [`CopyFailure::NoSpace`]）。
+    WriteFailed(String),
+    /// コピー先の空きが足りない。
     NoSpace(String),
 }
 
@@ -421,13 +426,14 @@ enum Availability {
     Taken,
 }
 
-/// 書き込みの失敗を分類する（空きが足りないなら [`CopyFailure::NoSpace`]）。
+/// コピー先への書き込みの失敗を分類する（空きが足りないなら [`CopyFailure::NoSpace`]、ほかは
+/// [`CopyFailure::WriteFailed`]）。
 fn write_failure(what: &str, path: &Path, e: &io::Error) -> CopyFailure {
     let message = format!("{what}（{}）: {e}", path.display());
     if e.kind() == io::ErrorKind::StorageFull {
         CopyFailure::NoSpace(message)
     } else {
-        CopyFailure::Failed(message)
+        CopyFailure::WriteFailed(message)
     }
 }
 
@@ -552,18 +558,20 @@ pub(crate) fn copy_verified_with(
     // 書いた内容を先頭から読み直して照合する。
     let file = tmp.as_file_mut();
     file.seek(io::SeekFrom::Start(0))
-        .map_err(|e| CopyFailure::Failed(format!("コピーを読み直せません: {e}")))?;
+        .map_err(|e| CopyFailure::WriteFailed(format!("コピーを読み直せません: {e}")))?;
     match hash_reader(&mut *file, token) {
         Ok(h) if h == source_hash => {}
         Ok(_) => {
-            return Err(CopyFailure::Failed(format!(
+            return Err(CopyFailure::WriteFailed(format!(
                 "コピーした内容が元と一致しません（書き込みの誤りの可能性があります。{}）",
                 source.display()
             )));
         }
         Err(HashFailure::Cancelled) => return Err(CopyFailure::Cancelled),
         Err(HashFailure::Io(e)) => {
-            return Err(CopyFailure::Failed(format!("コピーを読み直せません: {e}")));
+            return Err(CopyFailure::WriteFailed(format!(
+                "コピーを読み直せません: {e}"
+            )));
         }
     }
     // 上書きしない名前の変更で公開する。
@@ -593,7 +601,7 @@ pub(crate) fn copy_verified_with(
         Err(e) => {
             // 公開した直後のファイル（このジョブが作ったもの）を読めない。残さない。
             let _ = fs::remove_file(dest);
-            Err(CopyFailure::Failed(format!(
+            Err(CopyFailure::WriteFailed(format!(
                 "コピーしたファイルを確かめられません（{}）: {e}",
                 dest.display()
             )))
@@ -861,7 +869,7 @@ impl<'a> CopyState<'a> {
             fs::create_dir_all(dir).map_err(|e| {
                 match write_failure("フォルダを作れません", dir, &e) {
                     CopyFailure::NoSpace(m) => GroupFailure::Fatal(m),
-                    CopyFailure::Failed(m) => GroupFailure::Failed(m),
+                    CopyFailure::Failed(m) | CopyFailure::WriteFailed(m) => GroupFailure::Failed(m),
                     CopyFailure::Cancelled | CopyFailure::Exists => unreachable!(),
                 }
             })?;
@@ -1007,7 +1015,7 @@ impl<'a> CopyState<'a> {
                             rollback(&published, self);
                             return Err(GroupFailure::Cancelled);
                         }
-                        Err(CopyFailure::Failed(m)) => {
+                        Err(CopyFailure::Failed(m) | CopyFailure::WriteFailed(m)) => {
                             rollback(&published, self);
                             return Err(GroupFailure::Failed(m));
                         }
@@ -1561,6 +1569,44 @@ mod tests {
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    /// コピー先の失敗は、空きの不足とそれ以外を分け、元のファイルの側の失敗と混ぜない（動画の書き出しで、コピー先の
+    /// 失敗を元のファイルにアクセスできないと知らせないため。検証のラウンド 1 の指摘）。コピー先のフォルダがない・
+    /// ファイルである（一時ファイルを作れない）のはコピー先の側、元のファイルがないのは元の側。
+    #[test]
+    fn copy_failures_tell_the_source_from_the_destination() {
+        let p = Path::new("/out/V.mp4");
+        assert!(matches!(
+            write_failure("コピー先に書けません", p, &io::Error::from(io::ErrorKind::StorageFull)),
+            CopyFailure::NoSpace(m) if m.contains("/out/V.mp4")
+        ));
+        assert!(matches!(
+            write_failure(
+                "コピー先に書けません",
+                p,
+                &io::Error::from(io::ErrorKind::PermissionDenied)
+            ),
+            CopyFailure::WriteFailed(_)
+        ));
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("V.mp4");
+        write(&src, b"video");
+        let facts = FileFacts::read(&src).unwrap();
+        let mtime = fs::metadata(&src).unwrap().modified().unwrap();
+        // コピー先のフォルダの代わりにファイルがある（一時ファイルを作れない）。
+        let blocker = d.path().join("blocker");
+        write(&blocker, b"x");
+        assert!(matches!(
+            copy_plain(&src, &facts, mtime, &blocker.join("V.mp4")),
+            Err(CopyFailure::WriteFailed(_))
+        ));
+        // 元のファイルがない。
+        let missing = d.path().join("none.mp4");
+        assert!(matches!(
+            copy_plain(&missing, &facts, mtime, &d.path().join("out.mp4")),
+            Err(CopyFailure::Failed(_))
+        ));
     }
 
     /// 古い一時ファイルだけを消す（新しいもの・名前の形の違うものは消さない）。

@@ -8,7 +8,8 @@
 //!    ディザリングはしない（8bit の書き出しでも、パイプラインから 16bit で渡せば、縮小の後に 1 回だけ
 //!    8bit に丸めることになる）。
 //! 2. ビット数を形式に合わせる（JPEG・PNG 8bit は 8bit、TIFF・PNG 16bit は 16bit）。
-//! 3. 出力の色空間の ICC プロファイル（[`export_icc_profile`]）と Exif を埋め込む（IQ-06・EXP-04）。
+//! 3. 出力の色空間の ICC プロファイル（[`export_icc_profile`]）と Exif を埋め込む（IQ-06・EXP-04）。解像度
+//!    （`settings.resolution_ppi`。EXP-03）は Exif の XResolution・YResolution（TIFF は IFD0）と PNG の pHYs に書く。
 //!    GPS は `settings.remove_gps = false` のときだけ書く（SEC-03）。カタログで編集した説明の
 //!    メタデータ（LIB-15。[`ExifData::descriptive`]）があれば、XMP（[`crate::xmp_write`]）も埋め込む
 //!    （JPEG は APP1、PNG は iTXt、TIFF はタグ 700）。
@@ -26,7 +27,7 @@ use crate::buffer::DynRgbImage;
 use crate::error::{MediaError, Result};
 use crate::exif_write::{ByteOrder, ExifData, ExifImageInfo, build_ifds, encode_exif_tiff};
 use crate::jpeg::{encode_jpeg, insert_jpeg_xmp};
-use crate::png_io::encode_png_with_xmp_to;
+use crate::png_io::{PngMetadata, encode_png_with_metadata_to};
 use crate::resize::downscale_encoded;
 use crate::safe_write::{ProtectedFiles, WriteOutcome, write_atomically};
 use crate::tiff_io::encode_tiff16_to;
@@ -60,10 +61,13 @@ pub fn export_icc_profile(space: OutputColorSpace) -> Result<IccProfile> {
 /// `remove_gps` の適用は [`encode_export`]・[`export_image`] が行う）。`exif` の説明のメタデータ
 /// （[`ExifData::descriptive`]）に値があれば XMP も書く（JPEG で XMP が大きすぎれば
 /// [`MediaError::TooLarge`]。[`insert_jpeg_xmp`]）。
+///
+/// `resolution_ppi` は解像度（Exif の XResolution・YResolution と、PNG の pHYs に書く。画素数は変えない）。
 pub fn encode_export_to<W: Write + std::io::Seek>(
     image: &DynRgbImage,
     format: ExportFormat,
     color_space: OutputColorSpace,
+    resolution_ppi: u32,
     exif: Option<&ExifData>,
     w: &mut W,
 ) -> Result<()> {
@@ -76,6 +80,7 @@ pub fn encode_export_to<W: Write + std::io::Seek>(
                 width,
                 height,
                 color_space,
+                resolution_ppi,
             },
         )
     });
@@ -101,22 +106,16 @@ pub fn encode_export_to<W: Write + std::io::Seek>(
         ExportFormat::Png8 | ExportFormat::Png16 => {
             // BufWriter は drop のときの書き込みの失敗を無視するので、最後に明示的に flush する。
             let mut bw = BufWriter::new(w);
+            let meta = PngMetadata {
+                icc: Some(icc.as_bytes()),
+                exif_tiff: exif_tiff.as_deref(),
+                xmp: xmp.as_deref(),
+                resolution_ppi: Some(resolution_ppi),
+            };
             if format == ExportFormat::Png8 {
-                encode_png_with_xmp_to(
-                    &image.to_rgb8(),
-                    Some(icc.as_bytes()),
-                    exif_tiff.as_deref(),
-                    xmp.as_deref(),
-                    &mut bw,
-                )?;
+                encode_png_with_metadata_to(&image.to_rgb8(), &meta, &mut bw)?;
             } else {
-                encode_png_with_xmp_to(
-                    &image.to_rgb16(),
-                    Some(icc.as_bytes()),
-                    exif_tiff.as_deref(),
-                    xmp.as_deref(),
-                    &mut bw,
-                )?;
+                encode_png_with_metadata_to(&image.to_rgb16(), &meta, &mut bw)?;
             }
             bw.flush().map_err(MediaError::io_no_path)
         }
@@ -180,6 +179,7 @@ pub fn encode_export(
         &fitted,
         settings.format,
         settings.color_space,
+        settings.resolution_ppi,
         exif.as_ref(),
         &mut cur,
     )?;
@@ -207,6 +207,7 @@ pub fn export_image(
             &fitted,
             settings.format,
             settings.color_space,
+            settings.resolution_ppi,
             exif.as_ref(),
             file,
         )
@@ -394,6 +395,48 @@ mod tests {
             xmp.contains("清水寺") && !xmp.contains("dc:subject"),
             "{xmp}"
         );
+    }
+
+    /// 解像度（EXP-03）は Exif の XResolution・YResolution と PNG の pHYs に書く（画素数は変えない）。
+    #[test]
+    fn resolution_is_written_to_exif_and_png() {
+        let img = DynRgbImage::Rgb8(RgbImage8::from_fn(8, 6, |x, _| [x as u8 * 30, 0, 0]).unwrap());
+        for format in [
+            ExportFormat::Jpeg { quality: 90 },
+            ExportFormat::Png8,
+            ExportFormat::Png16,
+            ExportFormat::Tiff16,
+        ] {
+            for ppi in [72u32, 300] {
+                let s = ExportSettings {
+                    format,
+                    resolution_ppi: ppi,
+                    ..Default::default()
+                };
+                let bytes = encode_export(&img, &s, Some(&ExifData::default())).unwrap();
+                let e = exif::Reader::new()
+                    .read_from_container(&mut std::io::Cursor::new(&bytes))
+                    .unwrap();
+                let x = e
+                    .get_field(exif::Tag::XResolution, exif::In::PRIMARY)
+                    .unwrap();
+                match &x.value {
+                    exif::Value::Rational(v) => assert_eq!((v[0].num, v[0].denom), (ppi, 1)),
+                    other => panic!("{other:?}"),
+                }
+                if matches!(format, ExportFormat::Png8 | ExportFormat::Png16) {
+                    let reader = png::Decoder::new(std::io::Cursor::new(&bytes))
+                        .read_info()
+                        .unwrap();
+                    let d = reader.info().pixel_dims.unwrap();
+                    assert_eq!(d.unit, png::Unit::Meter);
+                    // 300 ppi = 11811 画素 / m、72 ppi = 2835 画素 / m。
+                    assert_eq!(d.xppu, if ppi == 300 { 11_811 } else { 2_835 });
+                }
+                let decoded = image::load_from_memory(&bytes).unwrap();
+                assert_eq!((decoded.width(), decoded.height()), (8, 6));
+            }
+        }
     }
 
     #[test]

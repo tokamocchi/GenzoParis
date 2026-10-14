@@ -10,7 +10,9 @@ use genzo_media::MAX_IMAGE_PIXELS;
 use genzo_model::PhotoMetadata;
 use genzo_raw::{MAX_PIXELS, RawImage};
 
-use crate::protocol::{LinearImageInfo, RawFrameInfo, ThumbnailInfo};
+use crate::protocol::{
+    LinearImageInfo, RawFrameInfo, ThumbnailInfo, WatermarkInfo, WatermarkRequest,
+};
 use crate::shm::{BufferError, PayloadKind, ReceivedPayload};
 
 /// 受け取るサムネイルの JPEG の大きさの上限（バイト）。
@@ -214,6 +216,63 @@ pub(crate) fn thumbnail_jpeg(
         ));
     }
     Ok(data)
+}
+
+/// 透かし（RGBA の 16bit）を複製する（EXP-03）。寸法が依頼の上限（文字の外接矩形の端の余裕の 2 画素を足した値）以下で、
+/// 画素数の上限（`genzo_media::watermark::MAX_WATERMARK_PIXELS`）以下で、長さが寸法と合うことを確かめる。値はどれも
+/// 0〜65535 で使えるので、中身は確かめない。
+pub(crate) fn watermark(
+    payload: &ReceivedPayload<'_>,
+    info: &WatermarkInfo,
+    request: &WatermarkRequest,
+) -> Result<genzo_media::watermark::WatermarkBitmap, BufferError> {
+    let h = *payload.header();
+    if h.kind != PayloadKind::RgbaU16 {
+        return Err(BufferError::UnexpectedKind {
+            expected: PayloadKind::RgbaU16,
+            actual: h.kind,
+        });
+    }
+    checked_pixels(
+        h.width,
+        h.height,
+        genzo_media::watermark::MAX_WATERMARK_PIXELS,
+    )?;
+    if h.width > request.max_width.saturating_add(2)
+        || h.height > request.max_height.saturating_add(2)
+    {
+        return Err(BufferError::Invalid(format!(
+            "透かしの寸法 {} × {} が上限 {} × {} を超える",
+            h.width, h.height, request.max_width, request.max_height
+        )));
+    }
+    same_dimensions(payload, (info.width, info.height))?;
+    let expected = PayloadKind::RgbaU16.data_len_for(h.width, h.height).ok_or(
+        BufferError::InvalidDimensions {
+            width: h.width,
+            height: h.height,
+        },
+    )?;
+    expect_len(payload, expected)?;
+    let data = read_u16_le(payload, expected)?;
+    genzo_media::watermark::WatermarkBitmap::new(h.width, h.height, data)
+        .map_err(|e| BufferError::Invalid(e.to_string()))
+}
+
+/// フォントにない文字の一覧（ワーカーが返したもの）を整える（制御文字・空白を除き、重なりを除き、
+/// [`WatermarkInfo::MAX_MISSING_CHARS`] 文字まで）。
+pub(crate) fn sanitize_missing(missing: &str) -> Vec<char> {
+    let mut out = Vec::new();
+    for c in missing.chars() {
+        if c.is_control() || c.is_whitespace() || out.contains(&c) {
+            continue;
+        }
+        out.push(c);
+        if out.len() >= WatermarkInfo::MAX_MISSING_CHARS {
+            break;
+        }
+    }
+    out
 }
 
 /// データの長さ `len`（バイト。寸法との一致は確かめ済み）を `usize` にする。

@@ -106,6 +106,8 @@ pub enum PayloadKind {
     RgbF32,
     /// JPEG のバイト列。[`crate::protocol::Job::Thumbnail`] など。
     Jpeg,
+    /// RGBA（u16、4 チャンネル）。[`crate::protocol::Job::RenderWatermark`]。
+    RgbaU16,
 }
 
 impl PayloadKind {
@@ -115,6 +117,7 @@ impl PayloadKind {
             PayloadKind::CfaU16 => 1,
             PayloadKind::RgbF32 => 2,
             PayloadKind::Jpeg => 3,
+            PayloadKind::RgbaU16 => 4,
         }
     }
 
@@ -124,6 +127,7 @@ impl PayloadKind {
             1 => Some(PayloadKind::CfaU16),
             2 => Some(PayloadKind::RgbF32),
             3 => Some(PayloadKind::Jpeg),
+            4 => Some(PayloadKind::RgbaU16),
             _ => None,
         }
     }
@@ -134,6 +138,7 @@ impl PayloadKind {
             PayloadKind::CfaU16 => 1,
             PayloadKind::RgbF32 => 3,
             PayloadKind::Jpeg => 0,
+            PayloadKind::RgbaU16 => 4,
         }
     }
 
@@ -143,6 +148,7 @@ impl PayloadKind {
             PayloadKind::CfaU16 => 2,
             PayloadKind::RgbF32 => 4,
             PayloadKind::Jpeg => 1,
+            PayloadKind::RgbaU16 => 2,
         }
     }
 
@@ -891,7 +897,12 @@ mod tests {
         assert_eq!(get_u32(&b, at::FLAGS), 0);
         assert_eq!(get_u64(&b, at::CHECKSUM), 0);
         assert_eq!(ShmHeader::decode(&b).unwrap(), no_sum);
-        for kind in [PayloadKind::CfaU16, PayloadKind::RgbF32, PayloadKind::Jpeg] {
+        for kind in [
+            PayloadKind::CfaU16,
+            PayloadKind::RgbF32,
+            PayloadKind::Jpeg,
+            PayloadKind::RgbaU16,
+        ] {
             assert_eq!(PayloadKind::from_code(kind.code()), Some(kind));
             let h = ShmHeader { kind, ..h };
             assert_eq!(ShmHeader::decode(&h.encode()).unwrap(), h);

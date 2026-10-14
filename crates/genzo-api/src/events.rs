@@ -197,6 +197,8 @@ pub enum WarningCode {
     ImportCopyRolledBack,
     /// 以前の形式（パスで識別）のボリュームのフォルダを、ドライブの ID で識別するボリュームへ移した（FILE-03）。
     VolumesRebound,
+    /// 動画のコピーの警告（登録の後に元のファイルが変わっていた・同じ名前があったので連番を付けたなど。EXP-05）。
+    VideoCopy,
     /// 別のドライブへ移した写真の元のファイルを、ゴミ箱へ移せなかった（FILE-02。カタログは移動先を指し、元の
     /// ファイルは元の場所に残る）。
     MoveSourceLeft,

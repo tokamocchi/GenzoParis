@@ -22,9 +22,9 @@
 //   見本の色として足す。選んでいる番号が設定の外になったら（Undo など）、選んでいないとみなす（currentMask）。
 
 import * as core from "../api/core";
-import type { AspectRatio, CropRect, DevelopSettings, LocalAdjustment, VariantId } from "../api/types";
+import type { AspectRatio, BeforeSource, CropRect, DevelopSettings, LocalAdjustment, VariantId } from "../api/types";
 import { actions } from "../state/app";
-import { applySettings, developStore, endDrag, enqueue, refreshFrame } from "../state/develop";
+import { applySettings, developStore, endDrag, enqueue, refreshFrame, setBeforeSource } from "../state/develop";
 import { cancelRegionRender } from "../state/region";
 import { createStore, useStore } from "../state/store";
 import {
@@ -145,6 +145,30 @@ export function setCompareMode(mode: CompareMode): void {
     if (s.tool === "wb" || s.tool === "brush" || s.tool === "mask_color") viewStore.set({ tool: "none", pickTarget: null });
   }
   viewStore.set({ compare: mode });
+}
+
+/** 表示を始めるときに使うビフォーの出どころ（スナップショット・履歴の「ビフォーに設定」。DEV-28。使ったら消す）。 */
+let wantedBefore: BeforeSource | null = null;
+
+/**
+ * スナップショット・履歴の項目をビフォーにする（DEV-28・DEV-31）。ビフォー / アフターの表示がオフなら、左右に
+ * 並べる表示にして、表示を始めるときにこの出どころを使う（DevelopView の useBeforeForCompare が takeWantedBefore で
+ * 受け取る。オフのまま設定すると、表示をやめたものとしてビフォーが捨てられるため）。表示中ならすぐに変える。
+ */
+export function showAsBefore(source: BeforeSource): void {
+  if (viewStore.get().compare === "off") {
+    wantedBefore = source;
+    setCompareMode("side_by_side");
+    return;
+  }
+  void setBeforeSource(source).catch((e) => actions.reportError(e, "ビフォーを変えられません"));
+}
+
+/** 表示を始めるときのビフォーの出どころ（showAsBefore で選んだもの。なければ null）を受け取る（1 回だけ）。 */
+export function takeWantedBefore(): BeforeSource | null {
+  const w = wantedBefore;
+  wantedBefore = null;
+  return w;
 }
 
 /** キーで形を切り替える（同じ形なら off に戻す。\・Y・Shift ＋ Y）。 */

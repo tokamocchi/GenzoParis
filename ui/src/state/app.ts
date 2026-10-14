@@ -22,14 +22,17 @@ import type {
   ErrorInfo,
   Flag,
   FolderId,
+  HistoryEntryId,
   ImportOptions,
   JobInfo,
   JobKind,
   JobState,
   KeywordId,
+  PresetKind,
   Rating,
   SearchFilter,
   SearchSort,
+  SnapshotId,
   VariantId,
   VariantSummary,
 } from "../api/types";
@@ -90,7 +93,29 @@ export type DialogState =
   | { kind: "relocate_folder"; folderId: FolderId }
   | { kind: "remove_folder"; folderId: FolderId }
   // カメラプロファイル・ルック（DEV-17）の一覧: 取り込み・詳細（説明・注意・著作権の表示）・除く。
-  | { kind: "profiles" };
+  | { kind: "profiles" }
+  // スナップショット（DEV-28）: 作る（今の状態か、履歴の項目 entryId の状態）・名前の変更。
+  | {
+      kind: "snapshot_name";
+      mode: "create" | "rename";
+      variantId: VariantId;
+      snapshotId?: SnapshotId;
+      entryId?: HistoryEntryId;
+      currentName?: string;
+    }
+  // 現像プリセット（DEV-29）: 今の写真の設定から作る・今の設定で更新（含める項目を選ぶ）、選んだ写真に適用する。
+  | { kind: "develop_preset"; mode: "create" | "update"; variantId: VariantId; presetId?: string }
+  | { kind: "apply_preset"; targets: VariantId[]; presetId?: string }
+  // プリセット（DEV-29・EXP-02）の名前の変更・フォルダへの移動・フォルダの名前の変更・削除の確認。
+  | {
+      kind: "preset_name";
+      mode: "rename" | "move" | "rename_folder";
+      presetKind: PresetKind;
+      presetId?: string;
+      folder?: string;
+      currentName: string;
+    }
+  | { kind: "preset_delete"; presetKind: PresetKind; presetId: string; name: string };
 
 export interface Toast {
   id: number;
@@ -838,6 +863,19 @@ async function kindOf(id: VariantId): Promise<AssetKind> {
 }
 
 /**
+ * `ids` のうち、動画と分かっているものの数（読み込み済みの検索結果・選んだときの項目から。コアには問い合わせない。
+ * 書き出しのダイアログの注意書き（EXP-05）に使う）。
+ */
+function knownVideoCount(ids: readonly VariantId[]): number {
+  let n = 0;
+  for (const id of new Set(ids)) {
+    const kind = searchCache.getLoadedById(id)?.kind ?? selectedSummaries.get(id)?.kind;
+    if (kind === "video") n += 1;
+  }
+  return n;
+}
+
+/**
  * 写真の現像設定をコピーする（Ctrl / ⌘ + Shift + C。DEV-30）。動画には現像設定がない（コアは既定の設定を返し、
  * 貼り付けると貼り付け先を既定に戻してしまう）ので、種類を確かめてからコピーする。`latest` は現像中の写真なら
  * 画面の最新の値（送信前を含む）。コピーしたら true。
@@ -1415,6 +1453,7 @@ export const actions = {
     return ok && seq === modeSeq;
   },
   kindOf,
+  knownVideoCount,
   /** 選択中の写真の概要（選んだときの項目。順は決まっていない）。 */
   selectedSummaries: (): Iterable<SelectedSummary> => selectedSummaries.values(),
   async selectAll() {

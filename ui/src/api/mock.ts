@@ -1,6 +1,7 @@
 // テスト用の Bridge（invoke・listen の記録と応答の差し替え）と、画面のテストに使う応答の見本。
 
 import type { Bridge, Unlisten } from "./bridge";
+import { ApiError } from "./errors";
 import { HUE_BANDS } from "./types";
 import type {
   ColorParams,
@@ -42,7 +43,12 @@ import type {
   ProfileImportReport,
   RegionInfo,
   RegionRequest,
+  RenameRule,
+  SettingGroups,
   SmartRule,
+  SnapshotInfo,
+  ExportPresetSettings,
+  PresetInfo,
   SourceInfo,
   StackInfo,
   Timeline,
@@ -53,6 +59,7 @@ import type {
   VideoPlayback,
   VideoProxyCacheStatus,
   ViewOutputSize,
+  Watermark,
 } from "./types";
 
 export interface MockCall {
@@ -1130,6 +1137,51 @@ export function mockVideoCommands(
 }
 
 // ---------------------------------------------------------------------------
+// v1 の export: 出力シャープ・透かし（EXP-03）の見本
+// ---------------------------------------------------------------------------
+
+/** 1 × 1 の灰色の PNG（透かしの見本の代わり）。 */
+export const MOCK_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg==";
+
+/** OS のフォントのフォルダの見本。 */
+export const MOCK_FONT_DIRS = ["/home/u/.local/share/fonts", "/usr/share/fonts"];
+
+/**
+ * 透かしのコマンドの応答を足す（watermark_preview・system_font_dirs）。送ったコマンドは `sent` に残す。
+ * 文字が「漢」を含むと、フォントにない文字の警告を返す。
+ */
+export function mockWatermarkCommands(b: MockBridge): { sent: Record<string, unknown>[] } {
+  const sent: Record<string, unknown>[] = [];
+  const base = b.responses.get("core_execute");
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    switch (c.type) {
+      case "watermark_preview": {
+        sent.push(c);
+        const mark = c.watermark as Watermark;
+        const text = "text" in mark.content ? mark.content.text.text : "";
+        return {
+          type: "watermark_preview",
+          width: (c.width as number | undefined) ?? 600,
+          height: (c.height as number | undefined) ?? 400,
+          png_base64: MOCK_PNG_BASE64,
+          mark_width: 120,
+          mark_height: 24,
+          warnings: text.includes("漢") ? ["フォントにない文字があります: 漢"] : [],
+        };
+      }
+      case "system_font_dirs":
+        sent.push(c);
+        return { type: "paths", paths: [...MOCK_FONT_DIRS] };
+      default:
+        return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
+    }
+  });
+  return { sent };
+}
+
+// ---------------------------------------------------------------------------
 // v1 の profile: カメラプロファイル・ルック（DEV-17）の見本
 // ---------------------------------------------------------------------------
 
@@ -1317,4 +1369,280 @@ export function mockMaskCommands(
     return out.buffer;
   });
   return { sent };
+}
+
+// ---------------------------------------------------------------------------
+// v1 の presets: スナップショット（DEV-28）・現像プリセット（DEV-29）・書き出しプリセット（EXP-02）の見本
+// ---------------------------------------------------------------------------
+
+/** 含める項目の見本（基本補正・外観だけ）。 */
+export const MOCK_TONE_GROUPS: SettingGroups = {
+  white_balance: false,
+  basic_tone: true,
+  presence: true,
+  tone_curve: false,
+  color: false,
+  geometry: false,
+  lens: false,
+  detail: false,
+  effects: false,
+  profile: false,
+  masks: false,
+};
+
+/** 現像プリセットの見本（フォルダなし 1 件・「ルック」に 1 件・新しい版のアプリで作った使えないもの 1 件）。 */
+export function mockDevelopPresets(): PresetInfo[] {
+  const base = {
+    kind: "develop" as const,
+    created_at: "2026-10-14T01:02:03.000Z",
+    updated_at: "2026-10-14T01:02:03.000Z",
+    format_version: 1,
+    problem: null,
+    process_version: 2,
+  };
+  return [
+    { ...base, id: "0000000000000001", name: "明るく", folder: "", groups: MOCK_TONE_GROUPS },
+    {
+      ...base,
+      id: "0000000000000002",
+      name: "フィルム風",
+      folder: "ルック",
+      groups: { ...MOCK_TONE_GROUPS, color: true, effects: true },
+    },
+    {
+      ...base,
+      id: "0000000000000003",
+      name: "新しい形式",
+      folder: "ルック",
+      format_version: 2,
+      problem: "新しい版のアプリで作ったプリセットです（形式の版 2。このアプリは 1 まで）。アプリを更新すると使えます",
+      process_version: undefined,
+    },
+  ];
+}
+
+/** 書き出しプリセットの見本（Web 用: JPEG 品質 80・長辺 2048・GPS を削除・名前の規則・書き出し先）。 */
+export function mockExportPresets(): PresetInfo[] {
+  return [
+    {
+      kind: "export",
+      id: "00000000000000e1",
+      name: "Web 用",
+      folder: "",
+      created_at: "2026-10-14T01:02:03.000Z",
+      updated_at: "2026-10-14T01:02:03.000Z",
+      format_version: 1,
+      problem: null,
+      export: {
+        export: {
+          format: { jpeg: { quality: 80 } },
+          color_space: "srgb",
+          size: { long_edge: 2048 },
+          remove_gps: true,
+          on_conflict: "sequence",
+          remove_keywords: false,
+        },
+        destination: "/home/u/Pictures/web",
+        file_naming: { template: "{date}-{seq}", custom_text: "", sequence_start: 1, sequence_digits: 3 },
+      },
+    },
+  ];
+}
+
+/** スナップショットの見本。 */
+export function mockSnapshots(variantId: number): SnapshotInfo[] {
+  return [
+    { id: 11, variant_id: variantId, name: "明るめ", created_at: "2026-10-14T01:00:00.000Z", process_version: 2 },
+    { id: 12, variant_id: variantId, name: "取り込み直後", created_at: "2026-10-14T01:05:00.000Z", process_version: 1 },
+  ];
+}
+
+/**
+ * スナップショット・プリセットのコマンドの応答を足す（snapshots・create_snapshot・rename_snapshot・delete_snapshot・
+ * apply_snapshot・presets・create_develop_preset・update_develop_preset・apply_develop_preset・create_export_preset・
+ * update_export_preset・rename_preset・move_preset・rename_preset_folder・delete_preset・import_presets・
+ * export_preset_files・export_name_preview）。一覧は `state`（作る・変える・消すで変わる）。同じ種類・同じフォルダの
+ * 同じ名前は conflict にする（コアと同じ）。現像プリセットの適用は、`init.videos` の variant を動画として除く（コアと
+ * 同じ）。送ったコマンドは `sent` に残す。
+ */
+export function mockPresetCommands(
+  b: MockBridge,
+  init: { develop?: PresetInfo[]; export?: PresetInfo[]; snapshots?: SnapshotInfo[]; videos?: number[] } = {},
+): {
+  sent: Record<string, unknown>[];
+  state: { develop: PresetInfo[]; export: PresetInfo[]; snapshots: SnapshotInfo[] };
+} {
+  const sent: Record<string, unknown>[] = [];
+  const state = {
+    develop: [...(init.develop ?? mockDevelopPresets())],
+    export: [...(init.export ?? mockExportPresets())],
+    snapshots: [...(init.snapshots ?? mockSnapshots(1))],
+  };
+  let nextId = 100;
+  const base = b.responses.get("core_execute");
+  const conflict = (message: string) =>
+    new ApiError({ kind: "conflict", message, user_actionable: true, retryable: false, hint: null });
+  const listOf = (kind: unknown) => (kind === "export" ? state.export : state.develop);
+  const taken = (list: PresetInfo[], folder: string, name: string, except?: string) =>
+    list.some((p) => p.id !== except && p.folder === folder && p.name.toLowerCase() === name.trim().toLowerCase());
+  const newPreset = (kind: "develop" | "export", name: string, folder: string, extra: Partial<PresetInfo>): PresetInfo => ({
+    kind,
+    id: (nextId++).toString(16).padStart(16, "0"),
+    name: name.trim(),
+    folder: folder.trim(),
+    created_at: "2026-10-14T02:00:00.000Z",
+    updated_at: "2026-10-14T02:00:00.000Z",
+    format_version: 1,
+    problem: null,
+    ...extra,
+  });
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    switch (c.type) {
+      case "snapshots":
+        sent.push(c);
+        return { type: "snapshots", snapshots: state.snapshots.filter((s) => s.variant_id === c.variant_id) };
+      case "create_snapshot": {
+        sent.push(c);
+        const s: SnapshotInfo = {
+          id: nextId++,
+          variant_id: c.variant_id as number,
+          name: (c.name as string).trim(),
+          created_at: "2026-10-14T02:00:00.000Z",
+          process_version: 2,
+        };
+        state.snapshots.push(s);
+        return { type: "snapshot", snapshot: s };
+      }
+      case "rename_snapshot": {
+        sent.push(c);
+        const s = state.snapshots.find((x) => x.id === c.snapshot_id);
+        if (!s) return new Error("スナップショットが見つかりません");
+        s.name = (c.name as string).trim();
+        return { type: "snapshot", snapshot: s };
+      }
+      case "delete_snapshot":
+        sent.push(c);
+        state.snapshots = state.snapshots.filter((x) => x.id !== c.snapshot_id);
+        return { type: "ok" };
+      case "apply_snapshot":
+        sent.push(c);
+        return { type: "settings", settings: mockDevelopSettings() };
+      case "presets":
+        sent.push(c);
+        return { type: "presets", presets: [...listOf(c.kind)], dir: "/home/u/.local/share/io.github.tokamocchi.genzoparis/presets" };
+      case "develop_preset_settings":
+        sent.push(c);
+        return { type: "settings", settings: mockDevelopSettings({ exposure_ev: 0.5 }) };
+      case "create_develop_preset": {
+        sent.push(c);
+        if (taken(state.develop, c.folder as string, c.name as string)) return conflict("同じ名前の現像プリセットがあります");
+        const p = newPreset("develop", c.name as string, c.folder as string, {
+          groups: c.groups as SettingGroups,
+          process_version: 2,
+        });
+        state.develop.push(p);
+        return { type: "preset", preset: p };
+      }
+      case "update_develop_preset": {
+        sent.push(c);
+        const p = state.develop.find((x) => x.id === c.preset_id);
+        if (!p) return new Error("プリセットが見つかりません");
+        p.groups = c.groups as SettingGroups;
+        return { type: "preset", preset: p };
+      }
+      case "apply_develop_preset": {
+        sent.push(c);
+        // 動画（init.videos）は除いて、除いた数を返す（コアと同じ）。
+        const ids = [...new Set(c.targets as number[])];
+        const videos = ids.filter((id) => (init.videos ?? []).includes(id)).length;
+        return { type: "pasted", count: ids.length - videos, upgraded: 0, needs_upgrade: 0, skipped_videos: videos };
+      }
+      case "create_export_preset": {
+        sent.push(c);
+        if (taken(state.export, c.folder as string, c.name as string)) return conflict("同じ名前の書き出しプリセットがあります");
+        const p = newPreset("export", c.name as string, c.folder as string, {
+          export: c.settings as ExportPresetSettings,
+        });
+        state.export.push(p);
+        return { type: "preset", preset: p };
+      }
+      case "update_export_preset": {
+        sent.push(c);
+        const p = state.export.find((x) => x.id === c.preset_id);
+        if (!p) return new Error("プリセットが見つかりません");
+        p.export = c.settings as ExportPresetSettings;
+        return { type: "preset", preset: p };
+      }
+      case "rename_preset": {
+        sent.push(c);
+        const list = listOf(c.kind);
+        const p = list.find((x) => x.id === c.preset_id);
+        if (!p) return new Error("プリセットが見つかりません");
+        if (taken(list, p.folder, c.name as string, p.id)) return conflict("同じ名前のプリセットがあります");
+        p.name = (c.name as string).trim();
+        return { type: "preset", preset: p };
+      }
+      case "move_preset": {
+        sent.push(c);
+        const list = listOf(c.kind);
+        const p = list.find((x) => x.id === c.preset_id);
+        if (!p) return new Error("プリセットが見つかりません");
+        p.folder = (c.folder as string).trim();
+        return { type: "preset", preset: p };
+      }
+      case "rename_preset_folder": {
+        sent.push(c);
+        const moved = listOf(c.kind).filter((p) => p.folder === c.folder);
+        for (const p of moved) p.folder = (c.name as string).trim();
+        return { type: "updated", count: moved.length };
+      }
+      case "delete_preset": {
+        sent.push(c);
+        if (c.kind === "export") state.export = state.export.filter((x) => x.id !== c.preset_id);
+        else state.develop = state.develop.filter((x) => x.id !== c.preset_id);
+        return { type: "ok" };
+      }
+      case "import_presets": {
+        sent.push(c);
+        const imported: PresetInfo[] = [];
+        const failed: { path: string; message: string }[] = [];
+        for (const path of c.paths as string[]) {
+          if (!path.endsWith(".json")) {
+            failed.push({ path, message: "プリセットのファイルとして読めません" });
+            continue;
+          }
+          const name = (path.split(/[\\/]/).pop() ?? path).replace(/\.json$/, "");
+          const p = newPreset(c.kind === "export" ? "export" : "develop", name, "", { groups: MOCK_TONE_GROUPS, process_version: 2 });
+          listOf(c.kind).push(p);
+          imported.push(p);
+        }
+        return { type: "preset_import", imported, failed };
+      }
+      case "export_preset_files":
+        sent.push(c);
+        return { type: "paths", paths: (c.preset_ids as string[]).map((id) => `${String(c.dest_dir)}/${id}.json`) };
+      case "export_name_preview": {
+        sent.push(c);
+        const rule = c.file_naming as RenameRule | null;
+        const ext = typeof c.format === "string" ? (c.format === "tiff16" ? "tif" : "png") : "jpg";
+        if (rule && rule.template.includes("{nope}")) {
+          return { type: "name_preview", examples: [], error: "ファイル名のテンプレート: 「{nope}」という項目はありません" };
+        }
+        const stem = (i: number) => (rule ? `20261013-${String(rule.sequence_start + i).padStart(rule.sequence_digits, "0")}` : `DSC0123${4 + i}`);
+        return {
+          type: "name_preview",
+          error: null,
+          examples: [0, 1].map((i) => ({
+            source: `DSC0123${4 + i}.ARW`,
+            destination: `${stem(i)}.${ext}`,
+            captured: "2026-10-13 14:30:52",
+          })),
+        };
+      }
+      default:
+        return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
+    }
+  });
+  return { sent, state };
 }

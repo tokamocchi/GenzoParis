@@ -151,7 +151,14 @@ function useGlobalHotkeys(enabled: boolean) {
         if (appStore.get().mode !== "develop") focusKeywordInput();
       },
       "mod+n": () => {
-        if (appStore.get().mode === "develop") return;
+        // 現像の画面では、今の状態でスナップショットを作る（DEV-28。Lightroom と同じ）。
+        if (appStore.get().mode === "develop") {
+          const v = developStore.get();
+          if (v.state && v.variantId !== null) {
+            actions.openDialog({ kind: "snapshot_name", mode: "create", variantId: v.variantId });
+          }
+          return;
+        }
         actions.openDialog({
           kind: "collection",
           mode: "create",
@@ -159,6 +166,14 @@ function useGlobalHotkeys(enabled: boolean) {
           parentId: null,
           variantIds: actions.targets(),
         });
+      },
+      // 現像の画面: 今の写真の設定から現像プリセットを作る（DEV-29。Lightroom と同じ）。
+      "mod+shift+n": () => {
+        if (appStore.get().mode !== "develop") return;
+        const v = developStore.get();
+        if (v.state && v.variantId !== null) {
+          actions.openDialog({ kind: "develop_preset", mode: "create", variantId: v.variantId });
+        }
       },
       // ファイルの名前の変更（FILE-02）。現像の画面では使わない（入力欄の F2 とも重ならないように）。
       F2: () => {

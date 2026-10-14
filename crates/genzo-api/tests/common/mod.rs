@@ -117,6 +117,8 @@ impl Env {
         std::fs::create_dir_all(self.dir.path().join("shm")).unwrap();
         c.worker_timeouts = Some(JobTimeouts::uniform(TEST_JOB_TIMEOUT));
         c.worker_startup_timeout = Some(TEST_JOB_TIMEOUT);
+        // プリセット（DEV-29・EXP-02）は、利用者のアプリのデータのフォルダではなく一時フォルダに置く。
+        c.presets_dir = Some(self.dir.path().join("presets"));
         c
     }
 

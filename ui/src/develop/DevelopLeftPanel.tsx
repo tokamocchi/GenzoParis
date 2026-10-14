@@ -1,11 +1,13 @@
-// 現像の左のパネル（DEV-27・DEV-30・LIB-13）: 履歴、元に戻す・やり直す、設定のコピー・貼り付け・同期、
-// 仮想コピー。
+// 現像の左のパネル（DEV-27・DEV-28・DEV-29・DEV-30・LIB-13）: プリセット・スナップショット・履歴、元に戻す・
+// やり直す、設定のコピー・貼り付け・同期、仮想コピー。
 //
 // - 履歴はコアの history（古い順）を新しい順に出し、今の位置（is_current）を強調する。developStore の
 //   historyVersion（ドラッグの終了・Undo / Redo・保存のイベントで増える）で読み直す。
 // - 項目をクリックすると、コアの go_to_history でその位置へ 1 回で移る（送信の列の中で行う）。保存待ちの
 //   変更があれば、コアが先に保存する（そのときに消えた項目へは移らない）。移っている間は履歴を読み直さず、
 //   終わってから 1 回だけ読む。
+// - 履歴の項目の右クリック: その段階からスナップショットを作る・ビフォーに設定（DEV-28・DEV-31）。
+// - プリセット（DEV-29）・スナップショット（DEV-28）の欄は PresetPanels.tsx。
 
 import { useEffect, useRef, useState } from "react";
 
@@ -16,8 +18,11 @@ import { actions, appStore, useApp } from "../state/app";
 import { developStore, enqueue, redo, undo, useDevelop } from "../state/develop";
 import { createVirtualCopyOf } from "../state/stacks";
 import { shallowEqual } from "../state/store";
+import { type MenuAt, type MenuEntry, PopupMenu } from "../components/Menu";
 import { Section } from "../components/Section";
 import { historyAvailability, historyRows, redoAvailable } from "./historyMath";
+import { DevelopPresetsSection, SnapshotsSection } from "./PresetPanels";
+import { showAsBefore } from "./viewState";
 import "./develop.css";
 
 /** 履歴を読み直すまでの待ち（ミリ秒。仮置き）。続けて届く変更の知らせ（Undo / Redo のたびの保存など）をまとめる。 */
@@ -140,28 +145,50 @@ function useHistory(variantId: VariantId | null): { entries: HistoryItem[] | nul
   return result.id === variantId ? { entries: result.entries, error: result.error } : { entries: null, error: null };
 }
 
+/** 履歴の項目の右クリックのメニュー（その段階からスナップショットを作る・ビフォーに設定。DEV-28・DEV-31）。 */
+function historyMenu(variantId: VariantId, item: HistoryItem): MenuEntry[] {
+  return [
+    {
+      label: "この段階からスナップショットを作る…",
+      onSelect: () =>
+        actions.openDialog({ kind: "snapshot_name", mode: "create", variantId, entryId: item.id, currentName: item.label }),
+    },
+    { label: "ビフォーに設定", onSelect: () => showAsBefore({ kind: "history", entry_id: item.id }) },
+  ];
+}
+
 function HistoryList(props: { variantId: VariantId; entries: HistoryItem[] | null; error: string | null }) {
   const { variantId, entries, error } = props;
+  const [menu, setMenu] = useState<{ at: MenuAt; item: HistoryItem } | null>(null);
   if (error) return <div className="error-text">{error}</div>;
   if (!entries) return <div className="muted">読み込んでいます…</div>;
   if (entries.length === 0) return <div className="muted">まだ履歴はありません</div>;
   return (
-    <ul className="dl-history">
-      {historyRows(entries).map(({ item, current, undone }) => (
-        <li
-          key={item.id}
-          className={current ? "current" : undone ? "undone" : undefined}
-          aria-current={current ? "step" : undefined}
-          title={current ? "今の状態" : "クリックでこの状態に戻す"}
-          onClick={() => {
-            if (!current) void goToHistory(variantId, item.id);
-          }}
-        >
-          <span>{item.label}</span>
-          <span className="time">{formatTime(item.created_at)}</span>
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul className="dl-history">
+        {historyRows(entries).map(({ item, current, undone }) => (
+          <li
+            key={item.id}
+            className={current ? "current" : undone ? "undone" : undefined}
+            aria-current={current ? "step" : undefined}
+            title={`${current ? "今の状態" : "クリックでこの状態に戻す"}（右クリックでスナップショット・ビフォー）`}
+            onClick={() => {
+              if (!current) void goToHistory(variantId, item.id);
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenu({ at: { x: e.clientX, y: e.clientY }, item });
+            }}
+          >
+            <span>{item.label}</span>
+            <span className="time">{formatTime(item.created_at)}</span>
+          </li>
+        ))}
+      </ul>
+      {menu && (
+        <PopupMenu at={menu.at} items={historyMenu(variantId, menu.item)} onClose={() => setMenu(null)} label="履歴の操作" />
+      )}
+    </>
   );
 }
 
@@ -252,6 +279,11 @@ export function DevelopLeftPanel() {
           仮想コピーを作る
         </button>
       </div>
+      <DevelopPresetsSection variantId={ready ? variantId : null} />
+      <SnapshotsSection
+        variantId={ready ? variantId : null}
+        latestProcessVersion={state?.latest_process_version ?? null}
+      />
       <Section id="develop.history" title="履歴">
         {ready && variantId !== null ? (
           <HistoryList variantId={variantId} entries={history.entries} error={history.error} />

@@ -289,7 +289,7 @@ fn accepts_frame(
 }
 
 /// 変わった項目から履歴の名前を作る（DEV-27。「露光量 +0.30」など）。CLI が設定を保存するときの
-/// 履歴の名前にも使う（[`Core::paste_settings_with_label`]）。
+/// 履歴の名前にも使う（[`Core::paste_settings_with`]）。
 pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     let mut parts: Vec<String> = Vec::new();
     if old.white_balance != new.white_balance {
@@ -913,7 +913,10 @@ pub(crate) fn unused_until_upgrade(settings: &DevelopSettings) -> bool {
 /// 動画の variant が含まれていればエラーにする（動画には現像設定を保存しない。implementation_status の
 /// No.31。動画は現像できず（[`Core::open_develop`] の doc）、保存した設定は使われないため、一括適用や
 /// CLI の `develop set` で誤って保存しないようにする）。
-fn reject_videos(c: &genzo_catalog::Catalog, targets: &[VariantId]) -> Result<(), ApiError> {
+pub(crate) fn reject_videos(
+    c: &genzo_catalog::Catalog,
+    targets: &[VariantId],
+) -> Result<(), ApiError> {
     if let Some(v) = c
         .variant_summaries(targets)?
         .iter()
@@ -923,6 +926,21 @@ fn reject_videos(c: &genzo_catalog::Catalog, targets: &[VariantId]) -> Result<()
             "動画（variant {}）には現像設定を保存できません（動画はカタログの管理だけ）",
             v.variant_id
         )));
+    }
+    Ok(())
+}
+
+/// 現像中の写真が `variant_id` なら、ドラッグを終えたものとして保存待ちの変更を保存する（今の状態からスナップショット
+/// を作る前など。DEV-28）。`state` は `inner.develop.state` のロックの中身（ロックの順序は state → カタログ）。
+pub(crate) fn save_session_of(
+    inner: &Arc<Inner>,
+    state: &mut Option<Session>,
+    variant_id: VariantId,
+) -> Result<(), ApiError> {
+    if let Some(s) = state.as_mut().filter(|s| s.variant_id == variant_id) {
+        s.dragging = false;
+        s.drag_base_a1 = None;
+        save_locked(inner, s, None)?;
     }
     Ok(())
 }
@@ -1653,7 +1671,7 @@ impl Core {
     /// - 1 つのトランザクションで保存する（1 件でも失敗したら、何も保存しない）。外部データ（`render_deps`）は
     ///   貼り付け先の値のまま（現像中の写真なら、実際に使っている値）。
     /// - 動画の variant: `skip_videos` なら飛ばし、そうでなければ [`ApiError::InvalidArgument`]。
-    fn apply_to_variants(
+    pub(crate) fn apply_to_variants(
         &self,
         targets: &[VariantId],
         skip_videos: bool,

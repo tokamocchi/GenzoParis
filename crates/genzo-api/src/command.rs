@@ -15,14 +15,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use genzo_model::{
-    CollectionId, CollectionKind, ColorLabel, CropRect, DevelopSettings, ExportSettings, Flag,
-    FolderId, HistoryEntryId, KeywordId, MetadataField, Rating, SmartRule, StackId, VariantId,
+    CollectionId, CollectionKind, ColorLabel, CropRect, DevelopSettings, ExportFormat,
+    ExportSettings, Flag, FolderId, HistoryEntryId, KeywordId, MetadataField, Rating, SmartRule,
+    SnapshotId, StackId, VariantId, Watermark,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::core::Core;
 use crate::error::ApiError;
 use crate::maintenance::RestorePlan;
+use crate::naming::RenameRule;
+use crate::presets::{ExportPresetSettings, PresetImportReport, PresetInfo, PresetKind};
 use crate::types::{
     AutoStackReport, BackupEntry, BeforeInfo, BeforeSource, Capabilities, CaptureDevice,
     CaptureDeviceKey, CaptureTarget, CaptureTimeEdit, CaptureTimeEditInfo, CaptureTimePlan,
@@ -37,7 +40,8 @@ use crate::types::{
 };
 use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, ProfileEntry, ProfileImportReport, ProfileKind,
-    RelinkReport, RelinkRequest, RelocatePlan, RenameSpec, VolumeInfo,
+    RelinkReport, RelinkRequest, RelocatePlan, RenameSpec, SnapshotInfo, SnapshotSource,
+    VolumeInfo,
 };
 
 /// コマンド（UI → コア）。
@@ -521,6 +525,39 @@ pub enum Command {
         /// variant。
         variant_id: VariantId,
     },
+    /// スナップショットの一覧（DEV-28。[`crate::Core::snapshots`]）。→ [`Response::Snapshots`]
+    Snapshots {
+        /// variant。
+        variant_id: VariantId,
+    },
+    /// スナップショットを作る（DEV-28。[`crate::Core::create_snapshot`]）。→ [`Response::Snapshot`]
+    CreateSnapshot {
+        /// variant。
+        variant_id: VariantId,
+        /// 名前。
+        name: String,
+        /// 出どころ（`{"kind": "current"}`（省略時）・`{"kind": "history", "entry_id": 12}`）。
+        #[serde(default)]
+        source: SnapshotSource,
+    },
+    /// スナップショットの名前を変える。→ [`Response::Snapshot`]
+    RenameSnapshot {
+        /// スナップショット。
+        snapshot_id: SnapshotId,
+        /// 新しい名前。
+        name: String,
+    },
+    /// スナップショットを削除する。→ [`Response::Ok`]
+    DeleteSnapshot {
+        /// スナップショット。
+        snapshot_id: SnapshotId,
+    },
+    /// スナップショットをその写真に適用する（履歴に 1 件記録する。[`crate::Core::apply_snapshot`]）。
+    /// → [`Response::Settings`]
+    ApplySnapshot {
+        /// スナップショット。
+        snapshot_id: SnapshotId,
+    },
     /// 現像設定（コピー）。→ [`Response::Settings`]
     CopySettings {
         /// variant。
@@ -630,8 +667,146 @@ pub enum Command {
         id: String,
     },
 
+    // --- プリセット（DEV-29・EXP-02。`presets` の doc） ---
+    /// プリセットの一覧（[`crate::Core::presets`]）。→ [`Response::Presets`]
+    Presets {
+        /// 種類。
+        kind: PresetKind,
+    },
+    /// 現像プリセットの設定（含めない項目は既定値。[`crate::Core::develop_preset_settings`]）。
+    /// → [`Response::Settings`]
+    DevelopPresetSettings {
+        /// プリセット。
+        preset_id: String,
+    },
+    /// 写真の今の設定から現像プリセットを作る（[`crate::Core::create_develop_preset`]）。→ [`Response::Preset`]
+    CreateDevelopPreset {
+        /// 名前。
+        name: String,
+        /// フォルダ（空ならフォルダなし）。
+        #[serde(default)]
+        folder: String,
+        /// 含める項目。
+        groups: SettingGroups,
+        /// 元にする写真。
+        variant_id: VariantId,
+    },
+    /// 現像プリセットを写真の今の設定で置き換える（[`crate::Core::update_develop_preset`]）。
+    /// → [`Response::Preset`]
+    UpdateDevelopPreset {
+        /// プリセット。
+        preset_id: String,
+        /// 含める項目。
+        groups: SettingGroups,
+        /// 元にする写真。
+        variant_id: VariantId,
+    },
+    /// 現像プリセットを選んだ写真に適用する（動画は除き、除いた数を返す。[`crate::Core::apply_develop_preset`]）。
+    /// → [`Response::Pasted`]
+    ApplyDevelopPreset {
+        /// プリセット。
+        preset_id: String,
+        /// 適用先。
+        targets: Vec<VariantId>,
+        /// 適用先の処理バージョンの扱い（省略時は変えない。DATA-09）。
+        #[serde(default)]
+        process_version: PasteVersion,
+    },
+    /// 書き出しプリセットを作る（[`crate::Core::create_export_preset`]）。→ [`Response::Preset`]
+    CreateExportPreset {
+        /// 名前。
+        name: String,
+        /// フォルダ（空ならフォルダなし）。
+        #[serde(default)]
+        folder: String,
+        /// 中身。
+        settings: ExportPresetSettings,
+    },
+    /// 書き出しプリセットの中身を置き換える（[`crate::Core::update_export_preset`]）。→ [`Response::Preset`]
+    UpdateExportPreset {
+        /// プリセット。
+        preset_id: String,
+        /// 中身。
+        settings: ExportPresetSettings,
+    },
+    /// プリセットの名前を変える。→ [`Response::Preset`]
+    RenamePreset {
+        /// 種類。
+        kind: PresetKind,
+        /// プリセット。
+        preset_id: String,
+        /// 新しい名前。
+        name: String,
+    },
+    /// プリセットをフォルダへ移す（空の名前でフォルダなし）。→ [`Response::Preset`]
+    MovePreset {
+        /// 種類。
+        kind: PresetKind,
+        /// プリセット。
+        preset_id: String,
+        /// フォルダ。
+        folder: String,
+    },
+    /// フォルダの名前を変える（そのフォルダのプリセットをすべて移す）。→ [`Response::Updated`]（移した数）
+    RenamePresetFolder {
+        /// 種類。
+        kind: PresetKind,
+        /// 今のフォルダ。
+        folder: String,
+        /// 新しい名前（空ならフォルダなし）。
+        name: String,
+    },
+    /// プリセットを削除する。→ [`Response::Ok`]
+    DeletePreset {
+        /// 種類。
+        kind: PresetKind,
+        /// プリセット。
+        preset_id: String,
+    },
+    /// プリセットのファイルを読み込む（[`crate::Core::import_presets`]）。→ [`Response::PresetImport`]
+    ImportPresets {
+        /// ファイル。
+        paths: Vec<PathBuf>,
+        /// 種類（指定するとその種類のファイルだけ）。
+        #[serde(default)]
+        kind: Option<PresetKind>,
+    },
+    /// プリセットをファイルに書き出す（[`crate::Core::export_preset_files`]）。→ [`Response::Paths`]
+    ExportPresetFiles {
+        /// 種類。
+        kind: PresetKind,
+        /// プリセット。
+        preset_ids: Vec<String>,
+        /// 書き出し先のフォルダ。
+        dest_dir: PathBuf,
+    },
+    /// 書き出しのファイル名の例（見本の写真。[`crate::Core::export_name_preview`]）。→ [`Response::NamePreview`]
+    ExportNamePreview {
+        /// ファイル名の規則（`null` なら元のファイル名）。
+        #[serde(default)]
+        file_naming: Option<RenameRule>,
+        /// 形式（拡張子に使う）。
+        #[serde(default)]
+        format: ExportFormat,
+    },
+
+    /// 透かしの見本（EXP-03。[`crate::Core::watermark_preview`]）。→ [`Response::WatermarkPreview`]
+    WatermarkPreview {
+        /// 透かし。
+        watermark: Watermark,
+        /// 見本の画像の幅（省略時は 600）。
+        #[serde(default)]
+        width: Option<u32>,
+        /// 見本の画像の高さ（省略時は 400）。
+        #[serde(default)]
+        height: Option<u32>,
+    },
+    /// OS の既定のフォントのフォルダ（EXP-03。透かしのフォントを選ぶ最初の場所。[`crate::Core::system_font_dirs`]）。
+    /// → [`Response::Paths`]
+    SystemFontDirs,
+
     // --- 書き出し ---
-    /// 書き出す（P3 のジョブ）。→ [`Response::JobStarted`]
+    /// 書き出す（P3 のジョブ。動画は元のファイルのままコピーする）。→ [`Response::JobStarted`]
     Export {
         /// variant。
         variant_ids: Vec<VariantId>,
@@ -639,6 +814,9 @@ pub enum Command {
         settings: ExportSettings,
         /// 書き出し先のフォルダ。
         dest_dir: PathBuf,
+        /// ファイル名の規則（EXP-02。省略・`null` なら元のファイル名）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_naming: Option<RenameRule>,
     },
 
     // --- 削除 ---
@@ -1030,6 +1208,37 @@ pub enum Response {
         /// 履歴（古い順）。
         entries: Vec<HistoryItem>,
     },
+    /// スナップショットの一覧（DEV-28）。
+    Snapshots {
+        /// スナップショット（作った順）。
+        snapshots: Vec<SnapshotInfo>,
+    },
+    /// スナップショット（作った・名前を変えたもの）。
+    Snapshot {
+        /// スナップショット。
+        snapshot: SnapshotInfo,
+    },
+    /// プリセットの一覧（DEV-29・EXP-02）。
+    Presets {
+        /// プリセット（フォルダ → 名前の順）。
+        presets: Vec<PresetInfo>,
+        /// プリセットのフォルダ（分からなければ `null`）。
+        #[serde(serialize_with = "crate::types::lossy_path")]
+        dir: Option<PathBuf>,
+    },
+    /// プリセット（作った・変えたもの）。
+    Preset {
+        /// プリセット。
+        preset: PresetInfo,
+    },
+    /// プリセットのファイルの読み込みの結果。
+    PresetImport(PresetImportReport),
+    /// 書いたファイル。
+    Paths {
+        /// ファイル。
+        #[serde(serialize_with = "crate::types::lossy_path")]
+        paths: Vec<PathBuf>,
+    },
     /// 作った variant。
     VariantCreated {
         /// variant。
@@ -1086,6 +1295,8 @@ pub enum Response {
     FileIdentity(FileIdentity),
     /// コピー先の名前の例。
     NamePreview(NamePreview),
+    /// 透かしの見本。
+    WatermarkPreview(crate::watermark::WatermarkPreview),
     /// 動画の再生の情報（VID-04）。
     VideoPlayback(VideoPlayback),
     /// 再生用のファイルのキャッシュの状況。
@@ -1430,6 +1641,26 @@ impl Core {
             C::History { variant_id } => R::History {
                 entries: self.history(variant_id)?,
             },
+            C::Snapshots { variant_id } => R::Snapshots {
+                snapshots: self.snapshots(variant_id)?,
+            },
+            C::CreateSnapshot {
+                variant_id,
+                name,
+                source,
+            } => R::Snapshot {
+                snapshot: self.create_snapshot(variant_id, &name, source)?,
+            },
+            C::RenameSnapshot { snapshot_id, name } => R::Snapshot {
+                snapshot: self.rename_snapshot(snapshot_id, &name)?,
+            },
+            C::DeleteSnapshot { snapshot_id } => {
+                self.delete_snapshot(snapshot_id)?;
+                R::Ok
+            }
+            C::ApplySnapshot { snapshot_id } => R::Settings {
+                settings: Box::new(self.apply_snapshot(snapshot_id)?),
+            },
             C::CopySettings { variant_id } => R::Settings {
                 settings: Box::new(self.develop_settings(variant_id)?),
             },
@@ -1487,12 +1718,108 @@ impl Core {
                 self.remove_profile(kind, &id)?;
                 R::Updated { count: 1 }
             }
+            C::Presets { kind } => R::Presets {
+                presets: self.presets(kind)?,
+                dir: self.presets_dir(),
+            },
+            C::DevelopPresetSettings { preset_id } => R::Settings {
+                settings: Box::new(self.develop_preset_settings(&preset_id)?),
+            },
+            C::CreateDevelopPreset {
+                name,
+                folder,
+                groups,
+                variant_id,
+            } => R::Preset {
+                preset: self.create_develop_preset(&name, &folder, groups, variant_id)?,
+            },
+            C::UpdateDevelopPreset {
+                preset_id,
+                groups,
+                variant_id,
+            } => R::Preset {
+                preset: self.update_develop_preset(&preset_id, groups, variant_id)?,
+            },
+            C::ApplyDevelopPreset {
+                preset_id,
+                targets,
+                process_version,
+            } => R::Pasted(self.apply_develop_preset(&preset_id, &targets, process_version)?),
+            C::CreateExportPreset {
+                name,
+                folder,
+                settings,
+            } => R::Preset {
+                preset: self.create_export_preset(&name, &folder, &settings)?,
+            },
+            C::UpdateExportPreset {
+                preset_id,
+                settings,
+            } => R::Preset {
+                preset: self.update_export_preset(&preset_id, &settings)?,
+            },
+            C::RenamePreset {
+                kind,
+                preset_id,
+                name,
+            } => R::Preset {
+                preset: self.rename_preset(kind, &preset_id, &name)?,
+            },
+            C::MovePreset {
+                kind,
+                preset_id,
+                folder,
+            } => R::Preset {
+                preset: self.move_preset(kind, &preset_id, &folder)?,
+            },
+            C::RenamePresetFolder { kind, folder, name } => R::Updated {
+                count: self.rename_preset_folder(kind, &folder, &name)? as u64,
+            },
+            C::DeletePreset { kind, preset_id } => {
+                self.delete_preset(kind, &preset_id)?;
+                R::Ok
+            }
+            C::ImportPresets { paths, kind } => R::PresetImport(self.import_presets(&paths, kind)?),
+            C::ExportPresetFiles {
+                kind,
+                preset_ids,
+                dest_dir,
+            } => R::Paths {
+                paths: self.export_preset_files(kind, &preset_ids, &dest_dir)?,
+            },
+            C::ExportNamePreview {
+                file_naming,
+                format,
+            } => R::NamePreview(self.export_name_preview(file_naming.as_ref(), format)),
+            C::WatermarkPreview {
+                watermark,
+                width,
+                height,
+            } => {
+                // 片方だけなら 3:2 の横長にする。
+                let size = match (width, height) {
+                    (Some(w), Some(h)) => Some((w, h)),
+                    (Some(w), None) => Some((w, w.saturating_mul(2) / 3)),
+                    (None, Some(h)) => Some((h.saturating_mul(3) / 2, h)),
+                    (None, None) => None,
+                };
+                R::WatermarkPreview(self.watermark_preview(&watermark, size)?)
+            }
+            C::SystemFontDirs => R::Paths {
+                paths: self.system_font_dirs(),
+            },
             C::Export {
                 variant_ids,
                 settings,
                 dest_dir,
+                file_naming,
             } => R::JobStarted {
-                job_id: self.export(&variant_ids, &settings, &dest_dir)?,
+                job_id: self.export_with(
+                    &variant_ids,
+                    &settings,
+                    &dest_dir,
+                    file_naming.as_ref(),
+                )?,
             },
             C::PlanDelete { kind, variant_ids } => {
                 R::DeletePlan(self.plan_delete(kind, &variant_ids)?)
@@ -1807,11 +2134,12 @@ mod tests {
             count: 3,
             upgraded: 1,
             needs_upgrade: 2,
+            skipped_videos: 0,
         }))
         .unwrap();
         assert_eq!(
             r,
-            json!({"type": "pasted", "count": 3, "upgraded": 1, "needs_upgrade": 2})
+            json!({"type": "pasted", "count": 3, "upgraded": 1, "needs_upgrade": 2, "skipped_videos": 0})
         );
         let c: Command = serde_json::from_value(json!({
             "type": "constrain_crop",
@@ -2183,6 +2511,95 @@ mod tests {
                 variant_ids: vec![VariantId::new(1)],
                 settings: ExportSettings::default(),
                 dest_dir: "/out".into(),
+                file_naming: None,
+            },
+            Command::Export {
+                variant_ids: vec![VariantId::new(1)],
+                settings: ExportSettings::default(),
+                dest_dir: "/out".into(),
+                file_naming: Some(crate::RenameRule::default()),
+            },
+            Command::Snapshots {
+                variant_id: VariantId::new(1),
+            },
+            Command::CreateSnapshot {
+                variant_id: VariantId::new(1),
+                name: "明るめ".to_owned(),
+                source: SnapshotSource::History {
+                    entry_id: HistoryEntryId::new(4),
+                },
+            },
+            Command::RenameSnapshot {
+                snapshot_id: SnapshotId::new(2),
+                name: "白黒".to_owned(),
+            },
+            Command::DeleteSnapshot {
+                snapshot_id: SnapshotId::new(2),
+            },
+            Command::ApplySnapshot {
+                snapshot_id: SnapshotId::new(2),
+            },
+            Command::Presets {
+                kind: PresetKind::Develop,
+            },
+            Command::CreateDevelopPreset {
+                name: "フィルム".to_owned(),
+                folder: "ルック".to_owned(),
+                groups: SettingGroups::ALL,
+                variant_id: VariantId::new(1),
+            },
+            Command::ApplyDevelopPreset {
+                preset_id: "0123456789abcdef".to_owned(),
+                targets: vec![VariantId::new(1), VariantId::new(2)],
+                process_version: PasteVersion::Keep,
+            },
+            Command::CreateExportPreset {
+                name: "Web".to_owned(),
+                folder: String::new(),
+                settings: ExportPresetSettings::default(),
+            },
+            Command::RenamePresetFolder {
+                kind: PresetKind::Export,
+                folder: "旧".to_owned(),
+                name: "新".to_owned(),
+            },
+            Command::ImportPresets {
+                paths: vec!["/x/a.json".into()],
+                kind: None,
+            },
+            Command::ExportPresetFiles {
+                kind: PresetKind::Develop,
+                preset_ids: vec!["0123456789abcdef".to_owned()],
+                dest_dir: "/out".into(),
+            },
+            Command::ExportNamePreview {
+                file_naming: None,
+                format: ExportFormat::Png8,
+            },
+            Command::WatermarkPreview {
+                watermark: Watermark::new(genzo_model::WatermarkContent::Image {
+                    path: "/logo.png".into(),
+                }),
+                width: Some(300),
+                height: None,
+            },
+            Command::SystemFontDirs,
+            Command::Export {
+                variant_ids: vec![VariantId::new(1), VariantId::new(2)],
+                settings: ExportSettings {
+                    output_sharpening: Some(genzo_model::OutputSharpening::default()),
+                    watermark: Some(Watermark::new(genzo_model::WatermarkContent::Text {
+                        text: "© 2026".into(),
+                        font: "/fonts/a.ttf".into(),
+                        font_index: 0,
+                        color: genzo_model::RgbColor::WHITE,
+                    })),
+                    videos: genzo_model::VideoExport::Skip,
+                    resolution_ppi: 300,
+                    ..ExportSettings::default()
+                },
+                dest_dir: "/out".into(),
+                file_naming: None,
             },
             Command::PlanDelete {
                 kind: DeleteKind::Trash,

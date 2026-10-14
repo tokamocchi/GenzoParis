@@ -7,7 +7,7 @@
 //! | 0th | ImageDescription (0x010E)・Artist (0x013B)・Copyright (0x8298) | キャプション・作成者・著作権表示（LIB-15。**ASCII で表せる値だけ**） |
 //! | 0th | Make (0x010F)・Model (0x0110) | カメラ |
 //! | 0th | Orientation (0x0112) | **常に 1**（現像で向きを画素に反映済みのため） |
-//! | 0th | XResolution・YResolution・ResolutionUnit | [`EXPORT_RESOLUTION_PPI`] ppi |
+//! | 0th | XResolution・YResolution・ResolutionUnit | 書き出しの設定の解像度（既定は [`EXPORT_RESOLUTION_PPI`] ppi。EXP-03） |
 //! | 0th | Software (0x0131) | [`EXIF_SOFTWARE`] |
 //! | Exif | ExposureTime・FNumber・PhotographicSensitivity（ISO）・FocalLength・LensModel | 撮影情報 |
 //! | Exif | ExifVersion (0x9000) | "0232" |
@@ -33,11 +33,11 @@ use crate::error::{MediaError, Result};
 /// Exif の Software タグに書く文字列。
 pub const EXIF_SOFTWARE: &str = "GenzoParis";
 
-/// 書き出すファイルの解像度（ppi。仮置き）。
+/// 書き出すファイルの解像度の既定値（ppi）。
 ///
-/// 画素数には影響しない印刷用の目安。Exif の既定値（72 dpi）に合わせた。印刷の設定を作るときに
-/// 見直す。
-pub const EXPORT_RESOLUTION_PPI: u32 = 72;
+/// 画素数には影響しない印刷用の目安。Exif の既定値（72 dpi）に合わせた。書き出しの設定の `resolution_ppi`
+/// （EXP-03。2026-10-14 追加）で変えられる（[`genzo_model::ExportSettings::DEFAULT_RESOLUTION_PPI`] と同じ値）。
+pub const EXPORT_RESOLUTION_PPI: u32 = genzo_model::ExportSettings::DEFAULT_RESOLUTION_PPI;
 
 /// ASCII のタグの最大の文字数（仮置き）。メーカー名・機種名・レンズ名には十分な長さ。
 pub const EXIF_MAX_ASCII_CHARS: usize = 255;
@@ -215,6 +215,8 @@ pub(crate) struct ExifImageInfo {
     pub width: u32,
     pub height: u32,
     pub color_space: OutputColorSpace,
+    /// 解像度（ppi。XResolution・YResolution。書き出しの設定の `resolution_ppi`）。
+    pub resolution_ppi: u32,
 }
 
 /// TIFF のバイト順。
@@ -437,7 +439,7 @@ pub(crate) fn build_ifds(data: &ExifData, info: &ExifImageInfo) -> ExifIfds {
     for t in [tag::X_RESOLUTION, tag::Y_RESOLUTION] {
         ifd0.push(Entry {
             tag: t,
-            value: Value::Rational(vec![(EXPORT_RESOLUTION_PPI, 1)]),
+            value: Value::Rational(vec![(info.resolution_ppi.max(1), 1)]),
         });
     }
     ifd0.push(Entry {
@@ -630,6 +632,7 @@ pub fn exif_tiff_bytes(
                 width,
                 height,
                 color_space,
+                resolution_ppi: EXPORT_RESOLUTION_PPI,
             },
         ),
         ByteOrder::Big,
@@ -710,6 +713,7 @@ mod tests {
             width: 640,
             height: 480,
             color_space: OutputColorSpace::Srgb,
+            resolution_ppi: EXPORT_RESOLUTION_PPI,
         }
     }
 

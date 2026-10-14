@@ -24,10 +24,10 @@ use genzo_jobs::CancellationToken;
 use genzo_media::{CacheSpec, VideoProbe};
 
 use crate::client::{
-    LinearImage, RawFrame, Thumbnail, WorkerClient, WorkerClientError, WorkerConfig,
+    LinearImage, RawFrame, Thumbnail, WatermarkImage, WorkerClient, WorkerClientError, WorkerConfig,
 };
 use crate::failures::FailureTracker;
-use crate::protocol::{PhotoProbe, PongInfo};
+use crate::protocol::{PhotoProbe, PongInfo, WatermarkRequest};
 use crate::shm::ShmArena;
 
 /// バッチ用のワーカーの数の上限（04 の 1.2 節「バッチ用ワーカー（1〜2 個）」）。
@@ -292,6 +292,18 @@ impl WorkerPool {
     ) -> Result<LinearImage, WorkerClientError> {
         self.skip_check(path)?;
         self.acquire(lane, cancel)?.decode_image(path, cancel)
+    }
+
+    /// 書き出しの透かしを作る（[`WorkerClient::render_watermark`]。EXP-03）。
+    pub fn render_watermark(
+        &self,
+        lane: Lane,
+        request: &WatermarkRequest,
+        cancel: &CancellationToken,
+    ) -> Result<WatermarkImage, WorkerClientError> {
+        self.skip_check(request.content.file())?;
+        self.acquire(lane, cancel)?
+            .render_watermark(request, cancel)
     }
 
     /// 写真のサムネイルを作る（[`WorkerClient::thumbnail`]）。

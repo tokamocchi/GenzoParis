@@ -47,6 +47,8 @@
 //!   `source.lens_correction_note`）。
 //! - `mask` はローカル補正（マスク。DEV-18・DEV-19）の一覧・追加・変更・削除・重ねて表示の PNG・色のスポイト
 //!   （`crate::masks`）。
+//! - `snapshot` はスナップショット（DEV-28）の一覧・作成（今の状態・`--from-history` で履歴の項目の状態）・名前の
+//!   変更・削除・適用（genzo-api の `snapshots`。適用は履歴に 1 件記録し、処理バージョンも保存した版に戻す）。
 
 use std::io::Read;
 
@@ -59,7 +61,7 @@ use serde_json::{Value, json};
 use crate::Status;
 use crate::args::{
     BeforeArgs, ColorArgs, CompareArgs, DetailArgs, DevelopCommand, GlobalArgs, LensArgs,
-    ProfileArgs, RegionArgs, RegionSpaceArg, SensorArgs, setting_groups,
+    ProfileArgs, RegionArgs, RegionSpaceArg, SensorArgs, SnapshotCommand, setting_groups,
 };
 use crate::error::{CliError, CliResult};
 use crate::library::{ensure_variants, unique_ids};
@@ -153,7 +155,95 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
         DevelopCommand::Before(a) => before(g, out, &a),
         DevelopCommand::Compare(a) => compare(g, out, &a),
         DevelopCommand::Mask(c) => crate::masks::run(g, out, c),
+        DevelopCommand::Snapshot(c) => snapshot(g, out, c),
     }
+}
+
+/// `develop snapshot`（DEV-28）。JSON の出力: `list` はスナップショットの配列、`create`・`rename` は
+/// スナップショット（`{"id", "variant_id", "name", "created_at", "process_version"}`）、`delete` は
+/// `{"deleted"}`、`apply` は `{"snapshot", "settings"}`。
+fn snapshot(g: &GlobalArgs, out: Output, cmd: SnapshotCommand) -> CliResult<Status> {
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    let r = snapshot_in(&s, out, cmd);
+    s.close()?;
+    r
+}
+
+fn snapshot_in(s: &Session, out: Output, cmd: SnapshotCommand) -> CliResult<Status> {
+    let line = |snap: &genzo_api::SnapshotInfo, done: &str| {
+        if out.json {
+            out.print_json(snap);
+        } else {
+            out.line(format!(
+                "スナップショット {}「{}」を{done}（variant {}・処理バージョン {}）",
+                snap.id, snap.name, snap.variant_id, snap.process_version
+            ));
+        }
+    };
+    match cmd {
+        SnapshotCommand::List { variant } => {
+            ensure_variants(s, &[variant])?;
+            let list = s.core.snapshots(variant)?;
+            if out.json {
+                out.print_json(&list);
+            } else if list.is_empty() {
+                out.line("スナップショットはありません");
+            } else {
+                let mut t = Table::new(["ID", "日時", "名前", "処理バージョン"]);
+                for x in &list {
+                    t.row([
+                        x.id.to_string(),
+                        x.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                        x.name.clone(),
+                        x.process_version.to_string(),
+                    ]);
+                }
+                out.table(&t);
+            }
+        }
+        SnapshotCommand::Create {
+            variant,
+            name,
+            from_history,
+        } => {
+            ensure_variants(s, &[variant])?;
+            let source = match from_history {
+                Some(entry_id) => genzo_api::SnapshotSource::History { entry_id },
+                None => genzo_api::SnapshotSource::Current,
+            };
+            let snap = s.core.create_snapshot(variant, &name, source)?;
+            line(&snap, "作りました");
+        }
+        SnapshotCommand::Rename { snapshot, name } => {
+            let snap = s.core.rename_snapshot(snapshot, &name)?;
+            line(&snap, "名前を変えました");
+        }
+        SnapshotCommand::Delete { snapshot } => {
+            let snap = s.core.snapshot(snapshot)?;
+            s.core.delete_snapshot(snapshot)?;
+            if out.json {
+                out.print_json(&json!({ "deleted": snap }));
+            } else {
+                out.line(format!(
+                    "スナップショット {}「{}」を削除しました",
+                    snap.id, snap.name
+                ));
+            }
+        }
+        SnapshotCommand::Apply { snapshot } => {
+            let snap = s.core.snapshot(snapshot)?;
+            let settings = s.core.apply_snapshot(snapshot)?;
+            if out.json {
+                out.print_json(&json!({ "snapshot": snap, "settings": settings }));
+            } else {
+                out.line(format!(
+                    "スナップショット {}「{}」を variant {} に適用しました（履歴に記録しました）",
+                    snap.id, snap.name, snap.variant_id
+                ));
+            }
+        }
+    }
+    Ok(Status::Success)
 }
 
 /// JSON の入力を読む（`-` なら標準入力）。文字コードは [`decode_text`]。

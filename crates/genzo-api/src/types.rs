@@ -1435,8 +1435,8 @@ pub struct DevelopState {
 /// ビフォー / アフターの表示（DEV-31）のビフォーの設定の出どころ（[`crate::Core::set_before`]）。
 ///
 /// どの出どころでも、切り抜き・角度補正（`geometry`）は今の設定（アフター）のものを使う（位置を合わせて
-/// 比べ、拡大・パンを同期するため。決定事項ログ No.79）。後のパッケージ（スナップショット・履歴。DEV-28）は
-/// `History`・`Snapshot` を画面から選べるようにする。
+/// 比べ、拡大・パンを同期するため。決定事項ログ No.79）。`History`・`Snapshot` は、画面の履歴・スナップショットの
+/// メニューの「ビフォーに設定」で選ぶ（DEV-28。決定事項ログ No.164）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BeforeSource {
@@ -1492,6 +1492,47 @@ pub struct HistoryItem {
     pub label: String,
     /// 現在の位置か。
     pub is_current: bool,
+}
+
+/// スナップショットの 1 件（DEV-28。[`crate::Core::snapshots`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotInfo {
+    /// ID。
+    pub id: SnapshotId,
+    /// 写真（variant）。
+    pub variant_id: VariantId,
+    /// 名前。
+    pub name: String,
+    /// 作った日時。
+    pub created_at: DateTime<Utc>,
+    /// 保存した設定の処理バージョン（作ったときの写真の版。適用すると写真の版もこの版になる）。
+    pub process_version: u32,
+}
+
+impl From<genzo_catalog::Snapshot> for SnapshotInfo {
+    fn from(s: genzo_catalog::Snapshot) -> Self {
+        Self {
+            id: s.id,
+            variant_id: s.variant_id,
+            name: s.name,
+            created_at: s.created_at,
+            process_version: s.process_version,
+        }
+    }
+}
+
+/// スナップショットの出どころ（DEV-28。[`crate::Core::create_snapshot`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SnapshotSource {
+    /// 今の状態（現像中の写真なら、保存待ちの変更を保存してから）。既定。
+    #[default]
+    Current,
+    /// 履歴の 1 件（[`HistoryItem::id`]）の状態。
+    History {
+        /// 履歴の項目。
+        entry_id: HistoryEntryId,
+    },
 }
 
 /// 白飛び・黒つぶれの画素の数（DEV-26。表示用の 8bit の階級の端）。
@@ -1833,6 +1874,14 @@ impl SettingGroups {
         masks: true,
     };
 
+    /// 現像プリセット（DEV-29）を作るときの既定の項目: 切り抜きと角度・マスクを除くすべて（写真ごとに位置・構図が
+    /// 違うことが多いため。画面の貼り付け・プリセットのダイアログの既定の選択と同じ。決定事項ログ No.161）。
+    pub const PRESET_DEFAULT: Self = Self {
+        geometry: false,
+        masks: false,
+        ..Self::ALL
+    };
+
     /// すべての項目か。
     pub fn is_all(&self) -> bool {
         *self == Self::ALL
@@ -1922,6 +1971,9 @@ pub struct PasteReport {
     /// 貼り付けた後の設定に、その写真の処理バージョンでは使われず、最新の版に更新すると使われる項目の値が
     /// ある variant の数（版 1 の写真に写したレンズ補正など。画面は処理バージョンの更新を案内する）。
     pub needs_upgrade: u64,
+    /// 除いた動画の数（現像プリセットの適用。[`crate::Core::apply_develop_preset`]。設定の貼り付けでは常に 0）。
+    #[serde(default)]
+    pub skipped_videos: u64,
 }
 
 /// 画面のプロファイルの情報（IQ-05）。
@@ -1961,7 +2013,20 @@ pub enum ExportOutcome {
         #[serde(default)]
         render_deps: Option<Box<genzo_model::RenderDeps>>,
     },
-    /// 書き出さなかった（衝突時の「スキップ」・動画など）。
+    /// 動画を再エンコードせずにコピーした（EXP-05）。
+    Copied {
+        /// コピーしたファイル（連番を付けた場合は付けた後の名前）。
+        #[serde(serialize_with = "lossy_path")]
+        path: PathBuf,
+        /// 大きさ（バイト）。
+        bytes: u64,
+        /// 内容の BLAKE3（16 進数の小文字。元のファイルと、コピーを読み直した値が同じことを確かめてある）。
+        full_hash: String,
+        /// 警告（登録の後に元のファイルが変わっていた・上書きしなかったなど）。
+        #[serde(default)]
+        warnings: Vec<String>,
+    },
+    /// 書き出さなかった（衝突時の「スキップ」・書き出さない設定の動画など）。
     Skipped {
         /// 理由。
         reason: String,
@@ -1993,8 +2058,11 @@ pub struct ExportReport {
     pub dest_dir: PathBuf,
     /// 1 件ずつの結果（要求の順）。
     pub items: Vec<ExportItem>,
-    /// 書き出した数。
+    /// 書き出した数（写真）。
     pub written: u64,
+    /// コピーした動画の数（EXP-05）。
+    #[serde(default)]
+    pub copied: u64,
     /// 書き出さなかった数。
     pub skipped: u64,
     /// 失敗した数。

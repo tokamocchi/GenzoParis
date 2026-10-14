@@ -100,7 +100,7 @@ pub struct CoreHooks {
     #[doc(hidden)]
     pub on_regenerate_start: Option<Arc<dyn Fn(genzo_model::VariantId) + Send + Sync>>,
     /// テスト専用: コピー取り込み（IMP-02）が途中の段階に着いたときに、ジョブのスレッドで呼ぶ
-    /// （[`CopyImportStage`]）。`Err` を返すと、その段階の失敗（書き込み・照合の失敗、公開の後の失敗、カタログへの
+    /// （[`CopyImportStage`]。動画の書き出し（EXP-05）のコピーでも [`CopyImportStage::Written`] で呼ぶ）。`Err` を返すと、その段階の失敗（書き込み・照合の失敗、公開の後の失敗、カタログへの
     /// 登録の失敗）として扱うので、失敗したときの後始末（このジョブが作ったファイルだけを消す）を確かめられる。
     #[doc(hidden)]
     pub on_copy_import: Option<CopyImportHook>,
@@ -229,6 +229,8 @@ pub(crate) struct Inner {
     pub engine: Engine,
     /// カメラプロファイル・ルックのライブラリ（DEV-17。`profiles` の doc。`engine` にも渡している）。
     pub profiles: Arc<crate::profiles::ProfileLibrary>,
+    /// 現像プリセット・書き出しプリセット（DEV-29・EXP-02。`presets` の doc。アプリのデータのフォルダ）。
+    pub presets: crate::presets::PresetStore,
     pub gpu: Mutex<GpuState>,
     pub display: Mutex<DisplayState>,
     /// 検索の状態と、作り直しのスレッドとの受け渡し（`search` の doc）。
@@ -507,6 +509,13 @@ impl Core {
             display,
         } = parts;
         let proxies = crate::playback::ProxyState::open(&config.data_dir, &settings);
+        // プリセット（DEV-29・EXP-02）: アプリのデータのフォルダ（読むだけならフォルダを作らない）。
+        let presets = crate::presets::PresetStore::new(
+            config
+                .presets_dir
+                .clone()
+                .or_else(crate::presets::default_presets_dir),
+        );
 
         let inner = Arc::new(Inner {
             config,
@@ -523,6 +532,7 @@ impl Core {
             proxy_support: std::sync::OnceLock::new(),
             engine,
             profiles,
+            presets,
             gpu: Mutex::new(GpuState::default()),
             display: Mutex::new(display),
             search: Arc::new(SearchShared::default()),

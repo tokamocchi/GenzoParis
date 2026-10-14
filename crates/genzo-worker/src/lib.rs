@@ -26,6 +26,7 @@
 //! | `DecodeImage` | `genzo_media::decode_image_file` ＋ lcms2 でリニア BT.2020 へ | [`LinearImageInfo`] | RGB（f32） |
 //! | `Thumbnail` | RAW: 埋め込みの JPEG（`genzo_raw::extract_thumbnail`）、それ以外: 画像そのもの → B5 | [`ThumbnailInfo`] | JPEG |
 //! | `VideoThumbnail` | ffmpeg（`genzo_media::FfmpegTools::thumbnail`）→ B5 | [`ThumbnailInfo`] | JPEG |
+//! | `RenderWatermark` | 透かしの画像のデコード・フォントの文字の描画（`genzo_media::watermark`。EXP-03） | [`WatermarkInfo`] | RGBA（u16） |
 //!
 //! 機能フラグ `libraw` が無効な build では、RAW のジョブは [`WorkerErrorKind::Unsupported`] になる。
 //!
@@ -75,7 +76,8 @@ pub mod worker;
 
 pub use client::{
     InitialShmBytes, JobTimeouts, LinearImage, RawFrame, TestHook, TestHookOutput, Thumbnail,
-    WorkerClient, WorkerClientError, WorkerConfig, WorkerStats, locate_worker_executable,
+    WatermarkImage, WorkerClient, WorkerClientError, WorkerConfig, WorkerStats,
+    locate_worker_executable,
 };
 pub use failures::{FailureTracker, MAX_CONSECUTIVE_FAILURES};
 pub use limits::DEFAULT_MEMORY_LIMIT_BYTES;
@@ -83,7 +85,7 @@ pub use pool::{Lane, MAX_BATCH_WORKERS, PoolConfig, WorkerLease, WorkerPool};
 pub use protocol::{
     GarbageMode, JobKind, LinearImageInfo, MemoryLimitStatus, OversizeMode, PROTOCOL_VERSION,
     PhotoFormat, PhotoProbe, PongInfo, ProfileSummary, RawFrameInfo, ThumbnailInfo,
-    ThumbnailSource, VideoFrameInfo, WorkerError, WorkerErrorKind,
+    ThumbnailSource, VideoFrameInfo, WatermarkInfo, WatermarkRequest, WorkerError, WorkerErrorKind,
 };
 pub use shm::{BufferError, PayloadKind, ShmArena};
 pub use validate::{MAX_THUMBNAIL_EDGE, MAX_THUMBNAIL_JPEG_BYTES};

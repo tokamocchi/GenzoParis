@@ -1,5 +1,5 @@
 // ショートカットの一覧（UX-02）の内容。登録は App.tsx（全体。キーワード・コレクションの B・Ctrl / ⌘ + K・N、スタック・仮想コピーの
-// Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + ' を含む）・library/Grid.tsx（グリッドの移動・Enter・タイムラインの T）・
+// Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + '、現像の画面のスナップショット・プリセットの Ctrl / ⌘ + N・Shift + N を含む）・library/Grid.tsx（グリッドの移動・Enter・タイムラインの T）・
 // viewer/Loupe.tsx（I・Z・等倍表示の Esc）・viewer/CompareView.tsx（比較表示の ←・→・↑・↓・Z・等倍表示の Esc）・
 // viewer/SurveyView.tsx（選別表示の ←・→・/）・viewer/VideoPlayer.tsx（動画のスペース・J・K・L・,・.・M・Home・End）・
 // develop/DevelopView.tsx（W・R・Z・J・I・V・O・[・]・\・Y・
@@ -117,6 +117,8 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["mod+shift+z", "mod+y"], label: "やり直す" },
       { keys: ["mod+shift+c"], label: "現像設定をコピー" },
       { keys: ["mod+shift+v"], label: "現像設定を貼り付け（選んだ写真へ）" },
+      { keys: ["mod+n"], label: "今の状態でスナップショットを作る（現像の画面。ほかの画面ではコレクションを作る）" },
+      { keys: ["mod+shift+n"], label: "今の写真の設定から現像プリセットを作る（含める項目を選ぶ）" },
     ],
   },
   {

@@ -51,6 +51,10 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 tiff = "0.11.3"
 png = "0.18.1"
 kamadak-exif = "0.6.1"
+# フォントのファイル（TrueType・OpenType・そのコレクション）の解析。透かしの文字（EXP-03）の形を読む。描画（ラスタライズ）は
+# genzo-media の自前のコード。harfbuzz の組織が保守する、unsafe を使わない（#![forbid(unsafe_code)]）依存のない crate。
+# 使うのは std だけ（字形の置き換え・可変フォントの軸・字形の名前の機能は使わない）。docs/third_party.md。
+ttf-parser = { version = "0.25.1", default-features = false, features = ["std"] }
 
 # カタログ（SQLite を同梱してビルドする。backup はオンラインバックアップ API 用。04 の 3.4 節）
 rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }

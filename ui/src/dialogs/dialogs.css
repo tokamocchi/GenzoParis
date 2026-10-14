@@ -621,3 +621,36 @@ button.dlg-list-item:focus-visible {
 .import-tag-group textarea {
   resize: vertical;
 }
+
+/* 書き出しプリセット（EXP-02） */
+.export-presets {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+.export-preset-edit {
+  margin: 6px 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* 書き出しの透かし（EXP-03）: 位置の 3 × 3 のボタンと見本。 */
+.export-anchors {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(3.5em, auto));
+  gap: 4px;
+  justify-content: start;
+}
+.export-watermark-preview {
+  margin: 4px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.export-watermark-preview img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--line-strong);
+  align-self: flex-start;
+}

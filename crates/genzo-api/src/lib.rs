@@ -63,7 +63,10 @@
 //! | `render` | GPU → CPU の切り替え、画面のプロファイル（[`Core::set_display_profile`]） | 2.4 節・6.3 節、IQ-05 |
 //! | `region` | 表示範囲の描画（[`Core::render_region`]。ルーペの等倍表示・拡大とパン。P0 の最新の 1 件だけ、取り消しあり） | PRV-03・LIB-02、2.7 節・6.1 節 |
 //! | `view` | 比較表示の表示範囲の描画（[`Core::render_view_region`]・[`Core::view_output_size`]。面ごとに任意の写真を描く。展開した入力を上限まで持ち、[`Core::release_view`] で捨てる） | LIB-03、1.5 節・6.1 節 |
-//! | `export` | 書き出し（[`Core::export`]） | EXP-01・04、2.4 節・6.4 節 |
+//! | `export` | 書き出し（[`Core::export`]・ファイル名の規則を指定する [`Core::export_with`]・名前の例 [`preview_export_names`]・書き出しの仕上げ（出力シャープ・透かし）・動画の再エンコードなしのコピー） | EXP-01〜05、2.4 節・6.4 節 |
+//! | `watermark` | 透かしの見本（[`Core::watermark_preview`]。ワーカーで透かしを作り、見本の画像に重ねた PNG）と OS のフォントのフォルダ（[`system_font_dirs`]） | EXP-03、2.4 節 |
+//! | `snapshots` | スナップショット（[`Core::snapshots`]・[`Core::create_snapshot`]（今の状態・履歴の段階）・[`Core::rename_snapshot`]・[`Core::delete_snapshot`]・[`Core::apply_snapshot`]（履歴に 1 件残す））。ビフォーには [`BeforeSource::Snapshot`] | DEV-28、3.1 節 |
+//! | `presets` | 現像プリセット・書き出しプリセット（[`PresetStore`]。アプリのデータのフォルダ（[`default_presets_dir`]）に 1 件 1 ファイルの版付きの JSON。[`Core::create_develop_preset`]・[`Core::apply_develop_preset`]（設定の貼り付けと同じく処理バージョンを変えない）・[`Core::create_export_preset`]・名前・フォルダ・削除・ファイルの読み込みと書き出し） | DEV-29・EXP-02、2.5 節・6.4 節 |
 //! | `capture_time` | 撮影日時の一括修正（[`Core::capture_devices`]・[`Core::plan_capture_time_edit`]・[`Core::edit_capture_times`]・[`Core::undo_capture_time_edit`]。ずらす・基準の写真に合わせる・タイムゾーンの指定。カタログの中だけで、元のファイルには書かない） | LIB-16、3.13 節 |
 //! | `timeline` | 写真と動画の統合タイムライン（[`Core::timeline`]。表示中の検索結果を撮影日と、撮影の間隔によるイベントでまとめる） | ORG-01、3.13 節 |
 //! | `volumes` | ボリュームの識別（OS のボリューム ID。取れなければパスの先頭。OS ごとの取り方は `volumes::os`）・つながりの確認（[`Core::volumes`]・[`Core::refresh_volumes`]）・以前の形式のボリュームの移し替え | FILE-03、3.3 節・3.14 節 |
@@ -140,6 +143,7 @@ pub mod naming;
 mod organize;
 mod paths;
 mod playback;
+mod presets;
 mod previews;
 mod profiles;
 mod region;
@@ -147,11 +151,13 @@ mod relink;
 mod render;
 mod search;
 mod settings;
+mod snapshots;
 mod stacks;
 mod timeline;
 pub mod types;
 mod view;
 mod volumes;
+mod watermark;
 
 pub use capture_time::{CAPTURE_TIME_EXAMPLES, CAPTURE_ZONE_RANGE_MINUTES};
 pub use command::{Command, Response};
@@ -167,6 +173,7 @@ pub use develop::{
 };
 pub use error::{ApiError, ErrorInfo, ErrorKind};
 pub use events::{CatalogChange, Event, WarningCode};
+pub use export::preview_export_names;
 pub use identity::{DUPLICATE_GROUPS_MAX, HASH_FAILURES_KEPT, INTERACTIVE_MAX_WAIT};
 pub use import::{IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS, media_kind};
 pub use maintenance::{RestorePlan, apply_restore, prepare_restore};
@@ -175,6 +182,12 @@ pub use organize::MAX_KEYWORD_HITS;
 pub use playback::{
     DEFAULT_VIDEO_PROXY_CAPACITY_BYTES, MIN_VIDEO_PROXY_CACHE_BYTES, VIDEO_PROXY_DIR,
     video_content_type,
+};
+pub use presets::{
+    ENV_PRESETS_DIR, ExportPresetSettings, MAX_PRESET_FILE_BYTES, MAX_PRESET_FILES_PER_CALL,
+    MAX_PRESET_NAME_CHARS, MAX_PRESETS, PRESET_FORMAT, PRESET_FORMAT_VERSION, PRESETS_DIR,
+    PresetFileFailure, PresetImportReport, PresetInfo, PresetKind, PresetStore, apply_preset_label,
+    default_presets_dir, develop_preset_settings, is_valid_preset_id,
 };
 pub use previews::{L0_FORMAT_VERSION, L1_FORMAT_VERSION};
 pub use profiles::{MAX_PROFILE_ENTRIES, PROFILES_DIR, inspect_profile_file, load_profile_files};
@@ -187,18 +200,27 @@ pub use settings::{
     KEY_PREVIEW_CACHE_BYTES, KEY_PREVIEW_CACHE_DIR, KEY_VIDEO_PROXY_CACHE_BYTES,
     MIN_PREVIEW_CACHE_BYTES, UTC_OFFSET_RANGE_MINUTES,
 };
+pub use snapshots::apply_snapshot_label;
 pub use stacks::MAX_AUTO_STACK_GAP_SECONDS;
 pub use timeline::{MAX_TIMELINE_GAP_SECONDS, MAX_TIMELINE_GROUPS};
 pub use types::*;
 pub use view::{MAX_VIEW_PANES, MAX_VIEW_SOURCES};
 pub use volumes::{OsVolumes, VolumeIdentity, VolumeProbe};
+pub use watermark::{
+    PREVIEW_DEFAULT_SIZE, PREVIEW_MAX_EDGE, PREVIEW_MIN_EDGE, WatermarkPreview,
+    render_watermark_preview, system_font_dirs,
+};
 
 // 型付きのメソッドの引数・応答で使う、依存先の crate の型（UI がまとめて使えるように）。
-pub use genzo_catalog::{MAX_CAPTURE_SHIFT_SECONDS, MAX_CAPTURE_TIME_EDITS};
+pub use genzo_catalog::{
+    MAX_CAPTURE_SHIFT_SECONDS, MAX_CAPTURE_TIME_EDITS, MAX_SNAPSHOT_NAME_CHARS,
+};
 pub use genzo_model::{
     AssetId, AssetKind, CaptureTime, CollectionId, CollectionKind, ColorLabel, DevelopSettings,
     ExportFormat, ExportSettings, ExportSize, FileStatus, Flag, KeywordId, OutputColorSpace,
-    Rating, RenderQuality, SmartCondition, SmartRule, StackId, VariantId, ZoneMode,
+    OutputSharpening, Rating, RenderQuality, RgbColor, SharpenAmount, SharpenMedia, SmartCondition,
+    SmartRule, StackId, VariantId, VideoExport, Watermark, WatermarkAnchor, WatermarkContent,
+    ZoneMode,
 };
 pub use genzo_worker::{Lane, TestHook, TestHookOutput};
 

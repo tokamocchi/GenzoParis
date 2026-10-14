@@ -59,6 +59,9 @@ image.workspace = true
 kamadak-exif.workspace = true
 # 結合テストのカメラプロファイル（DCP）を作る（`DcpProfile::to_bytes`。workspace の crate で、新しい crate は増えない）。
 genzo-color.workspace = true
+# 透かしの文字のテスト（EXP-03）に使うフォントを作る（`genzo_media::testing`。workspace の crate で、新しい crate は
+# 増えない）。
+genzo-media = { workspace = true, features = ["test-support"] }
 
 # Ctrl+C の結合テストで、プロセスグループに SIGINT を送る（Unix だけ。K3）。
 [target.'cfg(unix)'.dev-dependencies]

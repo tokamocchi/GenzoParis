@@ -333,8 +333,14 @@ fn test_log_dir() -> PathBuf {
     std::env::temp_dir().join(format!("genzo-cli-test-logs-{}", std::process::id()))
 }
 
-/// `genzo` を実行する（環境変数のカタログ・データのフォルダ・ログの指定は引き継がない）。ログのファイルには
-/// 書かない（`GENZO_LOG_FILE=off`。ログを確かめるテストは `env` で上書きする）。
+/// テストの `genzo` のプリセット（DEV-29・EXP-02）のフォルダ（利用者のアプリのデータのフォルダには書かない。
+/// プリセットを作るテストは [`Env`] の一時フォルダを `--presets-dir` で指定する）。
+fn test_presets_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("genzo-cli-test-presets-{}", std::process::id()))
+}
+
+/// `genzo` を実行する（環境変数のカタログ・データのフォルダ・ログ・プリセットの指定は引き継がない）。ログの
+/// ファイルには書かない（`GENZO_LOG_FILE=off`。ログを確かめるテストは `env` で上書きする）。
 fn genzo_with(args: &[&str], env: &[(&str, &Path)], stdin: Option<&str>) -> Run {
     let mut cmd = genzo_command();
     cmd.args(args)
@@ -344,6 +350,7 @@ fn genzo_with(args: &[&str], env: &[(&str, &Path)], stdin: Option<&str>) -> Run 
         .env_remove("GENZO_BENCH_DIR")
         .env("GENZO_LOG_DIR", test_log_dir())
         .env("GENZO_LOG_FILE", "off")
+        .env("GENZO_PRESETS_DIR", test_presets_dir())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if stdin.is_some() {
@@ -458,8 +465,17 @@ impl Env {
 
     fn run_stdin(&self, args: &[&str], stdin: Option<&str>) -> Run {
         let catalog = self.catalog.to_string_lossy().into_owned();
+        let presets = self.path("presets").to_string_lossy().into_owned();
         let mut all: Vec<&str> = args.to_vec();
-        all.extend(["--catalog", &catalog, "--gpu", "off", "--quiet"]);
+        all.extend([
+            "--catalog",
+            &catalog,
+            "--gpu",
+            "off",
+            "--quiet",
+            "--presets-dir",
+            &presets,
+        ]);
         genzo_with(&all, &[], stdin)
     }
 
@@ -1043,12 +1059,25 @@ fn end_to_end_catalog_workflow() {
     assert_eq!(r.code, genzo_cli::EXIT_PARTIAL as i32, "{}", r.stdout);
     assert_eq!(r.json()["report"]["failed"], 1);
     if video {
+        // 動画は元のファイルのままコピーする（EXP-05）。--remove-gps・--skip-videos では書き出さない。
         let v = id_of(&all, "V.mp4");
         let r = env.json(&["export", &v.to_string(), "--out", out_dir.to_str().unwrap()]);
+        assert_eq!(r["report"]["copied"], 1, "{r}");
+        let copied = PathBuf::from(r["report"]["items"][0]["outcome"]["path"].as_str().unwrap());
         assert_eq!(
-            r["report"]["skipped"], 1,
-            "動画は書き出さない（EXP-05 は v1）"
+            std::fs::read(&copied).unwrap(),
+            std::fs::read(p.join("sub").join("V.mp4")).unwrap()
         );
+        for flag in ["--remove-gps", "--skip-videos"] {
+            let r = env.json(&[
+                "export",
+                &v.to_string(),
+                "--out",
+                out_dir.to_str().unwrap(),
+                flag,
+            ]);
+            assert_eq!(r["report"]["skipped"], 1, "{flag}: {r}");
+        }
     }
     if dng {
         let rid = id_of(&all, "R.dng");
@@ -1591,7 +1620,451 @@ fn develop_copy_and_upgrade_between_process_versions() {
     );
 }
 
+/// スナップショット（DEV-28）・現像プリセット（DEV-29）・書き出しプリセットとファイル名の規則（EXP-02）の
+/// サブコマンド（`develop snapshot`・`preset`・`export --preset`）。
+#[test]
+fn snapshots_presets_and_export_naming() {
+    let env = Env::new();
+    write_jpeg(
+        &env.photos.join("A.jpg"),
+        (40, 30),
+        1,
+        Some("2024-05-01 10:00:00"),
+        false,
+    );
+    write_jpeg(
+        &env.photos.join("B.jpg"),
+        (40, 30),
+        2,
+        Some("2024-05-02 11:00:00"),
+        false,
+    );
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+    );
+
+    // --- スナップショット ---
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"exposure_ev": 0.5}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let snap = env.json(&["develop", "snapshot", "create", &a, "明るめ"]);
+    assert_eq!(snap["name"], "明るめ");
+    assert_eq!(snap["process_version"], 2);
+    let snap_id = snap["id"].as_i64().unwrap().to_string();
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-"],
+        Some(r#"{"exposure_ev": -1.0}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    // 履歴の項目からも作れる。
+    let history = env.json(&["develop", "history", &a]);
+    let first = history[0]["id"].as_i64().unwrap().to_string();
+    let initial = env.json(&[
+        "develop",
+        "snapshot",
+        "create",
+        &a,
+        "読み込み直後",
+        "--from-history",
+        &first,
+    ]);
+    let list = env.json(&["develop", "snapshot", "list", &a]);
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    let applied = env.json(&["develop", "snapshot", "apply", &snap_id]);
+    assert_eq!(applied["settings"]["exposure_ev"], 0.5);
+    let history = env.json(&["develop", "history", &a]);
+    assert_eq!(
+        history.as_array().unwrap().last().unwrap()["label"],
+        "スナップショット「明るめ」を適用"
+    );
+    let renamed = env.json(&["develop", "snapshot", "rename", &snap_id, "+0.5"]);
+    assert_eq!(renamed["name"], "+0.5");
+    let initial_id = initial["id"].as_i64().unwrap().to_string();
+    env.json(&["develop", "snapshot", "delete", &initial_id]);
+    assert_eq!(
+        env.json(&["develop", "snapshot", "list", &a])
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let text = env.run(&["develop", "snapshot", "list", &a]);
+    assert!(text.stdout.contains("+0.5"), "{}", text.stdout);
+    assert_eq!(env.run(&["develop", "snapshot", "apply", "999"]).code, 1);
+
+    // --- 現像プリセット ---
+    let p = env.json(&[
+        "preset",
+        "create-develop",
+        "明るく",
+        "--from",
+        &a,
+        "--groups",
+        "basic-tone",
+        "--folder",
+        "基本",
+    ]);
+    assert_eq!(p["preset"]["folder"], "基本");
+    assert_eq!(p["preset"]["groups"]["basic_tone"], true);
+    assert_eq!(p["preset"]["groups"]["white_balance"], false);
+    let listed = env.json(&["preset", "list"]);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    // ファイルは --presets-dir の develop/<ID>.json。
+    let id = p["preset"]["id"].as_str().unwrap().to_owned();
+    assert!(
+        env.path("presets")
+            .join("develop")
+            .join(format!("{id}.json"))
+            .is_file()
+    );
+    let applied = env.json(&["preset", "apply", "明るく", "--to", &b]);
+    assert_eq!(applied["updated"], 1);
+    assert_eq!(env.json(&["develop", "get", &b])["exposure_ev"], 0.5);
+    let history = env.json(&["develop", "history", &b]);
+    assert_eq!(
+        history.as_array().unwrap().last().unwrap()["label"],
+        "プリセット「明るく」を適用"
+    );
+    let shown = env.json(&["preset", "show", &id]);
+    assert_eq!(shown["settings"]["exposure_ev"], 0.5);
+    let moved = env.json(&["preset", "move", "明るく", "--to", ""]);
+    assert_eq!(moved["preset"]["folder"], "");
+    let renamed = env.json(&["preset", "rename", "明るく", "明るく 2"]);
+    assert_eq!(renamed["preset"]["name"], "明るく 2");
+    // 同じ名前は作れない（終了コード 1）。
+    let dup = env.run(&[
+        "preset",
+        "create-develop",
+        "明るく 2",
+        "--from",
+        &a,
+        "--json",
+    ]);
+    assert_eq!(dup.code, 1, "{}", dup.stdout);
+    assert_eq!(dup.json()["error"]["kind"], "conflict");
+
+    // --- 書き出しプリセットとファイル名 ---
+    let out = env.path("out");
+    let created = env.json(&[
+        "preset",
+        "create-export",
+        "Web",
+        "--format",
+        "png8",
+        "--long-edge",
+        "32",
+        "--dest",
+        out.to_str().unwrap(),
+        "--rename",
+        "{date}_{seq}",
+        "--seq-digits",
+        "2",
+    ]);
+    assert_eq!(created["preset"]["export"]["export"]["format"], "png8");
+    let exported = env.json(&["export", &a, &b, "--preset", "Web"]);
+    assert_eq!(exported["preset"]["name"], "Web");
+    let items = exported["report"]["items"].as_array().unwrap();
+    let names: Vec<String> = items
+        .iter()
+        .map(|i| {
+            PathBuf::from(i["outcome"]["path"].as_str().unwrap())
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(names, vec!["20240501_01.png", "20240502_02.png"]);
+    let img = image::open(out.join("20240501_01.png")).unwrap();
+    assert_eq!((img.width(), img.height()), (32, 24));
+    // オプションが優先する（--out・--keep-names・--format）。
+    let other = env.path("other");
+    let exported = env.json(&[
+        "export",
+        &a,
+        "--preset",
+        "Web",
+        "--out",
+        other.to_str().unwrap(),
+        "--keep-names",
+        "--format",
+        "jpeg",
+    ]);
+    assert_eq!(
+        written_path(&exported).file_name().unwrap(),
+        std::ffi::OsStr::new("A.jpg")
+    );
+    // --rename だけでも（プリセットなし）。
+    let exported = env.json(&[
+        "export",
+        &b,
+        "--out",
+        other.to_str().unwrap(),
+        "--rename",
+        "{name}-{text}",
+        "--text",
+        "京都",
+    ]);
+    assert_eq!(
+        written_path(&exported).file_name().unwrap(),
+        std::ffi::OsStr::new("B-京都.jpg")
+    );
+    // 書き出し先がない・規則が正しくない・--text だけは使い方の誤り。
+    assert_eq!(env.run(&["export", &a]).code, 2);
+    assert_eq!(
+        env.run(&[
+            "export",
+            &a,
+            "--out",
+            other.to_str().unwrap(),
+            "--rename",
+            "{date"
+        ])
+        .code,
+        2
+    );
+    assert_eq!(
+        env.run(&[
+            "export",
+            &a,
+            "--out",
+            other.to_str().unwrap(),
+            "--text",
+            "x"
+        ])
+        .code,
+        2
+    );
+
+    // --- ファイルへの書き出しと読み込み ---
+    let files = env.path("files");
+    std::fs::create_dir_all(&files).unwrap();
+    let written = env.json(&[
+        "preset",
+        "export-files",
+        "Web",
+        "明るく 2",
+        "--out",
+        files.to_str().unwrap(),
+    ]);
+    let written: Vec<String> = written["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(written.len(), 2);
+    let r = env.run(&[
+        "preset",
+        "import",
+        &written[0],
+        files.join("none.json").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    let imported = r.json();
+    assert_eq!(imported["imported"][0]["name"], "Web (2)");
+    assert_eq!(imported["failed"].as_array().unwrap().len(), 1);
+    env.json(&["preset", "delete", "Web (2)"]);
+    let dir = env.json(&["preset", "dir"]);
+    assert_eq!(
+        PathBuf::from(dir["dir"].as_str().unwrap()),
+        env.path("presets")
+    );
+}
+
 /// 書き出した画像（8bit の RGB に直したもの）の、`(x, y)` から `n × n` 画素の平均の明るさ（R・G・B の平均）。
+/// 書き出しの仕上げ（出力シャープ・透かし。EXP-03）と書き出しプリセットへの保存、透かしの見本・フォントのフォルダ。
+#[test]
+fn export_output_sharpening_watermark_and_preview() {
+    let env = Env::new();
+    write_plain(&env.photos.join("P.png"), (60, 40));
+    let font = env.path("test.ttf");
+    std::fs::write(&font, genzo_media::testing::test_font()).unwrap();
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let p = id_of(&search, "P.png").to_string();
+    let out = env.path("out");
+
+    // 出力シャープ・解像度・文字の透かし（右下・白）。
+    let r = env.json(&[
+        "export",
+        &p,
+        "--out",
+        out.to_str().unwrap(),
+        "--format",
+        "png8",
+        "--ppi",
+        "300",
+        "--output-sharpen",
+        "matte",
+        "--sharpen-amount",
+        "high",
+        "--watermark-text",
+        "AB",
+        "--watermark-font",
+        font.to_str().unwrap(),
+        "--watermark-size",
+        "25",
+        "--watermark-opacity",
+        "100",
+        "--watermark-margin",
+        "0",
+    ]);
+    assert_eq!(r["report"]["written"], 1, "{r}");
+    let s = &r["settings"];
+    assert_eq!(s["resolution_ppi"], 300);
+    assert_eq!(s["output_sharpening"]["media"], "matte_paper");
+    assert_eq!(s["output_sharpening"]["amount"], "high");
+    assert_eq!(s["watermark"]["content"]["text"]["text"], "AB");
+    assert_eq!(s["watermark"]["anchor"], "bottom_right");
+    let img = image::open(written_path(&r)).unwrap().to_rgb8();
+    assert_eq!(img.dimensions(), (60, 40));
+    // 文字の大きさ 10 画素の「AB」が右下にある（白い画素がある）。左上には描かない。
+    let white = |x0: u32, y0: u32, x1: u32, y1: u32| {
+        (y0..y1).any(|y| (x0..x1).any(|x| img.get_pixel(x, y).0 == [255, 255, 255]))
+    };
+    assert!(white(40, 28, 60, 40));
+    assert!(!white(0, 0, 20, 12));
+
+    // 使い方の誤り（文字だけでフォントがない・中身なしの調整・出力シャープなしの適用量）は 2。
+    for args in [
+        vec!["--watermark-text", "A"],
+        vec!["--watermark-size", "10"],
+        vec!["--sharpen-amount", "low"],
+    ] {
+        let mut a = vec!["export", p.as_str(), "--out", out.to_str().unwrap()];
+        a.extend(args.iter().copied());
+        let r = env.run(&a);
+        assert_eq!(
+            r.code,
+            genzo_cli::EXIT_USAGE as i32,
+            "{args:?}: {}",
+            r.stderr
+        );
+    }
+
+    // 書き出しプリセットに保存して使い、一部だけ変える。
+    let created = env.json(&[
+        "preset",
+        "create-export",
+        "透かし付き",
+        "--format",
+        "png8",
+        "--output-sharpen",
+        "screen",
+        "--watermark-text",
+        "A",
+        "--watermark-font",
+        font.to_str().unwrap(),
+        "--watermark-position",
+        "top-left",
+        "--skip-videos",
+    ]);
+    let saved = &created["preset"]["export"]["export"];
+    assert_eq!(saved["watermark"]["anchor"], "top_left");
+    assert_eq!(saved["videos"], "skip");
+    assert_eq!(saved["output_sharpening"]["media"], "screen");
+    let r = env.json(&[
+        "export",
+        &p,
+        "--preset",
+        "透かし付き",
+        "--out",
+        env.path("out2").to_str().unwrap(),
+        "--watermark-opacity",
+        "30",
+    ]);
+    assert_eq!(r["settings"]["watermark"]["opacity"], 30);
+    assert_eq!(r["settings"]["watermark"]["anchor"], "top_left");
+    assert_eq!(r["settings"]["videos"], "skip");
+    let r = env.json(&[
+        "export",
+        &p,
+        "--preset",
+        "透かし付き",
+        "--out",
+        env.path("out3").to_str().unwrap(),
+        "--no-watermark",
+        "--no-output-sharpen",
+    ]);
+    assert!(r["settings"]["watermark"].is_null());
+    assert!(r["settings"]["output_sharpening"].is_null());
+
+    // 別の OS で作った書き出しプリセット（書き出し先・フォントのパスがこの OS の絶対パスでない）も読み込んで使える。
+    // パスは使わずに警告し、書き出し先は --out、フォントは --watermark-font で指定する（検証のラウンド 1 の指摘）。
+    let (dest, other_font) = if cfg!(windows) {
+        ("/Users/a/out", "/Library/Fonts/A.ttf")
+    } else {
+        ("C:\\Users\\a\\out", "C:\\Windows\\Fonts\\meiryo.ttc")
+    };
+    let foreign = env.path("winpreset.json");
+    let json = serde_json::json!({
+        "format": "genzoparis-preset", "format_version": 1, "kind": "export",
+        "id": "0123456789abcdef", "name": "別の OS", "folder": "",
+        "settings": {
+            "export": {"format": "png8", "watermark": {
+                "content": {"text": {"text": "A", "font": other_font}}, "size": 10}},
+            "destination": dest, "file_naming": null
+        }
+    });
+    std::fs::write(&foreign, json.to_string()).unwrap();
+    let imported = env.json(&["preset", "import", foreign.to_str().unwrap()]);
+    assert_eq!(imported["imported"][0]["name"], "別の OS", "{imported}");
+    let warnings = imported["imported"][0]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 2, "{imported}");
+    // フォントを選ばなければ使い方の誤り（書き出し先もない）。
+    let r = env.run(&["export", &p, "--preset", "別の OS"]);
+    assert_eq!(r.code, genzo_cli::EXIT_USAGE as i32, "{}", r.stderr);
+    let r = env.run(&[
+        "export",
+        &p,
+        "--preset",
+        "別の OS",
+        "--out",
+        env.path("out4").to_str().unwrap(),
+        "--watermark-font",
+        font.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stderr.contains("この PC のパスではない"), "{}", r.stderr);
+    assert_eq!(r.json()["report"]["written"], 1);
+
+    // 見本（カタログは使わない）。同じ名前があれば連番。
+    let preview = env.path("preview.png");
+    for expected in ["preview.png", "preview-1.png"] {
+        let r = env.json(&[
+            "watermark",
+            "preview",
+            "--out",
+            preview.to_str().unwrap(),
+            "--width",
+            "300",
+            "--height",
+            "200",
+            "--watermark-text",
+            "A漢",
+            "--watermark-font",
+            font.to_str().unwrap(),
+        ]);
+        let written = PathBuf::from(r["output"].as_str().unwrap());
+        assert_eq!(written.file_name().unwrap(), std::ffi::OsStr::new(expected));
+        assert!(r["warnings"][0].as_str().unwrap().contains('漢'), "{r}");
+        let img = image::open(&written).unwrap();
+        assert_eq!((img.width(), img.height()), (300, 200));
+    }
+    let dirs = env.json(&["watermark", "font-dirs"]);
+    assert!(dirs["dirs"].is_array());
+}
+
 fn mean_luma(img: &image::RgbImage, (x0, y0): (u32, u32), n: u32) -> f64 {
     let mut sum = 0.0;
     for y in y0..y0 + n {

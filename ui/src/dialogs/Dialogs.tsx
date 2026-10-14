@@ -32,6 +32,13 @@ import {
   KeywordDialog,
 } from "./OrganizeDialogs";
 import { PasteSettingsDialog, UpgradeProcessDialog } from "./PasteSettingsDialog";
+import {
+  ApplyPresetDialog,
+  DevelopPresetDialog,
+  PresetDeleteDialog,
+  PresetNameDialog,
+  SnapshotNameDialog,
+} from "./PresetDialogs";
 import { ProfileBrowserDialog } from "./ProfileBrowserDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
@@ -188,6 +195,37 @@ export function Dialogs() {
       break;
     case "profiles":
       body = <ProfileBrowserDialog />;
+      break;
+    case "snapshot_name":
+      body = (
+        <SnapshotNameDialog
+          mode={dialog.mode}
+          variantId={dialog.variantId}
+          snapshotId={dialog.snapshotId}
+          entryId={dialog.entryId}
+          currentName={dialog.currentName}
+        />
+      );
+      break;
+    case "develop_preset":
+      body = <DevelopPresetDialog mode={dialog.mode} variantId={dialog.variantId} presetId={dialog.presetId} />;
+      break;
+    case "apply_preset":
+      body = <ApplyPresetDialog targets={dialog.targets} presetId={dialog.presetId} />;
+      break;
+    case "preset_name":
+      body = (
+        <PresetNameDialog
+          mode={dialog.mode}
+          presetKind={dialog.presetKind}
+          presetId={dialog.presetId}
+          folder={dialog.folder}
+          currentName={dialog.currentName}
+        />
+      );
+      break;
+    case "preset_delete":
+      body = <PresetDeleteDialog presetKind={dialog.presetKind} presetId={dialog.presetId} name={dialog.name} />;
       break;
     case undefined:
       break;

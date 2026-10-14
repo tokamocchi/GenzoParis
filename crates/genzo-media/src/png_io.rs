@@ -35,6 +35,43 @@ pub fn encode_png_with_xmp_to<T: Sample, W: Write>(
     xmp: Option<&str>,
     w: W,
 ) -> Result<()> {
+    encode_png_with_metadata_to(
+        img,
+        &PngMetadata {
+            icc,
+            exif_tiff,
+            xmp,
+            resolution_ppi: None,
+        },
+        w,
+    )
+}
+
+/// PNG に入れるメタデータ（[`encode_png_with_metadata_to`]）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PngMetadata<'a> {
+    /// ICC プロファイル（iCCP）。
+    pub icc: Option<&'a [u8]>,
+    /// Exif の TIFF の構造（eXIf）。
+    pub exif_tiff: Option<&'a [u8]>,
+    /// XMP のパケット（iTXt）。
+    pub xmp: Option<&'a str>,
+    /// 解像度（ppi。pHYs に 1 メートルあたりの画素の数（四捨五入）で書く。EXP-03）。`None` なら pHYs を書かない。
+    pub resolution_ppi: Option<u32>,
+}
+
+/// RGB 画像を、メタデータ（[`PngMetadata`]）と一緒に PNG にして `w` に書く。
+pub fn encode_png_with_metadata_to<T: Sample, W: Write>(
+    img: &RgbImage<T>,
+    meta: &PngMetadata<'_>,
+    w: W,
+) -> Result<()> {
+    let PngMetadata {
+        icc,
+        exif_tiff,
+        xmp,
+        resolution_ppi,
+    } = *meta;
     let (width, height) = img.dimensions();
     let mut info = png::Info::with_size(width, height);
     info.color_type = png::ColorType::Rgb;
@@ -44,6 +81,15 @@ pub fn encode_png_with_xmp_to<T: Sample, W: Write>(
     };
     info.icc_profile = icc.map(|b| b.to_vec().into());
     info.exif_metadata = exif_tiff.map(|b| b.to_vec().into());
+    if let Some(ppi) = resolution_ppi {
+        // 1 インチ = 0.0254 メートル。
+        let ppm = (f64::from(ppi.max(1)) / 0.0254).round() as u32;
+        info.pixel_dims = Some(png::PixelDimensions {
+            xppu: ppm,
+            yppu: ppm,
+            unit: png::Unit::Meter,
+        });
+    }
     let mut encoder =
         png::Encoder::with_info(w, info).map_err(|e| MediaError::encode(format!("PNG: {e}")))?;
     if let Some(x) = xmp {

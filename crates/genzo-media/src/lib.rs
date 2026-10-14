@@ -15,6 +15,7 @@
 //! | [`video_proxy`] | 動画の再生用のファイル（WebView で再生できない動画を、利用者の ffmpeg で H.264 ＋ AAC の MP4 に変換する。進捗・取り消し・出力の確認） | VID-04、4.2 節 |
 //! | [`process`] | 子プロセスのタイムアウト付きの実行と、進捗を読みながらの取り消しできる実行 | 1.2 節、6.3 節 |
 //! | [`safe_write`] | 原本を上書きせず、不完全なファイルを残さない書き出し | 6.4 節（レビュー R-06） |
+//! | [`watermark`] | 透かし（画像・文字の透かしを作る（ワーカーで使う）・大きさと位置・合成） | EXP-03、2.4 節 |
 //!
 //! - 元のファイルは読み取り専用で開く（DATA-01）。書き出しは一時ファイルを経由し、原本と同じ
 //!   ファイルへの書き出しを拒否する（6.4 節）。
@@ -72,7 +73,13 @@ pub mod safe_write;
 pub mod tiff_io;
 pub mod video;
 pub mod video_proxy;
+pub mod watermark;
 pub mod xmp_write;
+
+// 他の crate の結合テスト（機能フラグ `test-support`）と、この crate のテストが使う（テストのフォント）。
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod testing;
 
 pub use buffer::{DynRgbImage, MAX_IMAGE_PIXELS, RgbImage, RgbImage8, RgbImage16, Sample};
 pub use cache::{
@@ -80,8 +87,9 @@ pub use cache::{
     cache_jpeg_from_encoded, render_cache_jpeg, render_cache_rgb,
 };
 pub use decode::{
-    DecodedImage, ImageFileFormat, ImageInfo, SourceProfile, SrgbAssumption, decode_image_bytes,
-    decode_image_file, open_read_only, probe_image_bytes, probe_image_file,
+    DecodedImage, DecodedRgba, ImageFileFormat, ImageInfo, SourceProfile, SrgbAssumption,
+    decode_image_bytes, decode_image_file, decode_image_rgba_bytes, open_read_only,
+    probe_image_bytes, probe_image_file,
 };
 pub use error::{MediaError, Result};
 pub use exif_read::AdobeRgbBasis;

@@ -151,6 +151,11 @@ pub struct CoreConfig {
     /// 自動バックアップの置き場。`None` なら `data_dir/backups`。
     #[serde(default)]
     pub backup_dir: Option<PathBuf>,
+    /// 現像プリセット・書き出しプリセット（DEV-29・EXP-02）のフォルダ。カタログをまたいで使うので、カタログの
+    /// データのフォルダとは別（`None` なら [`crate::default_presets_dir`]: 環境変数 `GENZO_PRESETS_DIR`、なければ
+    /// OS のアプリのデータのフォルダの `presets`。アプリと CLI で同じ場所）。
+    #[serde(default)]
+    pub presets_dir: Option<PathBuf>,
     /// 自動バックアップの世代数（DATA-04。既定 5。0 なら自動バックアップをしない）。
     #[serde(default = "default_backup_generations")]
     pub backup_generations: usize,
@@ -231,6 +236,7 @@ impl CoreConfig {
             gpu: GpuMode::Auto,
             gpu_allow_software: false,
             backup_dir: None,
+            presets_dir: None,
             backup_generations: default_backup_generations(),
             backup_on_close: false,
             render_previews_after_import: false,

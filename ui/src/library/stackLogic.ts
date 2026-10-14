@@ -129,6 +129,7 @@ export type PhotoMenuAction =
   | "auto_stack"
   | "edit_capture_time"
   | "upgrade_process"
+  | "apply_preset"
   | "move_to_folder"
   | "rename_files"
   | "relink";
@@ -178,6 +179,7 @@ export function photoMenuEntries(
     { action: "auto_stack", label: "撮影時刻でスタック…", enabled: true },
     PHOTO_MENU_SEPARATOR,
     { action: "edit_capture_time", label: "撮影日時を修正…", enabled: any },
+    { action: "apply_preset", label: "現像プリセットを適用…", enabled: any && !(targets <= 1 && isVideo) },
     { action: "upgrade_process", label: "処理バージョンを最新に更新…", enabled: any && !(targets <= 1 && isVideo) },
     PHOTO_MENU_SEPARATOR,
     { action: "move_to_folder", label: "フォルダへ移動…", enabled: any },
