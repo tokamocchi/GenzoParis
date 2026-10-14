@@ -304,7 +304,9 @@ impl GpuRenderer {
             Some(raw) => self.draft_a1(engine, source, raw, settings, request.long_edge)?,
             None => engine.a1(source, settings, quality, request.long_edge)?,
         };
-        let base: StageContext<'static> = a1.finish_context(settings)?;
+        let base: StageContext<'static> = a1
+            .finish_context(settings)?
+            .with_photo_seed(source.id.photo_seed());
         let (plan, guide) = match FinishPlan::new(settings, &base) {
             Ok(plan) => (plan, None),
             Err(PipelineError::GuideMismatch { .. }) => {

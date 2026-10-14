@@ -6,8 +6,8 @@ mod common;
 
 use common::{Env, WAIT_LIMIT, all_items, by_name, drain, hashes, import, wait_until, write_jpeg};
 use genzo_api::{
-    ApiError, DevelopSettings, Event, GpuMode, HISTORY_LABEL_PASTE, JobResult, PasteReport,
-    PasteVersion, RenderBackend, RenderQuality, SettingGroups, VariantId,
+    ApiError, DevelopSettings, Event, GpuMode, HISTORY_LABEL_BLACK_WHITE, HISTORY_LABEL_PASTE,
+    JobResult, PasteReport, PasteVersion, RenderBackend, RenderQuality, SettingGroups, VariantId,
 };
 use genzo_model::{CropRect, WhiteBalance};
 
@@ -1052,6 +1052,220 @@ fn highlight_recovery_and_noise_reduction_are_applied_or_reported() {
                 .any(|x| x.contains(w) && x.contains("処理バージョンを更新")),
             "{w}: {:?}",
             frame.warnings
+        );
+    }
+    core.close().unwrap();
+}
+
+/// カラーミキサー・カラーグレーディング・白黒（DEV-09・DEV-10・DEV-25）: 版 2 の写真では警告なしに描け、白黒は灰色に
+/// なり、履歴に項目の名前が残る。版 1 の写真では適用せずに知らせ、一括適用では使われない写真の数を返す（DATA-09）。
+#[test]
+fn color_mixer_grading_and_black_white_are_applied_or_reported() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
+    write_jpeg(&env.photos.join("B.jpg"), (64, 48), 4, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let (a, b) = (
+        by_name(&items, "A.jpg").variant_id,
+        by_name(&items, "B.jpg").variant_id,
+    );
+    let state = core.open_develop(a).unwrap();
+    assert_eq!(state.settings.process_version, 2);
+    // 白黒（V キー）: 灰色になる。
+    let mut s = state.settings.clone();
+    s.color.black_white.enabled = true;
+    core.set_settings(&s, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let frame = core.develop_frame().expect("描いたプレビュー");
+    for p in frame.b3.image.data() {
+        let m = p[1].abs().max(1e-3);
+        assert!(
+            (p[0] - p[1]).abs() <= 2e-5 * m && (p[2] - p[1]).abs() <= 2e-5 * m,
+            "{p:?}"
+        );
+    }
+    core.flush_develop().unwrap();
+    assert_eq!(labels(&core, a).last().unwrap(), HISTORY_LABEL_BLACK_WHITE);
+    // 白黒ミキサーとカラーグレーディング（白黒の色付け）。
+    s.color.black_white.mix.orange = 40.0;
+    s.color.grading.shadows.hue = 220.0;
+    s.color.grading.shadows.saturation = 30.0;
+    core.set_settings(&s, false).unwrap();
+    assert!(core.render_develop().unwrap().warnings.is_empty());
+    core.flush_develop().unwrap();
+    assert_eq!(
+        labels(&core, a).last().unwrap(),
+        "白黒ミキサー・カラーグレーディング"
+    );
+    core.close_develop().unwrap();
+
+    // 版 1 の写真へ「色」だけを写す: 値は保存するが使われないので数で知らせる。開くと警告が出る。
+    let b_v1 = DevelopSettings {
+        process_version: 1,
+        ..core.develop_settings(b).unwrap()
+    };
+    core.paste_settings_with(
+        &b_v1,
+        &[b],
+        SettingGroups::ALL,
+        PasteVersion::Source,
+        "版 1",
+    )
+    .unwrap();
+    let color_only = SettingGroups {
+        white_balance: false,
+        basic_tone: false,
+        presence: false,
+        tone_curve: false,
+        color: true,
+        geometry: false,
+        lens: false,
+        detail: false,
+        effects: false,
+        masks: false,
+    };
+    let report = core
+        .paste_settings_with(
+            &s,
+            &[b],
+            color_only,
+            PasteVersion::Keep,
+            HISTORY_LABEL_PASTE,
+        )
+        .unwrap();
+    assert_eq!(
+        report,
+        PasteReport {
+            count: 1,
+            upgraded: 0,
+            needs_upgrade: 1,
+        }
+    );
+    let got = core.develop_settings(b).unwrap();
+    assert_eq!(got.process_version, 1);
+    assert_eq!(got.color, s.color);
+    core.open_develop(b).unwrap();
+    let info = core.render_develop().unwrap();
+    for what in ["白黒", "カラーグレーディング"] {
+        assert!(
+            info.warnings
+                .iter()
+                .any(|w| w.contains(what) && w.contains("処理バージョンを更新")),
+            "{what}: {:?}",
+            info.warnings
+        );
+    }
+    core.close().unwrap();
+}
+
+/// テクスチャ・明瞭度・かすみの除去（DEV-11）・シャープ（DEV-12）・効果（DEV-24）: 版 2 の写真では警告なしに描け
+/// （RAW 以外の写真にも使える）、プレビューが変わり、履歴に項目の名前が残る。版 1 の写真では適用せずに知らせ、一括適用
+/// では「外観」「効果」を別の項目として選べ、使われない写真の数を返す（DATA-09）。
+#[test]
+fn presence_sharpening_and_effects_are_applied_or_reported() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
+    write_jpeg(&env.photos.join("B.jpg"), (64, 48), 4, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let (a, b) = (
+        by_name(&items, "A.jpg").variant_id,
+        by_name(&items, "B.jpg").variant_id,
+    );
+    let state = core.open_develop(a).unwrap();
+    assert_eq!(state.settings.process_version, 2);
+    assert!(core.render_develop().unwrap().warnings.is_empty());
+    let before = core
+        .develop_frame()
+        .expect("描いたプレビュー")
+        .b3
+        .image
+        .clone();
+    let mut s = state.settings.clone();
+    s.presence.clarity = 40.0;
+    s.presence.dehaze = 30.0;
+    s.detail.sharpening.amount = 60.0;
+    s.effects.vignette.amount = -50.0;
+    s.effects.grain.amount = 30.0;
+    core.set_settings(&s, false).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let after = core
+        .develop_frame()
+        .expect("描いたプレビュー")
+        .b3
+        .image
+        .clone();
+    assert_eq!(after.dimensions(), before.dimensions());
+    let changed = after
+        .data()
+        .iter()
+        .zip(before.data())
+        .filter(|(p, q)| p != q)
+        .count();
+    assert!(changed > after.data().len() / 2, "{changed}");
+    core.flush_develop().unwrap();
+    assert_eq!(
+        labels(&core, a).last().unwrap(),
+        "明瞭度 +40・かすみの除去 +30・シャープ 60ほか"
+    );
+    core.close_develop().unwrap();
+
+    // 版 1 の写真へ「外観」「効果」だけを写す: 値は保存するが使われないので数で知らせる。開くと警告が出る。
+    let b_v1 = DevelopSettings {
+        process_version: 1,
+        ..core.develop_settings(b).unwrap()
+    };
+    core.paste_settings_with(
+        &b_v1,
+        &[b],
+        SettingGroups::ALL,
+        PasteVersion::Source,
+        "版 1",
+    )
+    .unwrap();
+    let groups = SettingGroups {
+        white_balance: false,
+        basic_tone: false,
+        presence: true,
+        tone_curve: false,
+        color: false,
+        geometry: false,
+        lens: false,
+        detail: false,
+        effects: true,
+        masks: false,
+    };
+    let report = core
+        .paste_settings_with(&s, &[b], groups, PasteVersion::Keep, HISTORY_LABEL_PASTE)
+        .unwrap();
+    assert_eq!(
+        report,
+        PasteReport {
+            count: 1,
+            upgraded: 0,
+            needs_upgrade: 1,
+        }
+    );
+    let got = core.develop_settings(b).unwrap();
+    assert_eq!(got.process_version, 1);
+    assert_eq!(got.presence, s.presence);
+    assert_eq!(got.effects, s.effects);
+    // ディテール（シャープ）は選ばなかったので写らない。
+    assert_eq!(got.detail.sharpening.amount, 0.0);
+    core.open_develop(b).unwrap();
+    let info = core.render_develop().unwrap();
+    for what in ["明瞭度", "周辺光量", "粒子"] {
+        assert!(
+            info.warnings
+                .iter()
+                .any(|w| w.contains(what) && w.contains("処理バージョンを更新")),
+            "{what}: {:?}",
+            info.warnings
         );
     }
     core.close().unwrap();

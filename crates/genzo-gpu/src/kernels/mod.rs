@@ -35,8 +35,16 @@ use genzo_color::transfer::{
     SRGB_INV_GAMMA_F32, SRGB_LINEAR_SLOPE_F32, SRGB_OFFSET_F32,
 };
 use genzo_pipeline::Roi;
-use genzo_pipeline::finish::color::{SKIN_PROTECTION, VIBRANCE_CHROMA_REF, VIBRANCE_MAX};
+use genzo_pipeline::finish::color::{SKIN_PROTECTION, VIBRANCE_CHROMA_REF, VIBRANCE_MAX, poly};
+use genzo_pipeline::finish::effects::{
+    GRAIN_MAX_SPAN, VIGNETTE_DARK_MAX, VIGNETTE_HL_HI, VIGNETTE_HL_LO, VIGNETTE_LIGHT_MAX,
+};
 use genzo_pipeline::finish::exposure::CONTRAST_CHROMA_GAIN_MAX;
+use genzo_pipeline::finish::frequency::LUMA_LOG_OFFSET;
+use genzo_pipeline::finish::presence::{
+    CLARITY_LIMIT, CLARITY_MID_WIDTH, DEHAZE_ADD_FLOOR, DEHAZE_ADD_MAX, DEHAZE_OMEGA, DEHAZE_T_MIN,
+    TEXTURE_LIMIT,
+};
 use genzo_pipeline::finish::tone::{
     BLACKS_CENTER_EV, BLACKS_MAX_EV, BLACKS_WIDTH_EV, HIGHLIGHTS_CENTER_EV, HIGHLIGHTS_MAX_EV,
     HIGHLIGHTS_WIDTH_EV, SHADOWS_CENTER_EV, SHADOWS_MAX_EV, SHADOWS_WIDTH_EV, WHITES_CENTER_EV,
@@ -59,6 +67,8 @@ const QUANTIZE: &str = include_str!("../shaders/quantize.wgsl");
 const SENSOR: &str = include_str!("../shaders/sensor.wgsl");
 const RESAMPLE: &str = include_str!("../shaders/resample.wgsl");
 const DENOISE: &str = include_str!("../shaders/denoise.wgsl");
+const NOISE: &str = include_str!("../shaders/noise.wgsl");
+const DETAIL: &str = include_str!("../shaders/detail.wgsl");
 
 /// 座標を i32 にするときの切り詰めの範囲（2^30。CPU 版は i64 で 2^40。極端な座標でだけ結果が違う）。
 pub(crate) const COORD_LIMIT: f32 = (1u32 << 30) as f32;
@@ -118,11 +128,11 @@ impl Module {
 
     fn parts(self) -> &'static [&'static str] {
         match self {
-            Module::Finish => &[COMMON, PIXEL_IO, COLOR_LIB, FINISH],
+            Module::Finish => &[COMMON, PIXEL_IO, COLOR_LIB, FINISH, NOISE, DETAIL],
             Module::Output => &[COMMON, PIXEL_IO, COLOR_LIB, OUTPUT],
             Module::Geometry => &[COMMON, PIXEL_IO, GEOMETRY],
             Module::Histogram => &[COMMON, HISTOGRAM],
-            Module::Quantize => &[COMMON, QUANTIZE],
+            Module::Quantize => &[COMMON, NOISE, QUANTIZE],
             Module::Sensor => &[COMMON, SENSOR],
             Module::Resample => &[COMMON, PIXEL_IO, RESAMPLE],
             Module::Denoise => &[COMMON, PIXEL_IO, DENOISE],
@@ -153,6 +163,16 @@ impl Module {
                 ("SKIN_COS_W", 1),
                 ("NEUTRAL_A", 1),
                 ("NEUTRAL_B", 1),
+                ("COLOR_FLAGS", 1),
+                ("HUE_C", 9),
+                ("HUE_INV", 8),
+                ("HSL_H", 8),
+                ("HSL_S", 8),
+                ("HSL_L", 8),
+                ("BW_MIX", 8),
+                ("CG_TINT", 8),
+                ("CG_EV", 4),
+                ("CG_ZONE", 7),
                 ("S2D_MODE", 1),
                 ("S2D_FLOOR_RATIO", 1),
                 ("CURVE_FLAGS", 1),
@@ -162,6 +182,37 @@ impl Module {
                 ("LUT_INV", 4),
                 ("BLACK_LIFT", 1),
                 ("RATIO_MIN", 1),
+                // ステージ 12・14・16 の効果（detail.wgsl）。
+                ("BLUR_R", 1),
+                ("PLANE_X", 1),
+                ("PLANE_Y", 1),
+                ("PLANE_W", 1),
+                ("PR_FLAGS", 1),
+                ("PR_TEX", 1),
+                ("PR_CLA", 1),
+                ("PR_DEHAZE", 1),
+                ("PR_AIR", 3),
+                ("HAZE_OFF", 1),
+                ("SH_AMOUNT", 1),
+                ("SH_THRESHOLD", 1),
+                ("SH_LIMIT", 1),
+                ("SH_MASK", 1),
+                ("SH_GSCALE", 1),
+                ("FX_FLAGS", 1),
+                ("VG_CENTER", 2),
+                ("VG_INV", 2),
+                ("VG_EXP", 1),
+                ("VG_INV_CORNER", 1),
+                ("VG_EDGE", 2),
+                ("VG_AMOUNT", 1),
+                ("VG_HL", 1),
+                ("GR_SEED", 1),
+                ("GR_SALT", 1),
+                ("GR_ORIGIN", 2),
+                ("GR_INV_DENSITY", 2),
+                ("GR_INV_CELL", 2),
+                ("GR_W", 2),
+                ("GR_STRENGTH", 1),
             ],
             Module::Output => &[
                 ("W2D", 9),
@@ -289,10 +340,16 @@ pub(crate) enum Kernel {
     ColorMatrix,
     DownscaleH,
     DownscaleV,
+    LumaLog,
+    BlurH,
+    BlurV,
+    Presence,
+    Sharpen,
+    Effects,
 }
 
 impl Kernel {
-    pub(crate) const ALL: [Kernel; 24] = [
+    pub(crate) const ALL: [Kernel; 30] = [
         Kernel::Exposure,
         Kernel::Contrast,
         Kernel::Tone,
@@ -317,6 +374,12 @@ impl Kernel {
         Kernel::ColorMatrix,
         Kernel::DownscaleH,
         Kernel::DownscaleV,
+        Kernel::LumaLog,
+        Kernel::BlurH,
+        Kernel::BlurV,
+        Kernel::Presence,
+        Kernel::Sharpen,
+        Kernel::Effects,
     ];
 
     pub(crate) fn module(self) -> Module {
@@ -326,7 +389,13 @@ impl Kernel {
             | Kernel::Tone
             | Kernel::Color
             | Kernel::SceneToDisplay
-            | Kernel::ToneCurve => Module::Finish,
+            | Kernel::ToneCurve
+            | Kernel::LumaLog
+            | Kernel::BlurH
+            | Kernel::BlurV
+            | Kernel::Presence
+            | Kernel::Sharpen
+            | Kernel::Effects => Module::Finish,
             Kernel::Display | Kernel::Export => Module::Output,
             Kernel::Geometry | Kernel::LensCorrection => Module::Geometry,
             Kernel::Histogram => Module::Histogram,
@@ -368,6 +437,12 @@ impl Kernel {
             Kernel::ColorMatrix => "color_matrix_main",
             Kernel::DownscaleH => "downscale_h_main",
             Kernel::DownscaleV => "downscale_v_main",
+            Kernel::LumaLog => "luma_log_main",
+            Kernel::BlurH => "blur_h_main",
+            Kernel::BlurV => "blur_v_main",
+            Kernel::Presence => "presence_main",
+            Kernel::Sharpen => "sharpen_main",
+            Kernel::Effects => "effects_main",
         }
     }
 
@@ -375,7 +450,13 @@ impl Kernel {
     pub(crate) fn counts_non_finite(self) -> bool {
         !matches!(
             self,
-            Kernel::Histogram | Kernel::Quantize | Kernel::DownscaleH | Kernel::DownscaleV
+            Kernel::Histogram
+                | Kernel::Quantize
+                | Kernel::DownscaleH
+                | Kernel::DownscaleV
+                | Kernel::LumaLog
+                | Kernel::BlurH
+                | Kernel::BlurV
         )
     }
 
@@ -405,6 +486,16 @@ impl Kernel {
                 "SKIN_COS_W",
                 "NEUTRAL_A",
                 "NEUTRAL_B",
+                "COLOR_FLAGS",
+                "HUE_C",
+                "HUE_INV",
+                "HSL_H",
+                "HSL_S",
+                "HSL_L",
+                "BW_MIX",
+                "CG_TINT",
+                "CG_EV",
+                "CG_ZONE",
             ],
             Kernel::SceneToDisplay => &[
                 "S2D_MODE",
@@ -471,6 +562,58 @@ impl Kernel {
             Kernel::NrInverse => &["AUX_X", "AUX_Y", "AUX_W", "EPS"],
             Kernel::ColorMatrix => &["MAT"],
             Kernel::DownscaleH | Kernel::DownscaleV => &["TAP_OFF"],
+            Kernel::LumaLog => &[],
+            Kernel::BlurH | Kernel::BlurV => &["BLUR_R"],
+            Kernel::Presence => &[
+                "PR_FLAGS",
+                "PR_TEX",
+                "PR_CLA",
+                "PR_DEHAZE",
+                "PR_AIR",
+                "HAZE_OFF",
+                "PLANE_X",
+                "PLANE_Y",
+                "PLANE_W",
+                "TONE_H",
+                "TONE_S",
+                "TONE_W",
+                "TONE_B",
+                "TONE_EV",
+                "GAMMA",
+                "GUIDE_OX",
+                "GUIDE_OY",
+                "GUIDE_SX",
+                "GUIDE_SY",
+                "GUIDE_W",
+                "GUIDE_H",
+            ],
+            Kernel::Sharpen => &[
+                "SH_AMOUNT",
+                "SH_THRESHOLD",
+                "SH_LIMIT",
+                "SH_MASK",
+                "SH_GSCALE",
+                "PLANE_X",
+                "PLANE_Y",
+                "PLANE_W",
+            ],
+            Kernel::Effects => &[
+                "FX_FLAGS",
+                "VG_CENTER",
+                "VG_INV",
+                "VG_EXP",
+                "VG_INV_CORNER",
+                "VG_EDGE",
+                "VG_AMOUNT",
+                "VG_HL",
+                "GR_SEED",
+                "GR_SALT",
+                "GR_ORIGIN",
+                "GR_INV_DENSITY",
+                "GR_INV_CELL",
+                "GR_W",
+                "GR_STRENGTH",
+            ],
         }
     }
 }
@@ -541,8 +684,40 @@ pub(crate) fn shared_constants() -> Vec<(&'static str, f32)> {
         ("VIBRANCE_MAX", VIBRANCE_MAX),
         ("VIBRANCE_CHROMA_REF", VIBRANCE_CHROMA_REF),
         ("SKIN_PROTECTION", SKIN_PROTECTION),
+        ("POLY_TAN_PI_12", poly::TAN_PI_12),
+        ("POLY_SQRT3", poly::SQRT3),
+        ("POLY_FRAC_PI_6", poly::FRAC_PI_6),
+        ("POLY_FRAC_PI_2", poly::FRAC_PI_2),
+        ("POLY_PI", poly::PI),
+        ("POLY_TAU", poly::TAU),
+        ("POLY_INV3", poly::INV3),
+        ("POLY_INV5", poly::INV5),
+        ("POLY_INV7", poly::INV7),
+        ("POLY_INV9", poly::INV9),
+        ("POLY_INV11", poly::INV11),
+        ("POLY_INV6", poly::INV6),
+        ("POLY_INV120", poly::INV120),
+        ("POLY_INV5040", poly::INV5040),
+        ("POLY_INV362880", poly::INV362880),
+        ("POLY_INV24", poly::INV24),
+        ("POLY_INV720", poly::INV720),
+        ("POLY_INV40320", poly::INV40320),
+        ("POLY_INV_CHROMA_RAMP", poly::INV_CHROMA_RAMP),
         ("COORD_LIMIT", COORD_LIMIT),
         ("DITHER_SCALE", DITHER_SCALE),
+        ("LUMA_LOG_OFFSET", LUMA_LOG_OFFSET),
+        ("TEXTURE_LIMIT", TEXTURE_LIMIT),
+        ("CLARITY_LIMIT", CLARITY_LIMIT),
+        ("CLARITY_MID_WIDTH", CLARITY_MID_WIDTH),
+        ("DEHAZE_OMEGA", DEHAZE_OMEGA),
+        ("DEHAZE_T_MIN", DEHAZE_T_MIN),
+        ("DEHAZE_ADD_MAX", DEHAZE_ADD_MAX),
+        ("DEHAZE_ADD_FLOOR", DEHAZE_ADD_FLOOR),
+        ("VIGNETTE_DARK_MAX", VIGNETTE_DARK_MAX),
+        ("VIGNETTE_LIGHT_MAX", VIGNETTE_LIGHT_MAX),
+        ("VIGNETTE_HL_LO", VIGNETTE_HL_LO),
+        ("VIGNETTE_HL_HI", VIGNETTE_HL_HI),
+        ("GRAIN_MAX_SPAN", GRAIN_MAX_SPAN),
     ]
 }
 
@@ -655,6 +830,12 @@ impl Params {
 
     pub(crate) fn u32s(&mut self, name: &str, v: &[u32]) -> &mut Self {
         self.put(name, v);
+        self
+    }
+
+    pub(crate) fn i32s(&mut self, name: &str, v: &[i32]) -> &mut Self {
+        let words: Vec<u32> = v.iter().map(|x| *x as u32).collect();
+        self.put(name, &words);
         self
     }
 

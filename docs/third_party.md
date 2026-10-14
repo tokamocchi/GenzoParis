@@ -83,6 +83,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | RCD デモザイク | デモザイク（04 の 2.1 節のステージ 5。最終品質。既定のまま。決定事項ログ No.34） | CPU 版は `crates/genzo-pipeline/src/sensor/demosaic/rcd.rs`（2026-10-10。調査の時点の SHA-256 `3fe730d9b5bf8e4a876aae7d7c5bbed0075e3778c5271d1edf0dff7b471313fc`、追加したコミット 527f911）。GPU 版は未実装（書き出しのセンサー処理は CPU 版を使う）。第三者のファイルは取り込んでいない | アルゴリズムの考案者は Luis Sanz Rodríguez。考案者の実装は https://github.com/LuisSR/RCD-Demosaicing （`rcd_demosaicing.c`、Release 2.3）。改変した実装は RawTherapee・darktable・librtprocess にある（3.5 節に URL・コミット）。**`rcd.rs` は、これらの実装（特に 2021 年以降の改変版）と手順・定数・式の書き方・変数名が一致する**（2026-10-10 の AI の調査。3.5 節） | 自前のファイルとして、アプリと同じ GPL-3.0-or-later。比べた実装のファイルの表示は、RawTherapee・darktable・librtprocess が GPL-3.0-or-later、考案者の実装は LICENSE が GPL 第 3 版の全文でソースに表示なし（3.5 節）。由来の扱いと元の著作権表示の書き方は**人・専門家の確認待ち** | 該当なし（自前の Rust のコード） | アプリのソースに含まれる | 考案者の名前は doc コメントに記載済み。RawTherapee・darktable の版を参考にした実装として扱い、元の著作権表示（RawTherapee: Luis Sanz Rodriguez・Ingo Weyrich、darktable: darktable developers）と出典を `rcd.rs` のヘッダに記載した（2026-10-10。3.5 節）。書き方の妥当性は人・専門家の確認待ち | AI 記入（2026-10-10）。出典の調査は済み（2026-10-10）。扱いは人・専門家の確認待ち |
 | darktable のレンズ補正（埋め込みのメタデータの解釈。参考） | Sony の ARW に埋め込まれたレンズ補正の値（0x7032・0x7035・0x7037）の意味と、DNG の opcode（WarpRectilinear・FixVignetteRadial）の形・式の確認（DEV-14。決定事項ログ No.121。04 の 2.1 節のステージ 7・9） | darktable のブランチ master（2026-10-13 に取得。コミットは記録していない）の `src/iop/lens.cc`・`src/common/exif.cc`・`src/common/dng_opcode.c`（SHA-256 は 3.9 節） | https://github.com/darktable-org/darktable | GPL-3.0-or-later（3 つのファイルのヘッダの「either version 3 of the License, or (at your option) any later version」で確認） | 該当なし（第三者のファイルは取り込んでいない。自前の Rust のコード `crates/genzo-raw/src/lens.rs`・`crates/genzo-pipeline/src/lens.rs`） | アプリのソースに含まれる（自前のコード） | 値の解釈（節点の位置・尺度・式）が darktable と同じなので、参考にした実装として、darktable の著作権表示（「Copyright (C) 2019-2026 darktable developers」）と出典・SHA-256 を `crates/genzo-pipeline/src/lens.rs` の doc に記載した（2026-10-13）。書き方の妥当性は人・専門家の確認待ち | AI 記入（2026-10-13）。扱いは人・専門家の確認待ち |
 | ハイライト復元・ノイズ軽減の手法（公開の手法。参考） | ハイライト復元（DEV-06。04 の 2.1 節のステージ 4）とノイズ軽減（DEV-13。ステージ 6）の考え方: 近傍の色の比による再構成（最小二乗の比）、平方根による分散の安定化（Anscombe 変換の近似）、B3 スプラインの à trous ウェーブレットと non-negative garrote による係数の縮小（決定事項ログ No.126・127） | 該当なし（2026-10-13 の自前の実装。`crates/genzo-pipeline/src/sensor/highlight.rs`・`denoise.rs`、GPU 版は `crates/genzo-gpu/src/shaders/sensor.wgsl`・`denoise.wgsl`） | 文献の手法（3.10 節。**この実装では文献・第三者のコードを取得していない。AI の知識**） | 自前のコードとして、アプリと同じ GPL-3.0-or-later。第三者のコード（darktable・RawTherapee など）は参照・取り込みしていない | 該当なし（自前の Rust・WGSL のコード） | アプリのソースに含まれる（自前のコード） | 不要の見込み（コードを写していないため）。手法の出典は 3.10 節に記す | AI 記入（2026-10-13）。出典の書き方は人の確認待ち |
+| テクスチャ・明瞭度・かすみの除去・シャープ・効果の手法（公開の手法。参考） | テクスチャ・明瞭度・かすみの除去（DEV-11。04 の 2.1 節のステージ 12）・シャープ（DEV-12。ステージ 14）・効果（DEV-24。ステージ 16）の考え方: 輝度の対数の領域のぼかしとの差（周波数分解）とアンシャープマスク、暗いチャンネルの事前分布によるかすみの推定、ガイデッドフィルタによる精緻化、超楕円の周辺光量、格子の値の補間による粒子（決定事項ログ No.137〜139） | 該当なし（2026-10-14 の自前の実装。`crates/genzo-pipeline/src/finish/presence.rs`・`sharpen.rs`・`effects.rs`・`frequency.rs`・`crates/genzo-pipeline/src/haze.rs`、GPU 版は `crates/genzo-gpu/src/shaders/detail.wgsl`・`noise.wgsl`） | 文献の手法（3.11 節。**この実装では文献・第三者のコードを取得していない。AI の知識**） | 自前のコードとして、アプリと同じ GPL-3.0-or-later。第三者のコード（darktable・RawTherapee・論文の著者の公開のコードなど）は参照・取り込みしていない | 該当なし（自前の Rust・WGSL のコード） | アプリのソースに含まれる（自前のコード） | 不要の見込み（コードを写していないため）。手法の出典は 3.11 節に記す | AI 記入（2026-10-14）。出典の書き方と、手法の権利（特許など）の有無は人の確認待ち |
 | ColorChecker Classic の基準値 | PoC-4 の色の評価の基準とテスト（`crates/genzo-testkit/src/colorchecker.rs`。2014 年 11 月以降の版と、より前の版の 24 色 × L\*a\*b\*（D50）） | X-Rite の公表値（CGATS のファイル。2014 年 11 月以降の版の測定日は 2015-04-28）。値は colour-science 0.4.6 のデータから写したもの | X-Rite（現在は Calibrite）の公表資料。2026-10-10 の照合には、GitHub 上の第三者のリポジトリにある CGATS ファイルの写しを使った（3.8 節） | 利用条件は未確認（**要確認**） | 該当なし（テストのデータ） | `genzo-testkit` はテストと計測用の crate。開発用の CLI（`genzo`）は計測の記録のために依存するが、配布するアプリに含めるかは未定（含める場合は利用条件の確認が要る） | 出典（X-Rite）を doc に記載 | AI 記入（2026-10-10）。値は写しと一致、一次資料とは未照合（人の確認待ち） |
 | カメラ行列（α7 IV / α7C） | カメラ RGB から XYZ への変換（04 の 2.5 節の `render_deps`、2.6 節） | 未作成 | 候補は LibRaw の内蔵の表、DNG の ColorMatrix、カラーチャートからの自作（3.6 節） | 要確認（出典ごとに利用条件を確認する） | アプリのデータファイルとして持ち、ID とハッシュで参照する | アプリに同梱する予定 | 出典による（要確認） | 未着手 |
 | Mesa（llvmpipe） | 開発環境（Linux のコンテナ）で wgpu を動かすための、ソフトウェアの Vulkan | 25.2.8（`mesa-vulkan-drivers` 25.2.8-0ubuntu0.24.04.4）。Vulkan のローダーは `libvulkan1` 1.3.275.0 | Ubuntu 24.04 の apt | 主に MIT とされる（未確認。配布しないため優先度は低い） | wgpu が実行時に Vulkan のローダー経由で読み込む。ビルド時のリンクはない | **配布物に含めない** | 不要（配布しない） | 開発環境だけで使う |
@@ -272,6 +273,22 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 - **人の確認が必要な事項**
   1. 手法の出典の書き方（コードは写していないので著作権表示は要らない見込みだが、論文の参照の要否と書き方）。
   2. 実写での画質（人の判断の表 No.137・138）。
+
+### 3.11 テクスチャ・明瞭度・かすみの除去・シャープ・効果の手法（公開の手法。第三者のコードは参照していない）
+
+**実装の状況**（2026-10-14、AI 記入。DEV-11・DEV-12・DEV-24、決定事項ログ No.137〜140）
+- ステージ 12（`crates/genzo-pipeline/src/finish/presence.rs`）・14（`sharpen.rs`）・16 の効果（`effects.rs`）、共通の部品（`frequency.rs`）、段階 B のかすみの推定（`crates/genzo-pipeline/src/haze.rs`）、GPU 版（`crates/genzo-gpu/src/shaders/detail.wgsl`・`noise.wgsl`）は自前の Rust・WGSL のコードです。**第三者のファイル・コードは取得も取り込みもしていません**（論文の著者の公開のコード、darktable の「haze removal」「local contrast」「sharpen」「grain」、RawTherapee の各方式は、この実装のために読んでいません。名前と考え方は AI の知識として知っているもの）。
+- 使った考え方（公開の手法。**文献はこの調査では取得していない。出典は AI の知識による**）:
+  - かすみの推定: 暗いチャンネルの事前分布（K. He, J. Sun, X. Tang, "Single Image Haze Removal Using Dark Channel Prior", CVPR 2009）。窓の最小で暗いチャンネルを求め、その上位の画素の平均で大気の光を推定し、透過率 `1 − ω·暗いチャンネル` でかすみの式を戻す。窓の大きさ（G の長辺の 1 %）・上位の割合（0.1 %）・ω（0.95）・透過率の下限（0.1）・負の値（かすみを足す）の式は、この実装で決めたもの（仮置き）。
+  - 暗いチャンネルの精緻化: ガイデッドフィルタ（K. He, J. Sun, X. Tang, "Guided Image Filtering", ECCV 2010）。半径（窓の 2 倍）と ε（1e−3）はこの実装で決めたもの。
+  - テクスチャ・明瞭度・シャープ: ぼかした画像との差を強める（アンシャープマスク。写真の処理で古くから広く使われる考え方）を、輝度の対数の領域で行う。しきい値・上限・中間調の重み・勾配のマスクの形は、この実装で決めたもの。
+  - 周辺光量: 超楕円（|u|^q + |v|^q）の距離と smoothstep の重み。粒子: 整数のハッシュ（17b のディザと同じ関数。既存の自前のコード）で作る格子の値の双線形の補間（バリューノイズ）を 2 つの大きさで重ねる。
+- **特許などの権利**: これらの手法（特に暗いチャンネルの事前分布とガイデッドフィルタ）に特許などの権利があるか、あるならアプリの配布に関係するかは**調べていません**（**要確認**。AI はこれについて判断しません）。
+
+- **人の確認が必要な事項**
+  1. 手法の出典の書き方（コードは写していないので著作権表示は要らない見込みだが、論文の参照の要否と書き方）。
+  2. 手法の権利（特許など）の有無と扱い（implementation_status の人の判断の表 No.151）。
+  3. 実写での画質（人の判断の表 No.149）。
 
 ## 4. 今後記入する対象
 

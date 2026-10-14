@@ -192,9 +192,60 @@ export interface ToneCurve {
   blue: CurvePoint[];
 }
 
+/** カラーミキサー・白黒ミキサーの色相の帯（genzo-model の HueBand。色相の順）。 */
+export type HueBand = "red" | "orange" | "yellow" | "green" | "aqua" | "blue" | "purple" | "magenta";
+
+/** 帯の順（genzo-model の HueBand::ALL）。 */
+export const HUE_BANDS: readonly HueBand[] = ["red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta"];
+
+/** 色相の帯ごとの値（JSON は帯の名前のオブジェクト）。 */
+export type HueBands<T> = Record<HueBand, T>;
+
+/** カラーミキサーの 1 つの帯の調整（各 -100〜100）。 */
+export interface HslAdjustment {
+  hue: number;
+  saturation: number;
+  luminance: number;
+}
+
+/** カラーグレーディングの 1 つの範囲（色相環）。 */
+export interface GradingWheel {
+  /** 色相（度。0〜360。sRGB の色相環で 0 がレッド）。 */
+  hue: number;
+  /** 強さ（0〜100）。 */
+  saturation: number;
+  /** 輝度（-100〜100）。 */
+  luminance: number;
+}
+
+/** カラーグレーディング（DEV-10。genzo-model の ColorGrading。処理バージョン 2 から使える）。 */
+export interface ColorGrading {
+  shadows: GradingWheel;
+  midtones: GradingWheel;
+  highlights: GradingWheel;
+  global: GradingWheel;
+  /** ブレンド（0〜100。既定 50）。 */
+  blending: number;
+  /** バランス（-100〜100。正でハイライトの範囲を広げる）。 */
+  balance: number;
+}
+
+/** 白黒（DEV-25。genzo-model の BlackWhite。処理バージョン 2 から使える）。 */
+export interface BlackWhite {
+  enabled: boolean;
+  /** 白黒ミキサー（帯ごとの明るさ。-100〜100）。 */
+  mix: HueBands<number>;
+}
+
 export interface ColorParams {
   saturation: number;
   vibrance: number;
+  /** カラーミキサー（DEV-09。古いコアの応答では欠けうる）。 */
+  mixer: HueBands<HslAdjustment>;
+  /** カラーグレーディング（DEV-10。古いコアの応答では欠けうる）。 */
+  grading: ColorGrading;
+  /** 白黒（DEV-25。古いコアの応答では欠けうる）。 */
+  black_white: BlackWhite;
 }
 
 /** 切り抜き（G の外接矩形の各軸の割合。0〜1）。 */
@@ -250,9 +301,58 @@ export interface NoiseReduction {
   color_detail: number;
 }
 
+/** シャープ（DEV-12。genzo-model の Sharpening。処理バージョン 2 から使える）。 */
+export interface Sharpening {
+  /** 適用量（0〜150）。 */
+  amount: number;
+  /** 半径（0.5〜3.0。写真のフル解像度の画素。既定 1.0）。 */
+  radius: number;
+  /** ディテール（0〜100。既定 25。小さいほど細かい模様を強めず、輪郭のにじみを抑える）。 */
+  detail: number;
+  /** マスク（0〜100。既定 0。大きいほど平らな部分にかけない）。 */
+  masking: number;
+}
+
 export interface DetailParams {
-  sharpening: { amount: number; radius: number; detail: number; masking: number };
+  sharpening: Sharpening;
   noise_reduction: NoiseReduction;
+}
+
+/** テクスチャ・明瞭度・かすみの除去（DEV-11。genzo-model の PresenceParams。各 -100〜100。処理バージョン 2 から）。 */
+export interface PresenceParams {
+  texture: number;
+  clarity: number;
+  dehaze: number;
+}
+
+/** 切り抜き後の周辺光量補正（DEV-24。genzo-model の PostCropVignette。処理バージョン 2 から）。 */
+export interface PostCropVignette {
+  /** 量（-100〜100。負で暗く、正で明るく）。 */
+  amount: number;
+  /** 中点（0〜100。既定 50）。 */
+  midpoint: number;
+  /** 丸み（-100〜100。既定 0）。 */
+  roundness: number;
+  /** ぼかし（0〜100。既定 50）。 */
+  feather: number;
+  /** ハイライトの保護（0〜100。既定 0）。 */
+  highlights: number;
+}
+
+/** 粒子（DEV-24。genzo-model の Grain。処理バージョン 2 から）。 */
+export interface Grain {
+  /** 量（0〜100）。 */
+  amount: number;
+  /** 大きさ（0〜100。既定 25）。 */
+  size: number;
+  /** 粗さ（0〜100。既定 50）。 */
+  roughness: number;
+}
+
+/** 効果（DEV-24。genzo-model の EffectsParams）。 */
+export interface EffectsParams {
+  vignette: PostCropVignette;
+  grain: Grain;
 }
 
 /** ハイライト復元の方式（genzo-model の HighlightMethod）。 */
@@ -283,11 +383,15 @@ export interface DevelopSettings {
   /** コントラスト（-100〜100）。 */
   contrast: number;
   tone: ToneParams;
+  /** テクスチャ・明瞭度・かすみの除去（DEV-11。古いコアの応答では欠けうる）。 */
+  presence: PresenceParams;
   tone_curve: ToneCurve;
   color: ColorParams;
   geometry: Geometry;
   lens: LensCorrection;
   detail: DetailParams;
+  /** 効果（切り抜き後の周辺光量補正・粒子。DEV-24。古いコアの応答では欠けうる）。 */
+  effects: EffectsParams;
   /** 部分補正（v1。MVP の画面では扱わず、そのまま保つ）。 */
   masks: unknown[];
   render_deps: RenderDeps;
@@ -307,6 +411,12 @@ export const RANGES = {
   lensManual: { min: -100, max: 100 },
   /** 手動の周辺減光の中点。 */
   lensMidpoint: { min: 0, max: 100 },
+  /** カラーグレーディングの色相（度）。 */
+  hueDeg: { min: 0, max: 360 },
+  /** シャープの適用量。 */
+  sharpenAmount: { min: 0, max: 150 },
+  /** シャープの半径（写真のフル解像度の画素）。 */
+  sharpenRadius: { min: 0.5, max: 3 },
 } as const;
 
 /** WB のプリセットの色温度と tint（genzo-model の WbPreset::temperature_tint）。 */
@@ -323,11 +433,15 @@ export const WB_PRESETS: Record<WbPreset, { temperature_k: number; tint: number;
 export interface SettingGroups {
   white_balance: boolean;
   basic_tone: boolean;
+  /** テクスチャ・明瞭度・かすみの除去（DEV-11）。 */
+  presence: boolean;
   tone_curve: boolean;
   color: boolean;
   geometry: boolean;
   lens: boolean;
   detail: boolean;
+  /** 効果（切り抜き後の周辺光量補正・粒子。DEV-24）。 */
+  effects: boolean;
   masks: boolean;
 }
 

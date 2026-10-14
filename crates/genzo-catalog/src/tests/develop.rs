@@ -338,6 +338,45 @@ fn reverting_to_default_settings_is_stored_compactly() {
     assert_eq!(hash, DevelopSettings::default().develop_hash_hex());
 }
 
+/// finish-detail より前の版が保存した設定（シャープの旧既定のディテール 0 を書いていたもの）を読むと、適用量が 0 なら
+/// 新しい既定のディテール 25 になる（genzo-model の migrate.rs。決定事項ログ No.142）。ほかの値は保つ。
+#[test]
+fn settings_saved_before_finish_detail_read_the_new_sharpening_detail_default() {
+    let mut f = Fixture::new();
+    let v = f.photo("A.ARW", 1, None).master_variant_id;
+    let w = f.photo("B.ARW", 2, None).master_variant_id;
+    // 旧版のシリアライザが書いた形（`presence`・`effects` がなく、シャープの 4 つの値を必ず書く）。
+    let old = |amount: f32| {
+        format!(
+            r#"{{"schema_version":2,"process_version":2,"exposure_ev":0.5,
+                "detail":{{"sharpening":{{"amount":{amount:.1},"radius":1.0,"detail":0.0,"masking":0.0}},
+                "noise_reduction":{{"luminance":0.0,"luminance_detail":50.0,"luminance_contrast":0.0,
+                "color":0.0,"color_detail":50.0}}}}}}"#
+        )
+    };
+    for (id, json) in [(v, old(0.0)), (w, old(40.0))] {
+        f.cat
+            .conn
+            .execute(
+                "UPDATE variant SET develop_json = ?2 WHERE id = ?1",
+                rusqlite::params![id.get(), json],
+            )
+            .unwrap();
+    }
+    let s = f.cat.develop_state(v).unwrap().settings;
+    assert_eq!(s, exposure(0.5));
+    assert_eq!(s.detail.sharpening.detail, 25.0);
+    // 適用量があれば、利用者が決めた値として保つ。
+    let s = f.cat.develop_settings(w).unwrap();
+    assert_eq!(s.detail.sharpening.amount, 40.0);
+    assert_eq!(s.detail.sharpening.detail, 0.0);
+    // 読み替えた設定を保存し直すと、新しい形で保存され、読み直しても変わらない。
+    let mut t = f.cat.develop_settings(v).unwrap();
+    t.exposure_ev = 0.6;
+    f.cat.save_develop(v, &t, "露光量").unwrap();
+    assert_eq!(f.cat.develop_settings(v).unwrap(), t);
+}
+
 #[test]
 fn batch_save_stores_different_settings_atomically() {
     let mut f = Fixture::new();

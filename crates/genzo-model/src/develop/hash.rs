@@ -25,6 +25,11 @@
 //!   歪曲補正を有効にするかどうか（`lens.profile_enabled`）は周辺減光と共通なので A1 に含まれ、
 //!   B にも A1 を通じて含まれる。
 //! - 露光量・切り抜き・ハイライトやシャドウなどのスライダーは B に含めない（2.7 節の表）。
+//! - 色（ステージ 13。彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒）は段階 C だけに含まれる
+//!   （A1・B のキャッシュを作り直さない）。
+//! - テクスチャ・明瞭度・かすみの除去（ステージ 12）・シャープ（ステージ 14）・効果（ステージ 16 の周辺光量・粒子）も
+//!   段階 C だけに含まれる。明瞭度・かすみの除去が使う全体の情報（段階 B のガイドと、かすみの推定）は、項目の値に
+//!   よらず A1 の画像と回転・歪曲補正だけで決まる（値は段階 C で使う）ので、B に含めない。
 //! - ガイドのアルゴリズムのパラメータは process_version で固定されるため、設定には持たない。
 
 use serde::Serialize;
@@ -224,6 +229,41 @@ mod tests {
     }
 
     #[test]
+    fn color_items_change_only_phase_c() {
+        // カラーミキサー・カラーグレーディング・白黒はステージ 13（段階 C）。A1・ガイドを作り直さない。
+        let a = base();
+        let mut b = base();
+        b.color.mixer.blue.luminance = -40.0;
+        assert_eq!(changed_phases(&a, &b), [Phase::C]);
+        let mut c = base();
+        c.color.grading.shadows.saturation = 30.0;
+        c.color.grading.balance = 20.0;
+        assert_eq!(changed_phases(&a, &c), [Phase::C]);
+        let mut d = base();
+        d.color.black_white.enabled = true;
+        d.color.black_white.mix.red = 25.0;
+        assert_eq!(changed_phases(&a, &d), [Phase::C]);
+    }
+
+    #[test]
+    fn presence_sharpening_and_effects_change_only_phase_c() {
+        // テクスチャ・明瞭度・かすみの除去（ステージ 12）・シャープ（14）・効果（16）は段階 C。A1・ガイドを作り直さない。
+        let a = base();
+        for f in [
+            |s: &mut DevelopSettings| s.presence.texture = 30.0,
+            |s: &mut DevelopSettings| s.presence.clarity = -20.0,
+            |s: &mut DevelopSettings| s.presence.dehaze = 40.0,
+            |s: &mut DevelopSettings| s.detail.sharpening.masking = 60.0,
+            |s: &mut DevelopSettings| s.effects.vignette.amount = -30.0,
+            |s: &mut DevelopSettings| s.effects.grain.amount = 25.0,
+        ] {
+            let mut b = base();
+            f(&mut b);
+            assert_eq!(changed_phases(&a, &b), [Phase::C]);
+        }
+    }
+
+    #[test]
     fn rotation_changes_b_and_c() {
         let a = base();
         let mut b = base();
@@ -368,11 +408,13 @@ mod tests {
             "\"exposure_ev\"",
             "\"contrast\"",
             "\"tone\"",
+            "\"presence\"",
             "\"tone_curve\"",
             "\"color\"",
             "\"geometry\"",
             "\"lens\"",
             "\"detail\"",
+            "\"effects\"",
             "\"masks\"",
             "\"render_deps\"",
         ];
@@ -393,14 +435,20 @@ mod tests {
                 r#""highlight_recovery":{"method":"clip","amount":100.0},"#,
                 r#""exposure_ev":0.0,"contrast":0.0,"#,
                 r#""tone":{"highlights":0.0,"shadows":0.0,"whites":0.0,"blacks":0.0},"#,
+                r#""presence":{"texture":0.0,"clarity":0.0,"dehaze":0.0},"#,
                 r#""tone_curve":{"parametric":{"highlights":0.0,"lights":0.0,"darks":0.0,"shadows":0.0},"#,
                 r#""luma":[],"red":[],"green":[],"blue":[]},"#,
-                r#""color":{"saturation":0.0,"vibrance":0.0},"#,
+                r#""color":{"saturation":0.0,"vibrance":0.0,"#,
+                r#""mixer":{"red":{"hue":0.0,"saturation":0.0,"luminance":0.0},"orange":{"hue":0.0,"saturation":0.0,"luminance":0.0},"yellow":{"hue":0.0,"saturation":0.0,"luminance":0.0},"green":{"hue":0.0,"saturation":0.0,"luminance":0.0},"aqua":{"hue":0.0,"saturation":0.0,"luminance":0.0},"blue":{"hue":0.0,"saturation":0.0,"luminance":0.0},"purple":{"hue":0.0,"saturation":0.0,"luminance":0.0},"magenta":{"hue":0.0,"saturation":0.0,"luminance":0.0}},"#,
+                r#""grading":{"shadows":{"hue":0.0,"saturation":0.0,"luminance":0.0},"midtones":{"hue":0.0,"saturation":0.0,"luminance":0.0},"highlights":{"hue":0.0,"saturation":0.0,"luminance":0.0},"global":{"hue":0.0,"saturation":0.0,"luminance":0.0},"blending":50.0,"balance":0.0},"#,
+                r#""black_white":{"enabled":false,"mix":{"red":0.0,"orange":0.0,"yellow":0.0,"green":0.0,"aqua":0.0,"blue":0.0,"purple":0.0,"magenta":0.0}}},"#,
                 r#""geometry":{"crop":{"left":0.0,"top":0.0,"right":1.0,"bottom":1.0},"angle_deg":0.0,"aspect":null},"#,
                 r#""lens":{"profile_enabled":false,"distortion_scale":100.0,"vignetting_scale":100.0,"remove_chromatic_aberration":false,"#,
                 r#""distortion":0.0,"vignetting_amount":0.0,"vignetting_midpoint":50.0,"ca_red_cyan":0.0,"ca_blue_yellow":0.0},"#,
-                r#""detail":{"sharpening":{"amount":0.0,"radius":1.0,"detail":0.0,"masking":0.0},"#,
+                r#""detail":{"sharpening":{"amount":0.0,"radius":1.0,"detail":25.0,"masking":0.0},"#,
                 r#""noise_reduction":{"luminance":0.0,"luminance_detail":50.0,"luminance_contrast":0.0,"color":0.0,"color_detail":50.0}},"#,
+                r#""effects":{"vignette":{"amount":0.0,"midpoint":50.0,"roundness":0.0,"feather":50.0,"highlights":0.0},"#,
+                r#""grain":{"amount":0.0,"size":25.0,"roughness":50.0}},"#,
                 r#""masks":[],"#,
                 r#""render_deps":{"camera_profile":{"id":"","sha256":""},"lens_profile":null,"raw_decoder":""}}"#
             )

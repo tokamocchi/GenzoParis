@@ -251,13 +251,18 @@ impl<'r> Chain<'r> {
                     Some(bytes) => Some(self.r.gpu.create_storage_init("genzo-gpu.aux", bytes)?),
                     None => None,
                 };
+                // ステージ 12・14: 輝度の対数の面をぼかしてから仕上げる（ぼかした面は binding 5）。
+                let plane = match &p.blur {
+                    Some(b) => Some(record_blur(self.batch()?, &input.buffer, in_roi, b)?),
+                    None => None,
+                };
                 self.batch()?.dispatch(Dispatch {
                     kernel: p.kernel,
                     params: p.params,
                     src: &input.buffer,
                     dst: &out.buffer,
                     aux: aux.as_ref(),
-                    aux_out: None,
+                    aux_out: plane.as_ref(),
                     threads: (output_roi.width, output_roi.height),
                 })?;
                 self.current = Current::Gpu(out);
@@ -1210,6 +1215,67 @@ pub(crate) fn record_noise_reduction(
     keep.push(cur);
     keep.push(acc);
     Ok(out)
+}
+
+/// ステージ 12・14 の前処理（genzo-pipeline の `finish::frequency` の `luma_log_plane` → `blur_plane`）のディスパッチを
+/// 記録する。`src` は範囲 `in_roi` の RGB（ぼかした面の範囲を半径だけ広げた範囲を含む）。ぼかした面（範囲 `blur.plane`、
+/// 1 画素 1 つの f32）のバッファを返す。途中のバッファは投入まで wgpu が持つ。
+pub(crate) fn record_blur(
+    batch: &mut Batch<'_>,
+    src: &wgpu::Buffer,
+    in_roi: Roi,
+    blur: &crate::stages::BlurPrep,
+) -> Result<wgpu::Buffer> {
+    let gpu = batch.gpu();
+    let r = blur.radius;
+    let out = blur.plane;
+    let need = out.expand(r);
+    if !in_roi.contains_roi(&need) {
+        return Err(PipelineError::InvalidRoi {
+            roi: in_roi,
+            reason: "ぼかしの入力が必要な範囲（半径の余白）を覆っていない",
+        }
+        .into());
+    }
+    let gray_bytes = |roi: Roi| roi.pixel_count().max(1) * 4;
+    let luma = gpu.create_storage("genzo-gpu.detail（輝度の対数）", gray_bytes(need))?;
+    let p = Params::new(Kernel::LumaLog, in_roi, need);
+    batch.dispatch(Dispatch {
+        kernel: Kernel::LumaLog,
+        params: p.finish()?,
+        src,
+        dst: &luma,
+        aux: None,
+        aux_out: None,
+        threads: (need.width, need.height),
+    })?;
+    let weights = gpu.create_storage_init("genzo-gpu.detail（重み）", &blur.weights)?;
+    let h_roi = Roi::new(out.x, out.y - r as i32, out.width, out.height + 2 * r);
+    let tmp = gpu.create_storage("genzo-gpu.detail（横）", gray_bytes(h_roi))?;
+    let mut p = Params::new(Kernel::BlurH, need, h_roi);
+    p.u32("BLUR_R", r);
+    batch.dispatch(Dispatch {
+        kernel: Kernel::BlurH,
+        params: p.finish()?,
+        src: &luma,
+        dst: &tmp,
+        aux: Some(&weights),
+        aux_out: None,
+        threads: (h_roi.width, h_roi.height),
+    })?;
+    let plane = gpu.create_storage("genzo-gpu.detail（ぼかした面）", gray_bytes(out))?;
+    let mut p = Params::new(Kernel::BlurV, h_roi, out);
+    p.u32("BLUR_R", r);
+    batch.dispatch(Dispatch {
+        kernel: Kernel::BlurV,
+        params: p.finish()?,
+        src: &tmp,
+        dst: &plane,
+        aux: Some(&weights),
+        aux_out: None,
+        threads: (out.width, out.height),
+    })?;
+    Ok(plane)
 }
 
 /// 符号化した値（B4a・B4b・B5）か（genzo-pipeline の量子化・ヒストグラムと同じ確認）。

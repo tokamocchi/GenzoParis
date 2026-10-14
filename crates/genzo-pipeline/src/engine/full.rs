@@ -592,7 +592,8 @@ impl Engine {
         let base: StageContext<'static> =
             finish_context(settings, frames, grid, RenderQuality::Final)?
                 .with_input_kind(source.image.input_kind())
-                .with_uncropped(uncropped);
+                .with_uncropped(uncropped)
+                .with_photo_seed(source.id.photo_seed());
         let (plan, guide) = plan_with_guide(settings, &base, || {
             self.guide(
                 source,

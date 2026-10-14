@@ -216,3 +216,112 @@ fn bench_a1_with_highlight_recovery_and_noise_reduction_a7iv() {
         .unwrap();
     report(&result);
 }
+
+#[test]
+#[ignore = "計測（手動で --release で実行する）"]
+fn bench_stage_c_preview_2560_with_presence_sharpening_and_effects() {
+    // 処理バージョン 2 のステージ 12（テクスチャ・明瞭度・かすみの除去）・14（シャープ）・16 の効果（周辺光量・粒子）を
+    // 足した段階 C（露光量のドラッグ。A1・ガイドはキャッシュ）。入力は B2 の 2560 × 1707（RAW 以外の経路）。
+    // 項目ごとに足した時間を比べるため、strong_settings だけのものも同じ条件で測る。
+    let (w, h) = (2560u32, 1707u32);
+    let scene = busy_scene(w, h);
+    let image = RgbImage::from_vec(
+        w,
+        h,
+        ColorContract::B2Working,
+        scene
+            .data()
+            .chunks_exact(3)
+            .map(|c| [c[0], c[1], c[2]])
+            .collect(),
+    )
+    .unwrap();
+    let source = PhotoSource::new(
+        SourceId::new(FileId::new(1), 1),
+        SourceImage::Working {
+            image: Arc::new(image),
+            orientation: Orientation::Normal,
+        },
+    )
+    .unwrap();
+    let with = |f: &dyn Fn(&mut DevelopSettings)| {
+        let mut s = strong_settings();
+        f(&mut s);
+        s
+    };
+    let all = with(&|s| {
+        s.presence.texture = 40.0;
+        s.presence.clarity = 30.0;
+        s.presence.dehaze = 25.0;
+        s.detail.sharpening.amount = 60.0;
+        s.detail.sharpening.masking = 20.0;
+        s.effects.vignette.amount = -30.0;
+        s.effects.grain.amount = 25.0;
+    });
+    for (name, s) in [
+        ("engine_stage_c_preview_2560_base", strong_settings()),
+        (
+            "engine_stage_c_preview_2560_texture",
+            with(&|s| s.presence.texture = 40.0),
+        ),
+        (
+            "engine_stage_c_preview_2560_clarity",
+            with(&|s| s.presence.clarity = 30.0),
+        ),
+        (
+            "engine_stage_c_preview_2560_dehaze",
+            with(&|s| s.presence.dehaze = 25.0),
+        ),
+        (
+            "engine_stage_c_preview_2560_sharpen",
+            with(&|s| s.detail.sharpening.amount = 60.0),
+        ),
+        (
+            "engine_stage_c_preview_2560_vignette",
+            with(&|s| s.effects.vignette.amount = -30.0),
+        ),
+        (
+            "engine_stage_c_preview_2560_grain",
+            with(&|s| s.effects.grain.amount = 25.0),
+        ),
+        ("engine_stage_c_preview_2560_detail_all", all.clone()),
+    ] {
+        let e = engine(2560, 1024);
+        let mut s = s;
+        e.render_preview(&source, &s, RenderQuality::Final, 2560)
+            .unwrap();
+        let mut ev = 0.0f32;
+        let result = Bench::latency(name)
+            .target(Duration::from_millis(33))
+            .note("resolution", "2560x1707")
+            .note("backend", "cpu")
+            .develop_settings(&s)
+            .run_warm(|| {
+                ev = if ev > 1.0 { 0.0 } else { ev + 0.1 };
+                s.exposure_ev = ev;
+                e.render_preview(&source, &s, RenderQuality::Final, 2560)
+                    .unwrap()
+            })
+            .unwrap();
+        report(&result);
+        assert!(e.stats().guide.misses <= 1, "ガイドは作り直さない");
+    }
+    // ガイド（かすみの推定あり・なし）の作り直しの時間（回転を変えたときなど）。
+    let e = engine(2560, 1024);
+    for (name, s) in [
+        ("engine_guide_2560", strong_settings()),
+        ("engine_guide_with_haze_2560", all),
+    ] {
+        let result = Bench::batch(name)
+            .note("backend", "cpu")
+            .run_cold(
+                || {
+                    e.clear_caches();
+                    e.a1(&source, &s, RenderQuality::Final, 2560).unwrap();
+                },
+                || e.guide(&source, &s, RenderQuality::Final, 2560).unwrap(),
+            )
+            .unwrap();
+        report(&result);
+    }
+}

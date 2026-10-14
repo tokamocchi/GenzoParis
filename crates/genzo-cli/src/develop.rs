@@ -14,6 +14,11 @@
 //!   `--nr-luminance`・`--nr-luminance-detail`・`--nr-luminance-contrast`・`--nr-color`・`--nr-color-detail`）で
 //!   指定できる（JSON の後、レンズ補正と同じく当てる）。処理バージョン 1 の写真では使われないので警告する
 //!   （[`sensor_ignored`]）。
+//! - `set` の白黒（DEV-25）・カラーミキサー（DEV-09）・カラーグレーディング（DEV-10）もオプション（`--black-white`・
+//!   `--hsl-hue`・`--hsl-saturation`・`--hsl-luminance`・`--bw-mix`（`帯=値`。繰り返せる）・`--grading-shadows`・
+//!   `--grading-midtones`・`--grading-highlights`・`--grading-global`（`色相,強さ[,輝度]`）・`--grading-blending`・
+//!   `--grading-balance`）で指定できる（JSON の後に当てる）。処理バージョン 1 の写真では使われないので警告する
+//!   （[`color_ignored`]）。
 //! - `upgrade` は処理バージョンを最新に更新する（DATA-09。履歴の名前はアプリの更新と同じ
 //!   [`genzo_api::upgrade_process_label`]）。複数の ID をまとめて更新できる（genzo-api の
 //!   [`genzo_api::Core::upgrade_process_versions`]。すでに最新の写真・動画は飛ばす）。`source` は写真を開いて、
@@ -51,8 +56,8 @@ use serde_json::{Value, json};
 
 use crate::Status;
 use crate::args::{
-    BeforeArgs, CompareArgs, DevelopCommand, GlobalArgs, LensArgs, RegionArgs, RegionSpaceArg,
-    SensorArgs, setting_groups,
+    BeforeArgs, ColorArgs, CompareArgs, DetailArgs, DevelopCommand, GlobalArgs, LensArgs,
+    RegionArgs, RegionSpaceArg, SensorArgs, setting_groups,
 };
 use crate::error::{CliError, CliResult};
 use crate::library::{ensure_variants, unique_ids};
@@ -72,20 +77,35 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
             replace,
             lens,
             sensor,
+            color,
+            detail,
         } => {
             let patch = match settings {
                 Some(source) => read_json_input(&source)?,
-                None if lens.any() || sensor.any() => json!({}),
+                None if lens.any() || sensor.any() || color.any() || detail.any() => json!({}),
                 None => {
                     return Err(CliError::Usage(
                         "現像設定の JSON を --json <FILE>（または --settings <FILE>。- で標準入力）か、レンズ補正・\
-                         ハイライト復元・ノイズ軽減のオプション（--lens-profile・--highlight-recovery・\
-                         --nr-luminance など）で指定してください"
+                         ハイライト復元・ノイズ軽減・色・ディテール・効果のオプション（--lens-profile・\
+                         --highlight-recovery・--nr-luminance・--black-white・--hsl-hue・--grading-shadows・\
+                         --clarity・--sharpen-amount・--grain-amount など）で指定してください"
                             .to_owned(),
                     ));
                 }
             };
-            set(g, out, variant, &patch, replace, &lens, &sensor)
+            set(
+                g,
+                out,
+                variant,
+                &patch,
+                replace,
+                &OptionArgs {
+                    lens: &lens,
+                    sensor: &sensor,
+                    color: &color,
+                    detail: &detail,
+                },
+            )
         }
         DevelopCommand::Upgrade { variants } => upgrade(g, out, &variants),
         DevelopCommand::Source { variant } => source(g, out, variant),
@@ -317,21 +337,59 @@ fn save(s: &Session, v: VariantId, new: &DevelopSettings, label: Option<&str>) -
     Ok(true)
 }
 
-/// JSON をマージした設定に、レンズ補正・ハイライト復元・ノイズ軽減のオプションを当てて検証する。
+/// `develop set` のオプション（レンズ補正・ハイライト復元とノイズ軽減・色）。
+#[derive(Debug, Clone, Copy)]
+pub struct OptionArgs<'a> {
+    /// レンズ補正（DEV-14）。
+    pub lens: &'a LensArgs,
+    /// ハイライト復元・ノイズ軽減（DEV-06・DEV-13）。
+    pub sensor: &'a SensorArgs,
+    /// 白黒・カラーミキサー・カラーグレーディング（DEV-25・DEV-09・DEV-10）。
+    pub color: &'a ColorArgs,
+    /// テクスチャ・明瞭度・かすみの除去・シャープ・効果（DEV-11・DEV-12・DEV-24）。
+    pub detail: &'a DetailArgs,
+}
+
+impl OptionArgs<'_> {
+    /// どれかを指定したか。
+    pub fn any(&self) -> bool {
+        self.lens.any() || self.sensor.any() || self.color.any() || self.detail.any()
+    }
+}
+
+/// JSON をマージした設定に、レンズ補正・ハイライト復元・ノイズ軽減・色のオプションを当てて検証する。
 pub fn settings_with_options(
     current: &DevelopSettings,
     patch: &Value,
     replace: bool,
-    lens: &LensArgs,
-    sensor: &SensorArgs,
+    options: &OptionArgs<'_>,
 ) -> CliResult<DevelopSettings> {
     let mut new = merged_settings(current, patch, replace)?;
-    if lens.any() || sensor.any() {
-        lens.apply(&mut new.lens);
-        sensor.apply(&mut new);
+    if options.any() {
+        options.lens.apply(&mut new.lens);
+        options.sensor.apply(&mut new);
+        options.color.apply(&mut new.color);
+        options.detail.apply(&mut new);
         new.validate().map_err(genzo_model::DevelopError::from)?;
     }
     Ok(new)
+}
+
+/// 処理バージョンが古く、白黒・カラーミキサー・カラーグレーディングが使われない設定か（DEV-25・DEV-09・DEV-10。
+/// 処理バージョン 2 から使われる）。
+pub fn color_ignored(settings: &DevelopSettings) -> bool {
+    let c = &settings.color;
+    settings.process_version < genzo_pipeline::ProcessVersion::V2.get()
+        && (c.black_white.enabled || !c.mixer.is_neutral() || !c.grading.is_neutral())
+}
+
+/// 処理バージョンが古く、テクスチャ・明瞭度・かすみの除去・シャープ・効果が使われない設定か（DEV-11・DEV-12・
+/// DEV-24。処理バージョン 2 から使われる。量が 0 のものは何もしないので知らせない）。
+pub fn detail_ignored(settings: &DevelopSettings) -> bool {
+    settings.process_version < genzo_pipeline::ProcessVersion::V2.get()
+        && (!settings.presence.is_neutral()
+            || !settings.detail.sharpening.is_disabled()
+            || !settings.effects.is_neutral())
 }
 
 /// 処理バージョンが古く、ハイライト復元・ノイズ軽減が使われない設定か（DEV-06・DEV-13。処理バージョン 2 から
@@ -354,12 +412,11 @@ fn set(
     v: VariantId,
     patch: &Value,
     replace: bool,
-    lens: &LensArgs,
-    sensor: &SensorArgs,
+    options: &OptionArgs<'_>,
 ) -> CliResult<Status> {
     let s = Session::open(g, out, &OpenOptions::default())?;
     let current = s.core.develop_settings(v)?;
-    let new = settings_with_options(&current, patch, replace, lens, sensor)?;
+    let new = settings_with_options(&current, patch, replace, options)?;
     let changed = save(&s, v, &new, None)?;
     let saved = s.core.develop_settings(v)?;
     s.close()?;
@@ -378,6 +435,22 @@ fn set(
     {
         out.warn(format!(
             "この写真の処理バージョン（{}）では、ハイライト復元・ノイズ軽減は使われません（genzo develop upgrade {v} で更新できます）",
+            saved.process_version
+        ));
+    }
+    if detail_ignored(&saved)
+        && (saved.presence != current.presence
+            || saved.detail.sharpening != current.detail.sharpening
+            || saved.effects != current.effects)
+    {
+        out.warn(format!(
+            "この写真の処理バージョン（{}）では、テクスチャ・明瞭度・かすみの除去・シャープ・効果は使われません（genzo develop upgrade {v} で更新できます）",
+            saved.process_version
+        ));
+    }
+    if color_ignored(&saved) && saved.color != current.color {
+        out.warn(format!(
+            "この写真の処理バージョン（{}）では、白黒・カラーミキサー・カラーグレーディングは使われません（genzo develop upgrade {v} で更新できます）",
             saved.process_version
         ));
     }
@@ -576,7 +649,7 @@ fn copy(
     s.close()?;
     if r.needs_upgrade > 0 {
         out.warn(format!(
-            "{} 件は処理バージョンが古いため、写した項目の一部（レンズ補正・ハイライト復元・ノイズ軽減）は使われません\
+            "{} 件は処理バージョンが古いため、写した項目の一部（レンズ補正・ハイライト復元・ノイズ軽減・色の調整・明瞭度・シャープ・効果など）は使われません\
              （--upgrade-process-version を付けてコピーするか、genzo develop upgrade で更新できます）",
             r.needs_upgrade
         ));
@@ -904,6 +977,27 @@ fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> CliResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// レンズ補正・ハイライト復元とノイズ軽減のオプションだけを当てる（色のオプションなし）。
+    fn options_applied(
+        current: &DevelopSettings,
+        patch: &Value,
+        replace: bool,
+        lens: &LensArgs,
+        sensor: &SensorArgs,
+    ) -> CliResult<DevelopSettings> {
+        settings_with_options(
+            current,
+            patch,
+            replace,
+            &OptionArgs {
+                lens,
+                sensor,
+                color: &ColorArgs::default(),
+                detail: &DetailArgs::default(),
+            },
+        )
+    }
     use genzo_model::WhiteBalance;
 
     #[test]
@@ -967,8 +1061,7 @@ mod tests {
             lens_profile: Some(crate::args::SwitchArg::On),
             ..LensArgs::default()
         };
-        let s = settings_with_options(&current, &json!({}), true, &lens, &SensorArgs::default())
-            .unwrap();
+        let s = options_applied(&current, &json!({}), true, &lens, &SensorArgs::default()).unwrap();
         assert_eq!(s.process_version, 1);
         assert!(s.lens.profile_enabled);
         // JSON に書けば、その版にする（明示的な指定）。
@@ -1073,8 +1166,7 @@ mod tests {
             ..Default::default()
         };
         let patch = json!({"lens": {"distortion": 10, "ca_red_cyan": 4}, "exposure_ev": 0.5});
-        let s =
-            settings_with_options(&current, &patch, false, &lens, &SensorArgs::default()).unwrap();
+        let s = options_applied(&current, &patch, false, &lens, &SensorArgs::default()).unwrap();
         assert!(s.lens.profile_enabled);
         assert_eq!(s.lens.distortion, -20.0, "オプションが JSON より後");
         assert_eq!(s.lens.ca_red_cyan, 4.0);
@@ -1085,8 +1177,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            settings_with_options(&current, &json!({}), false, &bad, &SensorArgs::default())
-                .is_err()
+            options_applied(&current, &json!({}), false, &bad, &SensorArgs::default()).is_err()
         );
         // 処理バージョン 1 では、レンズ補正を設定していれば「使われない」。
         assert!(!lens_ignored(&s));
@@ -1112,8 +1203,7 @@ mod tests {
             ..Default::default()
         };
         let patch = json!({"detail": {"noise_reduction": {"luminance": 10, "color": 25}}});
-        let s =
-            settings_with_options(&current, &patch, false, &LensArgs::default(), &sensor).unwrap();
+        let s = options_applied(&current, &patch, false, &LensArgs::default(), &sensor).unwrap();
         assert_eq!(
             s.highlight_recovery.method,
             genzo_model::HighlightMethod::Reconstruct
@@ -1131,9 +1221,7 @@ mod tests {
             nr_color: Some(120.0),
             ..Default::default()
         };
-        assert!(
-            settings_with_options(&current, &json!({}), false, &LensArgs::default(), &bad).is_err()
-        );
+        assert!(options_applied(&current, &json!({}), false, &LensArgs::default(), &bad).is_err());
         // 処理バージョン 1 では使われない。
         assert!(!sensor_ignored(&s));
         assert!(sensor_ignored(&DevelopSettings {
@@ -1144,6 +1232,156 @@ mod tests {
             process_version: 1,
             ..DevelopSettings::default()
         }));
+    }
+
+    #[test]
+    fn color_options_are_applied_after_the_json_and_validated() {
+        use genzo_model::{GradingWheel, HueBand};
+        let current = DevelopSettings::default();
+        let color = ColorArgs {
+            black_white: Some(crate::args::SwitchArg::On),
+            hsl_luminance: vec![(HueBand::Blue, -40.0), (HueBand::Blue, -30.0)],
+            hsl_hue: vec![(HueBand::Red, 15.0)],
+            bw_mix: vec![(HueBand::Orange, 25.0)],
+            grading_shadows: Some(GradingWheel {
+                hue: 220.0,
+                saturation: 30.0,
+                luminance: -10.0,
+            }),
+            grading_balance: Some(-20.0),
+            ..Default::default()
+        };
+        let patch = json!({"color": {"mixer": {"blue": {"luminance": 10, "hue": 5}}, "grading": {"blending": 70}}});
+        let s = settings_with_options(
+            &current,
+            &patch,
+            false,
+            &OptionArgs {
+                lens: &LensArgs::default(),
+                sensor: &SensorArgs::default(),
+                color: &color,
+                detail: &DetailArgs::default(),
+            },
+        )
+        .unwrap();
+        assert!(s.color.black_white.enabled);
+        assert_eq!(
+            s.color.mixer.blue.luminance, -30.0,
+            "オプションが JSON より後。同じ帯は後の値"
+        );
+        assert_eq!(s.color.mixer.blue.hue, 5.0);
+        assert_eq!(s.color.mixer.red.hue, 15.0);
+        assert_eq!(s.color.black_white.mix.orange, 25.0);
+        assert_eq!(s.color.grading.shadows.hue, 220.0);
+        assert_eq!(s.color.grading.blending, 70.0);
+        assert_eq!(s.color.grading.balance, -20.0);
+        // 範囲の外は検証で拒む。
+        let bad = ColorArgs {
+            grading_global: Some(GradingWheel {
+                hue: 400.0,
+                saturation: 10.0,
+                luminance: 0.0,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            settings_with_options(
+                &current,
+                &json!({}),
+                false,
+                &OptionArgs {
+                    lens: &LensArgs::default(),
+                    sensor: &SensorArgs::default(),
+                    color: &bad,
+                    detail: &DetailArgs::default(),
+                },
+            )
+            .is_err()
+        );
+        // 処理バージョン 1 では使われない（白黒ミキサーだけ・強さ 0 の色相は何もしないので知らせない）。
+        assert!(!color_ignored(&s));
+        assert!(color_ignored(&DevelopSettings {
+            process_version: 1,
+            ..s.clone()
+        }));
+        let mut quiet = DevelopSettings {
+            process_version: 1,
+            ..DevelopSettings::default()
+        };
+        quiet.color.black_white.mix.red = 30.0;
+        quiet.color.grading.midtones.hue = 120.0;
+        assert!(!color_ignored(&quiet));
+    }
+
+    #[test]
+    fn detail_options_are_applied_after_the_json_and_validated() {
+        let current = DevelopSettings::default();
+        let detail = DetailArgs {
+            clarity: Some(35.0),
+            dehaze: Some(-20.0),
+            sharpen_amount: Some(60.0),
+            sharpen_masking: Some(40.0),
+            vignette_amount: Some(-30.0),
+            grain_amount: Some(25.0),
+            grain_size: Some(70.0),
+            ..Default::default()
+        };
+        assert!(detail.any() && !DetailArgs::default().any());
+        let patch = json!({"presence": {"texture": 15, "clarity": 10}, "effects": {"vignette": {"feather": 80}}});
+        let s = settings_with_options(
+            &current,
+            &patch,
+            false,
+            &OptionArgs {
+                lens: &LensArgs::default(),
+                sensor: &SensorArgs::default(),
+                color: &ColorArgs::default(),
+                detail: &detail,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.presence.texture, 15.0);
+        assert_eq!(s.presence.clarity, 35.0, "オプションが JSON より後");
+        assert_eq!(s.presence.dehaze, -20.0);
+        assert_eq!(s.detail.sharpening.amount, 60.0);
+        assert_eq!(s.detail.sharpening.masking, 40.0);
+        assert_eq!(s.detail.sharpening.radius, 1.0);
+        assert_eq!(s.effects.vignette.amount, -30.0);
+        assert_eq!(s.effects.vignette.feather, 80.0);
+        assert_eq!(s.effects.grain.amount, 25.0);
+        assert_eq!(s.effects.grain.size, 70.0);
+        // 範囲の外は検証で拒む。
+        let bad = DetailArgs {
+            sharpen_radius: Some(5.0),
+            ..Default::default()
+        };
+        assert!(
+            settings_with_options(
+                &current,
+                &json!({}),
+                false,
+                &OptionArgs {
+                    lens: &LensArgs::default(),
+                    sensor: &SensorArgs::default(),
+                    color: &ColorArgs::default(),
+                    detail: &bad,
+                },
+            )
+            .is_err()
+        );
+        // 処理バージョン 1 では使われない（量が 0 なら知らせない）。
+        assert!(!detail_ignored(&s));
+        assert!(detail_ignored(&DevelopSettings {
+            process_version: 1,
+            ..s.clone()
+        }));
+        let mut quiet = DevelopSettings {
+            process_version: 1,
+            ..DevelopSettings::default()
+        };
+        quiet.effects.grain.size = 80.0;
+        quiet.detail.sharpening.radius = 2.0;
+        assert!(!detail_ignored(&quiet));
     }
 
     #[test]

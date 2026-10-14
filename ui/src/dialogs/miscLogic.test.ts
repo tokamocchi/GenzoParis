@@ -84,11 +84,13 @@ describe("一括適用", () => {
     expect(toSettingGroups(DEFAULT_PASTE_SELECTION)).toEqual({
       white_balance: true,
       basic_tone: true,
+      presence: true,
       tone_curve: true,
       color: true,
       geometry: false,
       lens: true,
       detail: true,
+      effects: true,
       masks: true,
     });
     // ディテール（ノイズ軽減）を外せば写さない。
@@ -106,6 +108,9 @@ describe("一括適用", () => {
     // レンズ補正・ディテールを選べるようになる前に保存した選択（lens・detail が無い）では、前と同じく写す。
     expect(restorePasteSelection({ geometry: true }).lens).toBe(true);
     expect(restorePasteSelection({ geometry: true }).detail).toBe(true);
+    // 外観（テクスチャ・明瞭度・かすみの除去）・効果を選べるようになる前に保存した選択でも写す。
+    expect(restorePasteSelection({ geometry: true }).presence).toBe(true);
+    expect(restorePasteSelection({ geometry: true, effects: false }).effects).toBe(false);
     expect(restorePasteSelection("x")).toEqual(DEFAULT_PASTE_SELECTION);
     expect(restorePasteSelection({ white_balance: "no" })).toEqual(DEFAULT_PASTE_SELECTION);
   });
@@ -114,14 +119,17 @@ describe("一括適用", () => {
     const none = {
       white_balance: false,
       basic_tone: false,
+      presence: false,
       tone_curve: false,
       color: false,
       detail: false,
       lens: false,
+      effects: false,
     };
     expect(anySelected({ ...none, geometry: false })).toBe(false);
     expect(anySelected({ ...none, lens: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, detail: true, geometry: false })).toBe(true);
+    expect(anySelected({ ...none, effects: true, geometry: false })).toBe(true);
     expect(anySelected(DEFAULT_PASTE_SELECTION)).toBe(true);
   });
 

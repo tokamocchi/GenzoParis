@@ -56,7 +56,7 @@ use genzo_testkit::{EnvironmentInfo, InputRef};
 use serde_json::json;
 
 use crate::Status;
-use crate::args::{BenchArgs, BenchTarget, GlobalArgs, SensorArgs};
+use crate::args::{BenchArgs, BenchTarget, ColorArgs, DetailArgs, GlobalArgs, SensorArgs};
 use crate::error::{CliError, CliResult};
 use crate::output::{Output, json_value};
 use crate::standalone::{
@@ -287,17 +287,31 @@ struct Ctx {
     /// RAW か（RAW 以外は簡易処理がなく、WB のドラッグも最終品質で描く）。
     is_raw: bool,
     gpu: Option<GpuRenderer>,
-    /// 計測の設定に当てるハイライト復元・ノイズ軽減（DEV-06・DEV-13。指定がなければ何もしない）。
-    sensor: SensorArgs,
+    /// 計測で使う現像設定（[`bench_settings_with`]。オプションの指定を当てて検証したもの）。
+    settings: DevelopSettings,
 }
 
 impl Ctx {
-    /// 計測で使う現像設定（[`bench_settings`] に、ハイライト復元・ノイズ軽減の指定を当てたもの）。
+    /// 計測で使う現像設定。
     fn settings(&self) -> DevelopSettings {
-        let mut s = bench_settings();
-        self.sensor.apply(&mut s);
-        s
+        self.settings.clone()
     }
+}
+
+/// 計測で使う現像設定: [`bench_settings`] に、`develop set` と同じオプション（ハイライト復元・ノイズ軽減・白黒・
+/// カラーミキサー・カラーグレーディング・テクスチャ・明瞭度・かすみの除去・シャープ・効果）の指定を当てたもの。
+/// 範囲の外の値は、計測を始める前にエラーにする（genzo-model の検証）。
+pub fn bench_settings_with(
+    sensor: &SensorArgs,
+    color: &ColorArgs,
+    detail: &DetailArgs,
+) -> CliResult<DevelopSettings> {
+    let mut s = bench_settings();
+    sensor.apply(&mut s);
+    color.apply(&mut s.color);
+    detail.apply(&mut s);
+    s.validate().map_err(genzo_model::DevelopError::from)?;
+    Ok(s)
 }
 
 /// プレビューを 1 回描く（GPU があれば GPU 版。結果は読み出さず、ヒストグラムだけ求める）。
@@ -546,6 +560,8 @@ fn bench_export(ctx: &Ctx, input: &BenchInput, worker: &mut Worker) -> CliResult
 
 /// `bench`。
 pub fn run(g: &GlobalArgs, out: Output, a: BenchArgs) -> CliResult<Status> {
+    // 設定の誤りは、ワーカーを起こして入力を展開する前に知らせる。
+    let settings = bench_settings_with(&a.sensor, &a.color, &a.detail)?;
     let mut worker = Worker::spawn()?;
     let input = BenchInput::prepare(&a, &mut worker)?;
     out.progress("入力を展開しています…");
@@ -586,7 +602,7 @@ pub fn run(g: &GlobalArgs, out: Output, a: BenchArgs) -> CliResult<Status> {
         size,
         is_raw: matches!(source.image, SourceImage::Raw(_)),
         gpu,
-        sensor: a.sensor.clone(),
+        settings,
     };
     out.progress(format!(
         "計測しています（{}、{} × {}、{}）…",
@@ -664,6 +680,48 @@ mod tests {
         assert_eq!(WB_RELEASE_TARGET.as_millis(), 500);
         assert_eq!(EXPORT_TARGET.as_secs(), 3);
         assert_eq!(PREVIEW_LONG_EDGE, genzo_pipeline::DEFAULT_PREVIEW_LONG_EDGE);
+    }
+
+    /// 計測の設定に、`develop set` と同じオプションの指定を当てる。範囲の外の値はエラー。
+    #[test]
+    fn bench_settings_take_the_develop_options() {
+        let none = bench_settings_with(
+            &SensorArgs::default(),
+            &ColorArgs::default(),
+            &DetailArgs::default(),
+        )
+        .unwrap();
+        assert_eq!(none, bench_settings());
+        let sensor = SensorArgs {
+            nr_luminance: Some(20.0),
+            ..SensorArgs::default()
+        };
+        let color = ColorArgs {
+            grading_balance: Some(-40.0),
+            hsl_saturation: vec![(genzo_model::HueBand::Blue, -50.0)],
+            ..ColorArgs::default()
+        };
+        let detail = DetailArgs {
+            clarity: Some(30.0),
+            sharpen_amount: Some(60.0),
+            grain_amount: Some(25.0),
+            ..DetailArgs::default()
+        };
+        let s = bench_settings_with(&sensor, &color, &detail).unwrap();
+        assert_eq!(s.detail.noise_reduction.luminance, 20.0);
+        assert_eq!(s.color.grading.balance, -40.0);
+        assert_eq!(s.color.mixer.blue.saturation, -50.0);
+        assert_eq!(s.presence.clarity, 30.0);
+        assert_eq!(s.detail.sharpening.amount, 60.0);
+        assert_eq!(s.effects.grain.amount, 25.0);
+        // 基準の設定（露光量など）は保つ。
+        assert_eq!(s.exposure_ev, bench_settings().exposure_ev);
+        assert_eq!(s.tone_curve, bench_settings().tone_curve);
+        let bad = DetailArgs {
+            dehaze: Some(150.0),
+            ..DetailArgs::default()
+        };
+        assert!(bench_settings_with(&SensorArgs::default(), &ColorArgs::default(), &bad).is_err());
     }
 
     #[test]

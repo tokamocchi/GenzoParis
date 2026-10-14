@@ -1,12 +1,14 @@
 // 現像設定の一括適用（DEV-30）のダイアログで選ぶ項目（DOM を使わない純粋な計算）。
 //
-// 画面で選ぶのは 7 つ。部分補正（genzo-api の SettingGroups の masks）は画面で扱わないので、常に写す（true）。
-// レンズ補正（DEV-14）とディテール（ノイズ軽減。DEV-13）は現像のパネルで扱うので選べる（既定は写す。前の版の
-// 保存した選択に無ければ、前と同じく写す）。ハイライト復元（DEV-06）は基本補正に含める（genzo-api の basic_tone）。
+// 画面で選ぶのは 9 つ。部分補正（genzo-api の SettingGroups の masks）は画面で扱わないので、常に写す（true）。
+// レンズ補正（DEV-14）とディテール（シャープ・ノイズ軽減。DEV-12・DEV-13）・外観（テクスチャ・明瞭度・かすみの除去。
+// DEV-11）・効果（切り抜き後の周辺光量補正・粒子。DEV-24）は現像のパネルで扱うので選べる（既定は写す。前の版の
+// 保存した選択に無ければ写す）。ハイライト復元（DEV-06）は基本補正に含める（genzo-api の basic_tone）。
 //
 // 処理バージョン（DATA-09）: 貼り付けは、貼り付け先の処理バージョンを変えない（版 1 と 2 の写真の間でも、選んだ
 // 項目だけを写せる）。「処理バージョンが古い写真は更新する」を選んだときだけ、貼り付け元より古い写真を貼り付け元の
-// 版に上げる（既定はオフ。保存しない）。版 1 の写真に写したレンズ補正・ハイライト復元・ノイズ軽減は、更新するまで
+// 版に上げる（既定はオフ。保存しない）。版 1 の写真に写した v1 の機能の項目（レンズ補正・ハイライト復元・ノイズ軽減・
+// カラーミキサー・テクスチャ・明瞭度・シャープ・効果など）は、更新するまで
 // 使われないので、貼り付けた後に数を知らせる（describePasteReport）。
 
 import type { PasteReport, SettingGroups, VariantId, VariantSummary } from "../api/types";
@@ -14,10 +16,12 @@ import type { PasteReport, SettingGroups, VariantId, VariantSummary } from "../a
 export type PasteGroupKey =
   | "white_balance"
   | "basic_tone"
+  | "presence"
   | "tone_curve"
   | "color"
   | "detail"
   | "lens"
+  | "effects"
   | "geometry";
 
 export type PasteSelection = Record<PasteGroupKey, boolean>;
@@ -29,10 +33,12 @@ export const PASTE_GROUP_ITEMS: { key: PasteGroupKey; label: string; detail: str
     label: "基本補正",
     detail: "露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベル・ハイライト復元",
   },
+  { key: "presence", label: "外観", detail: "テクスチャ・明瞭度・かすみの除去" },
   { key: "tone_curve", label: "トーンカーブ", detail: "パラメトリック・ポイントカーブ" },
-  { key: "color", label: "色", detail: "彩度・自然な彩度" },
-  { key: "detail", label: "ディテール", detail: "ノイズ軽減（輝度・カラー）" },
+  { key: "color", label: "色", detail: "彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒" },
+  { key: "detail", label: "ディテール", detail: "シャープ・ノイズ軽減（輝度・カラー）" },
   { key: "lens", label: "レンズ補正", detail: "プロファイルによる補正・色収差の除去・手動の歪曲 / 周辺減光 / 色収差" },
+  { key: "effects", label: "効果", detail: "切り抜き後の周辺光量補正・粒子" },
   { key: "geometry", label: "切り抜きと角度", detail: "写真ごとに構図が違うことが多いため、既定では写しません" },
 ];
 
@@ -40,10 +46,12 @@ export const PASTE_GROUP_ITEMS: { key: PasteGroupKey; label: string; detail: str
 export const DEFAULT_PASTE_SELECTION: PasteSelection = {
   white_balance: true,
   basic_tone: true,
+  presence: true,
   tone_curve: true,
   color: true,
   detail: true,
   lens: true,
+  effects: true,
   geometry: false,
 };
 
@@ -120,7 +128,10 @@ export function preparePasteTargets(
   };
 }
 
-/** v1 の機能（レンズ補正・ハイライト復元・ノイズ軽減）を使える最初の処理バージョン（genzo-pipeline の ProcessVersion::V2）。 */
+/**
+ * v1 の機能（レンズ補正・ハイライト復元・ノイズ軽減・カラーミキサー・カラーグレーディング・白黒・テクスチャ・明瞭度・
+ * かすみの除去・シャープ・効果）を使える最初の処理バージョン（genzo-pipeline の ProcessVersion::V2）。
+ */
 export const V1_FEATURES_PROCESS_VERSION = 2;
 
 /**
@@ -137,7 +148,8 @@ export function processUpgradeOption(sourceVersion: number): { label: string; de
     label: `処理バージョンが古い写真は ${sourceVersion} に更新する`,
     detail:
       "オフなら、それぞれの写真の処理バージョンのまま貼り付けます。処理バージョン 1 の写真では、レンズ補正・" +
-      "ハイライト復元・ノイズ軽減は使われません（更新すると使われ、見え方が変わることがあります。履歴から元に戻せます）。",
+      "ハイライト復元・ノイズ軽減・カラーミキサー・明瞭度・シャープ・効果など（処理バージョン 2 の項目）は使われません" +
+      "（更新すると使われ、見え方が変わることがあります。履歴から元に戻せます）。",
   };
 }
 
@@ -152,7 +164,8 @@ export function describePasteReport(
     message: `${n(r.count)} 枚に現像設定を貼り付けました${upgraded}`,
     warning:
       r.needs_upgrade > 0
-        ? `${n(r.needs_upgrade)} 枚は処理バージョンが古いため、レンズ補正・ハイライト復元・ノイズ軽減は使われません` +
+        ? `${n(r.needs_upgrade)} 枚は処理バージョンが古いため、レンズ補正・ハイライト復元・ノイズ軽減・カラーミキサー・` +
+          "明瞭度・シャープ・効果など（処理バージョン 2 の項目）は使われません" +
           "（写真を右クリックして「処理バージョンを最新に更新…」で更新できます）"
         : null,
   };

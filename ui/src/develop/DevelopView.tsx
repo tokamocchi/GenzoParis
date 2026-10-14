@@ -31,7 +31,14 @@ import { type Frame, drawFrame } from "../api/frames";
 import type { BeforeSource, CropRect, FrameInfo, RegionInfo, VariantId } from "../api/types";
 import { comboLabel, isTyping, useHotkeys } from "../keyboard";
 import { actions, appStore, useApp } from "../state/app";
-import { beforePending, developStore, openDevelopFor, setBeforeSource, useDevelop } from "../state/develop";
+import {
+  applySettings,
+  beforePending,
+  developStore,
+  openDevelopFor,
+  setBeforeSource,
+  useDevelop,
+} from "../state/develop";
 import { regionFor, renderBeforeRegion, renderRegion } from "../state/region";
 import { useDevicePixelRatio } from "../viewer/hooks";
 import { InfoOverlay } from "../viewer/InfoOverlay";
@@ -47,6 +54,7 @@ import {
   paneSize,
   splitX,
 } from "./compareMath";
+import { colorControls, toggleBlackWhite } from "./colorLogic";
 import { type CropHandle, cropFractionAspect, dragCrop, rotatedImageCorners } from "./cropMath";
 import { useGeometryInfo, useLoadedSummary, useLoadedSummaryObject } from "./hooks";
 import { activatesOnEnter } from "./keyTargets";
@@ -643,7 +651,24 @@ function OperationError() {
   );
 }
 
-/** 現像の画面のキー（W・R・Z・J・I・\・Y・Shift ＋ Y と、道具を使っている間の Esc・Enter）。 */
+/**
+ * 白黒とカラーを切り替える（V キー。DEV-25）。写真を開いていなければ何もしない。処理バージョン 1 の写真では使われない
+ * ので、変えずに知らせる。
+ */
+function toggleBlackWhiteKey(): void {
+  const d = developStore.get();
+  if (!d.state || !d.settings || d.opening) return;
+  if (colorControls(d.settings, false).needsUpgrade) {
+    actions.notify(
+      "info",
+      `この写真の処理バージョン（${d.settings.process_version}）では、白黒は使われません（処理バージョンを更新すると使えます）`,
+    );
+    return;
+  }
+  applySettings(toggleBlackWhite(d.settings), false);
+}
+
+/** 現像の画面のキー（W・R・Z・J・I・V・\・Y・Shift ＋ Y と、道具を使っている間の Esc・Enter）。 */
 function useDevelopKeys(enabled: boolean) {
   const tool = useDevelopView((s) => s.tool);
   const zoomed = useDevelopView((s) => s.zoom !== null);
@@ -674,6 +699,7 @@ function useDevelopKeys(enabled: boolean) {
       i: () => {
         cycleInfoMode();
       },
+      v: () => toggleBlackWhiteKey(),
       "\\": () => toggleCompareMode("before"),
       // macOS の日本語配列の ¥ のキー（Option なしでは "¥" になる）。
       "¥": () => toggleCompareMode("before"),

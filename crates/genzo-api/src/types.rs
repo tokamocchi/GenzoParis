@@ -1671,16 +1671,20 @@ pub struct SettingGroups {
     pub white_balance: bool,
     /// 露光量・コントラスト・ハイライト・シャドウ・白・黒・ハイライト復元（DEV-06）。
     pub basic_tone: bool,
+    /// テクスチャ・明瞭度・かすみの除去（DEV-11）。
+    pub presence: bool,
     /// トーンカーブ。
     pub tone_curve: bool,
-    /// 彩度・自然な彩度など。
+    /// 色（彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒。DEV-08〜10・DEV-25）。
     pub color: bool,
     /// 切り抜き・角度補正。
     pub geometry: bool,
     /// レンズ補正。
     pub lens: bool,
-    /// シャープ・ノイズ軽減（DEV-13）。
+    /// シャープ（DEV-12）・ノイズ軽減（DEV-13）。
     pub detail: bool,
+    /// 効果（切り抜き後の周辺光量補正・粒子。DEV-24）。
+    pub effects: bool,
     /// ローカル補正。
     pub masks: bool,
 }
@@ -1696,11 +1700,13 @@ impl SettingGroups {
     pub const ALL: Self = Self {
         white_balance: true,
         basic_tone: true,
+        presence: true,
         tone_curve: true,
         color: true,
         geometry: true,
         lens: true,
         detail: true,
+        effects: true,
         masks: true,
     };
 
@@ -1730,6 +1736,9 @@ impl SettingGroups {
             out.tone = source.tone;
             out.highlight_recovery = source.highlight_recovery;
         }
+        if self.presence {
+            out.presence = source.presence;
+        }
         if self.tone_curve {
             out.tone_curve = source.tone_curve.clone();
         }
@@ -1744,6 +1753,9 @@ impl SettingGroups {
         }
         if self.detail {
             out.detail = source.detail;
+        }
+        if self.effects {
+            out.effects = source.effects;
         }
         if self.masks {
             out.masks = source.masks.clone();
@@ -2744,11 +2756,13 @@ mod setting_groups_tests {
         let tone_only = SettingGroups {
             white_balance: false,
             basic_tone: true,
+            presence: false,
             tone_curve: false,
             color: false,
             geometry: false,
             lens: false,
             detail: false,
+            effects: false,
             masks: false,
         };
         let out = tone_only.merge(&source, &target);
@@ -2765,6 +2779,44 @@ mod setting_groups_tests {
         assert_eq!(out.detail.noise_reduction.luminance, 30.0);
         assert_eq!(out.highlight_recovery, target.highlight_recovery);
         assert_eq!(out.exposure_ev, 0.0);
+    }
+
+    #[test]
+    fn presence_and_effects_are_their_own_groups() {
+        let mut source = DevelopSettings::default();
+        source.presence.clarity = 40.0;
+        source.effects.grain.amount = 20.0;
+        source.detail.sharpening.amount = 50.0;
+        let target = DevelopSettings::default();
+        let none = SettingGroups {
+            white_balance: false,
+            basic_tone: false,
+            presence: false,
+            tone_curve: false,
+            color: false,
+            geometry: false,
+            lens: false,
+            detail: false,
+            effects: false,
+            masks: false,
+        };
+        let presence = SettingGroups {
+            presence: true,
+            ..none
+        }
+        .merge(&source, &target);
+        assert_eq!(presence.presence.clarity, 40.0);
+        assert!(presence.effects.is_neutral() && presence.detail.sharpening.amount == 0.0);
+        let effects = SettingGroups {
+            effects: true,
+            ..none
+        }
+        .merge(&source, &target);
+        assert_eq!(effects.effects.grain.amount, 20.0);
+        assert!(effects.presence.is_neutral());
+        // 古い画面（項目のない JSON）からの指定は、足した項目も写す（既定はすべて）。
+        let old: SettingGroups = serde_json::from_str(r#"{"white_balance": false}"#).unwrap();
+        assert!(old.presence && old.effects && !old.white_balance);
     }
 
     /// すべての項目を写しても、一部の項目を写しても、処理バージョンと外部データは貼り付け先のまま（DATA-09。

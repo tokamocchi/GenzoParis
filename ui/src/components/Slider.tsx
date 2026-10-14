@@ -45,6 +45,8 @@ export interface SliderProps {
   toPosition?: (v: number) => number;
   fromPosition?: (p: number) => number;
   title?: string;
+  /** 名前の前に出す色の印（CSS の色。カラーミキサーの帯の色など）。 */
+  swatch?: string;
 }
 
 export function Slider(p: SliderProps) {
@@ -77,6 +79,7 @@ export function Slider(p: SliderProps) {
   return (
     <div className={`slider${changed ? " changed" : ""}`} title={p.title}>
       <span className="slider-label" onDoubleClick={() => p.defaultValue !== undefined && p.onChange(p.defaultValue, false)}>
+        {p.swatch && <span className="slider-swatch" style={{ background: p.swatch }} aria-hidden="true" />}
         {p.label}
       </span>
       <input

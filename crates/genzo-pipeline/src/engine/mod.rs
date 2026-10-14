@@ -169,6 +169,13 @@ impl SourceId {
             file_revision,
         }
     }
+
+    /// 写真ごとの乱数の種（[`crate::StageContext::photo_seed`]。ステージ 16 の粒子の模様）。元ファイルの ID だけから
+    /// 決める（内容のリビジョンを含めない。仮想コピーは同じ模様になる。決定事項ログ No.139）。
+    pub fn photo_seed(&self) -> u32 {
+        let v = self.file_id.get() as u64;
+        crate::finish::output::hash32((v as u32) ^ crate::finish::output::hash32((v >> 32) as u32))
+    }
 }
 
 /// 現像する写真の入力（段階 A0 の結果と、その識別）。複製は `Arc` を数えるだけで安い。
@@ -631,6 +638,7 @@ impl Engine {
             cache,
             a1_long_edge: long_edge,
             params: spec.params.into(),
+            haze: spec.haze,
         })
     }
 
@@ -701,7 +709,8 @@ impl Engine {
         let a1 = self.a1(source, settings, quality, request.long_edge)?;
         let base: StageContext<'static> = a1
             .finish_context(settings)?
-            .with_uncropped(request.uncropped);
+            .with_uncropped(request.uncropped)
+            .with_photo_seed(source.id.photo_seed());
         let (plan, guide) = plan_with_guide(settings, &base, || {
             self.guide_with(source, settings, quality, request.long_edge, Some(&a1))
         })?;

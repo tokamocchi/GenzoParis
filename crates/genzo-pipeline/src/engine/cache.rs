@@ -50,6 +50,8 @@ pub struct GuideKey {
     /// ガイドのアルゴリズムのパラメータ（[`GuideParams`] の各値のビット列）。処理バージョンで決まるが、
     /// 明示的にキーに含める（2.7 節「ガイドのアルゴリズムのパラメータ」）。
     pub params: GuideParamsKey,
+    /// かすみの推定も作ったか（[`crate::guide::GuideSpec::haze`]。処理バージョン 2 のかすみの除去）。
+    pub haze: bool,
 }
 
 /// [`GuideParams`] をキーにするための値（浮動小数点はビット列にする）。

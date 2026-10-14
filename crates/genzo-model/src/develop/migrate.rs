@@ -11,7 +11,7 @@
 
 use serde_json::Value;
 
-use super::DevelopError;
+use super::{DevelopError, Sharpening};
 use crate::CURRENT_SCHEMA_VERSION;
 
 /// 1 つ前のスキーマの JSON を、次のスキーマの JSON に変換する関数。
@@ -21,16 +21,21 @@ pub type Migration = fn(Value) -> Result<Value, String>;
 
 /// マイグレーション関数の表。`MIGRATIONS[i]` は schema_version `i + 1` → `i + 2` の変換。
 ///
-/// - 1 → 2（[`migrate_v1_to_v2`]）: レンズ補正の手動の項目を加えた（DEV-14）。v1 の機能のパッケージの間
+/// - 1 → 2（`migrate_v1_to_v2`）: レンズ補正の手動の項目を加えた（DEV-14）。v1 の機能のパッケージの間
 ///   （配布の前）は、後のパッケージが足す項目も版 2 に入れる（決定事項ログ No.120）: ハイライト復元
 ///   （`highlight_recovery`。DEV-06）、ノイズ軽減のディテール・コントラスト（`detail.noise_reduction.
-///   luminance_detail`・`luminance_contrast`・`color_detail`。DEV-13）。
+///   luminance_detail`・`luminance_contrast`・`color_detail`。DEV-13）、カラーミキサー・カラーグレーディング・白黒
+///   （`color.mixer`・`color.grading`・`color.black_white`。DEV-09・DEV-10・DEV-25）、テクスチャ・明瞭度・かすみの除去
+///   （`presence`。DEV-11）、効果（`effects` の切り抜き後の周辺光量補正・粒子。DEV-24）。
 pub const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2];
 
 /// schema_version 1 → 2: レンズ補正の手動の項目（`lens.distortion`・`lens.vignetting_amount`・
 /// `lens.vignetting_midpoint`・`lens.ca_red_cyan`・`lens.ca_blue_yellow`）、ハイライト復元
 /// （`highlight_recovery`）、ノイズ軽減のディテール・コントラスト（`detail.noise_reduction` の
-/// `luminance_detail`・`luminance_contrast`・`color_detail`）を加えた。
+/// `luminance_detail`・`luminance_contrast`・`color_detail`）、カラーミキサー・カラーグレーディング・白黒（`color` の
+/// `mixer`・`grading`・`black_white`）、テクスチャ・明瞭度・かすみの除去（`presence`）、効果（`effects`）を加えた。
+/// シャープ（`detail.sharpening`）は版 1 からある項目で、ディテールの既定値を 0 から 25 にした（JSON にディテールが
+/// なければ 25 で補う。旧版が書いた旧既定の 0 の読み替えは [`read_changed_defaults_in_v2`]）。
 ///
 /// 新しい項目は JSON になければ既定値（何もしない値）で補うので、値は書き換えない。`lens` が
 /// オブジェクトでない（型の誤り）ときは、そのまま残して型の読み込みでエラーにする。
@@ -55,8 +60,46 @@ fn process_version_when_missing(schema_version: u32) -> u32 {
 }
 
 /// JSON の値を現在のスキーマへ移行する。
-pub(crate) fn migrate_to_current(value: Value) -> Result<Value, DevelopError> {
+pub(crate) fn migrate_to_current(mut value: Value) -> Result<Value, DevelopError> {
+    read_changed_defaults_in_v2(&mut value);
     migrate_with(value, CURRENT_SCHEMA_VERSION, MIGRATIONS)
+}
+
+/// スキーマの版 2 のうちに既定値を変えた項目の読み替え。v1 の機能のパッケージの間（配布の前）は、スキーマの版を
+/// 上げずに版 2 に項目を足すため（決定事項ログ No.120・No.142）、マイグレーションの表の前に、スキーマの版 1・2 の
+/// JSON に当てる（後でスキーマの版を上げても、版 1・2 の JSON にはこの読み替えを先に当てる）。
+///
+/// - シャープのディテール（`detail.sharpening.detail`）: 既定を 0 から 25 にした（finish-detail。No.138）。
+///   それより前の版は `presence` を書かず、シャープの 4 つの値を必ず書いていたので、`presence` がなく、適用量が 0
+///   （または項目がない）でディテールが 0 の JSON は、旧既定のままとみなして 25 に読み替える。適用量が 0 なら
+///   ディテールは効かないので、画素の結果は変わらない。適用量が 0 でないときは、利用者が決めた値として保つ。
+///
+/// 型の誤り（オブジェクトでない・数でない）は書き換えずに残し、型への読み込みでエラーにする。
+fn read_changed_defaults_in_v2(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let schema = obj.get("schema_version").and_then(Value::as_u64);
+    if !matches!(schema, Some(1..=2)) || obj.contains_key("presence") {
+        return;
+    }
+    let Some(sharpening) = obj
+        .get_mut("detail")
+        .and_then(Value::as_object_mut)
+        .and_then(|d| d.get_mut("sharpening"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let amount_is_zero = sharpening
+        .get("amount")
+        .is_none_or(|a| a.as_f64() == Some(0.0));
+    if amount_is_zero && sharpening.get("detail").and_then(Value::as_f64) == Some(0.0) {
+        sharpening.insert(
+            "detail".to_owned(),
+            Value::from(f64::from(Sharpening::DEFAULT_DETAIL)),
+        );
+    }
 }
 
 /// JSON の値を `target` のスキーマへ移行する（テストで表を差し替えられるように分けている）。
@@ -200,6 +243,62 @@ mod tests {
         assert_eq!(v1["process_version"], json!(1));
         let v2 = migrate_to_current(json!({"schema_version": 2})).unwrap();
         assert_eq!(v2["process_version"], json!(2));
+    }
+
+    /// finish-detail のパッケージより前の版（`presence` を書かない版）が保存した設定では、シャープの旧既定
+    /// （適用量 0・ディテール 0）を新しい既定（ディテール 25）に読み替える。適用量が 0 でなければ値を保つ。
+    /// 新しい版が書いた設定（`presence` がある）は書き換えない。
+    #[test]
+    fn old_sharpening_detail_default_is_read_as_the_new_default() {
+        let sharpening = |v: &Value| v["detail"]["sharpening"]["detail"].as_f64();
+        // 旧版（スキーマの版 1・2）のシリアライザは、シャープの 4 つの値を必ず書いていた。
+        for schema in [1, 2] {
+            let old = json!({
+                "schema_version": schema,
+                "process_version": schema,
+                "detail": {
+                    "sharpening": {"amount": 0.0, "radius": 1.0, "detail": 0.0, "masking": 0.0},
+                    "noise_reduction": {"luminance": 0.0, "color": 0.0}
+                }
+            });
+            let v = migrate_to_current(old).unwrap();
+            assert_eq!(sharpening(&v), Some(25.0), "schema {schema}");
+            // ほかの値は変えない。
+            assert_eq!(v["detail"]["sharpening"]["radius"], json!(1.0));
+            assert_eq!(v["detail"]["sharpening"]["amount"], json!(0.0));
+            assert_eq!(v["process_version"], json!(schema));
+            // 適用量が 0 でなければ、利用者が決めた値として保つ。
+            let old = json!({
+                "schema_version": schema,
+                "detail": {"sharpening": {"amount": 40.0, "radius": 1.0, "detail": 0.0, "masking": 0.0}}
+            });
+            assert_eq!(sharpening(&migrate_to_current(old).unwrap()), Some(0.0));
+            // ディテールが 0 でなければ保つ。
+            let old = json!({
+                "schema_version": schema,
+                "detail": {"sharpening": {"amount": 0.0, "detail": 10.0}}
+            });
+            assert_eq!(sharpening(&migrate_to_current(old).unwrap()), Some(10.0));
+        }
+        // 適用量のない旧版の JSON（既定の 0）も読み替える。
+        let old = json!({"schema_version": 2, "detail": {"sharpening": {"detail": 0}}});
+        assert_eq!(sharpening(&migrate_to_current(old).unwrap()), Some(25.0));
+        // 新しい版が書いた設定（`presence` がある）は、適用量 0・ディテール 0 でも保つ。
+        let new = json!({
+            "schema_version": 2,
+            "presence": {"texture": 0.0, "clarity": 0.0, "dehaze": 0.0},
+            "detail": {"sharpening": {"amount": 0.0, "radius": 1.0, "detail": 0.0, "masking": 0.0}}
+        });
+        assert_eq!(sharpening(&migrate_to_current(new).unwrap()), Some(0.0));
+        // 型の誤り（オブジェクトでない）はそのまま残して、型の読み込みでエラーにする。
+        for broken in [
+            json!({"schema_version": 2, "detail": 3}),
+            json!({"schema_version": 2, "detail": {"sharpening": "x"}}),
+            json!({"schema_version": 2, "detail": {"sharpening": {"amount": "0", "detail": 0}}}),
+        ] {
+            let v = migrate_to_current(broken.clone()).unwrap();
+            assert_eq!(v["detail"], broken["detail"]);
+        }
     }
 
     #[test]

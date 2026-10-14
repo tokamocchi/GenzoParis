@@ -35,7 +35,15 @@
 //! | 保存形式 | `CacheFormat { kind: BGuide, color_space: Log2Luminance, format_version: GUIDE_FORMAT_VERSION }` |
 //!
 //! 露光量・切り抜き・ハイライトやシャドウなどのスライダーは含めない（[`GuideSpec::from_settings`] は
-//! 処理バージョンと角度補正とレンズ補正（歪曲補正の項目。ほかの項目は A1 のキーに含まれる）だけを読む）。
+//! 処理バージョンと角度補正とレンズ補正（歪曲補正の項目。ほかの項目は A1 のキーに含まれる）と、かすみの推定を
+//! 作るか（下記）だけを読む）。
+//!
+//! # かすみの推定（処理バージョン 2。DEV-11）
+//!
+//! かすみの除去（ステージ 12）が 0 でないときは、同じ縮小（3a・3b。RGB の 3 つの面をそれぞれ同じ式で縮小して
+//! 引く）の RGB から、かすみの推定（[`crate::haze`]）も作ってガイドに付ける（[`Guide::haze`]）。推定はかすみの
+//! 除去の量によらない（量は段階 C で使う）ので、作るかどうか（[`GuideSpec::haze`]）だけをキャッシュのキーに含める
+//! （`GuideKey::haze`）。ガイドの画像（輝度）は推定の有無によらずビット単位で同じ。
 //!
 //! # GPU 版と一致させるための決めごと（2.3 節）
 //!
@@ -73,8 +81,9 @@ pub const GUIDE_RADIUS_FRACTION: f64 = 0.03;
 /// ぼかし（質感として残す）、それより大きい明暗の境目は保つ（ハローを抑える）目安。PoC-5 で決める。
 pub const GUIDE_EPSILON: f32 = 0.25;
 
-/// ガイドのキャッシュの保存形式のバージョン（`CacheFormat::format_version`）。
-pub const GUIDE_FORMAT_VERSION: u32 = 1;
+/// ガイドのキャッシュの保存形式のバージョン（`CacheFormat::format_version`）。2026-10-14 に 2 にした（処理バージョン 2
+/// のガイドにかすみの推定を付けられるようにした。キャッシュはメモリの上だけ）。
+pub const GUIDE_FORMAT_VERSION: u32 = 2;
 
 /// ガイドのアルゴリズムのパラメータ（処理バージョンで決まる）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -118,6 +127,8 @@ pub struct GuideSpec {
     pub lens: genzo_model::LensCorrection,
     /// アルゴリズムのパラメータ。
     pub params: GuideParams,
+    /// かすみの推定（[`crate::haze`]）も作るか（処理バージョン 2 で、かすみの除去が 0 でないとき）。
+    pub haze: bool,
 }
 
 impl GuideSpec {
@@ -135,6 +146,10 @@ impl GuideSpec {
             },
             lens: s.lens,
             params: GuideParams::for_version(process_version),
+            haze: match process_version {
+                ProcessVersion::V1 => false,
+                ProcessVersion::V2 => s.presence.dehaze != 0.0,
+            },
         })
     }
 
@@ -228,24 +243,28 @@ pub fn compute_guide_from(
     ];
     let mut values = vec![0.0f32; out_w as usize * out_h as usize];
     let warped = frames.distortion.is_some();
+    // ガイドの画素 (p, q) の、縮小した格子の上の位置。
+    let coords = |p: usize, q: usize| -> (f32, f32) {
+        let v = q as f32 + 0.5;
+        let u = p as f32 + 0.5;
+        if warped {
+            // 歪曲補正: G → S を f64 で求める（モジュールの doc の 3b）。
+            let (gx, gy) = (f64::from(u) * kx, f64::from(v) * ky);
+            let (xs, ys) = frames.g_to_sensor(gx, gy);
+            ((xs * sx) as f32, (ys * sy) as f32)
+        } else {
+            (
+                a[0][0] * u + a[0][1] * v + a[0][2],
+                a[1][0] * u + a[1][1] * v + a[1][2],
+            )
+        }
+    };
     values
         .par_chunks_mut(out_w as usize)
         .enumerate()
         .for_each(|(q, row)| {
-            let v = q as f32 + 0.5;
             for (p, out) in row.iter_mut().enumerate() {
-                let u = p as f32 + 0.5;
-                let (x, y) = if warped {
-                    // 歪曲補正: G → S を f64 で求める（モジュールの doc の 3b）。
-                    let (gx, gy) = (f64::from(u) * kx, f64::from(v) * ky);
-                    let (xs, ys) = frames.g_to_sensor(gx, gy);
-                    ((xs * sx) as f32, (ys * sy) as f32)
-                } else {
-                    (
-                        a[0][0] * u + a[0][1] * v + a[0][2],
-                        a[1][0] * u + a[1][1] * v + a[1][2],
-                    )
-                };
+                let (x, y) = coords(p, q);
                 // 4. 対数（下限 2^−16）。
                 *out = safe_log2(sample_bilinear_gray(&small, x, y));
             }
@@ -256,7 +275,30 @@ pub fn compute_guide_from(
     let radius = spec.params.radius_px(out_w.max(out_h));
     let mut blurred = guided_filter(&log_img, radius, spec.params.epsilon)?;
     blurred.sanitize();
-    Ok(Guide::new(blurred, frames, spec.process_version))
+    let guide = Guide::new(blurred, frames, spec.process_version);
+    if !spec.haze {
+        return Ok(guide);
+    }
+    // かすみの推定（処理バージョン 2）: RGB の面を同じ式で縮小して引く。
+    let mut smalls = Vec::with_capacity(3);
+    for k in 0..3 {
+        let plane = GrayImage::from_vec(
+            grid.width,
+            grid.height,
+            image.data().par_iter().map(|c| c[k]).collect(),
+        )?;
+        smalls.push(downscale_gray(&plane, iw, ih)?);
+    }
+    let mut rgb = vec![[0.0f32; 3]; out_w as usize * out_h as usize];
+    rgb.par_chunks_mut(out_w as usize)
+        .enumerate()
+        .for_each(|(q, row)| {
+            for (p, out) in row.iter_mut().enumerate() {
+                let (x, y) = coords(p, q);
+                *out = std::array::from_fn(|k| sample_bilinear_gray(&smalls[k], x, y));
+            }
+        });
+    Ok(guide.with_haze(crate::haze::estimate_haze(&rgb, out_w, out_h)?))
 }
 
 /// 1 チャンネルの画像を面積平均で縮小する（[`crate::resample::downscale_area`] と同じ定義・同じ
@@ -448,6 +490,7 @@ mod tests {
             rotation_deg: deg,
             lens: genzo_model::LensCorrection::default(),
             params: GuideParams::for_version(ProcessVersion::V1),
+            haze: false,
         }
     }
 
@@ -570,5 +613,44 @@ mod tests {
         assert_ne!(GuideSpec::from_settings(&s).unwrap(), base);
         s.process_version = 9;
         assert!(GuideSpec::from_settings(&s).is_err());
+    }
+
+    #[test]
+    fn haze_estimate_is_made_only_for_dehaze_in_version_2() {
+        let mut s = DevelopSettings::default();
+        assert!(!GuideSpec::from_settings(&s).unwrap().haze);
+        s.presence.clarity = 40.0;
+        assert!(!GuideSpec::from_settings(&s).unwrap().haze);
+        s.presence.dehaze = 30.0;
+        assert!(GuideSpec::from_settings(&s).unwrap().haze);
+        // 量によらず同じ推定（キーは作るかどうかだけ）。
+        let mut t = s.clone();
+        t.presence.dehaze = -60.0;
+        assert_eq!(
+            GuideSpec::from_settings(&t).unwrap(),
+            GuideSpec::from_settings(&s).unwrap()
+        );
+        s.process_version = 1;
+        assert!(!GuideSpec::from_settings(&s).unwrap().haze);
+        // ガイドの画像は推定の有無によらず同じで、推定はガイドと同じ寸法。
+        let img = RgbImage::from_fn(64, 48, ColorContract::B2Working, |x, y| {
+            [0.02 + x as f32 * 0.01, 0.1 + y as f32 * 0.005, 0.3]
+        })
+        .unwrap();
+        let f = frames(64, 48, Orientation::Normal);
+        let grid = SensorGrid::full_resolution(&f);
+        let mut sp = spec(3.0);
+        sp.process_version = ProcessVersion::V2;
+        sp.params = GuideParams::for_version(ProcessVersion::V2);
+        let plain = compute_guide_from(&img, grid, f, &sp).unwrap();
+        assert!(plain.haze.is_none());
+        sp.haze = true;
+        let hazy = compute_guide_from(&img, grid, f, &sp).unwrap();
+        assert_eq!(hazy.image, plain.image);
+        let h = hazy.haze.as_ref().unwrap();
+        assert_eq!(
+            (h.dark.width(), h.dark.height()),
+            (hazy.image.width(), hazy.image.height())
+        );
     }
 }

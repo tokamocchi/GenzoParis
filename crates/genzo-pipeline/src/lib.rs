@@ -31,15 +31,20 @@
 //! | [`lens`] | レンズ補正（処理バージョン 2。DEV-14）: ステージ 7 の周辺減光・倍率色収差（[`lens::LensStagePlan`]）、ステージ 9 の歪曲補正（[`lens::RadialDistortion`]）、埋め込みの補正の情報の解釈 | 2.1 節・2.7 節 |
 //! | [`sanitize`] | NaN・無限大の置き換え、対数の下限 | 2.3 節・2.6 節 |
 //! | [`guide`] | 段階 B: ガイドの計算（[`compute_guide`]・ガイデッドフィルタ）とキャッシュのキーの項目（[`GuideSpec`]） | 2.2 節・2.7 節 |
+//! | [`haze`] | 段階 B: かすみの推定（処理バージョン 2。暗いチャンネルと大気の光。ステージ 12 のかすみの除去が使う） | 2.7 節、DEV-11 |
 //! | [`finish`] | 仕上げのステージ 9〜17 の一覧・段階 C の文脈（[`finish_context`]）・基準の実行とタイルの範囲（[`FinishPlan`]） | 2.1 節・2.2 節・2.6 節 |
 //! | [`finish::geometry`] | ステージ 9: 向き・回転・歪曲補正・切り抜き（1 回のリサンプリング。バイキュービック）と C の格子（[`finish::GeometryPlan`]） | 2.1 節・2.7 節 |
 //! | [`finish::exposure`] | ステージ 10: 露光量・コントラスト | DEV-04・IQ-02 |
 //! | [`finish::tone`] | ステージ 11: ハイライト・シャドウ・白・黒（ガイドを使うローカルトーンマッピング） | DEV-05・2.7 節・PoC-5 |
-//! | [`finish::color`] | ステージ 13: 彩度・自然な彩度（OKLab） | DEV-08 |
+//! | [`finish::presence`] | ステージ 12: テクスチャ・明瞭度・かすみの除去（処理バージョン 2。輝度の対数の周波数分解・ガイド・かすみの推定） | DEV-11・2.7 節 |
+//! | [`finish::frequency`] | ステージ 12・14 の共通の部品（輝度の対数の領域・ガウスのぼかし） | 2.3 節 |
+//! | [`finish::color`] | ステージ 13: 彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒（OKLab） | DEV-08〜10・DEV-25 |
+//! | [`finish::sharpen`] | ステージ 14: シャープ（処理バージョン 2。アンシャープマスク・ディテール・マスク） | DEV-12 |
 //! | [`finish::scene_to_display`] | ステージ 15: シーン → ディスプレイ（B2 → B3） | 2.6 節 |
 //! | [`finish::tone_curve`] | ステージ 16: トーンカーブ（単調な 3 次スプライン → 1D LUT） | DEV-07・2.6 節 |
+//! | [`finish::effects`] | ステージ 16 の後: 効果（処理バージョン 2。切り抜き後の周辺光量補正・粒子） | DEV-24 |
 //! | [`finish::output`] | ステージ 17a 画面・17b 書き出し（量子化とディザリング）・17c ヒストグラム | 2.6 節・DEV-26 |
-//! | [`finish::reserved`] | v1 のステージの ID（4・6・7。実装は [`sensor::highlight`]・[`sensor::denoise`]・[`lens`]）と、まだ予約のステージ 12・14、処理バージョンで無視する設定の一覧 | 2.1 節 |
+//! | [`finish::reserved`] | v1 のステージの ID（4・6・7。実装は [`sensor::highlight`]・[`sensor::denoise`]・[`lens`]）と、処理バージョンで無視する設定の一覧 | 2.1 節 |
 //! | [`engine`] | エンジン: 段階 A0 / A1 / B のキャッシュ（[`Engine`]・ヒット・ミスの回数）、プレビュー（[`Engine::render_preview`]）、等倍・書き出しのタイル処理（[`FullResolutionJob`]）、ルーペの範囲（[`Engine::render_region`]）、書き出し（[`Engine::export`]）、取り消し（[`RenderControl`]）、切り抜く前の全体の表示（[`PreviewRequest::uncropped`]・[`Engine::full_resolution_with`]）、WB のスポイト（[`Engine::white_balance_at`]） | 2.2 節・2.4 節・2.7 節・4.1 節・6.1 節、DEV-03・DEV-15 |
 //! | [`input`] | RAW 以外の入力: 符号化した RGB と ICC からリニア BT.2020（B2）へ（[`working_image_from_encoded`]） | 2.6 節 |
 //!
@@ -63,7 +68,8 @@
 //!   ctx = a1.finish_context(settings).with_guide(&guide)   … 回転・ステージ 9 の入力の格子・倍率
 //!   FinishPlan::new(settings, &ctx).render_roi(&ctx, &source_tile, roi)
 //!      9. ジオメトリ（S の格子 → C の格子）→ 10. 露光量・コントラスト → 11. トーン（ガイド）
-//!      → 13. 色 → 15. シーン → ディスプレイ（B3）→ 16. トーンカーブ（B3）
+//!      → 12. テクスチャ・明瞭度・かすみの除去 → 13. 色 → 14. シャープ → 15. シーン → ディスプレイ（B3）
+//!      → 16. トーンカーブ・効果（B3）
 //!   run_stage_cpu(&DisplayStage, …)        → 17a 画面（B4a）
 //!   run_stage_cpu(&ExportStage::SRGB, …)   → 17b 書き出し（B4b）→ quantize_u8 / quantize_u16
 //!   Histogram::compute(&b4, …)             → 17c ヒストグラム
@@ -196,11 +202,15 @@
 //! - **ガイド**（2 段目）: 段階 A1 のプレビュー（切り抜く前の全体、露光量の前）から作る。ステージ 11 は
 //!   文脈のガイドの座標系・処理バージョンが文脈と一致するか確かめる（違えば
 //!   [`PipelineError::GuideMismatch`]）。キャッシュのキーの項目は [`guide`] の doc の表。
-//! - **v1 の項目**（ハイライト復元・ノイズ軽減・レンズ補正・シャープ・マスク）: 処理バージョン 1 では値が
-//!   あっても適用しない（[`finish::reserved`]。[`finish::unimplemented_settings`] で警告できる）。処理バージョン 2
-//!   では、ハイライト復元（ステージ 4。[`sensor::highlight`]）・ノイズ軽減（ステージ 6。[`sensor::denoise`]）・
-//!   レンズ補正（ステージ 7 と、ステージ 9 の歪曲補正。[`lens`]）を適用する（シャープ（14）・テクスチャなど（12）・
-//!   マスクはまだ予約のまま）。
+//! - **v1 の項目**（ハイライト復元・ノイズ軽減・レンズ補正・カラーミキサー・カラーグレーディング・白黒・シャープ・
+//!   マスク）: 処理バージョン 1 では値があっても適用しない（[`finish::reserved`]。[`finish::unimplemented_settings`] で
+//!   警告できる）。処理バージョン 2 では、ハイライト復元（ステージ 4。[`sensor::highlight`]）・ノイズ軽減（ステージ 6。
+//!   [`sensor::denoise`]）・レンズ補正（ステージ 7 と、ステージ 9 の歪曲補正。[`lens`]）・カラーミキサー・カラー
+//!   グレーディング・白黒（ステージ 13。[`finish::color`]）・テクスチャ・明瞭度・かすみの除去（ステージ 12。
+//!   [`finish::presence`]）・シャープ（ステージ 14。[`finish::sharpen`]）・効果（ステージ 16。[`finish::effects`]）を
+//!   適用する（マスクはまだ予約のまま）。
+//! - **写真ごとの乱数の種**: 粒子の模様は [`StageContext::photo_seed`]（エンジンが [`SourceId::photo_seed`] から入れる）と
+//!   G の座標だけで決まる。プレビュー・等倍・書き出しで同じ種を使う。
 //!
 //! - **エンジン**（3 段目）: 段階 A0 / A1 / B は最新の数件だけをキャッシュし（キーは genzo-model の
 //!   `CacheKey`。[`engine::cache`]）、段階 C は毎回計算する。等倍・書き出しはタイル（既定
@@ -221,8 +231,9 @@
 //! キャッシュ L0 / L1 の符号化と保存（B5 は [`OutputTarget::CacheDisplayP3`] の出力を量子化したもの）、
 //! 書き出しのファイル（genzo-media）。
 //!
-//! **v1 / PoC で決めること**: ステージ 12・14、HSL・カラーグレーディング、トーンカーブの効果（周辺光量・粒子）（ステージ 4・6・7 と歪曲補正は
-//! 処理バージョン 2 で実装した。式と定数の多くは仮置き。[`sensor::highlight`]・[`sensor::denoise`]・[`lens`] の doc）。仮置きの式と定数
+//! **v1 / PoC で決めること**: マスク（ステージ 4・6・7・12〜14・16 の効果と歪曲補正は処理バージョン 2 で実装した。
+//! 式と定数の多くは仮置き。[`sensor::highlight`]・[`sensor::denoise`]・[`lens`]・[`finish::color`]・
+//! [`finish::presence`]・[`finish::sharpen`]・[`finish::effects`] の doc）。仮置きの式と定数
 //! （コントラスト・トーン・ガイド・自然な彩度・ステージ 15・パラメトリックのカーブ）は PoC-4 / PoC-5
 //! で見直す（各モジュールの doc に「仮置き」と書いた）。IQ-07b（縮小プレビューとフル解像度の一致）は、
 //! 細線・色の境界の合成画像で満たせていない（tests/engine.rs の計測値。プレビューは縮小してから
@@ -249,6 +260,7 @@ pub mod engine;
 pub mod error;
 pub mod finish;
 pub mod guide;
+pub mod haze;
 pub mod image;
 pub mod input;
 pub mod interp;

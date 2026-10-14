@@ -1195,14 +1195,15 @@ pub enum DevelopCommand {
         #[arg(value_parser = parse_variant_id)]
         variant: VariantId,
     },
-    /// 現像設定を変える（JSON。部分的な指定は今の設定にマージする。レンズ補正・ハイライト復元・ノイズ軽減は
-    /// オプションでも指定できる。履歴に 1 件記録する）
+    /// 現像設定を変える（JSON。部分的な指定は今の設定にマージする。レンズ補正・ハイライト復元・ノイズ軽減・白黒・
+    /// カラーミキサー・カラーグレーディング・テクスチャ・明瞭度・かすみの除去・シャープ・効果はオプションでも指定できる。
+    /// 履歴に 1 件記録する）
     Set {
         /// variant の ID
         #[arg(value_parser = parse_variant_id)]
         variant: VariantId,
         /// 設定の JSON のファイル（- で標準入力）。`--json <FILE>` とも書ける（レンズ補正・ハイライト復元・ノイズ
-        /// 軽減のオプションだけを指定するときは省ける。UTF-8、BOM 付きの UTF-8、UTF-16 を読める）
+        /// 軽減・色のオプションだけを指定するときは省ける。UTF-8、BOM 付きの UTF-8、UTF-16 を読める）
         #[arg(long = "settings", value_name = "FILE")]
         settings: Option<String>,
         /// マージせず、指定した JSON（欠けた項目は既定値）で置き換える
@@ -1214,6 +1215,13 @@ pub enum DevelopCommand {
         /// ハイライト復元・ノイズ軽減（DEV-06・DEV-13。JSON の後に当てる）
         #[command(flatten)]
         sensor: SensorArgs,
+        /// 白黒・カラーミキサー・カラーグレーディング（DEV-25・DEV-09・DEV-10。JSON の後に当てる。項目が多いので
+        /// 箱に入れる）
+        #[command(flatten)]
+        color: Box<ColorArgs>,
+        /// テクスチャ・明瞭度・かすみの除去・シャープ・効果（DEV-11・DEV-12・DEV-24。JSON の後に当てる。箱に入れる）
+        #[command(flatten)]
+        detail: Box<DetailArgs>,
     },
     /// 処理バージョンを最新に更新する（DATA-09。レンズ補正などは処理バージョン 2 から使われる。ほかの設定は
     /// 変えない。履歴に 1 件記録する。すでに最新の写真・動画は何もしない。複数の ID をまとめて更新できる）
@@ -1265,7 +1273,7 @@ pub enum DevelopCommand {
         #[arg(long, value_enum, value_delimiter = ',')]
         groups: Vec<GroupArg>,
         /// コピー先の処理バージョンがコピー元より古ければ、コピー元の版に更新する（DATA-09。省略時はコピー先の
-        /// 版のまま。古い版の写真では、レンズ補正・ハイライト復元・ノイズ軽減は使われない）
+        /// 版のまま。古い版の写真では、レンズ補正・ハイライト復元・ノイズ軽減・明瞭度・シャープ・効果などは使われない）
         #[arg(long)]
         upgrade_process_version: bool,
     },
@@ -1483,6 +1491,247 @@ impl SensorArgs {
     }
 }
 
+/// `develop set` のテクスチャ・明瞭度・かすみの除去（DEV-11）・シャープ（DEV-12）・効果（周辺光量・粒子。DEV-24）の
+/// 指定（設定の JSON の `presence`・`detail.sharpening`・`effects` と同じ項目。処理バージョン 2 から使われる）。値の
+/// 範囲は genzo-model の検証で確かめる。
+#[derive(Debug, Clone, Default, Args)]
+pub struct DetailArgs {
+    /// テクスチャ（-100〜100。presence.texture）
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub texture: Option<f32>,
+    /// 明瞭度（-100〜100。presence.clarity）
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub clarity: Option<f32>,
+    /// かすみの除去（-100〜100。負でかすみを足す。presence.dehaze）
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub dehaze: Option<f32>,
+    /// シャープの適用量（0〜150。detail.sharpening.amount）
+    #[arg(long, value_name = "N")]
+    pub sharpen_amount: Option<f32>,
+    /// シャープの半径（0.5〜3.0。写真のフル解像度の画素。既定 1.0。detail.sharpening.radius）
+    #[arg(long, value_name = "PX")]
+    pub sharpen_radius: Option<f32>,
+    /// シャープのディテール（0〜100。既定 25。detail.sharpening.detail）
+    #[arg(long, value_name = "N")]
+    pub sharpen_detail: Option<f32>,
+    /// シャープのマスク（0〜100。既定 0。detail.sharpening.masking）
+    #[arg(long, value_name = "N")]
+    pub sharpen_masking: Option<f32>,
+    /// 切り抜き後の周辺光量補正の量（-100〜100。負で暗く、正で明るく。effects.vignette.amount）
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub vignette_amount: Option<f32>,
+    /// 切り抜き後の周辺光量補正の中点（0〜100。既定 50。effects.vignette.midpoint）
+    #[arg(long, value_name = "N")]
+    pub vignette_midpoint: Option<f32>,
+    /// 切り抜き後の周辺光量補正の丸み（-100〜100。既定 0。effects.vignette.roundness）
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub vignette_roundness: Option<f32>,
+    /// 切り抜き後の周辺光量補正のぼかし（0〜100。既定 50。effects.vignette.feather）
+    #[arg(long, value_name = "N")]
+    pub vignette_feather: Option<f32>,
+    /// 切り抜き後の周辺光量補正のハイライトの保護（0〜100。既定 0。effects.vignette.highlights）
+    #[arg(long, value_name = "N")]
+    pub vignette_highlights: Option<f32>,
+    /// 粒子の量（0〜100。effects.grain.amount）
+    #[arg(long, value_name = "N")]
+    pub grain_amount: Option<f32>,
+    /// 粒子の大きさ（0〜100。既定 25。effects.grain.size）
+    #[arg(long, value_name = "N")]
+    pub grain_size: Option<f32>,
+    /// 粒子の粗さ（0〜100。既定 50。effects.grain.roughness）
+    #[arg(long, value_name = "N")]
+    pub grain_roughness: Option<f32>,
+}
+
+impl DetailArgs {
+    /// 値の指定と、当てる先（設定の項目）の組。
+    fn fields(&self) -> [Option<f32>; 15] {
+        [
+            self.texture,
+            self.clarity,
+            self.dehaze,
+            self.sharpen_amount,
+            self.sharpen_radius,
+            self.sharpen_detail,
+            self.sharpen_masking,
+            self.vignette_amount,
+            self.vignette_midpoint,
+            self.vignette_roundness,
+            self.vignette_feather,
+            self.vignette_highlights,
+            self.grain_amount,
+            self.grain_size,
+            self.grain_roughness,
+        ]
+    }
+
+    /// どれかを指定したか。
+    pub fn any(&self) -> bool {
+        self.fields().iter().any(Option::is_some)
+    }
+
+    /// 指定した項目を `settings` に当てる（指定しなかった項目は今の値のまま）。
+    pub fn apply(&self, settings: &mut genzo_model::DevelopSettings) {
+        let p = &mut settings.presence;
+        let sh = &mut settings.detail.sharpening;
+        let v = &mut settings.effects.vignette;
+        let g = &mut settings.effects.grain;
+        let targets: [&mut f32; 15] = [
+            &mut p.texture,
+            &mut p.clarity,
+            &mut p.dehaze,
+            &mut sh.amount,
+            &mut sh.radius,
+            &mut sh.detail,
+            &mut sh.masking,
+            &mut v.amount,
+            &mut v.midpoint,
+            &mut v.roundness,
+            &mut v.feather,
+            &mut v.highlights,
+            &mut g.amount,
+            &mut g.size,
+            &mut g.roughness,
+        ];
+        for (dst, value) in targets.into_iter().zip(self.fields()) {
+            if let Some(value) = value {
+                *dst = value;
+            }
+        }
+    }
+}
+
+/// `develop set` の色（DEV-09・DEV-10・DEV-25）の指定（設定の JSON の `color.mixer`・`color.grading`・
+/// `color.black_white` と同じ項目。処理バージョン 2 から使われる）。値の範囲は genzo-model の検証で確かめる。
+#[derive(Debug, Clone, Default, Args)]
+pub struct ColorArgs {
+    /// 白黒にする（on）・カラーに戻す（off）（color.black_white.enabled。画面の V キー）
+    #[arg(long, value_enum, value_name = "on|off")]
+    pub black_white: Option<SwitchArg>,
+    /// カラーミキサーの色相（帯=値。-100〜100。帯は red・orange・yellow・green・aqua・blue・purple・magenta。
+    /// 繰り返して指定できる。color.mixer.<帯>.hue）
+    #[arg(long, value_name = "BAND=N", value_parser = parse_band_value)]
+    pub hsl_hue: Vec<(genzo_model::HueBand, f32)>,
+    /// カラーミキサーの彩度（帯=値。-100〜100。color.mixer.<帯>.saturation）
+    #[arg(long, value_name = "BAND=N", value_parser = parse_band_value)]
+    pub hsl_saturation: Vec<(genzo_model::HueBand, f32)>,
+    /// カラーミキサーの輝度（帯=値。-100〜100。color.mixer.<帯>.luminance）
+    #[arg(long, value_name = "BAND=N", value_parser = parse_band_value)]
+    pub hsl_luminance: Vec<(genzo_model::HueBand, f32)>,
+    /// 白黒ミキサー（帯=値。-100〜100。白黒のときの色ごとの明るさ。color.black_white.mix.<帯>）
+    #[arg(long, value_name = "BAND=N", value_parser = parse_band_value)]
+    pub bw_mix: Vec<(genzo_model::HueBand, f32)>,
+    /// カラーグレーディングのシャドウ（色相,強さ か 色相,強さ,輝度。色相 0〜360・強さ 0〜100・輝度 -100〜100
+    /// （省くと 0）。color.grading.shadows）
+    #[arg(long, value_name = "HUE,SAT[,LUM]", value_parser = parse_grading_wheel)]
+    pub grading_shadows: Option<genzo_model::GradingWheel>,
+    /// カラーグレーディングの中間調（色相,強さ か 色相,強さ,輝度。color.grading.midtones）
+    #[arg(long, value_name = "HUE,SAT[,LUM]", value_parser = parse_grading_wheel)]
+    pub grading_midtones: Option<genzo_model::GradingWheel>,
+    /// カラーグレーディングのハイライト（色相,強さ か 色相,強さ,輝度。color.grading.highlights）
+    #[arg(long, value_name = "HUE,SAT[,LUM]", value_parser = parse_grading_wheel)]
+    pub grading_highlights: Option<genzo_model::GradingWheel>,
+    /// カラーグレーディングの全体（色相,強さ か 色相,強さ,輝度。color.grading.global）
+    #[arg(long, value_name = "HUE,SAT[,LUM]", value_parser = parse_grading_wheel)]
+    pub grading_global: Option<genzo_model::GradingWheel>,
+    /// カラーグレーディングのブレンド（0〜100。既定 50。color.grading.blending）
+    #[arg(long, value_name = "N")]
+    pub grading_blending: Option<f32>,
+    /// カラーグレーディングのバランス（-100〜100。正でハイライトの範囲を広げる。color.grading.balance）
+    #[arg(long, allow_hyphen_values = true, value_name = "N")]
+    pub grading_balance: Option<f32>,
+}
+
+impl ColorArgs {
+    /// どれかを指定したか。
+    pub fn any(&self) -> bool {
+        self.black_white.is_some()
+            || !self.hsl_hue.is_empty()
+            || !self.hsl_saturation.is_empty()
+            || !self.hsl_luminance.is_empty()
+            || !self.bw_mix.is_empty()
+            || self.grading_shadows.is_some()
+            || self.grading_midtones.is_some()
+            || self.grading_highlights.is_some()
+            || self.grading_global.is_some()
+            || self.grading_blending.is_some()
+            || self.grading_balance.is_some()
+    }
+
+    /// 指定した項目を `color` に当てる（指定しなかった項目は今の値のまま。同じ帯を繰り返したら後の値）。
+    pub fn apply(&self, color: &mut genzo_model::ColorParams) {
+        if let Some(v) = self.black_white {
+            color.black_white.enabled = v.is_on();
+        }
+        for (band, v) in &self.hsl_hue {
+            color.mixer.get_mut(*band).hue = *v;
+        }
+        for (band, v) in &self.hsl_saturation {
+            color.mixer.get_mut(*band).saturation = *v;
+        }
+        for (band, v) in &self.hsl_luminance {
+            color.mixer.get_mut(*band).luminance = *v;
+        }
+        for (band, v) in &self.bw_mix {
+            *color.black_white.mix.get_mut(*band) = *v;
+        }
+        let g = &mut color.grading;
+        for (dst, src) in [
+            (&mut g.shadows, self.grading_shadows),
+            (&mut g.midtones, self.grading_midtones),
+            (&mut g.highlights, self.grading_highlights),
+            (&mut g.global, self.grading_global),
+        ] {
+            if let Some(w) = src {
+                *dst = w;
+            }
+        }
+        if let Some(v) = self.grading_blending {
+            g.blending = v;
+        }
+        if let Some(v) = self.grading_balance {
+            g.balance = v;
+        }
+    }
+}
+
+/// `帯=値`（例: `blue=-30`）を読む。
+fn parse_band_value(s: &str) -> Result<(genzo_model::HueBand, f32), String> {
+    let (band, value) = s
+        .split_once('=')
+        .ok_or_else(|| format!("「帯=値」の形で指定してください（例: blue=-30）: {s}"))?;
+    let band = genzo_model::HueBand::from_key(band.trim()).ok_or_else(|| {
+        format!("帯は red・orange・yellow・green・aqua・blue・purple・magenta のどれかです: {band}")
+    })?;
+    let value: f32 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("値が数値ではありません: {value}"))?;
+    Ok((band, value))
+}
+
+/// `色相,強さ[,輝度]`（例: `220,30` や `40,25,-10`）を読む。
+fn parse_grading_wheel(s: &str) -> Result<genzo_model::GradingWheel, String> {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if !(2..=3).contains(&parts.len()) {
+        return Err(format!(
+            "「色相,強さ」か「色相,強さ,輝度」の形で指定してください（例: 220,30,-10）: {s}"
+        ));
+    }
+    let num = |t: &str| {
+        t.parse::<f32>()
+            .map_err(|_| format!("値が数値ではありません: {t}"))
+    };
+    Ok(genzo_model::GradingWheel {
+        hue: num(parts[0])?,
+        saturation: num(parts[1])?,
+        luminance: match parts.get(2) {
+            Some(t) => num(t)?,
+            None => 0.0,
+        },
+    })
+}
+
 /// `develop compare` の引数（LIB-03）。
 #[derive(Debug, Args)]
 pub struct CompareArgs {
@@ -1682,6 +1931,14 @@ pub struct BenchArgs {
     /// 計測の設定に当てるハイライト復元・ノイズ軽減（DEV-06・DEV-13。`develop set` と同じオプション。処理バージョン 2）
     #[command(flatten)]
     pub sensor: SensorArgs,
+    /// 計測の設定に当てる白黒・カラーミキサー・カラーグレーディング（DEV-25・DEV-09・DEV-10。`develop set` と同じ
+    /// オプション。処理バージョン 2。項目が多いので箱に入れる）
+    #[command(flatten)]
+    pub color: Box<ColorArgs>,
+    /// 計測の設定に当てるテクスチャ・明瞭度・かすみの除去・シャープ・効果（DEV-11・DEV-12・DEV-24。`develop set` と
+    /// 同じオプション。処理バージョン 2。箱に入れる）
+    #[command(flatten)]
+    pub detail: Box<DetailArgs>,
 }
 
 /// 計測する処理。
@@ -1793,8 +2050,10 @@ pub fn direction(desc: bool) -> SortDirection {
 pub enum GroupArg {
     /// ホワイトバランス。
     WhiteBalance,
-    /// 露光量・コントラスト・ハイライト・シャドウ・白・黒。
+    /// 露光量・コントラスト・ハイライト・シャドウ・白・黒・ハイライト復元。
     BasicTone,
+    /// テクスチャ・明瞭度・かすみの除去。
+    Presence,
     /// トーンカーブ。
     ToneCurve,
     /// 彩度・自然な彩度など。
@@ -1805,6 +2064,8 @@ pub enum GroupArg {
     Lens,
     /// シャープ・ノイズ軽減。
     Detail,
+    /// 効果（切り抜き後の周辺光量補正・粒子）。
+    Effects,
     /// ローカル補正。
     Masks,
 }
@@ -1818,11 +2079,13 @@ pub fn setting_groups(groups: &[GroupArg]) -> SettingGroups {
     SettingGroups {
         white_balance: has(GroupArg::WhiteBalance),
         basic_tone: has(GroupArg::BasicTone),
+        presence: has(GroupArg::Presence),
         tone_curve: has(GroupArg::ToneCurve),
         color: has(GroupArg::Color),
         geometry: has(GroupArg::Geometry),
         lens: has(GroupArg::Lens),
         detail: has(GroupArg::Detail),
+        effects: has(GroupArg::Effects),
         masks: has(GroupArg::Masks),
     }
 }
@@ -2535,6 +2798,177 @@ mod tests {
     }
 
     #[test]
+    fn develop_set_color_options() {
+        use genzo_model::HueBand;
+        let cli = parse(&[
+            "genzo",
+            "develop",
+            "set",
+            "7",
+            "--black-white",
+            "on",
+            "--hsl-hue",
+            "red=-15",
+            "--hsl-luminance",
+            "blue=-40",
+            "--hsl-luminance",
+            "aqua=10.5",
+            "--bw-mix",
+            "orange=30",
+            "--grading-shadows",
+            "220,30",
+            "--grading-highlights",
+            "40,25,-10",
+            "--grading-balance",
+            "-20",
+            "--grading-blending",
+            "70",
+        ])
+        .unwrap();
+        let Command::Develop(DevelopCommand::Set { color, .. }) = cli.command else {
+            panic!()
+        };
+        assert!(color.any());
+        assert_eq!(color.black_white, Some(SwitchArg::On));
+        assert_eq!(color.hsl_hue, [(HueBand::Red, -15.0)]);
+        assert_eq!(
+            color.hsl_luminance,
+            [(HueBand::Blue, -40.0), (HueBand::Aqua, 10.5)]
+        );
+        assert_eq!(color.bw_mix, [(HueBand::Orange, 30.0)]);
+        let sh = color.grading_shadows.unwrap();
+        assert_eq!((sh.hue, sh.saturation, sh.luminance), (220.0, 30.0, 0.0));
+        let hi = color.grading_highlights.unwrap();
+        assert_eq!((hi.hue, hi.saturation, hi.luminance), (40.0, 25.0, -10.0));
+        assert_eq!(color.grading_balance, Some(-20.0));
+        assert_eq!(color.grading_blending, Some(70.0));
+        let mut c = genzo_model::ColorParams::default();
+        c.mixer.green.saturation = 5.0;
+        color.apply(&mut c);
+        assert!(c.black_white.enabled);
+        assert_eq!(c.mixer.red.hue, -15.0);
+        assert_eq!(c.mixer.aqua.luminance, 10.5);
+        assert_eq!(
+            c.mixer.green.saturation, 5.0,
+            "指定しない項目は今の値のまま"
+        );
+        assert_eq!(c.black_white.mix.orange, 30.0);
+        assert_eq!(c.grading.midtones, genzo_model::GradingWheel::default());
+        // 形の誤り。
+        for bad in [
+            ["--hsl-hue", "cyan=10"],
+            ["--hsl-hue", "red"],
+            ["--hsl-hue", "red=abc"],
+            ["--grading-shadows", "220"],
+            ["--grading-shadows", "1,2,3,4"],
+            ["--black-white", "yes"],
+        ] {
+            let mut args = vec!["genzo", "develop", "set", "7"];
+            args.extend(bad);
+            assert!(parse(&args).is_err(), "{bad:?}");
+        }
+        let cli = parse(&["genzo", "develop", "set", "7"]).unwrap();
+        let Command::Develop(DevelopCommand::Set { color, .. }) = cli.command else {
+            panic!()
+        };
+        assert!(!color.any());
+    }
+
+    #[test]
+    fn develop_set_detail_options() {
+        let cli = parse(&[
+            "genzo",
+            "develop",
+            "set",
+            "7",
+            "--texture",
+            "-30",
+            "--clarity",
+            "40",
+            "--dehaze",
+            "-15.5",
+            "--sharpen-amount",
+            "80",
+            "--sharpen-radius",
+            "1.5",
+            "--vignette-amount",
+            "-25",
+            "--vignette-roundness",
+            "-60",
+            "--grain-amount",
+            "20",
+            "--grain-roughness",
+            "0",
+        ])
+        .unwrap();
+        let Command::Develop(DevelopCommand::Set { detail, .. }) = cli.command else {
+            panic!()
+        };
+        assert!(detail.any());
+        let mut s = genzo_model::DevelopSettings::default();
+        s.effects.vignette.feather = 70.0;
+        detail.apply(&mut s);
+        assert_eq!(s.presence.texture, -30.0);
+        assert_eq!(s.presence.clarity, 40.0);
+        assert_eq!(s.presence.dehaze, -15.5);
+        assert_eq!(s.detail.sharpening.amount, 80.0);
+        assert_eq!(s.detail.sharpening.radius, 1.5);
+        assert_eq!(
+            s.detail.sharpening.detail, 25.0,
+            "指定しない項目は今の値のまま"
+        );
+        assert_eq!(s.effects.vignette.amount, -25.0);
+        assert_eq!(s.effects.vignette.roundness, -60.0);
+        assert_eq!(s.effects.vignette.feather, 70.0);
+        assert_eq!(s.effects.grain.amount, 20.0);
+        assert_eq!(s.effects.grain.roughness, 0.0);
+        assert!(parse(&["genzo", "develop", "set", "7", "--clarity", "abc"]).is_err());
+    }
+
+    /// `bench` にも `develop set` と同じ色・外観・シャープ・効果のオプションがある（計測の設定に当てる）。
+    #[test]
+    fn bench_accepts_color_and_detail_options() {
+        let cli = parse(&[
+            "genzo",
+            "bench",
+            "preview",
+            "--synthetic",
+            "640x426",
+            "--nr-luminance",
+            "20",
+            "--black-white",
+            "on",
+            "--bw-mix",
+            "blue=-30",
+            "--grading-shadows",
+            "220,30",
+            "--clarity",
+            "-30",
+            "--dehaze",
+            "25",
+            "--sharpen-amount",
+            "60",
+            "--grain-amount",
+            "25",
+        ])
+        .unwrap();
+        let Command::Bench(a) = cli.command else {
+            panic!()
+        };
+        assert_eq!(a.target, BenchTarget::Preview);
+        assert!(a.sensor.any() && a.color.any() && a.detail.any());
+        assert_eq!(a.detail.clarity, Some(-30.0));
+        assert_eq!(a.detail.sharpen_amount, Some(60.0));
+        assert_eq!(a.color.bw_mix, vec![(genzo_model::HueBand::Blue, -30.0)]);
+        // 指定しなければ何も当てない。
+        let cli = parse(&["genzo", "bench", "export"]).unwrap();
+        let Command::Bench(a) = cli.command else {
+            panic!()
+        };
+        assert!(!a.sensor.any() && !a.color.any() && !a.detail.any());
+    }
+
+    #[test]
     fn json_is_detected_for_usage_errors() {
         let args = rewrite_develop_set(os(&["genzo", "rate", "1", "9", "--json"]));
         assert!(json_requested(&args));
@@ -2637,6 +3071,9 @@ mod tests {
         assert_eq!(setting_groups(&[]), SettingGroups::ALL);
         let g = setting_groups(&[GroupArg::BasicTone, GroupArg::Color]);
         assert!(g.basic_tone && g.color && !g.white_balance && !g.geometry);
+        assert!(!g.presence && !g.effects);
+        let g = setting_groups(&[GroupArg::Presence, GroupArg::Effects]);
+        assert!(g.presence && g.effects && !g.basic_tone && !g.detail);
         let cli = parse(&[
             "genzo",
             "develop",

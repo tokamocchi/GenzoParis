@@ -160,8 +160,8 @@ pub use core::{
 };
 pub use delete::{OsTrash, TrashBackend};
 pub use develop::{
-    HISTORY_LABEL_GENERIC, HISTORY_LABEL_PASTE, HISTORY_LABEL_UPGRADE_PROCESS, describe_change,
-    upgrade_process_label,
+    HISTORY_LABEL_BLACK_WHITE, HISTORY_LABEL_COLOR, HISTORY_LABEL_GENERIC, HISTORY_LABEL_PASTE,
+    HISTORY_LABEL_UPGRADE_PROCESS, describe_change, upgrade_process_label,
 };
 pub use error::{ApiError, ErrorInfo, ErrorKind};
 pub use events::{CatalogChange, Event, WarningCode};

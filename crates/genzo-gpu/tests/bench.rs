@@ -147,3 +147,54 @@ fn bench_export_jpeg8_gpu() {
         .unwrap();
     report(&result);
 }
+
+#[test]
+#[ignore = "計測（手動で --release で実行する。llvmpipe の数値は性能の判断に使えない）"]
+fn bench_stage_c_preview_2560_gpu_with_presence_sharpening_and_effects() {
+    // 処理バージョン 2 のステージ 12（テクスチャ・明瞭度・かすみの除去）・14（シャープ）・16 の効果を足した段階 C の
+    // GPU 版（露光量のドラッグ。A1・ガイドはキャッシュ）。strong_settings だけのものと同じ条件で比べる。
+    let g = gpu_or_skip!();
+    g.compile_all().unwrap();
+    let (w, h) = PREVIEW;
+    let source = working_source(scene_b2(w, h), Orientation::Normal);
+    let request = PreviewRequest::new(RenderQuality::Final, 2560)
+        .with_output(OutputTarget::assumed_srgb_display().unwrap())
+        .with_histogram();
+    let options = GpuPreviewOptions {
+        download_b3: false,
+        download_output: false,
+        ..Default::default()
+    };
+    let mut all = strong_settings();
+    all.presence.texture = 40.0;
+    all.presence.clarity = 30.0;
+    all.presence.dehaze = 25.0;
+    all.detail.sharpening.amount = 60.0;
+    all.detail.sharpening.masking = 20.0;
+    all.effects.vignette.amount = -30.0;
+    all.effects.grain.amount = 25.0;
+    for (name, s) in [
+        ("gpu_stage_c_preview_2560_base", strong_settings()),
+        ("gpu_stage_c_preview_2560_detail_all", all),
+    ] {
+        let e = engine(2560, 1024);
+        let mut s = s;
+        g.render_preview(&e, &source, &s, &request, &options)
+            .unwrap();
+        let mut ev = 0.0f32;
+        let result = Bench::latency(name)
+            .target(Duration::from_millis(33))
+            .note("resolution", "2560x1707")
+            .note("backend", "gpu")
+            .note("adapter", g.context().summary().to_string())
+            .develop_settings(&s)
+            .run_warm(|| {
+                ev = if ev > 1.0 { 0.0 } else { ev + 0.1 };
+                s.exposure_ev = ev;
+                g.render_preview(&e, &source, &s, &request, &options)
+                    .unwrap()
+            })
+            .unwrap();
+        report(&result);
+    }
+}

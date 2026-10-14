@@ -2,7 +2,7 @@
 // Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + ' を含む）・library/Grid.tsx（グリッドの移動・Enter・タイムラインの T）・
 // viewer/Loupe.tsx（I・Z・等倍表示の Esc）・viewer/CompareView.tsx（比較表示の ←・→・↑・↓・Z・等倍表示の Esc）・
 // viewer/SurveyView.tsx（選別表示の ←・→・/）・viewer/VideoPlayer.tsx（動画のスペース・J・K・L・,・.・M・Home・End）・
-// develop/DevelopView.tsx（W・R・Z・J・I・\・Y・
+// develop/DevelopView.tsx（W・R・Z・J・I・V・\・Y・
 // Shift ＋ Y と、切り抜き・スポイト・等倍表示の間の Esc・Enter）が持つ。比較表示（C）・選別表示（N）を始めるキーは
 // App.tsx。ここは表示用の写しなので、キーを変えたらここも直す。
 
@@ -107,6 +107,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["Enter"], label: "切り抜きを確定" },
       { keys: ["Escape"], label: "切り抜き・スポイトを取り消す" },
       { keys: ["j"], label: "白飛び・黒つぶれの表示" },
+      { keys: ["v"], label: "白黒・カラーの切り替え（処理バージョン 2 の写真。白黒のときはカラーミキサーが白黒ミキサーになる）" },
       { keys: ["\\"], label: "ビフォー / アフター: ビフォーだけ（もう一度押すとアフター）" },
       { keys: ["y"], label: "ビフォー / アフター: 左右に並べる" },
       { keys: ["shift+y"], label: "ビフォー / アフター: 分割（左半分がビフォー）" },

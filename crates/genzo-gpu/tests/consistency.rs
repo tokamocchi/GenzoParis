@@ -25,9 +25,26 @@ use genzo_raw::CfaPattern;
 
 use common::*;
 
+/// 処理バージョン 2 のステージ 12・14・16 の効果の項目（テクスチャ・明瞭度・かすみの除去・シャープ・周辺光量・粒子）。
+fn with_detail_features(mut s: DevelopSettings) -> DevelopSettings {
+    s.presence.texture = 45.0;
+    s.presence.clarity = -35.0;
+    s.presence.dehaze = 40.0;
+    s.detail.sharpening.amount = 90.0;
+    s.detail.sharpening.radius = 2.0;
+    s.detail.sharpening.detail = 40.0;
+    s.detail.sharpening.masking = 30.0;
+    s.effects.vignette.amount = -45.0;
+    s.effects.vignette.roundness = -40.0;
+    s.effects.vignette.highlights = 50.0;
+    s.effects.grain.amount = 40.0;
+    s.effects.grain.size = 70.0;
+    s
+}
+
 /// RGB のステージを有効にする設定（回転・切り抜きでステージ 9 も有効にする）。
 fn settings_for_all_stages() -> DevelopSettings {
-    let mut s = strong_settings();
+    let mut s = with_detail_features(strong_settings());
     rotate_and_crop(
         &mut s,
         4.0,
@@ -85,11 +102,18 @@ fn case_for(
         return (tile_of(a1_image, need), out);
     }
     // 画素ごとのステージ: 出力の範囲を全体の格子の途中に置き、入力は少し広くする（位置の扱いの確認）。
+    // 周辺の画素を使うステージ（12・14）は、必要な範囲（ぼかしの余白）よりさらに少し広くする。
     let out = Roi::new(5, 4, 70, 50);
-    let input_roi = out.expand(2);
+    let need = stage.input_roi(out, &params, ctx);
+    let input_roi = need.expand(2);
+    let (w, h) = if need == out {
+        (80, 60)
+    } else {
+        (input_roi.width, input_roi.height)
+    };
     let image = match stage.input_contract() {
-        ColorContract::B2Working => scene_b2(80, 60),
-        ColorContract::B3DisplayReferred => scene_b3(80, 60),
+        ColorContract::B2Working => scene_b2(w, h),
+        ColorContract::B3DisplayReferred => scene_b3(w, h),
         c => panic!("{}: 想定していない入力の契約 {c}", stage.id()),
     };
     let tile = ImageTile::from_image(
@@ -279,7 +303,74 @@ fn other_settings() -> Vec<DevelopSettings> {
     c.tone_curve.parametric.lights = 100.0;
     c.color.saturation = 100.0;
     c.tone.blacks = -100.0;
-    vec![settings_for_all_stages(), a, b, c]
+    // 処理バージョン 2 のステージ 12・14・16 の別の分岐（テクスチャだけ・かすみを足す・マスクなしのシャープ・
+    // 明るくする周辺光量・丸み +100・粗さ 0 の粒子）。
+    let mut d = DevelopSettings::default();
+    d.presence.texture = -80.0;
+    d.presence.dehaze = -60.0;
+    d.detail.sharpening.amount = 150.0;
+    d.detail.sharpening.detail = 100.0;
+    d.effects.vignette.amount = 70.0;
+    d.effects.vignette.roundness = 100.0;
+    d.effects.vignette.feather = 0.0;
+    d.effects.grain.amount = 100.0;
+    d.effects.grain.roughness = 0.0;
+    d.effects.grain.size = 0.0;
+    vec![
+        settings_for_all_stages(),
+        a,
+        b,
+        c,
+        color_features(false),
+        color_features(true),
+        d,
+    ]
+}
+
+/// ステージ 13 の処理バージョン 2 の項目（カラーミキサー・カラーグレーディング。`black_white` で白黒と白黒ミキサー）。
+fn color_features(black_white: bool) -> DevelopSettings {
+    use genzo_model::{GradingWheel, HslAdjustment, HueBands};
+    let mut s = DevelopSettings::default();
+    s.color.saturation = -20.0;
+    s.color.vibrance = 40.0;
+    s.color.mixer.red = HslAdjustment {
+        hue: 100.0,
+        saturation: -50.0,
+        luminance: 30.0,
+    };
+    s.color.mixer.blue = HslAdjustment {
+        hue: -100.0,
+        saturation: 100.0,
+        luminance: -100.0,
+    };
+    s.color.mixer.yellow.luminance = 60.0;
+    s.color.mixer.magenta.hue = 40.0;
+    s.color.grading.shadows = GradingWheel {
+        hue: 210.0,
+        saturation: 60.0,
+        luminance: 20.0,
+    };
+    s.color.grading.midtones = GradingWheel {
+        hue: 100.0,
+        saturation: 20.0,
+        luminance: 0.0,
+    };
+    s.color.grading.highlights = GradingWheel {
+        hue: 35.0,
+        saturation: 40.0,
+        luminance: -30.0,
+    };
+    s.color.grading.global = GradingWheel {
+        hue: 300.0,
+        saturation: 10.0,
+        luminance: 10.0,
+    };
+    s.color.grading.blending = 30.0;
+    s.color.grading.balance = -40.0;
+    s.color.black_white.enabled = black_white;
+    s.color.black_white.mix =
+        HueBands::from_values([80.0, -40.0, 20.0, 0.0, -60.0, -100.0, 50.0, 100.0]);
+    s
 }
 
 #[test]
@@ -310,7 +401,13 @@ fn pixel_stages_match_on_boundary_values_and_other_settings() {
                     c => panic!("{}: 想定していない入力の契約 {c}", stage.id()),
                 };
                 let roi = Roi::full(image.width(), image.height());
-                let input = ImageTile::from_image(roi, image).unwrap();
+                // 周辺の画素を使うステージ（12・14）は、余白を鏡映で足す。
+                let need = stage.input_roi(roi, &params, ctx);
+                let input = if need == roi {
+                    ImageTile::from_image(roi, image).unwrap()
+                } else {
+                    tile_of(&image, need)
+                };
                 let (cpu, n_cpu) = run_stage_cpu(stage, ctx, &input, roi, &params).unwrap();
                 let (gpu, n_gpu) = g
                     .run_stage(stage, ctx, &input, roi, &params)
@@ -326,8 +423,51 @@ fn pixel_stages_match_on_boundary_values_and_other_settings() {
             }
         });
     }
-    // 4 つの設定 × 2 つの入力の種類で 12 ステージ前後ずつ（設定によっては無効になるステージがある）。
-    assert!(compared >= 80, "{compared}");
+    // 7 つの設定 × 2 つの入力の種類で 12 ステージ前後ずつ（設定によっては無効になるステージがある）。
+    assert!(compared >= 100, "{compared}");
+}
+
+#[test]
+fn color_stage_matches_around_the_hue_circle() {
+    // ステージ 13 の色相の帯（自前の atan の多項式・帯の境目）・回転（sin / cos の多項式）・無彩色に近い画素を、
+    // OKLCh の色相を 1° ずつ回した画像で比べる（L 4 段 × C 6 段 × 色相 360）。
+    use genzo_color::oklab::oklab_to_linear_bt2020;
+    use genzo_pipeline::finish::ColorStage;
+    let g = gpu_or_skip!();
+    let ls = [0.15f32, 0.45, 0.8, 1.1];
+    let cs = [0.0f32, 1e-4, 0.01, 0.03, 0.12, 0.3];
+    let image = RgbImage::from_fn(
+        360,
+        (ls.len() * cs.len()) as u32,
+        ColorContract::B2Working,
+        |x, y| {
+            let l = ls[y as usize / cs.len()];
+            let c = cs[y as usize % cs.len()];
+            let h = (x as f32).to_radians();
+            oklab_to_linear_bt2020([l, c * h.cos(), c * h.sin()])
+        },
+    )
+    .unwrap();
+    let roi = Roi::full(image.width(), image.height());
+    let input = ImageTile::from_image(roi, image).unwrap();
+    let mut compared = 0;
+    for settings in [color_features(false), color_features(true)] {
+        with_context(&settings, |ctx, _| {
+            let params = ColorStage.params(&settings, ctx).unwrap().unwrap();
+            let (cpu, n_cpu) = run_stage_cpu(&ColorStage, ctx, &input, roi, &params).unwrap();
+            let (gpu, n_gpu) = g.run_stage(&ColorStage, ctx, &input, roi, &params).unwrap();
+            let report = compare_pixels(
+                cpu.image.data(),
+                gpu.image.data(),
+                stage_tolerance(ColorStage::ID),
+            );
+            eprintln!("{}: {report}", ColorStage::ID);
+            assert!(report.passed(), "{report}");
+            assert_eq!(n_cpu, n_gpu);
+            compared += 1;
+        });
+    }
+    assert_eq!(compared, 4);
 }
 
 #[test]
@@ -423,7 +563,14 @@ fn pixelwise_stages_do_not_depend_on_the_tiling() {
     let registry = StageRegistry::builtin();
     let settings = settings_for_all_stages();
     with_context(&settings, |ctx, a1_image| {
-        for id in ["finish.geometry", "finish.tone", "output.export.srgb"] {
+        for id in [
+            "finish.geometry",
+            "finish.tone",
+            "finish.texture",
+            "finish.sharpen",
+            "finish.effects",
+            "output.export.srgb",
+        ] {
             let stage = registry.find(id).unwrap();
             let params = stage.params(&settings, ctx).unwrap().unwrap();
             let (input, out) = case_for(stage, a1_image, ctx, &settings);
@@ -483,8 +630,13 @@ fn extreme_values_stay_finite() {
             })
             .unwrap();
             let roi = Roi::full(n * n, n);
-            let input = ImageTile::from_image(roi, image).unwrap();
             let params = stage.params(&settings, ctx).unwrap().unwrap();
+            let need = stage.input_roi(roi, &params, ctx);
+            let input = if need == roi {
+                ImageTile::from_image(roi, image).unwrap()
+            } else {
+                tile_of(&image, need)
+            };
             let (out, _) = g.run_stage(stage, ctx, &input, roi, &params).unwrap();
             let non_finite = out
                 .image
@@ -516,10 +668,16 @@ fn gpu_stage_checks_inputs_like_the_cpu_version() {
         // 入力が出力の範囲を覆っていない。
         let small = ImageTile::from_image(Roi::new(0, 0, 4, 4), scene_b2(4, 4)).unwrap();
         assert!(g.run_stage(stage, ctx, &small, roi, &params).is_err());
-        // GPU 版のないステージは Unsupported。
+        // GPU 版を登録していないステージは Unsupported。
+        let without = common::renderer()
+            .unwrap()
+            .unwrap()
+            .with_registry(genzo_gpu::GpuStageRegistry::builtin().without("finish.texture"));
         let texture = registry.find("finish.texture").unwrap();
         let input = ImageTile::from_image(roi, scene_b2(8, 8)).unwrap();
-        let err = g.run_stage(texture, ctx, &input, roi, &params).unwrap_err();
+        let err = without
+            .run_stage(texture, ctx, &input, roi, &params)
+            .unwrap_err();
         assert!(
             matches!(err, genzo_gpu::GpuError::Unsupported { .. }),
             "{err}"

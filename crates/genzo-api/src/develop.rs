@@ -65,6 +65,10 @@ const PREVIEW_SLOT: &str = "develop-preview";
 pub const HISTORY_LABEL_PASTE: &str = "設定の貼り付け";
 /// Undo / Redo の前に保存待ちの変更を保存したときなどの、変更の名前（変わった項目が分からないとき）。
 pub const HISTORY_LABEL_GENERIC: &str = "現像設定の変更";
+/// 白黒にしたときの履歴の名前（DEV-25。画面の V キー）。
+pub const HISTORY_LABEL_BLACK_WHITE: &str = "白黒に変換";
+/// 白黒からカラーに戻したときの履歴の名前（DEV-25）。
+pub const HISTORY_LABEL_COLOR: &str = "カラーに変換";
 /// 処理バージョンの更新（[`Core::upgrade_process_version`]）の履歴の名前の前半（後に「2 に更新」が付く。
 /// [`upgrade_process_label`]）。
 pub const HISTORY_LABEL_UPGRADE_PROCESS: &str = "処理バージョンを";
@@ -312,16 +316,47 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     if t.0.blacks != t.1.blacks {
         parts.push(format!("黒レベル {:+.0}", t.1.blacks));
     }
+    let pr = (&old.presence, &new.presence);
+    if pr.0.texture != pr.1.texture {
+        parts.push(format!("テクスチャ {:+.0}", pr.1.texture));
+    }
+    if pr.0.clarity != pr.1.clarity {
+        parts.push(format!("明瞭度 {:+.0}", pr.1.clarity));
+    }
+    if pr.0.dehaze != pr.1.dehaze {
+        parts.push(format!("かすみの除去 {:+.0}", pr.1.dehaze));
+    }
     if old.tone_curve != new.tone_curve {
         parts.push("トーンカーブ".to_owned());
     }
-    if old.color.saturation != new.color.saturation {
-        parts.push(format!("彩度 {:+.0}", new.color.saturation));
+    let (c_old, c_new) = (&old.color, &new.color);
+    let before_color = parts.len();
+    if c_old.black_white.enabled != c_new.black_white.enabled {
+        parts.push(
+            if c_new.black_white.enabled {
+                HISTORY_LABEL_BLACK_WHITE
+            } else {
+                HISTORY_LABEL_COLOR
+            }
+            .to_owned(),
+        );
     }
-    if old.color.vibrance != new.color.vibrance {
-        parts.push(format!("自然な彩度 {:+.0}", new.color.vibrance));
+    if c_old.saturation != c_new.saturation {
+        parts.push(format!("彩度 {:+.0}", c_new.saturation));
     }
-    if old.color != new.color && !parts.iter().any(|p| p.contains("彩度")) {
+    if c_old.vibrance != c_new.vibrance {
+        parts.push(format!("自然な彩度 {:+.0}", c_new.vibrance));
+    }
+    if c_old.mixer != c_new.mixer {
+        parts.push("カラーミキサー".to_owned());
+    }
+    if c_old.black_white.mix != c_new.black_white.mix {
+        parts.push("白黒ミキサー".to_owned());
+    }
+    if c_old.grading != c_new.grading {
+        parts.push("カラーグレーディング".to_owned());
+    }
+    if c_old != c_new && parts.len() == before_color {
         parts.push("色".to_owned());
     }
     if old.geometry != new.geometry {
@@ -340,8 +375,22 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     if nr_old != nr_new && nr_old.luminance == nr_new.luminance && nr_old.color == nr_new.color {
         parts.push("ノイズ軽減".to_owned());
     }
-    if old.detail.sharpening != new.detail.sharpening {
-        parts.push("ディテール".to_owned());
+    let (sh_old, sh_new) = (&old.detail.sharpening, &new.detail.sharpening);
+    if sh_old.amount != sh_new.amount {
+        parts.push(format!("シャープ {:.0}", sh_new.amount));
+    } else if sh_old != sh_new {
+        parts.push("シャープ".to_owned());
+    }
+    let (fx_old, fx_new) = (&old.effects, &new.effects);
+    if fx_old.vignette.amount != fx_new.vignette.amount {
+        parts.push(format!("周辺光量 {:+.0}", fx_new.vignette.amount));
+    } else if fx_old.vignette != fx_new.vignette {
+        parts.push("周辺光量".to_owned());
+    }
+    if fx_old.grain.amount != fx_new.grain.amount {
+        parts.push(format!("粒子 {:.0}", fx_new.grain.amount));
+    } else if fx_old.grain != fx_new.grain {
+        parts.push("粒子".to_owned());
     }
     if old.masks != new.masks {
         parts.push("ローカル補正".to_owned());
@@ -1945,6 +1994,31 @@ mod tests {
         assert_eq!(describe_change(&a, &e), "ノイズ軽減");
         let mut f = a.clone();
         f.detail.sharpening.amount = 30.0;
-        assert_eq!(describe_change(&a, &f), "ディテール");
+        assert_eq!(describe_change(&a, &f), "シャープ 30");
+        // テクスチャ・明瞭度・かすみの除去（DEV-11）・シャープ（DEV-12）・効果（DEV-24）。
+        let mut p = a.clone();
+        p.presence.texture = 20.0;
+        p.presence.dehaze = -10.0;
+        assert_eq!(describe_change(&a, &p), "テクスチャ +20・かすみの除去 -10");
+        let mut q = a.clone();
+        q.detail.sharpening.masking = 40.0;
+        q.effects.vignette.amount = -30.0;
+        q.effects.grain.size = 60.0;
+        assert_eq!(describe_change(&a, &q), "シャープ・周辺光量 -30・粒子");
+        // カラーミキサー・白黒・カラーグレーディング（DEV-09・DEV-25・DEV-10）。
+        let mut g = a.clone();
+        g.color.black_white.enabled = true;
+        assert_eq!(describe_change(&a, &g), HISTORY_LABEL_BLACK_WHITE);
+        assert_eq!(describe_change(&g, &a), HISTORY_LABEL_COLOR);
+        let mut h = g.clone();
+        h.color.black_white.mix.blue = -30.0;
+        assert_eq!(describe_change(&g, &h), "白黒ミキサー");
+        let mut i = a.clone();
+        i.color.mixer.orange.luminance = 20.0;
+        i.color.grading.shadows.saturation = 15.0;
+        assert_eq!(
+            describe_change(&a, &i),
+            "カラーミキサー・カラーグレーディング"
+        );
     }
 }

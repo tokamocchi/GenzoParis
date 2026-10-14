@@ -1,7 +1,9 @@
 // テスト用の Bridge（invoke・listen の記録と応答の差し替え）と、画面のテストに使う応答の見本。
 
 import type { Bridge, Unlisten } from "./bridge";
+import { HUE_BANDS } from "./types";
 import type {
+  ColorParams,
   AutoStackReport,
   BeforeInfo,
   CaptureDevice,
@@ -229,6 +231,20 @@ export const MOCK_LENS_CORRECTION_INFO: LensCorrectionInfo = {
   chromatic_aberration: true,
 };
 
+/** 色の見本（genzo-model の ColorParams::default の JSON。カラーミキサー・カラーグレーディング・白黒は何もしない）。 */
+export function mockColorParams(): ColorParams {
+  const bands = <T>(v: () => T) =>
+    Object.fromEntries(HUE_BANDS.map((b) => [b, v()])) as Record<(typeof HUE_BANDS)[number], T>;
+  const wheel = () => ({ hue: 0, saturation: 0, luminance: 0 });
+  return {
+    saturation: 0,
+    vibrance: 0,
+    mixer: bands(() => ({ hue: 0, saturation: 0, luminance: 0 })),
+    grading: { shadows: wheel(), midtones: wheel(), highlights: wheel(), global: wheel(), blending: 50, balance: 0 },
+    black_white: { enabled: false, mix: bands(() => 0) },
+  };
+}
+
 /** 現像設定の見本（genzo-model の DevelopSettings::default の JSON。スキーマ版 2・処理バージョン 2）。 */
 export function mockDevelopSettings(over: Partial<DevelopSettings> = {}): DevelopSettings {
   return {
@@ -239,6 +255,7 @@ export function mockDevelopSettings(over: Partial<DevelopSettings> = {}): Develo
     exposure_ev: 0,
     contrast: 0,
     tone: { highlights: 0, shadows: 0, whites: 0, blacks: 0 },
+    presence: { texture: 0, clarity: 0, dehaze: 0 },
     tone_curve: {
       parametric: { highlights: 0, lights: 0, darks: 0, shadows: 0 },
       luma: [],
@@ -246,7 +263,7 @@ export function mockDevelopSettings(over: Partial<DevelopSettings> = {}): Develo
       green: [],
       blue: [],
     },
-    color: { saturation: 0, vibrance: 0 },
+    color: mockColorParams(),
     geometry: { crop: { left: 0, top: 0, right: 1, bottom: 1 }, angle_deg: 0, aspect: null },
     lens: {
       profile_enabled: false,
@@ -260,8 +277,12 @@ export function mockDevelopSettings(over: Partial<DevelopSettings> = {}): Develo
       ca_blue_yellow: 0,
     },
     detail: {
-      sharpening: { amount: 0, radius: 1, detail: 0, masking: 0 },
+      sharpening: { amount: 0, radius: 1, detail: 25, masking: 0 },
       noise_reduction: { luminance: 0, luminance_detail: 50, luminance_contrast: 0, color: 0, color_detail: 50 },
+    },
+    effects: {
+      vignette: { amount: 0, midpoint: 50, roundness: 0, feather: 50, highlights: 0 },
+      grain: { amount: 0, size: 25, roughness: 50 },
     },
     masks: [],
     render_deps: { camera_profile: { id: "", sha256: "" }, lens_profile: null, raw_decoder: "" },
@@ -273,7 +294,8 @@ export function mockDevelopSettings(over: Partial<DevelopSettings> = {}): Develo
  * 設定の貼り付け（paste_settings）・処理バージョンのまとめての更新（upgrade_process_versions）の応答を足す（DEV-30・
  * DATA-09）。`versions` は写真ごとの処理バージョン（無い写真は 2）。コアと同じく、貼り付けは版を変えず
  * （process_version が "upgrade" なら貼り付け元の版まで上げる）、版 1 の写真に v1 の機能の項目（レンズ補正の
- * プロファイル・手動の歪曲・ノイズ軽減の輝度）を写したら needs_upgrade に数える。送ったコマンドは `sent` に残す。
+ * プロファイル・手動の歪曲・ノイズ軽減の輝度・白黒・カラーグレーディングのシャドウの強さ・カラーミキサーのブルーの
+ * 輝度・明瞭度・シャープの適用量・粒子の量）を写したら needs_upgrade に数える。送ったコマンドは `sent` に残す。
  */
 export function mockPasteCommands(
   b: MockBridge,
@@ -290,7 +312,15 @@ export function mockPasteCommands(
         const settings = c.settings as DevelopSettings;
         const ids = [...new Set(c.targets as number[])];
         const usesV1Features =
-          settings.lens.profile_enabled || settings.lens.distortion !== 0 || settings.detail.noise_reduction.luminance !== 0;
+          settings.lens.profile_enabled ||
+          settings.lens.distortion !== 0 ||
+          settings.detail.noise_reduction.luminance !== 0 ||
+          !!settings.color.black_white?.enabled ||
+          (settings.color.grading?.shadows.saturation ?? 0) !== 0 ||
+          (settings.color.mixer?.blue.luminance ?? 0) !== 0 ||
+          (settings.presence?.clarity ?? 0) !== 0 ||
+          (settings.detail.sharpening?.amount ?? 0) !== 0 ||
+          (settings.effects?.grain.amount ?? 0) !== 0;
         let upgraded = 0;
         let needs = 0;
         for (const id of ids) {

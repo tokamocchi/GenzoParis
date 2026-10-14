@@ -99,6 +99,9 @@ impl fmt::Debug for StageParams {
 /// `log2(max(Y, 2^−16))`（[`crate::sanitize::safe_log2`]）をぼかしたもの。露光量は使うときに EV を
 /// 足す。作り方（縮小・ぼかし）は [`crate::guide`]（[`crate::guide::compute_guide`]）を参照。
 /// キャッシュは 3 段目（キーは [`crate::guide::GuideSpec`] の doc）。
+///
+/// 処理バージョン 2 では、同じ縮小した画像から求めたかすみの推定（[`Guide::haze`]。ステージ 12 のかすみの除去が
+/// 使う）も持つ。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Guide {
     /// G 座標の画像（切り抜く前の全体）。画素 (i, j) の中心は G の
@@ -109,10 +112,12 @@ pub struct Guide {
     pub frames: CoordinateFrames,
     /// ガイドを作った処理バージョン（アルゴリズムのパラメータは版で決まる）。
     pub process_version: ProcessVersion,
+    /// かすみの推定（処理バージョン 2。[`crate::haze`]。`image` と同じ寸法・座標）。版 1 では `None`。
+    pub haze: Option<crate::haze::HazeEstimate>,
 }
 
 impl Guide {
-    /// 画像と、作ったときの座標系・処理バージョンから作る。
+    /// 画像と、作ったときの座標系・処理バージョンから作る（かすみの推定なし）。
     pub fn new(
         image: GrayImage,
         frames: CoordinateFrames,
@@ -122,7 +127,14 @@ impl Guide {
             image,
             frames,
             process_version,
+            haze: None,
         }
+    }
+
+    /// かすみの推定を付けたもの。
+    pub fn with_haze(mut self, haze: crate::haze::HazeEstimate) -> Self {
+        self.haze = Some(haze);
+        self
     }
 }
 
@@ -168,6 +180,9 @@ pub struct StageContext<'a> {
     /// `false`（設定の切り抜き）。ステージ 9・11 の [`crate::finish::geometry::GeometryPlan`] が見る
     /// （[`crate::finish::geometry`] の doc の「切り抜く前の全体の表示」）。
     pub uncropped: bool,
+    /// 写真ごとの乱数の種（ステージ 16 の粒子の模様。[`crate::finish::effects`]）。エンジンが写真の識別
+    /// （[`crate::SourceId::photo_seed`]）から入れる。既定は 0。プレビュー・等倍・書き出しで同じ値にすること。
+    pub photo_seed: u32,
 }
 
 impl<'a> StageContext<'a> {
@@ -182,7 +197,14 @@ impl<'a> StageContext<'a> {
             sensor_grid: SensorGrid::full_resolution(&frames),
             input_kind: InputKind::SceneReferred,
             uncropped: false,
+            photo_seed: 0,
         }
+    }
+
+    /// 写真ごとの乱数の種（[`StageContext::photo_seed`]）を変えたもの。
+    pub fn with_photo_seed(mut self, seed: u32) -> Self {
+        self.photo_seed = seed;
+        self
     }
 
     /// 切り抜く前の全体を出力にするか（[`StageContext::uncropped`]）を変えたもの。

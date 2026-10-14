@@ -592,6 +592,134 @@ fn lens_corrections_match_the_cpu_version() {
 }
 
 #[test]
+fn color_mixer_grading_and_black_white_match_the_cpu_version() {
+    // ステージ 13 の処理バージョン 2 の項目（カラーミキサー・カラーグレーディング・白黒。DEV-09・DEV-10・DEV-25）を
+    // 含むプレビュー（RAW・RAW 以外）と書き出し。
+    use genzo_model::{GradingWheel, HslAdjustment};
+    let g = gpu_or_skip!();
+    let engine = engine(80, 48);
+    let sources = [
+        working_source(scene_b2(150, 100), Orientation::Normal),
+        raw_source(raw_from(&camera_scene(140, 96), CfaPattern::RGGB, true)),
+    ];
+    for bw in [false, true] {
+        let mut s = rotated_strong();
+        s.color.mixer.orange = HslAdjustment {
+            hue: 30.0,
+            saturation: -40.0,
+            luminance: 40.0,
+        };
+        s.color.mixer.aqua.hue = -70.0;
+        s.color.grading.shadows = GradingWheel {
+            hue: 200.0,
+            saturation: 40.0,
+            luminance: 15.0,
+        };
+        s.color.grading.highlights = GradingWheel {
+            hue: 45.0,
+            saturation: 30.0,
+            luminance: 0.0,
+        };
+        s.color.black_white.enabled = bw;
+        s.color.black_white.mix.orange = 60.0;
+        s.color.black_white.mix.blue = -80.0;
+        for source in &sources {
+            let p = compare_preview(
+                g,
+                &engine,
+                source,
+                &s,
+                RenderQuality::Final,
+                80,
+                OutputTarget::Export(OutputColorSpace::Srgb),
+            );
+            assert!(p.active_stages.contains(&"finish.color"));
+            let export = ExportSettings::default();
+            let c = engine
+                .export(source, &s, &export, &ExportOptions::default(), &NeverCancel)
+                .unwrap();
+            let e = g
+                .export(
+                    &engine,
+                    source,
+                    &s,
+                    &export,
+                    &ExportOptions::default(),
+                    &NeverCancel,
+                )
+                .unwrap();
+            let diff = export_diff_8bit(&c.pixels, &e.pixels);
+            eprintln!("白黒 {bw}: 書き出しの 8bit 換算の差の最大 {diff:.3}");
+            assert!(diff <= FINAL_OUTPUT_MAX_DIFF_8BIT, "{diff}");
+        }
+    }
+}
+
+#[test]
+fn presence_sharpening_and_effects_match_the_cpu_version() {
+    // 処理バージョン 2 のステージ 12（テクスチャ・明瞭度・かすみの除去）・14（シャープ）・16 の効果（周辺光量・粒子）を
+    // 含むプレビュー（RAW・RAW 以外）と書き出し（タイルの余白・ガイドとかすみの推定・写真ごとの種）。
+    let g = gpu_or_skip!();
+    let engine = engine(80, 48);
+    let sources = [
+        working_source(scene_b2(150, 100), Orientation::Normal),
+        raw_source(raw_from(&camera_scene(140, 96), CfaPattern::RGGB, true)),
+    ];
+    let mut s = rotated_strong();
+    s.presence.texture = 50.0;
+    s.presence.clarity = 40.0;
+    s.presence.dehaze = 35.0;
+    s.detail.sharpening.amount = 100.0;
+    s.detail.sharpening.radius = 1.5;
+    s.detail.sharpening.masking = 25.0;
+    s.effects.vignette.amount = -50.0;
+    s.effects.vignette.midpoint = 30.0;
+    s.effects.grain.amount = 35.0;
+    s.effects.grain.size = 60.0;
+    for source in &sources {
+        let p = compare_preview(
+            g,
+            &engine,
+            source,
+            &s,
+            RenderQuality::Final,
+            80,
+            OutputTarget::Export(OutputColorSpace::Srgb),
+        );
+        for id in ["finish.texture", "finish.sharpen", "finish.effects"] {
+            assert!(p.active_stages.contains(&id), "{id}");
+        }
+        assert!(
+            p.backends
+                .iter()
+                .filter(
+                    |(id, _)| ["finish.texture", "finish.sharpen", "finish.effects"].contains(id)
+                )
+                .all(|(_, b)| *b == StageBackend::Gpu),
+            "{:?}",
+            p.backends
+        );
+        let export = ExportSettings::default();
+        let c = engine
+            .export(source, &s, &export, &ExportOptions::default(), &NeverCancel)
+            .unwrap();
+        let e = g
+            .export(
+                &engine,
+                source,
+                &s,
+                &export,
+                &ExportOptions::default(),
+                &NeverCancel,
+            )
+            .unwrap();
+        let diff = export_diff_8bit(&c.pixels, &e.pixels);
+        eprintln!("ステージ 12・14・16: 書き出しの 8bit 換算の差の最大 {diff:.3}");
+        assert!(diff <= FINAL_OUTPUT_MAX_DIFF_8BIT, "{diff}");
+    }
+}
+
+#[test]
 fn export_matches_the_cpu_version() {
     let g = gpu_or_skip!();
     let engine = engine(80, 48);

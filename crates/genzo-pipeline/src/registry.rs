@@ -125,7 +125,9 @@ impl StageRegistry {
     ///
     /// - センサーのステージ（2・3・4（ハイライト復元）・5（3 方式）・6（ノイズ軽減）・7（レンズ補正）・8）。
     ///   4・6・7 は v1 の機能で、処理バージョン 2 だけで適用する（ID は [`crate::finish::reserved`]）。
-    /// - 仕上げのステージ 9〜16（[`crate::finish::scene_stages`]。12・14 は v1 の予約で、常に飛ばす）。
+    /// - 仕上げのステージ 9〜16 と、16 の後の効果（[`crate::finish::scene_stages`]）。12（テクスチャ・明瞭度・
+    ///   かすみの除去）・14（シャープ）・16 の後の効果（切り抜き後の周辺光量補正・粒子）は v1 の機能で、処理バージョン 2
+    ///   だけで適用する（版 1 では飛ばす）。
     /// - 出力: 17a 画面（[`DisplayStage::default`]。モニターのプロファイルがない場合の sRGB の変換で、
     ///   一致テスト用）、17b 書き出し（sRGB・Display P3・Adobe RGB）とキャッシュ（Display P3）。
     ///   17c のヒストグラムは画像を出力しないので登録しない。
@@ -260,6 +262,7 @@ mod tests {
                 "finish.sharpen",
                 "finish.scene_to_display",
                 "finish.tone_curve",
+                "finish.effects",
                 "output.display",
                 "output.export.srgb",
                 "output.export.display_p3",

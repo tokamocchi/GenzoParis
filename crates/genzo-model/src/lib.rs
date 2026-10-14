@@ -33,10 +33,12 @@ pub use catalog::{
     FolderStatus, ParseEnumError, Rating, TzSource,
 };
 pub use develop::{
-    AspectRatio, ColorParams, CropRect, CurvePoint, DataRef, DetailParams, DevelopError,
-    DevelopSettings, FieldIssue, Geometry, HighlightMethod, HighlightRecovery, IssueKind,
+    AspectRatio, BlackWhite, ColorGrading, ColorMixer, ColorParams, CropRect, CurvePoint, DataRef,
+    DetailParams, DevelopError, DevelopSettings, EffectsParams, FieldIssue, Geometry, GradingWheel,
+    Grain, HighlightMethod, HighlightRecovery, HslAdjustment, HueBand, HueBands, IssueKind,
     LensCorrection, LocalAdjustment, LocalDelta, MaskShape, NoiseReduction, ParametricCurve,
-    RenderDeps, Sharpening, ToneCurve, ToneParams, ValidationError, WbPreset, WhiteBalance,
+    PostCropVignette, PresenceParams, RenderDeps, Sharpening, ToneCurve, ToneParams,
+    ValidationError, WbPreset, WhiteBalance,
 };
 pub use export::{
     ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize, OutputColorSpace,
@@ -68,7 +70,11 @@ pub use smart::{
 /// - 2（2026-10-13。DEV-14）: レンズ補正の手動の項目（`lens.distortion` など）を加えた。v1 の機能の
 ///   パッケージの間（配布の前）は、後のパッケージが足す項目も版 2 に入れる（決定事項ログ No.120）。
 ///   同日、ハイライト復元（`highlight_recovery`。DEV-06）とノイズ軽減のディテール・コントラスト（DEV-13）を
-///   加えた（決定事項ログ No.126・127）。
+///   加えた（決定事項ログ No.126・127）。2026-10-13・14 に、カラーミキサー・カラーグレーディング・白黒
+///   （`color.mixer`・`color.grading`・`color.black_white`。DEV-09・DEV-10・DEV-25）、テクスチャ・明瞭度・
+///   かすみの除去（`presence`。DEV-11）、効果（`effects`。DEV-24）を加え、シャープのディテールの既定を 0 から 25 に
+///   した（それより前の版が書いた旧既定の 0 は読み込みで読み替える。[`develop::migrate`]。決定事項ログ
+///   No.135・140・142）。
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// 処理アルゴリズムの現在のバージョン（04 の 2.5 節。IQ-08・DATA-09）。

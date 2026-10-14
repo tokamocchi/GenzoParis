@@ -124,8 +124,16 @@ fn tone_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ---------------------------------------------------------------------------
-// ステージ 13: 彩度・自然な彩度（finish::color）
+// ステージ 13: 彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒（finish::color）
+// P_COLOR_FLAGS: 1 = カラーミキサー、2 = 白黒、4 = 白黒ミキサー、8 = カラーグレーディング、16 = 彩度・自然な彩度。
+// 色相の角度・回転の sin / cos は CPU 版と同じ多項式（GPU の atan2・sin・cos の精度に左右されないため）。
 // ---------------------------------------------------------------------------
+
+const COLOR_FLAG_MIXER: u32 = 1u;
+const COLOR_FLAG_BW: u32 = 2u;
+const COLOR_FLAG_BW_MIX: u32 = 4u;
+const COLOR_FLAG_GRADING: u32 = 8u;
+const COLOR_FLAG_SAT: u32 = 16u;
 
 // ColorStageParams::chroma_gain。
 fn chroma_gain(da: f32, db: f32) -> f32 {
@@ -148,18 +156,190 @@ fn chroma_gain(da: f32, db: f32) -> f32 {
     return ks * kv;
 }
 
+// color::atan_unit（t は 0〜1）。
+fn atan_unit(t: f32) -> f32 {
+    var u = t;
+    var base = 0.0;
+    if (t > POLY_TAN_PI_12) {
+        u = (t * POLY_SQRT3 - 1.0) / (t + POLY_SQRT3);
+        base = POLY_FRAC_PI_6;
+    }
+    let u2 = u * u;
+    var q = POLY_INV9 - u2 * POLY_INV11;
+    q = u2 * q - POLY_INV7;
+    q = u2 * q + POLY_INV5;
+    q = u2 * q - POLY_INV3;
+    return base + (u + (u * u2) * q);
+}
+
+// color::hue_angle（0〜2π）。
+fn hue_angle(da: f32, db: f32) -> f32 {
+    let ax = abs(da);
+    let ay = abs(db);
+    let mx = max(ax, ay);
+    let mn = min(ax, ay);
+    if (!(mx > 0.0)) {
+        return 0.0;
+    }
+    var a = atan_unit(mn / mx);
+    if (ay > ax) {
+        a = POLY_FRAC_PI_2 - a;
+    }
+    if (da < 0.0) {
+        a = POLY_PI - a;
+    }
+    if (db < 0.0) {
+        a = POLY_TAU - a;
+    }
+    return a;
+}
+
+// color::small_sin_cos（x = sin、y = cos）。
+fn small_sin_cos(theta: f32) -> vec2<f32> {
+    let t2 = theta * theta;
+    var qs = POLY_INV362880 * t2 - POLY_INV5040;
+    qs = qs * t2 + POLY_INV120;
+    qs = qs * t2 - POLY_INV6;
+    let sn = theta + (theta * t2) * qs;
+    var qc = POLY_INV40320 * t2 - POLY_INV720;
+    qc = qc * t2 + POLY_INV24;
+    qc = qc * t2 - 0.5;
+    let cs = 1.0 + t2 * qc;
+    return vec2<f32>(sn, cs);
+}
+
+// color::chroma_ramp。
+fn chroma_ramp(c: f32) -> f32 {
+    let r = min(c * POLY_INV_CHROMA_RAMP, 1.0);
+    return r * r * (3.0 - 2.0 * r);
+}
+
+// 色相の帯（HueBandTable::locate の帯 k と、帯 k + 1 の重み s）。
+struct HueBand {
+    k: u32,
+    s: f32,
+}
+
+fn band_locate(h0: f32) -> HueBand {
+    var h = h0;
+    if (h < pf(P_HUE_C)) {
+        h = h + POLY_TAU;
+    }
+    var k = 0u;
+    for (var i = 1u; i < 8u; i = i + 1u) {
+        if (h >= pf(P_HUE_C + i)) {
+            k = i;
+        }
+    }
+    let t = clamp((h - pf(P_HUE_C + k)) * pf(P_HUE_INV + k), 0.0, 1.0);
+    return HueBand(k, t * t * (3.0 - 2.0 * t));
+}
+
+// color::band_mix（帯ごとの値はパラメータの位置 base から 8 個）。
+fn band_mix(base: u32, b: HueBand) -> f32 {
+    let a = pf(base + b.k);
+    return a + (pf(base + ((b.k + 1u) & 7u)) - a) * b.s;
+}
+
+// GradingParams::step。
+fn grading_step(t: f32) -> f32 {
+    let u = clamp((t - 0.5) * pf(P_CG_ZONE + 6u) + 0.5, 0.0, 1.0);
+    return u * u * (3.0 - 2.0 * u);
+}
+
+// GradingParams::zones（シャドウ・中間調・ハイライトの重み）。P_CG_ZONE: 中間グレーの L、0.5 / L、
+// 0.5 / (Lw − L)、x0、1 / x0、1 / (1 − x0)、なめらかさ。
+fn grading_zones(l: f32) -> vec3<f32> {
+    let pivot = pf(P_CG_ZONE);
+    var x: f32;
+    if (l <= pivot) {
+        x = l * pf(P_CG_ZONE + 1u);
+    } else {
+        x = 0.5 + (l - pivot) * pf(P_CG_ZONE + 2u);
+    }
+    x = clamp(x, 0.0, 1.0);
+    let x0 = pf(P_CG_ZONE + 3u);
+    if (x < x0) {
+        let m = grading_step(x * pf(P_CG_ZONE + 4u));
+        return vec3<f32>(1.0 - m, m, 0.0);
+    }
+    let h = grading_step((x - x0) * pf(P_CG_ZONE + 5u));
+    return vec3<f32>(0.0, 1.0 - h, h);
+}
+
 @compute @workgroup_size(8, 8)
 fn color_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!in_output(gid)) {
         return;
     }
     let lab = oklab_from_bt2020(load_global(out_global(gid)));
-    let an = lab.x * pf(P_NEUTRAL_A);
-    let bn = lab.x * pf(P_NEUTRAL_B);
-    let da = lab.y - an;
-    let db = lab.z - bn;
-    let k = chroma_gain(da, db);
-    store_out(gid, sanitize3(oklab_to_bt2020(vec3<f32>(lab.x, an + da * k, bn + db * k))));
+    let flags = pu(P_COLOR_FLAGS);
+    let na = pf(P_NEUTRAL_A);
+    let nb = pf(P_NEUTRAL_B);
+    var l = lab.x;
+    var da = lab.y - l * na;
+    var db = lab.z - l * nb;
+    if ((flags & COLOR_FLAG_BW) != 0u) {
+        if ((flags & COLOR_FLAG_BW_MIX) != 0u) {
+            let cc = sqrt(da * da + db * db);
+            if (cc > 0.0) {
+                let g = chroma_ramp(cc);
+                let band = band_locate(hue_angle(da, db));
+                let e = band_mix(P_BW_MIX, band) * g;
+                if (e != 0.0) {
+                    l = l * exp2(e);
+                }
+            }
+        }
+        da = 0.0;
+        db = 0.0;
+    } else {
+        if ((flags & COLOR_FLAG_MIXER) != 0u) {
+            let cc = sqrt(da * da + db * db);
+            if (cc > 0.0) {
+                let g = chroma_ramp(cc);
+                let band = band_locate(hue_angle(da, db));
+                let theta = band_mix(P_HSL_H, band) * g;
+                let gain = 1.0 + band_mix(P_HSL_S, band) * g;
+                let e = band_mix(P_HSL_L, band) * g;
+                if (theta != 0.0) {
+                    let sc = small_sin_cos(theta);
+                    let ra = da * sc.y - db * sc.x;
+                    let rb = da * sc.x + db * sc.y;
+                    da = ra;
+                    db = rb;
+                }
+                da = da * gain;
+                db = db * gain;
+                if (e != 0.0) {
+                    let m = exp2(e);
+                    l = l * m;
+                    da = da * m;
+                    db = db * m;
+                }
+            }
+        }
+        if ((flags & COLOR_FLAG_SAT) != 0u) {
+            let k = chroma_gain(da, db);
+            da = da * k;
+            db = db * k;
+        }
+    }
+    if ((flags & COLOR_FLAG_GRADING) != 0u) {
+        let w = grading_zones(l);
+        let ta = w.x * pf(P_CG_TINT) + w.y * pf(P_CG_TINT + 2u) + w.z * pf(P_CG_TINT + 4u) + pf(P_CG_TINT + 6u);
+        let tb = w.x * pf(P_CG_TINT + 1u) + w.y * pf(P_CG_TINT + 3u) + w.z * pf(P_CG_TINT + 5u) + pf(P_CG_TINT + 7u);
+        let e = w.x * pf(P_CG_EV) + w.y * pf(P_CG_EV + 1u) + w.z * pf(P_CG_EV + 2u) + pf(P_CG_EV + 3u);
+        da = da + l * ta;
+        db = db + l * tb;
+        if (e != 0.0) {
+            let m = exp2(e);
+            l = l * m;
+            da = da * m;
+            db = db * m;
+        }
+    }
+    store_out(gid, sanitize3(oklab_to_bt2020(vec3<f32>(l, l * na + da, l * nb + db))));
 }
 
 // ---------------------------------------------------------------------------

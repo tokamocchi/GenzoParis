@@ -1,5 +1,6 @@
 // 現像設定の組み立て（WB の選択・レンズ補正・ハイライト復元・ノイズ軽減の操作の可否・リセット。DOM を使わない純粋な
-// 計算）。
+// 計算）。色（カラーミキサー・カラーグレーディング・白黒）は colorLogic.ts、テクスチャ・明瞭度・かすみの除去・シャープ・
+// 効果は detailLogic.ts。
 
 import {
   type AsShotWhiteBalance,
@@ -14,7 +15,9 @@ import {
   type WhiteBalance,
   WB_PRESETS,
 } from "../api/types";
+import { defaultColor } from "./colorLogic";
 import { FULL_CROP } from "./cropMath";
+import { defaultEffects, defaultPresence, defaultSharpening } from "./detailLogic";
 
 /** WB の選択（撮影時の設定・プリセット・カスタム）。 */
 export type WbMode = "as_shot" | WbPreset | "custom";
@@ -237,8 +240,9 @@ export function sensorControls(
  * すべてリセット（genzo-model の DevelopSettings::default の値にする）。
  *
  * - schema_version・process_version・render_deps は今の値を保つ（コアが管理する値）。
- * - レンズ補正・ハイライト復元・ノイズ軽減は既定に戻す（画面のパネルで見える項目）。
- * - masks とシャープ（detail.sharpening）は今の値を保つ（画面にない項目を、利用者が見えないところで消さない）。
+ * - レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・色（カラーミキサー・
+ *   カラーグレーディング・白黒）は既定に戻す（画面のパネルで見える項目）。
+ * - masks は今の値を保つ（画面にない項目を、利用者が見えないところで消さない）。
  */
 export function resetAll(s: DevelopSettings): DevelopSettings {
   return {
@@ -246,9 +250,11 @@ export function resetAll(s: DevelopSettings): DevelopSettings {
     lens: defaultLens(),
     highlight_recovery: defaultHighlightRecovery(),
     detail: {
-      ...(s.detail ?? { sharpening: { amount: 0, radius: 1, detail: 0, masking: 0 } }),
+      sharpening: defaultSharpening(),
       noise_reduction: defaultNoiseReduction(),
     },
+    presence: defaultPresence(),
+    effects: defaultEffects(),
     white_balance: "as_shot",
     exposure_ev: 0,
     contrast: 0,
@@ -260,7 +266,7 @@ export function resetAll(s: DevelopSettings): DevelopSettings {
       green: [],
       blue: [],
     },
-    color: { saturation: 0, vibrance: 0 },
+    color: defaultColor(),
     geometry: defaultGeometry(),
   };
 }

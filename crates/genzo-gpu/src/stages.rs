@@ -12,9 +12,12 @@
 //! | `finish.geometry` | ステージ 9（バイキュービック。歪曲補正（処理バージョン 2）を含む） | `geometry.wgsl` |
 //! | `finish.exposure`・`finish.contrast` | ステージ 10 | `finish.wgsl` |
 //! | `finish.tone` | ステージ 11（ガイドの双線形） | `finish.wgsl` |
-//! | `finish.color` | ステージ 13（OKLab） | `finish.wgsl` |
+//! | `finish.texture` | ステージ 12（テクスチャ・明瞭度・かすみの除去。処理バージョン 2。輝度の対数・横と縦のぼかし・仕上げの 4 つのカーネル） | `detail.wgsl` |
+//! | `finish.color` | ステージ 13（OKLab。彩度・自然な彩度と、処理バージョン 2 のカラーミキサー・カラーグレーディング・白黒） | `finish.wgsl` |
+//! | `finish.sharpen` | ステージ 14（シャープ。処理バージョン 2。輝度の対数・横と縦のぼかし・仕上げの 4 つのカーネル） | `detail.wgsl` |
 //! | `finish.scene_to_display` | ステージ 15（1D LUT） | `finish.wgsl` |
 //! | `finish.tone_curve` | ステージ 16（1D LUT） | `finish.wgsl` |
+//! | `finish.effects` | ステージ 16 の効果（切り抜き後の周辺光量補正・粒子。処理バージョン 2） | `detail.wgsl` |
 //! | `output.display` | ステージ 17a（3D LUT の四面体補間） | `output.wgsl` |
 //! | `output.export.*`・`output.cache.display_p3` | ステージ 17b | `output.wgsl` |
 //! | `sensor.normalize`・`sensor.white_balance`・`sensor.demosaic.half2x2` | ステージ 2・3・5（簡易） | `sensor.wgsl` |
@@ -23,23 +26,25 @@
 //! | `sensor.lens_correction` | ステージ 7（周辺減光・倍率色収差。処理バージョン 2） | `geometry.wgsl`（`lens_main`） |
 //! | `sensor.color_matrix` | ステージ 8 | `resample.wgsl` |
 //!
-//! GPU 版がないステージ（`finish.texture`・`finish.sharpen`（v1 の予約）、`sensor.demosaic.rcd`・
-//! `sensor.demosaic.bilinear`）は CPU 版で処理する。17c のヒストグラム・量子化は画像を出力するステージで
+//! GPU 版がないステージ（`sensor.demosaic.rcd`・`sensor.demosaic.bilinear`）は CPU 版で処理する。17c のヒストグラム・量子化は画像を出力するステージで
 //! はないので、[`crate::GpuRenderer::histogram`]・[`crate::GpuRenderer::quantize_u8`] で実行する。
 
 use std::any::Any;
 use std::sync::Arc;
 
 use genzo_color::{DisplayGamut, Mat3F32, RgbColorSpace, TransferFunction};
+use genzo_pipeline::finish::effects::EffectsStageParams;
 use genzo_pipeline::finish::exposure::{ContrastParams, ExposureParams};
 use genzo_pipeline::finish::geometry::GeometryPlan;
 use genzo_pipeline::finish::output::{DisplayTransform, ExportTransform};
+use genzo_pipeline::finish::presence::PresenceStageParams;
 use genzo_pipeline::finish::scene_to_display::SceneToDisplayParams;
+use genzo_pipeline::finish::sharpen::SharpenStageParams;
 use genzo_pipeline::finish::tone::ToneStageParams;
 use genzo_pipeline::finish::tone_curve::ToneCurveParams;
 use genzo_pipeline::finish::{
-    ColorStage, ContrastStage, DisplayStage, ExportStage, ExposureStage, GeometryStage,
-    SceneToDisplayStage, ToneCurveStage, ToneStage,
+    ColorStage, ContrastStage, DisplayStage, EffectsStage, ExportStage, ExposureStage,
+    GeometryStage, SceneToDisplayStage, SharpenStage, TextureStage, ToneCurveStage, ToneStage,
 };
 use genzo_pipeline::guide::checked_guide;
 use genzo_pipeline::interp::Lut1d;
@@ -65,12 +70,18 @@ pub enum GpuStageKind {
     Contrast,
     /// ステージ 11: トーン。
     Tone,
-    /// ステージ 13: 彩度・自然な彩度。
+    /// ステージ 12: テクスチャ・明瞭度・かすみの除去。
+    Texture,
+    /// ステージ 13: 彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒。
     Color,
+    /// ステージ 14: シャープ。
+    Sharpen,
     /// ステージ 15: シーン → ディスプレイ。
     SceneToDisplay,
     /// ステージ 16: トーンカーブ。
     ToneCurve,
+    /// ステージ 16 の効果（切り抜き後の周辺光量補正・粒子）。
+    Effects,
     /// ステージ 17a: 画面。
     Display,
     /// ステージ 17b: 書き出し・キャッシュ。
@@ -162,9 +173,12 @@ impl GpuStageRegistry {
             GpuStageEntry::new(ExposureStage::ID, K::Exposure),
             GpuStageEntry::new(ContrastStage::ID, K::Contrast),
             GpuStageEntry::new(ToneStage::ID, K::Tone),
+            GpuStageEntry::new(TextureStage::ID, K::Texture),
             GpuStageEntry::new(ColorStage::ID, K::Color),
+            GpuStageEntry::new(SharpenStage::ID, K::Sharpen),
             GpuStageEntry::new(SceneToDisplayStage::ID, K::SceneToDisplay),
             GpuStageEntry::new(ToneCurveStage::ID, K::ToneCurve),
+            GpuStageEntry::new(EffectsStage::ID, K::Effects),
             GpuStageEntry::new(DisplayStage::ID, K::Display),
         ];
         for s in ExportStage::ALL {
@@ -257,6 +271,19 @@ pub(crate) struct Prepared {
     pub(crate) params: Vec<u32>,
     /// 補助の入力（binding 4）のバイト列。
     pub(crate) aux: Option<Arc<Vec<u8>>>,
+    /// 仕上げのカーネルの前に、輝度の対数の面をぼかす（ステージ 12・14。結果の面を binding 5 で渡す）。
+    pub(crate) blur: Option<BlurPrep>,
+}
+
+/// ステージ 12・14 の前処理のぼかし（genzo-pipeline の `finish::frequency`。輝度の対数の面 → 横 → 縦）。
+#[derive(Debug, Clone)]
+pub(crate) struct BlurPrep {
+    /// ぼかしの半径（画素）。
+    pub(crate) radius: u32,
+    /// 重み（f32 のバイト列。`2 · radius + 1` 個）。
+    pub(crate) weights: Arc<Vec<u8>>,
+    /// ぼかした面の範囲（仕上げのカーネルが読む範囲）。
+    pub(crate) plane: Roi,
 }
 
 fn unsupported(stage: &'static str, reason: impl Into<String>) -> GpuError {
@@ -292,6 +319,7 @@ pub(crate) fn prepare_rgb(
     match ctx.process_version {
         ProcessVersion::V1 | ProcessVersion::V2 => {}
     }
+    let mut blur = None;
     let (kernel, p, aux) = match kind {
         GpuStageKind::Geometry => {
             let plan = params.expect::<GeometryPlan>(id)?;
@@ -367,15 +395,42 @@ pub(crate) fn prepare_rgb(
         }
         GpuStageKind::Color => {
             let c = params.expect::<genzo_pipeline::finish::color::ColorStageParams>(id)?;
-            let mut p = Params::new(Kernel::Color, input, output);
-            p.f32("SAT", c.saturation)
-                .f32("VIB", c.vibrance)
-                .f32("SKIN_COS", c.skin_cos)
-                .f32("SKIN_SIN", c.skin_sin)
-                .f32("SKIN_COS_W", c.skin_cos_width)
-                .f32("NEUTRAL_A", c.neutral.0)
-                .f32("NEUTRAL_B", c.neutral.1);
-            (Kernel::Color, p, None)
+            (Kernel::Color, color_params(c, input, output), None)
+        }
+        GpuStageKind::Texture => {
+            let t = params.expect::<PresenceStageParams>(id)?;
+            let (p, aux) = presence_params(t, ctx, id, input, output)?;
+            if let Some(k) = &t.kernel {
+                blur = Some(BlurPrep {
+                    radius: k.radius,
+                    weights: f32_bytes(&k.weights),
+                    plane: output,
+                });
+            }
+            (Kernel::Presence, p, Some(aux))
+        }
+        GpuStageKind::Sharpen => {
+            let sp = params.expect::<SharpenStageParams>(id)?;
+            let plane = output.expand(1);
+            let mut p = Params::new(Kernel::Sharpen, input, output);
+            p.f32("SH_AMOUNT", sp.amount)
+                .f32("SH_THRESHOLD", sp.threshold)
+                .f32("SH_LIMIT", sp.limit)
+                .f32("SH_MASK", sp.mask_edge)
+                .f32("SH_GSCALE", sp.gradient_scale)
+                .i32("PLANE_X", plane.x)
+                .i32("PLANE_Y", plane.y)
+                .u32("PLANE_W", plane.width);
+            blur = Some(BlurPrep {
+                radius: sp.kernel.radius,
+                weights: f32_bytes(&sp.kernel.weights),
+                plane,
+            });
+            (Kernel::Sharpen, p, None)
+        }
+        GpuStageKind::Effects => {
+            let e = params.expect::<EffectsStageParams>(id)?;
+            (Kernel::Effects, effects_params(e, input, output), None)
         }
         GpuStageKind::SceneToDisplay => {
             let s = params.expect::<SceneToDisplayParams>(id)?;
@@ -443,11 +498,206 @@ pub(crate) fn prepare_rgb(
         kernel,
         params: p.finish()?,
         aux,
+        blur,
     })
+}
+
+/// ステージ 12 のパラメータと補助の入力（ガイドと、その後ろのかすみの暗いチャンネル。`detail.wgsl` の
+/// `presence_main`）。ガイドを使わないときの補助の入力は小さな空の表。
+fn presence_params(
+    t: &PresenceStageParams,
+    ctx: &StageContext<'_>,
+    id: &'static str,
+    input: Roi,
+    output: Roi,
+) -> Result<(Params, Arc<Vec<u8>>)> {
+    let mut flags = 0u32;
+    if t.kernel.is_some() {
+        flags |= 1;
+    }
+    if t.texture != 0.0 {
+        flags |= 2;
+    }
+    if t.clarity != 0.0 {
+        flags |= 4;
+    }
+    let mut values: Vec<f32> = Vec::new();
+    let (mut gw, mut gh, mut haze_off) = (1u32, 1u32, 0u32);
+    if t.uses_guide {
+        flags |= 16;
+        let guide = checked_guide(ctx, id)?;
+        gw = guide.image.width();
+        gh = guide.image.height();
+        values.extend_from_slice(guide.image.data());
+        if t.dehaze != 0.0 {
+            flags |= 8;
+            let haze = guide.haze.as_ref().ok_or_else(|| {
+                GpuError::from(genzo_pipeline::PipelineError::GuideMismatch {
+                    stage: id,
+                    reason: "ガイドにかすみの推定がない",
+                })
+            })?;
+            haze_off = values.len() as u32;
+            values.extend_from_slice(haze.dark.data());
+        }
+    } else if t.dehaze != 0.0 {
+        return Err(GpuError::Internal(
+            "かすみの除去はガイドを使う（uses_guide が偽）".to_owned(),
+        ));
+    }
+    if values.is_empty() {
+        values.extend_from_slice(&[0.0, 0.0]);
+    }
+    let tone = &t.tone;
+    let mut p = Params::new(Kernel::Presence, input, output);
+    p.u32("PR_FLAGS", flags)
+        .f32("PR_TEX", t.texture)
+        .f32("PR_CLA", t.clarity)
+        .f32("PR_DEHAZE", t.dehaze)
+        .f32s("PR_AIR", &t.airlight)
+        .u32("HAZE_OFF", haze_off)
+        .i32("PLANE_X", output.x)
+        .i32("PLANE_Y", output.y)
+        .u32("PLANE_W", output.width)
+        .f32("TONE_H", tone.highlights)
+        .f32("TONE_S", tone.shadows)
+        .f32("TONE_W", tone.whites)
+        .f32("TONE_B", tone.blacks)
+        .f32("TONE_EV", tone.ev)
+        .f32("GAMMA", tone.contrast.gamma)
+        .i32("GUIDE_OX", to_i32(id, tone.lookup.origin.0)?)
+        .i32("GUIDE_OY", to_i32(id, tone.lookup.origin.1)?)
+        .f32("GUIDE_SX", tone.lookup.scale.0)
+        .f32("GUIDE_SY", tone.lookup.scale.1)
+        .u32("GUIDE_W", gw)
+        .u32("GUIDE_H", gh);
+    Ok((p, f32_bytes(&values)))
+}
+
+/// ステージ 16 の効果のパラメータ（`detail.wgsl` の `effects_main`。使わない部分は 0 を入れ、`FX_FLAGS` で飛ばす）。
+fn effects_params(e: &EffectsStageParams, input: Roi, output: Roi) -> Params {
+    let mut flags = 0u32;
+    let mut p = Params::new(Kernel::Effects, input, output);
+    match &e.vignette {
+        Some(v) => {
+            flags |= 1;
+            p.f32s("VG_CENTER", &v.center)
+                .f32s("VG_INV", &v.inv_axes)
+                .f32("VG_EXP", v.exponent)
+                .f32("VG_INV_CORNER", v.inv_corner)
+                .f32s("VG_EDGE", &v.edge)
+                .f32("VG_AMOUNT", v.amount)
+                .f32("VG_HL", v.highlights);
+        }
+        None => {
+            p.f32s("VG_CENTER", &[0.0; 2])
+                .f32s("VG_INV", &[0.0; 2])
+                .f32("VG_EXP", 2.0)
+                .f32("VG_INV_CORNER", 0.0)
+                .f32s("VG_EDGE", &[0.0, 1.0])
+                .f32("VG_AMOUNT", 0.0)
+                .f32("VG_HL", 0.0);
+        }
+    }
+    match &e.grain {
+        Some(g) => {
+            flags |= 2;
+            p.u32("GR_SEED", g.seed)
+                .i32s("GR_ORIGIN", &g.origin)
+                .f32s("GR_INV_DENSITY", &g.inv_density)
+                .f32s("GR_INV_CELL", &g.inv_cell)
+                .f32s("GR_W", &g.weights)
+                .f32("GR_STRENGTH", g.strength);
+        }
+        None => {
+            p.u32("GR_SEED", 0)
+                .i32s("GR_ORIGIN", &[0; 2])
+                .f32s("GR_INV_DENSITY", &[1.0; 2])
+                .f32s("GR_INV_CELL", &[1.0; 2])
+                .f32s("GR_W", &[0.0; 2])
+                .f32("GR_STRENGTH", 0.0);
+        }
+    }
+    p.u32("GR_SALT", genzo_pipeline::finish::effects::GRAIN_SALT)
+        .u32("FX_FLAGS", flags);
+    p
 }
 
 /// カーネル・パラメータ・補助の入力の組。
 type KernelSetup = (Kernel, Params, Option<Arc<Vec<u8>>>);
+
+/// ステージ 13 のパラメータ（`finish.wgsl` の `color_main`。使わない部分は 0 を入れ、`COLOR_FLAGS` で飛ばす）。
+fn color_params(
+    c: &genzo_pipeline::finish::color::ColorStageParams,
+    input: Roi,
+    output: Roi,
+) -> Params {
+    let mut flags = 0u32;
+    let mut p = Params::new(Kernel::Color, input, output);
+    p.f32("SAT", c.saturation)
+        .f32("VIB", c.vibrance)
+        .f32("SKIN_COS", c.skin_cos)
+        .f32("SKIN_SIN", c.skin_sin)
+        .f32("SKIN_COS_W", c.skin_cos_width)
+        .f32("NEUTRAL_A", c.neutral.0)
+        .f32("NEUTRAL_B", c.neutral.1)
+        .f32s("HUE_C", &c.bands.centers)
+        .f32s("HUE_INV", &c.bands.inv_widths);
+    match &c.mixer {
+        Some(m) => {
+            flags |= 1;
+            p.f32s("HSL_H", &m.hue)
+                .f32s("HSL_S", &m.saturation)
+                .f32s("HSL_L", &m.luminance);
+        }
+        None => {
+            p.f32s("HSL_H", &[0.0; 8])
+                .f32s("HSL_S", &[0.0; 8])
+                .f32s("HSL_L", &[0.0; 8]);
+        }
+    }
+    match &c.black_white {
+        Some(bw) => {
+            flags |= 2;
+            if bw.active {
+                flags |= 4;
+            }
+            p.f32s("BW_MIX", &bw.mix);
+        }
+        None => {
+            p.f32s("BW_MIX", &[0.0; 8]);
+        }
+    }
+    match &c.grading {
+        Some(g) => {
+            flags |= 8;
+            p.f32s("CG_TINT", g.tint.as_flattened())
+                .f32s("CG_EV", &g.ev)
+                .f32s(
+                    "CG_ZONE",
+                    &[
+                        g.pivot,
+                        g.inv_lower,
+                        g.inv_upper,
+                        g.x0,
+                        g.inv_x0,
+                        g.inv_x1,
+                        g.sharpness,
+                    ],
+                );
+        }
+        None => {
+            p.f32s("CG_TINT", &[0.0; 8])
+                .f32s("CG_EV", &[0.0; 4])
+                .f32s("CG_ZONE", &[0.0; 7]);
+        }
+    }
+    if c.saturation != 0.0 || c.vibrance != 0.0 {
+        flags |= 16;
+    }
+    p.u32("COLOR_FLAGS", flags);
+    p
+}
 
 /// ステージ 15 のパラメータ（RAW は輝度のカーブの表を aux の表 0 に入れる。RAW 以外は表なし）。
 fn prepare_scene_to_display(s: &SceneToDisplayParams, input: Roi, output: Roi) -> KernelSetup {
@@ -566,9 +816,12 @@ mod tests {
             "finish.exposure",
             "finish.contrast",
             "finish.tone",
+            "finish.texture",
             "finish.color",
+            "finish.sharpen",
             "finish.scene_to_display",
             "finish.tone_curve",
+            "finish.effects",
             "output.display",
             "output.export.srgb",
             "output.export.display_p3",
@@ -582,12 +835,7 @@ mod tests {
             assert!(c.with_gpu.contains(&id), "{id}");
         }
         // GPU 版のないステージは CPU 版。
-        for id in [
-            "finish.texture",
-            "finish.sharpen",
-            "sensor.demosaic.rcd",
-            "sensor.demosaic.bilinear",
-        ] {
+        for id in ["sensor.demosaic.rcd", "sensor.demosaic.bilinear"] {
             assert!(c.cpu_only.contains(&id), "{id}");
         }
         // 登録したすべての ID がパイプラインに存在する（綴りの誤りがない）。

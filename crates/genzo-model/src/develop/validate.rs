@@ -9,10 +9,11 @@ use std::fmt;
 
 use super::DevelopSettings;
 use super::params::{
-    AspectRatio, ColorParams, CropRect, CurvePoint, DataRef, DetailParams, Geometry,
-    HighlightRecovery, LensCorrection, LocalAdjustment, LocalDelta, MAX_ASPECT_TERM,
-    MAX_CURVE_POINTS, MAX_MASKS, MIN_CROP_SIZE, MaskShape, NoiseReduction, ParametricCurve,
-    RenderDeps, ToneCurve, ToneParams, ValueRange, WhiteBalance, ranges,
+    AspectRatio, BlackWhite, ColorGrading, ColorMixer, ColorParams, CropRect, CurvePoint, DataRef,
+    DetailParams, EffectsParams, Geometry, GradingWheel, Grain, HighlightRecovery, HueBand,
+    LensCorrection, LocalAdjustment, LocalDelta, MAX_ASPECT_TERM, MAX_CURVE_POINTS, MAX_MASKS,
+    MIN_CROP_SIZE, MaskShape, NoiseReduction, ParametricCurve, PostCropVignette, PresenceParams,
+    RenderDeps, Sharpening, ToneCurve, ToneParams, ValueRange, WhiteBalance, ranges,
 };
 use crate::{CURRENT_PROCESS_VERSION, CURRENT_SCHEMA_VERSION};
 
@@ -163,11 +164,13 @@ impl DevelopSettings {
         c.range("exposure_ev", self.exposure_ev, ranges::EXPOSURE_EV);
         c.range("contrast", self.contrast, ranges::SLIDER);
         self.tone.check(&mut c);
+        self.presence.check(&mut c);
         self.tone_curve.check(&mut c);
         self.color.check(&mut c);
         self.geometry.check(&mut c);
         self.lens.check(&mut c);
         self.detail.check(&mut c);
+        self.effects.check(&mut c);
         if self.masks.len() > MAX_MASKS {
             c.invalid(
                 "masks",
@@ -214,11 +217,13 @@ impl DevelopSettings {
         clamp0(&mut s.exposure_ev, ranges::EXPOSURE_EV);
         clamp0(&mut s.contrast, ranges::SLIDER);
         s.tone.normalize();
+        s.presence.normalize();
         s.tone_curve.normalize();
         s.color.normalize();
         s.geometry.normalize();
         s.lens.normalize();
         s.detail.normalize();
+        s.effects.normalize();
         s.masks.truncate(MAX_MASKS);
         for m in &mut s.masks {
             m.normalize();
@@ -270,6 +275,20 @@ impl ToneParams {
             &mut self.whites,
             &mut self.blacks,
         ] {
+            clamp0(v, ranges::SLIDER);
+        }
+    }
+}
+
+impl PresenceParams {
+    fn check(&self, c: &mut Checker) {
+        c.range("presence.texture", self.texture, ranges::SLIDER);
+        c.range("presence.clarity", self.clarity, ranges::SLIDER);
+        c.range("presence.dehaze", self.dehaze, ranges::SLIDER);
+    }
+
+    fn normalize(&mut self) {
+        for v in [&mut self.texture, &mut self.clarity, &mut self.dehaze] {
             clamp0(v, ranges::SLIDER);
         }
     }
@@ -369,11 +388,102 @@ impl ColorParams {
     fn check(&self, c: &mut Checker) {
         c.range("color.saturation", self.saturation, ranges::SLIDER);
         c.range("color.vibrance", self.vibrance, ranges::SLIDER);
+        self.mixer.check(c);
+        self.grading.check(c);
+        self.black_white.check(c);
     }
 
     fn normalize(&mut self) {
         clamp0(&mut self.saturation, ranges::SLIDER);
         clamp0(&mut self.vibrance, ranges::SLIDER);
+        self.mixer.normalize();
+        self.grading.normalize();
+        self.black_white.normalize();
+    }
+}
+
+impl ColorMixer {
+    fn check(&self, c: &mut Checker) {
+        for band in HueBand::ALL {
+            let a = self.get(band);
+            let p = format!("color.mixer.{}", band.key());
+            c.range(format!("{p}.hue"), a.hue, ranges::SLIDER);
+            c.range(format!("{p}.saturation"), a.saturation, ranges::SLIDER);
+            c.range(format!("{p}.luminance"), a.luminance, ranges::SLIDER);
+        }
+    }
+
+    fn normalize(&mut self) {
+        for band in HueBand::ALL {
+            let a = self.get_mut(band);
+            clamp0(&mut a.hue, ranges::SLIDER);
+            clamp0(&mut a.saturation, ranges::SLIDER);
+            clamp0(&mut a.luminance, ranges::SLIDER);
+        }
+    }
+}
+
+impl GradingWheel {
+    fn check(&self, path: &str, c: &mut Checker) {
+        c.range(format!("{path}.hue"), self.hue, ranges::HUE_DEG);
+        c.range(
+            format!("{path}.saturation"),
+            self.saturation,
+            ranges::AMOUNT_0_100,
+        );
+        c.range(format!("{path}.luminance"), self.luminance, ranges::SLIDER);
+    }
+
+    fn normalize(&mut self) {
+        clamp0(&mut self.hue, ranges::HUE_DEG);
+        clamp0(&mut self.saturation, ranges::AMOUNT_0_100);
+        clamp0(&mut self.luminance, ranges::SLIDER);
+    }
+}
+
+impl ColorGrading {
+    fn check(&self, c: &mut Checker) {
+        self.shadows.check("color.grading.shadows", c);
+        self.midtones.check("color.grading.midtones", c);
+        self.highlights.check("color.grading.highlights", c);
+        self.global.check("color.grading.global", c);
+        c.range(
+            "color.grading.blending",
+            self.blending,
+            ranges::AMOUNT_0_100,
+        );
+        c.range("color.grading.balance", self.balance, ranges::SLIDER);
+    }
+
+    fn normalize(&mut self) {
+        for w in [
+            &mut self.shadows,
+            &mut self.midtones,
+            &mut self.highlights,
+            &mut self.global,
+        ] {
+            w.normalize();
+        }
+        self.blending = ranges::AMOUNT_0_100.clamp_or(self.blending, Self::DEFAULT_BLENDING);
+        clamp0(&mut self.balance, ranges::SLIDER);
+    }
+}
+
+impl BlackWhite {
+    fn check(&self, c: &mut Checker) {
+        for band in HueBand::ALL {
+            c.range(
+                format!("color.black_white.mix.{}", band.key()),
+                self.mix.get(band),
+                ranges::SLIDER,
+            );
+        }
+    }
+
+    fn normalize(&mut self) {
+        for band in HueBand::ALL {
+            clamp0(self.mix.get_mut(band), ranges::SLIDER);
+        }
     }
 }
 
@@ -524,10 +634,47 @@ impl DetailParams {
     fn normalize(&mut self) {
         let s = &mut self.sharpening;
         clamp0(&mut s.amount, ranges::SHARPEN_AMOUNT);
-        s.radius = ranges::SHARPEN_RADIUS.clamp_or(s.radius, 1.0);
-        clamp0(&mut s.detail, ranges::AMOUNT_0_100);
+        s.radius = ranges::SHARPEN_RADIUS.clamp_or(s.radius, Sharpening::DEFAULT_RADIUS);
+        s.detail = ranges::AMOUNT_0_100.clamp_or(s.detail, Sharpening::DEFAULT_DETAIL);
         clamp0(&mut s.masking, ranges::AMOUNT_0_100);
         self.noise_reduction.normalize();
+    }
+}
+
+impl EffectsParams {
+    fn check(&self, c: &mut Checker) {
+        let v = &self.vignette;
+        c.range("effects.vignette.amount", v.amount, ranges::SLIDER);
+        c.range(
+            "effects.vignette.midpoint",
+            v.midpoint,
+            ranges::AMOUNT_0_100,
+        );
+        c.range("effects.vignette.roundness", v.roundness, ranges::SLIDER);
+        c.range("effects.vignette.feather", v.feather, ranges::AMOUNT_0_100);
+        c.range(
+            "effects.vignette.highlights",
+            v.highlights,
+            ranges::AMOUNT_0_100,
+        );
+        let g = &self.grain;
+        c.range("effects.grain.amount", g.amount, ranges::AMOUNT_0_100);
+        c.range("effects.grain.size", g.size, ranges::AMOUNT_0_100);
+        c.range("effects.grain.roughness", g.roughness, ranges::AMOUNT_0_100);
+    }
+
+    fn normalize(&mut self) {
+        let r = ranges::AMOUNT_0_100;
+        let v = &mut self.vignette;
+        clamp0(&mut v.amount, ranges::SLIDER);
+        v.midpoint = r.clamp_or(v.midpoint, PostCropVignette::DEFAULT_MIDPOINT);
+        clamp0(&mut v.roundness, ranges::SLIDER);
+        v.feather = r.clamp_or(v.feather, PostCropVignette::DEFAULT_FEATHER);
+        clamp0(&mut v.highlights, r);
+        let g = &mut self.grain;
+        clamp0(&mut g.amount, r);
+        g.size = r.clamp_or(g.size, Grain::DEFAULT_SIZE);
+        g.roughness = r.clamp_or(g.roughness, Grain::DEFAULT_ROUGHNESS);
     }
 }
 

@@ -1,5 +1,5 @@
-//! `genzo` の結合テスト（実際の実行ファイルを `env!("CARGO_BIN_EXE_genzo")` で動かす。ORG-05・MAINT-01、
-//! 05 の 2.4 節「回帰テストと CLI が CI で動く」）。
+//! `genzo` の結合テスト（実際の実行ファイルを `env!("CARGO_BIN_EXE_genzo")`（Unix ではその実体。
+//! [`resolve_genzo`]）で動かす。ORG-05・MAINT-01、05 の 2.4 節「回帰テストと CLI が CI で動く」）。
 //!
 //! - 合成の画像（JPEG・PNG・TIFF）、ffmpeg があれば動画、LibRaw が有効な build なら合成 DNG のフォルダで、
 //!   init → import → search → rate → search --min-rating → develop set → export（ICC と GPS の有無）→
@@ -13,12 +13,293 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use genzo_media::{ExifData, FfmpegTools, RgbImage8};
 use genzo_model::{GpsCoord, OutputColorSpace};
 use serde_json::Value;
 
 const GENZO: &str = env!("CARGO_BIN_EXE_genzo");
+
+/// テストで動かす `genzo` の実行ファイル（[`resolve_genzo`]。テストのプロセスで最初に使うときに 1 回だけ
+/// 決める）。
+fn genzo_exe() -> &'static Path {
+    static EXE: OnceLock<PathBuf> = OnceLock::new();
+    EXE.get_or_init(resolve_genzo)
+}
+
+/// `genzo` を起動する [`Command`]（実行ファイルは [`genzo_exe`]）。Unix ではプログラムの名前（`argv[0]`）を
+/// `genzo` にする（clap の使い方・版の表示はこの名前を使う。実体の名前 `genzo-<ハッシュ>` を出さない）。
+fn genzo_command() -> Command {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut cmd = Command::new(genzo_exe());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.arg0("genzo");
+    }
+    cmd
+}
+
+/// テストで動かす `genzo` の実行ファイルを決める。
+///
+/// cargo の作る [`GENZO`]（`target/debug/genzo`）は、実体（`target/debug/deps/genzo-<ハッシュ>`。ハッシュは
+/// 機能フラグなどで決まる）へのハードリンク（作れなければコピー）で、`target/` を共有する別の cargo が機能
+/// フラグの違う build（LibRaw の有無が違うもの）で差し替えることがある（テストの前にも途中にも。検証の
+/// ラウンドで実際に起きた）。実体はハッシュが違うので差し替わらない。そこで Unix では、LibRaw の有無
+/// （[`binary_has_libraw`]）がテストの build と同じ実体を、
+///
+/// 1. [`GENZO`] と同じファイル（デバイスと i ノードが同じ）の実体
+/// 2. ほかの実体（更新の新しい順。テストの前に [`GENZO`] が差し替わっていたとき）
+///
+/// の順に探して使う（テストの途中で [`GENZO`] が差し替わっても影響しない。ワーカーも本体の実行ファイル
+/// 自身なので同じ実体が動く）。見つからなければ [`GENZO`] を使う（食い違いは [`genzo_with`] などが原因を
+/// 示して止める）。Windows では [`GENZO`] をそのまま使う（`argv[0]` を変えられないため）。
+fn resolve_genzo() -> PathBuf {
+    let built = PathBuf::from(GENZO);
+    #[cfg(unix)]
+    if let Some(found) = matching_deps_binary(&built) {
+        return found;
+    }
+    built
+}
+
+/// [`resolve_genzo`] の Unix の部分: LibRaw の有無がテストの build と同じ実体。
+#[cfg(unix)]
+fn matching_deps_binary(built: &Path) -> Option<PathBuf> {
+    let want = genzo_raw::LIBRAW_ENABLED;
+    let found = pick_matching(deps_candidates(built)?, want, binary_has_libraw)?;
+    if !found.same {
+        eprintln!(
+            "{} の LibRaw の有無がテストの build（{want}）と違う（target/ を共有する別の cargo が差し替えたと\
+             みられる）。代わりに、LibRaw の有無が同じ実体 {} を使う",
+            built.display(),
+            found.path.display()
+        );
+    }
+    Some(found.path)
+}
+
+/// [`resolve_genzo`] の候補の実行ファイル。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Candidate {
+    /// `GENZO` と同じファイルか（`GENZO` そのものを含む）。
+    same: bool,
+    /// 更新日時。
+    modified: std::time::SystemTime,
+    path: PathBuf,
+}
+
+/// `built`（`target/debug/genzo`）の隣の `deps` にある `genzo` の実体（[`is_genzo_deps_binary`]）。`built` と
+/// 同じファイル（デバイスと i ノードが同じ）に `same` を付ける。どれも同じでなければ（cargo がハードリンク
+/// でなくコピーした）、`built` そのものを `same` として加える。`deps` を読めなければ `None`。
+#[cfg(unix)]
+fn deps_candidates(built: &Path) -> Option<Vec<Candidate>> {
+    use std::os::unix::fs::MetadataExt;
+    let built_id = std::fs::metadata(built).ok().map(|m| (m.dev(), m.ino()));
+    let mut found: Vec<Candidate> = std::fs::read_dir(built.parent()?.join("deps"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| is_genzo_deps_binary(&e.file_name().to_string_lossy()))
+        .filter_map(|e| {
+            let m = e.metadata().ok().filter(std::fs::Metadata::is_file)?;
+            Some(Candidate {
+                same: built_id == Some((m.dev(), m.ino())),
+                modified: m.modified().ok()?,
+                path: e.path(),
+            })
+        })
+        .collect();
+    if !found.iter().any(|c| c.same) {
+        found.push(Candidate {
+            same: true,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            path: built.to_path_buf(),
+        });
+    }
+    Some(found)
+}
+
+/// 候補を `GENZO` と同じものを先に、ほかは更新の新しい順に並べ、LibRaw の有無（`probe`。起動できなければ
+/// `None`）が `want` の最初のもの。調べるのは [`MAX_PROBES`] 個まで（1 つにつきワーカーを 1 回起動する）。
+fn pick_matching(
+    mut candidates: Vec<Candidate>,
+    want: bool,
+    mut probe: impl FnMut(&Path) -> Option<bool>,
+) -> Option<Candidate> {
+    candidates.sort_by(|a, b| {
+        b.same
+            .cmp(&a.same)
+            .then_with(|| b.modified.cmp(&a.modified))
+    });
+    candidates
+        .into_iter()
+        .take(MAX_PROBES)
+        .find(|c| probe(&c.path) == Some(want))
+}
+
+/// [`pick_matching`] で調べる候補の数の上限。
+const MAX_PROBES: usize = 6;
+
+/// cargo の実体の `genzo` の名前（`genzo-<16 桁の 16 進>`。Windows は `.exe` 付き）か（`.d`・`.pdb` などは
+/// 除く）。
+fn is_genzo_deps_binary(name: &str) -> bool {
+    name.strip_suffix(std::env::consts::EXE_SUFFIX)
+        .and_then(|n| n.strip_prefix("genzo-"))
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// 実行ファイルの `genzo` をワーカーとして起動し（`genzo __worker`）、LibRaw の有無を尋ねる（ping の応答の
+/// `raw_decoder`。`genzo bench` の入力の選び方と同じ）。起動・握手できなければ `None`。
+fn binary_has_libraw(exe: &Path) -> Option<bool> {
+    let mut client = genzo_worker::WorkerClient::spawn(genzo_worker::WorkerConfig {
+        executable: Some(exe.to_path_buf()),
+        args: vec![genzo_worker::WORKER_SUBCOMMAND.into()],
+        ..genzo_worker::WorkerConfig::default()
+    })
+    .ok()?;
+    let has = client.ping().ok().map(|p| p.raw_decoder.is_some());
+    let _ = client.shutdown();
+    has
+}
+
+#[test]
+fn deps_binaries_of_genzo_are_recognized_by_name() {
+    let exe = std::env::consts::EXE_SUFFIX;
+    assert!(is_genzo_deps_binary(&format!(
+        "genzo-37ef6aeb00bf8433{exe}"
+    )));
+    for name in [
+        "genzo".to_owned(),
+        format!("genzo{exe}"),
+        "genzo-37ef6aeb00bf8433.d".to_owned(),
+        "genzo-37ef6aeb00bf8433.pdb".to_owned(),
+        format!("genzo-37ef6aeb00bf843{exe}"),
+        format!("genzo-37ef6aeb00bf843z{exe}"),
+        format!("genzo_worker-37ef6aeb00bf8433{exe}"),
+        format!("genzo-api-worker-37ef6aeb00bf8433{exe}"),
+        "libgenzo_cli-37ef6aeb00bf8433.rlib".to_owned(),
+    ] {
+        assert!(!is_genzo_deps_binary(&name), "{name}");
+    }
+}
+
+/// テストで動かす `genzo`（[`genzo_exe`]）の LibRaw の有無が、テストの build と同じ（Unix では
+/// [`resolve_genzo`] が同じものを選ぶ。Windows では [`GENZO`] がそのまま同じであること）。
+#[test]
+fn the_genzo_used_by_the_tests_matches_the_test_build() {
+    assert_eq!(
+        binary_has_libraw(genzo_exe()),
+        Some(genzo_raw::LIBRAW_ENABLED),
+        "{BINARY_MISMATCH_HINT}: {}",
+        genzo_exe().display()
+    );
+    #[cfg(unix)]
+    assert!(
+        is_genzo_deps_binary(&genzo_exe().file_name().unwrap().to_string_lossy())
+            || genzo_exe() == Path::new(GENZO),
+        "{}",
+        genzo_exe().display()
+    );
+}
+
+/// [`pick_matching`]: `GENZO` と同じものが合えばそれ、食い違えばほかの新しい順で LibRaw の有無が同じもの、
+/// 起動できないもの（`None`）は飛ばす、調べるのは [`MAX_PROBES`] 個まで。
+#[test]
+fn the_matching_genzo_binary_is_picked() {
+    use std::time::{Duration, SystemTime};
+    let at = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
+    let c = |same: bool, t: u64, name: &str| Candidate {
+        same,
+        modified: at(t),
+        path: PathBuf::from(name),
+    };
+    let candidates = vec![
+        c(false, 30, "newer-no-libraw"),
+        c(false, 10, "older-libraw"),
+        c(true, 20, "built"),
+        c(false, 25, "broken"),
+        c(false, 20, "same-time-libraw"),
+    ];
+    // 調べた順を記録する。
+    let has = |order: &mut Vec<String>, p: &Path| {
+        let name = p.to_string_lossy().into_owned();
+        order.push(name.clone());
+        match name.as_str() {
+            "built" | "older-libraw" | "same-time-libraw" => Some(true),
+            "newer-no-libraw" => Some(false),
+            _ => None,
+        }
+    };
+    // GENZO と同じものが合えば、ほかは調べない。
+    let mut order = Vec::new();
+    let got = pick_matching(candidates.clone(), true, |p| has(&mut order, p)).unwrap();
+    assert_eq!(got.path, Path::new("built"));
+    assert_eq!(order, ["built"]);
+    // GENZO が食い違えば（差し替わっていた）、ほかを新しい順に調べ、起動できないものは飛ばす。
+    let mut order = Vec::new();
+    let got = pick_matching(candidates.clone(), false, |p| has(&mut order, p)).unwrap();
+    assert_eq!(got.path, Path::new("newer-no-libraw"));
+    assert!(!got.same);
+    assert_eq!(order, ["built", "newer-no-libraw"]);
+    let without_built: Vec<Candidate> = candidates.iter().filter(|c| !c.same).cloned().collect();
+    let mut order = Vec::new();
+    let got = pick_matching(without_built, true, |p| has(&mut order, p)).unwrap();
+    assert_eq!(got.path, Path::new("same-time-libraw"));
+    assert_eq!(order, ["newer-no-libraw", "broken", "same-time-libraw"]);
+    // どれも合わなければ None。調べるのは MAX_PROBES 個まで。
+    let many: Vec<Candidate> = (0..MAX_PROBES as u64 + 3)
+        .map(|i| c(false, i, &format!("x{i}")))
+        .collect();
+    let mut probes = 0;
+    assert_eq!(
+        pick_matching(many, true, |_| {
+            probes += 1;
+            Some(false)
+        }),
+        None
+    );
+    assert_eq!(probes, MAX_PROBES);
+}
+
+/// [`deps_candidates`]: `deps` の `genzo` の実体だけを集め、`built` と同じファイル（ハードリンク）に `same` を
+/// 付ける。同じものがなければ（コピー）`built` そのものを加える。
+#[cfg(unix)]
+#[test]
+fn deps_candidates_mark_the_hard_link_of_the_built_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let deps = dir.path().join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    let a = deps.join("genzo-0123456789abcdef");
+    let b = deps.join("genzo-fedcba9876543210");
+    std::fs::write(&a, b"a").unwrap();
+    std::fs::write(&b, b"b").unwrap();
+    for other in ["genzo-0123456789abcdef.d", "genzo_worker-0123456789abcdef"] {
+        std::fs::write(deps.join(other), b"x").unwrap();
+    }
+    std::fs::create_dir_all(deps.join("genzo-aaaaaaaaaaaaaaaa")).unwrap();
+    let sorted = |mut v: Vec<Candidate>| {
+        v.sort_by(|x, y| x.path.cmp(&y.path));
+        v.into_iter().map(|c| (c.same, c.path)).collect::<Vec<_>>()
+    };
+    // cargo と同じくハードリンクした。
+    let built = dir.path().join("genzo");
+    std::fs::hard_link(&b, &built).unwrap();
+    assert_eq!(
+        sorted(deps_candidates(&built).unwrap()),
+        [(false, a.clone()), (true, b.clone())]
+    );
+    // コピーした（同じファイルの実体がない）。
+    std::fs::remove_file(&built).unwrap();
+    std::fs::copy(&b, &built).unwrap();
+    assert_eq!(
+        sorted(deps_candidates(&built).unwrap()),
+        [(false, a), (false, b), (true, built.clone())]
+    );
+    // deps がない。
+    std::fs::remove_dir_all(&deps).unwrap();
+    assert_eq!(deps_candidates(&built), None);
+}
 
 /// CI のランナーか（環境変数 `CI` が空でなく、`0`・`false` でない）。
 fn on_ci() -> bool {
@@ -55,7 +336,7 @@ fn test_log_dir() -> PathBuf {
 /// `genzo` を実行する（環境変数のカタログ・データのフォルダ・ログの指定は引き継がない）。ログのファイルには
 /// 書かない（`GENZO_LOG_FILE=off`。ログを確かめるテストは `env` で上書きする）。
 fn genzo_with(args: &[&str], env: &[(&str, &Path)], stdin: Option<&str>) -> Run {
-    let mut cmd = Command::new(GENZO);
+    let mut cmd = genzo_command();
     cmd.args(args)
         .env_remove("GENZO_CATALOG")
         .env_remove("GENZO_DATA_DIR")
@@ -108,14 +389,15 @@ const LIBRAW_DISABLED_MARK: &str = "この build では LibRaw が無効です";
 /// テストの build と [`GENZO`] の実行ファイルで、LibRaw の有無が食い違うときの説明。
 const BINARY_MISMATCH_HINT: &str = "テストの build と genzo の実行ファイル（CARGO_BIN_EXE_genzo）で、\
      LibRaw の有無が食い違っている可能性がある。target/ を共有する別の cargo（機能フラグ libraw の違う \
-     build）が target/debug/genzo を上書きすると起きる（コードの不具合ではない）。その build が終わってから\
-     再実行する";
+     build）が target/debug/genzo を上書きすると起きる（コードの不具合ではない。resolve_genzo で LibRaw の有無の\
+     同じ実体を探したが、見つからなかった）。その build が終わってから再実行する";
 
 /// テストの build では LibRaw が有効なのに、`genzo`（ワーカーを含む）が「LibRaw が無効」と答えたか。
 ///
 /// cargo は同じ機能フラグでテストと実行ファイルを作るので、通常は起きない。`target/` を共有する別の cargo が
-/// 実行ファイルを上書きしたときに、原因の分かりにくい失敗（取り込みのエラー・終了コードの食い違い）になる
-/// ので、ここで原因を示して止める。
+/// 実行ファイルを上書きしても、[`resolve_genzo`] が LibRaw の有無の同じ実体を選ぶ。それでも食い違ったとき
+/// （同じ実体が見つからない・Windows）に、原因の分かりにくい失敗（取り込みのエラー・終了コードの食い違い）に
+/// なるので、ここで原因を示して止める。
 fn libraw_missing_in_binary(test_build_has_libraw: bool, run: &Run) -> bool {
     test_build_has_libraw
         && (run.stdout.contains(LIBRAW_DISABLED_MARK) || run.stderr.contains(LIBRAW_DISABLED_MARK))
@@ -1309,6 +1591,358 @@ fn develop_copy_and_upgrade_between_process_versions() {
     );
 }
 
+/// 書き出した画像（8bit の RGB に直したもの）の、`(x, y)` から `n × n` 画素の平均の明るさ（R・G・B の平均）。
+fn mean_luma(img: &image::RgbImage, (x0, y0): (u32, u32), n: u32) -> f64 {
+    let mut sum = 0.0;
+    for y in y0..y0 + n {
+        for x in x0..x0 + n {
+            let p = img.get_pixel(x, y).0;
+            sum += (f64::from(p[0]) + f64::from(p[1]) + f64::from(p[2])) / 3.0;
+        }
+    }
+    sum / f64::from(n * n)
+}
+
+/// 写真を PNG に書き出して、8bit の RGB で読む（書き出し先は `<一時フォルダ>/<名前>`）。
+fn export_png(env: &Env, id: &str, name: &str) -> image::RgbImage {
+    let out = env.path(name);
+    let e = env.json(&[
+        "export",
+        id,
+        "--out",
+        out.to_str().unwrap(),
+        "--format",
+        "png16",
+    ]);
+    image::open(written_path(&e)).unwrap().to_rgb8()
+}
+
+/// `develop set` の白黒・カラーミキサー・カラーグレーディングのオプション（DEV-25・DEV-09・DEV-10）: 保存・
+/// 履歴の名前・書き出し（白黒は R = G = B）・範囲の外の値のエラー・処理バージョン 1 の写真での警告。
+#[test]
+fn develop_black_white_mixer_and_grading_options() {
+    let env = Env::new();
+    for (i, name) in ["A.jpg", "B.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (90, 60), i as u8 + 1, None, false);
+    }
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+    );
+    // 白黒と白黒ミキサー（同じ帯を繰り返したら後の値）。
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--black-white",
+        "on",
+        "--bw-mix",
+        "blue=-30",
+        "--bw-mix",
+        "red=20",
+        "--bw-mix",
+        "blue=-35",
+    ]);
+    assert_eq!(set["changed"], true);
+    let bw = &set["settings"]["color"]["black_white"];
+    assert_eq!(bw["enabled"], true);
+    assert_eq!(bw["mix"]["blue"], -35.0);
+    assert_eq!(bw["mix"]["red"], 20.0);
+    assert_eq!(bw["mix"]["green"], 0.0);
+    let label = |v: &str| {
+        let history = env.json(&["develop", "history", v]);
+        history.as_array().unwrap().last().unwrap()["label"].clone()
+    };
+    assert_eq!(label(&a), "白黒に変換・白黒ミキサー");
+    // 書き出した画像は灰色（R = G = B。色の変換の丸めの 1 段まで）。
+    let img = export_png(&env, &a, "out-bw");
+    let max_diff = img
+        .pixels()
+        .map(|p| {
+            let [r, g, b] = p.0;
+            r.abs_diff(g).max(g.abs_diff(b))
+        })
+        .max()
+        .unwrap();
+    assert!(max_diff <= 1, "白黒の書き出しに色が残っている: {max_diff}");
+    // カラーに戻す（白黒ミキサーの値は保つ）。
+    let set = env.json(&["develop", "set", &a, "--black-white", "off"]);
+    assert_eq!(set["settings"]["color"]["black_white"]["enabled"], false);
+    assert_eq!(
+        set["settings"]["color"]["black_white"]["mix"]["blue"],
+        -35.0
+    );
+    assert_eq!(label(&a), "カラーに変換");
+    // カラーミキサーとカラーグレーディング（輝度を省くと 0）。
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--hsl-hue",
+        "orange=10",
+        "--hsl-saturation",
+        "blue=-40",
+        "--hsl-luminance",
+        "green=15",
+        "--grading-shadows",
+        "220,30",
+        "--grading-midtones",
+        "40,10,-5",
+        "--grading-highlights",
+        "60,20",
+        "--grading-global",
+        "0,5",
+        "--grading-blending",
+        "70",
+        "--grading-balance",
+        "-20",
+    ]);
+    let c = &set["settings"]["color"];
+    assert_eq!(c["mixer"]["orange"]["hue"], 10.0);
+    assert_eq!(c["mixer"]["blue"]["saturation"], -40.0);
+    assert_eq!(c["mixer"]["green"]["luminance"], 15.0);
+    assert_eq!(c["mixer"]["red"]["hue"], 0.0);
+    let g = &c["grading"];
+    assert_eq!(
+        g["shadows"],
+        serde_json::json!({"hue": 220.0, "saturation": 30.0, "luminance": 0.0})
+    );
+    assert_eq!(g["midtones"]["luminance"], -5.0);
+    assert_eq!(g["highlights"]["hue"], 60.0);
+    assert_eq!(g["global"]["saturation"], 5.0);
+    assert_eq!(g["blending"], 70.0);
+    assert_eq!(g["balance"], -20.0);
+    assert_eq!(label(&a), "カラーミキサー・カラーグレーディング");
+    // JSON の後にオプションを当てる。
+    let r = env.run_stdin(
+        &[
+            "develop",
+            "set",
+            &a,
+            "--json",
+            "-",
+            "--grading-balance",
+            "15",
+        ],
+        Some(r#"{"color": {"grading": {"balance": 50, "blending": 30}}}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["color"]["grading"]["balance"], 15.0);
+    assert_eq!(got["color"]["grading"]["blending"], 30.0);
+    // 範囲の外の値はエラー（設定は変わらない）。形の誤り・知らない帯は使い方の誤り。
+    let r = env.run(&["develop", "set", &a, "--grading-shadows", "400,10"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &a, "--hsl-hue", "orange=150"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    for bad in [
+        ["--hsl-hue", "cyan=10"],
+        ["--bw-mix", "blue"],
+        ["--grading-global", "10"],
+    ] {
+        let r = env.run(&["develop", "set", &a, bad[0], bad[1]]);
+        assert_eq!(r.code, 2, "{bad:?}: {}", r.stderr);
+    }
+    assert_eq!(env.json(&["develop", "get", &a]), got);
+    // 処理バージョン 1 の写真では知らせる（保存はする）。
+    let r = env.run_stdin(
+        &["develop", "set", &b, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &b, "--black-white", "on"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("白黒・カラーミキサー・カラーグレーディングは使われません"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(
+        env.json(&["develop", "get", &b])["color"]["black_white"]["enabled"],
+        true
+    );
+}
+
+/// `develop set` のテクスチャ・明瞭度・かすみの除去・シャープ・効果のオプション（DEV-11・DEV-12・DEV-24）: 保存・
+/// 履歴の名前・書き出し（切り抜き後の周辺光量補正で四隅が暗くなる）・範囲の外の値のエラー・`develop copy --groups
+/// presence,effects`・処理バージョン 1 の写真での警告。
+#[test]
+fn develop_presence_sharpening_and_effects_options() {
+    let env = Env::new();
+    for (i, name) in ["A.jpg", "B.jpg", "C.jpg"].into_iter().enumerate() {
+        write_jpeg(&env.photos.join(name), (90, 60), i as u8 + 1, None, false);
+    }
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b, c) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+        id_of(&search, "C.jpg").to_string(),
+    );
+    let label = |v: &str| {
+        let history = env.json(&["develop", "history", v]);
+        history.as_array().unwrap().last().unwrap()["label"].clone()
+    };
+    // 切り抜き後の周辺光量補正（暗く）: 四隅が暗くなり、中央はほとんど変わらない。
+    let before = export_png(&env, &a, "out-before");
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--vignette-amount",
+        "-60",
+        "--vignette-midpoint",
+        "40",
+        "--vignette-roundness",
+        "20",
+        "--vignette-feather",
+        "60",
+        "--vignette-highlights",
+        "10",
+    ]);
+    let v = &set["settings"]["effects"]["vignette"];
+    assert_eq!(v["amount"], -60.0);
+    assert_eq!(v["midpoint"], 40.0);
+    assert_eq!(v["roundness"], 20.0);
+    assert_eq!(v["feather"], 60.0);
+    assert_eq!(v["highlights"], 10.0);
+    assert_eq!(label(&a), "周辺光量 -60");
+    let after = export_png(&env, &a, "out-vignette");
+    assert_eq!(after.dimensions(), before.dimensions());
+    let (w, h) = after.dimensions();
+    let n = 6;
+    for corner in [(0, 0), (w - n, 0), (0, h - n), (w - n, h - n)] {
+        let (l0, l1) = (mean_luma(&before, corner, n), mean_luma(&after, corner, n));
+        assert!(l1 < l0 - 5.0, "{corner:?}: {l0:.2} → {l1:.2}");
+    }
+    let center = (w / 2 - n / 2, h / 2 - n / 2);
+    let (l0, l1) = (mean_luma(&before, center, n), mean_luma(&after, center, n));
+    assert!((l1 - l0).abs() < 1.5, "中央: {l0:.2} → {l1:.2}");
+    // テクスチャ・明瞭度・かすみの除去・シャープ（指定しない項目は今の値のまま）。
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--texture",
+        "20",
+        "--clarity",
+        "40",
+        "--dehaze",
+        "-30",
+        "--sharpen-amount",
+        "60",
+        "--sharpen-radius",
+        "1.5",
+        "--sharpen-masking",
+        "10",
+    ]);
+    let s = &set["settings"];
+    assert_eq!(
+        s["presence"],
+        serde_json::json!({"texture": 20.0, "clarity": 40.0, "dehaze": -30.0})
+    );
+    let sh = &s["detail"]["sharpening"];
+    assert_eq!(sh["amount"], 60.0);
+    assert_eq!(sh["radius"], 1.5);
+    assert_eq!(sh["detail"], 25.0, "指定しない項目は既定のまま");
+    assert_eq!(sh["masking"], 10.0);
+    assert_eq!(s["effects"]["vignette"]["amount"], -60.0);
+    assert_eq!(
+        label(&a),
+        "テクスチャ +20・明瞭度 +40・かすみの除去 -30ほか"
+    );
+    let set = env.json(&[
+        "develop",
+        "set",
+        &a,
+        "--sharpen-detail",
+        "40",
+        "--grain-amount",
+        "25",
+        "--grain-size",
+        "40",
+        "--grain-roughness",
+        "70",
+    ]);
+    let s = &set["settings"];
+    assert_eq!(s["detail"]["sharpening"]["detail"], 40.0);
+    assert_eq!(
+        s["effects"]["grain"],
+        serde_json::json!({"amount": 25.0, "size": 40.0, "roughness": 70.0})
+    );
+    assert_eq!(label(&a), "シャープ・粒子 25");
+    // 粒子を足した写真も書き出せる（JSON の後にオプションを当てる）。
+    let r = env.run_stdin(
+        &["develop", "set", &a, "--json", "-", "--texture", "5"],
+        Some(r#"{"presence": {"texture": 50, "clarity": 10}}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let got = env.json(&["develop", "get", &a]);
+    assert_eq!(got["presence"]["texture"], 5.0);
+    assert_eq!(got["presence"]["clarity"], 10.0);
+    let grain = export_png(&env, &a, "out-grain");
+    assert_eq!(grain.dimensions(), (w, h));
+    // 範囲の外の値はエラー（設定は変わらない）。数でない値は使い方の誤り。
+    for bad in [
+        ["--clarity", "101"],
+        ["--sharpen-radius", "0.1"],
+        ["--sharpen-amount", "151"],
+        ["--vignette-amount", "-101"],
+        ["--grain-size", "120"],
+    ] {
+        let r = env.run(&["develop", "set", &a, bad[0], bad[1]]);
+        assert_eq!(r.code, 1, "{bad:?}: {}", r.stderr);
+    }
+    let r = env.run(&["develop", "set", &a, "--dehaze", "much"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert_eq!(env.json(&["develop", "get", &a]), got);
+    // develop copy --groups presence,effects: 外観と効果だけを写す（シャープは「ディテール」なので写さない）。
+    let copied = env.json(&[
+        "develop",
+        "copy",
+        &a,
+        "--to",
+        &b,
+        "--groups",
+        "presence,effects",
+    ]);
+    assert_eq!(copied["updated"], 1);
+    assert_eq!(copied["needs_upgrade"], 0);
+    let got_b = env.json(&["develop", "get", &b]);
+    assert_eq!(got_b["presence"], got["presence"]);
+    assert_eq!(got_b["effects"], got["effects"]);
+    assert_eq!(got_b["detail"]["sharpening"]["amount"], 0.0);
+    assert_eq!(got_b["detail"]["sharpening"]["detail"], 25.0);
+    // 処理バージョン 1 の写真: 設定すると知らせ、写すと使われない写真の数を返す。
+    let r = env.run_stdin(
+        &["develop", "set", &c, "--json", "-"],
+        Some(r#"{"process_version": 1}"#),
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["develop", "set", &c, "--clarity", "10"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("テクスチャ・明瞭度・かすみの除去・シャープ・効果は使われません"),
+        "{}",
+        r.stderr
+    );
+    let r = env.run(&[
+        "develop", "copy", &a, "--to", &c, "--groups", "effects", "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let copied: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(copied["needs_upgrade"], 1);
+    let got_c = env.json(&["develop", "get", &c]);
+    assert_eq!(got_c["process_version"], 1);
+    assert_eq!(got_c["effects"], got["effects"]);
+}
+
 /// `develop region`: 表示範囲を描いて PNG に書く（コア API の render_region。No.52）。既にあるファイルには
 /// 書かない（使い方の誤り）。範囲は画像の内側に収める。
 #[test]
@@ -1845,6 +2479,49 @@ fn bench_records_results_and_compares_with_the_previous_run() {
         None,
     );
     assert_eq!(r.code, 2);
+
+    // `develop set` と同じ色・外観・シャープ・効果のオプションを計測の設定に当て、記録に残す（DEV-09〜DEV-12・
+    // DEV-24・DEV-25。決定事項ログ No.142）。
+    let mut a = args("preview", "1");
+    a.extend(
+        [
+            "--clarity",
+            "30",
+            "--grain-amount",
+            "25",
+            "--sharpen-amount",
+            "60",
+            "--black-white",
+            "on",
+            "--hsl-saturation",
+            "blue=-20",
+        ]
+        .map(str::to_owned),
+    );
+    let r = run(&a);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let v = r.json();
+    let reports = v["reports"].as_array().unwrap();
+    assert!(!reports.is_empty());
+    for rep in reports {
+        let s = &rep["result"]["develop"]["settings"];
+        assert_eq!(s["presence"]["clarity"].as_f64(), Some(30.0), "{rep}");
+        assert_eq!(s["effects"]["grain"]["amount"].as_f64(), Some(25.0));
+        assert_eq!(s["detail"]["sharpening"]["amount"].as_f64(), Some(60.0));
+        assert_eq!(s["color"]["black_white"]["enabled"], true);
+        assert_eq!(
+            s["color"]["mixer"]["blue"]["saturation"].as_f64(),
+            Some(-20.0)
+        );
+        // 基準の設定（露光量など）は保つ。
+        assert_eq!(s["exposure_ev"].as_f64(), Some(0.5));
+        assert!(rep["comparison"].is_null(), "設定が違う記録とは比べない");
+    }
+    // 範囲の外の値は、計測の前にエラーにする。
+    let mut a = args("preview", "1");
+    a.extend(["--dehaze", "150"].map(str::to_owned));
+    let r = run(&a);
+    assert_eq!(r.code, 1, "{}", r.stderr);
 }
 
 /// ゴミ箱への移動（`--yes`）。OS のゴミ箱を汚さないよう、Linux で XDG_DATA_HOME を一時フォルダにして
@@ -2204,7 +2881,7 @@ mod ctrl_c {
         /// 指定し、GPU は使わない。`--quiet` は付けないので、進捗が標準エラーに出る）。
         fn spawn(env: &Env, args: &[&str]) -> Self {
             let catalog = env.catalog.to_string_lossy().into_owned();
-            let mut child = Command::new(GENZO)
+            let mut child = genzo_command()
                 .args(args)
                 .args(["--catalog", &catalog, "--gpu", "off"])
                 .env_remove("GENZO_CATALOG")

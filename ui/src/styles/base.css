@@ -275,6 +275,14 @@ button:focus-visible {
   color: var(--fg-1);
   font-size: 12px;
 }
+.slider-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: 0;
+}
 .slider-value {
   grid-column: 2;
   grid-row: 1 / span 2;

@@ -469,3 +469,39 @@
 .dl-history li.undone .time {
   color: var(--fg-3);
 }
+
+/* カラーグレーディングの色相環（DEV-10） */
+.dp-wheel-row {
+  display: flex;
+  justify-content: center;
+  margin: 6px 0 8px;
+}
+.dp-wheel {
+  position: relative;
+  border-radius: 50%;
+  cursor: crosshair;
+  touch-action: none;
+  box-shadow: 0 0 0 1px var(--line-strong);
+}
+.dp-wheel.disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.dp-wheel-dot {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  border: 2px solid var(--fg-0);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.dp-tabs .dp-tab-swatch {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 4px;
+  border-radius: 50%;
+  vertical-align: 1px;
+}

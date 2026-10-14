@@ -22,6 +22,8 @@
 //! | `finish.color` | 1e−5 | 1e−4 | 立方根（WGSL にないので `pow` とニュートン法）、OKLab の行列の打ち消し |
 //! | `finish.scene_to_display` | 1e−6 | 1e−5 | 割り算の精度（2.5 ULP）、`log2` の精度による 1D LUT の位置の差（対数の軸。llvmpipe で差の最大 8.3e−7、許容に対する比 0.08） |
 //! | `finish.tone_curve` | 1e−5 | 1e−4 | `pow`（IEC 61966-2-1）、LUT の位置の差 |
+//! | `finish.texture`・`finish.sharpen` | 1e−5 | 2e−4 | `log2`・`exp2`、ぼかしの積和（融合）を横・縦で重ねる、ガイドの双線形・割り算（かすみの除去） |
+//! | `finish.effects` | 1e−5 | 1e−4 | `pow`（IEC 61966-2-1）・`exp2`・`log2`（楕円の距離）、粒子の重み付きの和 |
 //! | `output.display` | 1e−4 | 0 | 符号化（IEC 61966-2-1）の `pow`、色域の圧縮の割り算、3D LUT の位置の差（0〜1 の値） |
 //! | `output.export.*`・`output.cache.*` | 1e−4 | 0 | 同上（0〜1 の値） |
 //! | `sensor.highlight_recovery` | 1e−6 | 1e−5 | 近傍の組の積和（融合）と割り算（2.5 ULP） |
@@ -77,6 +79,8 @@ pub fn stage_tolerance(stage_id: &str) -> StageTolerance {
         "finish.color" => StageTolerance::new(1e-5, 1e-4),
         "finish.scene_to_display" => StageTolerance::new(1e-6, 1e-5),
         "finish.tone_curve" => StageTolerance::new(1e-5, 1e-4),
+        "finish.texture" | "finish.sharpen" => StageTolerance::new(1e-5, 2e-4),
+        "finish.effects" => StageTolerance::new(1e-5, 1e-4),
         "output.display" => StageTolerance::new(1e-4, 0.0),
         id if id.starts_with("output.export.") || id.starts_with("output.cache.") => {
             StageTolerance::new(1e-4, 0.0)

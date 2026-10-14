@@ -1,10 +1,13 @@
-// 現像のパネル（右。DEV-03〜08・13〜15・26）。
+// 現像のパネル（右。DEV-03〜10・13〜15・25・26）。
 //
-// - ヒストグラム・基本補正（WB・露光量・コントラスト・ハイライト / シャドウ・白 / 黒・ハイライト復元（処理バージョン 2
-//   から。RAW だけ）・自然な彩度・彩度）・トーンカーブ（パラメトリックとポイント）・ディテール（ノイズ軽減の輝度・
-//   カラー。処理バージョン 2 から。RAW だけ）・切り抜きと角度・レンズ補正（プロファイル・色収差の除去・手動の
-//   歪曲 / 周辺減光 / 色収差。処理バージョン 2 から）・すべてリセット・警告と元の画像の情報（処理バージョンの
-//   更新）。
+// - ヒストグラム・基本補正（カラー / 白黒の切り替え（処理バージョン 2 から。V キー）・WB・露光量・コントラスト・
+//   ハイライト / シャドウ・白 / 黒・ハイライト復元（処理バージョン 2 から。RAW だけ）・外観（テクスチャ・明瞭度・
+//   かすみの除去。処理バージョン 2 から）・自然な彩度・彩度）・トーンカーブ（パラメトリックとポイント）・カラーミキサー
+//   （色相・彩度・輝度。白黒のときは白黒ミキサー。処理バージョン 2 から）・カラーグレーディング（シャドウ・中間調・
+//   ハイライト・全体の色相環、ブレンド・バランス。処理バージョン 2 から）・ディテール（シャープ（処理バージョン 2 から）・
+//   ノイズ軽減の輝度・カラー（処理バージョン 2 から。RAW だけ））・切り抜きと角度・レンズ補正（プロファイル・色収差の
+//   除去・手動の歪曲 / 周辺減光 / 色収差。処理バージョン 2 から）・効果（切り抜き後の周辺光量補正・粒子。処理
+//   バージョン 2 から）・すべてリセット・警告と元の画像の情報（処理バージョンの更新）。
 // - 値は developStore.settings（送信前を含む最新の値）から読み、変更は applySettings で送る（ドラッグ中は
 //   dragging: true、離したら endDrag。state/develop.ts の送信の列）。
 // - 写真を開いている間・開けなかったときは、操作を無効にする。
@@ -14,19 +17,59 @@ import { useState } from "react";
 import type {
   CurvePoint,
   DevelopSettings,
+  Grain,
   HighlightMethod,
   LensCorrection,
   NoiseReduction,
+  PostCropVignette,
+  PresenceParams,
+  Sharpening,
   WbPreset,
 } from "../api/types";
-import { RANGES, WB_PRESETS } from "../api/types";
+import { HUE_BANDS, RANGES, WB_PRESETS } from "../api/types";
 import { Section } from "../components/Section";
 import { Slider } from "../components/Slider";
 import { comboLabel } from "../keyboard";
 import { useApp } from "../state/app";
 import { applySettings, developStore, endDrag, upgradeProcessVersion, useDevelop } from "../state/develop";
+import {
+  GRADING_RANGES,
+  type GradingRange,
+  HUE_BAND_INFO,
+  MIXER_ASPECTS,
+  type MixerAspect,
+  bwMixIsNeutral,
+  colorControls,
+  defaultBlackWhite,
+  defaultGrading,
+  defaultMixer,
+  fullColor,
+  gradingIsDefault,
+  hsvCss,
+  mixerIsNeutral,
+  wheelIsNeutral,
+  withBlackWhite,
+  withBwMix,
+  withGrading,
+  withMixer,
+  withWheel,
+} from "./colorLogic";
+import { ColorWheel } from "./ColorWheel";
 import { ASPECT_CHOICES, aspectKey } from "./cropMath";
 import { CURVE_CHANNELS, type CurveChannel, withChannel } from "./curveMath";
+import {
+  type DetailControls,
+  defaultEffects,
+  defaultSharpening,
+  detailControls,
+  fullEffects,
+  fullPresence,
+  fullSharpening,
+  withGrain,
+  withPresence,
+  withSharpening,
+  withVignette,
+} from "./detailLogic";
 import { Histogram } from "./Histogram";
 import { useGeometryInfo, useLoadedSummary } from "./hooks";
 import {
@@ -78,7 +121,7 @@ const PLACEHOLDER: DevelopSettings = resetAll({
   process_version: 0,
   lens: defaultLens(),
   detail: {
-    sharpening: { amount: 0, radius: 1, detail: 0, masking: 0 },
+    sharpening: defaultSharpening(),
     noise_reduction: defaultNoiseReduction(),
   },
   masks: [],
@@ -293,10 +336,45 @@ function WhiteBalanceRows(props: { settings: DevelopSettings; disabled: boolean 
   );
 }
 
+/** 処理（カラー / 白黒。DEV-25。V キー）の切り替え。 */
+function TreatmentRow(props: { settings: DevelopSettings; disabled: boolean }) {
+  const c = colorControls(props.settings, props.disabled);
+  const choices = [
+    { bw: false, label: "カラー" },
+    { bw: true, label: "白黒" },
+  ];
+  return (
+    <div className="dp-row">
+      <span className="dp-label">処理</span>
+      <div className="dp-tabs grow" role="radiogroup" aria-label="処理（カラー / 白黒）" style={{ margin: 0 }}>
+        {choices.map((ch) => (
+          <button
+            key={ch.label}
+            role="radio"
+            aria-checked={c.blackWhite === ch.bw}
+            className={c.blackWhite === ch.bw ? "on" : ""}
+            disabled={!c.treatment}
+            onClick={() => update((s) => (colorControls(s, false).blackWhite === ch.bw ? null : withBlackWhite(s, ch.bw)), false)}
+            title={
+              c.needsUpgrade
+                ? "処理バージョンを更新すると白黒にできます"
+                : `${ch.bw ? "白黒にする" : "カラーに戻す"}（${comboLabel("v")} で切り替え）`
+            }
+          >
+            {ch.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function BasicSection(props: { settings: DevelopSettings; disabled: boolean }) {
   const { settings, disabled } = props;
+  const c = colorControls(settings, disabled);
   return (
     <Section id="develop.basic" title="基本補正">
+      <TreatmentRow settings={settings} disabled={disabled} />
       <WhiteBalanceRows settings={settings} disabled={disabled} />
       <div className="dp-sub">トーン</div>
       <Slider
@@ -319,8 +397,307 @@ function BasicSection(props: { settings: DevelopSettings; disabled: boolean }) {
       />
       <SliderRows defs={TONE_SLIDERS} settings={settings} disabled={disabled} />
       <HighlightRecoveryRows settings={settings} disabled={disabled} />
+      <PresenceRows settings={settings} disabled={disabled} />
       <div className="dp-sub">色</div>
-      <SliderRows defs={COLOR_SLIDERS} settings={settings} disabled={disabled} />
+      <SliderRows defs={COLOR_SLIDERS} settings={settings} disabled={!c.saturation} />
+      {c.blackWhite && !c.needsUpgrade && !disabled && (
+        <div className="dp-note">白黒のときは、彩度・自然な彩度・カラーミキサーは使われません（値は保ちます）。</div>
+      )}
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// カラーミキサー・白黒ミキサー（DEV-09・DEV-25）・カラーグレーディング（DEV-10）。処理バージョン 2 から。
+// ---------------------------------------------------------------------------
+
+const signedBand = (v: number) => formatSigned(v, 0);
+
+function MixerSection(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const [aspect, setAspect] = useState<MixerAspect>("hue");
+  const c = colorControls(settings, disabled);
+  const color = fullColor(settings.color);
+  const bw = c.blackWhite && !c.needsUpgrade;
+  const changed = bw ? !bwMixIsNeutral(color.black_white.mix) : !mixerIsNeutral(color.mixer);
+  const aspectChanged = (a: MixerAspect) => HUE_BANDS.some((b) => color.mixer[b][a] !== 0);
+  return (
+    <Section id="develop.mixer" title={bw ? "白黒ミキサー" : "カラーミキサー"} defaultOpen={false}>
+      {c.needsUpgrade && !disabled && (
+        <UpgradeNote what="カラーミキサー・白黒" processVersion={settings.process_version} />
+      )}
+      {bw ? (
+        <>
+          <div className="dp-note">色ごとの明るさ（白黒にしたときの灰色の明るさ）を調整します。</div>
+          {HUE_BANDS.map((band) => (
+            <Slider
+              key={band}
+              label={HUE_BAND_INFO[band].label}
+              swatch={hsvCss(HUE_BAND_INFO[band].hue)}
+              value={color.black_white.mix[band]}
+              min={RANGES.slider.min}
+              max={RANGES.slider.max}
+              step={1}
+              defaultValue={0}
+              format={signedBand}
+              parse={parseNumber}
+              disabled={!c.bwMix}
+              onChange={(v, dragging) =>
+                update(
+                  (s) =>
+                    sameShown(signedBand, v, fullColor(s.color).black_white.mix[band])
+                      ? null
+                      : withBwMix(s, band, Math.round(v)),
+                  dragging,
+                )
+              }
+              onCommit={endDrag}
+              title={`${HUE_BAND_INFO[band].label}の部分を明るく（正）・暗く（負）します`}
+            />
+          ))}
+        </>
+      ) : (
+        <>
+          <div className="dp-tabs" role="tablist" aria-label="カラーミキサーの調整">
+            {MIXER_ASPECTS.map((a) => (
+              <button
+                key={a.key}
+                role="tab"
+                aria-selected={aspect === a.key}
+                className={aspect === a.key ? "on" : ""}
+                onClick={() => setAspect(a.key)}
+                title={a.title}
+              >
+                {a.label}
+                {aspectChanged(a.key) ? " •" : ""}
+              </button>
+            ))}
+          </div>
+          {HUE_BANDS.map((band) => (
+            <Slider
+              key={`${aspect}.${band}`}
+              label={HUE_BAND_INFO[band].label}
+              swatch={hsvCss(HUE_BAND_INFO[band].hue)}
+              value={color.mixer[band][aspect]}
+              min={RANGES.slider.min}
+              max={RANGES.slider.max}
+              step={1}
+              defaultValue={0}
+              format={signedBand}
+              parse={parseNumber}
+              disabled={!c.mixer}
+              onChange={(v, dragging) =>
+                update(
+                  (s) =>
+                    sameShown(signedBand, v, fullColor(s.color).mixer[band][aspect])
+                      ? null
+                      : withMixer(s, band, aspect, Math.round(v)),
+                  dragging,
+                )
+              }
+              onCommit={endDrag}
+              title={`${HUE_BAND_INFO[band].label}の${MIXER_ASPECTS.find((a) => a.key === aspect)?.title ?? ""}`}
+            />
+          ))}
+        </>
+      )}
+      <div className="dp-row">
+        <span className="grow" />
+        <button
+          className="btn small"
+          disabled={disabled || c.needsUpgrade || !changed}
+          onClick={() =>
+            update((s) => {
+              const cur = fullColor(s.color);
+              return bw
+                ? { ...s, color: { ...cur, black_white: { ...cur.black_white, mix: defaultBlackWhite().mix } } }
+                : { ...s, color: { ...cur, mixer: defaultMixer() } };
+            }, false)
+          }
+          title={bw ? "白黒ミキサーを元に戻す" : "カラーミキサーを元に戻す（色相・彩度・輝度のすべて）"}
+        >
+          リセット
+        </button>
+      </div>
+    </Section>
+  );
+}
+
+function GradingSection(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const [range, setRange] = useState<GradingRange>("shadows");
+  const c = colorControls(settings, disabled);
+  const g = fullColor(settings.color).grading;
+  const w = g[range];
+  const off = !c.grading;
+  const pct = (v: number) => String(Math.round(v));
+  const deg = (v: number) => `${Math.round(v)}°`;
+  const rangeLabel = GRADING_RANGES.find((r) => r.key === range)?.label ?? "";
+  return (
+    <Section id="develop.grading" title="カラーグレーディング" defaultOpen={false}>
+      {c.needsUpgrade && !disabled && (
+        <UpgradeNote what="カラーグレーディング" processVersion={settings.process_version} />
+      )}
+      <div className="dp-tabs" role="tablist" aria-label="カラーグレーディングの範囲">
+        {GRADING_RANGES.map((r) => (
+          <button
+            key={r.key}
+            role="tab"
+            aria-selected={range === r.key}
+            className={range === r.key ? "on" : ""}
+            onClick={() => setRange(r.key)}
+            title={r.title}
+          >
+            {r.label}
+            {!wheelIsNeutral(g[r.key]) && (
+              <span
+                className="dp-tab-swatch"
+                style={{ background: hsvCss(g[r.key].hue, Math.max(0.25, g[r.key].saturation / 100)) }}
+                aria-hidden="true"
+              />
+            )}
+          </button>
+        ))}
+      </div>
+      <div className="dp-wheel-row">
+        <ColorWheel
+          hue={w.hue}
+          saturation={w.saturation}
+          size={150}
+          disabled={off}
+          label={rangeLabel}
+          onChange={(v, dragging) =>
+            update((s) => {
+              const cur = fullColor(s.color).grading[range];
+              if (cur.hue === v.hue && cur.saturation === v.saturation) return null;
+              return withWheel(s, range, v);
+            }, dragging)
+          }
+          onCommit={endDrag}
+        />
+      </div>
+      <Slider
+        label="色相"
+        value={w.hue}
+        min={RANGES.hueDeg.min}
+        max={RANGES.hueDeg.max}
+        step={1}
+        defaultValue={0}
+        format={deg}
+        parse={parseNumber}
+        disabled={off}
+        onChange={(v, dragging) =>
+          update(
+            (s) =>
+              sameShown(deg, v, fullColor(s.color).grading[range].hue)
+                ? null
+                : withWheel(s, range, { hue: Math.round(v) }),
+            dragging,
+          )
+        }
+        onCommit={endDrag}
+        title="色付けの色相（0 がレッド・120 がグリーン・240 がブルー）"
+      />
+      <Slider
+        label="彩度"
+        value={w.saturation}
+        min={RANGES.amount.min}
+        max={RANGES.amount.max}
+        step={1}
+        defaultValue={0}
+        format={pct}
+        parse={parseNumber}
+        disabled={off}
+        onChange={(v, dragging) =>
+          update(
+            (s) =>
+              sameShown(pct, v, fullColor(s.color).grading[range].saturation)
+                ? null
+                : withWheel(s, range, { saturation: Math.round(v) }),
+            dragging,
+          )
+        }
+        onCommit={endDrag}
+        title="色付けの強さ（0 なら色相は効きません）"
+      />
+      <Slider
+        label="輝度"
+        value={w.luminance}
+        min={RANGES.slider.min}
+        max={RANGES.slider.max}
+        step={1}
+        defaultValue={0}
+        format={signed0}
+        parse={parseNumber}
+        disabled={off}
+        onChange={(v, dragging) =>
+          update(
+            (s) =>
+              sameShown(signed0, v, fullColor(s.color).grading[range].luminance)
+                ? null
+                : withWheel(s, range, { luminance: Math.round(v) }),
+            dragging,
+          )
+        }
+        onCommit={endDrag}
+        title={`${rangeLabel}の明るさ（正で明るく）`}
+      />
+      <div className="dp-sub">範囲</div>
+      <Slider
+        label="ブレンド"
+        value={g.blending}
+        min={RANGES.amount.min}
+        max={RANGES.amount.max}
+        step={1}
+        defaultValue={50}
+        format={pct}
+        parse={parseNumber}
+        disabled={off}
+        onChange={(v, dragging) =>
+          update(
+            (s) =>
+              sameShown(pct, v, fullColor(s.color).grading.blending)
+                ? null
+                : withGrading(s, { blending: Math.round(v) }),
+            dragging,
+          )
+        }
+        onCommit={endDrag}
+        title="シャドウ・中間調・ハイライトの範囲の重なり（大きいほど広く重なり、なめらかに移ります）"
+      />
+      <Slider
+        label="バランス"
+        value={g.balance}
+        min={RANGES.slider.min}
+        max={RANGES.slider.max}
+        step={1}
+        defaultValue={0}
+        format={signed0}
+        parse={parseNumber}
+        disabled={off}
+        onChange={(v, dragging) =>
+          update(
+            (s) =>
+              sameShown(signed0, v, fullColor(s.color).grading.balance)
+                ? null
+                : withGrading(s, { balance: Math.round(v) }),
+            dragging,
+          )
+        }
+        onCommit={endDrag}
+        title="正でハイライトの範囲を広げ（境目を暗い側へ）、負でシャドウの範囲を広げます"
+      />
+      <div className="dp-row">
+        <span className="grow" />
+        <button
+          className="btn small"
+          disabled={disabled || c.needsUpgrade || gradingIsDefault(g)}
+          onClick={() => update((s) => ({ ...s, color: { ...fullColor(s.color), grading: defaultGrading() } }), false)}
+          title="カラーグレーディングを元に戻す（すべての範囲・ブレンド・バランス）"
+        >
+          リセット
+        </button>
+      </div>
     </Section>
   );
 }
@@ -519,7 +896,10 @@ function DetailSection(props: { settings: DevelopSettings; disabled: boolean }) 
   const changed = JSON.stringify(nr) !== JSON.stringify(defaultNoiseReduction());
   return (
     <Section id="develop.detail" title="ディテール" defaultOpen={false}>
-      {c.needsUpgrade && !disabled && <UpgradeNote what="ノイズ軽減" processVersion={settings.process_version} />}
+      {c.needsUpgrade && !disabled && (
+        <UpgradeNote what="シャープ・ノイズ軽減" processVersion={settings.process_version} />
+      )}
+      <SharpenRows settings={settings} disabled={disabled} />
       <div className="dp-sub">ノイズ軽減</div>
       <NoiseSliders defs={LUMINANCE_SLIDERS} nr={nr} controls={c} />
       <NoiseSliders defs={COLOR_NOISE_SLIDERS} nr={nr} controls={c} />
@@ -533,6 +913,331 @@ function DetailSection(props: { settings: DevelopSettings; disabled: boolean }) 
             update((s) => ({ ...s, detail: { ...s.detail, noise_reduction: defaultNoiseReduction() } }), false)
           }
           title="ノイズ軽減を元に戻す（軽減しない）"
+        >
+          リセット
+        </button>
+      </div>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 外観（テクスチャ・明瞭度・かすみの除去。DEV-11）・シャープ（DEV-12）・効果（DEV-24）。処理バージョン 2 から。
+// ---------------------------------------------------------------------------
+
+/** 0〜100 などの整数の書式。 */
+const int0 = (v: number) => String(Math.round(v));
+
+/** 1 つのスライダーの定義（`T` は設定の一部。値を読んで、変えた設定を作る）。 */
+interface PartSliderDef<T> {
+  key: keyof T & string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  defaultValue: number;
+  format: (v: number) => string;
+  title: string;
+  /** 動かせるか。 */
+  enabled: (c: DetailControls) => boolean;
+}
+
+/** 設定の一部（`read` で読む）のスライダーの列。変えたら `write` で設定を作って送る。 */
+function PartSliders<T>(props: {
+  defs: PartSliderDef<T>[];
+  value: T;
+  controls: DetailControls;
+  read: (s: DevelopSettings) => T;
+  write: (s: DevelopSettings, patch: Partial<T>) => DevelopSettings;
+}) {
+  return (
+    <>
+      {props.defs.map((d) => (
+        <Slider
+          key={d.key}
+          label={d.label}
+          value={props.value[d.key] as unknown as number}
+          min={d.min}
+          max={d.max}
+          step={d.step}
+          defaultValue={d.defaultValue}
+          format={d.format}
+          parse={parseNumber}
+          disabled={!d.enabled(props.controls)}
+          onChange={(v, dragging) =>
+            update((s) => {
+              const cur = props.read(s)[d.key] as unknown as number;
+              if (sameShown(d.format, v, cur)) return null;
+              const rounded = Math.round(v / d.step) * d.step;
+              return props.write(s, { [d.key]: Number(rounded.toFixed(2)) } as Partial<T>);
+            }, dragging)
+          }
+          onCommit={endDrag}
+          title={d.title}
+        />
+      ))}
+    </>
+  );
+}
+
+const PRESENCE_SLIDERS: PartSliderDef<PresenceParams>[] = [
+  {
+    key: "texture",
+    label: "テクスチャ",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    step: 1,
+    defaultValue: 0,
+    format: signed0,
+    title: "中くらいの細部（肌・葉・布の質感）を強め（正）・なめらかにします（負）",
+    enabled: (c) => c.presence,
+  },
+  {
+    key: "clarity",
+    label: "明瞭度",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    step: 1,
+    defaultValue: 0,
+    format: signed0,
+    title: "大きめの範囲の明暗の差（中間調の局所のコントラスト）を強め（正）・弱めます（負）",
+    enabled: (c) => c.presence,
+  },
+  {
+    key: "dehaze",
+    label: "かすみの除去",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    step: 1,
+    defaultValue: 0,
+    format: signed0,
+    title: "かすみ（白い膜）を取り除き（正）・足します（負）",
+    enabled: (c) => c.presence,
+  },
+];
+
+function PresenceRows(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const c = detailControls(settings, disabled);
+  return (
+    <>
+      <div className="dp-sub">外観</div>
+      {c.needsUpgrade && !disabled && (
+        <UpgradeNote what="テクスチャ・明瞭度・かすみの除去" processVersion={settings.process_version} />
+      )}
+      <PartSliders
+        defs={PRESENCE_SLIDERS}
+        value={fullPresence(settings.presence)}
+        controls={c}
+        read={(s) => fullPresence(s.presence)}
+        write={withPresence}
+      />
+    </>
+  );
+}
+
+const SHARPEN_SLIDERS: PartSliderDef<Sharpening>[] = [
+  {
+    key: "amount",
+    label: "適用量",
+    min: RANGES.sharpenAmount.min,
+    max: RANGES.sharpenAmount.max,
+    step: 1,
+    defaultValue: 0,
+    format: int0,
+    title: "輪郭をくっきりさせる強さ（0 でかけない）",
+    enabled: (c) => c.sharpen,
+  },
+  {
+    key: "radius",
+    label: "半径",
+    min: RANGES.sharpenRadius.min,
+    max: RANGES.sharpenRadius.max,
+    step: 0.1,
+    defaultValue: 1,
+    format: (v) => v.toFixed(1),
+    title: "強める細部の大きさ（写真の画素の単位）",
+    enabled: (c) => c.sharpenOptions,
+  },
+  {
+    key: "detail",
+    label: "ディテール",
+    min: RANGES.amount.min,
+    max: RANGES.amount.max,
+    step: 1,
+    defaultValue: 25,
+    format: int0,
+    title: "大きいほど細かい模様も強め、小さいほど輪郭だけを強めて、にじみ（ハロー）を抑えます",
+    enabled: (c) => c.sharpenOptions,
+  },
+  {
+    key: "masking",
+    label: "マスク",
+    min: RANGES.amount.min,
+    max: RANGES.amount.max,
+    step: 1,
+    defaultValue: 0,
+    format: int0,
+    title: "大きいほど、輪郭のない平らな部分（空・肌）にはかけません",
+    enabled: (c) => c.sharpenOptions,
+  },
+];
+
+function SharpenRows(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const c = detailControls(settings, disabled);
+  return (
+    <>
+      <div className="dp-sub">シャープ</div>
+      <PartSliders
+        defs={SHARPEN_SLIDERS}
+        value={fullSharpening(settings.detail?.sharpening)}
+        controls={c}
+        read={(s) => fullSharpening(s.detail?.sharpening)}
+        write={withSharpening}
+      />
+      {!c.needsUpgrade && !disabled && (
+        <div className="dp-note">シャープの効き方は等倍（100%）の表示で確かめてください（縮小した表示では小さく見えます）。</div>
+      )}
+      <div className="dp-row">
+        <span className="grow" />
+        <button
+          className="btn small"
+          disabled={disabled || c.needsUpgrade || !c.sharpenChanged}
+          onClick={() => update((s) => withSharpening(s, defaultSharpening()), false)}
+          title="シャープを元に戻す（かけない）"
+        >
+          リセット
+        </button>
+      </div>
+    </>
+  );
+}
+
+const VIGNETTE_SLIDERS: PartSliderDef<PostCropVignette>[] = [
+  {
+    key: "amount",
+    label: "量",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    step: 1,
+    defaultValue: 0,
+    format: signed0,
+    title: "切り抜いた後の四隅を暗く（負）・明るく（正）します",
+    enabled: (c) => c.vignette,
+  },
+  {
+    key: "midpoint",
+    label: "中点",
+    min: RANGES.amount.min,
+    max: RANGES.amount.max,
+    step: 1,
+    defaultValue: 50,
+    format: int0,
+    title: "小さいほど中心の近くから効きます",
+    enabled: (c) => c.vignetteOptions,
+  },
+  {
+    key: "roundness",
+    label: "丸み",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    step: 1,
+    defaultValue: 0,
+    format: signed0,
+    title: "0 で画像の縦横比に合わせた楕円、正で円、負で角の丸い四角に近づきます",
+    enabled: (c) => c.vignetteOptions,
+  },
+  {
+    key: "feather",
+    label: "ぼかし",
+    min: RANGES.amount.min,
+    max: RANGES.amount.max,
+    step: 1,
+    defaultValue: 50,
+    format: int0,
+    title: "境目の幅（0 でくっきり）",
+    enabled: (c) => c.vignetteOptions,
+  },
+  {
+    key: "highlights",
+    label: "ハイライト",
+    min: RANGES.amount.min,
+    max: RANGES.amount.max,
+    step: 1,
+    defaultValue: 0,
+    format: int0,
+    title: "暗くするとき、明るい部分（光源など）を暗くしにくくします",
+    enabled: (c) => c.vignetteHighlights,
+  },
+];
+
+const GRAIN_SLIDERS: PartSliderDef<Grain>[] = [
+  {
+    key: "amount",
+    label: "量",
+    min: RANGES.amount.min,
+    max: RANGES.amount.max,
+    step: 1,
+    defaultValue: 0,
+    format: int0,
+    title: "フィルムのような粒子を足します（0 で足さない）",
+    enabled: (c) => c.grain,
+  },
+  {
+    key: "size",
+    label: "大きさ",
+    min: RANGES.amount.min,
+    max: RANGES.amount.max,
+    step: 1,
+    defaultValue: 25,
+    format: int0,
+    title: "粒の大きさ",
+    enabled: (c) => c.grainOptions,
+  },
+  {
+    key: "roughness",
+    label: "粗さ",
+    min: RANGES.amount.min,
+    max: RANGES.amount.max,
+    step: 1,
+    defaultValue: 50,
+    format: int0,
+    title: "大きいほど、粒の大きさが不ぞろいになります",
+    enabled: (c) => c.grainOptions,
+  },
+];
+
+function EffectsSection(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const c = detailControls(settings, disabled);
+  const fx = fullEffects(settings.effects);
+  return (
+    <Section id="develop.effects" title="効果" defaultOpen={false}>
+      {c.needsUpgrade && !disabled && <UpgradeNote what="効果" processVersion={settings.process_version} />}
+      <div className="dp-sub">切り抜き後の周辺光量補正</div>
+      <PartSliders
+        defs={VIGNETTE_SLIDERS}
+        value={fx.vignette}
+        controls={c}
+        read={(s) => fullEffects(s.effects).vignette}
+        write={withVignette}
+      />
+      <div className="dp-sub">粒子</div>
+      <PartSliders
+        defs={GRAIN_SLIDERS}
+        value={fx.grain}
+        controls={c}
+        read={(s) => fullEffects(s.effects).grain}
+        write={withGrain}
+      />
+      <div className="dp-row">
+        <span className="grow" />
+        <button
+          className="btn small"
+          disabled={disabled || c.needsUpgrade || !c.effectsChanged}
+          onClick={() => update((s) => ({ ...s, effects: defaultEffects() }), false)}
+          title="効果を元に戻す（周辺光量補正・粒子なし）"
         >
           リセット
         </button>
@@ -991,9 +1696,12 @@ export function DevelopPanel() {
       )}
       <BasicSection settings={shown} disabled={disabled} />
       <CurveSection settings={shown} disabled={disabled} />
+      <MixerSection settings={shown} disabled={disabled} />
+      <GradingSection settings={shown} disabled={disabled} />
       <DetailSection settings={shown} disabled={disabled} />
       <CropSection settings={shown} disabled={disabled} />
       <LensSection settings={shown} disabled={disabled} />
+      <EffectsSection settings={shown} disabled={disabled} />
       <div className="dp-actions">
         <button
           className="btn"
@@ -1003,7 +1711,7 @@ export function DevelopPanel() {
             if (viewStore.get().crop) void cancelCrop();
             update((s) => resetAll(s), false);
           }}
-          title="切り抜き・レンズ補正・ハイライト復元・ノイズ軽減を含むすべての調整を元に戻す（シャープ・部分補正は保つ）"
+          title="切り抜き・レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・カラーミキサー・カラーグレーディング・白黒を含むすべての調整を元に戻す（部分補正は保つ）"
         >
           すべてリセット
         </button>

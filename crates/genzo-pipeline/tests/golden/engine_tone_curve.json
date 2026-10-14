@@ -12,6 +12,85 @@
     "develop": {
       "settings": {
         "color": {
+          "black_white": {
+            "enabled": false,
+            "mix": {
+              "aqua": 0.0,
+              "blue": 0.0,
+              "green": 0.0,
+              "magenta": 0.0,
+              "orange": 0.0,
+              "purple": 0.0,
+              "red": 0.0,
+              "yellow": 0.0
+            }
+          },
+          "grading": {
+            "balance": 0.0,
+            "blending": 50.0,
+            "global": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "highlights": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "midtones": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "shadows": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            }
+          },
+          "mixer": {
+            "aqua": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "blue": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "green": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "magenta": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "orange": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "purple": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "red": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            },
+            "yellow": {
+              "hue": 0.0,
+              "luminance": 0.0,
+              "saturation": 0.0
+            }
+          },
           "saturation": 0.0,
           "vibrance": 0.0
         },
@@ -26,9 +105,23 @@
           },
           "sharpening": {
             "amount": 0.0,
-            "detail": 0.0,
+            "detail": 25.0,
             "masking": 0.0,
             "radius": 1.0
+          }
+        },
+        "effects": {
+          "grain": {
+            "amount": 0.0,
+            "roughness": 50.0,
+            "size": 25.0
+          },
+          "vignette": {
+            "amount": 0.0,
+            "feather": 50.0,
+            "highlights": 0.0,
+            "midpoint": 50.0,
+            "roundness": 0.0
           }
         },
         "exposure_ev": 0.0,
@@ -58,6 +151,11 @@
           "vignetting_scale": 100.0
         },
         "masks": [],
+        "presence": {
+          "clarity": 0.0,
+          "dehaze": 0.0,
+          "texture": 0.0
+        },
         "process_version": 1,
         "render_deps": {
           "camera_profile": {
@@ -118,7 +216,7 @@
         },
         "white_balance": "as_shot"
       },
-      "develop_hash": "e90f93ae009dc0c85a2c6eae15f182780c8e843346b13abd843d6fb61ab40db7",
+      "develop_hash": "dac4eaacdacc3e99190c73880d977083252c4d0db1b0377eaef682f69c7fc322",
       "process_version": 1
     },
     "process_version": 1,
