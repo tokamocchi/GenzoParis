@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | 大きさ・余白・位置（書き出す画像の短辺に対する割合から画素に） | [`WatermarkGeometry::new`]・[`place`] | 本体 |
 //! | 画像の透かし（PNG・JPEG・TIFF。透明度を保ち、埋め込みの ICC プロファイルで出力の色空間へ） | [`image_watermark`] | ワーカー（SEC-05） |
-//! | 文字の透かし（利用者の OS のフォントのファイルを ttf-parser で読み、自前のラスタライザで描く） | [`text_watermark`] | ワーカー（SEC-05） |
+//! | 文字の透かし（利用者の OS のフォントのファイルを skrifa で読み、自前のラスタライザで描く） | [`text_watermark`] | ワーカー（SEC-05） |
 //! | 合成（`out = dst × (1 − a) + mark × a`、a = アルファ × 不透明度。出力の色空間の符号化した値で） | [`composite`] | 本体 |
 //!
 //! 透かしの画像・フォントは利用者が選んだファイルで、写真と同じく信頼できない入力として扱う（デコード・ICC の解析・
@@ -23,6 +23,14 @@
 //!   保って縮める（[`TextWatermark::shrunk`]）。ヒンティングはしない。
 //! - ラスタライズ: 字形の輪郭（直線・2 次・3 次のベジェ曲線を線分に分ける）を、1 画素を [`TEXT_SUBSAMPLES`] 本の
 //!   横の線で調べ、各線で非ゼロ回転数の規則で塗る区間の横の長さ（画素の中での割合まで）を足して、覆われた割合にする。
+//! - フォントの解析は skrifa（Google Fonts の fontations。決定事項ログ No.173。以前は ttf-parser）。輪郭は TrueType
+//!   （`glyf`。合成の字形を含む）・CFF・CFF2 を、ヒンティングなし・フォントの単位のまま読む。可変フォントは既定の形
+//!   （軸を動かさない）。ビットマップ・カラーの字形（絵文字など）は描かない。`glyf` の字形は FreeType と同じく、
+//!   `hmtx` の左の余白に合わせて横に置く（字形の xMin と左の余白が違うフォントでは、ttf-parser のころより
+//!   その差だけ横にずれる。確かめたフォントでは 1 単位）。
+//! - フォントは信頼できない入力なので、読む前に必須の表（`head`・`hhea`・`maxp`）を確かめ（`open_font`）、
+//!   輪郭の要素の数（[`MAX_TEXT_OUTLINE_ELEMENTS`]）と線分の数（[`MAX_TEXT_EDGES`]）に上限を置く。輪郭を読めない
+//!   字形は描かない（形がないものとして扱う）。
 //!
 //! # 画像
 //!
@@ -31,11 +39,18 @@
 //!   掛けた値で縮小・拡大（三角形の重み。縮小は倍率の幅）してから、出力の色空間に変えて符号化する（色域の外は切り
 //!   そろえる）。Exif の向きは反映する。
 
+use std::collections::HashMap;
+
 use genzo_color::space::working_to;
 use genzo_color::transfer::srgb_decode_f32;
 use genzo_color::{IccTransform, IccVersion, RenderingIntent, RgbColorSpace, StandardProfile};
 use genzo_model::{Align, Orientation, OutputColorSpace, RgbColor, Watermark, WatermarkAnchor};
-use ttf_parser::{Face, GlyphId, OutlineBuilder};
+use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::prelude::{LocationRef, Size};
+use skrifa::raw::tables::cmap::{CmapSubtable, PlatformId};
+use skrifa::raw::types::Version16Dot16;
+use skrifa::raw::{CollectionRef, ReadError, TableProvider};
+use skrifa::{FontRef, GlyphId, MetadataProvider};
 
 use crate::decode::decode_image_rgba_bytes;
 use crate::error::{MediaError, Result};
@@ -51,6 +66,12 @@ pub const MAX_FONT_FILE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_WATERMARK_PIXELS: u64 = 40_000_000;
 /// 文字のラスタライズで 1 画素を調べる横の線の数。
 pub const TEXT_SUBSAMPLES: usize = 16;
+/// 文字の透かしの字形の輪郭の要素（移動・直線・曲線・閉じる）の数の上限（すべての字形の合計。同じ字形は 1 回だけ
+/// 数える。仮置き）。壊れた・悪意のあるフォントで記憶を使い尽くさないため。1 字形の要素の数は、Linux のフォントで
+/// 多くて 211（IPA ゴシック）〜594（DejaVu Sans）で、200 文字がすべて違う字形でも十分に収まる。
+pub const MAX_TEXT_OUTLINE_ELEMENTS: u64 = 1_000_000;
+/// 文字の透かしのラスタライズの線分の数の上限（曲線を分けた後。仮置き。1 本 20 バイトで 40 MB）。
+pub const MAX_TEXT_EDGES: u64 = 2_000_000;
 /// 曲線を線分に分けるときの許容差（画素）。
 const FLATTEN_TOLERANCE: f32 = 0.2;
 
@@ -446,9 +467,77 @@ struct Edge {
     dir: i32,
 }
 
-/// 字形の輪郭を、画素の座標の線分にする（ttf-parser の [`OutlineBuilder`]）。
+/// 字形の輪郭の要素（フォントの単位。y は上向き）。
+#[derive(Debug, Clone, Copy)]
+enum Segment {
+    Move(f32, f32),
+    Line(f32, f32),
+    Quad(f32, f32, f32, f32),
+    Cubic(f32, f32, f32, f32, f32, f32),
+    Close,
+}
+
+/// 読んだ字形の輪郭（同じ字形は 1 回だけ読む）。
+#[derive(Debug, Default)]
+struct GlyphOutline {
+    segments: Vec<Segment>,
+    /// 外接矩形（x の最小・y の最小・x の最大・y の最大。フォントの単位）。曲線の制御点を含む。置き換える前
+    /// （ttf-parser の `glyph_bounding_box`）と同じく、`glyf` の字形の見出しの値ではなく輪郭から求める（見出しの値は
+    /// 壊れていることがあるため）。輪郭がなければ `None`。
+    bounds: Option<[f32; 4]>,
+}
+
+/// skrifa が読んだ輪郭を [`GlyphOutline`] に記録するペン。要素の数（すべての字形の合計）が
+/// [`MAX_TEXT_OUTLINE_ELEMENTS`] を超えたら、記録をやめて数だけ数える。
+struct OutlineRecorder<'a> {
+    outline: &'a mut GlyphOutline,
+    count: &'a mut u64,
+}
+
+impl OutlineRecorder<'_> {
+    fn add(&mut self, segment: Segment, points: &[(f32, f32)]) {
+        *self.count += 1;
+        if *self.count > MAX_TEXT_OUTLINE_ELEMENTS {
+            return;
+        }
+        for &(x, y) in points {
+            let b = self.outline.bounds.get_or_insert([x, y, x, y]);
+            *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+        }
+        self.outline.segments.push(segment);
+    }
+}
+
+impl OutlinePen for OutlineRecorder<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.add(Segment::Move(x, y), &[(x, y)]);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.add(Segment::Line(x, y), &[(x, y)]);
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        self.add(Segment::Quad(cx0, cy0, x, y), &[(cx0, cy0), (x, y)]);
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        self.add(
+            Segment::Cubic(cx0, cy0, cx1, cy1, x, y),
+            &[(cx0, cy0), (cx1, cy1), (x, y)],
+        );
+    }
+
+    fn close(&mut self) {
+        self.add(Segment::Close, &[]);
+    }
+}
+
+/// 字形の輪郭を、画素の座標の線分にする（skrifa の [`OutlinePen`]。記録した輪郭を流し込む）。線分の数
+/// （すべての字形の合計）が [`MAX_TEXT_EDGES`] を超えたら、線分を足すのをやめて数だけ数える。
 struct EdgeBuilder<'a> {
     edges: &'a mut Vec<Edge>,
+    count: &'a mut u64,
     /// フォントの単位 → 画素の倍率。
     scale: f32,
     /// 字形の原点の画素の座標。
@@ -466,14 +555,17 @@ impl EdgeBuilder<'_> {
     fn push(&mut self, to: (f32, f32)) {
         let (a, b) = (self.cur, to);
         if a.1 != b.1 {
-            let (dir, p, q) = if a.1 < b.1 { (1, a, b) } else { (-1, b, a) };
-            self.edges.push(Edge {
-                x0: p.0,
-                y0: p.1,
-                x1: q.0,
-                y1: q.1,
-                dir,
-            });
+            *self.count += 1;
+            if *self.count <= MAX_TEXT_EDGES {
+                let (dir, p, q) = if a.1 < b.1 { (1, a, b) } else { (-1, b, a) };
+                self.edges.push(Edge {
+                    x0: p.0,
+                    y0: p.1,
+                    x1: q.0,
+                    y1: q.1,
+                    dir,
+                });
+            }
         }
         self.cur = to;
     }
@@ -484,7 +576,7 @@ fn segments_for(dist: f32) -> usize {
     ((dist / FLATTEN_TOLERANCE).sqrt().ceil() as usize).clamp(1, 64)
 }
 
-impl OutlineBuilder for EdgeBuilder<'_> {
+impl OutlinePen for EdgeBuilder<'_> {
     fn move_to(&mut self, x: f32, y: f32) {
         let p = self.point(x, y);
         self.start = p;
@@ -605,6 +697,118 @@ fn rasterize(edges: &[Edge], width: usize, height: usize) -> Vec<f32> {
     cov
 }
 
+/// フォントのファイルの先頭の 4 バイト（TrueType・古い Mac の TrueType（`true`）・OpenType の CFF（`OTTO`）・
+/// コレクション（`ttcf`））。
+const FONT_MAGICS: [[u8; 4]; 4] = [[0, 1, 0, 0], *b"true", *b"OTTO", *b"ttcf"];
+
+/// フォントを読めないときのエラー。`detail` の英語は、置き換える前（ttf-parser）のエラーの文言をそのまま使う
+/// （利用者に見える文言を変えないため。決定事項ログ No.173）。
+fn unreadable_font(detail: &str) -> MediaError {
+    MediaError::decode(format!("フォントを読めません: {detail}"))
+}
+
+/// フォントのファイル（`data`）の `index` 番目のフォントを開き、em（フォントの単位。16〜16384）と返す。番号の誤りは
+/// 引数の誤り（[`MediaError::invalid_argument`]）、そのほかは読めないフォント（[`MediaError::decode`]）。
+///
+/// 置き換える前（ttf-parser の `Face::parse`）と同じ順に確かめる: 先頭の 4 バイト → コレクションのフォントの数と
+/// 番号（コレクションでなければ番号は 0 だけ） → 表の一覧（途中で切れていないか） → 必須の表（`head`: em が 16〜16384・`loca` の形式が 0 か
+/// 1、`hhea`、`maxp`: 版が 0.5 か 1.0・字形が 1 つ以上）。表の中身のほかの部分は、使うときに skrifa が確かめる
+/// （範囲の外を読まない。読めなければ形がないものとして扱う）。
+fn open_font(data: &[u8], index: u32) -> Result<(FontRef<'_>, u16)> {
+    let magic = data.get(..4).and_then(|m| <[u8; 4]>::try_from(m).ok());
+    let Some(magic) = magic.filter(|m| FONT_MAGICS.contains(m)) else {
+        return Err(unreadable_font("unknown magic"));
+    };
+    let collection = &magic == b"ttcf";
+    if collection {
+        // コレクションのヘッダ: 印（4 バイト）・版（4 バイト）・フォントの数（4 バイト）・各フォントの位置。
+        let count = data
+            .get(8..12)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(u32::from_be_bytes);
+        match count {
+            None => return Err(unreadable_font("malformed font")),
+            Some(n) if index >= n => {
+                return Err(MediaError::invalid_argument(format!(
+                    "フォントの番号 {index} はありません（このファイルのフォントは {n} 個。0〜{} で指定してください）",
+                    n.saturating_sub(1)
+                )));
+            }
+            Some(_) => {}
+        }
+    } else if index != 0 {
+        return Err(MediaError::invalid_argument(format!(
+            "このフォントのファイルはコレクション（.ttc）ではないため、番号は 0 にしてください（{index}）"
+        )));
+    }
+    let font = if collection {
+        CollectionRef::new(data).and_then(|c| c.get(index))
+    } else {
+        FontRef::new(data)
+    }
+    .map_err(|e| {
+        unreadable_font(match e {
+            ReadError::InvalidSfnt(_) => "unknown magic",
+            _ => "malformed font",
+        })
+    })?;
+    // read-fonts は表の一覧が途中で切れていても開ける（一覧が空になる）ので、数と合うかを確かめる。
+    let dir = font.table_directory();
+    if dir.table_records().len() != usize::from(dir.num_tables()) {
+        return Err(unreadable_font("malformed font"));
+    }
+    let upem = font
+        .head()
+        .ok()
+        .filter(|h| matches!(h.index_to_loc_format(), 0 | 1))
+        .map(|h| h.units_per_em())
+        .filter(|u| (16..=16384).contains(u))
+        .ok_or_else(|| unreadable_font("the head table is missing or malformed"))?;
+    if font.hhea().is_err() {
+        return Err(unreadable_font("the hhea table is missing or malformed"));
+    }
+    let maxp_ok = font.maxp().is_ok_and(|m| {
+        m.num_glyphs() != 0
+            && [Version16Dot16::VERSION_0_5, Version16Dot16::VERSION_1_0].contains(&m.version())
+    });
+    if !maxp_ok {
+        return Err(unreadable_font("the maxp table is missing or malformed"));
+    }
+    Ok((font, upem))
+}
+
+/// 文字から字形を引く `cmap` の表。置き換える前（ttf-parser の `glyph_index`）と同じ規則: Unicode の表（プラット
+/// フォーム 0（Unicode）、プラットフォーム 3（Windows）の符号化 1（BMP）、プラットフォーム 3 の符号化 10 の形式 12・13）
+/// を、ファイルの並びの順に調べる。記号のフォント（プラットフォーム 3 の符号化 0）・Mac の表は使わない。
+fn unicode_subtables<'a>(font: &FontRef<'a>) -> Vec<CmapSubtable<'a>> {
+    let Ok(cmap) = font.cmap() else {
+        return Vec::new();
+    };
+    cmap.encoding_records()
+        .iter()
+        .filter_map(|r| {
+            let s = r.subtable(cmap.offset_data()).ok()?;
+            let unicode = match r.platform_id() {
+                PlatformId::Unicode => true,
+                PlatformId::Windows => {
+                    r.encoding_id() == 1
+                        || (r.encoding_id() == 10
+                            && matches!(s, CmapSubtable::Format12(_) | CmapSubtable::Format13(_)))
+                }
+                _ => false,
+            };
+            unicode.then_some(s)
+        })
+        .collect()
+}
+
+/// 文字の字形（最初に見つかった表の字形。`.notdef`（0）はないものとして扱う）。
+fn glyph_for(subtables: &[CmapSubtable<'_>], c: char) -> Option<GlyphId> {
+    subtables
+        .iter()
+        .find_map(|s| s.map_codepoint(c).filter(|g| *g != GlyphId::NOTDEF))
+}
+
 /// 文字の透かしを作る（モジュールの doc の「文字」）。`font` はフォントのファイルの中身、`index` はコレクションの中の
 /// 番号、`size_px` は文字の大きさ（em の画素）、`align` は行の揃え。
 #[allow(clippy::too_many_arguments)]
@@ -619,27 +823,22 @@ pub fn text_watermark(
     max_height: u32,
     space: OutputColorSpace,
 ) -> Result<TextWatermark> {
-    let face = Face::parse(font, index).map_err(|e| {
-        match ttf_parser::fonts_in_collection(font) {
-            Some(n) if index >= n => MediaError::invalid_argument(format!(
-                "フォントの番号 {index} はありません（このファイルのフォントは {n} 個。0〜{} で指定してください）",
-                n.saturating_sub(1)
-            )),
-            None if index != 0 && e == ttf_parser::FaceParsingError::FaceIndexOutOfBounds => {
-                MediaError::invalid_argument(format!(
-                    "このフォントのファイルはコレクション（.ttc）ではないため、番号は 0 にしてください（{index}）"
-                ))
-            }
-            _ => MediaError::decode(format!("フォントを読めません: {e}")),
-        }
-    })?;
-    let upem = f32::from(face.units_per_em().max(1));
-    let ascender = f32::from(face.ascender());
-    let descender = f32::from(face.descender());
-    let mut line_height = ascender - descender + f32::from(face.line_gap());
+    let (font, upem) = open_font(font, index)?;
+    let upem = f32::from(upem);
+    // ヒンティングなし・フォントの単位のまま・可変フォントは既定の形。
+    let size = Size::unscaled();
+    let location = LocationRef::default();
+    // 行の高さ（OS/2 の USE_TYPO_METRICS の印があれば OS/2 の値、なければ hhea、hhea が 0 なら OS/2 の値。skrifa の
+    // `Metrics`）。
+    let metrics = font.metrics(size, location);
+    let ascender = metrics.ascent;
+    let descender = metrics.descent;
+    let mut line_height = ascender - descender + metrics.leading;
     if line_height <= 0.0 {
         line_height = upem * 1.2;
     }
+    let subtables = unicode_subtables(&font);
+    let glyph_metrics = font.glyph_metrics(size, location);
     // 並べる（フォントの単位）。
     let mut placed = Vec::new();
     let mut missing: Vec<char> = Vec::new();
@@ -647,13 +846,13 @@ pub fn text_watermark(
     for (line, s) in text.split('\n').enumerate() {
         let mut pen = 0.0f32;
         for c in s.chars().filter(|c| *c != '\r') {
-            let glyph = match face.glyph_index(c) {
+            let glyph = match glyph_for(&subtables, c) {
                 Some(g) => g,
                 None => {
                     if !missing.contains(&c) {
                         missing.push(c);
                     }
-                    GlyphId(0)
+                    GlyphId::NOTDEF
                 }
             };
             placed.push(Placed {
@@ -661,9 +860,39 @@ pub fn text_watermark(
                 x: pen,
                 line,
             });
-            pen += f32::from(face.glyph_hor_advance(glyph).unwrap_or(0));
+            pen += glyph_metrics.advance_width(glyph).unwrap_or(0.0);
         }
         widths.push(pen);
+    }
+    // 字形の輪郭を読む（同じ字形は 1 回。読めない字形は形がないものとして扱う）。
+    let outlines = font.outline_glyphs();
+    let mut glyphs: HashMap<GlyphId, GlyphOutline> = HashMap::new();
+    let mut elements = 0u64;
+    for p in &placed {
+        if glyphs.contains_key(&p.glyph) {
+            continue;
+        }
+        let mut g = GlyphOutline::default();
+        if let Some(outline) = outlines.get(p.glyph) {
+            let mut recorder = OutlineRecorder {
+                outline: &mut g,
+                count: &mut elements,
+            };
+            if outline
+                .draw(DrawSettings::unhinted(size, location), &mut recorder)
+                .is_err()
+            {
+                g = GlyphOutline::default();
+            }
+        }
+        if elements > MAX_TEXT_OUTLINE_ELEMENTS {
+            return Err(MediaError::TooLarge {
+                what: "透かしの文字の輪郭の要素の数",
+                actual: elements,
+                max: MAX_TEXT_OUTLINE_ELEMENTS,
+            });
+        }
+        glyphs.insert(p.glyph, g);
     }
     let block = widths.iter().copied().fold(0.0f32, f32::max);
     let offset = |line: usize| -> f32 {
@@ -677,12 +906,12 @@ pub fn text_watermark(
     // 形の外接矩形（フォントの単位。y は下向き、1 行目の上端から）。
     let mut ink: Option<[f32; 4]> = None;
     for p in &placed {
-        if let Some(r) = face.glyph_bounding_box(p.glyph) {
+        if let Some(r) = glyphs.get(&p.glyph).and_then(|g| g.bounds) {
             let base = ascender + p.line as f32 * line_height;
-            let x0 = offset(p.line) + p.x + f32::from(r.x_min);
-            let x1 = offset(p.line) + p.x + f32::from(r.x_max);
-            let y0 = base - f32::from(r.y_max);
-            let y1 = base - f32::from(r.y_min);
+            let x0 = offset(p.line) + p.x + r[0];
+            let x1 = offset(p.line) + p.x + r[2];
+            let y0 = base - r[3];
+            let y1 = base - r[1];
             ink = Some(match ink {
                 None => [x0, y0, x1, y1],
                 Some(b) => [b[0].min(x0), b[1].min(y0), b[2].max(x1), b[3].max(y1)],
@@ -715,17 +944,40 @@ pub fn text_watermark(
         });
     }
     let mut edges = Vec::new();
+    let mut edge_count = 0u64;
     for p in &placed {
+        let Some(g) = glyphs.get(&p.glyph) else {
+            continue;
+        };
         let base = ascender + p.line as f32 * line_height;
         let mut b = EdgeBuilder {
             edges: &mut edges,
+            count: &mut edge_count,
             scale,
             ox: (offset(p.line) + p.x) * scale - px0,
             oy: base * scale - py0,
             start: (0.0, 0.0),
             cur: (0.0, 0.0),
         };
-        face.outline_glyph(p.glyph, &mut b);
+        for s in &g.segments {
+            match *s {
+                Segment::Move(x, y) => b.move_to(x, y),
+                Segment::Line(x, y) => b.line_to(x, y),
+                Segment::Quad(cx, cy, x, y) => b.quad_to(cx, cy, x, y),
+                Segment::Cubic(cx0, cy0, cx1, cy1, x, y) => b.curve_to(cx0, cy0, cx1, cy1, x, y),
+                Segment::Close => b.close(),
+            }
+            if *b.count > MAX_TEXT_EDGES {
+                break;
+            }
+        }
+        if edge_count > MAX_TEXT_EDGES {
+            return Err(MediaError::TooLarge {
+                what: "透かしの文字の輪郭の線分の数",
+                actual: edge_count,
+                max: MAX_TEXT_EDGES,
+            });
+        }
     }
     let cov = rasterize(&edges, width as usize, height as usize);
     let c = color_in(space, color);
@@ -1120,5 +1372,119 @@ mod tests {
             render(Align::End),
         );
         assert!(col_of_ink(&l) < col_of_ink(&c) && col_of_ink(&c) < col_of_ink(&r));
+    }
+
+    /// テストのフォントの表の記録（表の一覧の中の位置・表の位置・長さ）。
+    fn table_record(font: &[u8], tag: &[u8; 4]) -> (usize, usize, usize) {
+        let n = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        let be32 = |at: usize| u32::from_be_bytes(font[at..at + 4].try_into().unwrap()) as usize;
+        (0..n)
+            .map(|i| 12 + 16 * i)
+            .find(|&r| &font[r..r + 4] == tag)
+            .map(|r| (r, be32(r + 8), be32(r + 12)))
+            .unwrap()
+    }
+
+    fn render_a(font: &[u8], index: u32, text: &str) -> Result<TextWatermark> {
+        text_watermark(
+            font,
+            index,
+            text,
+            RgbColor::WHITE,
+            40,
+            Align::Start,
+            99,
+            99,
+            OutputColorSpace::Srgb,
+        )
+    }
+
+    #[test]
+    fn broken_fonts_are_errors_with_the_same_messages() {
+        let font = test_font();
+        let err = |f: &[u8], i: u32| render_a(f, i, "A").unwrap_err().to_string();
+        // 先頭の 4 バイト（空・短い・知らない印）。
+        for bad in [&b""[..], b"tt", b"garbage", b"wOFF\0\0\0\0"] {
+            assert!(
+                err(bad, 0).ends_with("フォントを読めません: unknown magic"),
+                "{bad:?}"
+            );
+        }
+        // 表の一覧が途中で切れている。
+        assert!(err(&font[..40], 0).ends_with("フォントを読めません: malformed font"));
+        // 必須の表（head の em が 0・hhea が短い・maxp の字形が 0）。
+        let (_, head, _) = table_record(&font, b"head");
+        let mut f = font.clone();
+        f[head + 18..head + 20].copy_from_slice(&0u16.to_be_bytes());
+        assert!(err(&f, 0).ends_with("the head table is missing or malformed"));
+        let (rec, _, _) = table_record(&font, b"hhea");
+        let mut f = font.clone();
+        f[rec + 12..rec + 16].copy_from_slice(&10u32.to_be_bytes());
+        assert!(err(&f, 0).ends_with("the hhea table is missing or malformed"));
+        let (_, maxp, _) = table_record(&font, b"maxp");
+        let mut f = font.clone();
+        f[maxp + 4..maxp + 6].copy_from_slice(&0u16.to_be_bytes());
+        assert!(err(&f, 0).ends_with("the maxp table is missing or malformed"));
+        // コレクションのヘッダが短い・フォントの数が巨大（パニックしない・確保しない）。
+        assert!(err(b"ttcf\0\x01\0\0", 0).ends_with("malformed font"));
+        let huge = b"ttcf\0\x01\0\0\xff\xff\xff\xff\0\0\0\x10";
+        assert!(err(huge, 3).ends_with("malformed font"));
+        let e = err(huge, u32::MAX);
+        assert!(e.contains("4294967295 個"), "{e}");
+        // コレクションの中のフォントの位置がファイルの外。
+        let mut ttc = crate::testing::test_font_collection(2);
+        ttc[16..20].copy_from_slice(&0x7fff_0000u32.to_be_bytes());
+        assert!(err(&ttc, 1).ends_with("malformed font"));
+        render_a(&ttc, 0, "A").unwrap();
+    }
+
+    #[test]
+    fn unreadable_glyphs_have_no_shape() {
+        // 「B」（字形 2）の終わりの位置（loca の 4 番目。空白（字形 3）の始まりでもある）を glyf の外にする: 「B」は
+        // 形がないものとして扱い、「A」は描く。
+        let mut font = test_font();
+        let (_, loca, _) = table_record(&font, b"loca");
+        font[loca + 12..loca + 16].copy_from_slice(&0x00ff_0000u32.to_be_bytes());
+        let ab = render_a(&font, 0, "AB").unwrap();
+        let a = render_a(&font, 0, "A").unwrap();
+        assert_eq!(ab.bitmap, a.bitmap);
+        assert!(ab.missing.is_empty());
+        let e = render_a(&font, 0, "B").unwrap_err().to_string();
+        assert!(e.contains("描ける形がありません"), "{e}");
+    }
+
+    #[test]
+    fn outline_limits_stop_recording() {
+        // 要素の数が上限に達した後は記録しない（数えるだけ）。
+        let mut g = GlyphOutline::default();
+        let mut count = MAX_TEXT_OUTLINE_ELEMENTS - 1;
+        let mut r = OutlineRecorder {
+            outline: &mut g,
+            count: &mut count,
+        };
+        r.move_to(0.0, 0.0);
+        r.line_to(10.0, 5.0);
+        r.close();
+        assert_eq!(count, MAX_TEXT_OUTLINE_ELEMENTS + 2);
+        assert_eq!(g.segments.len(), 1);
+        assert_eq!(g.bounds, Some([0.0, 0.0, 0.0, 0.0]));
+        // 線分の数も同じ。
+        let mut edges = Vec::new();
+        let mut count = MAX_TEXT_EDGES - 1;
+        let mut b = EdgeBuilder {
+            edges: &mut edges,
+            count: &mut count,
+            scale: 1.0,
+            ox: 0.0,
+            oy: 0.0,
+            start: (0.0, 0.0),
+            cur: (0.0, 0.0),
+        };
+        b.move_to(0.0, 0.0);
+        b.line_to(1.0, 1.0);
+        b.line_to(2.0, 0.0);
+        b.close();
+        assert_eq!(count, MAX_TEXT_EDGES + 1);
+        assert_eq!(edges.len(), 1);
     }
 }

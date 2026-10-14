@@ -209,7 +209,7 @@ pub fn test_font() -> Vec<u8> {
     let mut body = Vec::new();
     for (tag, data) in &tables {
         out.extend_from_slice(*tag);
-        be32(&mut out, 0); // チェックサム（ttf-parser は確かめない）
+        be32(&mut out, 0); // チェックサム（skrifa（read-fonts）は確かめない）
         be32(&mut out, offset);
         be32(&mut out, data.len() as u32);
         body.extend_from_slice(data);
@@ -251,31 +251,85 @@ pub fn test_font_collection(count: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skrifa::outline::{DrawSettings, OutlinePen};
+    use skrifa::prelude::{LocationRef, Size};
+    use skrifa::raw::{CollectionRef, TableProvider};
+    use skrifa::{FontRef, GlyphId, MetadataProvider};
+
+    /// 輪郭の要素の数と、制御点を含む外接矩形を数えるペン。
+    #[derive(Default)]
+    struct Bounds {
+        count: usize,
+        rect: Option<[f32; 4]>,
+    }
+
+    impl Bounds {
+        fn add(&mut self, x: f32, y: f32) {
+            self.count += 1;
+            let r = self.rect.get_or_insert([x, y, x, y]);
+            *r = [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)];
+        }
+    }
+
+    impl OutlinePen for Bounds {
+        fn move_to(&mut self, x: f32, y: f32) {
+            self.add(x, y);
+        }
+        fn line_to(&mut self, x: f32, y: f32) {
+            self.add(x, y);
+        }
+        fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+            self.add(cx0, cy0);
+            self.add(x, y);
+        }
+        fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+            self.add(cx0, cy0);
+            self.add(cx1, cy1);
+            self.add(x, y);
+        }
+        fn close(&mut self) {}
+    }
+
+    fn outline_of(font: &FontRef<'_>, glyph: GlyphId) -> Bounds {
+        let mut pen = Bounds::default();
+        font.outline_glyphs()
+            .get(glyph)
+            .unwrap()
+            .draw(
+                DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),
+                &mut pen,
+            )
+            .unwrap();
+        pen
+    }
 
     #[test]
     fn test_font_is_readable() {
         let data = test_font();
-        let face = ttf_parser::Face::parse(&data, 0).unwrap();
-        assert_eq!(face.units_per_em(), 1000);
-        assert_eq!(face.ascender(), 800);
-        assert_eq!(face.descender(), -200);
-        assert_eq!(face.number_of_glyphs(), 6);
-        let a = face.glyph_index('A').unwrap();
-        assert_eq!(face.glyph_index('あ'), Some(a));
-        assert_eq!(face.glyph_index('漢'), None);
-        assert_eq!(face.glyph_hor_advance(a), Some(700));
-        let r = face.glyph_bounding_box(a).unwrap();
-        assert_eq!((r.x_min, r.y_min, r.x_max, r.y_max), (50, 0, 650, 700));
-        assert!(
-            face.glyph_bounding_box(face.glyph_index(' ').unwrap())
-                .is_none()
-        );
+        let font = FontRef::new(&data).unwrap();
+        assert_eq!(font.head().unwrap().units_per_em(), 1000);
+        let m = font.metrics(Size::unscaled(), LocationRef::default());
+        assert_eq!((m.ascent, m.descent, m.leading), (800.0, -200.0, 0.0));
+        assert_eq!(font.maxp().unwrap().num_glyphs(), 6);
+        let cmap = font.charmap();
+        let a = cmap.map('A').unwrap();
+        assert_eq!(cmap.map('あ'), Some(a));
+        assert_eq!(cmap.map('漢'), None);
+        let gm = font.glyph_metrics(Size::unscaled(), LocationRef::default());
+        assert_eq!(gm.advance_width(a), Some(700.0));
+        let r = outline_of(&font, a).rect.unwrap();
+        assert_eq!(r, [50.0, 0.0, 650.0, 700.0]);
+        // 空白は輪郭がない。
+        assert_eq!(outline_of(&font, cmap.map(' ').unwrap()).count, 0);
+        // 2 次の曲線（Q）の外接矩形は制御点を含む。
+        let q = outline_of(&font, cmap.map('Q').unwrap()).rect.unwrap();
+        assert_eq!(q, [50.0, 0.0, 650.0, 700.0]);
         let ttc = test_font_collection(2);
-        assert_eq!(ttf_parser::fonts_in_collection(&ttc), Some(2));
+        assert_eq!(CollectionRef::new(&ttc).unwrap().len(), 2);
         for i in 0..2 {
-            let f = ttf_parser::Face::parse(&ttc, i).unwrap();
-            assert_eq!(f.glyph_index('B'), face.glyph_index('B'));
+            let f = FontRef::from_index(&ttc, i).unwrap();
+            assert_eq!(f.charmap().map('B'), cmap.map('B'));
         }
-        assert!(ttf_parser::Face::parse(&ttc, 2).is_err());
+        assert!(FontRef::from_index(&ttc, 2).is_err());
     }
 }
