@@ -74,6 +74,7 @@ import {
   constrainDraft,
   currentMask,
   endAllTools,
+  overlayShown,
   pickMaskColor,
   pickWhiteBalance,
   setBrushOptions,
@@ -415,7 +416,7 @@ function Stage() {
   const hasState = useDevelop((s) => s.state !== null);
   const maskIndex = useDevelopView((s) => s.maskIndex);
   const componentIndex = useDevelopView((s) => s.componentIndex);
-  const maskOverlay = useDevelopView((s) => s.maskOverlay);
+  const overlayOn = useDevelopView(overlayShown);
   const brush = useDevelopView((s) => s.brush);
 
   const header: FrameInfo | null = frame?.header ?? null;
@@ -575,7 +576,7 @@ function Stage() {
   const gb = boundsOrDefault(header?.g_bounds);
   const maskEditable = !!settings && maskControls(settings, !hasState || opening).editable;
   const overlay = useMaskOverlay(
-    sel && maskOverlay && variantId !== null && header
+    sel && overlayOn && variantId !== null && header
       ? { variantId, index: sel.index, generation: header.generation, uncropped }
       : null,
   );
@@ -590,7 +591,7 @@ function Stage() {
   if (tool === "wb") hint = "スポイト: 中立（灰色）にしたい点をクリック（Esc で取り消し）";
   else if (tool === "mask_color") hint = "色域: 選びたい色の点をクリック（Esc で取り消し）";
   else if (tool === "brush")
-    hint = `ブラシ${brush.erase ? "（消しゴム）" : ""}: ドラッグで描く。Alt を押しながらで${brush.erase ? "描く" : "消す"}・[ ] で大きさ・Esc で終わる`;
+    hint = `ブラシ${brush.erase ? "（消しゴム）" : ""}: ドラッグで描く。Alt を押しながらで${brush.erase ? "描く" : "消す"}・[ ] で大きさ・O で赤の表示・Esc で終わる`;
   else if (crop && !cropReady) hint = "切り抜く前の全体を描いています…（Esc で取り消し）";
   else if (crop) hint = "切り抜き: 枠の四隅・四辺・中をドラッグ。Enter で完了、Esc で取り消し";
   else if (zoomed) hint = comparing ? "等倍表示（ビフォーとアフターは同じ位置）: ドラッグで移動。クリック・Z・Esc で全体表示" : "等倍表示: ドラッグで移動。クリック・Z・Esc で全体表示";
@@ -654,6 +655,8 @@ function Stage() {
           painting={tool === "brush" && maskEditable}
           brush={brush}
           editable={maskEditable}
+          overlayOn={overlayOn}
+          overlayGeneration={overlay?.header.generation ?? null}
         />
       )}
       {comparing && split && <div className="dv-split-line" style={{ left: splitAt }} />}

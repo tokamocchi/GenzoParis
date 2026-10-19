@@ -57,6 +57,7 @@ import {
   addMaskWith,
   applyAddedComponent,
   currentMask,
+  overlayShown,
   selectComponent,
   selectMask,
   setBrushOptions,
@@ -529,7 +530,7 @@ export function MaskSection(props: { settings: DevelopSettings; disabled: boolea
   const { settings, disabled } = props;
   const c = maskControls(settings, disabled);
   const view = useDevelopView(
-    (s) => ({ maskIndex: s.maskIndex, componentIndex: s.componentIndex, overlay: s.maskOverlay, tool: s.tool, pickTarget: s.pickTarget }),
+    (s) => ({ maskIndex: s.maskIndex, componentIndex: s.componentIndex, overlay: overlayShown(s), tool: s.tool, pickTarget: s.pickTarget }),
     shallowEqual,
   );
   const gb = useDevelop((s) => s.frame?.header.g_bounds ?? null);
@@ -620,7 +621,10 @@ export function MaskSection(props: { settings: DevelopSettings; disabled: boolea
         <>
           <NameInput key={sel.index} index={sel.index} name={sel.mask.name} disabled={!editable} />
           <div className="dp-row">
-            <label className="dp-check" title={`選んだマスクの範囲を赤で重ねて表示します（${comboLabel("o")}）`}>
+            <label
+              className="dp-check"
+              title={`選んだマスクの範囲を赤で重ねて表示します（${comboLabel("o")}。ブラシで描いている間と、それ以外とで別に切り替えます。描いている間は、既定で表示します）`}
+            >
               <input type="checkbox" checked={view.overlay} onChange={() => toggleMaskOverlay()} />
               重ねて表示
             </label>

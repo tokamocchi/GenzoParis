@@ -48,7 +48,24 @@ export interface DevelopStoreState {
   before: BeforeInfo | null;
   /** ビフォーの最新のプレビュー。 */
   beforeFrame: Frame<FrameInfo> | null;
+  /** 最近に送った設定の結果（送った順。最後の SETTINGS_ACK_HISTORY 件）。 */
+  settingsAcks: readonly SettingsAck[];
 }
+
+/**
+ * 送った設定の結果（applySettings の通し番号 `seq` と、コアが割り当てた世代）。`seq` 以前に渡して、まだ結果の出ていない
+ * 設定は、この操作でまとめて送った（後の設定は前の設定を含むため）。受け付けたら、世代 `generation` 以降のプレビュー・
+ * 重ねて表示に入っている。受け付けなかった（送信が失敗した）ら `generation` は null で、`superseded` はそのときに後の
+ * 設定（失敗した設定を含む。画面の設定から作るため）がすでに渡されていたか（その結果を待てばよい）。
+ */
+export interface SettingsAck {
+  seq: number;
+  generation: number | null;
+  superseded?: boolean;
+}
+
+/** 覚えておく設定の結果の件数。 */
+const SETTINGS_ACK_HISTORY = 16;
 
 export const developStore = createStore<DevelopStoreState>({
   variantId: null,
@@ -60,6 +77,7 @@ export const developStore = createStore<DevelopStoreState>({
   historyVersion: 0,
   before: null,
   beforeFrame: null,
+  settingsAcks: [],
 });
 
 export function useDevelop<T>(selector: (s: DevelopStoreState) => T, equal?: (a: T, b: T) => boolean): T {
@@ -144,11 +162,13 @@ export async function closeDevelopSession(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 type Op =
-  | { kind: "settings"; settings: DevelopSettings; dragging: boolean }
+  | { kind: "settings"; settings: DevelopSettings; dragging: boolean; seq: number }
   | { kind: "end_drag" }
   | { kind: "call"; run: () => Promise<void> };
 
 let running = false;
+/** applySettings の通し番号（最後に渡した設定の番号）。 */
+let applySeq = 0;
 /** 送信待ちの設定（最新の 1 つ）。 */
 let pending: Op | null = null;
 /** 設定の後に順に実行する操作（end_drag・Undo など）。 */
@@ -187,6 +207,7 @@ async function pump(): Promise<void> {
         // なので消さない）。
         if (developStore.get().error && developStore.get().state) developStore.set({ error: null });
       } catch (e) {
+        if (op.kind === "settings") recordAck({ seq: op.seq, generation: null, superseded: applySeq > op.seq });
         const err = toApiError(e);
         if (err.kind !== "cancelled") {
           console.error("現像の操作に失敗", err.info);
@@ -200,11 +221,17 @@ async function pump(): Promise<void> {
   }
 }
 
+function recordAck(a: SettingsAck): void {
+  developStore.set((s) => ({ settingsAcks: [...s.settingsAcks, a].slice(-SETTINGS_ACK_HISTORY) }));
+}
+
 async function runOp(op: Op): Promise<void> {
   switch (op.kind) {
-    case "settings":
-      await core.setSettings(op.settings, op.dragging);
+    case "settings": {
+      const generation = await core.setSettings(op.settings, op.dragging);
+      recordAck({ seq: op.seq, generation });
       break;
+    }
     case "end_drag": {
       const state = await core.endDrag();
       developStore.set((s) => ({ state, before: beforeOf(state, s), historyVersion: s.historyVersion + 1 }));
@@ -221,13 +248,17 @@ async function runOp(op: Op): Promise<void> {
  *
  * - スライダーのドラッグ中は `dragging: true` で送り、離したら [`endDrag`] を呼ぶ（履歴に 1 件）。
  * - ドラッグでない変更（数値の入力・プリセット）は `dragging: false`（コアが 1 秒後に保存して履歴に記録）。
+ *
+ * 戻り値は通し番号（送った結果は [`DevelopStoreState.settingsAcks`] に出る）。写真を開いていなければ null。
  */
-export function applySettings(settings: DevelopSettings, dragging: boolean): void {
+export function applySettings(settings: DevelopSettings, dragging: boolean): number | null {
   const s = developStore.get();
-  if (!s.state) return;
+  if (!s.state) return null;
   developStore.set({ settings });
-  pending = { kind: "settings", settings, dragging };
+  applySeq += 1;
+  pending = { kind: "settings", settings, dragging, seq: applySeq };
   void pump();
+  return applySeq;
 }
 
 /** ドラッグを終える（最後の値を送ってから。履歴に 1 件記録して保存）。 */

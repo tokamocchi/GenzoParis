@@ -93,8 +93,10 @@ export interface DevelopViewState {
   maskIndex: number | null;
   /** 選んでいるマスクの部品の番号。 */
   componentIndex: number | null;
-  /** 選んでいるマスクを重ねて表示する（O）。 */
+  /** 選んでいるマスクを重ねて表示する（O。ブラシで描いている間は brushOverlay）。 */
   maskOverlay: boolean;
+  /** ブラシで描いている間に重ねて表示する（O。既定は表示する。描いたところが赤くなる）。 */
+  brushOverlay: boolean;
   /** ブラシの道具の設定（次に描くストロークに使う）。 */
   brush: BrushOptions;
   /** 色域のスポイトの入れ先（tool が mask_color の間）。 */
@@ -110,6 +112,7 @@ export const viewStore = createStore<DevelopViewState>({
   maskIndex: null,
   componentIndex: null,
   maskOverlay: false,
+  brushOverlay: true,
   brush: DEFAULT_BRUSH,
   pickTarget: null,
 });
@@ -525,11 +528,23 @@ export function selectComponent(index: number | null): void {
   });
 }
 
-/** 重ねて表示を切り替える（O。マスクを選んでいなければ最初のマスクを選ぶ。マスクがなければ知らせる）。 */
+/** 重ねて表示をするか（ブラシで描いている間は brushOverlay、それ以外は maskOverlay）。 */
+export function overlayShown(s: Pick<DevelopViewState, "tool" | "maskOverlay" | "brushOverlay">): boolean {
+  return s.tool === "brush" ? s.brushOverlay : s.maskOverlay;
+}
+
+/**
+ * 重ねて表示を切り替える（O。マスクを選んでいなければ最初のマスクを選ぶ。マスクがなければ知らせる）。ブラシで描いている
+ * 間は、描いている間の表示（brushOverlay）を切り替える。
+ */
 export function toggleMaskOverlay(): void {
   const s = viewStore.get();
   const d = developStore.get();
   if (!d.state || !d.settings) return;
+  if (s.tool === "brush") {
+    viewStore.set({ brushOverlay: !s.brushOverlay });
+    return;
+  }
   const masks = d.settings.masks ?? [];
   if (!s.maskOverlay && masks.length === 0) {
     actions.notify("info", "マスクがありません（右のパネルの「マスク」で追加できます）");
@@ -642,19 +657,19 @@ export async function pickMaskColor(x: number, y: number): Promise<void> {
 
 /**
  * 描いたストローク（G 座標の点の列）を、選んでいるマスクのブラシの部品に足す（離したとき。履歴に 1 件）。足せなければ
- * 知らせる。
+ * 知らせる。戻り値は applySettings の通し番号（足せなければ null）。
  */
-export function commitBrushStroke(points: [number, number][], erase: boolean): void {
+export function commitBrushStroke(points: [number, number][], erase: boolean): number | null {
   const d = developStore.get();
   const s = viewStore.get();
-  if (!d.state || !d.settings) return;
+  if (!d.state || !d.settings) return null;
   const sel = currentMask(d.settings, s);
-  if (!sel || sel.component === null) return;
+  if (!sel || sel.component === null) return null;
   const stroke = makeStroke(points, { ...s.brush, erase });
   const r = appendStroke(d.settings, sel.index, sel.component, stroke);
   if ("error" in r) {
     actions.notify("info", r.error);
-    return;
+    return null;
   }
-  applySettings(r.settings, false);
+  return applySettings(r.settings, false);
 }

@@ -529,6 +529,53 @@ export function clearStrokes(s: DevelopSettings, i: number, j: number): DevelopS
 // 表示
 // ---------------------------------------------------------------------------
 
+/** 離したストローク（コアに渡した設定の通し番号 `seq`。受け付けた世代 `generation` が分かるまでは null）。 */
+export interface PendingStroke {
+  points: [number, number][];
+  erase: boolean;
+  /** 大きさ（半径。G 座標）。 */
+  size: number;
+  seq: number;
+  generation: number | null;
+}
+
+/**
+ * 離したストロークのうち、まだ描いておくもの。送った設定の結果 `acks`（送った順）のうち、ストロークの番号以降で受け付けた
+ * 最初のもので世代を埋め、その世代以降の重ねて表示 `overlayGeneration` が届いたら除く（重ねて表示をしていなければ
+ * （`overlayOn` が false）、受け付けたら除く）。受け付けた結果がなく、番号以降の失敗のうちに、後の設定が渡されて
+ * いなかった（`superseded` でない）ものがあれば、すぐに除く（後の設定が渡されていれば、その結果を待つ）。
+ * 変わらなければ同じ配列を返す。
+ */
+export function settlePendingStrokes(
+  pending: PendingStroke[],
+  acks: readonly { seq: number; generation: number | null; superseded?: boolean }[],
+  overlayOn: boolean,
+  overlayGeneration: number | null,
+): PendingStroke[] {
+  let changed = false;
+  const next: PendingStroke[] = [];
+  for (const p of pending) {
+    let generation = p.generation;
+    if (generation === null) {
+      const covering = acks.filter((a) => a.seq >= p.seq);
+      generation = covering.find((a) => a.generation !== null)?.generation ?? null;
+      if (generation === null && covering.some((a) => a.generation === null && !a.superseded)) {
+        changed = true;
+        continue;
+      }
+    }
+    const done =
+      generation !== null && (!overlayOn || (overlayGeneration !== null && overlayGeneration >= generation));
+    if (done) {
+      changed = true;
+      continue;
+    }
+    if (generation !== p.generation) changed = true;
+    next.push(generation === p.generation ? p : { ...p, generation });
+  }
+  return changed ? next : pending;
+}
+
 /** 重ねて表示の色（赤）と、重み 1 のときの不透明度。 */
 export const OVERLAY_RGB: [number, number, number] = [255, 40, 40];
 export const OVERLAY_ALPHA = 0.5;

@@ -32,6 +32,12 @@ all-features = true
 # - proc-macro-error: Linux の GTK のバインディング（glib-macros）のビルド時のマクロ。配布の対象
 #   （Windows・macOS）の実行ファイルには入らない。
 # - unic-*: tauri-utils の urlpattern（権限の URL の照合）。Unicode の識別子の表で、入力は自分の設定だけ。
+#
+# 2026-10-19 追加（同じく「メンテナンス終了」の通知で、脆弱性ではない。zbus 6 に統合されたが、tauri-plugin-opener の
+# 最新の安定版 2.5.5 は zbus 5 を使うので更新先がない。tauri-plugin-opener を上げるときに見直す。遅くとも 2027-01 に
+# 見直す）:
+# - zvariant・zbus_names・zvariant_derive: tauri-plugin-opener の Linux 用の依存（zbus。D-Bus でファイルの場所を
+#   開く）。配布の対象（Windows・macOS）の依存の木には入らない（cargo tree -i zbus --target で確かめた）。
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error（Tauri の Linux の GTK の依存。ビルド時のみ）。Tauri の更新時に見直す" },
     { id = "RUSTSEC-2025-0075", reason = "unic-char-range（Tauri の urlpattern）。Tauri の更新時に見直す" },
@@ -39,6 +45,9 @@ ignore = [
     { id = "RUSTSEC-2025-0081", reason = "unic-char-property（Tauri の urlpattern）。Tauri の更新時に見直す" },
     { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version（Tauri の urlpattern）。Tauri の更新時に見直す" },
     { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident（Tauri の urlpattern）。Tauri の更新時に見直す" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant（tauri-plugin-opener の Linux 用の zbus 5 の依存）。tauri-plugin-opener の更新時に見直す" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names（tauri-plugin-opener の Linux 用の zbus 5 の依存）。tauri-plugin-opener の更新時に見直す" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive（tauri-plugin-opener の Linux 用の zbus 5 の依存）。tauri-plugin-opener の更新時に見直す" },
 ]
 
 [licenses]

@@ -37,6 +37,7 @@ import {
   pixelsPerG,
   removeColorSample,
   sanitizeMaskName,
+  settlePendingStrokes,
   shapeKind,
   simplifyPoints,
   totalBrushPoints,
@@ -48,6 +49,7 @@ import {
   commitBrushStroke,
   currentMask,
   endAllTools,
+  overlayShown,
   pickMaskColor,
   selectMask,
   startMaskColorPick,
@@ -244,6 +246,65 @@ describe("重ねて表示と見本の色", () => {
     expect(out[11]).toBe(64);
   });
 
+  it("離したストロークは、コアが受け付けた世代以降の重ねて表示が届くまで描いておく", () => {
+    const p = (seq: number) => ({
+      points: [[0.1, 0.1]] as [number, number][],
+      erase: false,
+      size: 0.05,
+      seq,
+      generation: null,
+    });
+    const pending = [p(3), p(4)];
+    // まだ受け付けていない（前の設定の受け付けだけ）: 変わらない。
+    expect(settlePendingStrokes(pending, [{ seq: 2, generation: 10 }], true, 10)).toBe(pending);
+    // 3 番を世代 11 で受け付けた: 世代を埋めるが、重ねて表示は前の世代なので描いておく。
+    const a = settlePendingStrokes(pending, [{ seq: 3, generation: 11 }], true, 10);
+    expect(a.map((x) => [x.seq, x.generation])).toEqual([
+      [3, 11],
+      [4, null],
+    ]);
+    // 世代 11 の重ねて表示が届いた: 3 番を除く。
+    const b = settlePendingStrokes(a, [{ seq: 3, generation: 11 }], true, 11);
+    expect(b.map((x) => x.seq)).toEqual([4]);
+    // 後の設定（4 番は前の設定を含む）を受け付け、その重ねて表示が届いた: すべて除く。
+    expect(settlePendingStrokes(b, [{ seq: 5, generation: 13 }], true, 12).map((x) => x.generation)).toEqual([13]);
+    expect(settlePendingStrokes(b, [{ seq: 5, generation: 13 }], true, 13)).toEqual([]);
+    // 重ねて表示をしていない・まだ届いていない。
+    expect(settlePendingStrokes(pending, [{ seq: 4, generation: 12 }], false, null)).toEqual([]);
+    expect(settlePendingStrokes(pending, [{ seq: 4, generation: 12 }], true, null)).toHaveLength(2);
+    // コアが受け付けなかった（送信が失敗した）: その番号までの、まだ世代の分からないストロークはすぐに除く。
+    expect(settlePendingStrokes(pending, [{ seq: 3, generation: null }], true, null).map((x) => x.seq)).toEqual([4]);
+    const failed = settlePendingStrokes(a, [{ seq: 4, generation: null }], true, 10);
+    expect(failed.map((x) => [x.seq, x.generation])).toEqual([[3, 11]]);
+    // 前の設定を受け付けた直後に、後の設定が失敗した（両方の結果を同時に見る）: 前のストロークは受け付けたものとして残す。
+    const both = settlePendingStrokes(
+      pending,
+      [
+        { seq: 3, generation: 11 },
+        { seq: 4, generation: null },
+      ],
+      true,
+      10,
+    );
+    expect(both.map((x) => [x.seq, x.generation])).toEqual([[3, 11]]);
+    // 失敗したが、そのときに後の設定（失敗したストロークを含む）が渡されていた: 後の設定の結果を待つ。
+    const carried = settlePendingStrokes(pending, [{ seq: 3, generation: null, superseded: true }], true, 10);
+    expect(carried).toBe(pending);
+    const later = settlePendingStrokes(
+      pending,
+      [
+        { seq: 3, generation: null, superseded: true },
+        { seq: 4, generation: 12 },
+      ],
+      true,
+      10,
+    );
+    expect(later.map((x) => [x.seq, x.generation])).toEqual([
+      [3, 12],
+      [4, 12],
+    ]);
+  });
+
   it("OKLab の見本の色を CSS の色にする（無彩色は R = G = B）", () => {
     expect(labToCss([1, 0, 0])).toBe("#ffffff");
     expect(labToCss([0, 0, 0])).toBe("#000000");
@@ -301,7 +362,14 @@ describe("マスクの道具（コアとのやり取り）", () => {
     mock.responses.set("develop_frame", new ArrayBuffer(0));
     ({ sent } = mockMaskCommands(mock, { masks: () => developStore.get().settings?.masks.length ?? 0 }));
     appStore.set({ toasts: [] });
-    viewStore.set({ tool: "none", maskIndex: null, componentIndex: null, maskOverlay: false, pickTarget: null });
+    viewStore.set({
+      tool: "none",
+      maskIndex: null,
+      componentIndex: null,
+      maskOverlay: false,
+      brushOverlay: true,
+      pickTarget: null,
+    });
     // 前のテストで開いた写真と違う ID で開く（同じ写真なら開いているものを返すため）。
     await openDevelopFor(Math.floor(Math.random() * 1e9) + 10);
   });
@@ -326,6 +394,24 @@ describe("マスクの道具（コアとのやり取り）", () => {
     expect(viewStore.get()).toMatchObject({ maskOverlay: true, maskIndex: 0, componentIndex: 0 });
     toggleMaskOverlay();
     expect(viewStore.get().maskOverlay).toBe(false);
+  });
+
+  it("ブラシで描いている間は既定で重ねて表示し、O は描いている間の表示だけを切り替える", () => {
+    developStore.set({ settings: withMasks([brushMask()]) });
+    selectMask(0);
+    expect(overlayShown(viewStore.get())).toBe(false);
+    toggleBrushTool();
+    expect(viewStore.get().tool).toBe("brush");
+    expect(overlayShown(viewStore.get())).toBe(true);
+    toggleMaskOverlay();
+    expect(viewStore.get()).toMatchObject({ brushOverlay: false, maskOverlay: false });
+    expect(overlayShown(viewStore.get())).toBe(false);
+    toggleMaskOverlay();
+    expect(overlayShown(viewStore.get())).toBe(true);
+    // 描くのをやめたら、ふだんの表示（O で切り替える）に戻る。
+    toggleBrushTool();
+    expect(viewStore.get().tool).toBe("none");
+    expect(overlayShown(viewStore.get())).toBe(false);
   });
 
   it("色域のスポイトで、点の色を見本にした新しいマスクを作る（交差の部品 1 つ）", async () => {
@@ -353,19 +439,32 @@ describe("マスクの道具（コアとのやり取り）", () => {
     selectMask(0);
     toggleBrushTool();
     expect(viewStore.get().tool).toBe("brush");
-    commitBrushStroke(
+    const first = commitBrushStroke(
       [
         [0.1, 0.1],
         [0.2, 0.1],
       ],
       false,
     );
-    commitBrushStroke([[0.3, 0.3]], true);
+    const second = commitBrushStroke([[0.3, 0.3]], true);
+    expect(first).not.toBeNull();
+    expect(second).toBeGreaterThan(first ?? Infinity);
     const sh = (await lastSettings())?.masks[0].components[0].shape;
     expect(sh && "brush" in sh && sh.brush.strokes.map((x) => [x.erase, x.points.length])).toEqual([
       [false, 2],
       [true, 1],
     ]);
+    // コアが受け付けた設定の番号と世代（離したストロークを、重ねて表示に入るまで描いておくのに使う）。
+    expect(developStore.get().settingsAcks.at(-1)).toEqual({ seq: second, generation: 2 });
+    // コアが受け付けなかったら、世代は null（離したストロークを残さない）。
+    const base = mock.responses.get("core_execute") as (a?: Record<string, unknown>) => unknown;
+    mock.responses.set("core_execute", (args?: Record<string, unknown>) =>
+      (args?.command as { type: string }).type === "set_settings" ? new Error("受け付けない") : base(args),
+    );
+    const third = commitBrushStroke([[0.4, 0.4]], false);
+    await enqueue(async () => undefined);
+    expect(developStore.get().settingsAcks.at(-1)).toEqual({ seq: third, generation: null, superseded: false });
+    mock.responses.set("core_execute", base);
     // ブラシでない部品を選んでいれば描き始めない。
     viewStore.set({ tool: "none" });
     developStore.set({ settings: withMasks([newMask(newLinearShape(GB))]) });
