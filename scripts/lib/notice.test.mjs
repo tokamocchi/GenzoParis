@@ -11,7 +11,9 @@ import {
   LIBRAW_LICENSE_SOURCE_DIR,
   licenseResources,
   librawNotice,
+  librawVersionHeaderCandidates,
   parseLibrawVersion,
+  recipeLines,
 } from "./notice.mjs";
 import { APP_DIR } from "./proc.mjs";
 
@@ -29,12 +31,38 @@ test("LibRaw のヘッダから版を読む", () => {
   assert.equal(parseLibrawVersion(""), null);
 });
 
-test("ライセンスの文書と案内を、配布物の licenses/LibRaw に置く対応", () => {
+test("版のヘッダを探す場所（libraw/libraw.h・libraw.h のどちらのあるフォルダでもよい）", () => {
+  assert.deepEqual(librawVersionHeaderCandidates(["C:/vcpkg/include", "", "/opt/homebrew/include"]), [
+    "C:/vcpkg/include/libraw/libraw_version.h",
+    "C:/vcpkg/include/libraw_version.h",
+    "/opt/homebrew/include/libraw/libraw_version.h",
+    "/opt/homebrew/include/libraw_version.h",
+  ]);
+});
+
+test("ライセンスの文書・案内・ビルドの手順の写しを、配布物の licenses/LibRaw に置く対応", () => {
   assert.deepEqual(licenseResources(), {
     "binaries/licenses/LibRaw/LICENSE.LGPL": "licenses/LibRaw/LICENSE.LGPL",
     "binaries/licenses/LibRaw/COPYRIGHT": "licenses/LibRaw/COPYRIGHT",
     "binaries/licenses/LibRaw/README.txt": "licenses/LibRaw/README.txt",
   });
+  const r = licenseResources(["vcpkg-ports-libraw/vcpkg.json", "vcpkg-ports-libraw/portfile.cmake"]);
+  assert.equal(r["binaries/licenses/LibRaw/build-recipe/vcpkg-ports-libraw/portfile.cmake"], "licenses/LibRaw/build-recipe/vcpkg-ports-libraw/portfile.cmake");
+  assert.equal(Object.keys(r).length, 5);
+});
+
+test("ビルドの手順の案内は、コミットを固定した URL にする", () => {
+  const vcpkg = recipeLines({ kind: "vcpkg", version: "0.22.0#1", revision: "abc123", copied: true });
+  assert.match(vcpkg.ja, /版 0\.22\.0#1。https:\/\/github\.com\/microsoft\/vcpkg\/tree\/abc123\/ports\/libraw。写しを build-recipe に同梱（port が当てるパッチを含む）/);
+  assert.match(vcpkg.en, /tree\/abc123\/ports\/libraw; a copy is included in build-recipe/);
+  const brew = recipeLines({ kind: "homebrew", version: "0.22.2", revision: "def456", copied: true });
+  assert.match(brew.ja, /https:\/\/github\.com\/Homebrew\/homebrew-core\/blob\/def456\/Formula\/lib\/libraw\.rb/);
+  assert.doesNotMatch(brew.ja, /パッチ/);
+  // コミットが取れなければ、master・HEAD の URL ではなく「記録できなかった」と書く。
+  const none = recipeLines({ kind: "homebrew", copied: false });
+  assert.match(none.ja, /ビルドの時点のコミットは記録できませんでした/);
+  assert.doesNotMatch(none.ja, /HEAD|master/);
+  assert.match(recipeLines({ kind: "unknown" }).ja, /独自にビルド/);
 });
 
 test("上流の LibRaw のファイルをそのまま持つ（LGPL-2.1 の全文と著作権表示）", () => {
@@ -50,22 +78,35 @@ test("上流の LibRaw のファイルをそのまま持つ（LGPL-2.1 の全文
 });
 
 test("案内に版・同梱したファイル・ソースの入手先・差し替えの方法を書く", () => {
-  const win = librawNotice({ os: "windows", version: "0.22.0", bundled: ["z.dll", "raw_r.dll", "lcms2-2.dll", "vcruntime140.dll"] });
+  const win = librawNotice({
+    os: "windows",
+    version: "0.22.0",
+    bundled: ["z.dll", "raw_r.dll", "lcms2-2.dll", "vcruntime140.dll"],
+    recipe: { kind: "vcpkg", version: "0.22.0", revision: "abc123", copied: true },
+  });
   assert.match(win, /LibRaw 0\.22\.0 を使っています/);
   assert.match(win, /LGPL-2\.1 を選んで/);
   assert.match(win, /- LibRaw: raw_r\.dll\n/);
   assert.match(win, /- LibRaw などが使うライブラリ: lcms2-2\.dll, vcruntime140\.dll, z\.dll\n/);
   assert.match(win, /https:\/\/github\.com\/LibRaw\/LibRaw\/tree\/0\.22\.0/);
   assert.match(win, /%LOCALAPPDATA%\\GenzoParis/);
-  assert.match(win, /ports\/libraw/);
+  assert.match(win, /vcpkg\/tree\/abc123\/ports\/libraw/);
   assert.doesNotMatch(win, /codesign/);
   assert.match(win, /GNU Lesser General Public\nLicense version 2\.1/);
 
-  const mac = librawNotice({ os: "macos", version: "0.22.2", bundled: ["libraw_r.25.dylib", "libomp.dylib"] });
+  const mac = librawNotice({
+    os: "macos",
+    version: "0.22.2",
+    bundled: ["libraw_r.25.dylib", "libomp.dylib"],
+    recipe: { kind: "homebrew", version: "0.22.2", revision: "def456", copied: true },
+  });
   assert.match(mac, /GenzoParis\.app\/Contents\/Frameworks の libraw_r\.25\.dylib/);
   assert.match(mac, /codesign --force --deep --sign - \/Applications\/GenzoParis\.app/);
-  assert.match(mac, /Formula\/lib\/libraw\.rb/);
+  assert.match(mac, /homebrew-core\/blob\/def456\/Formula\/lib\/libraw\.rb/);
   assert.doesNotMatch(mac, /%LOCALAPPDATA%/);
 
-  assert.throws(() => librawNotice({ os: "windows", version: "0.22.0", bundled: ["z.dll"] }), /LibRaw がない/);
+  assert.throws(
+    () => librawNotice({ os: "windows", version: "0.22.0", bundled: ["z.dll"], recipe: { kind: "unknown" } }),
+    /LibRaw がない/,
+  );
 });

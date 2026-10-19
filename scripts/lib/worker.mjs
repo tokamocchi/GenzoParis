@@ -21,7 +21,9 @@
 //    （LibRaw の LGPL の扱いを人が確かめるときのため。docs/packaging.md）。
 // 5. Windows・macOS では、LibRaw の LGPL-2.1 の全文・著作権表示と案内（使っている版・同梱したファイル・ソースの
 //    入手先・差し替えの方法）を crates/genzo-app/binaries/licenses/LibRaw に集め、配布物に入れる
-//    （scripts/lib/notice.mjs。版は LibRaw のヘッダ libraw/libraw_version.h から読む）。
+//    （scripts/lib/notice.mjs。版は LibRaw のヘッダ libraw_version.h から、genzo-raw の build.rs と同じ場所を探して
+//    読む）。LibRaw をビルドした手順（vcpkg の port の定義とパッチ・Homebrew の formula）の写しと、その手順の
+//    リポジトリのコミットも記録する（取れなければ案内に「記録できなかった」と書く。止めない）。
 //
 // LibRaw の場所:
 // - Windows: 環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR（genzo-raw の build.rs）。なければ
@@ -73,8 +75,10 @@ import {
   LIBRAW_LICENSE_SOURCE_DIR,
   LIBRAW_NOTICE_FILE,
   LICENSES_BUILD_DIR,
+  RECIPE_DIR,
   licenseResources,
   librawNotice,
+  librawVersionHeaderCandidates,
   parseLibrawVersion,
 } from "./notice.mjs";
 import { readPeImports } from "./pe.mjs";
@@ -100,7 +104,8 @@ export function prepareWorker() {
   console.log(`対象: ${triple}`);
 
   const env = { ...process.env };
-  const dllDirs = os === "windows" ? setupWindowsLibraw(env) : [];
+  const windowsLibraw = os === "windows" ? setupWindowsLibraw(env) : null;
+  const dllDirs = windowsLibraw?.dllDirs ?? [];
 
   // 前回の結果を先に消す（途中で失敗したときに、前回の tauri.libs.conf.json・一覧を使ってしまわないように）。
   fs.mkdirSync(BINARIES_DIR, { recursive: true });
@@ -157,7 +162,14 @@ export function prepareWorker() {
 
   const resources =
     os === "windows" || os === "macos"
-      ? writeLibrawLicenses(os, readLibrawVersion(os, env), bundled.map((b) => b.name), licensesDir)
+      ? writeLibrawLicenses(
+          os,
+          readLibrawVersion(os, env),
+          bundled.map((b) => b.name),
+          licensesDir,
+          windowsLibraw?.vcpkgRoot ?? null,
+          env,
+        )
       : undefined;
   const config = libsTauriConfig(
     os,
@@ -170,8 +182,13 @@ export function prepareWorker() {
   return { triple, os, sidecar, libs: bundled.map((b) => b.name) };
 }
 
-/** Windows: LibRaw の場所を環境変数に入れ、DLL を探すフォルダを返す。 */
+/**
+ * Windows: LibRaw の場所を環境変数に入れ、DLL を探すフォルダと、vcpkg の LibRaw を使うならその vcpkg の場所を返す。
+ *
+ * @returns {{ dllDirs: string[], vcpkgRoot: string | null }}
+ */
 function setupWindowsLibraw(env) {
+  let usedVcpkg = null;
   if (!env.LIBRAW_INCLUDE_DIR || !env.LIBRAW_LIB_DIR) {
     const vcpkgRoot = env.VCPKG_ROOT || env.VCPKG_INSTALLATION_ROOT;
     if (!vcpkgRoot) {
@@ -182,6 +199,7 @@ function setupWindowsLibraw(env) {
     const installed = path.join(vcpkgRoot, "installed", env.VCPKG_DEFAULT_TRIPLET || "x64-windows");
     env.LIBRAW_INCLUDE_DIR ||= path.join(installed, "include");
     env.LIBRAW_LIB_DIR ||= path.join(installed, "lib");
+    usedVcpkg = vcpkgRoot;
   }
   if (!fs.existsSync(env.LIBRAW_LIB_DIR)) {
     throw new Error(`LIBRAW_LIB_DIR のフォルダがない: ${env.LIBRAW_LIB_DIR}`);
@@ -197,9 +215,10 @@ function setupWindowsLibraw(env) {
   console.log(
     `LibRaw: LIBRAW_INCLUDE_DIR=${env.LIBRAW_INCLUDE_DIR} LIBRAW_LIB_DIR=${env.LIBRAW_LIB_DIR} LIBRAW_LIB_NAME=${env.LIBRAW_LIB_NAME}`,
   );
-  return env.LIBRAW_DLL_DIR
+  const dllDirs = env.LIBRAW_DLL_DIR
     ? [env.LIBRAW_DLL_DIR]
     : [path.join(env.LIBRAW_LIB_DIR, "..", "bin"), env.LIBRAW_LIB_DIR];
+  return { dllDirs, vcpkgRoot: usedVcpkg };
 }
 
 /**
@@ -444,33 +463,114 @@ function reportLinuxLibraw(sidecar) {
 }
 
 /**
- * 同梱する LibRaw の版を、ヘッダ（libraw/libraw_version.h）から読む。Windows は LIBRAW_INCLUDE_DIR
- * （setupWindowsLibraw が設定する）、macOS は pkg-config の includedir（genzo-raw の build.rs と同じ libraw_r）。
- * 読めなければエラーにする（案内に版を書けないため）。
+ * 同梱する LibRaw の版を、ヘッダ（libraw_version.h）から読む。genzo-raw の build.rs と同じ場所を探す: Windows は
+ * LIBRAW_INCLUDE_DIR（setupWindowsLibraw が設定する。libraw/libraw.h・libraw.h のどちらのあるフォルダでもよい）、
+ * macOS は pkg-config の libraw_r、なければ libraw の includedir。読めなければエラーにする（案内に版を書けないため）。
  */
-function readLibrawVersion(os, env) {
-  const includeDir =
-    os === "windows" ? env.LIBRAW_INCLUDE_DIR : capture("pkg-config", ["--variable=includedir", "libraw_r"], { env }).trim();
-  const header = path.join(includeDir ?? "", "libraw", "libraw_version.h");
-  const version = fs.existsSync(header) ? parseLibrawVersion(fs.readFileSync(header, "utf8")) : null;
-  if (!version) throw new Error(`LibRaw の版が読めない: ${header}`);
-  console.log(`LibRaw の版: ${version}（${header}）`);
-  return version;
+export function readLibrawVersion(os, env) {
+  const includeDirs = [];
+  if (os === "windows") {
+    includeDirs.push(env.LIBRAW_INCLUDE_DIR ?? "");
+  } else {
+    for (const name of ["libraw_r", "libraw"]) {
+      try {
+        includeDirs.push(capture("pkg-config", ["--variable=includedir", name], { env }).trim());
+      } catch {
+        // その名前の .pc がない。次を探す。
+      }
+    }
+  }
+  const candidates = librawVersionHeaderCandidates(includeDirs).map((p) => path.normalize(p));
+  for (const header of candidates) {
+    if (!fs.existsSync(header)) continue;
+    const version = parseLibrawVersion(fs.readFileSync(header, "utf8"));
+    if (version) {
+      console.log(`LibRaw の版: ${version}（${header}）`);
+      return version;
+    }
+  }
+  throw new Error(`LibRaw の版が読めない（探したヘッダ: ${candidates.join(", ") || "なし"}）`);
 }
 
 /**
- * LibRaw のライセンスの文書（上流のファイルをそのまま）と案内を `dir` に置き、Tauri の resources の対応を返す。
+ * LibRaw をビルドした手順（vcpkg の port・Homebrew の formula）の写しを `dir` に置き、手順の情報を返す。
+ * 取れないもの（コミット・写し）は省く（案内に「記録できなかった」と書く）。
+ *
+ * @returns {{ recipe: import("./notice.mjs").LibrawRecipe, files: string[] }} `files` は写しのファイル（`dir` からの相対）
+ */
+export function collectLibrawRecipe(os, dir, vcpkgRoot, env) {
+  const tryCapture = (cmd, args) => {
+    try {
+      return capture(cmd, args, { env });
+    } catch (e) {
+      console.warn(`警告: ${e instanceof Error ? e.message.split("\n")[0] : e}`);
+      return null;
+    }
+  };
+  if (os === "windows") {
+    const port = vcpkgRoot ? path.join(vcpkgRoot, "ports", "libraw") : null;
+    if (!port || !fs.existsSync(port)) return { recipe: { kind: "unknown" }, files: [] };
+    const revision = tryCapture("git", ["-C", vcpkgRoot, "rev-parse", "HEAD"])?.trim() || undefined;
+    let version;
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(port, "vcpkg.json"), "utf8"));
+      const v = manifest.version ?? manifest["version-string"] ?? manifest["version-semver"] ?? manifest["version-date"];
+      if (v) version = manifest["port-version"] ? `${v}#${manifest["port-version"]}` : String(v);
+    } catch {
+      // 版が読めなくても、写しとコミットは残す。
+    }
+    const dest = path.join(dir, "vcpkg-ports-libraw");
+    fs.cpSync(port, dest, { recursive: true });
+    const files = listFiles(dest).map((f) => `vcpkg-ports-libraw/${f}`);
+    return { recipe: { kind: "vcpkg", version, revision, copied: files.length > 0 }, files };
+  }
+  // macOS: Homebrew（brew がなければ手順は分からない）。
+  const info = tryCapture("brew", ["info", "--json=v2", "libraw"]);
+  if (info === null) return { recipe: { kind: "unknown" }, files: [] };
+  let version;
+  let revision;
+  try {
+    const f = JSON.parse(info).formulae?.[0] ?? {};
+    version = f.installed?.[0]?.version ?? f.versions?.stable ?? undefined;
+    revision = f.tap_git_head || undefined;
+  } catch {
+    // 情報が読めなくても、formula の写しは試す。
+  }
+  const formula = tryCapture("brew", ["cat", "libraw"]);
+  const files = [];
+  if (formula) {
+    fs.writeFileSync(path.join(dir, "homebrew-libraw.rb"), formula);
+    files.push("homebrew-libraw.rb");
+  }
+  return { recipe: { kind: "homebrew", version, revision, copied: files.length > 0 }, files };
+}
+
+/** フォルダの中のファイル（相対のパス。区切りは "/"）。 */
+function listFiles(dir) {
+  return fs
+    .readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile())
+    .map((e) => path.relative(dir, path.join(e.parentPath ?? e.path, e.name)).split(path.sep).join("/"))
+    .sort();
+}
+
+/**
+ * LibRaw のライセンスの文書（上流のファイルをそのまま）・ビルドの手順の写し・案内を `dir` に置き、Tauri の
+ * resources の対応を返す。
  *
  * @returns {Record<string, string>}
  */
-function writeLibrawLicenses(os, version, bundledNames, dir) {
-  fs.mkdirSync(dir, { recursive: true });
+function writeLibrawLicenses(os, version, bundledNames, dir, vcpkgRoot, env) {
+  fs.mkdirSync(path.join(dir, RECIPE_DIR), { recursive: true });
   for (const f of LIBRAW_LICENSE_FILES) {
     fs.copyFileSync(path.join(APP_DIR, LIBRAW_LICENSE_SOURCE_DIR, f), path.join(dir, f));
   }
-  fs.writeFileSync(path.join(dir, LIBRAW_NOTICE_FILE), librawNotice({ os, version, bundled: bundledNames }));
+  const { recipe, files } = collectLibrawRecipe(os, path.join(dir, RECIPE_DIR), vcpkgRoot, env);
+  if (files.length === 0) fs.rmSync(path.join(dir, RECIPE_DIR), { recursive: true, force: true });
+  console.log(`LibRaw のビルドの手順: ${JSON.stringify(recipe)}`);
+  fs.writeFileSync(path.join(dir, LIBRAW_NOTICE_FILE), librawNotice({ os, version, bundled: bundledNames, recipe }));
   console.log(`LibRaw のライセンスの文書と案内: ${path.relative(REPO_ROOT, dir)}`);
-  return licenseResources();
+  return licenseResources(files);
 }
 
 /** tauri.conf.json の bundle.macOS.minimumSystemVersion を読む（ないときはエラー。最小の版を確かめられないため）。 */
