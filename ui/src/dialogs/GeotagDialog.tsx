@@ -97,6 +97,9 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const seq = useRef(0);
+  // 見込みを問い合わせ直す印（取り消しの後に増やし、見込みの effect をその時点の座標で走らせ直す。取り消しの途中に
+  // 座標を書き換えても、押した時点の古い座標の見込みを出さないため）。
+  const [planTick, setPlanTick] = useState(0);
   const composing = useRef(false);
   // オンラインの地図の設定（オブジェクトは保存するまで同じものなので、そのまま購読する）。
   const mapSettings = useApp((s) => s.status?.settings.map);
@@ -140,7 +143,7 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.current, idsKey]);
 
-  // 座標が変わったら見込みを問い合わせる。
+  // 座標が変わったら（と、取り消しの後に）見込みを問い合わせる。
   useEffect(() => {
     const my = ++seq.current;
     setPlan(null);
@@ -165,7 +168,7 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
     }, PREVIEW_DELAY_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [coordKey, idsKey]);
+  }, [coordKey, idsKey, planTick]);
 
   /** 位置を付ける（location が null なら付けた位置を消す）。 */
   const apply = async (location: GpsCoord | null) => {
@@ -195,18 +198,12 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
       await reloadHistory();
       if (props.current !== null) setRef(await core.variantDetails(props.current));
       if (ids.length > 0) setTargets(await core.planLocationEdit(ids, null));
-      // 見込みを問い合わせ直す。
-      const my = ++seq.current;
-      setPlan(null);
-      setCounting(false);
-      if (coord && ids.length > 0) {
-        const p = await core.planLocationEdit(ids, coord);
-        if (my === seq.current) setPlan(p);
-      }
     } catch (e) {
       setError(toApiError(e).info);
     } finally {
       setBusy(false);
+      // 見込みを問い合わせ直す（見込みの effect が、その時点の座標で問い合わせる。押した時点の座標は使わない）。
+      setPlanTick((t) => t + 1);
     }
   };
 
