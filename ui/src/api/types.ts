@@ -2316,6 +2316,8 @@ export interface AppSettings {
   backup_on_close: boolean;
   /** 取り込みのダイアログの設定（古いアプリでは無い）。 */
   import?: ImportPreferences;
+  /** オンラインの地図の設定（LIB-21。古いアプリでは無い。無いときは無効とみなす）。 */
+  map?: MapPreferences;
 }
 
 /** 取り込みのダイアログの設定（genzo-app の ImportPreferences。アプリに保存し、次に開いたときの初めの値）。 */
@@ -2328,6 +2330,46 @@ export interface ImportPreferences {
   rename_rule: RenameRule;
   metadata: ImportMetadata;
 }
+
+/**
+ * オンラインの地図の設定（位置情報の後付け LIB-21 の第 2 段階。genzo-app の MapPreferences。docs/04 の 3.16 節）。
+ * 保存は専用のコマンド save_map_preferences（すぐ効く）。
+ */
+export interface MapPreferences {
+  /** オンラインの地図（地図のタイルと地名の検索）を使う（既定は false。利用者が明示的に有効にしたときだけ通信する）。 */
+  online: boolean;
+  /** 初めて有効にした日時（UTC。RFC 3339。アプリが入れ、画面が送った値は使わない）。 */
+  consented_at: string | null;
+  /** 地図のタイルの URL のひな形（https。{z}・{x}・{y} を含む。null なら OpenStreetMap の標準）。 */
+  tile_url: string | null;
+  /** 地名の検索（Nominatim と同じ API の /search）の URL（https。null なら nominatim.openstreetmap.org）。 */
+  search_url: string | null;
+}
+
+/** 地名の検索の結果（genzo-geo の Place）。 */
+export interface Place {
+  /** 名前（ないときは空）。 */
+  name: string;
+  /** 住所などを並べた表示用の名前。 */
+  display_name: string;
+  lat: number;
+  lon: number;
+  /** 範囲（[最小緯度, 最大緯度, 最小経度, 最大経度]。Nominatim の boundingbox と同じ並び）。 */
+  bbox: [number, number, number, number] | null;
+  /** 分類（例 "railway"）。 */
+  category: string;
+  /** 種類（例 "station"）。 */
+  kind: string;
+}
+
+/** 地図のタイルのキャッシュの大きさ（genzo-geo の CacheInfo。files はタイルと付随の .json の両方を数える）。 */
+export interface MapCacheInfo {
+  files: number;
+  bytes: number;
+}
+
+/** 既定のブラウザで開く OSM のページ（genzo-app の MapLink。任意の URL は開けない）。 */
+export type MapLink = "copyright" | "fix_the_map" | "tile_policy" | "nominatim_policy";
 
 export interface ExternalTools {
   ffmpeg: string | null;

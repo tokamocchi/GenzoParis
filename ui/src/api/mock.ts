@@ -5,6 +5,8 @@ import { ApiError } from "./errors";
 import { HUE_BANDS } from "./types";
 import type {
   ColorParams,
+  AppSettings,
+  AppStatus,
   AutoStackReport,
   BeforeInfo,
   CaptureDevice,
@@ -38,9 +40,12 @@ import type {
   LocationEditPlan,
   LogFolderInfo,
   LogStatus,
+  MapCacheInfo,
+  MapPreferences,
   MaskOverlayInfo,
   MetadataSummary,
   NamePreview,
+  Place,
   ProfileEntry,
   ProfileImportReport,
   RegionInfo,
@@ -885,6 +890,80 @@ export const MOCK_GEOTAGGED_DETAILS: VariantDetails = {
   video: null,
   files: [],
 };
+
+/** オンラインの地図の設定の見本（有効。提供元は OSM の既定）。 */
+export const MOCK_MAP_PREFERENCES: MapPreferences = {
+  online: true,
+  consented_at: "2026-10-20T01:02:03Z",
+  tile_url: null,
+  search_url: null,
+};
+
+/**
+ * 地名の検索の結果の見本（Nominatim の jsonv2 を genzo-geo が読んだ形。座標・範囲は見本の値で、実際の検索の結果
+ * ではない）。
+ */
+export const MOCK_PLACES: Place[] = [
+  {
+    name: "東京駅",
+    display_name: "東京駅, 丸の内一丁目, 千代田区, 東京都, 日本",
+    lat: 35.681236,
+    lon: 139.767125,
+    bbox: [35.6785, 35.6838, 139.7637, 139.7706],
+    category: "railway",
+    kind: "station",
+  },
+  {
+    name: "",
+    display_name: "東京駅前, 八重洲一丁目, 中央区, 東京都, 日本",
+    lat: 35.6807,
+    lon: 139.7702,
+    bbox: null,
+    category: "highway",
+    kind: "bus_stop",
+  },
+];
+
+/** 地図のタイルのキャッシュの大きさの見本。 */
+export const MOCK_MAP_CACHE: MapCacheInfo = { files: 240, bytes: 3_276_800 };
+
+/** アプリの状態の見本（カタログは開いていない。`map` を省くと、地図の設定の無い古いアプリの形）。 */
+export function mockAppStatus(map?: MapPreferences): AppStatus {
+  return {
+    version: "0.1.0",
+    platform: "linux",
+    settings: {
+      version: 1,
+      last_catalog: null,
+      recent_catalogs: [],
+      ffmpeg_dir: null,
+      gpu: "auto",
+      backup_on_close: false,
+      ...(map ? { map } : {}),
+    },
+    notice: null,
+    default_catalog: null,
+    default_catalog_in_onedrive: false,
+    catalog: null,
+    tools: { ffmpeg: null, ffprobe: null },
+    logs: MOCK_LOG_STATUS,
+    crash_reports: [],
+  };
+}
+
+/** オンラインの地図のコマンド（genzo-app の map.rs）の応答を入れる（設定の保存は送った値を有効にして返す）。 */
+export function mockMapCommands(b: MockBridge, settings: AppSettings): void {
+  b.responses.set("save_map_preferences", (args?: Record<string, unknown>) => {
+    const p = args?.preferences as MapPreferences;
+    // 初めて有効にした日時はアプリが入れる（画面が送った値は使わない）。
+    const consented = settings.map?.consented_at ?? (p.online ? "2026-10-20T01:02:03Z" : null);
+    return { ...settings, map: { ...p, consented_at: consented } } satisfies AppSettings;
+  });
+  b.responses.set("search_places", MOCK_PLACES);
+  b.responses.set("map_cache_info", MOCK_MAP_CACHE);
+  b.responses.set("clear_map_cache", { files: 0, bytes: 0 } satisfies MapCacheInfo);
+  b.responses.set("open_map_link", undefined);
+}
 
 // ---------------------------------------------------------------------------
 // v1 の files: ボリューム（FILE-03）・ファイル操作（FILE-02）・見つからない写真と再リンク（FILE-04）の見本

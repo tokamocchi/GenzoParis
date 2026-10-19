@@ -1,4 +1,4 @@
-// genzo:// の URI（サムネイル・標準プレビュー・動画。genzo-app の protocol.rs）。
+// genzo:// の URI（サムネイル・標準プレビュー・動画・地図のタイル。genzo-app の protocol.rs）。
 //
 // Windows（WebView2）は http://genzo.localhost/...、macOS・Linux は genzo://localhost/... の形。
 
@@ -39,4 +39,13 @@ export function videoUrl(id: VariantId): string {
  */
 export function videoProxyUrl(id: VariantId, rev?: string | number | null): string {
   return `${base()}/video-proxy/${id}${rev !== undefined && rev !== null ? `?rev=${encodeURIComponent(String(rev))}` : ""}`;
+}
+
+/**
+ * 地図のタイルの URL のひな形（Leaflet の TileLayer に渡す。{z}・{x}・{y} は Leaflet が埋める。位置情報の後付け
+ * LIB-21 の第 2 段階）。genzo-app がオンラインの地図の提供元から取ってディスクにキャッシュし、返す（WebView は
+ * 外部と通信しない）。拡張子は付けない（protocol.rs が受け付けるのは `/tile/{z}/{x}/{y}` だけ）。
+ */
+export function tileUrlTemplate(): string {
+  return `${base()}/tile/{z}/{x}/{y}`;
 }
