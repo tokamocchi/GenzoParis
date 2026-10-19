@@ -15,9 +15,15 @@
 //!    記号のない度分秒（`35 40 52.4 N 139 46 1.7 E`）は方角の記号があるときだけ。度は整数、分は 0 以上
 //!    60 未満（秒があれば整数）、秒は 0 以上 60 未満。
 //! 5. Google マップの URL（`http://`・`https://` で始まるもの）: クエリの `q=緯度,経度`、`ll=緯度,経度`、
-//!    パスの `@緯度,経度`（`https://www.google.com/maps/@35.681236,139.767125,17z`）の順に探す。
-//!    `q`・`ll` の値は `%XX`（`%2C` はカンマ）と `+`（空白）を戻してから読む。`@` の値は表示している
-//!    地図の中心と考えられ、ピンの位置とずれることがある（Google の資料では確かめていない）。
+//!    パスの `/data=` より後ろの `!3d緯度!4d経度`（場所の URL のピンの位置。
+//!    `https://www.google.com/maps/place/…/@35.6812362,139.7645445,17z/data=…!8m2!3d35.6812362!4d139.7671248`
+//!    なら 35.6812362, 139.7671248）、パスの `@緯度,経度`（`https://www.google.com/maps/@35.681236,139.767125,17z`）
+//!    の順に探す。`q`・`ll` の値は `%XX`（`%2C` はカンマ）と `+`（空白）を戻してから読む。`!3d` は、直後の数に
+//!    すぐ `!4d` と数が続く組（後ろは `!`・`/` か終わり）だけを読み、組が 2 つ以上あれば最初の組。`!4d` が
+//!    続かない `!3d` は飛ばす。経路の URL（`/maps/dir/`）の地点の `!1d経度!2d緯度` は読まない。
+//!    `@` の値は表示している地図の中心と考えられ、ピンの位置とずれることがある（場所の URL でピンを先に読むのは
+//!    このため）。`!3d`・`!4d` がピンの位置であることと `@` が地図の中心であることは、Google の資料では
+//!    確かめていない（URL の形は公開されておらず、変わることがある）。
 //!
 //! 読む前に、全角の数字・「，」「．」「－」「＋」・全角の空白を半角にし、前後の空白を除く。
 //!
@@ -47,7 +53,8 @@ pub enum CoordParseError {
     Unreadable,
     /// URL に座標が見つからない。
     #[error(
-        "URL から座標を読めません（Google マップの URL の @緯度,経度・q=緯度,経度・ll=緯度,経度 を読みます）"
+        "URL から座標を読めません（Google マップの URL の q=緯度,経度・ll=緯度,経度・場所の URL のピン\
+         （data=…!3d緯度!4d経度）・@緯度,経度 を読みます）"
     )]
     NoCoordinatesInUrl,
     /// 度分秒の値が正しくない（度・分が整数でない、分・秒が 0 以上 60 未満でない）。
@@ -146,7 +153,8 @@ fn is_url(s: &str) -> bool {
     })
 }
 
-/// URL の `q=`・`ll=`・`@` から（緯度, 経度）を読む。範囲は検査しない。
+/// URL の `q=`・`ll=`・場所のピン（`/data=` より後ろの `!3d緯度!4d経度`）・`@` から（緯度, 経度）を読む。
+/// 範囲は検査しない。
 fn parse_url(url: &str) -> Result<(f64, f64), CoordParseError> {
     let url = url.split_once('#').map_or(url, |(u, _)| u);
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
@@ -165,6 +173,13 @@ fn parse_url(url: &str) -> Result<(f64, f64), CoordParseError> {
             }
         }
     }
+    // 場所の URL（`/maps/place/…`）のピンの位置。`@` は地図の中心で、ピンとずれることがあるので、先に見る。
+    if let Some(c) = path
+        .split_once("/data=")
+        .and_then(|(_, data)| pin_in_data(data))
+    {
+        return Ok(c);
+    }
     // パスの `@緯度,経度`（後ろに `,17z` などが続く）。
     for (i, _) in path.match_indices('@') {
         if let Some((c, rest)) = decimal_pair_prefix(&path[i + 1..])
@@ -174,6 +189,26 @@ fn parse_url(url: &str) -> Result<(f64, f64), CoordParseError> {
         }
     }
     Err(CoordParseError::NoCoordinatesInUrl)
+}
+
+/// Google マップの URL のパスの `/data=` より後ろ（`!` で始まる項目の並び）から、場所のピンの
+/// （緯度, 経度）を読む。
+///
+/// `!3d` の直後の数に、すぐ `!4d` と数が続く組（後ろは `!`・`/` か終わり）だけを読む。そうでない `!3d` は
+/// 飛ばして次を探し、組が 2 つ以上あれば最初の組。経路の URL（`/maps/dir/`）の地点の `!1d経度!2d緯度` は
+/// 読まない。範囲は検査しない。
+fn pin_in_data(data: &str) -> Option<(f64, f64)> {
+    data.match_indices("!3d").find_map(|(i, _)| {
+        let lat = &data[i + "!3d".len()..];
+        let lat_end = number_end(lat, 0)?;
+        let lon = lat[lat_end..].strip_prefix("!4d")?;
+        let lon_end = number_end(lon, 0)?;
+        let rest = &lon[lon_end..];
+        if !(rest.is_empty() || rest.starts_with(['!', '/'])) {
+            return None;
+        }
+        Some((lat[..lat_end].parse().ok()?, lon[..lon_end].parse().ok()?))
+    })
 }
 
 /// URL のクエリの値の `%XX` と `+`（空白）を戻す。`%` の後ろが 16 進の 2 桁でない・UTF-8 でなければ `None`。
@@ -806,6 +841,94 @@ mod tests {
     }
 
     #[test]
+    fn google_maps_place_urls_use_the_pin() {
+        // 場所の URL（/maps/place/）は、@ が地図の中心で、data= の !3d緯度!4d経度 がピンの位置（と考えられる。
+        // Google の資料では確かめていない）。@ とピンが違うときはピンを読む。1s・16z の値は仮の値。
+        for text in [
+            "https://www.google.com/maps/place/Tokyo+Station/@35.6812362,139.7645445,17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d35.6812362!4d139.7671248",
+            "https://www.google.com/maps/place/Tokyo+Station/@35.6812362,139.7645445,17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d35.6812362!4d139.7671248!16zAAAA?entry=ttu",
+            "https://www.google.com/maps/place/Tokyo+Station/@35.6812362,139.7645445,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d35.6812362!4d139.7671248/",
+            "https://www.google.com/maps/place/Tokyo+Station/data=!4m2!3m1!8m2!3d35.6812362!4d139.7671248",
+        ] {
+            assert_coord(text, 35.6812362, 139.7671248);
+        }
+        // 座標を検索したときの場所の URL（パスに度分秒。@ の値は例）。
+        for text in [
+            "https://www.google.com/maps/place/35%C2%B040'52.4%22N+139%C2%B046'01.7%22E/@35.6812222,139.7645611,17z/data=!3m1!4b1!4m4!3m3!8m2!3d35.6812222!4d139.7671389?entry=ttu",
+            "https://www.google.com/maps/place/35°40'52.4\"N+139°46'01.7\"E/@35.6812222,139.7645611,17z/data=!3m1!4b1!4m4!3m3!8m2!3d35.6812222!4d139.7671389",
+        ] {
+            assert_coord(text, 35.6812222, 139.7671389);
+        }
+        // 南緯・西経（負の値。@ の値は例）。
+        assert_coord(
+            "https://www.google.com/maps/place/Sydney+Opera+House/@-33.8567844,151.2127218,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d-33.8567844!4d151.2152967",
+            -33.8567844,
+            151.2152967,
+        );
+        assert_coord(
+            "https://www.google.com/maps/place/X/@40.7,-74.1,12z/data=!8m2!3d40.7128!4d-74.006",
+            40.7128,
+            -74.006,
+        );
+        // !3d の後に !4d と数が続かないもの・data= の外のものは読まない（次の !3d か、@ を読む）。
+        for text in [
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!5d2",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!14d2",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!8m2!4d2",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!4d",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!4dabc",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!4d2abc",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!4d2.",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d!4d2",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1.!4d2",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!13d1!4d2",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3D1!4D2",
+            "https://www.google.com/maps/place/X!3d1!4d2/@35.681236,139.767125,17z",
+            "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/xdata=!3d1!4d2",
+            "https://www.google.com/maps/@35.681236,139.767125,17z?data=!3d1!4d2",
+            "https://www.google.com/maps/@35.681236,139.767125,17z#data=!3d1!4d2",
+        ] {
+            assert_coord(text, 35.681236, 139.767125);
+        }
+        // 続かない !3d の後ろに、つながった組があれば、それを読む。
+        assert_coord(
+            "https://www.google.com/maps/place/X/@5,6,17z/data=!3d1!5d2!8m2!3d35.6812362!4d139.7671248",
+            35.6812362,
+            139.7671248,
+        );
+        // 組が 2 つあれば最初の組。
+        assert_coord(
+            "https://www.google.com/maps/place/X/@5,6,17z/data=!8m2!3d1!4d2!8m2!3d3!4d4",
+            1.0,
+            2.0,
+        );
+        // 経路の URL（/maps/dir/）の地点の !1d経度!2d緯度 は読まない（@ の地図の中心を読む）。1s の値は仮の値、
+        // @ の値は例。
+        assert_coord(
+            "https://www.google.com/maps/dir/Tokyo+Station/Shinjuku+Station/@35.6851,139.733,13z/data=!3m1!4b1!4m14!4m13!1m5!1m1!1s0x0:0x0!2m2!1d139.7671248!2d35.6812362!1m5!1m1!1s0x0:0x0!2m2!1d139.7005713!2d35.6895924!3e0",
+            35.6851,
+            139.733,
+        );
+        // q・ll は data= の !3d!4d より先。
+        assert_coord(
+            "https://www.google.com/maps/place/X/@5,6,17z/data=!8m2!3d7!4d8?q=1,2",
+            1.0,
+            2.0,
+        );
+        assert_coord(
+            "https://www.google.com/maps/place/X/@5,6,17z/data=!8m2!3d7!4d8?ll=1,2",
+            1.0,
+            2.0,
+        );
+        assert_coord(
+            "https://www.google.com/maps/place/X/@5,6,17z/data=!8m2!3d7!4d8?q=Tokyo",
+            7.0,
+            8.0,
+        );
+    }
+
+    #[test]
     fn urls_without_coordinates_are_rejected() {
         for text in [
             "https://maps.app.goo.gl/abcdefg",
@@ -832,6 +955,15 @@ mod tests {
         assert_err(
             "https://maps.google.com/?q=0,180.5",
             CoordParseError::LongitudeOutOfRange(180.5),
+        );
+        // 場所のピン（!3d!4d）が範囲外なら、@ には戻らずに誤り。
+        assert_err(
+            "https://www.google.com/maps/place/X/@0,0,17z/data=!8m2!3d91!4d0",
+            CoordParseError::LatitudeOutOfRange(91.0),
+        );
+        assert_err(
+            "https://www.google.com/maps/place/X/@0,0,17z/data=!8m2!3d0!4d-180.5",
+            CoordParseError::LongitudeOutOfRange(-180.5),
         );
         // http(s) で始まらなければ URL として読まない。
         assert_err(
@@ -1015,6 +1147,12 @@ mod tests {
             CoordParseError::LongitudeOutOfRange(-181.0).to_string(),
             "経度が範囲外です（-180〜180）: -181"
         );
+        // 画面の coordErrorMessage（geotagLogic.test.ts）と同じ。
+        assert_eq!(
+            CoordParseError::NoCoordinatesInUrl.to_string(),
+            "URL から座標を読めません（Google マップの URL の q=緯度,経度・ll=緯度,経度・場所の URL のピン\
+             （data=…!3d緯度!4d経度）・@緯度,経度 を読みます）"
+        );
     }
 
     #[test]
@@ -1106,6 +1244,38 @@ mod proptests {
             let text = format!("{lat}{sep}{lon}");
             let g = parse_coordinates(&text).unwrap();
             prop_assert_eq!(g, GpsCoord { lat: lat + 0.0, lon: lon + 0.0 });
+        }
+
+        #[test]
+        fn place_urls_read_the_pin_exactly(
+            lat in -90.0f64..=90.0,
+            lon in -180.0f64..=180.0,
+            center_lat in -90.0f64..=90.0,
+            center_lon in -180.0f64..=180.0,
+        ) {
+            // @ が地図の中心、!3d!4d がピンの場所の URL（1s・16z の値は仮の値）。ピンをそのまま読む。
+            let text = format!(
+                "https://www.google.com/maps/place/X/@{center_lat},{center_lon},17z/data=!4m6!3m5!1s0x0:0x0\
+                 !8m2!3d{lat}!4d{lon}!16zAAAA?entry=ttu"
+            );
+            let g = parse_coordinates(&text).unwrap();
+            prop_assert_eq!(g, GpsCoord { lat: lat + 0.0, lon: lon + 0.0 });
+        }
+
+        #[test]
+        fn google_maps_like_urls_never_panic(
+            parts in prop::collection::vec(
+                prop::sample::select(vec![
+                    "!3d", "!4d", "!1d", "!2d", "!8m2", "/data=", "data=", "@", "35.68", "-139.76", "1.", ".5",
+                    "91", ",", "17z", "/", "?", "q=", "ll=", "&", "#", "!", "%2C", "+",
+                ]),
+                0..16,
+            ),
+        ) {
+            let text = format!("https://www.google.com/maps/place/X/{}", parts.concat());
+            if let Ok(g) = parse_coordinates(&text) {
+                prop_assert!(g.is_valid(), "{:?} → {:?}", text, g);
+            }
         }
 
         #[test]

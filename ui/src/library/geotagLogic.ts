@@ -17,9 +17,12 @@
 // 4. 度分秒: `35°40'52.4"N 139°46'01.7"E`、"35°40′52.4″N 139°46′1.7″E"、度分 "35°40.873'N"。記号のない度分秒
 //    （"35 40 52.4 N 139 46 1.7 E"）は方角の記号があるときだけ。度は整数、分は 0 以上 60 未満（秒があれば整数）、
 //    秒は 0 以上 60 未満。
-// 5. Google マップの URL（http://・https:// で始まるもの）: クエリの q=緯度,経度、ll=緯度,経度、パスの @緯度,経度
+// 5. Google マップの URL（http://・https:// で始まるもの）: クエリの q=緯度,経度、ll=緯度,経度、パスの /data= より
+//    後ろの !3d緯度!4d経度（場所の URL のピンの位置。"https://www.google.com/maps/place/…/@35.6812362,139.7645445,17z/
+//    data=…!8m2!3d35.6812362!4d139.7671248" なら 35.6812362, 139.7671248）、パスの @緯度,経度
 //    （"https://www.google.com/maps/@35.681236,139.767125,17z"）の順に探す。q・ll の値は %XX と +（空白）を戻して
-//    から読む。
+//    から読む。!3d は直後の数にすぐ !4d と数が続く組だけを読む（経路の URL の !1d経度!2d緯度 は読まない）。@ の値は
+//    地図の中心と考えられ、ピンの位置とずれることがある（Google の資料では確かめていない）。
 //
 // 読む前に、全角の数字・「，」「．」「－」「＋」・全角の空白を半角にし、前後の空白を除く。細かい規則（区切りの
 // 記号がないときの方角の記号の付け方、誤りの順など）は location.rs のモジュールの doc を参照。
@@ -72,7 +75,10 @@ export function coordErrorMessage(e: CoordParseError): string {
     case "unreadable":
       return "座標として読めません（例: 35.681236, 139.767125）";
     case "no_coordinates_in_url":
-      return "URL から座標を読めません（Google マップの URL の @緯度,経度・q=緯度,経度・ll=緯度,経度 を読みます）";
+      return (
+        "URL から座標を読めません（Google マップの URL の q=緯度,経度・ll=緯度,経度・場所の URL のピン" +
+        "（data=…!3d緯度!4d経度）・@緯度,経度 を読みます）"
+      );
     case "invalid_dms":
       return "度分秒の値が正しくありません（度は整数、分・秒は 0 以上 60 未満。秒があれば分も整数）";
     case "sign_with_direction":
@@ -171,7 +177,7 @@ function isUrl(s: string): boolean {
   return /^https?:\/\//i.test(s);
 }
 
-/** URL の q=・ll=・@ から（緯度, 経度）を読む。範囲は検査しない。 */
+/** URL の q=・ll=・場所のピン（/data= より後ろの !3d緯度!4d経度）・@ から（緯度, 経度）を読む。範囲は検査しない。 */
 function parseUrl(full: string): [number, number] {
   const hash = full.indexOf("#");
   const url = hash >= 0 ? full.slice(0, hash) : full;
@@ -188,6 +194,10 @@ function parseUrl(full: string): [number, number] {
       if (found && trim(found.rest) === "") return [found.lat, found.lon];
     }
   }
+  // 場所の URL（/maps/place/…）のピンの位置。@ は地図の中心で、ピンとずれることがあるので、先に見る。
+  const data = path.indexOf("/data=");
+  const pin = data >= 0 ? pinInData(path.slice(data + "/data=".length)) : null;
+  if (pin) return pin;
   // パスの `@緯度,経度`（後ろに `,17z` などが続く）。
   for (let i = path.indexOf("@"); i >= 0; i = path.indexOf("@", i + 1)) {
     const found = decimalPairPrefix(path.slice(i + 1));
@@ -196,6 +206,28 @@ function parseUrl(full: string): [number, number] {
     }
   }
   return fail({ kind: "no_coordinates_in_url" });
+}
+
+/**
+ * Google マップの URL のパスの /data= より後ろ（! で始まる項目の並び）から、場所のピンの（緯度, 経度）を読む
+ * （Rust の pin_in_data と同じ）。
+ *
+ * !3d の直後の数に、すぐ !4d と数が続く組（後ろは !・/ か終わり）だけを読む。そうでない !3d は飛ばして次を探し、
+ * 組が 2 つ以上あれば最初の組。経路の URL（/maps/dir/）の地点の !1d経度!2d緯度 は読まない。範囲は検査しない。
+ */
+function pinInData(data: string): [number, number] | null {
+  for (let i = data.indexOf("!3d"); i >= 0; i = data.indexOf("!3d", i + 1)) {
+    const lat = data.slice(i + "!3d".length);
+    const latEnd = numberEnd(lat, 0);
+    if (latEnd === null || !lat.startsWith("!4d", latEnd)) continue;
+    const lon = lat.slice(latEnd + "!4d".length);
+    const lonEnd = numberEnd(lon, 0);
+    if (lonEnd === null) continue;
+    const rest = lon.slice(lonEnd);
+    if (rest !== "" && !rest.startsWith("!") && !rest.startsWith("/")) continue;
+    return [Number(lat.slice(0, latEnd)), Number(lon.slice(0, lonEnd))];
+  }
+  return null;
 }
 
 /**

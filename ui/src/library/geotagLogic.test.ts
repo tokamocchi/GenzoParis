@@ -254,6 +254,73 @@ describe("座標の解釈: 受け付ける形", () => {
     );
   });
 
+  it("Google マップの場所の URL はピンの位置を読む", () => {
+    // 場所の URL（/maps/place/）は、@ が地図の中心で、data= の !3d緯度!4d経度 がピンの位置（と考えられる。
+    // Google の資料では確かめていない）。@ とピンが違うときはピンを読む。1s・16z の値は仮の値。
+    for (const text of [
+      "https://www.google.com/maps/place/Tokyo+Station/@35.6812362,139.7645445,17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d35.6812362!4d139.7671248",
+      "https://www.google.com/maps/place/Tokyo+Station/@35.6812362,139.7645445,17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d35.6812362!4d139.7671248!16zAAAA?entry=ttu",
+      "https://www.google.com/maps/place/Tokyo+Station/@35.6812362,139.7645445,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d35.6812362!4d139.7671248/",
+      "https://www.google.com/maps/place/Tokyo+Station/data=!4m2!3m1!8m2!3d35.6812362!4d139.7671248",
+    ]) {
+      expectCoord(text, 35.6812362, 139.7671248);
+    }
+    // 座標を検索したときの場所の URL（パスに度分秒。@ の値は例）。
+    for (const text of [
+      "https://www.google.com/maps/place/35%C2%B040'52.4%22N+139%C2%B046'01.7%22E/@35.6812222,139.7645611,17z/data=!3m1!4b1!4m4!3m3!8m2!3d35.6812222!4d139.7671389?entry=ttu",
+      `https://www.google.com/maps/place/35°40'52.4"N+139°46'01.7"E/@35.6812222,139.7645611,17z/data=!3m1!4b1!4m4!3m3!8m2!3d35.6812222!4d139.7671389`,
+    ]) {
+      expectCoord(text, 35.6812222, 139.7671389);
+    }
+    // 南緯・西経（負の値。@ の値は例）。
+    expectCoord(
+      "https://www.google.com/maps/place/Sydney+Opera+House/@-33.8567844,151.2127218,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d-33.8567844!4d151.2152967",
+      -33.8567844,
+      151.2152967,
+    );
+    expectCoord("https://www.google.com/maps/place/X/@40.7,-74.1,12z/data=!8m2!3d40.7128!4d-74.006", 40.7128, -74.006);
+    // !3d の後に !4d と数が続かないもの・data= の外のものは読まない（次の !3d か、@ を読む）。
+    for (const text of [
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!5d2",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!14d2",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!8m2!4d2",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!4d",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!4dabc",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!4d2abc",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1!4d2.",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d!4d2",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3d1.!4d2",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!13d1!4d2",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/data=!3D1!4D2",
+      "https://www.google.com/maps/place/X!3d1!4d2/@35.681236,139.767125,17z",
+      "https://www.google.com/maps/place/X/@35.681236,139.767125,17z/xdata=!3d1!4d2",
+      "https://www.google.com/maps/@35.681236,139.767125,17z?data=!3d1!4d2",
+      "https://www.google.com/maps/@35.681236,139.767125,17z#data=!3d1!4d2",
+    ]) {
+      expectCoord(text, 35.681236, 139.767125);
+    }
+    // 続かない !3d の後ろに、つながった組があれば、それを読む。
+    expectCoord(
+      "https://www.google.com/maps/place/X/@5,6,17z/data=!3d1!5d2!8m2!3d35.6812362!4d139.7671248",
+      35.6812362,
+      139.7671248,
+    );
+    // 組が 2 つあれば最初の組。
+    expectCoord("https://www.google.com/maps/place/X/@5,6,17z/data=!8m2!3d1!4d2!8m2!3d3!4d4", 1, 2);
+    // 経路の URL（/maps/dir/）の地点の !1d経度!2d緯度 は読まない（@ の地図の中心を読む）。1s の値は仮の値、
+    // @ の値は例。
+    expectCoord(
+      "https://www.google.com/maps/dir/Tokyo+Station/Shinjuku+Station/@35.6851,139.733,13z/data=!3m1!4b1!4m14!4m13!1m5!1m1!1s0x0:0x0!2m2!1d139.7671248!2d35.6812362!1m5!1m1!1s0x0:0x0!2m2!1d139.7005713!2d35.6895924!3e0",
+      35.6851,
+      139.733,
+    );
+    // q・ll は data= の !3d!4d より先。
+    expectCoord("https://www.google.com/maps/place/X/@5,6,17z/data=!8m2!3d7!4d8?q=1,2", 1, 2);
+    expectCoord("https://www.google.com/maps/place/X/@5,6,17z/data=!8m2!3d7!4d8?ll=1,2", 1, 2);
+    expectCoord("https://www.google.com/maps/place/X/@5,6,17z/data=!8m2!3d7!4d8?q=Tokyo", 7, 8);
+  });
+
   it("書いた座標を読み直せる（gpsDecimal・formatGps）", () => {
     for (const g of [
       { lat: 35.681236, lon: 139.767125 },
@@ -290,6 +357,15 @@ describe("座標の解釈: 拒む形", () => {
     // URL の中の座標も範囲を検査する。
     expectError("https://www.google.com/maps/@91,0,17z", { kind: "latitude_out_of_range", value: 91 });
     expectError("https://maps.google.com/?q=0,180.5", { kind: "longitude_out_of_range", value: 180.5 });
+    // 場所のピン（!3d!4d）が範囲外なら、@ には戻らずに誤り。
+    expectError("https://www.google.com/maps/place/X/@0,0,17z/data=!8m2!3d91!4d0", {
+      kind: "latitude_out_of_range",
+      value: 91,
+    });
+    expectError("https://www.google.com/maps/place/X/@0,0,17z/data=!8m2!3d0!4d-180.5", {
+      kind: "longitude_out_of_range",
+      value: -180.5,
+    });
     // http(s) で始まらなければ URL として読まない。
     expectError("www.google.com/maps/@35.681236,139.767125,17z", UNREADABLE);
   });
@@ -434,6 +510,10 @@ describe("座標の解釈: 拒む形", () => {
     expect(coordErrorMessage({ kind: "unreadable" })).toBe("座標として読めません（例: 35.681236, 139.767125）");
     expect(coordErrorMessage({ kind: "latitude_out_of_range", value: 139.76 })).toBe("緯度が範囲外です（-90〜90）: 139.76");
     expect(coordErrorMessage({ kind: "longitude_out_of_range", value: -181 })).toBe("経度が範囲外です（-180〜180）: -181");
+    expect(coordErrorMessage({ kind: "no_coordinates_in_url" })).toBe(
+      "URL から座標を読めません（Google マップの URL の q=緯度,経度・ll=緯度,経度・場所の URL のピン" +
+        "（data=…!3d緯度!4d経度）・@緯度,経度 を読みます）",
+    );
   });
 });
 
@@ -457,6 +537,39 @@ describe("座標の解釈: いろいろな入力で例外を投げない", () =>
       // JavaScript の最短の表記は f64 に正確に戻る（指数の表記になる小さい値は除く）。
       if (text.includes("e")) continue;
       expect(parseCoordinates(text), text).toEqual({ ok: true, coord: { lat: lat + 0, lon: lon + 0 } });
+    }
+  });
+
+  it("場所の URL のピンは正確に読む", () => {
+    const next = random(33);
+    for (let i = 0; i < 300; i++) {
+      const [lat, lon] = [(next() * 2 - 1) * 90, (next() * 2 - 1) * 180];
+      const [centerLat, centerLon] = [(next() * 2 - 1) * 90, (next() * 2 - 1) * 180];
+      // @ が地図の中心、!3d!4d がピンの場所の URL（1s・16z の値は仮の値）。
+      const text =
+        `https://www.google.com/maps/place/X/@${centerLat},${centerLon},17z/data=!4m6!3m5!1s0x0:0x0` +
+        `!8m2!3d${lat}!4d${lon}!16zAAAA?entry=ttu`;
+      // JavaScript の最短の表記は f64 に正確に戻る（指数の表記になる小さい値は除く）。
+      if (/\d[eE]/.test(text)) continue;
+      expect(parseCoordinates(text), text).toEqual({ ok: true, coord: { lat: lat + 0, lon: lon + 0 } });
+    }
+  });
+
+  it("Google マップの URL に似た並び", () => {
+    const parts = [
+      "!3d", "!4d", "!1d", "!2d", "!8m2", "/data=", "data=", "@", "35.68", "-139.76", "1.", ".5",
+      "91", ",", "17z", "/", "?", "q=", "ll=", "&", "#", "!", "%2C", "+",
+    ];
+    const next = random(13);
+    for (let i = 0; i < 3000; i++) {
+      const len = Math.floor(next() * 16);
+      const tail = Array.from({ length: len }, () => parts[Math.floor(next() * parts.length)]).join("");
+      const text = `https://www.google.com/maps/place/X/${tail}`;
+      const r = parseCoordinates(text);
+      if (r.ok) {
+        const { lat, lon } = r.coord;
+        expect(Number.isFinite(lat) && lat >= -90 && lat <= 90 && Number.isFinite(lon) && lon >= -180 && lon <= 180, text).toBe(true);
+      }
     }
   });
 
