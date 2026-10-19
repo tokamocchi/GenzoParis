@@ -9,6 +9,7 @@ import type {
   PostCropVignette,
   PresenceParams,
   Sharpening,
+  VignetteCenter,
 } from "../api/types";
 
 /** テクスチャ・明瞭度・かすみの除去・シャープ・効果を使える最初の処理バージョン（genzo-pipeline の ProcessVersion::V2）。 */
@@ -51,10 +52,10 @@ export function defaultEffects(): EffectsParams {
 
 /** 古いコアや古い設定で項目が欠けていても、効果の項目をそろえる（欠けた項目は既定値）。 */
 export function fullEffects(e: Partial<EffectsParams> | null | undefined): EffectsParams {
-  return {
-    vignette: { ...defaultVignette(), ...(e?.vignette ?? {}) },
-    grain: { ...defaultGrain(), ...(e?.grain ?? {}) },
-  };
+  const vignette = { ...defaultVignette(), ...(e?.vignette ?? {}) };
+  // 中心が null（切り抜きの中心）なら、コアと同じく項目を持たない（既定との比較をそろえる）。
+  if (vignette.center == null) delete vignette.center;
+  return { vignette, grain: { ...defaultGrain(), ...(e?.grain ?? {}) } };
 }
 
 /** テクスチャ・明瞭度・かすみの除去の一部を変えた設定。 */
@@ -67,10 +68,23 @@ export function withSharpening(s: DevelopSettings, patch: Partial<Sharpening>): 
   return { ...s, detail: { ...s.detail, sharpening: { ...fullSharpening(s.detail?.sharpening), ...patch } } };
 }
 
-/** 切り抜き後の周辺光量補正の一部を変えた設定。 */
+/** 切り抜き後の周辺光量補正の一部を変えた設定（中心を null にすると、切り抜きの中心に戻す（項目を消す））。 */
 export function withVignette(s: DevelopSettings, patch: Partial<PostCropVignette>): DevelopSettings {
   const e = fullEffects(s.effects);
-  return { ...s, effects: { ...e, vignette: { ...e.vignette, ...patch } } };
+  const vignette = { ...e.vignette, ...patch };
+  if (vignette.center == null) delete vignette.center;
+  return { ...s, effects: { ...e, vignette } };
+}
+
+/**
+ * 周辺光量補正の中心として表示する位置（手動の中心か、切り抜きの中心。切り抜く前の画像の幅・高さに対する割合）。
+ * 手動に切り替えたときの最初の位置にも使う（切り替えても見え方が変わらない）。
+ */
+export function vignetteCenterOf(s: DevelopSettings): VignetteCenter {
+  const c = fullEffects(s.effects).vignette.center;
+  if (c) return c;
+  const r = s.geometry.crop;
+  return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
 }
 
 /** 粒子の一部を変えた設定。 */
@@ -100,6 +114,8 @@ export interface DetailControls {
   vignetteOptions: boolean;
   /** 周辺光量補正のハイライトの保護（暗くするとき。量が負）。 */
   vignetteHighlights: boolean;
+  /** 周辺光量補正の中心の位置（手動の中心のとき）。 */
+  vignetteCenter: boolean;
   /** 粒子の量。 */
   grain: boolean;
   /** 粒子の大きさ・粗さ（量が 0 でないとき）。 */
@@ -127,6 +143,7 @@ export function detailControls(settings: DevelopSettings, disabled: boolean): De
     vignette: on,
     vignetteOptions: on && fx.vignette.amount !== 0,
     vignetteHighlights: on && fx.vignette.amount < 0,
+    vignetteCenter: on && fx.vignette.amount !== 0 && fx.vignette.center != null,
     grain: on,
     grainOptions: on && fx.grain.amount > 0,
     sharpenChanged: !sameValues(sh, defaultSharpening()),

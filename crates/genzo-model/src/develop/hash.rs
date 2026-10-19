@@ -310,6 +310,9 @@ mod tests {
             |s: &mut DevelopSettings| s.detail.sharpening.masking = 60.0,
             |s: &mut DevelopSettings| s.effects.vignette.amount = -30.0,
             |s: &mut DevelopSettings| s.effects.grain.amount = 25.0,
+            |s: &mut DevelopSettings| {
+                s.effects.vignette.center = Some(crate::VignetteCenter { x: 0.3, y: 0.4 })
+            },
         ] {
             let mut b = base();
             f(&mut b);

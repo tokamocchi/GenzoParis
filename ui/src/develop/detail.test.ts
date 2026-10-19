@@ -19,6 +19,7 @@ import {
   fullEffects,
   fullPresence,
   fullSharpening,
+  vignetteCenterOf,
   withGrain,
   withPresence,
   withSharpening,
@@ -38,6 +39,7 @@ describe("テクスチャ・明瞭度・かすみの除去・シャープ・効�
       vignette: true,
       vignetteOptions: false,
       vignetteHighlights: false,
+      vignetteCenter: false,
       grain: true,
       grainOptions: false,
       sharpenChanged: false,
@@ -89,6 +91,37 @@ describe("テクスチャ・明瞭度・かすみの除去・シャープ・効�
     expect(u.effects.vignette.midpoint).toBe(50);
     expect(u.effects.grain).toEqual({ amount: 0, size: 70, roughness: 50 });
   });
+
+  it("周辺光量補正の中心は、既定で切り抜きの中心、手動にすると切り抜きによらない", () => {
+    const base = withVignette(mockDevelopSettings(), { amount: -30 });
+    const cropped = {
+      ...base,
+      geometry: { ...base.geometry, crop: { left: 0.2, top: 0.1, right: 0.6, bottom: 0.5 } },
+    };
+    // 既定（中心なし）は切り抜きの中心。中心の項目を持たない（コアの JSON と同じ）。
+    const auto = vignetteCenterOf(cropped);
+    expect(auto.x).toBeCloseTo(0.4, 12);
+    expect(auto.y).toBeCloseTo(0.3, 12);
+    expect("center" in fullEffects(cropped.effects).vignette).toBe(false);
+    expect(detailControls(cropped, false).vignetteCenter).toBe(false);
+    // 手動にすると、その位置のまま（切り抜きを変えても動かない）。
+    const manual = withVignette(cropped, { center: { x: 0.7, y: 0.25 } });
+    expect(vignetteCenterOf(manual)).toEqual({ x: 0.7, y: 0.25 });
+    const recropped = { ...manual, geometry: { ...manual.geometry, crop: { left: 0, top: 0, right: 1, bottom: 1 } } };
+    expect(vignetteCenterOf(recropped)).toEqual({ x: 0.7, y: 0.25 });
+    const c = detailControls(manual, false);
+    expect(c.vignetteCenter && c.effectsChanged).toBe(true);
+    // 量が 0 なら中心は動かせない。
+    expect(detailControls(withVignette(manual, { amount: 0 }), false).vignetteCenter).toBe(false);
+    // null で切り抜きの中心に戻す（項目を消す）。
+    const back = withVignette(manual, { center: null });
+    expect("center" in back.effects.vignette).toBe(false);
+    expect(vignetteCenterOf(back)).toEqual(vignetteCenterOf(cropped));
+    // コアから null が来ても、既定と同じに扱う。
+    const fromNull = fullEffects({ vignette: { ...defaultEffects().vignette, center: null } });
+    expect("center" in fromNull.vignette).toBe(false);
+    expect(detailControls({ ...mockDevelopSettings(), effects: fromNull }, false).effectsChanged).toBe(false);
+  });
 });
 
 describe("外観・ディテール・効果のパネルを描く", () => {
@@ -133,6 +166,9 @@ describe("外観・ディテール・効果のパネルを描く", () => {
       "粒子",
       "大きさ",
       "粗さ",
+      "中心を手動で設定",
+      "中心（横）",
+      "中心（縦）",
     ]) {
       expect(html).toContain(label);
     }
