@@ -25,9 +25,10 @@ sha2.workspace = true
 hex.workspace = true
 # タイルのキャッシュの書き込み（同じフォルダの一時ファイル → 名前の変更）。
 tempfile.workspace = true
-# HTTPS のクライアント（TLS は native-tls。理由はルートの Cargo.toml の注と src/tls.rs）。
+# HTTPS のクライアント（TLS は ureq の rustls。暗号の実装は ring、証明書の検証は OS。理由はルートの Cargo.toml の注）。
+# rustls は、プロセスの既定の暗号の実装（ring）を入れるためだけに直接使う（src/http.rs）。
 ureq.workspace = true
-native-tls.workspace = true
+rustls.workspace = true
 
 [lints]
 workspace = true

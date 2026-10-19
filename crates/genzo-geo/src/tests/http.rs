@@ -143,9 +143,9 @@ fn the_real_client_never_sends_plain_http() {
 }
 
 #[test]
-fn https_goes_through_native_tls_and_failures_are_network_errors() {
+fn https_goes_through_rustls_and_failures_are_network_errors() {
     // このサーバーは TLS を話さない（TLS のハンドシェイクに平文で応える）ので、TLS の接続が失敗する。
-    // ureq の機能 native-tls-no-default だけのときのように panic しないこと、TLS を張ろうとすること
+    // TLS の部品がない・暗号の実装がないときのように panic しないこと、TLS を張ろうとすること
     // （平文の HTTP を送らないこと）を確かめる。
     let server = LoopbackServer::start(|_| response("400 Bad Request", &[], b"not tls"));
     let client = UreqClient::for_test(false);
@@ -177,19 +177,63 @@ fn connection_failures_are_network_errors() {
 
 #[test]
 fn the_real_client_can_be_built() {
-    // OS の TLS の実装を準備できること（通信はしない）。
+    // 準備できること（通信はしない）。
     UreqClient::new().unwrap();
+}
+
+#[test]
+fn tls_uses_rustls_with_ring_and_the_os_verifier() {
+    let client = UreqClient::for_test(false);
+    let tls = client.config().tls_config();
+    assert_eq!(tls.provider(), ureq::tls::TlsProvider::Rustls);
+    // 証明書の検証は OS に任せる（webpki-roots の同梱の証明書は使わない）。検証は切らない。
+    assert!(
+        matches!(tls.root_certs(), ureq::tls::RootCerts::PlatformVerifier),
+        "{:?}",
+        tls.root_certs()
+    );
+    assert!(!tls.disable_verification());
+    // 作るときに、プロセスの既定の暗号の実装が入っている（ureq は、なければ panic する）。
+    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
 }
 
 #[test]
 fn socks_proxies_are_refused_instead_of_connecting_directly() {
     let server = LoopbackServer::start(|_| response("200 OK", &[], b"x"));
     let proxy = ureq::Proxy::new("socks5://127.0.0.1:1").unwrap();
-    let client = UreqClient::build(false, Some(Some(proxy))).unwrap();
+    let client = UreqClient::build(false, Some(proxy)).unwrap();
     let e = client.get(&server.url("/"), &[], 1024).unwrap_err();
     let GeoError::Network(message) = &e else {
         panic!("{e:?}");
     };
     assert!(message.contains("SOCKS"), "{message}");
     assert_eq!(server.connections(), 0);
+}
+
+#[test]
+fn with_a_socks_proxy_no_proxy_hosts_are_reached_directly_without_following_redirects() {
+    let server = LoopbackServer::start(|req| match req.target() {
+        "/old" => response("301 Moved Permanently", &[("Location", "/new")], b""),
+        _ => response("200 OK", &[], b"direct"),
+    });
+    let proxy = ureq::Proxy::builder(ureq::ProxyProtocol::Socks5)
+        .host("127.0.0.1")
+        .port(1)
+        .no_proxy("127.0.0.1")
+        .build()
+        .unwrap();
+    let client = UreqClient::build(false, Some(proxy)).unwrap();
+    assert_eq!(
+        client.get(&server.url("/tile"), &[], 1024).unwrap().body,
+        b"direct"
+    );
+    // 転送はたどらない（転送先が NO_PROXY の外なら、SOCKS を通さずに直接つないでしまうため）。
+    let r = client.get(&server.url("/old"), &[], 1024).unwrap();
+    assert_eq!(r.status, 301);
+    let targets: Vec<_> = server
+        .requests()
+        .iter()
+        .map(|r| r.target().to_string())
+        .collect();
+    assert_eq!(targets, ["/tile", "/old"]);
 }

@@ -6,8 +6,8 @@
 //! docs/04_architecture.md の 3.16 節）。オンラインの地図は既定で無効で、利用者が明示的に有効にしたときだけ
 //! genzo-app がこの crate を呼ぶ（docs/02 の SEC-01 の例外と SEC-02。有効かどうかは genzo-app の設定が持つ）。
 //!
-//! - HTTP: [`HttpClient`]（テストで差し替える trait）と [`UreqClient`]（ureq と native-tls による本物の実装。
-//!   TLS は OS の実装と証明書の保管場所を使う）。User-Agent は [`user_agent`]
+//! - HTTP: [`HttpClient`]（テストで差し替える trait）と [`UreqClient`]（ureq と rustls による本物の実装。
+//!   暗号の実装は ring、証明書の検証は OS に任せる）。User-Agent は [`user_agent`]
 //! - 提供元: [`TileProvider`]・[`GeocoderProvider`]（既定は OSM Foundation のサーバー。設定で変えられる。https だけ）
 //! - タイル: [`TileService`]（ディスクのキャッシュ。HTTP のキャッシュの指示に従い、読めなければ 7 日。期限切れは
 //!   条件付きの要求。同じタイルの同時の要求は 1 つにまとめる）
@@ -38,7 +38,6 @@ mod geocode;
 mod http;
 mod provider;
 mod tiles;
-mod tls;
 
 #[cfg(test)]
 mod tests;

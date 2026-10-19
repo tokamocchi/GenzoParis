@@ -1,4 +1,4 @@
-//! HTTP の取得（テストで差し替える trait と、ureq と native-tls による本物の実装）。
+//! HTTP の取得（テストで差し替える trait と、ureq と rustls による本物の実装）。
 //!
 //! 送るもの・送らないもの（OSM Foundation のタイルと Nominatim の利用ポリシー）:
 //! - User-Agent は必ず [`user_agent`]（アプリの名前・版・連絡先の URL。ライブラリの既定の `ureq/<版>` は
@@ -10,25 +10,27 @@
 //!
 //! 本物の実装 [`UreqClient`] のきまり:
 //! - https だけ（転送（リダイレクト）先も。ureq の `https_only`）。転送の回数は ureq の既定（10 回）。
+//! - TLS は ureq の公開の設定（`TlsConfig`）で rustls を選ぶ。暗号の実装は ring（[`UreqClient`] を作るときに
+//!   プロセスの既定として入れる。ほかの部品が先に別の実装を入れていたら、それを使う）。証明書の検証は OS に任せる
+//!   （ureq の `RootCerts::PlatformVerifier`。rustls-platform-verifier が、Windows は CryptoAPI、macOS は
+//!   Security.framework、Linux は OS の証明書の保管場所で確かめる）。検証は切らない。TLS の版は 1.2 と 1.3
+//!   （rustls が 1.1 以前を持たない）。ureq の unversioned の API は使わない。
 //! - タイムアウトは接続 [`CONNECT_TIMEOUT`]・全体 [`TOTAL_TIMEOUT`]（どちらも仮置き）。
 //! - 本文は呼び出し元が決めた上限まで読む（超えたら [`GeoError::BadResponse`]）。
 //! - 状態コードが 2xx でなくても誤りにせず返す（304 や 404 を呼び出し元が見分けるため）。
 //! - プロキシは環境変数（`HTTPS_PROXY`・`NO_PROXY` など）と、Windows ではレジストリの設定（ureq の機能
 //!   win-system-proxy）に従う。macOS のシステムの設定のプロキシは読まない（ureq が対応していない）。SOCKS の
 //!   プロキシは使えない（ureq の機能 socks-proxy を入れていない）。SOCKS が設定されていたら、直接つながずに
-//!   誤りにする（ureq の既定の部品は、環境変数の SOCKS を警告するだけで直接つなぐ。利用者がプロキシを通す
-//!   つもりの通信を直接送らないため）。
+//!   誤りにする（ureq の既定は、環境変数の SOCKS を警告するだけで直接つなぐ。利用者がプロキシを通すつもりの
+//!   通信を直接送らないため）。`NO_PROXY` に当たるホストへは直接つなぐが、そのときは転送をたどらない（転送先が
+//!   `NO_PROXY` の外なら、SOCKS を通さずに直接つないでしまうため）。
 
 use std::time::Duration;
 
 use ureq::ProxyProtocol;
-use ureq::unversioned::resolver::DefaultResolver;
-use ureq::unversioned::transport::{
-    ConnectProxyConnector, ConnectionDetails, Connector, TcpConnector, Transport,
-};
+use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
 use crate::GeoError;
-use crate::tls::NativeTlsConnector;
 
 /// 接続（名前の解決・TCP・TLS のハンドシェイク）のタイムアウト（仮置き）。
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -98,9 +100,12 @@ pub trait HttpClient: Send + Sync {
     ) -> Result<HttpResponse, GeoError>;
 }
 
-/// ureq と native-tls による [`HttpClient`]。接続を使い回す（keep-alive）ので、1 つを共有して使う。
+/// ureq と rustls による [`HttpClient`]。接続を使い回す（keep-alive）ので、1 つを共有して使う。
 pub struct UreqClient {
     agent: ureq::Agent,
+    /// SOCKS のプロキシが設定されているとき、そのプロキシ（ureq には渡さない。`NO_PROXY` に当たらないホストへの
+    /// 要求は、つながずに誤りにする。モジュールの doc）。
+    refused_socks: Option<ureq::Proxy>,
 }
 
 impl std::fmt::Debug for UreqClient {
@@ -112,22 +117,33 @@ impl std::fmt::Debug for UreqClient {
 impl UreqClient {
     /// https だけを使う本物のクライアントを作る（プロキシは環境変数・Windows のレジストリから）。
     pub fn new() -> Result<Self, GeoError> {
-        Self::build(true, None)
+        Self::build(true, ureq::Proxy::try_from_env())
     }
 
     /// テスト用: プロキシを使わない（手元の `TcpListener` のサーバーと話すため）。`allow_http` なら http の URL も使う。
     #[cfg(test)]
     pub(crate) fn for_test(allow_http: bool) -> Self {
-        Self::build(!allow_http, Some(None)).expect("TLS の準備")
+        Self::build(!allow_http, None).expect("クライアントの準備")
     }
 
-    /// `proxy` が `Some` なら、ureq の既定（環境変数など）の代わりにその設定を使う。
-    pub(crate) fn build(
-        https_only: bool,
-        proxy: Option<Option<ureq::Proxy>>,
-    ) -> Result<Self, GeoError> {
-        let tls = NativeTlsConnector::new()
-            .map_err(|e| GeoError::Network(format!("TLS の準備に失敗しました: {e}")))?;
+    /// テスト用: ureq の設定（TLS の設定を確かめるため）。
+    #[cfg(test)]
+    pub(crate) fn config(&self) -> &ureq::config::Config {
+        self.agent.config()
+    }
+
+    /// `proxy` のプロキシを使う（`None` なら直接つなぐ）。
+    pub(crate) fn build(https_only: bool, proxy: Option<ureq::Proxy>) -> Result<Self, GeoError> {
+        install_crypto_provider();
+        // SOCKS は ureq に渡さない（ureq の機能 socks-proxy を入れていないので、渡すと直接つなぐか panic する）。
+        let (proxy, refused_socks) = match proxy {
+            Some(p) if is_socks(p.protocol()) => (None, Some(p)),
+            other => (other, None),
+        };
+        let tls = TlsConfig::builder()
+            .provider(TlsProvider::Rustls)
+            .root_certs(RootCerts::PlatformVerifier)
+            .build();
         let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .https_only(https_only)
@@ -135,20 +151,55 @@ impl UreqClient {
             // gzip の機能を入れていないので空（ヘッダーを送らない）。既定でも送らないが、明示する。
             .accept_encoding("")
             .timeout_connect(Some(CONNECT_TIMEOUT))
-            .timeout_global(Some(TOTAL_TIMEOUT));
-        if let Some(proxy) = proxy {
-            config = config.proxy(proxy);
+            .timeout_global(Some(TOTAL_TIMEOUT))
+            .tls_config(tls)
+            // ureq の既定（環境変数などから読んだもの）の代わりに、渡されたものを使う。
+            .proxy(proxy);
+        if refused_socks.is_some() {
+            // NO_PROXY のホストへ直接つなぐとき、NO_PROXY の外への転送をたどらない（3xx をそのまま返す）。
+            config = config.max_redirects(0);
         }
-        // ureq の既定の部品の並び（DefaultConnector）の SOCKS を「断る部品」に、ureq の TLS を native-tls に
-        // 替えたもの。
-        let connector =
-            ().chain(RefuseSocksProxy)
-                .chain(ConnectProxyConnector::default())
-                .chain(TcpConnector::default())
-                .chain(tls);
-        let agent = ureq::Agent::with_parts(config.build(), connector, DefaultResolver::default());
-        Ok(Self { agent })
+        Ok(Self {
+            agent: config.build().new_agent(),
+            refused_socks,
+        })
     }
+
+    /// SOCKS のプロキシが設定されていて、`url` のホストが `NO_PROXY` に当たらなければ誤り（つながない）。
+    fn refuse_socks(&self, url: &str) -> Result<(), GeoError> {
+        let Some(socks) = &self.refused_socks else {
+            return Ok(());
+        };
+        let uri: ureq::http::Uri = url
+            .parse()
+            .map_err(|_| GeoError::InvalidInput("URL を読めません".to_string()))?;
+        if socks.is_no_proxy(&uri) {
+            return Ok(());
+        }
+        Err(GeoError::Network(
+            "プロキシ経由で接続できませんでした: SOCKS のプロキシには対応していません（HTTP のプロキシを指定してください）"
+                .to_string(),
+        ))
+    }
+}
+
+/// rustls のプロセスの既定の暗号の実装に ring を入れる（ureq の rustls は、`TlsConfig` で指定がなければ
+/// プロセスの既定を使う）。すでに入っていれば（別の部品が先に入れた場合も）そのまま使う。
+fn install_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // 同時に呼ばれて先を越されたときは Err になるが、どちらかの実装が入っていればよい。
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
+fn is_socks(protocol: ProxyProtocol) -> bool {
+    matches!(
+        protocol,
+        ProxyProtocol::Socks4
+            | ProxyProtocol::Socks4A
+            | ProxyProtocol::Socks5
+            | ProxyProtocol::Socks5h
+    )
 }
 
 impl HttpClient for UreqClient {
@@ -158,6 +209,7 @@ impl HttpClient for UreqClient {
         headers: &[(&str, String)],
         max_body_bytes: u64,
     ) -> Result<HttpResponse, GeoError> {
+        self.refuse_socks(url)?;
         let mut request = self.agent.get(url);
         for (name, value) in headers {
             request = request.header(*name, value.as_str());
@@ -195,39 +247,6 @@ impl HttpClient for UreqClient {
     }
 }
 
-/// SOCKS のプロキシが設定されていたら、直接つながずに誤りにする部品（モジュールの doc）。`NO_PROXY` に当たる
-/// ホストは直接つなぐ。
-#[derive(Debug)]
-struct RefuseSocksProxy;
-
-impl<In: Transport> Connector<In> for RefuseSocksProxy {
-    type Out = In;
-
-    fn connect(
-        &self,
-        details: &ConnectionDetails,
-        chained: Option<In>,
-    ) -> Result<Option<Self::Out>, ureq::Error> {
-        if chained.is_none()
-            && let Some(proxy) = details.config.proxy()
-            && matches!(
-                proxy.protocol(),
-                ProxyProtocol::Socks4
-                    | ProxyProtocol::Socks4A
-                    | ProxyProtocol::Socks5
-                    | ProxyProtocol::Socks5h
-            )
-            && !proxy.is_no_proxy(details.uri)
-        {
-            return Err(ureq::Error::ConnectProxyFailed(
-                "SOCKS のプロキシには対応していません（HTTP のプロキシを指定してください）"
-                    .to_string(),
-            ));
-        }
-        Ok(chained)
-    }
-}
-
 /// ureq の誤りを [`GeoError`] にする。URL（タイルの番号・検索語を含む）はメッセージに入れない。
 fn map_error(e: ureq::Error) -> GeoError {
     use ureq::Error as E;
@@ -253,8 +272,17 @@ fn map_error(e: ureq::Error) -> GeoError {
             GeoError::Network(format!("プロキシ経由で接続できませんでした: {reason}"))
         }
         E::TlsRequired => GeoError::Network("TLS で接続できませんでした".to_string()),
-        E::Io(e) => GeoError::Network(format!("入出力のエラー: {e}")),
-        // TLS の失敗（tls::TlsFailure）はここに来る。
+        E::Tls(reason) => GeoError::Network(format!("TLS で接続できませんでした: {reason}")),
+        E::Rustls(e) => GeoError::Network(format!("TLS で接続できませんでした: {e}")),
+        // TLS のハンドシェイクの失敗（証明書を確かめられない・TLS でない応答など）は、rustls の誤りを包んだ
+        // 入出力のエラーで届く。
+        E::Io(e) => match e
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        {
+            Some(tls) => GeoError::Network(format!("TLS で接続できませんでした: {tls}")),
+            None => GeoError::Network(format!("入出力のエラー: {e}")),
+        },
         E::Other(e) => GeoError::Network(e.to_string()),
         other => GeoError::Network(other.to_string()),
     }
