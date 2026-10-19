@@ -17,8 +17,13 @@
 //!    まとめて一番上にする。
 //!
 //! **失敗の扱い**: 1 枚でも現像に失敗したら（寸法が 1 枚目と違うときを含む）、何も書かずに全体を失敗にする
-//! （[`CompositeReport::failure`]。花火の 1 枚が黙って抜けた結果を残さない）。取り消したときも何も書かない。
-//! 登録・スタックの失敗では、書いたファイルは消さない（理由を結果に入れる）。
+//! （[`CompositeReport::failure`]。花火の 1 枚が黙って抜けた結果を残さない）。登録・スタックの失敗では、書いたファイルは
+//! 消さない（理由を結果に入れる）。
+//!
+//! **取り消し**: カタログに登録するまでは、取り消したら何も残さない。写真ごと（現像はタイルごと）、エンコードの前、
+//! 一時ファイルに書き終えて公開する前（genzo-media の `export_image_cancellable`）、公開した後・メタデータを読んでいる
+//! 間・登録の直前に確かめ、公開した後なら書いたファイルを消す（このジョブが作った保存先のフォルダも、空なら消す）。
+//! エンコードそのものは途中で止めない。登録をコミットした後は取り消さない（スタックにまとめるところまで進める）。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -307,20 +312,16 @@ fn register_written(
         .to_owned();
     let vol = crate::volumes::locate(inner.volume_probe.as_ref(), dir)?;
     let mount = crate::volumes::mount_str(&vol.mount)?;
-    let folder = inner.with_catalog(|c| {
-        let volume = c.ensure_volume(&vol.uuid, vol.label.as_deref(), Some(&mount))?;
-        c.note_volume_seen(volume, &mount, vol.label.as_deref(), vol.fs_type.as_deref())?;
-        c.ensure_folder(volume, &vol.rel)
-    })?;
+    // メタデータを先に読む（取り消したときに、カタログにフォルダの記録を残さない）。フォルダは登録の直前に決める。
     let facts = FileFacts::read(path)?;
     let pool = inner.pool()?;
     let target = ProbeTarget {
         path,
         kind: AssetKind::Photo,
-        folder,
+        folder: genzo_model::FolderId::new(0),
         name: &name,
     };
-    let request = probe_request(
+    let mut request = probe_request(
         &pool,
         &target,
         facts,
@@ -328,6 +329,15 @@ fn register_written(
         Lane::Batch,
         ctx.token(),
     )?;
+    // ここまでなら取り消せる（この後はカタログに登録する）。
+    if ctx.is_cancelled() {
+        return Err(ApiError::Cancelled);
+    }
+    request.folder_id = inner.with_catalog(|c| {
+        let volume = c.ensure_volume(&vol.uuid, vol.label.as_deref(), Some(&mount))?;
+        c.note_volume_seen(volume, &mount, vol.label.as_deref(), vol.fs_type.as_deref())?;
+        c.ensure_folder(volume, &vol.rel)
+    })?;
     let mut requests = vec![request];
     let mut import = ImportReport::default();
     // 元の写真と名前（拡張子の前）が違うので組にはならないが、念のため組にしない。
@@ -366,6 +376,20 @@ fn register_written(
         .as_ref()
         .map(|reason| format!("登録しましたが、メタデータを読めませんでした: {reason}"));
     Ok((variant, problem))
+}
+
+/// 取り消し・失敗のときの後片付け: このジョブが書いたファイル（`file`）と、このジョブが作った保存先のフォルダ（空の
+/// ときだけ）を消す。消せなくても失敗にはしない（ログに残す）。
+fn discard(file: Option<&Path>, dest: &Path, created_dest: bool) {
+    if let Some(f) = file
+        && let Err(e) = std::fs::remove_file(f)
+    {
+        tracing::warn!(path = %f.display(), error = %e, "合成: 取り消した結果のファイルを消せません");
+    }
+    if created_dest {
+        // 空でなければ消えない（ほかのファイルを消さない）。
+        let _ = std::fs::remove_dir(dest);
+    }
 }
 
 /// 合成の結果を元の写真とスタックにまとめ、一番上にする。
@@ -510,6 +534,7 @@ fn run_composite(
     };
     let (metadata, capture, descriptive) = first_meta.expect("1 枚目のメタデータ");
     // 保存先のフォルダは、書く直前に作る（失敗・取り消しで空のフォルダを残さない）。
+    let created_dest = !dest.exists();
     if let Err(e) = std::fs::create_dir_all(&dest) {
         fail(&mut report, None, &ApiError::io(&dest, e));
         return Ok(report);
@@ -517,12 +542,13 @@ fn run_composite(
     let exif = ExifData::from_photo_metadata(&metadata)
         .with_capture_time(&capture)
         .with_descriptive(descriptive);
-    let path = match genzo_media::export_image(
+    let path = match genzo_media::export_image_cancellable(
         &pixels,
         &write_settings(settings),
         Some(&exif),
         &dest.join(&name),
         &protected,
+        &|| ctx.is_cancelled(),
     ) {
         Ok(WriteOutcome::Written { path, .. }) => path,
         Ok(WriteOutcome::Skipped { existing }) => {
@@ -535,17 +561,37 @@ fn run_composite(
             return Ok(report);
         }
         Err(e) => {
-            fail(&mut report, None, &ApiError::from(e));
+            let e = ApiError::from(e);
+            discard(None, &dest, created_dest);
+            if e.is_cancelled() {
+                report.cancelled = true;
+            } else {
+                fail(&mut report, None, &e);
+            }
             return Ok(report);
         }
     };
-    report.path = Some(path.clone());
-    match register_written(ctx, &path) {
+    // 公開した後でも、カタログに登録する前なら取り消せる（書いたファイルを消す）。
+    let registered = if ctx.is_cancelled() {
+        Err(ApiError::Cancelled)
+    } else {
+        register_written(ctx, &path)
+    };
+    match registered {
         Ok((v, problem)) => {
+            report.path = Some(path);
             report.registered = Some(v);
             report.registration_error = problem;
         }
-        Err(e) => report.registration_error = Some(e.to_string()),
+        Err(e) if e.is_cancelled() => {
+            discard(Some(&path), &dest, created_dest);
+            report.cancelled = true;
+            return Ok(report);
+        }
+        Err(e) => {
+            report.path = Some(path);
+            report.registration_error = Some(e.to_string());
+        }
     }
     if settings.stack_with_sources
         && let Some(result) = report.registered

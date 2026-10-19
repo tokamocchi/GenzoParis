@@ -346,3 +346,35 @@ fn problems_are_reported_and_nothing_is_written_on_failure() {
         files_in(&dest)
     );
 }
+
+/// 取り消し: いつ取り消しても、取り消しとして終わったなら何も残さない（保存先のフォルダも作らない）。取り消しが
+/// 間に合わずに終わったなら、登録まで済んでいる（途中の状態を残さない）。
+#[test]
+fn cancelling_leaves_nothing_behind() {
+    let env = Env::new();
+    let (core, [a, b, c]) = setup(&env);
+    let base = CompositeSettings {
+        stack_with_sources: false,
+        ..CompositeSettings::default()
+    };
+    for (i, delay_ms) in [0u64, 5, 20, 60].into_iter().enumerate() {
+        let dest = env.dir.path().join(format!("cancel-{i}"));
+        let job = core.composite(&[a, b, c], &base, Some(&dest)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        let _ = core.cancel_job(job);
+        let info = wait_done(&core, job);
+        let Some(JobResult::Composite(r)) = info.result else {
+            // 取り消しでジョブそのものが結果なしで終わることもある。
+            assert!(!dest.exists(), "{info:?}");
+            continue;
+        };
+        if r.cancelled {
+            assert!(r.path.is_none() && r.registered.is_none(), "{r:?}");
+            assert!(!dest.exists(), "何も残さない: {:?}", files_in(&dest));
+        } else {
+            assert!(r.failure.is_none(), "{r:?}");
+            assert!(r.registered.is_some(), "{r:?}");
+            assert!(r.path.as_ref().unwrap().exists());
+        }
+    }
+}
