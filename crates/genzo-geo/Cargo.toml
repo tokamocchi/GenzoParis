@@ -9,7 +9,22 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# 検索の結果の座標の範囲の検査（GpsCoord）。
+genzo-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+# HTTP の日付（Expires・Date）とキャッシュの期限。
+chrono.workspace = true
+# 検索語の正規化（NFC。結果のキャッシュのキー）。
+unicode-normalization.workspace = true
+# タイルの提供元ごとのキャッシュのフォルダの名前（URL のひな形のハッシュ）。blake3 でなく sha2 なのは、
+# C のビルドが要らず、Linux から Windows・macOS 向けの型の検査ができるため。
+sha2.workspace = true
+hex.workspace = true
+# タイルのキャッシュの書き込み（同じフォルダの一時ファイル → 名前の変更）。
+tempfile.workspace = true
 # HTTPS のクライアント（TLS は native-tls。理由はルートの Cargo.toml の注と src/tls.rs）。
 ureq.workspace = true
 native-tls.workspace = true

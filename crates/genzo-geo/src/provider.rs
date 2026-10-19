@@ -63,6 +63,16 @@ impl TileProvider {
         })
     }
 
+    /// テスト用: 検査をせずに作る（手元の http のサーバーの URL を使うため）。
+    #[cfg(test)]
+    pub(crate) fn for_loopback_test(url_template: &str, max_zoom: u8) -> Self {
+        Self {
+            url_template: url_template.to_string(),
+            max_zoom,
+            attribution: OSM_ATTRIBUTION.to_string(),
+        }
+    }
+
     /// URL のひな形（`{z}`・`{x}`・`{y}` を含む）。
     pub fn url_template(&self) -> &str {
         &self.url_template
@@ -109,9 +119,30 @@ impl GeocoderProvider {
         })
     }
 
+    /// テスト用: 検査をせずに作る（手元の http のサーバーの URL を使うため）。
+    #[cfg(test)]
+    pub(crate) fn for_loopback_test(search_url: &str) -> Self {
+        Self {
+            search_url: search_url.to_string(),
+        }
+    }
+
     /// 検索の URL。
     pub fn search_url(&self) -> &str {
         &self.search_url
+    }
+
+    /// 検索の URL に問い合わせのパラメータ（エンコード済み）を足した URL。
+    pub(crate) fn url_with_query(&self, query: &str) -> String {
+        let base = &self.search_url;
+        let sep = if base.ends_with('?') || base.ends_with('&') {
+            ""
+        } else if base.contains('?') {
+            "&"
+        } else {
+            "?"
+        };
+        format!("{base}{sep}{query}")
     }
 }
 
@@ -319,5 +350,21 @@ mod tests {
                 "{ng}"
             );
         }
+    }
+
+    #[test]
+    fn query_parameters_are_joined_to_the_search_url() {
+        let p = GeocoderProvider::nominatim();
+        assert_eq!(
+            p.url_with_query("q=a&format=jsonv2"),
+            "https://nominatim.openstreetmap.org/search?q=a&format=jsonv2"
+        );
+        let p = GeocoderProvider::new("https://example.org/search?key=k").unwrap();
+        assert_eq!(
+            p.url_with_query("q=a"),
+            "https://example.org/search?key=k&q=a"
+        );
+        let p = GeocoderProvider::new("https://example.org/search?").unwrap();
+        assert_eq!(p.url_with_query("q=a"), "https://example.org/search?q=a");
     }
 }

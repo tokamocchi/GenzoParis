@@ -44,3 +44,13 @@ pub enum GeoError {
         source: Arc<io::Error>,
     },
 }
+
+impl GeoError {
+    /// 入出力のエラーを作る。
+    pub(crate) fn io(path: impl Into<PathBuf>, source: io::Error) -> Self {
+        Self::Io {
+            path: path.into(),
+            source: Arc::new(source),
+        }
+    }
+}
