@@ -4,12 +4,14 @@
 //! 1. バッチ用ワーカーで元ファイルを展開する（RAW は `DecodeRaw`、それ以外は `DecodeImage`）。
 //! 2. 本体で現像する（GPU 版を既定とし、GPU の側の失敗なら CPU 版。2.4 節）。寸法の指定は
 //!    「フル解像度で処理してから縮小」（genzo-pipeline の書き出し）。
-//! 3. genzo-media でエンコードする（出力の色空間の ICC を埋め込み、Exif を書く。`remove_gps` なら GPS を
-//!    書かない。SEC-03）。カタログで編集した説明のメタデータ（LIB-15。タイトル・キャプション・作成者と連絡先・
-//!    著作権・撮影場所など）は XMP に書き、ASCII で表せるキャプション・作成者・著作権表示は Exif の
-//!    ImageDescription・Artist・Copyright にも書く（genzo-media の `xmp_write`・`exif_write`）。写真に付けた
-//!    キーワード（LIB-09）は、親のキーワードを含めて XMP の `dc:subject` に書く（キーワードごとの「書き出しに
-//!    含める」の印と、設定の `remove_keywords` に従う。genzo-catalog の `Catalog::export_keywords`）。
+//! 3. genzo-media でエンコードする（出力の色空間の ICC を埋め込み、Exif を書く。GPS は、カタログで後から付けた
+//!    位置（LIB-21。genzo-catalog の `Catalog::asset_location`）があればそれ、なければ元のファイルの値。
+//!    `remove_gps` なら、付けた位置も含めて GPS を書かない。SEC-03）。カタログで編集した説明のメタデータ
+//!    （LIB-15。タイトル・キャプション・作成者と連絡先・著作権・撮影場所など）は XMP に書き、ASCII で表せる
+//!    キャプション・作成者・著作権表示は Exif の ImageDescription・Artist・Copyright にも書く（genzo-media の
+//!    `xmp_write`・`exif_write`）。写真に付けたキーワード（LIB-09）は、親のキーワードを含めて XMP の
+//!    `dc:subject` に書く（キーワードごとの「書き出しに含める」の印と、設定の `remove_keywords` に従う。
+//!    genzo-catalog の `Catalog::export_keywords`）。
 //! 4. 安全に書き出す（6.4 節）: **原本の保護**（書き出し先が、カタログに登録されたファイル、または今回の
 //!    入力と同じファイルなら中止する。genzo-media の `ProtectedFiles` で、パスとファイルの同一性で照合する）、
 //!    一時ファイルに書いてから名前を変更する、衝突の扱い（連番・上書き・スキップ）。
@@ -575,16 +577,19 @@ fn export_photo(run: &mut ExportRun<'_>, variant_id: VariantId) -> Result<Export
     let ctx = run.ctx;
     let inner = ctx.inner;
     let settings = run.settings;
-    let (file, develop, capture, descriptive, keywords) = inner.with_catalog_api(|c| {
-        let f = variant_file(c, variant_id)?;
-        let d = c.develop_settings(variant_id)?;
-        let t = c.capture_time(f.asset_id)?;
-        let m = c.asset_metadata(f.asset_id)?;
-        // 書き出すキーワード（付いているものと親のうち、書き出しに含めるもの。LIB-09）。設定で書かない
-        // ときも読む（genzo-media が設定に従って除く）。
-        let k = c.export_keywords(variant_id)?;
-        Ok((f, d, t, m, k))
-    })?;
+    let (file, develop, capture, descriptive, keywords, assigned_gps) =
+        inner.with_catalog_api(|c| {
+            let f = variant_file(c, variant_id)?;
+            let d = c.develop_settings(variant_id)?;
+            let t = c.capture_time(f.asset_id)?;
+            let m = c.asset_metadata(f.asset_id)?;
+            // 書き出すキーワード（付いているものと親のうち、書き出しに含めるもの。LIB-09）。設定で書かない
+            // ときも読む（genzo-media が設定に従って除く）。
+            let k = c.export_keywords(variant_id)?;
+            // 後から付けた位置（LIB-21）。GPS を削除する設定のときも読む（genzo-media が設定に従って除く）。
+            let g = c.asset_location(f.asset_id)?;
+            Ok((f, d, t, m, k, g))
+        })?;
     let loaded = load_source(inner, &file, Lane::Batch, ctx.token())?;
     // 保存された設定の外部データ（render_deps）を、実際に使う値に置き換えて描き、使った値を結果に記録する
     // （`deps` の doc）。保存された値と違えば警告する。
@@ -631,12 +636,16 @@ fn export_photo(run: &mut ExportRun<'_>, variant_id: VariantId) -> Result<Export
         }
     };
     // Exif（撮影情報と、利用者が補正した撮影日時）と、カタログで編集した説明のメタデータ（LIB-15。XMP と、
-    // ASCII で表せる値は Exif にも）、キーワード（LIB-09。XMP の dc:subject）。GPS・キーワードは
-    // export_image が設定（remove_gps・remove_keywords）に従って除く。
-    let exif = ExifData::from_photo_metadata(&loaded.metadata)
+    // ASCII で表せる値は Exif にも）、キーワード（LIB-09。XMP の dc:subject）。GPS は後から付けた位置（LIB-21）が
+    // あればそれで置き換え、なければ元のファイルの値のまま。GPS・キーワードは export_image が設定（remove_gps・
+    // remove_keywords）に従って除く（付けた位置を入れた後に除くので、付けた位置も書かない）。
+    let mut exif = ExifData::from_photo_metadata(&loaded.metadata)
         .with_capture_time(&capture)
         .with_descriptive(descriptive)
         .with_keywords(keywords);
+    if let Some(g) = assigned_gps {
+        exif = exif.with_gps(g);
+    }
     // 名前は書き出す前に決めてある（[`plan_names`]）。決めた後に増えた写真などは、元のファイルの名前にする。
     let desired_name = match run.names.get(&variant_id) {
         Some(n) => n.clone(),
