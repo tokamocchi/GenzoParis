@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { findVcRedistDirs } from "./worker.mjs";
+import { collectLibrawRecipe, findVcRedistDirs, readLibrawVersion } from "./worker.mjs";
 
 test("Visual C++ のランタイムを探すフォルダ（環境変数の指定と VCToolsRedistDir）", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "genzo-vcredist-"));
@@ -35,6 +35,48 @@ test("Visual C++ のランタイムを探すフォルダ（環境変数の指定
       /vswhere が見つからない/,
     );
     assert.throws(() => findVcRedistDirs({}, "riscv64gc-unknown-linux-gnu"), /アーキテクチャが分からない/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("LibRaw の版のヘッダを、build.rs と同じ include の置き方で探す（Windows の LIBRAW_INCLUDE_DIR）", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "genzo-libraw-"));
+  try {
+    const header = "#define LIBRAW_MAJOR_VERSION 0\n#define LIBRAW_MINOR_VERSION 22\n#define LIBRAW_PATCH_VERSION 1\n";
+    // libraw/libraw.h のあるフォルダ（vcpkg の include）。
+    fs.mkdirSync(path.join(root, "a", "libraw"), { recursive: true });
+    fs.writeFileSync(path.join(root, "a", "libraw", "libraw_version.h"), header);
+    assert.equal(readLibrawVersion("windows", { LIBRAW_INCLUDE_DIR: path.join(root, "a") }), "0.22.1");
+    // libraw.h を直接含むフォルダ。
+    fs.mkdirSync(path.join(root, "b"));
+    fs.writeFileSync(path.join(root, "b", "libraw_version.h"), header);
+    assert.equal(readLibrawVersion("windows", { LIBRAW_INCLUDE_DIR: path.join(root, "b") }), "0.22.1");
+    assert.throws(() => readLibrawVersion("windows", { LIBRAW_INCLUDE_DIR: path.join(root, "none") }), /LibRaw の版が読めない/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("LibRaw をビルドした手順: vcpkg の port の写しと版（git のないところではコミットなし）", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "genzo-recipe-"));
+  try {
+    const vcpkg = path.join(root, "vcpkg");
+    const port = path.join(vcpkg, "ports", "libraw");
+    fs.mkdirSync(path.join(port, "sub"), { recursive: true });
+    fs.writeFileSync(path.join(port, "vcpkg.json"), JSON.stringify({ name: "libraw", version: "0.22.0", "port-version": 1 }));
+    fs.writeFileSync(path.join(port, "portfile.cmake"), "# portfile");
+    fs.writeFileSync(path.join(port, "sub", "fix.patch"), "--- a\n+++ b\n");
+    const out = path.join(root, "out");
+    fs.mkdirSync(out);
+    const r = collectLibrawRecipe("windows", out, vcpkg, { PATH: process.env.PATH, GIT_CEILING_DIRECTORIES: root });
+    assert.equal(r.recipe.kind, "vcpkg");
+    assert.equal(r.recipe.version, "0.22.0#1");
+    assert.equal(r.recipe.copied, true);
+    assert.deepEqual(r.files, ["vcpkg-ports-libraw/portfile.cmake", "vcpkg-ports-libraw/sub/fix.patch", "vcpkg-ports-libraw/vcpkg.json"]);
+    assert.equal(fs.readFileSync(path.join(out, "vcpkg-ports-libraw", "sub", "fix.patch"), "utf8"), "--- a\n+++ b\n");
+    // vcpkg を使っていない（LIBRAW_INCLUDE_DIR などを自分で指定した）なら、手順は分からない。
+    assert.deepEqual(collectLibrawRecipe("windows", out, null, {}), { recipe: { kind: "unknown" }, files: [] });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
