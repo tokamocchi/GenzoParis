@@ -14,7 +14,7 @@
 //! | Exif | DateTimeOriginal・SubSecTimeOriginal・OffsetTimeOriginal | 撮影日時 |
 //! | Exif | ColorSpace (0xA001) | sRGB なら 1、それ以外は 0xFFFF（未較正。ICC で色空間を示す） |
 //! | Exif | PixelXDimension・PixelYDimension | 書き出した画像の寸法 |
-//! | GPS | GPSVersionID・緯度・経度 | **`remove_gps = false` のときだけ** 書く |
+//! | GPS | GPSVersionID・緯度・経度 | **`remove_gps = false` のときだけ** 書く。後から付けた位置（LIB-21）があればそれ（[`ExifData::with_gps`]）、なければ元のファイルの値 |
 //!
 //! ASCII のタグは、7bit の印字可能な文字以外を `?` に置き換え、[`EXIF_MAX_ASCII_CHARS`] 文字で切る
 //! （Exif の ASCII 型は 7bit の文字だけを許すため）。ただし利用者が書いた説明のメタデータ（キャプション・
@@ -92,7 +92,8 @@ pub(crate) mod tag {
 /// 書き出すファイルに書く Exif の情報。
 ///
 /// [`ExifData::from_photo_metadata`] で写真のメタデータから作る。書き出しの設定で GPS を削除する
-/// （`remove_gps = true`）ときは、書き出しの関数が [`ExifData::without_gps`] を適用する。
+/// （`remove_gps = true`）ときは、書き出しの関数が [`ExifData::without_gps`] を適用する（後から付けた位置を
+/// [`ExifData::with_gps`] で入れた後なので、付けた位置も書かない）。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ExifData {
     /// カメラのメーカー。
@@ -113,7 +114,7 @@ pub struct ExifData {
     pub iso: Option<u32>,
     /// 焦点距離（mm）。
     pub focal_length_mm: Option<f64>,
-    /// GPS の座標。
+    /// GPS の座標（元のファイルの値。後から付けた位置は [`ExifData::with_gps`] で置き換える）。
     pub gps: Option<GpsCoord>,
     /// カタログの中で編集した説明のメタデータ（LIB-15。タイトル・キャプション・作成者・著作権など）。
     /// Exif には ASCII で表せるキャプション・作成者・著作権表示だけを書き、すべての項目は XMP に書く
@@ -193,6 +194,16 @@ impl ExifData {
                 self.offset_time_original = None;
             }
         }
+        self
+    }
+
+    /// カタログで後から付けた位置（LIB-21）で、GPS を置き換える（元のファイルの位置の有無によらない）。
+    ///
+    /// 付けた位置があるときだけ呼ぶ（なければ元のファイルの値のまま）。書き出しの設定で GPS を削除する
+    /// ときは、この後に書き出しの関数が [`without_gps`](Self::without_gps) を適用するので、付けた位置も書かない。
+    /// 範囲外の座標は書かない（GPS の IFD を作るときに `GpsCoord::is_valid` で除く）。
+    pub fn with_gps(mut self, gps: GpsCoord) -> Self {
+        self.gps = Some(gps);
         self
     }
 
@@ -924,6 +935,35 @@ mod tests {
             rational(&e, exif::Tag::GPSLongitude),
             vec![(70, 1), (0, 1), (0, 10_000)]
         );
+    }
+
+    /// 後から付けた位置（LIB-21）は、元のファイルの位置を置き換える（元の位置がなくても書く）。GPS を削除する
+    /// 設定（`without_gps`。書き出しの関数が後で適用する）では、付けた位置も書かない。
+    #[test]
+    fn assigned_location_replaces_the_file_gps() {
+        let assigned = GpsCoord::new(-33.856_784, 151.215_297).unwrap();
+        let data = ExifData::from_photo_metadata(&sample_meta()).with_gps(assigned);
+        assert_eq!(data.gps, Some(assigned));
+        let e = parse(encode_exif_tiff(&build_ifds(&data, &info()), ByteOrder::Big).unwrap());
+        assert_eq!(ascii(&e, exif::Tag::GPSLatitudeRef).as_deref(), Some("S"));
+        assert_eq!(ascii(&e, exif::Tag::GPSLongitudeRef).as_deref(), Some("E"));
+        // 33.856784° = 33° 51' 24.4224"、151.215297° = 151° 12' 55.0692"。
+        assert_eq!(
+            rational(&e, exif::Tag::GPSLatitude),
+            vec![(33, 1), (51, 1), (244_224, 10_000)]
+        );
+        assert_eq!(
+            rational(&e, exif::Tag::GPSLongitude),
+            vec![(151, 1), (12, 1), (550_692, 10_000)]
+        );
+        // 元のファイルに位置がなくても書く。
+        let data = ExifData::default().with_gps(assigned);
+        assert!(build_ifds(&data, &info()).gps.is_some());
+        // GPS を削除する設定では、付けた位置も書かない。
+        let data = ExifData::from_photo_metadata(&sample_meta())
+            .with_gps(assigned)
+            .without_gps();
+        assert!(build_ifds(&data, &info()).gps.is_none());
     }
 
     #[test]

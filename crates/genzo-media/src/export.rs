@@ -10,7 +10,8 @@
 //! 2. ビット数を形式に合わせる（JPEG・PNG 8bit は 8bit、TIFF・PNG 16bit は 16bit）。
 //! 3. 出力の色空間の ICC プロファイル（[`export_icc_profile`]）と Exif を埋め込む（IQ-06・EXP-04）。解像度
 //!    （`settings.resolution_ppi`。EXP-03）は Exif の XResolution・YResolution（TIFF は IFD0）と PNG の pHYs に書く。
-//!    GPS は `settings.remove_gps = false` のときだけ書く（SEC-03）。カタログで編集した説明の
+//!    GPS は `settings.remove_gps = false` のときだけ書く（SEC-03。後から付けた位置（LIB-21。
+//!    [`ExifData::with_gps`]）も同じ）。カタログで編集した説明の
 //!    メタデータ（LIB-15。[`ExifData::descriptive`]）があれば、XMP（[`crate::xmp_write`]）も埋め込む
 //!    （JPEG は APP1、PNG は iTXt、TIFF はタグ 700）。
 //! 4. 安全に書き出す（原本の照合・一時ファイル・名前の変更。[`crate::safe_write`]）。
@@ -474,5 +475,26 @@ mod tests {
                 Some(10)
             );
         }
+    }
+
+    /// 後から付けた位置（LIB-21。`with_gps`）も、GPS を削除する設定では書かない（`exif_for` が後で除く）。
+    #[test]
+    fn assigned_gps_follows_the_remove_gps_setting() {
+        let assigned = GpsCoord::new(-33.856_784, 151.215_297).unwrap();
+        let exif = ExifData {
+            gps: GpsCoord::new(35.0, 139.0),
+            ..Default::default()
+        }
+        .with_gps(assigned);
+        let kept = ExportSettings {
+            remove_gps: false,
+            ..Default::default()
+        };
+        assert_eq!(exif_for(&kept, Some(&exif)).unwrap().gps, Some(assigned));
+        let removed = ExportSettings {
+            remove_gps: true,
+            ..Default::default()
+        };
+        assert_eq!(exif_for(&removed, Some(&exif)).unwrap().gps, None);
     }
 }
