@@ -33,6 +33,13 @@ export interface SliderProps {
   step?: number;
   /** 既定値（ダブルクリックで戻す）。 */
   defaultValue?: number;
+  /**
+   * ダブルクリックで既定に戻す処理（既定が 1 つの値ではないもの。ホワイトバランスの「撮影時の設定」など）。
+   * 渡すと defaultValue より優先する。
+   */
+  onReset?: () => void;
+  /** 既定から変えているか（onReset を渡すときの印。渡さなければ defaultValue と比べる）。 */
+  modified?: boolean;
   /** 表示の書式。 */
   format?: (v: number) => string;
   /** 入力欄の値を数値にする（既定は parseSliderText。どちらも normalizeNumberText で整えた文字を受ける）。 */
@@ -74,11 +81,16 @@ export function Slider(p: SliderProps) {
     }
   };
 
-  const changed = p.defaultValue !== undefined && Math.abs(p.value - p.defaultValue) > 1e-9;
+  const changed = p.modified ?? (p.defaultValue !== undefined && Math.abs(p.value - p.defaultValue) > 1e-9);
+  const reset = () => {
+    if (p.disabled) return;
+    if (p.onReset) p.onReset();
+    else if (p.defaultValue !== undefined) p.onChange(p.defaultValue, false);
+  };
 
   return (
     <div className={`slider${changed ? " changed" : ""}`} title={p.title}>
-      <span className="slider-label" onDoubleClick={() => p.defaultValue !== undefined && p.onChange(p.defaultValue, false)}>
+      <span className="slider-label" onDoubleClick={reset}>
         {p.swatch && <span className="slider-swatch" style={{ background: p.swatch }} aria-hidden="true" />}
         {p.label}
       </span>
@@ -131,7 +143,7 @@ export function Slider(p: SliderProps) {
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
-        onDoubleClick={() => p.defaultValue !== undefined && p.onChange(p.defaultValue, false)}
+        onDoubleClick={reset}
         // 矢印・Home・End などはスライダーの値を変える（window の全体のショートカット（←→ の写真の移動）まで
         // 届かないようにする）。値の変化は下の onChange で知らせる（ドラッグ中でなければ onChange(value, false)）。
         onKeyDown={(e) => {
