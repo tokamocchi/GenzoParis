@@ -21,6 +21,8 @@
 //! genzo time sync 12 "2024-05-01 12:34:56" --dry-run   # 12 と同じ機材の写真を、12 の正しい時刻に合わせる
 //! genzo time zone +02:00 --keep-instant 12 13       # 撮影した瞬間はそのままで、パリの時刻で表示する
 //! genzo timeline --gap 2h --folder ~/Pictures/2024-05-01
+//! genzo location set 12 13 --at "35.681236, 139.767125" --dry-run   # 位置を付ける見込み（LIB-21。元のファイルは変えない）
+//! genzo location clear 12 && genzo location undo   # 付けた位置を消す（カメラの位置に戻す）・取り消す
 //! genzo file move 12 13 --to ~/Pictures/選別済み --dry-run   # 移す予定（移せない写真・コピーの量）
 //! genzo file rename 12 13 --template "{date}-{seq}"
 //! genzo missing check && genzo missing relink --in /media/me/外付け --dry-run
@@ -98,6 +100,7 @@
 //! | `logs` | `log info / clear`（ログ・クラッシュレポート。カタログは使わない。SYS-07） |
 //! | `identity` | `hash compute / status / duplicates / identify`（ファイルの内容による同一性。ORG-03・IMP-04） |
 //! | `time` | `time devices / shift / sync / zone / clear-zone / reset / history / undo`（撮影日時の一括修正。LIB-16）と `timeline`（写真と動画のタイムライン。ORG-01） |
+//! | `location` | `location set / clear / history / undo`（位置情報の後付け。LIB-21。座標の文字列は genzo-model の `parse_coordinates`） |
 //! | `files` | `volume list`（FILE-03）・`folder list / create / rename / move / relocate`・`file move / rename`（FILE-02）・`missing check / relink / link`（FILE-04） |
 //! | `video` | `video info / proxy / cache / clear`（動画の再生の情報と再生用のファイル。VID-04） |
 //!
@@ -142,6 +145,7 @@ mod files;
 mod identity;
 mod interrupt;
 mod library;
+mod location;
 mod logs;
 mod masks;
 mod organize;
@@ -383,6 +387,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         Command::Hash(c) => identity::run(&g, out, c),
         Command::Time(c) => time::run(&g, out, c),
         Command::Timeline(a) => time::timeline(&g, out, &a),
+        Command::Location(c) => location::run(&g, out, c),
         Command::Volume(c) => files::volume(&g, out, c),
         Command::Folder(c) => files::folder(&g, out, c),
         Command::File(c) => files::file(&g, out, c),

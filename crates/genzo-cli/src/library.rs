@@ -6,10 +6,10 @@ use std::path::Path;
 
 use chrono::FixedOffset;
 use genzo_api::{
-    ApiError, AssetKind, DeleteKind, DeletePlan, DeleteReport, FileStatus, Flag, JobResult, Rating,
-    SearchFilter, SearchSort, VariantId, VariantSummary,
+    ApiError, AssetKind, DeleteKind, DeletePlan, DeleteReport, FileStatus, Flag, GpsSource,
+    JobResult, Rating, SearchFilter, SearchSort, VariantDetails, VariantId, VariantSummary,
 };
-use genzo_model::MetadataField;
+use genzo_model::{MetadataField, format_coordinates};
 use serde_json::json;
 
 use crate::Status;
@@ -472,10 +472,7 @@ pub fn show(g: &GlobalArgs, out: Output, variant: VariantId) -> CliResult<Status
             "焦点距離",
             opt(details.focal_mm.map(|x| format!("{x:.0} mm"))),
         ),
-        (
-            "GPS",
-            opt(details.gps.map(|g| format!("{:.6}, {:.6}", g.lat, g.lon))),
-        ),
+        ("GPS", gps_text(&details)),
         ("キャプション", opt(details.caption.clone())),
     ];
     // 説明のメタデータ（LIB-15。値のある項目だけ。キャプションは上）。
@@ -544,6 +541,22 @@ pub fn show(g: &GlobalArgs, out: Output, variant: VariantId) -> CliResult<Status
         out.line(serde_json::to_string_pretty(&settings).unwrap_or_default());
     }
     Ok(Status::Success)
+}
+
+/// `show` の GPS の行（使う位置。後から付けた位置（LIB-21）なら、カメラ（ファイル）の位置を注記に添える）。
+fn gps_text(d: &VariantDetails) -> String {
+    let Some(g) = d.gps else {
+        return "—".to_owned();
+    };
+    let text = format_coordinates(g);
+    match d.gps_source {
+        Some(GpsSource::Assigned) => format!(
+            "{text}（後から付けた位置。カメラの位置: {}）",
+            d.camera_gps
+                .map_or_else(|| "なし".to_owned(), format_coordinates)
+        ),
+        _ => text,
+    }
 }
 
 /// 動画のメタデータの表示（`show`・`info`）。
