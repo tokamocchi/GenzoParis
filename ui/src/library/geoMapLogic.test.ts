@@ -28,6 +28,7 @@ import {
   placeLabel,
   placeView,
   SEARCH_INTERVAL_MS,
+  searchInput,
   searchQueryProblem,
   searchWaitMs,
   urlFieldValue,
@@ -132,6 +133,33 @@ describe("地名の検索（Enter かボタンのときだけ。1 秒に 1 回�
     expect(searchQueryProblem("𠮷".repeat(MAX_QUERY_CHARS))).toBeNull();
     // 濁点を分けて書いた 200 文字は、NFC にすると 200 文字。
     expect(searchQueryProblem("が".repeat(MAX_QUERY_CHARS))).toBeNull();
+  });
+
+  it("座標の形の語は地名の検索に送らない（座標として読めれば座標の欄に入れる。座標を検索の欄に貼った場合）", () => {
+    const tokyo = { lat: 35.681236, lon: 139.767125 };
+    expect(searchInput("東京駅")).toEqual({ kind: "search", query: "東京駅" });
+    expect(searchInput("  東京駅 ")).toEqual({ kind: "search", query: "東京駅" });
+    expect(searchInput("35.681236, 139.767125")).toEqual({ kind: "coordinate", coord: tokyo });
+    expect(searchInput(" 北緯 35.681236°、東経 139.767125° ")).toEqual({ kind: "coordinate", coord: tokyo });
+    expect(searchInput("https://www.google.com/maps/@35.681236,139.767125,17z")).toEqual({
+      kind: "coordinate",
+      coord: tokyo,
+    });
+    // 200 文字を超える URL でも、座標が読めれば座標（長さの検査より先）。
+    const longUrl = `https://www.google.com/maps/@35.681236,139.767125,17z/data=${"x".repeat(MAX_QUERY_CHARS)}`;
+    expect(searchInput(longUrl)).toEqual({ kind: "coordinate", coord: tokyo });
+    // 座標の形だが読めない語（範囲外・座標のない URL など）も送らない。
+    for (const q of ["95, 139", "https://maps.app.goo.gl/abcdef"]) {
+      const r = searchInput(q);
+      expect(r.kind).toBe("problem");
+      expect(r.kind === "problem" && r.message).toContain("地名の検索に送りません");
+    }
+    // 空・長すぎる語は今までどおり。
+    expect(searchInput(" ")).toEqual({ kind: "problem", message: "検索語が空です" });
+    expect(searchInput("あ".repeat(MAX_QUERY_CHARS + 1))).toEqual({
+      kind: "problem",
+      message: "検索語が長すぎます（200 文字まで）",
+    });
   });
 
   it("前の要求の開始から 1 秒あける", () => {

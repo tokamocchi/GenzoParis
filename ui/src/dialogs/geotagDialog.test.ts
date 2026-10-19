@@ -215,6 +215,21 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     expect(html.indexOf('class="geo-map"')).toBeLessThan(html.indexOf("座標（緯度, 経度）"));
   });
 
+  it("開いたときのフォーカスは座標の欄（有効なときは地名の検索の欄が先にあるが、座標を貼って Enter で検索に送らない）", () => {
+    for (const prefs of [MOCK_MAP_PREFERENCES, DEFAULT_MAP_PREFERENCES]) {
+      appStore.set({ status: mockAppStatus(prefs) });
+      const html = dialog();
+      // Dialog は data-autofocus の付いた欄を先に探す（components/Dialog.tsx の initialFocusTarget）。
+      const marked = html.match(/<input[^>]*data-autofocus[^>]*>/g) ?? [];
+      expect(marked).toHaveLength(1);
+      expect(marked[0]).toContain('id="geo-coord"');
+    }
+    appStore.set({ status: mockAppStatus(MOCK_MAP_PREFERENCES) });
+    const html = dialog();
+    expect(html.indexOf('type="search"')).toBeGreaterThan(-1);
+    expect(html.indexOf('type="search"')).toBeLessThan(html.indexOf('id="geo-coord"'));
+  });
+
   it("有効にする前の説明: 送るもの・送り先・守ること・注意・利用ポリシーのページ", () => {
     const html = render(
       createElement(MapConsentPanel, {

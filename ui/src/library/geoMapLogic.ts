@@ -15,6 +15,7 @@
 
 import type { AppSettings, GpsCoord, MapCacheInfo, MapLink, MapPreferences, Place } from "../api/types";
 import { formatBytes } from "../format";
+import { coordErrorMessage, parseCoordinates } from "./geotagLogic";
 
 /** 地図の最大のズーム（genzo-geo の OSM_MAX_ZOOM と同じ。設定で変えた提供元も同じとみなす。仮置き）。 */
 export const MAP_MAX_ZOOM = 19;
@@ -172,6 +173,33 @@ export function searchQueryProblem(q: string): string | null {
   if (key === "") return "検索語が空です";
   if ([...key].length > MAX_QUERY_CHARS) return `検索語が長すぎます（${MAX_QUERY_CHARS} 文字まで）`;
   return null;
+}
+
+/** 地名の検索の欄の語の扱い（`searchInput`）。 */
+export type SearchInput =
+  /** 送らない（空・長すぎる・座標の形だが読めない）。`message` を欄の下に出す。 */
+  | { kind: "problem"; message: string }
+  /** 座標として読めた（外部に送らず、座標の欄に入れる）。 */
+  | { kind: "coordinate"; coord: GpsCoord }
+  /** 地名の検索に送る（整えた語）。 */
+  | { kind: "search"; query: string };
+
+/**
+ * 地名の検索の欄の語の扱い。座標の形の語（座標の欄と同じ parseCoordinates で読めるもの・範囲外や座標のない URL
+ * など、座標の形だが読めないもの）は地名の検索（外部）に送らない。座標の欄に貼るつもりの座標を、検索の欄に貼って
+ * Enter を押した場合に送らないため（座標の読み取りはこのパソコンの中で行うと画面に書いている。Nominatim の
+ * ポリシーも個人の情報を送らないよう求めている）。座標の判定は長さの検査より先（長い Google マップの URL も読む）。
+ */
+export function searchInput(q: string): SearchInput {
+  const query = normalizeSearchQuery(q);
+  if (query === "") return { kind: "problem", message: "検索語が空です" };
+  const parsed = parseCoordinates(q);
+  if (parsed.ok) return { kind: "coordinate", coord: parsed.coord };
+  if (parsed.error.kind !== "unreadable" && parsed.error.kind !== "empty") {
+    return { kind: "problem", message: `座標の形の語は地名の検索に送りません（${coordErrorMessage(parsed.error)}）` };
+  }
+  const problem = searchQueryProblem(query);
+  return problem ? { kind: "problem", message: problem } : { kind: "search", query };
 }
 
 /** 前の検索の開始（ms。なければ null）から SEARCH_INTERVAL_MS あけるために、今（`now`）から待つ時間（ms）。 */

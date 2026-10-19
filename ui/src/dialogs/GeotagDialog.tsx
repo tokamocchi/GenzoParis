@@ -16,7 +16,9 @@
 //   - 地名の検索（Nominatim）は Enter か「検索」のボタンのときだけ送る（入力の途中では送らない。オートコンプリートの
 //     禁止。IME の変換を確定する Enter は除く）。前の検索が終わるまでは次の検索を受け付けず、前の要求の開始から
 //     1 秒あけて送る（library/geoMapLogic.ts の searchWaitMs。genzo-geo もプロセス全体で 1 秒に 1 回にし、結果を
-//     キャッシュする）。
+//     キャッシュする）。座標の形の語は送らず、読めれば座標の欄に入れる（geoMapLogic.ts の searchInput）。
+//   - 開いたときのフォーカスは座標の欄（data-autofocus。地名の検索の欄が先にあるが、座標を貼って Enter で付ける
+//     主な使い方で、検索に送らないため）。
 
 import { useEffect, useRef, useState } from "react";
 
@@ -38,10 +40,9 @@ import { GeoMap, type MapFocus } from "../library/GeoMap";
 import {
   describePlaces,
   mapPreferencesOf,
-  normalizeSearchQuery,
   placeLabel,
   placeView,
-  searchQueryProblem,
+  searchInput,
   searchWaitMs,
 } from "../library/geoMapLogic";
 import {
@@ -254,9 +255,12 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
         )}
         <div className="field">
           <label htmlFor="geo-coord">座標（緯度, 経度）</label>
+          {/* 開いたときのフォーカスはこの欄（有効なときは地名の検索の欄が先にあるが、座標を貼って Enter で付ける
+              主な使い方で、検索に送らないため。Dialog の initialFocusTarget）。 */}
           <input
             id="geo-coord"
             type="text"
+            data-autofocus=""
             value={text}
             placeholder="35.681236, 139.767125"
             spellCheck={false}
@@ -338,6 +342,8 @@ function MapPicker(props: {
   const [places, setPlaces] = useState<Place[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // 検索の欄の語を座標として読んだときの案内。
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [focus, setFocus] = useState<MapFocus | null>(null);
   // 前の検索の要求を送った時刻（ms）。
@@ -358,13 +364,22 @@ function MapPicker(props: {
     };
   }, []);
 
-  /** 検索する（Enter か「検索」のボタンのときだけ。前の検索の途中なら何もしない）。 */
+  /**
+   * 検索する（Enter か「検索」のボタンのときだけ。前の検索の途中なら何もしない）。座標の形の語は送らず、読めれば
+   * 座標の欄に入れる（geoMapLogic.ts の searchInput）。
+   */
   const search = () => {
     if (inFlight.current || props.disabled) return;
-    const p = searchQueryProblem(query);
-    setProblem(p);
-    if (p) return;
-    const q = normalizeSearchQuery(query);
+    const input = searchInput(query);
+    setProblem(input.kind === "problem" ? input.message : null);
+    setNotice(null);
+    if (input.kind === "problem") return;
+    if (input.kind === "coordinate") {
+      setNotice("座標として読み、座標の欄に入れました（地名の検索には送っていません）。");
+      props.onPick(input.coord);
+      return;
+    }
+    const q = input.query;
     inFlight.current = true;
     setSearching(true);
     setError(null);
@@ -409,6 +424,7 @@ function MapPicker(props: {
             // 入力の途中では検索しない（オートコンプリートの禁止）。誤りの表示だけ消す。
             setQuery(e.target.value);
             setProblem(null);
+            setNotice(null);
           }}
           onCompositionStart={() => {
             composing.current = true;
@@ -430,6 +446,7 @@ function MapPicker(props: {
         </button>
       </div>
       {problem && <p className="dlg-field-error">{problem}</p>}
+      {notice && <p className="hint">{notice}</p>}
       <ErrorBox error={error} title="検索できません" />
       {places && <p className="hint">{describePlaces(places)}</p>}
       {places && places.length > 0 && (
