@@ -25,7 +25,15 @@ import { actions, useApp } from "../state/app";
 import { openMoveFiles, openRelink, refreshVolumes, showMissingOnly, startCheckMissing } from "../state/files";
 import { CollectionPanel } from "./CollectionPanel";
 import { folderMarks, offlineVolumesText } from "./fileOpsLogic";
-import { ancestorKeys, buildFolderTree, folderName, type FolderNode, visibleFolderRows } from "./folderTree";
+import {
+  ancestorKeys,
+  buildFolderTree,
+  folderName,
+  type FolderNode,
+  type FolderSegment,
+  layoutSegments,
+  visibleFolderRows,
+} from "./folderTree";
 import { KeywordPanel } from "./KeywordPanel";
 import "./library.css";
 import { usePhotoDrag } from "./photoDrag";
@@ -76,6 +84,7 @@ export function LibraryLeftPanel() {
   const [volumes, setVolumes] = useState<VolumeInfo[] | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ at: MenuAt; folder: FolderInfo } | null>(null);
+  const [moreMenu, setMoreMenu] = useState<{ at: MenuAt; segments: FolderSegment[] } | null>(null);
   const drag = usePhotoDrag();
   const [reload, setReload] = useState(0);
   const [stats, setStats] = useState<CatalogStats | null>(null);
@@ -264,6 +273,85 @@ export function LibraryLeftPanel() {
     { label: "ドライブのつながりを確かめ直す", onSelect: recheckVolumes },
   ];
 
+  /** 行の 1 つのフォルダ（選ぶ・右クリック・写真を落とす先・印）。`first` でなければ前に区切りを置く。 */
+  const renderSeg = (seg: FolderSegment, first: boolean) => {
+    const info = byId.get(seg.id);
+    const marks = info ? folderMarks(info) : null;
+    const over = drag?.target?.kind === "folder" && drag.target.id === seg.id;
+    const cls = [
+      "lib-tree-seg",
+      seg.id === folderId ? "on" : "",
+      marks?.offline ? "offline" : "",
+      marks?.missing ? "missing" : "",
+      over ? (marks?.droppable ? "drop-over" : "drop-no") : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return (
+      <Fragment key={seg.id}>
+        {!first && <span className="lib-tree-sep">›</span>}
+        <span
+          className={cls}
+          title={marks?.title ?? seg.fullPath}
+          onClick={() => selectFolder(seg.id)}
+          onContextMenu={(e) => {
+            if (!info) return;
+            e.preventDefault();
+            setMenu({ at: { x: e.clientX, y: e.clientY }, folder: info });
+          }}
+          data-drop-kind="folder"
+          data-drop-id={seg.id}
+          data-drop-ok={marks?.droppable ? "1" : "0"}
+          data-drop-label={seg.name}
+        >
+          {seg.name}
+        </span>
+        {marks?.missing && (
+          <span className="lib-tree-mark warn" aria-label="フォルダが見つかりません">
+            !
+          </span>
+        )}
+        {marks && !marks.missing && marks.missingFiles > 0 && (
+          <span className="lib-tree-mark warn" aria-label={`見つからない写真 ${marks.missingFiles} 件`}>
+            !{marks.missingFiles.toLocaleString("ja-JP")}
+          </span>
+        )}
+      </Fragment>
+    );
+  };
+
+  /** 行のフォルダ（区切りが多ければ、間を「…」にまとめ、「…」のメニューから選べるようにする）。 */
+  const renderSegments = (node: FolderNode) => {
+    const lay = layoutSegments(node.segments);
+    if (lay.hidden.length === 0) return lay.head.map((seg, i) => renderSeg(seg, i === 0));
+    const hidden = lay.hidden;
+    // まとめたフォルダの「!」（見つからないフォルダ・写真）は見えなくなるので、「…」を注意の色にする。
+    const warn = hidden.some((s) => {
+      const info = byId.get(s.id);
+      const marks = info ? folderMarks(info) : null;
+      return !!marks && (marks.missing || marks.missingFiles > 0);
+    });
+    return (
+      <>
+        {lay.head.map((seg, i) => renderSeg(seg, i === 0))}
+        <span className="lib-tree-sep">›</span>
+        <button
+          type="button"
+          className={`lib-tree-more${hidden.some((s) => s.id === folderId) ? " on" : ""}${warn ? " warn" : ""}`}
+          title={hidden.map((s) => s.name).join(" › ")}
+          aria-label={`途中のフォルダ（${hidden.length} 個）を選ぶ`}
+          onClick={(e) => {
+            const b = e.currentTarget.getBoundingClientRect();
+            setMoreMenu({ at: { x: b.left, y: b.bottom }, segments: hidden });
+          }}
+        >
+          …
+        </button>
+        {lay.tail.map((seg) => renderSeg(seg, false))}
+      </>
+    );
+  };
+
   return (
     <div className="lib-left">
       <Section id="lib.catalog" title="カタログ">
@@ -316,53 +404,7 @@ export function LibraryLeftPanel() {
                 >
                   {r.hasChildren ? (r.open ? "▾" : "▸") : ""}
                 </button>
-                <span className="lib-tree-segs">
-                  {r.node.segments.map((seg, i) => {
-                    const info = byId.get(seg.id);
-                    const marks = info ? folderMarks(info) : null;
-                    const over = drag?.target?.kind === "folder" && drag.target.id === seg.id;
-                    const cls = [
-                      "lib-tree-seg",
-                      seg.id === folderId ? "on" : "",
-                      marks?.offline ? "offline" : "",
-                      marks?.missing ? "missing" : "",
-                      over ? (marks?.droppable ? "drop-over" : "drop-no") : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ");
-                    return (
-                      <Fragment key={seg.id}>
-                        {i > 0 && <span className="lib-tree-sep">›</span>}
-                        <span
-                          className={cls}
-                          title={marks?.title ?? seg.fullPath}
-                          onClick={() => selectFolder(seg.id)}
-                          onContextMenu={(e) => {
-                            if (!info) return;
-                            e.preventDefault();
-                            setMenu({ at: { x: e.clientX, y: e.clientY }, folder: info });
-                          }}
-                          data-drop-kind="folder"
-                          data-drop-id={seg.id}
-                          data-drop-ok={marks?.droppable ? "1" : "0"}
-                          data-drop-label={seg.name}
-                        >
-                          {seg.name}
-                        </span>
-                        {marks?.missing && (
-                          <span className="lib-tree-mark warn" aria-label="フォルダが見つかりません">
-                            !
-                          </span>
-                        )}
-                        {marks && !marks.missing && marks.missingFiles > 0 && (
-                          <span className="lib-tree-mark warn" aria-label={`見つからない写真 ${marks.missingFiles} 件`}>
-                            !{marks.missingFiles.toLocaleString("ja-JP")}
-                          </span>
-                        )}
-                      </Fragment>
-                    );
-                  })}
-                </span>
+                <span className="lib-tree-segs">{renderSegments(r.node)}</span>
                 {byId.get(r.node.key)?.online === false && <span className="lib-tree-mark muted">未接続</span>}
               </div>
             ))}
@@ -385,6 +427,18 @@ export function LibraryLeftPanel() {
       </Section>
 
       {menu && <PopupMenu at={menu.at} items={folderMenu(menu.folder)} onClose={() => setMenu(null)} label="フォルダの操作" />}
+      {moreMenu && (
+        <PopupMenu
+          at={moreMenu.at}
+          items={moreMenu.segments.map((s) => ({
+            label: s.name,
+            checked: s.id === folderId,
+            onSelect: () => selectFolder(s.id),
+          }))}
+          onClose={() => setMoreMenu(null)}
+          label="途中のフォルダ"
+        />
+      )}
       <CollectionPanel />
       <KeywordPanel />
     </div>

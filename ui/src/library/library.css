@@ -489,6 +489,28 @@
   flex: none;
   color: var(--fg-3);
 }
+/* 区切りが多い行の途中のフォルダをまとめた「…」（押すと途中のフォルダのメニュー）。 */
+.lib-tree-more {
+  flex: none;
+  padding: 0 4px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.lib-tree-more:hover {
+  background: var(--bg-3);
+  color: var(--fg-0);
+}
+.lib-tree-more.on {
+  background: var(--bg-4);
+  color: var(--fg-0);
+}
+.lib-tree-more.warn {
+  color: var(--warn);
+  font-weight: 600;
+}
 .lib-left .check {
   display: flex;
   align-items: center;
