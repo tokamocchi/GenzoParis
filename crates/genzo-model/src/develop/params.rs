@@ -790,6 +790,21 @@ pub struct PostCropVignette {
     pub feather: f32,
     /// ハイライトの保護（0〜100。既定 0）。暗くするとき、明るい部分の効きを弱める。
     pub highlights: f32,
+    /// 手動の中心（既定 `None`）。`None` なら切り抜きの中心（切り抜きを動かすと一緒に動く）。値があれば、
+    /// 切り抜きによらずこの位置を中心にする（楕円の大きさと形は切り抜きから決めたまま）。`None` のときは JSON に
+    /// 書かない（この項目を足す前の設定と、現像設定のハッシュが同じになる）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center: Option<VignetteCenter>,
+}
+
+/// 切り抜き後の周辺光量補正の手動の中心（[`PostCropVignette::center`]）。座標は切り抜き（[`CropRect`]）と同じ、
+/// G の外接矩形の幅・高さに対する割合（各軸 0〜1。左上が (0, 0)）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct VignetteCenter {
+    /// 横の位置。
+    pub x: f32,
+    /// 縦の位置。
+    pub y: f32,
 }
 
 impl PostCropVignette {
@@ -812,6 +827,7 @@ impl Default for PostCropVignette {
             roundness: 0.0,
             feather: Self::DEFAULT_FEATHER,
             highlights: 0.0,
+            center: None,
         }
     }
 }

@@ -2244,6 +2244,10 @@ pub struct DetailArgs {
     /// 切り抜き後の周辺光量補正のハイライトの保護（0〜100。既定 0。effects.vignette.highlights）
     #[arg(long, value_name = "N")]
     pub vignette_highlights: Option<f32>,
+    /// 切り抜き後の周辺光量補正の中心（`X,Y` で手動の位置。切り抜く前の画像の幅・高さに対する割合（0〜1）。
+    /// `auto` で切り抜きの中心に戻す。effects.vignette.center）
+    #[arg(long, value_name = "X,Y|auto", value_parser = parse_vignette_center)]
+    pub vignette_center: Option<VignetteCenterArg>,
     /// 粒子の量（0〜100。effects.grain.amount）
     #[arg(long, value_name = "N")]
     pub grain_amount: Option<f32>,
@@ -2279,11 +2283,16 @@ impl DetailArgs {
 
     /// どれかを指定したか。
     pub fn any(&self) -> bool {
-        self.fields().iter().any(Option::is_some)
+        self.fields().iter().any(Option::is_some) || self.vignette_center.is_some()
     }
 
     /// 指定した項目を `settings` に当てる（指定しなかった項目は今の値のまま）。
     pub fn apply(&self, settings: &mut genzo_model::DevelopSettings) {
+        match self.vignette_center {
+            Some(VignetteCenterArg::Auto) => settings.effects.vignette.center = None,
+            Some(VignetteCenterArg::Manual(c)) => settings.effects.vignette.center = Some(c),
+            None => {}
+        }
         let p = &mut settings.presence;
         let sh = &mut settings.detail.sharpening;
         let v = &mut settings.effects.vignette;
@@ -2310,6 +2319,35 @@ impl DetailArgs {
                 *dst = value;
             }
         }
+    }
+}
+
+/// `--vignette-center` の指定。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VignetteCenterArg {
+    /// 切り抜きの中心（`auto`）。
+    Auto,
+    /// 手動の位置。
+    Manual(genzo_model::VignetteCenter),
+}
+
+/// `--vignette-center` を解釈する（`auto` か `X,Y`。値の範囲は genzo-model の検証で確かめる）。
+pub fn parse_vignette_center(s: &str) -> Result<VignetteCenterArg, String> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("auto") {
+        return Ok(VignetteCenterArg::Auto);
+    }
+    let parsed = t.split_once(',').and_then(|(x, y)| {
+        Some(genzo_model::VignetteCenter {
+            x: x.trim().parse().ok()?,
+            y: y.trim().parse().ok()?,
+        })
+    });
+    match parsed {
+        Some(c) if c.x.is_finite() && c.y.is_finite() => Ok(VignetteCenterArg::Manual(c)),
+        _ => Err(format!(
+            "周辺光量補正の中心は「X,Y」（0〜1 の割合）か「auto」で指定してください（{s}）"
+        )),
     }
 }
 
@@ -3928,7 +3966,31 @@ mod tests {
         assert_eq!(s.effects.vignette.feather, 70.0);
         assert_eq!(s.effects.grain.amount, 20.0);
         assert_eq!(s.effects.grain.roughness, 0.0);
+        assert_eq!(
+            s.effects.vignette.center, None,
+            "指定しなければ切り抜きの中心のまま"
+        );
         assert!(parse(&["genzo", "develop", "set", "7", "--clarity", "abc"]).is_err());
+        // 周辺光量補正の中心（手動・auto）。
+        let center = |arg: &str| {
+            let cli = parse(&["genzo", "develop", "set", "7", "--vignette-center", arg])?;
+            let Command::Develop(DevelopCommand::Set { detail, .. }) = cli.command else {
+                panic!()
+            };
+            assert!(detail.any());
+            let mut s = genzo_model::DevelopSettings::default();
+            s.effects.vignette.center = Some(genzo_model::VignetteCenter { x: 0.9, y: 0.9 });
+            detail.apply(&mut s);
+            Ok::<_, clap::Error>(s.effects.vignette.center)
+        };
+        assert_eq!(
+            center("0.25, 0.6").unwrap(),
+            Some(genzo_model::VignetteCenter { x: 0.25, y: 0.6 })
+        );
+        assert_eq!(center("auto").unwrap(), None);
+        for bad in ["0.5", "a,b", "NaN,0.5", ""] {
+            assert!(center(bad).is_err(), "{bad}");
+        }
     }
 
     /// `bench` にも `develop set` と同じ色・外観・シャープ・効果のオプションがある（計測の設定に当てる）。

@@ -4,8 +4,10 @@
 //!
 //! # 切り抜き後の周辺光量補正（画素ごと。f32、この順序）
 //!
-//! 設定の切り抜き（切り抜く前の全体の表示では、設定の切り抜きの枠）の中心と半分の幅・高さ（a, b。C の格子の
-//! 画素）から、丸み r（−1〜1）で楕円の半軸と指数を決める（f64 で求めて f32 に丸める）:
+//! 設定の切り抜き（切り抜く前の全体の表示では、設定の切り抜きの枠）の中心 (cx, cy) と半分の幅・高さ（a, b。
+//! C の格子の画素）から、丸み r（−1〜1）で楕円の半軸と指数を決める（f64 で求めて f32 に丸める）。手動の中心
+//! （`effects.vignette.center`。G の外接矩形の各軸の割合）があれば、(cx, cy) だけをその位置（C の格子の座標に
+//! 直したもの）にする（a, b・d_corner は切り抜きから求めたまま。中心を動かすと、遠い側の隅では ρ > 1 になる）:
 //!
 //! ```text
 //! r ≥ 0: (a', b') = (a^(1−r)·m^r, b^(1−r)·m^r)（m = √(a·b)。+1 で円）、 指数 q = 2
@@ -92,7 +94,7 @@ pub const GRAIN_SALT: u32 = 0x6772_6e00;
 /// 切り抜き後の周辺光量補正のパラメータ（GPU 版にも同じ値を渡す）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VignetteParams {
-    /// 切り抜きの中心（C の格子の連続座標）。
+    /// 中心（切り抜きの中心か手動の中心。C の格子の連続座標）。
     pub center: [f32; 2],
     /// 1 / 半軸（a'・b'。C の格子の画素）。
     pub inv_axes: [f32; 2],
@@ -296,6 +298,13 @@ fn vignette_params(
     let x1 = f64::from(crop.right) * gw * dx - f64::from(cl.x);
     let y0 = f64::from(crop.top) * gh * dy - f64::from(cl.y);
     let y1 = f64::from(crop.bottom) * gh * dy - f64::from(cl.y);
+    let center = match v.center {
+        Some(p) => [
+            f64::from(p.x) * gw * dx - f64::from(cl.x),
+            f64::from(p.y) * gh * dy - f64::from(cl.y),
+        ],
+        None => [(x0 + x1) * 0.5, (y0 + y1) * 0.5],
+    };
     let a = ((x1 - x0) * 0.5).max(1e-6);
     let b = ((y1 - y0) * 0.5).max(1e-6);
     let r = f64::from(v.roundness) / 100.0;
@@ -314,7 +323,7 @@ fn vignette_params(
     let half =
         VIGNETTE_FEATHER_MIN + (VIGNETTE_FEATHER_MAX - VIGNETTE_FEATHER_MIN) * v.feather / 100.0;
     Some(VignetteParams {
-        center: [((x0 + x1) * 0.5) as f32, ((y0 + y1) * 0.5) as f32],
+        center: [center[0] as f32, center[1] as f32],
         inv_axes: [(1.0 / ar) as f32, (1.0 / br) as f32],
         exponent: q as f32,
         inv_corner: (1.0 / corner) as f32,
@@ -484,6 +493,81 @@ mod tests {
         s.effects.vignette.midpoint = 100.0;
         let far = params(&s, &c).vignette.unwrap().weight(300, 150);
         assert!(near > far, "{near} {far}");
+    }
+
+    #[test]
+    fn manual_vignette_center_ignores_the_crop() {
+        let mut s = DevelopSettings::default();
+        s.effects.vignette.amount = -50.0;
+        s.effects.vignette.center = Some(genzo_model::VignetteCenter { x: 0.25, y: 0.75 });
+        let c = ctx(400, 200, 1, 0);
+        // 切り抜きなし: G の (100, 150)。
+        let full = params(&s, &c).vignette.unwrap();
+        assert!((full.center[0] - 100.0).abs() < 1e-3 && (full.center[1] - 150.0).abs() < 1e-3);
+        // 切り抜いても、写真の上の同じ位置（C の格子の原点からの位置）のまま。半軸は切り抜きから決める。
+        s.geometry.crop = CropRect {
+            left: 0.1,
+            top: 0.25,
+            right: 0.6,
+            bottom: 1.0,
+        };
+        let cropped = params(&s, &c).vignette.unwrap();
+        assert!(
+            (cropped.center[0] - 60.0).abs() < 1e-3 && (cropped.center[1] - 100.0).abs() < 1e-3,
+            "{:?}",
+            cropped.center
+        );
+        assert!(
+            (cropped.inv_axes[0] * 100.0 - 1.0).abs() < 1e-3,
+            "{:?}",
+            cropped.inv_axes
+        );
+        // 中心は効かず、中心から遠い隅（右上）は近い隅（左下）より強く効く。
+        assert_eq!(cropped.weight(60, 100), 0.0);
+        assert!(cropped.weight(199, 0) > cropped.weight(0, 149));
+        // 中心がなければ切り抜きの中心。
+        s.effects.vignette.center = None;
+        let auto = params(&s, &c).vignette.unwrap();
+        assert!((auto.center[0] - 100.0).abs() < 1e-3 && (auto.center[1] - 75.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn automatic_vignette_center_follows_the_constrained_crop() {
+        // 角度補正で切り抜きの中心が回転した画像の外に出ると、描くときの切り抜き（constrain_crop）は G の外接矩形の
+        // 中心を使う。周辺光量補正の中心もそれに合わせる（UI の detailLogic の vignetteCenterOf も同じ規則）。
+        let mut s = DevelopSettings::default();
+        s.effects.vignette.amount = -50.0;
+        s.geometry.angle_deg = 20.0;
+        s.geometry.crop = CropRect {
+            left: 0.0,
+            top: 0.0,
+            right: 0.2,
+            bottom: 0.2,
+        };
+        let frames = CoordinateFrames::new(600, 400, Orientation::Normal)
+            .unwrap()
+            .with_rotation(20.0)
+            .unwrap();
+        let grid = SensorGrid::new(600, 400, (600.0, 400.0)).unwrap();
+        let c = StageContext::new(ProcessVersion::V2, frames)
+            .with_sensor_grid(grid)
+            .with_resolution_scale(grid.resolution_scale());
+        let plan = GeometryPlan::from_settings(&s.normalized(), &c).unwrap();
+        assert_ne!(plan.crop(), s.geometry.crop, "画像の内側に制限される");
+        let (gw, gh) = plan.frames().g_size_px();
+        let (dx, dy) = plan.density();
+        let cl = plan.crop_lattice();
+        let v = params(&s, &c).vignette.unwrap();
+        let expect = [
+            gw * 0.5 * dx - f64::from(cl.x),
+            gh * 0.5 * dy - f64::from(cl.y),
+        ];
+        assert!(
+            (f64::from(v.center[0]) - expect[0]).abs() < 1e-3
+                && (f64::from(v.center[1]) - expect[1]).abs() < 1e-3,
+            "{:?} {expect:?}",
+            v.center
+        );
     }
 
     #[test]

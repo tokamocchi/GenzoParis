@@ -23,7 +23,7 @@ pub use params::{
     HslAdjustment, HueBand, HueBands, LensCorrection, MAX_ASPECT_TERM, MAX_CURVE_POINTS,
     MAX_PROFILE_ID_CHARS, MIN_CROP_SIZE, NoiseReduction, ParametricCurve, PostCropVignette,
     PresenceParams, ProfileSettings, RenderDeps, Sharpening, ToneCurve, ToneParams, ValueRange,
-    WbPreset, WhiteBalance, is_valid_profile_id, ranges,
+    VignetteCenter, WbPreset, WhiteBalance, is_valid_profile_id, ranges,
 };
 pub use validate::{FieldIssue, IssueKind, ValidationError};
 
@@ -677,6 +677,59 @@ mod tests {
         assert_eq!(n.effects.grain.size, 25.0);
         assert_eq!(n.effects.grain.roughness, 0.0);
         n.validate().unwrap();
+    }
+
+    #[test]
+    fn vignette_center_json_validation_and_hash() {
+        // ないとき（切り抜きの中心）は JSON に書かない（項目を足す前の設定とハッシュが同じ）。
+        let s = DevelopSettings::default();
+        assert_eq!(s.effects.vignette.center, None);
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(
+            json["effects"]["vignette"].get("center").is_none(),
+            "{json}"
+        );
+        // 手動の中心は書いて読み直せる。
+        let s = DevelopSettings::from_json(
+            r#"{"schema_version": 2,
+                "effects": {"vignette": {"amount": -30, "center": {"x": 0.25, "y": 0.6}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.effects.vignette.center,
+            Some(VignetteCenter { x: 0.25, y: 0.6 })
+        );
+        let back = DevelopSettings::from_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!(back, s);
+        s.validate().unwrap();
+        // null は切り抜きの中心。
+        let auto = DevelopSettings::from_json(
+            r#"{"schema_version": 2, "effects": {"vignette": {"amount": -30, "center": null}}}"#,
+        )
+        .unwrap();
+        assert_eq!(auto.effects.vignette.center, None);
+        // 中心を手動にすると段階 C のハッシュだけが変わる。
+        assert_ne!(auto.develop_hash(), s.develop_hash());
+        for phase in [crate::Phase::A1, crate::Phase::B] {
+            assert_eq!(auto.hash_for_phase(phase), s.hash_for_phase(phase));
+        }
+        // 範囲の外は端に寄せ、NaN は切り抜きの中心に戻す。
+        let mut bad = s.clone();
+        bad.effects.vignette.center = Some(VignetteCenter { x: -0.5, y: 1.5 });
+        let err = bad.validate().unwrap_err();
+        assert!(err.has_field("effects.vignette.center.x"), "{err}");
+        assert!(err.has_field("effects.vignette.center.y"), "{err}");
+        assert_eq!(
+            bad.normalized().effects.vignette.center,
+            Some(VignetteCenter { x: 0.0, y: 1.0 })
+        );
+        bad.effects.vignette.center = Some(VignetteCenter {
+            x: f32::NAN,
+            y: 0.5,
+        });
+        assert!(bad.validate().is_err());
+        assert_eq!(bad.normalized().effects.vignette.center, None);
+        bad.normalized().validate().unwrap();
     }
 
     #[test]

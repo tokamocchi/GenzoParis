@@ -72,6 +72,7 @@ import {
   withGrain,
   withPresence,
   withSharpening,
+  vignetteCenterOf,
   withVignette,
 } from "./detailLogic";
 import { Histogram } from "./Histogram";
@@ -1231,6 +1232,74 @@ const GRAIN_SLIDERS: PartSliderDef<Grain>[] = [
   },
 ];
 
+/** 周辺光量補正の中心の軸（手動の中心の横・縦。表示は切り抜く前の画像の幅・高さに対する %）。 */
+const VIGNETTE_CENTER_AXES = [
+  { key: "x", label: "中心（横）", title: "中心の横の位置（切り抜く前の画像の左端 0%〜右端 100%）" },
+  { key: "y", label: "中心（縦）", title: "中心の縦の位置（切り抜く前の画像の上端 0%〜下端 100%）" },
+] as const;
+
+/**
+ * 周辺光量補正の中心。既定は切り抜きの中心（切り抜きと一緒に動く）。「中心を手動で設定」で、切り抜きによらない
+ * 位置にする（切り替えたときは今の切り抜きの中心から始めるので、見え方は変わらない）。
+ */
+function VignetteCenterControls(props: { settings: DevelopSettings; controls: DetailControls }) {
+  const { settings, controls: c } = props;
+  // 効果の区切りを開いている（この部品を描いている）間は、プレビューに中心の印を出す（DevelopView。ドラッグで動かす）。
+  useEffect(() => {
+    viewStore.set({ vignetteHandle: true });
+    return () => viewStore.set({ vignetteHandle: false });
+  }, []);
+  const info = useGeometryInfo();
+  const manual = fullEffects(settings.effects).vignette.center != null;
+  const center = vignetteCenterOf(settings, info);
+  // 切り抜きの中心（描くときの切り抜きの中心。手動の値を消した位置）。
+  const cropCenter = vignetteCenterOf(withVignette(settings, { center: null }), info);
+  return (
+    <>
+      <label
+        className={`dp-check${!c.vignetteOptions ? " disabled" : ""}`}
+        title="切り抜きの中心の代わりに、決めた位置を中心にします（切り抜きを変えても動きません）"
+      >
+        <input
+          type="checkbox"
+          checked={manual}
+          disabled={!c.vignetteOptions}
+          onChange={(e) => {
+            const on = e.target.checked;
+            update((s) => withVignette(s, { center: on ? vignetteCenterOf(s, info) : null }), false);
+          }}
+        />
+        中心を手動で設定
+      </label>
+      {c.vignetteOptions && <div className="dp-note">プレビューの中心の印をドラッグしても動かせます（手動になります）。</div>}
+      {VIGNETTE_CENTER_AXES.map((a) => (
+        <Slider
+          key={a.key}
+          label={a.label}
+          value={center[a.key] * 100}
+          min={0}
+          max={100}
+          step={0.5}
+          defaultValue={cropCenter[a.key] * 100}
+          format={(v) => `${v.toFixed(1)}%`}
+          parse={parseNumber}
+          disabled={!c.vignetteCenter}
+          onChange={(v, dragging) =>
+            update((s) => {
+              const cur = vignetteCenterOf(s, info);
+              const next = Number((Math.min(100, Math.max(0, Math.round(v * 2) / 2)) / 100).toFixed(4));
+              if (cur[a.key] === next) return null;
+              return withVignette(s, { center: { ...cur, [a.key]: next } });
+            }, dragging)
+          }
+          onCommit={endDrag}
+          title={a.title}
+        />
+      ))}
+    </>
+  );
+}
+
 function EffectsSection(props: { settings: DevelopSettings; disabled: boolean }) {
   const { settings, disabled } = props;
   const c = detailControls(settings, disabled);
@@ -1246,6 +1315,7 @@ function EffectsSection(props: { settings: DevelopSettings; disabled: boolean })
         read={(s) => fullEffects(s.effects).vignette}
         write={withVignette}
       />
+      <VignetteCenterControls settings={settings} controls={c} />
       <div className="dp-sub">粒子</div>
       <PartSliders
         defs={GRAIN_SLIDERS}
