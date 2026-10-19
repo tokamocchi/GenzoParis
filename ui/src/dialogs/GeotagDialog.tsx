@@ -4,7 +4,9 @@
 //   仮想コピーと RAW＋JPEG の組は位置を共有する。動画は除く（コアが除いて数を返す）。
 // - 座標を貼り付ける（Google マップで地点を右クリックしてコピーした「35.681236, 139.767125」・度分秒・北緯と東経・
 //   Google マップの URL など。library/geotagLogic.ts の parseCoordinates。genzo-model と同じ規則）。入力するたびに
-//   このパソコンの中で読み、読んだ位置か誤りを出す（外部には送らない）。
+//   このパソコンの中で読み、読んだ位置か誤りを出す（座標そのものは外部に送らない。ただしオンラインの地図が有効なら、
+//   確定した座標へ地図を動かし、その付近のタイルを提供元に要求するので、欄の下の注記でそう書く。geoMapLogic.ts の
+//   coordinateNote）。
 // - 読めたら、コアに見込み（変わる数・カメラの位置がある数・除く動画の数）を問い合わせる（何も変えない）。
 // - 「位置を付ける」「付けた位置を消す（カメラの位置に戻す）」はカタログの中だけを変え、元のファイルには書かない。
 //   最後の変更から順に「直前の変更を取り消す」で戻せる。
@@ -41,6 +43,7 @@ import { Dialog } from "../components/Dialog";
 import { GeoMap, type MapFocus } from "../library/GeoMap";
 import {
   coordFieldReducer,
+  coordinateNote,
   describePlaces,
   EMPTY_COORD_FIELD,
   mapPreferencesOf,
@@ -318,7 +321,7 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
         <p className="hint">
           {FORMATS_HINT}
           <br />
-          座標はこのパソコンの中で読み、外部には送りません。
+          {coordinateNote(mapPrefs)}
         </p>
       </div>
 

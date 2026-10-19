@@ -6,7 +6,9 @@
 // - 保存は専用のコマンド（state/map.ts の saveMapPreferences）で、すぐ効く（この画面の「保存」のボタン・
 //   「再起動すると有効」とは別）。
 // - 提供元の URL（OSM のポリシーの「ソフトウェアの更新なしに切り替えられること」）は空なら OpenStreetMap の標準。
-//   https の URL だけ（形はアプリが確かめ、使えなければ何も保存しない）。
+//   https の URL だけ（形はアプリが確かめ、使えなければ何も保存しない）。PNG のタイルを配る提供元だけ（genzo-geo は
+//   Content-Type が image/png で PNG の署名で始まる応答だけを受け取る。保存のときには種類を確かめられないので、
+//   説明に書く）。
 // - キャッシュの大きさ・消去・ページを開くことは、無効でも使える（外部と通信しない）。
 
 import { useEffect, useState } from "react";
@@ -36,7 +38,8 @@ import { Busy, ErrorBox } from "./parts";
 function sectionNote(prefs: MapPreferences): string {
   return (
     "写真に位置を付けるダイアログで、地図で場所を選んだり、地名で検索したりできます。有効にしたときだけ、地図の" +
-    `タイルと検索した語を外部のサーバー（${describeDestinations(prefs)}）に送ります。無効のときは通信しません` +
+    "タイルの要求（地図に出した場所が分かります）と検索した語を外部のサーバー" +
+    `（${describeDestinations(prefs)}）に送ります。無効のときは通信しません` +
     "（座標の貼り付けで位置を付けることはできます）。この節の設定はすぐに効きます。"
   );
 }
@@ -49,7 +52,8 @@ const CACHE_NOTE =
 /** 提供元の URL の説明。 */
 const PROVIDER_NOTE =
   "空なら OpenStreetMap の標準を使います。OpenStreetMap のサーバーが使えないときや、利用の量が多いときは、OSM の" +
-  "データを使う別の提供元に切り替えられます（https の URL だけ。その提供元の利用条件を確かめてください。最大の" +
+  "データを使う別の提供元に切り替えられます（https の URL で、PNG のタイルを配る提供元だけ。JPEG・WebP などの" +
+  "タイルは読み込めません。その提供元の利用条件を確かめてください。最大の" +
   `ズームは ${MAP_MAX_ZOOM}、帰属の表示は「${MAP_ATTRIBUTION}」とみなします）。`;
 
 export function SettingsMap() {

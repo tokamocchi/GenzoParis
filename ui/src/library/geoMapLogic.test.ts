@@ -7,6 +7,7 @@ import type { Place } from "../api/types";
 import { setWindowsStyleForTest, tileUrlTemplate } from "../api/uri";
 import {
   coordFieldReducer,
+  coordinateNote,
   DEFAULT_MAP_CENTER,
   DEFAULT_MAP_PREFERENCES,
   DEFAULT_MAP_ZOOM,
@@ -19,6 +20,7 @@ import {
   MAP_ATTRIBUTION,
   MAP_LINK_LABELS,
   MAP_MAX_ZOOM,
+  MAP_TILE_ERROR,
   mapConsentText,
   mapDestinations,
   mapPointToGps,
@@ -114,8 +116,42 @@ describe("オンラインの地図の設定", () => {
     expect(all).toContain("© OpenStreetMap contributors");
     expect(all).toContain("個人の情報を検索語にしないでください");
     expect(all).toContain("座標の貼り付けで位置を付けられます");
+    // 位置を付けるダイアログは、表示中の写真の位置や確定した座標を中心に地図を開くので、その付近のタイルを要求する
+    // （タイルの位置から場所が分かる）。「写真とカタログの中身は送りません」と言い切らない。
+    const sends = t.sends.join("\n");
+    expect(sends).toContain("表示中の写真の位置（カメラの位置か付けた位置）");
+    expect(sends).toContain("座標の欄で確定した位置");
+    expect(sends).toContain("その付近のタイルを要求します");
+    expect(sends).toContain(`ズーム ${PIN_ZOOM} で開く`);
+    expect(sends).toContain("写真のファイルやカタログそのものは送りません");
+    expect(all).not.toContain("写真とカタログの中身は送りません");
+    expect(all).toContain("座標の欄に打つ途中の値では地図を動かしません");
+    // 文の終わりの「。」は MapConsent.tsx が付ける。
+    for (const item of [...t.sends, ...t.rules, ...t.cautions]) expect(item.endsWith("。")).toBe(false);
     const custom = mapConsentText({ ...DEFAULT_MAP_PREFERENCES, search_url: "https://geo.example.net/search" });
     expect(custom.destination).toContain("geo.example.net（設定で変えた提供元）");
+  });
+});
+
+describe("座標の欄の下の注記（オンラインの地図が有効なら、地図に出した位置のタイルを要求すると書く）", () => {
+  it("無効: 外部には送らない", () => {
+    expect(coordinateNote(DEFAULT_MAP_PREFERENCES)).toBe("座標はこのパソコンの中で読み、外部には送りません。");
+  });
+
+  it("有効: 読むのはこのパソコンの中だが、確定すると地図を動かし、付近のタイルを提供元に要求する", () => {
+    const on = { ...DEFAULT_MAP_PREFERENCES, online: true };
+    const note = coordinateNote(on);
+    expect(note).toContain("座標はこのパソコンの中で読みます");
+    expect(note).toContain("地図をその位置へ動かし");
+    expect(note).toContain("付近の地図のタイルを提供元（tile.openstreetmap.org）に要求します");
+    expect(note).toContain("おおよその場所が分かります");
+    expect(note).not.toContain("外部には送りません");
+    const custom = coordinateNote({ ...on, tile_url: "https://tiles.example.org/{z}/{x}/{y}.png" });
+    expect(custom).toContain("提供元（tiles.example.org）");
+  });
+
+  it("タイルを読めないときの文は、提供元が PNG のタイルを配っているかも確かめるよう案内する", () => {
+    expect(MAP_TILE_ERROR).toContain("PNG のタイルを配っているか");
   });
 });
 

@@ -195,6 +195,7 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
       expect(html).not.toContain("geo-map");
       expect(html).not.toContain("地名の検索");
       expect(html).toContain("座標（緯度, 経度）");
+      expect(html).toContain("座標はこのパソコンの中で読み、外部には送りません。");
     }
   });
 
@@ -211,6 +212,9 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     expect(html).toContain("地図の誤りを報告");
     expect(html).toContain("付ける位置（地図をクリックするか、ピンをドラッグして選びます）");
     expect(html).not.toContain("オンラインの地図について…");
+    // 座標の欄の下の注記: 有効なときは「外部には送りません」と言い切らず、地図に出すとタイルを要求すると書く。
+    expect(html).not.toContain("外部には送りません");
+    expect(html).toContain("付近の地図のタイルを提供元（tile.openstreetmap.org）に要求します");
     // 座標の欄は地図の後ろ（地図で選んだ位置がここに入る）。
     expect(html.indexOf('class="geo-map"')).toBeLessThan(html.indexOf("座標（緯度, 経度）"));
   });
@@ -277,6 +281,9 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     expect(off).toContain("詳細（地図の提供元）");
     expect(off).toContain(`placeholder="${DEFAULT_TILE_URL}"`);
     expect(off).toContain("最大のズームは 19");
+    // 提供元は PNG のタイルを配るものだけ（genzo-geo は PNG でない応答を受け取らない）。
+    expect(off).toContain("PNG のタイルを配る提供元だけ");
+    expect(off).toContain("地図のタイルの要求");
     expect(off).toContain("タイルの利用ポリシー");
 
     const tile_url = "https://tiles.example.org/{z}/{x}/{y}.png";
