@@ -5,7 +5,14 @@
 # - Windows（windows-latest）: NSIS のインストーラー（ユーザーごとのインストール。tauri.conf.json）
 # - macOS（macos-latest。Apple Silicon）: .dmg（と、.app を tar.gz にしたもの）
 # - 署名・公証はしない（社内の数名への配布。macOS はアドホック署名だけ。tauri.bundle.conf.json）
-# - 成果物は Actions の artifact に置く（GitHub の Releases には出さない。誰に・どこで配るかは人の判断）
+# - 成果物は Actions の artifact に置く。このワークフローは GitHub の Release を作らない（contents: read のまま）
+# - v0.1.0 から、artifact の配布物を GitHub の Release（プレリリース）にも添付する（利用者の決定。決定事項ログ
+#   No.181）。公開のリポジトリなので、ログインなしで誰でも取得でき、期限で消えない。添付は手で行う: タグ v<版> を
+#   main に付けて push → タグを選んで、allow_public_artifacts と allow_newer_macos_libs（決定事項ログ No.74）に
+#   印を付けて実行 → artifact から setup.exe・.dmg・bundled-libs.txt（bundled-libs-<OS>.txt に名前を変える）を
+#   取り出し、SHA256SUMS.txt を作って gh release create --prerelease で添付する（docs/packaging.md の 2.5）。
+#   法的な確認（LibRaw の LGPL-2.1・依存ライブラリのライセンス・Visual C++ のランタイムの再頒布。
+#   docs/packaging.md の 8 章）はまだ済んでいない
 #
 # 手順（OS ごと）: 公開の範囲の確認 →（タグのときは版の確認）→ 画面のビルド → LibRaw を入れる → ワーカーのビルドと LibRaw の収集
 # （LGPL-2.1 の全文・案内を含む。scripts/prepare-worker.mjs）→ tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json
@@ -17,7 +24,9 @@
 # 実行の記録: 2026-10-12 に main（c0681eb）で 2 回実行した。1 回目（run 38263152398）は Windows が通り、macOS は
 # 同梱する dylib が macOS 26.0 向け（minos 26.0）のため止まった。2 回目（run 38276847388。allow_newer_macos_libs に
 # 印を付けた。配る相手の Mac はすべて macOS 26 以降。決定事項ログ No.74）で、両 OS の配布物ができ、確認の手順が
-# 通った。Windows・macOS の実機での確認はまだ（docs/m5_acceptance.md）。
+# 通った。Windows・macOS の実機での確認はまだ（docs/m5_acceptance.md）。2026-10-20（日本時間）に、タグ v0.1.0
+# （main の 05fc227）で実行した run 39289979791（allow_public_artifacts・allow_newer_macos_libs に印）の成果物を、
+# v0.1.0 の Release に添付した。
 # シェルの変数のすぐ後に全角の文字を書くときは `${名前}` で囲む（macOS のランナーの bash は、全角の文字の先頭の
 # バイトまで変数名として読むことがある。scripts/workflows.test.mjs）。
 
