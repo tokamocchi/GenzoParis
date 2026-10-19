@@ -2092,7 +2092,7 @@ pub struct CompositeCheck {
     pub missing: Vec<VariantId>,
     /// 元の写真の寸法・向きが 1 枚目と違う写真（現像した後の寸法が違えば合成できない）。
     pub size_differs: Vec<VariantId>,
-    /// 切り抜き・角度・レンズ補正の設定が 1 枚目と違う写真（画素の位置がずれる。警告だけ）。
+    /// 切り抜き・角度・歪曲補正（画素の位置を動かす設定）が 1 枚目と違う写真（画素の位置がずれる。警告だけ）。
     pub geometry_differs: Vec<VariantId>,
     /// それ以外の現像の設定が 1 枚目と違う写真（警告だけ）。
     pub settings_differ: Vec<VariantId>,

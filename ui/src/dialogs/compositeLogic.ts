@@ -136,7 +136,7 @@ export function describeCheck(c: CompositeCheck, settings: CompositeSettings): C
   if (c.geometry_differs.length > 0) {
     lines.push({
       level: "warning",
-      text: `切り抜き・角度・レンズ補正が 1 枚目と違う写真が ${formatCount(c.geometry_differs.length)} 枚あります。位置がずれて、にじむことがあります`,
+      text: `切り抜き・角度・歪曲補正が 1 枚目と違う写真が ${formatCount(c.geometry_differs.length)} 枚あります。位置がずれて、にじむことがあります`,
     });
   }
   if (c.settings_differ.length > 0) {

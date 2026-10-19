@@ -2,7 +2,8 @@
 //!
 //! 選んだ写真を撮影日時の順に現像し、画素ごとに比べて 1 枚にして保存し、カタログに登録する（`genzo-api` の
 //! `Core::composite`）。`--check` なら合成せずに、確認の結果（`Core::composite_check`）だけを表示する。合成に失敗した・
-//! 取り消した・登録できなかったときは終了コード 3（[`crate::EXIT_PARTIAL`]）。
+//! 取り消した・登録できなかった（メタデータを読めずにエラーの状態で登録したときを含む）・スタックにまとめられなかった
+//! ときは終了コード 3（[`crate::EXIT_PARTIAL`]）。
 
 use genzo_api::{CompositeCheck, CompositeReport, JobResult};
 use genzo_model::{CompositeSettings, OutputColorSpace};
@@ -79,7 +80,7 @@ fn print_check(out: Output, settings: &CompositeSettings, c: &CompositeCheck) {
     }
     if !c.geometry_differs.is_empty() {
         out.warn(format!(
-            "切り抜き・角度・レンズ補正が 1 枚目と違う写真（位置がずれます）: {}",
+            "切り抜き・角度・歪曲補正が 1 枚目と違う写真（位置がずれます）: {}",
             ids_text(&c.geometry_differs)
         ));
     }
@@ -197,6 +198,7 @@ pub fn run(g: &GlobalArgs, out: Output, a: CompositeArgs) -> CliResult<Status> {
     let incomplete = report.failure.is_some()
         || report.cancelled
         || report.registered.is_none()
+        || report.registration_error.is_some()
         || report.stack_error.is_some();
     Ok(if incomplete {
         Status::Partial

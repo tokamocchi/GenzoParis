@@ -123,16 +123,39 @@ fn problems(sources: &Sources, missing: &[VariantId]) -> Vec<String> {
     out
 }
 
-/// 幾何（切り抜き・角度・レンズ補正）の設定。
-fn geometry_of(d: &DevelopSettings) -> (&genzo_model::Geometry, &genzo_model::LensCorrection) {
-    (&d.geometry, &d.lens)
+/// 画素の位置を動かす設定（切り抜き・角度・歪曲補正）。縦横比の指定（編集のときの制約）・周辺減光・倍率色収差は
+/// 含めない（プロファイルの補正の有効・無効は、歪曲にも周辺減光にも効くので含める）。
+#[derive(Debug, PartialEq)]
+struct GeometryKey {
+    crop: genzo_model::CropRect,
+    angle_deg: f32,
+    profile_enabled: bool,
+    /// プロファイルの歪曲補正の適用量（プロファイルの補正を使うときだけ効く）。
+    distortion_scale: Option<f32>,
+    distortion: f32,
 }
 
-/// 幾何と外部データを除いた現像の設定（ほかの写真と比べる）。
+fn geometry_of(d: &DevelopSettings) -> GeometryKey {
+    GeometryKey {
+        crop: d.geometry.crop,
+        angle_deg: d.geometry.angle_deg,
+        profile_enabled: d.lens.profile_enabled,
+        distortion_scale: d.lens.profile_enabled.then_some(d.lens.distortion_scale),
+        distortion: d.lens.distortion,
+    }
+}
+
+/// 位置を動かす設定と、画素に影響しない設定（縦横比の指定・外部データ）を除いた現像の設定（ほかの写真と比べる）。
 fn non_geometry(d: &DevelopSettings) -> DevelopSettings {
+    let none = genzo_model::LensCorrection::default();
+    let lens = genzo_model::LensCorrection {
+        distortion_scale: none.distortion_scale,
+        distortion: none.distortion,
+        ..d.lens
+    };
     DevelopSettings {
         geometry: genzo_model::Geometry::default(),
-        lens: genzo_model::LensCorrection::default(),
+        lens,
         render_deps: genzo_model::RenderDeps::default(),
         ..d.clone()
     }
@@ -664,6 +687,50 @@ mod tests {
         assert_ne!(geometry_of(&a), geometry_of(&b));
         b.exposure_ev = 1.0;
         assert_ne!(non_geometry(&a), non_geometry(&b));
+    }
+
+    /// 位置を動かすのは切り抜き・角度・歪曲補正だけ。周辺減光・倍率色収差はふつうの設定の違い、縦横比の指定はどちらでもない。
+    #[test]
+    fn only_position_changing_settings_count_as_geometry() {
+        let a = DevelopSettings::default();
+        let differs = |f: &dyn Fn(&mut DevelopSettings)| {
+            let mut b = a.clone();
+            f(&mut b);
+            (
+                geometry_of(&a) != geometry_of(&b),
+                non_geometry(&a) != non_geometry(&b),
+            )
+        };
+        assert_eq!(differs(&|b| b.lens.distortion = 10.0), (true, false));
+        assert_eq!(differs(&|b| b.geometry.crop.left = 0.1), (true, false));
+        assert_eq!(differs(&|b| b.lens.vignetting_amount = 20.0), (false, true));
+        assert_eq!(
+            differs(&|b| b.lens.vignetting_midpoint = 30.0),
+            (false, true)
+        );
+        assert_eq!(differs(&|b| b.lens.ca_red_cyan = 5.0), (false, true));
+        assert_eq!(
+            differs(&|b| b.lens.remove_chromatic_aberration = true),
+            (false, true)
+        );
+        assert_eq!(
+            differs(&|b| b.geometry.aspect = Some(genzo_model::AspectRatio::Ratio { w: 3, h: 2 })),
+            (false, false)
+        );
+        // プロファイルの歪曲の適用量は、プロファイルを使うときだけ効く。
+        assert_eq!(differs(&|b| b.lens.distortion_scale = 50.0), (false, false));
+        assert_eq!(
+            differs(&|b| {
+                b.lens.profile_enabled = true;
+            }),
+            (true, true)
+        );
+        let mut p = a.clone();
+        p.lens.profile_enabled = true;
+        let mut q = p.clone();
+        q.lens.distortion_scale = 50.0;
+        assert_ne!(geometry_of(&p), geometry_of(&q));
+        assert_eq!(non_geometry(&p), non_geometry(&q));
     }
 
     #[test]
