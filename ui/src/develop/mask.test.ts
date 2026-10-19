@@ -272,6 +272,10 @@ describe("重ねて表示と見本の色", () => {
     // 重ねて表示をしていない・まだ届いていない。
     expect(settlePendingStrokes(pending, { seq: 4, generation: 12 }, false, null)).toEqual([]);
     expect(settlePendingStrokes(pending, { seq: 4, generation: 12 }, true, null)).toHaveLength(2);
+    // コアが受け付けなかった（送信が失敗した）: その番号までの、まだ世代の分からないストロークはすぐに除く。
+    expect(settlePendingStrokes(pending, { seq: 3, generation: null }, true, null).map((x) => x.seq)).toEqual([4]);
+    const failed = settlePendingStrokes(a, { seq: 4, generation: null }, true, 10);
+    expect(failed.map((x) => [x.seq, x.generation])).toEqual([[3, 11]]);
   });
 
   it("OKLab の見本の色を CSS の色にする（無彩色は R = G = B）", () => {
@@ -425,6 +429,15 @@ describe("マスクの道具（コアとのやり取り）", () => {
     ]);
     // コアが受け付けた設定の番号と世代（離したストロークを、重ねて表示に入るまで描いておくのに使う）。
     expect(developStore.get().settingsAck).toEqual({ seq: second, generation: 2 });
+    // コアが受け付けなかったら、世代は null（離したストロークを残さない）。
+    const base = mock.responses.get("core_execute") as (a?: Record<string, unknown>) => unknown;
+    mock.responses.set("core_execute", (args?: Record<string, unknown>) =>
+      (args?.command as { type: string }).type === "set_settings" ? new Error("受け付けない") : base(args),
+    );
+    const third = commitBrushStroke([[0.4, 0.4]], false);
+    await enqueue(async () => undefined);
+    expect(developStore.get().settingsAck).toEqual({ seq: third, generation: null });
+    mock.responses.set("core_execute", base);
     // ブラシでない部品を選んでいれば描き始めない。
     viewStore.set({ tool: "none" });
     developStore.set({ settings: withMasks([newMask(newLinearShape(GB))]) });

@@ -50,9 +50,10 @@ export interface DevelopStoreState {
   beforeFrame: Frame<FrameInfo> | null;
   /**
    * コアが最後に受け付けた設定（applySettings の通し番号 `seq` と、コアが割り当てた世代）。`seq` 以前に渡した設定は、
-   * 世代 `generation` 以降のプレビュー・重ねて表示に入っている（後の設定は前の設定を含むため）。
+   * 世代 `generation` 以降のプレビュー・重ねて表示に入っている（後の設定は前の設定を含むため）。コアが受け付けなかった
+   * （送信が失敗した）ら `generation` は null（`seq` 以前の、まだ受け付けていない設定は入っていない）。
    */
-  settingsAck: { seq: number; generation: number } | null;
+  settingsAck: { seq: number; generation: number | null } | null;
 }
 
 export const developStore = createStore<DevelopStoreState>({
@@ -195,6 +196,7 @@ async function pump(): Promise<void> {
         // なので消さない）。
         if (developStore.get().error && developStore.get().state) developStore.set({ error: null });
       } catch (e) {
+        if (op.kind === "settings") developStore.set({ settingsAck: { seq: op.seq, generation: null } });
         const err = toApiError(e);
         if (err.kind !== "cancelled") {
           console.error("現像の操作に失敗", err.info);
