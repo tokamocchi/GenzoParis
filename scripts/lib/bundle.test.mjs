@@ -124,6 +124,17 @@ test("同梱するライブラリの Tauri の設定", () => {
   assert.deepEqual(libsTauriConfig("macos", ["libraw_r.24.dylib"], { minimumSystemVersion: "15.0" }), {
     bundle: { macOS: { frameworks: ["binaries/libs/libraw_r.24.dylib"], minimumSystemVersion: "15.0" } },
   });
+  // LibRaw のライセンスの文書と案内（scripts/lib/notice.mjs）を足すとき。
+  const resources = { "binaries/licenses/LibRaw/README.txt": "licenses/LibRaw/README.txt" };
+  assert.deepEqual(libsTauriConfig("windows", ["raw_r.dll"], { resources }), {
+    bundle: {
+      resources: { "binaries/libs/raw_r.dll": "raw_r.dll", "binaries/licenses/LibRaw/README.txt": "licenses/LibRaw/README.txt" },
+    },
+  });
+  assert.deepEqual(libsTauriConfig("macos", ["libraw_r.24.dylib"], { resources }), {
+    bundle: { macOS: { frameworks: ["binaries/libs/libraw_r.24.dylib"] }, resources },
+  });
+  assert.deepEqual(libsTauriConfig("linux", ["x.so"], { resources }), {});
   assert.deepEqual(libsTauriConfig("macos", [], {}), {});
   assert.deepEqual(libsTauriConfig("linux", ["x.so"]), {});
   assert.deepEqual(libsTauriConfig("windows", []), {});

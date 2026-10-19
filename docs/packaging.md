@@ -21,6 +21,7 @@ GenzoParis を社内の数名に配るための、配布物の作り方・入れ
 
 - **本体は LibRaw に依存しません。** LibRaw を読み込むのはワーカーだけです（決定 No.32）。本体はワーカーを「環境変数 `GENZO_WORKER_PATH` → 本体と同じフォルダ」の順に探します（`crates/genzo-worker/src/client.rs` の `locate_worker_executable`）。Tauri の `externalBin` は、ワーカーを本体と同じフォルダ（Windows はインストール先、macOS は `Contents/MacOS`、.deb は `/usr/bin`）に置くので、そのまま見つかります。
 - **LibRaw のライブラリはワーカーから読める場所に置きます。** Windows は、実行ファイルと同じフォルダの DLL を最初に探すので、インストール先のフォルダに置きます（Tauri の `bundle.resources`。Windows の resource のフォルダはインストール先）。macOS は `Contents/Frameworks` に置き（Tauri の `bundle.macOS.frameworks`）、ワーカーと dylib の参照を `@executable_path/../Frameworks/…`・`@loader_path/…` に書き換えます（`install_name_tool`）。
+- **LibRaw の LGPL-2.1 の全文・著作権表示・案内を同梱します**（2026-10-19。決定事項ログ No.175）。Windows はインストール先の `licenses\LibRaw\`、macOS は `GenzoParis.app/Contents/Resources/licenses/LibRaw/` に、`LICENSE.LGPL`（LGPL-2.1 の全文）・`COPYRIGHT`（LibRaw の著作権表示）・`README.txt`（使っている LibRaw の版・同梱したファイル・ソースの入手先・差し替えの方法）を置きます。`LICENSE.LGPL`・`COPYRIGHT` は上流の LibRaw（GitHub の 0.22.0 のタグ）のファイルをそのまま `crates/genzo-app/licenses/LibRaw/` に置いたもの、`README.txt` は `scripts/prepare-worker.mjs` がビルドのときに作るもの（版は LibRaw のヘッダ `libraw/libraw_version.h` から読む。文面は `scripts/lib/notice.mjs`）。同じものを Actions の artifact（`crates/genzo-app/binaries/licenses/`）にも入れます。
 - **FFmpeg（ffmpeg・ffprobe）は同梱しません**（決定 No.62）。各自が入れます（4 章）。
 - 自動更新はありません（DIST-04 は later）。新しい版は、同じ手順で上から入れ直します。
 
@@ -30,7 +31,7 @@ GenzoParis を社内の数名に配るための、配布物の作り方・入れ
 |---|---|---|
 | `crates/genzo-app/tauri.conf.json` | アプリの設定と、配布物の基本（種類・アイコン・NSIS・macOS の最小の版） | いつも |
 | `crates/genzo-app/tauri.bundle.conf.json` | ワーカーの同梱（`bundle.externalBin: ["binaries/genzo-worker"]`）と、macOS のアドホック署名（`signingIdentity: "-"`・`hardenedRuntime: false`） | 配布物を作るときだけ（`tauri build --config`） |
-| `crates/genzo-app/binaries/tauri.libs.conf.json` | LibRaw のライブラリの同梱（Windows は `bundle.resources`、macOS は `bundle.macOS.frameworks`）。`scripts/prepare-worker.mjs` が作る（コミットしない） | 配布物を作るときだけ |
+| `crates/genzo-app/binaries/tauri.libs.conf.json` | LibRaw のライブラリの同梱（Windows は `bundle.resources`、macOS は `bundle.macOS.frameworks`）と、LibRaw のライセンスの文書・案内（両 OS とも `bundle.resources`）。`scripts/prepare-worker.mjs` が作る（コミットしない） | 配布物を作るときだけ |
 
 `externalBin`・`resources`・`frameworks` を `tauri.conf.json` に書かないのは、Tauri のビルドスクリプト（tauri-build）が `cargo build` のたびにこれらのファイルを探してコピーし、ないと失敗するためです（tauri-build 2.6.3 の `lib.rs`）。分けておくと、ふだんの `cargo build`・`cargo clippy`・CI はワーカーのビルドなしで通ります。
 
@@ -274,7 +275,7 @@ main の c0681eb（PR #2 をマージしたもの）で、手動で 2 回実行�
 
 **次の事項は AI では決められません。社外に配る前（社内でも、必要と判断した場合は配る前）に、人（必要なら専門家）が確認し、結果を [決定事項ログ](decision_log.md) と [第三者の台帳](third_party.md) に書いてください。**
 
-1. **LibRaw の同梱と LGPL-2.1**（決定 No.32、台帳の 3.1 節）: 配布物に LibRaw の共有ライブラリを入れるときに、LGPL の条件を満たす方法（ライセンスの文書を同梱するか、対応するソースの提供の方法、利用者がライブラリを差し替えられること）。今の配布物には **ライセンスの文書を入れていません**。macOS では、`.app` の中の dylib を差し替えると署名が壊れるため、差し替えた人がアドホック署名し直す必要がある点も含めて確認してください。
+1. **LibRaw の同梱と LGPL-2.1**（決定 No.32・175、台帳の 3.1 節）: 配布物に LibRaw の共有ライブラリを入れるときに、LGPL の条件を満たす方法（ライセンスの文書を同梱するか、対応するソースの提供の方法、利用者がライブラリを差し替えられること）。**2026-10-19 から、LGPL-2.1 の全文・LibRaw の著作権表示・案内（ソースの入手先として上流の LibRaw の版のタグと、ビルドの手順（vcpkg の port・Homebrew の formula）の場所、差し替えの方法）を配布物に入れます**（1.1）。ソースそのものは同梱せず、上流の場所を案内するだけです。この案内で LGPL-2.1 の第 6 節（ソースの提供）などの条件を満たすか、vcpkg の port が当てるパッチの扱い、依存ライブラリ（lcms2・zlib・libomp・jpeg-turbo など）の表記の要否は、人（必要なら専門家）が確認してください。macOS では、`.app` の中の dylib を差し替えると署名が壊れるため、差し替えた人がアドホック署名し直す必要があります（案内に書いた）。
 2. **LibRaw の依存ライブラリのライセンス**: 2026-10-12 の配布物で同梱したのは、Windows（vcpkg）は lcms2（`lcms2-2.dll`）・zlib（`z.dll`）、macOS（Homebrew）は libomp・little-cms2・jpeg-turbo（6.2。一覧と SHA-256 は artifact の中の `bundled-libs.txt`）。それぞれのライセンスと、表記の要否を確認し、台帳に追加してください。
 3. **Visual C++ のランタイムの扱い**（2.2）: DLL をインストール先に同梱する（決定事項ログ No.73。利用者の指示、2026-10-12）。Microsoft の再頒布の条件（`REDIST.TXT`）の確認と、Windows Update で更新されないことの扱い（ビルドし直して配る）は人が判断する。
 4. **FFmpeg**（決定 No.62、台帳の 3.4 節）: 各自が入れる FFmpeg のビルドの構成と、H.264 / H.265 の特許の扱い。

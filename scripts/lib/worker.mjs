@@ -19,6 +19,9 @@
 //    - Linux: 同梱しない（確認用。OS のパッケージの LibRaw（apt の libraw-dev）を使う）。
 // 4. 同梱したファイルの一覧（元の場所・SHA-256）を crates/genzo-app/binaries/bundled-libs.txt に書く
 //    （LibRaw の LGPL の扱いを人が確かめるときのため。docs/packaging.md）。
+// 5. Windows・macOS では、LibRaw の LGPL-2.1 の全文・著作権表示と案内（使っている版・同梱したファイル・ソースの
+//    入手先・差し替えの方法）を crates/genzo-app/binaries/licenses/LibRaw に集め、配布物に入れる
+//    （scripts/lib/notice.mjs。版は LibRaw のヘッダ libraw/libraw_version.h から読む）。
 //
 // LibRaw の場所:
 // - Windows: 環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR（genzo-raw の build.rs）。なければ
@@ -65,6 +68,15 @@ import {
   planMacosBundle,
   unbundledReferences,
 } from "./macho.mjs";
+import {
+  LIBRAW_LICENSE_FILES,
+  LIBRAW_LICENSE_SOURCE_DIR,
+  LIBRAW_NOTICE_FILE,
+  LICENSES_BUILD_DIR,
+  licenseResources,
+  librawNotice,
+  parseLibrawVersion,
+} from "./notice.mjs";
 import { readPeImports } from "./pe.mjs";
 import { APP_DIR, BINARIES_DIR, LIBS_CONFIG, REPO_ROOT, capture, run } from "./proc.mjs";
 import { parseHostTriple, sidecarFileName, targetOs } from "./target.mjs";
@@ -115,6 +127,8 @@ export function prepareWorker() {
   const libsDir = path.join(APP_DIR, LIBS_DIR);
   fs.rmSync(libsDir, { recursive: true, force: true });
   fs.mkdirSync(libsDir, { recursive: true });
+  const licensesDir = path.join(APP_DIR, LICENSES_BUILD_DIR);
+  fs.rmSync(licensesDir, { recursive: true, force: true });
 
   const sidecar = path.join(BINARIES_DIR, sidecarFileName(WORKER_NAME, triple));
   fs.rmSync(sidecar, { force: true });
@@ -141,10 +155,14 @@ export function prepareWorker() {
     reportLinuxLibraw(sidecar);
   }
 
+  const resources =
+    os === "windows" || os === "macos"
+      ? writeLibrawLicenses(os, readLibrawVersion(os, env), bundled.map((b) => b.name), licensesDir)
+      : undefined;
   const config = libsTauriConfig(
     os,
     bundled.map((b) => b.name),
-    { minimumSystemVersion: raisedMinimum },
+    { minimumSystemVersion: raisedMinimum, resources },
   );
   fs.writeFileSync(LIBS_CONFIG, `${JSON.stringify(config, null, 2)}\n`);
   console.log(`Tauri の追加の設定: ${path.relative(REPO_ROOT, LIBS_CONFIG)}`);
@@ -423,6 +441,36 @@ function reportLinuxLibraw(sidecar) {
   } catch {
     console.log("LibRaw は同梱しない（Linux は確認用。OS のパッケージを使う）");
   }
+}
+
+/**
+ * 同梱する LibRaw の版を、ヘッダ（libraw/libraw_version.h）から読む。Windows は LIBRAW_INCLUDE_DIR
+ * （setupWindowsLibraw が設定する）、macOS は pkg-config の includedir（genzo-raw の build.rs と同じ libraw_r）。
+ * 読めなければエラーにする（案内に版を書けないため）。
+ */
+function readLibrawVersion(os, env) {
+  const includeDir =
+    os === "windows" ? env.LIBRAW_INCLUDE_DIR : capture("pkg-config", ["--variable=includedir", "libraw_r"], { env }).trim();
+  const header = path.join(includeDir ?? "", "libraw", "libraw_version.h");
+  const version = fs.existsSync(header) ? parseLibrawVersion(fs.readFileSync(header, "utf8")) : null;
+  if (!version) throw new Error(`LibRaw の版が読めない: ${header}`);
+  console.log(`LibRaw の版: ${version}（${header}）`);
+  return version;
+}
+
+/**
+ * LibRaw のライセンスの文書（上流のファイルをそのまま）と案内を `dir` に置き、Tauri の resources の対応を返す。
+ *
+ * @returns {Record<string, string>}
+ */
+function writeLibrawLicenses(os, version, bundledNames, dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  for (const f of LIBRAW_LICENSE_FILES) {
+    fs.copyFileSync(path.join(APP_DIR, LIBRAW_LICENSE_SOURCE_DIR, f), path.join(dir, f));
+  }
+  fs.writeFileSync(path.join(dir, LIBRAW_NOTICE_FILE), librawNotice({ os, version, bundled: bundledNames }));
+  console.log(`LibRaw のライセンスの文書と案内: ${path.relative(REPO_ROOT, dir)}`);
+  return licenseResources();
 }
 
 /** tauri.conf.json の bundle.macOS.minimumSystemVersion を読む（ないときはエラー。最小の版を確かめられないため）。 */
