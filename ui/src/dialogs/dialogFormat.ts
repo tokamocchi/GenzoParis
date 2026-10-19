@@ -162,6 +162,7 @@ export const ERROR_KIND_LABEL: Record<ErrorKind, string> = {
   incompatible_version: "版が合わない",
   worker: "画像の処理（ワーカー）のエラー",
   gpu: "GPU のエラー",
+  network: "通信のエラー",
   closed: "カタログが閉じている",
   internal: "内部のエラー",
 };

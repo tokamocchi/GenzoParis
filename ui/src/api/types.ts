@@ -56,6 +56,7 @@ export type ErrorKind =
   | "incompatible_version"
   | "worker"
   | "gpu"
+  | "network"
   | "closed"
   | "internal";
 

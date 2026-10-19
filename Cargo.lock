@@ -1628,6 +1628,7 @@ dependencies = [
  "genzo-api",
  "genzo-catalog",
  "genzo-color",
+ "genzo-geo",
  "genzo-model",
  "genzo-worker",
  "image",

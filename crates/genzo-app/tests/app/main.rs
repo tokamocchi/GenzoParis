@@ -30,6 +30,7 @@ mod develop;
 mod events;
 mod library;
 mod location;
+mod map;
 mod runner;
 mod support;
 
@@ -118,6 +119,14 @@ const TESTS: &[(&str, fn())] = &[
     (
         "location::locations_through_the_app",
         location::locations_through_the_app,
+    ),
+    (
+        "map::map_preferences_are_saved_and_read_again",
+        map::map_preferences_are_saved_and_read_again,
+    ),
+    (
+        "map::places_are_searched_only_when_online_maps_are_enabled",
+        map::places_are_searched_only_when_online_maps_are_enabled,
     ),
     (
         "develop::develop_and_region_frames_match_their_headers",

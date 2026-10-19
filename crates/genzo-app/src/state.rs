@@ -1,4 +1,4 @@
-//! アプリの状態: 開いているカタログ（[`Session`]）と、アプリの設定。
+//! アプリの状態: 開いているカタログ（[`Session`]）と、アプリの設定、オンラインの地図（[`MapService`]）。
 //!
 //! Tauri に依存しない形にして、単体テストでカタログを開く・閉じる・復元するまでを確かめられるようにする
 //! （イベントの送り先は [`EventSink`] で差し替える）。
@@ -44,6 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog_file::{self, Assessment};
 use crate::logs::AppLogs;
+use crate::map::MapService;
 use crate::settings::{self, AppSettings};
 use crate::tools::{self, ExternalTools};
 
@@ -174,6 +175,8 @@ pub struct AppState {
     worker: Option<WorkerLaunch>,
     /// ログとクラッシュレポート（SYS-07）。
     logs: AppLogs,
+    /// オンラインの地図のタイルと地名の検索（LIB-21。カタログによらない。[`crate::map`]）。
+    map: MapService,
 }
 
 /// エラーの情報を作る。
@@ -224,6 +227,7 @@ impl AppState {
             events,
             worker: None,
             logs: AppLogs::new(genzo_api::logging::status().unwrap_or_default()),
+            map: MapService::new(None),
         }
     }
 
@@ -242,6 +246,18 @@ impl AppState {
     pub fn with_worker(mut self, worker: WorkerLaunch) -> Self {
         self.worker = Some(worker);
         self
+    }
+
+    /// オンラインの地図の通信を指定する（起動時のタイルのキャッシュの場所と、テストの差し替え。既定は
+    /// 本物の通信でディスクにキャッシュしない [`MapService::new`]`(None)`）。
+    pub fn with_map(mut self, map: MapService) -> Self {
+        self.map = map;
+        self
+    }
+
+    /// オンラインの地図のタイルと地名の検索（有効かどうかは呼び出し元が設定で確かめる）。
+    pub fn map(&self) -> &MapService {
+        &self.map
     }
 
     /// 設定。

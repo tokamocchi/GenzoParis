@@ -2,15 +2,16 @@
 //!
 //! コアの操作は、汎用のコマンド [`core_execute`]（genzo-api の `Command` の JSON をそのまま渡す。04 の
 //! 1.5 節）で行う。アプリ固有の操作（カタログを開く・閉じる・復元する、画素のバイナリの受け渡し、
-//! アプリの設定、ファイルを OS で表示する）は個別のコマンドにする。
+//! アプリの設定、ファイルを OS で表示する、オンラインの地図（地名の検索・設定・タイルのキャッシュ・OSM の
+//! ページを開く。[`crate::map`]））は個別のコマンドにする。
 //!
 //! コアの関数はブロックしうるので、すべて `spawn_blocking` で呼ぶ（UI のスレッドを止めない。
 //! 決定事項ログ No.36）。失敗は genzo-api の `ErrorInfo`（JSON）で返す。
 //!
 //! Tauri の状態（`State`）を使わない処理の本体（[`execute_command`]・[`develop_frame_bytes`]・
 //! [`region_frame_bytes`]・[`before_frame_bytes`]・[`before_region_frame_bytes`]・
-//! [`view_region_frame_bytes`]・[`mask_overlay_frame_bytes`]）は別の関数にして、結合テスト（`tests/app`）から
-//! [`AppState`] で直接呼ぶ。
+//! [`view_region_frame_bytes`]・[`mask_overlay_frame_bytes`]、オンラインの地図は [`crate::map`] の関数）は
+//! 別の関数にして、結合テスト（`tests/app`）から [`AppState`] で直接呼ぶ。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,7 +26,8 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::catalog_file::{self, CatalogFileState};
 use crate::frames;
-use crate::settings::AppSettings;
+use crate::map::{self, MapLink};
+use crate::settings::{AppSettings, MapPreferences};
 use crate::state::{AppState, CatalogStatus, DisplayTarget, RestoreOutcome, error};
 use crate::tools::{self, ExternalTools};
 
@@ -469,6 +471,62 @@ pub async fn save_import_preferences(
         state.update_settings(|s| {
             s.import = preferences;
         })
+    })
+    .await
+}
+
+/// オンラインの地図の設定（有効・無効と提供元の URL）を保存する。すぐに効く（[`map::save_preferences`]。
+/// `consented_at` はアプリが入れる）。
+#[tauri::command]
+pub async fn save_map_preferences(
+    state: Shared<'_>,
+    preferences: MapPreferences,
+) -> Result<AppSettings, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || map::save_preferences(&state, preferences)).await
+}
+
+/// 地名を検索する（オンラインの地図が有効なときだけ通信する。画面は入力の途中では呼ばず、Enter かボタンの
+/// ときだけ呼ぶ。[`map::search_places`]）。
+#[tauri::command]
+pub async fn search_places(
+    state: Shared<'_>,
+    query: String,
+) -> Result<Vec<genzo_geo::Place>, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || map::search_places(&state, &query)).await
+}
+
+/// 地図のタイルのキャッシュの大きさ（通信しない。オンラインの地図が無効でも返す）。
+#[tauri::command]
+pub async fn map_cache_info(state: Shared<'_>) -> Result<genzo_geo::CacheInfo, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(map::cache_info(&state))).await
+}
+
+/// 地図のタイルのキャッシュを消して、消した後の大きさを返す（通信しない。[`map::clear_cache`]）。
+#[tauri::command]
+pub async fn clear_map_cache(state: Shared<'_>) -> Result<genzo_geo::CacheInfo, ErrorInfo> {
+    let state = Arc::clone(&state);
+    blocking(move || map::clear_cache(&state)).await
+}
+
+/// OSM のページ（地図の帰属の表示のリンク先・地図の誤りの報告・利用ポリシー）を既定のブラウザで開く
+/// （[`MapLink`] の決めたページだけ。任意の URL は開かない。WebView の中で開くと画面が外部のページへ移るため）。
+/// 利用者が選んだときにブラウザで開くだけなので、オンラインの地図が無効でも開く（有効にする前の確認で
+/// 利用ポリシーを示すため）。
+#[tauri::command]
+pub async fn open_map_link(app: AppHandle, kind: MapLink) -> Result<(), ErrorInfo> {
+    blocking(move || {
+        app.opener()
+            .open_url(kind.url(), None::<&str>)
+            .map_err(|e| {
+                error(
+                    ErrorKind::FileAccess,
+                    format!("ページ {} を開けません: {e}", kind.url()),
+                    Some("既定のブラウザが設定されているか確かめてください"),
+                )
+            })
     })
     .await
 }
