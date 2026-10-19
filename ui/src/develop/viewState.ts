@@ -101,6 +101,11 @@ export interface DevelopViewState {
   brush: BrushOptions;
   /** 色域のスポイトの入れ先（tool が mask_color の間）。 */
   pickTarget: MaskPickTarget | null;
+  /**
+   * 周辺光量補正の中心の印をプレビューに出す（効果の区切りを開いている間。ドラッグで中心を動かす）。
+   * 量が 0 のとき・マスクを選んでいるとき・ほかの道具の間などは、出す側（DevelopView）で出さない。
+   */
+  vignetteHandle: boolean;
 }
 
 export const viewStore = createStore<DevelopViewState>({
@@ -115,6 +120,7 @@ export const viewStore = createStore<DevelopViewState>({
   brushOverlay: true,
   brush: DEFAULT_BRUSH,
   pickTarget: null,
+  vignetteHandle: false,
 });
 
 export function useDevelopView<T>(selector: (s: DevelopViewState) => T, equal?: (a: T, b: T) => boolean): T {

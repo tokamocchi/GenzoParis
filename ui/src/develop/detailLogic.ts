@@ -98,6 +98,22 @@ function sameValues<T extends object>(a: T, b: T): boolean {
   return (Object.keys(a) as (keyof T)[]).every((k) => a[k] === b[k]);
 }
 
+/**
+ * 周辺光量補正の中心（切り抜く前の画像の幅・高さに対する割合）を G 座標（外接矩形の長辺を 1 とする座標。プレビューの
+ * 上の位置との対応に使う）にする。`gw`・`gh` は G の外接矩形の大きさ（比だけを使う）。
+ */
+export function vignetteCenterToG(c: VignetteCenter, gw: number, gh: number): [number, number] {
+  const long = Math.max(gw, gh);
+  return [(c.x * gw) / long, (c.y * gh) / long];
+}
+
+/** G 座標の点を、周辺光量補正の中心（各軸 0〜1 に収め、小数 4 桁に丸める）にする（vignetteCenterToG の逆）。 */
+export function gToVignetteCenter(u: number, v: number, gw: number, gh: number): VignetteCenter {
+  const long = Math.max(gw, gh);
+  const f = (t: number) => Math.round(Math.min(1, Math.max(0, t)) * 10000) / 10000;
+  return { x: f((u * long) / gw), y: f((v * long) / gh) };
+}
+
 /** テクスチャ・明瞭度・かすみの除去・シャープ・効果の各項目を操作できるか。 */
 export interface DetailControls {
   /** 処理バージョンが古く、使えない（更新が必要）。 */

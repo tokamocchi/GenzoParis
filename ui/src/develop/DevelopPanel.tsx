@@ -1237,6 +1237,11 @@ const VIGNETTE_CENTER_AXES = [
  */
 function VignetteCenterControls(props: { settings: DevelopSettings; controls: DetailControls }) {
   const { settings, controls: c } = props;
+  // 効果の区切りを開いている（この部品を描いている）間は、プレビューに中心の印を出す（DevelopView。ドラッグで動かす）。
+  useEffect(() => {
+    viewStore.set({ vignetteHandle: true });
+    return () => viewStore.set({ vignetteHandle: false });
+  }, []);
   const manual = fullEffects(settings.effects).vignette.center != null;
   const center = vignetteCenterOf(settings);
   const crop = settings.geometry.crop;
@@ -1258,6 +1263,7 @@ function VignetteCenterControls(props: { settings: DevelopSettings; controls: De
         />
         中心を手動で設定
       </label>
+      {c.vignetteOptions && <div className="dp-note">プレビューの中心の印をドラッグしても動かせます（手動になります）。</div>}
       {VIGNETTE_CENTER_AXES.map((a) => (
         <Slider
           key={a.key}
