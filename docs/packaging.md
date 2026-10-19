@@ -3,7 +3,7 @@
 GenzoParis を社内の数名に配るための、配布物の作り方・入れ方・注意をまとめます。
 
 - 作成: AI（2026-10-12）。この Linux の開発環境では、同じスクリプトで Linux の .deb を作り、本体とワーカーが入ることを確かめました（6.1）。**Windows・macOS の配布物は、2026-10-12 に GitHub Actions（`release.yml`）で作り、ワーカーが同梱の LibRaw で起動することまで確かめました**（6.2）。**実機ではまだ確かめていません**（7 章の「未確認の事項」）。
-- 関係する決定: [決定事項ログ](decision_log.md) の No.32（ワーカーを別の実行ファイルにし、本体を LibRaw に依存させない）・No.62（FFmpeg を同梱しない）・No.63（既定のカタログの場所）・No.73（Visual C++ のランタイムを同梱する）・No.74（macOS の配布物は macOS 26 以降向け）。
+- 関係する決定: [決定事項ログ](decision_log.md) の No.32（ワーカーを別の実行ファイルにし、本体を LibRaw に依存させない）・No.62（FFmpeg を同梱しない）・No.63（既定のカタログの場所）・No.73（Visual C++ のランタイムを同梱する）・No.74（macOS の配布物は macOS 26 以降向け）・No.181（v0.1.0 から、配布物を GitHub の Releases にも出す）。
 - **法的な事項**: LibRaw の LGPL の扱いと依存ライブラリのライセンスは、利用者が確認済みと回答しました（2026-10-12。implementation_status の判断の表 No.61・62）。**Visual C++ のランタイムの再頒布の条件（同梱するようにした。2.2）と FFmpeg は、人・専門家の確認待ちです**（8 章）。
 - 署名・公証はしません（社内の数名への配布のため）。署名が必要かどうかは人が判断します（[01 の SYS-08](01_feature_inventory.md)）。
 
@@ -133,9 +133,16 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
   - Windows: インストーラーを `/S` で無人インストールし、`PATH` を OS のフォルダだけにして `genzo-worker.exe --version` を実行する（終了コードと「genzo-worker <版>」の出力）。
   - macOS: `codesign --verify`、Info.plist の最小の版、`hdiutil verify`（.dmg）を見た後、`DYLD_PRINT_LIBRARIES=1` でワーカーを起動し、終了コード・「genzo-worker <版>」の出力・dyld のエラー（`Library not loaded`）がないこと・`Contents/Frameworks` のすべての dylib を `.app` の中から読み込んだこと・Homebrew の場所から読み込んでいないことを確かめる。
 - 外部のアクション（actions/checkout など）は、コミットの SHA で固定しています（ci.yml も同じ。タグの付け替えで、配布物を作る処理が変わらないように）。SHA は 2026-10-12 に `git ls-remote` で、その時点の各タグ（コメントに書いた版）が指すコミットを調べたものです。更新するときは、新しい版のタグが指す SHA を同じ方法で調べ、差分を確かめてから書き換えてください。
-- 成果物は Actions の artifact（`genzoparis-windows-x64`・`genzoparis-macos-arm64`。30 日で消える。仮置き）に置きます。GitHub の Releases には出しません。**artifact は、リポジトリを読める人なら誰でも取得できます。リポジトリの公開の範囲を確かめてから実行してください。**
+- 成果物は Actions の artifact（`genzoparis-windows-x64`・`genzoparis-macos-arm64`。30 日で消える。仮置き）に置きます。**artifact は、リポジトリを読める人なら誰でも取得できます。リポジトリの公開の範囲を確かめてから実行してください。**
+- **v0.1.0 から、artifact の配布物を GitHub の Release（プレリリース）にも添付します**（2026-10-20 の利用者の決定。決定事項ログ No.181）。リポジトリは公開なので、Release の添付ファイルは **GitHub にログインしなくても誰でも取得でき、artifact と違って期限で消えません**。ワークフローは Release を作らないので（`permissions` は `contents: read` のまま）、次の手順を手で行います。**8 章の法的な確認（LibRaw の LGPL-2.1・依存ライブラリのライセンスの表記・Visual C++ のランタイムの再頒布）は、まだ済んでいません。** 確認の結果、条件を満たさないと分かった場合は、Release の添付を外すか差し替えてください（既に取得した人の手元からは消せません）。
+  1. 版のタグを付けて push する: `tauri.conf.json` の `version` と Cargo の版（genzo-app・genzo-worker）が配る版と同じことを確かめ、main のコミットに `git tag -a v<版> -m "GenzoParis <版>" <コミット>` で注釈付きのタグを付けて、`git push origin v<版>` で push する。
+  2. Release ワークフローを実行する: Actions の画面の「Run workflow」の「Use workflow from」でそのタグを選び、「allow_public_artifacts」と「allow_newer_macos_libs」（決定事項ログ No.74）に印を付けて実行する（`gh workflow run release.yml --ref v<版> -f allow_public_artifacts=true -f allow_newer_macos_libs=true` でも同じ）。両 OS のジョブが成功したこと、artifact の名前の `-macos<版>-or-later` が 26.0 のままであること、ジョブの記録に警告・エラーがないことを確かめる（`-unverified` の artifact は使わない）。
+  3. artifact から添付するファイルを取り出す: `gh run download <run の ID> -D <空のフォルダ>` で 2 つの artifact を取り出し、Windows の `GenzoParis_<版>_x64-setup.exe`、macOS の `GenzoParis_<版>_aarch64.dmg`、それぞれの `bundled-libs.txt`（`bundled-libs-windows-x64.txt`・`bundled-libs-macos-arm64.txt` に名前を変える）を 1 つのフォルダに集める。`GenzoParis.app.tar.gz` と `licenses/`（同じものが配布物の中に入っている）は添付しない。
+  4. `SHA256SUMS.txt` を作る: そのフォルダで `sha256sum -b GenzoParis_* bundled-libs-*.txt > SHA256SUMS.txt`（Windows は Git Bash で）を実行する。2.6 の 2 の方法で、いくつかのファイルの値が一致することも確かめる。
+  5. Release を作る: `gh release create v<版> --verify-tag --prerelease --title "GenzoParis <版>" --notes-file <説明のファイル> GenzoParis_* bundled-libs-*.txt SHA256SUMS.txt`。説明には、対象の OS（macOS は 26.0 以降）、署名・公証をしていないこと（3 章）、FFmpeg を同梱していないこと（4 章）、作った run、8 章の確認が残っていることを書く。作った後、Release の画面で添付ファイルの名前と大きさを確かめる。
 - 途中で失敗したときは、調べるために `<名前>-unverified` の artifact（7 日で消える。仮置き）に、できたところまでの配布物と確認の記録を置きます。**`-unverified` の配布物は配らないでください。**
 - 2026-10-12 に main で 2 回実行しました。2 回目（「allow_newer_macos_libs」にも印）で、両 OS の配布物ができ、確認が通りました（6.2）。**GitHub の macos-latest・windows-latest のランナーの版は変わります**。次に実行したときも、artifact の名前の `-macos<版>-or-later` が 26.0 のままか、ジョブの記録に警告・エラーがないかを確かめてください。
+- 2026-10-20（日本時間）に、v0.1.0 のタグを main の 05fc227 に付け、タグを選んで実行した run 39289979791（「allow_public_artifacts」「allow_newer_macos_libs」に印。両 OS とも成功）の artifact から、`GenzoParis_0.1.0_x64-setup.exe`・`GenzoParis_0.1.0_aarch64.dmg`・`bundled-libs-windows-x64.txt`・`bundled-libs-macos-arm64.txt`・`SHA256SUMS.txt` を [v0.1.0 の Release](https://github.com/tokamocchi/GenzoParis/releases/tag/v0.1.0)（プレリリース）に添付しました（公開は 2026-10-19 17:10 UTC）。
 
 ### 2.6 配る前の確認
 
@@ -281,4 +288,4 @@ main の c0681eb（PR #2 をマージしたもの）で、手動で 2 回実行�
 4. **FFmpeg**（決定 No.62、台帳の 3.4 節）: 各自が入れる FFmpeg のビルドの構成と、H.264 / H.265 の特許の扱い。
 5. ~~**macOS の最小の版**（2.3）~~ **決定済み（2026-10-12。決定事項ログ No.74）**: 配る相手の Mac はすべて macOS 26 以降なので、`.app` の最小の版を 26.0 に上げて配る。
 6. **署名・公証の要否**（SYS-08）: 社内の数名への配布なら不要としていますが、配る範囲が広がる場合や、会社の規則で署名が求められる場合は、Windows のコード署名の証明書（有償の場合あり）と、Apple Developer Program（有償）が要ります。費用・手続きは確認していません。
-7. **成果物を置く場所の公開の範囲**（2.5・2.6）: GitHub Actions の artifact、社内の共有フォルダなどを、配る相手だけが見られるか。
+7. **成果物を置く場所の公開の範囲**（2.5・2.6）: GitHub Actions の artifact、社内の共有フォルダなどを、配る相手だけが見られるか。**2026-10-20 に、v0.1.0 から GitHub の Release（公開のリポジトリ。ログインなしで誰でも取得できる）にも添付すると利用者が決めました**（決定事項ログ No.181）。上の 1〜3 の確認は済んでいないので、結果によっては Release の添付を外すか差し替えてください。
