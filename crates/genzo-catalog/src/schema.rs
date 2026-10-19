@@ -128,7 +128,21 @@ pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[
         sql: include_str!("sql/catalog_0012_volumes_and_missing.sql"),
         post: None,
     },
+    Migration {
+        version: LOCATIONS_SCHEMA_VERSION,
+        description: "位置情報の後付け（LIB-21）: 後から付けた位置（asset_location）、位置の変更の履歴の表、photos_v1 の使う位置の列（location_lat・location_lon・location_source）",
+        sql: include_str!("sql/catalog_0013_asset_locations.sql"),
+        post: None,
+    },
 ];
+
+/// 位置情報の後付け（LIB-21）を使い始めたカタログのスキーマの版（後から付けた位置 `asset_location`、変更の
+/// 履歴 `location_edit`・`location_edit_item`、公開ビュー `photos_v1` の `location_lat`・`location_lon`・
+/// `location_source`）。
+///
+/// 既存の asset には行を作らない（付けた位置がないのと同じ）。`asset.gps_lat`・`gps_lon` はカメラ（ファイル）の
+/// 値のまま変えない。
+pub const LOCATIONS_SCHEMA_VERSION: u32 = 13;
 
 /// 外付けドライブの識別（FILE-03）・見つからない写真の検出（FILE-04）を使い始めたカタログのスキーマの版
 /// （`volume.fs_type`・`volume.last_seen_at`、`folder.status`・`folder.status_at`、索引 `file_not_ok`）。
@@ -365,7 +379,7 @@ pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[
 ];
 
 /// このアプリのカタログのスキーマの版。
-pub const CATALOG_SCHEMA_VERSION: u32 = 12;
+pub const CATALOG_SCHEMA_VERSION: u32 = 13;
 
 /// このアプリのサムネイル DB のスキーマの版。
 pub const THUMBS_SCHEMA_VERSION: u32 = 2;

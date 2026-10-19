@@ -49,6 +49,9 @@
 //! - 撮影日時の一括修正（LIB-16）: [`Catalog::capture_devices`]（機材）、[`Catalog::plan_capture_adjustment`]、
 //!   [`Catalog::adjust_capture_times`]、[`Catalog::undo_capture_time_edit`]。タイムライン（ORG-01）の撮影日時:
 //!   [`Catalog::timeline_keys`]
+//! - 位置情報の後付け（LIB-21）: [`Catalog::plan_location_edit`]、[`Catalog::edit_locations`]、
+//!   [`Catalog::undo_location_edit`]、[`Catalog::asset_location`]（付けた位置）。使う位置（付けた位置があれば
+//!   それ、なければカメラの位置）は [`AssetRecord::effective_gps`]
 
 mod backup;
 mod capture;
@@ -64,6 +67,7 @@ mod identity;
 mod iptc;
 mod keyword;
 mod library;
+mod location;
 mod preview_cache;
 mod register;
 mod schema;
@@ -121,6 +125,10 @@ pub use keyword::{
     MAX_KEYWORD_NAME_CHARS, check_keyword_path,
 };
 pub use library::{AssetRecord, CatalogCounts};
+pub use location::{
+    LocationEditKind, LocationEditOutcome, LocationEditRecord, LocationPlan, LocationUndoOutcome,
+    MAX_LOCATION_EDITS,
+};
 pub use preview_cache::{
     DEFAULT_PREVIEW_CAPACITY_BYTES, EvictionReport, PREVIEW_TEMP_FILE_MIN_AGE, PreviewCache,
     PreviewScan, ReconcileReport, scan_preview_dir,
@@ -133,10 +141,10 @@ pub use register::{
 pub use schema::{
     BUSY_TIMEOUT, CACHE_SIZE_KIB, CAPTURE_TIME_EDITS_SCHEMA_VERSION, CATALOG_APPLICATION_ID,
     CATALOG_SCHEMA_VERSION, COLLECTIONS_SCHEMA_VERSION, CONTENT_IDENTITY_SCHEMA_VERSION,
-    ColumnInfo, IPTC_SCHEMA_VERSION, PUBLIC_VIEWS, PUBLIC_VIEWS_SCHEMA_VERSION,
-    STABLE_IDS_SCHEMA_VERSION, STACKS_SCHEMA_VERSION, SchemaDescription, SchemaObject,
-    THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, TableInfo, UTC_ONLY_SCHEMA_VERSION,
-    VOLUMES_SCHEMA_VERSION,
+    ColumnInfo, IPTC_SCHEMA_VERSION, LOCATIONS_SCHEMA_VERSION, PUBLIC_VIEWS,
+    PUBLIC_VIEWS_SCHEMA_VERSION, STABLE_IDS_SCHEMA_VERSION, STACKS_SCHEMA_VERSION,
+    SchemaDescription, SchemaObject, THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, TableInfo,
+    UTC_ONLY_SCHEMA_VERSION, VOLUMES_SCHEMA_VERSION,
 };
 pub use search::{Facets, Filter, FolderFilter, Sort, SortDirection, SortKey, VariantSummary};
 pub use stack::{
