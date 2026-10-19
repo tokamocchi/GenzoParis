@@ -1,6 +1,9 @@
 // 現像のスライダー（ドラッグの開始・途中・終了を分けて知らせる。ダブルクリックで既定値に戻す）。
 //
 // - ドラッグ中は onChange(value, true)、離したら onCommit()（コアの end_drag。履歴に 1 件）。
+// - バーを離してから onCommit() まで DOUBLE_CLICK_MS だけ待つ。その間にダブルクリック（既定値に戻す）が来たら、
+//   戻す変更も同じドラッグの中で送ってから onCommit() する（1 回目のクリックで動いた途中の値を履歴に残さない。
+//   取り消すと、ダブルクリックの前の値に戻る）。
 // - キーボード（矢印）・数値の入力は onChange(value, false)（コアが 1 秒後に保存して履歴に記録）。
 // - スライダーにフォーカスがあるときの矢印・Home・End・PageUp・PageDown は、スライダーの値を変えるだけに
 //   する（window の全体のショートカット（←→ の写真の移動など）まで届かないようにする。数字キーの評価などは
@@ -25,6 +28,12 @@ export function parseSliderText(s: string): number {
   return t === "" ? Number.NaN : Number(t);
 }
 
+/**
+ * バーを離してから、ドラッグの終了（onCommit）を送るまでの時間（ms。仮置き: 500。Windows の既定の
+ * ダブルクリックの間隔と同じ。これより遅いダブルクリックでは、1 回目のクリックの値が履歴に 1 件残る）。
+ */
+export const DOUBLE_CLICK_MS = 500;
+
 export interface SliderProps {
   label: string;
   value: number;
@@ -37,7 +46,7 @@ export interface SliderProps {
    * ダブルクリックで既定に戻す処理（既定が 1 つの値ではないもの。ホワイトバランスの「撮影時の設定」など）。
    * 渡すと defaultValue より優先する。
    */
-  onReset?: () => void;
+  onReset?: (dragging: boolean) => void;
   /** 既定から変えているか（onReset を渡すときの印。渡さなければ defaultValue と比べる）。 */
   modified?: boolean;
   /** 表示の書式。 */
@@ -60,6 +69,14 @@ export function Slider(p: SliderProps) {
   const step = p.step ?? 1;
   const fmt = p.format ?? ((v: number) => (Number.isInteger(step) ? String(Math.round(v)) : v.toFixed(2)));
   const dragging = useRef(false);
+  // 離した後、ドラッグの終了を送るのを待っている間のタイマー。
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onCommitRef = useRef(p.onCommit);
+  onCommitRef.current = p.onCommit;
+  const rangeRef = useRef<HTMLInputElement>(null);
+  // 待っている間に、このバー以外を押した・キーを押したときに終了をすぐに送る（取り消し・ほかのスライダー・
+  // 写真の切り替えなどが、終了より先に動かないように）。
+  const outsideRef = useRef<((e: Event) => void) | null>(null);
   const [text, setText] = useState(fmt(p.value));
   const [editing, setEditing] = useState(false);
   // 入力欄を利用者が書き換えたか（書き換えずにフォーカスを外したときは値を送らない。Esc で取り消す）。
@@ -74,18 +91,66 @@ export function Slider(p: SliderProps) {
   const posValue = usePos ? p.toPosition!(p.value) : p.value;
   const clamp = (v: number) => Math.min(p.max, Math.max(p.min, v));
 
-  const endDrag = () => {
-    if (dragging.current) {
-      dragging.current = false;
-      p.onCommit?.();
+  const cancelCommitTimer = () => {
+    if (commitTimer.current !== null) {
+      clearTimeout(commitTimer.current);
+      commitTimer.current = null;
+    }
+    if (outsideRef.current) {
+      window.removeEventListener("pointerdown", outsideRef.current, true);
+      window.removeEventListener("keydown", outsideRef.current, true);
+      outsideRef.current = null;
     }
   };
+  /** ドラッグの終了をすぐに送る（待っている終了も含む）。 */
+  const commitNow = () => {
+    const pending = dragging.current || commitTimer.current !== null;
+    cancelCommitTimer();
+    dragging.current = false;
+    if (pending) onCommitRef.current?.();
+  };
+  /** バーを離した: ダブルクリックが来るかもしれないので、終了を少し待ってから送る。 */
+  const endDrag = () => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    cancelCommitTimer();
+    commitTimer.current = setTimeout(() => {
+      cancelCommitTimer();
+      onCommitRef.current?.();
+    }, DOUBLE_CLICK_MS);
+    const outside = (e: Event) => {
+      if (e.type === "pointerdown" && e.target === rangeRef.current) return;
+      cancelCommitTimer();
+      onCommitRef.current?.();
+    };
+    outsideRef.current = outside;
+    window.addEventListener("pointerdown", outside, true);
+    window.addEventListener("keydown", outside, true);
+  };
+  // 外されるとき（写真・パネルが変わったなど）は、待っている終了をすぐに送る。
+  useEffect(
+    () => () => {
+      if (commitTimer.current !== null) {
+        cancelCommitTimer();
+        onCommitRef.current?.();
+      }
+    },
+    // cancelCommitTimer は ref だけを使う。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   const changed = p.modified ?? (p.defaultValue !== undefined && Math.abs(p.value - p.defaultValue) > 1e-9);
+  /**
+   * 既定に戻す（ダブルクリック）。バーのダブルクリックでは 1 回目のクリックの変更がドラッグとして送られて
+   * いるので、戻す変更も同じドラッグの中で送ってから終了を送る（履歴は「前の値 → 既定」の 1 件）。
+   */
   const reset = () => {
     if (p.disabled) return;
-    if (p.onReset) p.onReset();
-    else if (p.defaultValue !== undefined) p.onChange(p.defaultValue, false);
+    const inDrag = dragging.current || commitTimer.current !== null;
+    if (p.onReset) p.onReset(inDrag);
+    else if (p.defaultValue !== undefined) p.onChange(p.defaultValue, inDrag);
+    if (inDrag) commitNow();
   };
 
   return (
@@ -130,6 +195,7 @@ export function Slider(p: SliderProps) {
         }}
       />
       <input
+        ref={rangeRef}
         type="range"
         min={usePos ? 0 : p.min}
         max={usePos ? 1000 : p.max}
@@ -138,6 +204,8 @@ export function Slider(p: SliderProps) {
         disabled={p.disabled}
         aria-label={p.label}
         onPointerDown={() => {
+          // 待っている終了は送らずに、同じドラッグの続きにする（ダブルクリックの 2 回目のクリック）。
+          cancelCommitTimer();
           dragging.current = true;
         }}
         onPointerUp={endDrag}
@@ -156,7 +224,7 @@ export function Slider(p: SliderProps) {
         }}
         onKeyUp={() => {
           if (!dragging.current) return;
-          endDrag();
+          commitNow();
         }}
       />
     </div>

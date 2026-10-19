@@ -265,7 +265,8 @@ function WhiteBalanceRows(props: { settings: DevelopSettings; disabled: boolean 
   const off = props.disabled || !isRaw;
   const mode = wbMode(wb);
   // 色温度・色かぶり補正のダブルクリック: 既定（撮影時の設定）に戻す。
-  const resetWb = () => update((s) => (s.white_balance === "as_shot" ? null : { ...s, white_balance: "as_shot" }), false);
+  const resetWb = (dragging: boolean) =>
+    update((s) => (s.white_balance === "as_shot" ? null : { ...s, white_balance: "as_shot" }), dragging);
   return (
     <>
       <div className="dp-sub">ホワイトバランス</div>
