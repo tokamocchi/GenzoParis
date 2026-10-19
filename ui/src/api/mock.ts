@@ -34,6 +34,8 @@ import type {
   KeywordInfo,
   KeywordUsage,
   LensCorrectionInfo,
+  LocationEditInfo,
+  LocationEditPlan,
   LogFolderInfo,
   LogStatus,
   MaskOverlayInfo,
@@ -841,6 +843,47 @@ export const MOCK_TIMELINE: Timeline = {
   events_merged: false,
   days: 2,
   without_time: 1,
+};
+
+// ---------------------------------------------------------------------------
+// v1 の geotag: 位置情報の後付け（LIB-21）の見本
+// ---------------------------------------------------------------------------
+
+/**
+ * 位置を付ける見込みの見本（写真 3 枚。1 枚はカメラの位置があり、1 枚は前に付けた位置を置き換える。動画 1 本は
+ * 除く）。
+ */
+export const MOCK_LOCATION_PLAN: LocationEditPlan = {
+  photos: 3,
+  changed: 3,
+  unchanged: 0,
+  with_camera_gps: 1,
+  with_assigned: 1,
+  skipped_videos: 1,
+  missing: 0,
+  edit_id: null,
+};
+
+/** 位置の変更の履歴の見本（新しい順。付けた位置を 1 枚消す前に、3 枚に付けた）。 */
+export const MOCK_LOCATION_EDITS: LocationEditInfo[] = [
+  { id: 2, kind: "clear", location: null, asset_count: 1, created_at: "2026-10-20T01:10:00Z" },
+  { id: 1, kind: "set", location: { lat: 35.681236, lon: 139.767125 }, asset_count: 3, created_at: "2026-10-20T01:00:00Z" },
+];
+
+/** 後から位置を付けた写真の詳細の見本（カメラの位置もある。座標は見本の値）。 */
+export const MOCK_GEOTAGGED_DETAILS: VariantDetails = {
+  summary: mockSummary({ variant_id: 8, asset_id: 8, file_name: "DSC00008.ARW" }),
+  camera_serial: "4012345",
+  iso: 100,
+  aperture: 4,
+  shutter_s: 0.002,
+  focal_mm: 24,
+  gps: { lat: 35.681236, lon: 139.767125 },
+  gps_source: "assigned",
+  camera_gps: { lat: 35.6586, lon: 139.7454 },
+  caption: null,
+  video: null,
+  files: [],
 };
 
 // ---------------------------------------------------------------------------

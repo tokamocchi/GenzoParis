@@ -1192,7 +1192,15 @@ export interface VariantDetails {
   aperture: number | null;
   shutter_s: number | null;
   focal_mm: number | null;
+  /**
+   * 使う位置（LIB-21。後から付けた位置があればそれ、なければカメラ（ファイル）の位置。書き出しの Exif に入る位置と
+   * 同じ）。
+   */
   gps: GpsCoord | null;
+  /** gps の出どころ（LIB-21。位置がなければ null）。古いコアでは無い。 */
+  gps_source?: GpsSource | null;
+  /** カメラ（ファイル）が記録した位置（LIB-21。後から付けた位置を使っていても、ファイルの値）。古いコアでは無い。 */
+  camera_gps?: GpsCoord | null;
   /** キャプション（metadata.caption と同じ）。 */
   caption: string | null;
   /** カタログの中で編集した説明のメタデータ（LIB-15。asset に付き、仮想コピーも同じ値）。古いコアでは無い。 */
@@ -1937,6 +1945,11 @@ export type Command =
   | { type: "edit_capture_times"; target: CaptureTarget; edit: CaptureTimeEdit }
   | { type: "capture_time_edits" }
   | { type: "undo_capture_time_edit" }
+  // 位置情報の後付け（LIB-21）。location は省略できない（null は付けた位置を消して、カメラの位置に戻す）。
+  | { type: "plan_location_edit"; variant_ids: VariantId[]; location: GpsCoord | null }
+  | { type: "edit_locations"; variant_ids: VariantId[]; location: GpsCoord | null }
+  | { type: "location_edits" }
+  | { type: "undo_location_edit" }
   | { type: "timeline"; generation: number; gap_seconds: number }
   | { type: "volumes"; refresh?: boolean }
   | { type: "plan_move_files"; variant_ids: VariantId[]; dest_folder: FolderId }
@@ -2032,6 +2045,9 @@ export type Response =
   | ({ type: "capture_time_plan" } & CaptureTimePlan)
   | { type: "capture_time_edits"; edits: CaptureTimeEditInfo[] }
   | { type: "capture_time_undone"; undone: CaptureTimeUndo | null }
+  | ({ type: "location_edit_plan" } & LocationEditPlan)
+  | { type: "location_edits"; edits: LocationEditInfo[] }
+  | { type: "location_undone"; undone: LocationUndo | null }
   | ({ type: "timeline" } & Timeline)
   | { type: "volumes"; volumes: VolumeInfo[] }
   | ({ type: "move_plan" } & FileMovePlan)
@@ -2154,6 +2170,60 @@ export interface Timeline {
 }
 
 // ---------------------------------------------------------------------------
+// 位置情報の後付け（LIB-21。ジオタグ付け）
+// ---------------------------------------------------------------------------
+
+/** 使う位置の出どころ（genzo-api の GpsSource。camera: カメラ（ファイル）が記録した位置、assigned: 後から付けた位置）。 */
+export type GpsSource = "camera" | "assigned";
+
+/**
+ * 位置の変更の見込み・結果（genzo-api の LocationEditPlan）。数はどれも写真の数（asset の数。同じ写真の仮想コピーは
+ * 位置を共有するので 1 枚）。
+ */
+export interface LocationEditPlan {
+  /** 対象の写真の数（動画・見つからないものを除く）。 */
+  photos: number;
+  /** 変わる（変えた）数。 */
+  changed: number;
+  /** 変わらない数（同じ位置がすでに付いている。消すときは付けた位置がない）。 */
+  unchanged: number;
+  /** 対象のうち、カメラの位置がある数。 */
+  with_camera_gps: number;
+  /** 対象のうち、変える前に付けた位置がある数。 */
+  with_assigned: number;
+  /** 除いた動画の数（動画には位置を付けない）。 */
+  skipped_videos: number;
+  /** 見つからなかった写真の数（削除されたものなど。variant の数）。 */
+  missing: number;
+  /** 記録した変更（結果のとき。変わったものがなければ null。見込みでは常に null）。 */
+  edit_id: number | null;
+}
+
+/** 位置の変更の種類（set: 位置を付けた、clear: 付けた位置を消した）。 */
+export type LocationEditKind = "set" | "clear";
+
+/** 位置の変更の履歴の 1 件（genzo-api の LocationEditInfo）。 */
+export interface LocationEditInfo {
+  id: number;
+  kind: LocationEditKind;
+  /** 付けた位置（set。clear は null）。 */
+  location: GpsCoord | null;
+  /** 変えた写真の数。 */
+  asset_count: number;
+  /** 変更した日時（UTC。RFC 3339）。 */
+  created_at: string;
+}
+
+/** 位置の変更の取り消しの結果（genzo-api の LocationUndo）。 */
+export interface LocationUndo {
+  edit: LocationEditInfo;
+  /** 戻した写真の数。 */
+  restored: number;
+  /** 変更の後に削除された写真の数（戻すものがない）。 */
+  removed: number;
+}
+
+// ---------------------------------------------------------------------------
 // イベント（コア → UI。genzo-api の Event。Tauri のイベント名は "core-event"）
 // ---------------------------------------------------------------------------
 
@@ -2172,7 +2242,9 @@ export type CatalogChange =
   | "stacks"
   | "variants"
   | "files"
-  | "folders";
+  | "folders"
+  // 後から付けた位置（LIB-21）。取り消しでは variant_ids は空で、all が真。
+  | "location";
 
 export type WarningCode =
   | "unclean_shutdown"

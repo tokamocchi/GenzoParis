@@ -44,6 +44,7 @@ import type {
   FolderId,
   FolderInfo,
   FrameInfo,
+  GpsCoord,
   HistoryEntryId,
   HistoryItem,
   ImportOptions,
@@ -54,6 +55,9 @@ import type {
   KeywordId,
   KeywordInfo,
   KeywordUsage,
+  LocationEditInfo,
+  LocationEditPlan,
+  LocationUndo,
   MetadataSummary,
   NamePreview,
   PasteReport,
@@ -594,6 +598,26 @@ export const undoCaptureTimeEdit = async (): Promise<CaptureTimeUndo | null> =>
 /** 表示中の検索結果のタイムライン（撮影日時の順のときだけ。古い世代なら stale）。 */
 export const timeline = async (generation: number, gap_seconds: number): Promise<Timeline> =>
   strip(await execute({ type: "timeline", generation, gap_seconds }, "timeline"));
+
+// ---------------------------------------------------------------------------
+// 位置情報の後付け（LIB-21。ジオタグ付け）
+// ---------------------------------------------------------------------------
+
+/** 位置の変更の見込み（何も変えない。location が null なら付けた位置を消す見込み）。 */
+export const planLocationEdit = async (variant_ids: VariantId[], location: GpsCoord | null): Promise<LocationEditPlan> =>
+  strip(await execute({ type: "plan_location_edit", variant_ids, location }, "location_edit_plan"));
+/**
+ * 選んだ写真に位置を付ける（location が null なら付けた位置を消して、カメラの位置に戻す）。カタログの中だけを変え、
+ * 履歴に残す。動画は除く。location は null でも必ず送る（省略するとコアが誤りにする）。
+ */
+export const editLocations = async (variant_ids: VariantId[], location: GpsCoord | null): Promise<LocationEditPlan> =>
+  strip(await execute({ type: "edit_locations", variant_ids, location }, "location_edit_plan"));
+/** 位置の変更の履歴（新しい順）。 */
+export const locationEdits = async (): Promise<LocationEditInfo[]> =>
+  (await execute({ type: "location_edits" }, "location_edits")).edits;
+/** 最後の位置の変更を取り消す（履歴がなければ null）。 */
+export const undoLocationEdit = async (): Promise<LocationUndo | null> =>
+  (await execute({ type: "undo_location_edit" }, "location_undone")).undone;
 
 // ---------------------------------------------------------------------------
 // ボリューム（FILE-03）・アプリの中でのファイル操作（FILE-02）・見つからない写真と再リンク（FILE-04）
