@@ -14,7 +14,8 @@
 //   既定のブラウザで OSM の著作権のページを開く（openMapLink）。「地図の誤りを報告」（fixthemap）も並べる。
 // - ピン（付ける位置）と表示中の写真の位置の印は L.divIcon（CSS だけ。既定のアイコンの画像のパスの自動判定は Vite の
 //   ビルドで壊れるので使わない）。地図をクリックするか、ピンをドラッグして離すと onPick に位置を渡す（親が座標の欄に
-//   入れ、読んだ座標が pin として戻る）。表示中の写真の印を押すと、その位置を渡す。
+//   入れ、読んだ座標が pin として戻る）。表示中の写真の印を押すと、その位置を渡す。処理中（disabled）は選べず、
+//   ピンのドラッグも止める（ドラッグされたら座標の欄の位置へ戻す）。
 // - 初めの表示は、確定した付ける位置（target）か表示中の写真の位置（なければ既定の範囲）。後から届いた位置も、
 //   利用者がまだ地図を動かしていなければ、そこへ動かす。target が表示の外に変わったら、そこまで動かす。
 // - ピン（pin。座標の欄で読めた値）は印を動かすだけで、地図は動かさない（印を動かすだけではタイルを要求しない）。
@@ -90,6 +91,11 @@ export function GeoMap(props: {
 
   const pick = (lat: number, lng: number) => {
     if (!latest.current.disabled) latest.current.onPick(mapPointToGps(lat, lng));
+  };
+  /** ピンを今の pin（座標の欄の位置）へ戻す（処理中にドラッグされたとき、ピンだけが動いて食い違わないように）。 */
+  const resetPin = (marker: Leaflet.Marker) => {
+    const cur = latest.current.pin;
+    if (cur) marker.setLatLng([cur.lat, cur.lon]);
   };
 
   // 地図を作る（1 回。Leaflet を読んでから）。
@@ -201,6 +207,11 @@ export function GeoMap(props: {
         title: "付ける位置（ドラッグで動かせます）",
       });
       marker.on("dragend", () => {
+        // 処理中は選べない（ドラッグは下の effect で止めるが、止める前に始めたドラッグもある）。ピンを戻す。
+        if (latest.current.disabled) {
+          resetPin(marker);
+          return;
+        }
         const g = marker.getLatLng();
         pick(g.lat, g.lng);
       });
@@ -208,6 +219,23 @@ export function GeoMap(props: {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generation, pin?.lat, pin?.lon]);
+
+  // 処理中（取り消しの途中など）はピンをドラッグできないようにする（作り直した地図・ピンにも当てる）。ドラッグの
+  // 途中で止めると、Leaflet はピンの dragend を出さずにドラッグした位置のまま残すので、ピンを座標の欄の位置へ戻す。
+  const disabled = props.disabled === true;
+  const hasPin = pin !== null;
+  useEffect(() => {
+    const m = parts.current?.pin;
+    // dragging は地図に足した後にできる（Leaflet 1.9 の Marker の _initInteraction）。
+    if (!m?.dragging) return;
+    if (disabled) {
+      m.dragging.disable();
+      resetPin(m);
+    } else {
+      m.dragging.enable();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generation, disabled, hasPin]);
 
   // 表示中の写真の位置の印。
   const photo = props.photo;
