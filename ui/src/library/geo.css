@@ -60,7 +60,14 @@
   color: var(--accent);
 }
 
-/* ピン（付ける位置。先の尖った丸）。L.divIcon の className で、大きさ 24×24・先は (12, 22)（GeoMap.tsx）。 */
+/* ピン（付ける位置。先の尖った丸）。L.divIcon の className で、大きさ 24×24・先は (12, 22)（GeoMap.tsx）。
+ * 寸法は枠を含む大きさ（border-box）で決めてある。base.css の `* { box-sizing: border-box }` は疑似要素に
+ * 当たらない（box-sizing は継承もしない）ので、ここで指定する（指定しないと頭の外形が 22×22 になり、先が
+ * アンカーより右に約 2px・下に約 4.6px ずれる）。 */
+.geo-pin::before,
+.geo-pin::after {
+  box-sizing: border-box;
+}
 .geo-pin::before {
   content: "";
   position: absolute;
