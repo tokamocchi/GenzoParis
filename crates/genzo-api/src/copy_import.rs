@@ -1110,7 +1110,6 @@ pub(crate) fn run_copy_import(
     // 進捗の分母は見つけたファイルの数のまま（画面の「n/総数」がファイルの数と合う）。準備（下の 1.）の間は
     // 総数を 0（「準備中…」・進み具合が分からない表示）にし、コピー・登録（3〜5.）が始まってから数える。
     let total = report.files_found;
-    let mut done = 0u64;
     ctx.progress(0, 0);
 
     // 1. 準備（重複の確認・メタデータ）。
@@ -1144,7 +1143,10 @@ pub(crate) fn run_copy_import(
     if report.cancelled {
         return Ok(report);
     }
-    ctx.progress(0, total);
+    // 準備で除いたもの（重複のため取り込まないもの・登録できないもの）は、ここで済んだものとして数える
+    // （コピー・登録の段では group の members（= sources）だけを数えるため。数えないと最後まで総数に届かない）。
+    let mut done = total.saturating_sub(sources.len() as u64);
+    ctx.progress(done, total);
 
     // 2. 組と順序。
     let groups = make_groups(sources);
