@@ -264,6 +264,9 @@ function WhiteBalanceRows(props: { settings: DevelopSettings; disabled: boolean 
   const eff = effectiveWb(wb, asShot);
   const off = props.disabled || !isRaw;
   const mode = wbMode(wb);
+  // 色温度・色かぶり補正のダブルクリック: 既定（撮影時の設定）に戻す。
+  const resetWb = (dragging: boolean) =>
+    update((s) => (s.white_balance === "as_shot" ? null : { ...s, white_balance: "as_shot" }), dragging);
   return (
     <>
       <div className="dp-sub">ホワイトバランス</div>
@@ -327,7 +330,9 @@ function WhiteBalanceRows(props: { settings: DevelopSettings; disabled: boolean 
           }, dragging)
         }
         onCommit={endDrag}
-        title="色温度（K）。動かすとカスタムになります"
+        onReset={resetWb}
+        modified={mode !== "as_shot"}
+        title="色温度（K）。動かすとカスタムになります。ダブルクリックで撮影時の設定に戻します"
       />
       <Slider
         label="色かぶり補正"
@@ -346,7 +351,9 @@ function WhiteBalanceRows(props: { settings: DevelopSettings; disabled: boolean 
           }, dragging)
         }
         onCommit={endDrag}
-        title="正で緑を弱め（マゼンタ寄り）、負で緑を強めます。動かすとカスタムになります"
+        onReset={resetWb}
+        modified={mode !== "as_shot"}
+        title="正で緑を弱め（マゼンタ寄り）、負で緑を強めます。動かすとカスタムになります。ダブルクリックで撮影時の設定に戻します"
       />
     </>
   );

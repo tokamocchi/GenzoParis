@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import type { FolderInfo } from "../api/types";
-import { ancestorKeys, buildFolderTree, folderName, rootName, visibleFolderRows } from "./folderTree";
+import {
+  ancestorKeys,
+  buildFolderTree,
+  type FolderSegment,
+  folderName,
+  layoutSegments,
+  rootName,
+  visibleFolderRows,
+} from "./folderTree";
 
 function folder(folder_id: number, parent_id: number | null, rel_path: string, volume_id = 1, mount = "/"): FolderInfo {
   const path = mount === "" ? null : rel_path === "" ? mount : `${mount.replace(/\/$/, "")}/${rel_path}`;
@@ -78,5 +86,30 @@ describe("フォルダの木", () => {
     // まとめた行の途中のフォルダ。
     expect(ancestorKeys(roots, 2)).toEqual([4]);
     expect(ancestorKeys(roots, 999)).toBeNull();
+  });
+});
+
+describe("行の区切りの見せ方", () => {
+  const segs = (names: string[]): FolderSegment[] =>
+    names.map((name, i) => ({ id: i + 1, name, fullPath: names.slice(0, i + 1).join("\\") }));
+  const names = (list: FolderSegment[]) => list.map((s) => s.name);
+
+  it("区切りが多ければ、先頭と末尾の 2 つを残して間を「…」にまとめる", () => {
+    const lay = layoutSegments(segs(["C:", "Users", "me", "Pictures", "DCIM", "2026", "2026-10-17"]));
+    expect(names(lay.head)).toEqual(["C:"]);
+    expect(names(lay.hidden)).toEqual(["Users", "me", "Pictures", "DCIM"]);
+    expect(names(lay.tail)).toEqual(["2026", "2026-10-17"]);
+  });
+
+  it("まとめても 1 つしか減らない（4 つまで）ならまとめない", () => {
+    for (const list of [["F:"], ["F:", "DCIM"], ["C:", "Users", "me", "Pictures"]]) {
+      const lay = layoutSegments(segs(list));
+      expect(names(lay.head)).toEqual(list);
+      expect(lay.hidden).toEqual([]);
+      expect(lay.tail).toEqual([]);
+    }
+    const five = layoutSegments(segs(["C:", "Users", "me", "Pictures", "DCIM"]));
+    expect(names(five.hidden)).toEqual(["Users", "me"]);
+    expect(names(five.tail)).toEqual(["Pictures", "DCIM"]);
   });
 });

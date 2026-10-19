@@ -29,6 +29,33 @@ export interface FolderNode {
   children: FolderNode[];
 }
 
+/** 行の区切りの見せ方（間を「…」にまとめたもの）。 */
+export interface SegmentLayout {
+  /** 先頭（ボリュームのルート。まとめないときはすべて）。 */
+  head: FolderSegment[];
+  /** 「…」にまとめた途中の区切り（まとめないときは空）。「…」のメニューから選ぶ。 */
+  hidden: FolderSegment[];
+  /** 末尾の区切り。 */
+  tail: FolderSegment[];
+}
+
+/** 末尾に必ず見せる区切りの数（仮置き: 2。「DCIM › 2026」のように、写真のあるあたりを読めるように）。 */
+export const TAIL_SEGMENTS = 2;
+
+/**
+ * 区切りが多い行（"C: › Users › me › Pictures › DCIM › 2026"）は、どれも短く切られて読めなくなるので、
+ * 先頭（ドライブ）と末尾の `tail` 個だけを見せ、間を「…」にまとめる（"C: › … › DCIM › 2026"）。
+ * まとめても 1 つしか減らないときはまとめない。
+ */
+export function layoutSegments(segments: readonly FolderSegment[], tail = TAIL_SEGMENTS): SegmentLayout {
+  if (segments.length <= tail + 2) return { head: [...segments], hidden: [], tail: [] };
+  return {
+    head: segments.slice(0, 1),
+    hidden: segments.slice(1, segments.length - tail),
+    tail: segments.slice(segments.length - tail),
+  };
+}
+
 /** 表示する行（開いている行の子だけを並べたもの）。 */
 export interface FolderRow {
   node: FolderNode;
