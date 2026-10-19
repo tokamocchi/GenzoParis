@@ -1,0 +1,18 @@
+[package]
+name = "genzo-geo"
+description = "GenzoParis のオンラインの地図の通信（地図のタイルのキャッシュと地名の検索。LIB-21 の第 2 段階）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# HTTPS のクライアント（TLS は native-tls。理由はルートの Cargo.toml の注と src/tls.rs）。
+ureq.workspace = true
+native-tls.workspace = true
+
+[lints]
+workspace = true
