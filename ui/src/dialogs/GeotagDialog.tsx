@@ -10,7 +10,9 @@
 //   最後の変更から順に「直前の変更を取り消す」で戻せる。
 // - 地図と地名の検索（第 2 段階。オンラインの地図）は「位置」の節の座標の欄の上に置く（library/GeoMap.tsx）。地図の
 //   クリック・ピンのドラッグ・検索の結果の選択で setCoordinate を呼び、座標の欄に入れる（見込み・付ける操作は座標の
-//   欄の値をそのまま使う。読めた座標がピンになる）。
+//   欄の値をそのまま使う。読めた座標がピンになる）。地図を動かすのは、座標の欄を確定したとき（Enter・欄を離れる・
+//   貼り付けた後）と setCoordinate のときだけ（打つ途中で読める値になるたびに動かすと、見るつもりのない場所の
+//   タイルを提供元に要求するため。geoMapLogic.ts の coordFieldReducer）。
 //   - オンラインの地図が無効（既定）なら通信しない。地図の代わりに 1 行の案内を出し、押すと有効にする前の説明と
 //     確認（MapConsent.tsx）を出す。無効のままでも座標の貼り付けで付けられる（docs/02 の SEC-01・SEC-02）。
 //   - 地名の検索（Nominatim）は Enter か「検索」のボタンのときだけ送る（入力の途中では送らない。オートコンプリートの
@@ -20,7 +22,7 @@
 //   - 開いたときのフォーカスは座標の欄（data-autofocus。地名の検索の欄が先にあるが、座標を貼って Enter で付ける
 //     主な使い方で、検索に送らないため）。
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 
 import * as app from "../api/app";
 import * as core from "../api/core";
@@ -38,7 +40,9 @@ import type {
 import { Dialog } from "../components/Dialog";
 import { GeoMap, type MapFocus } from "../library/GeoMap";
 import {
+  coordFieldReducer,
   describePlaces,
+  EMPTY_COORD_FIELD,
   mapPreferencesOf,
   placeLabel,
   placeView,
@@ -74,7 +78,10 @@ const FORMATS_HINT =
 export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantId | null }) {
   const ids = props.variantIds;
   const idsKey = ids.join(",");
-  const [text, setText] = useState("");
+  // 座標の欄の文字と、地図を動かす先（確定した座標。打つ途中の値では地図を動かさない。geoMapLogic.ts の
+  // coordFieldReducer）。
+  const [field, dispatchField] = useReducer(coordFieldReducer, EMPTY_COORD_FIELD);
+  const text = field.text;
   const [ref, setRef] = useState<VariantDetails | null>(null);
   // 対象の内訳（付けた位置を消す見込み。「付けた位置を消す」の数にも使う）。
   const [targets, setTargets] = useState<LocationEditPlan | null>(null);
@@ -96,8 +103,10 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
   const coord = parsed.ok ? parsed.coord : null;
   const coordKey = coord ? `${coord.lat},${coord.lon}` : "";
 
-  /** 座標の欄に入れる（第 2 段階の地図もこれを使う）。 */
-  const setCoordinate = (g: GpsCoord) => setText(gpsDecimal(g));
+  /** 座標の欄に入れる（第 2 段階の地図・検索の結果・写真の位置。すぐ確定して、地図もその位置へ動かす）。 */
+  const setCoordinate = (g: GpsCoord) => dispatchField({ kind: "set", text: gpsDecimal(g) });
+  /** 座標の欄を確定する（Enter・欄を離れる・貼り付けた後。地図をその位置へ動かす）。 */
+  const commitField = () => dispatchField({ kind: "commit" });
 
   const reloadHistory = () =>
     core
@@ -250,7 +259,13 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
       <div className="dlg-section">
         <h3>位置</h3>
         {mapPrefs.online ? (
-          <MapPicker pin={coord} photo={ref?.gps ?? null} onPick={setCoordinate} disabled={busy} />
+          <MapPicker
+            pin={coord}
+            target={field.target}
+            photo={ref?.gps ?? null}
+            onPick={setCoordinate}
+            disabled={busy}
+          />
         ) : (
           <MapOffline preferences={mapPrefs} />
         )}
@@ -267,7 +282,12 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
             spellCheck={false}
             autoComplete="off"
             aria-invalid={invalid}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => dispatchField({ kind: "input", text: e.target.value })}
+            // 貼り付けたら確定する（貼り付けの既定の動作で欄の値が変わった後。打つ途中では地図を動かさない）。
+            onPaste={() => {
+              setTimeout(commitField, 0);
+            }}
+            onBlur={commitField}
             onCompositionStart={() => {
               composing.current = true;
             }}
@@ -279,7 +299,9 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
               if (composing.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === "Enter") {
                 e.preventDefault();
+                // 付けられるなら付ける（ダイアログを閉じるので地図は動かさない）。付けられなければ確定して地図を動かす。
                 if (!applyDisabled && coord) void apply(coord);
+                else commitField();
               }
             }}
           />
@@ -334,7 +356,10 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
 
 /** 地名の検索と地図（オンラインの地図が有効なとき）。 */
 function MapPicker(props: {
+  /** 付ける位置の印（座標の欄で読めた値）。 */
   pin: GpsCoord | null;
+  /** 地図を動かす先（確定した座標）。 */
+  target: GpsCoord | null;
   photo: GpsCoord | null;
   onPick: (g: GpsCoord) => void;
   disabled: boolean;
@@ -465,7 +490,14 @@ function MapPicker(props: {
           })}
         </ul>
       )}
-      <GeoMap pin={props.pin} photo={props.photo} focus={focus} onPick={props.onPick} disabled={props.disabled} />
+      <GeoMap
+        pin={props.pin}
+        target={props.target}
+        photo={props.photo}
+        focus={focus}
+        onPick={props.onPick}
+        disabled={props.disabled}
+      />
       <p className="hint geo-legend">
         <span>
           <span className="geo-legend-pin" />

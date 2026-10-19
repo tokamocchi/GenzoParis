@@ -4,14 +4,16 @@
 // - 設定（MapPreferences）の既定値と重ね方・送り先の説明・有効にする前の説明（同意の文）。
 // - 地名の検索の間隔（画面でも前の要求の開始から 1 秒あける。genzo-geo もプロセス全体で守る）・検索語の検査・
 //   結果の文。
-// - 地図の座標（クリックした位置の経度を -180〜180 に戻す）・初めの表示・検索の結果へ動かすときの範囲。
+// - 地図の座標（クリックした位置の経度を -180〜180 に戻す）・初めの表示・検索の結果へ動かすときの範囲・座標の欄と
+//   地図を動かす先（打つ途中の値では動かさない。coordFieldReducer）。
 //
 // OSM Foundation の利用ポリシー（タイル: https://operations.osmfoundation.org/policies/tiles/ 、Nominatim:
 // https://operations.osmfoundation.org/policies/nominatim/ ）のうち、画面が受け持つのは次のこと（通信の規則は
 // genzo-geo、有効にするまで通信しないことは genzo-app）:
 // - 地名の検索は Enter か「検索」のボタンのときだけ（入力の途中で検索しない。オートコンプリートの禁止）。
 // - 帰属の表示「© OpenStreetMap contributors」を地図の右下に常に出す（リンクは WebView ではなく既定のブラウザで開く）。
-// - 先読み・まとめての取得をしない（Leaflet の既定の、表示している範囲のタイルだけを取る）。
+// - 先読み・まとめての取得をしない（Leaflet の既定の、表示している範囲のタイルだけを取る）。座標の欄に打つ途中の
+//   値では地図を動かさない（確定したときだけ動かす。見るつもりのない場所のタイルを取らない）。
 
 import type { AppSettings, GpsCoord, MapCacheInfo, MapLink, MapPreferences, Place } from "../api/types";
 import { formatBytes } from "../format";
@@ -240,7 +242,7 @@ export function placeView(p: Place): MapView {
   return { kind: "point", center: { lat: p.lat, lon: p.lon }, zoom: PLACE_ZOOM };
 }
 
-/** 地図の初めの表示（付ける位置、なければ表示中の写真の位置を中心に。どちらもなければ既定）。 */
+/** 地図の初めの表示（確定した付ける位置、なければ表示中の写真の位置を中心に。どちらもなければ既定）。 */
 export function initialMapView(
   pin: GpsCoord | null,
   photo: GpsCoord | null,
@@ -249,6 +251,51 @@ export function initialMapView(
   return at
     ? { center: at, zoom: PIN_ZOOM, located: true }
     : { center: DEFAULT_MAP_CENTER, zoom: DEFAULT_MAP_ZOOM, located: false };
+}
+
+/**
+ * 位置を付けるダイアログの座標の欄の文字と、地図を動かす先（確定した付ける位置）。
+ *
+ * 打つ途中で読める値になるたびに地図を動かすと（"35.681236, 1" は経度 1 として読める）、見るつもりのない場所の
+ * タイルを提供元に要求するので、地図を動かす先は確定したとき（Enter・欄を離れる・貼り付けた後）と、地図・検索の
+ * 結果・写真の位置から入れたときだけ変える。ピン（付ける位置の印）は欄の値に合わせてすぐ動かす（印を動かすだけ
+ * では、タイルを要求しない）。見込み・付ける操作は、今までどおり欄の値をそのまま読む。
+ */
+export interface CoordField {
+  text: string;
+  /** 地図を動かす先（確定したときに読めた座標。読めなければ null）。 */
+  target: GpsCoord | null;
+}
+
+export type CoordFieldAction =
+  /** 打つ・消す（地図を動かす先は変えない）。 */
+  | { kind: "input"; text: string }
+  /** 確定する（Enter・欄を離れる・貼り付けた後）。 */
+  | { kind: "commit" }
+  /** 地図・検索の結果・写真の位置から入れる（すぐ確定する）。 */
+  | { kind: "set"; text: string };
+
+export const EMPTY_COORD_FIELD: CoordField = { text: "", target: null };
+
+export function coordFieldReducer(state: CoordField, action: CoordFieldAction): CoordField {
+  switch (action.kind) {
+    case "input":
+      return action.text === state.text ? state : { ...state, text: action.text };
+    case "commit":
+      return committedField(state, state.text);
+    case "set":
+      return committedField(state, action.text);
+  }
+}
+
+/** `text` で確定した欄（動かす先が同じ座標なら前のものを使い、何も変わらなければ同じ state を返す）。 */
+function committedField(state: CoordField, text: string): CoordField {
+  const parsed = parseCoordinates(text);
+  const next = parsed.ok ? parsed.coord : null;
+  const prev = state.target;
+  const same = next === null || prev === null ? next === prev : next.lat === prev.lat && next.lon === prev.lon;
+  if (same && text === state.text) return state;
+  return { text, target: same ? prev : next };
 }
 
 /**

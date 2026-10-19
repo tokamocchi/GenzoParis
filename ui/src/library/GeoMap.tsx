@@ -15,8 +15,11 @@
 // - ピン（付ける位置）と表示中の写真の位置の印は L.divIcon（CSS だけ。既定のアイコンの画像のパスの自動判定は Vite の
 //   ビルドで壊れるので使わない）。地図をクリックするか、ピンをドラッグして離すと onPick に位置を渡す（親が座標の欄に
 //   入れ、読んだ座標が pin として戻る）。表示中の写真の印を押すと、その位置を渡す。
-// - 初めの表示は、付ける位置か表示中の写真の位置（なければ既定の範囲）。後から届いた位置も、利用者がまだ地図を
-//   動かしていなければ、そこへ動かす。pin が表示の外に変わったら、そこまで動かす。
+// - 初めの表示は、確定した付ける位置（target）か表示中の写真の位置（なければ既定の範囲）。後から届いた位置も、
+//   利用者がまだ地図を動かしていなければ、そこへ動かす。target が表示の外に変わったら、そこまで動かす。
+// - ピン（pin。座標の欄で読めた値）は印を動かすだけで、地図は動かさない（印を動かすだけではタイルを要求しない）。
+//   地図を動かすのは target（座標の欄を確定したとき・地図や検索の結果から入れたとき）が変わったときだけ。打つ途中で
+//   読める値になるたびに地図を動かすと、見るつもりのない場所のタイルを提供元に要求するため（GeotagDialog）。
 // - React の StrictMode の 2 回の初期化に備え、片付けで map.remove() し、読み込みの途中で外れたら作らない。
 // - Leaflet のキーボードの操作は使わない（Dialog が keydown の伝わりを止めるので効かない）。マウスのドラッグ・
 //   ホイール・ズームのボタンで動かす。
@@ -63,8 +66,10 @@ const photoIcon = (L: typeof Leaflet) =>
   L.divIcon({ className: "geo-photo-mark", iconSize: [14, 14], iconAnchor: [7, 7] });
 
 export function GeoMap(props: {
-  /** 付ける位置（座標の欄で読めた値。なければ null）。 */
+  /** 付ける位置の印（座標の欄で読めた値。なければ null）。変わっても地図は動かさない。 */
   pin: GpsCoord | null;
+  /** 地図を動かす先（確定した付ける位置。なければ null）。変わったら、その位置が見えるように動かす。 */
+  target: GpsCoord | null;
   /** 表示中の写真の使う位置。 */
   photo: GpsCoord | null;
   focus: MapFocus | null;
@@ -97,7 +102,7 @@ export function GeoMap(props: {
       .then(({ default: L }) => {
         const el = container.current;
         if (cancelled || !el) return;
-        const first = initialMapView(latest.current.pin, latest.current.photo);
+        const first = initialMapView(latest.current.target, latest.current.photo);
         const map = L.map(el, {
           attributionControl: false,
           keyboard: false,
@@ -138,7 +143,7 @@ export function GeoMap(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 検索の結果などへ動かす（ピンより先に。動かした後の範囲でピンが見えるかを判定する）。
+  // 検索の結果などへ動かす（確定した付ける位置より先に。動かした後の範囲で、その位置が見えるかを判定する）。
   const focus = props.focus;
   useEffect(() => {
     const p = parts.current;
@@ -159,7 +164,22 @@ export function GeoMap(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generation, focus?.seq]);
 
-  // ピン（付ける位置）。
+  // 確定した付ける位置へ動かす（まだ位置へ動かしていなければそこを中心に、表示の外ならそこまで。ピンより先に）。
+  const target = props.target;
+  useEffect(() => {
+    const p = parts.current;
+    if (!p || !target) return;
+    const at = p.L.latLng(target.lat, target.lon);
+    if (!p.located) {
+      p.map.setView(at, PIN_ZOOM);
+      p.located = true;
+    } else if (!p.map.getBounds().contains(at)) {
+      p.map.panTo(at);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generation, target?.lat, target?.lon]);
+
+  // ピン（付ける位置の印。印を動かすだけで、地図は動かさない）。
   const pin = props.pin;
   useEffect(() => {
     const p = parts.current;
@@ -185,12 +205,6 @@ export function GeoMap(props: {
         pick(g.lat, g.lng);
       });
       p.pin = marker.addTo(p.map);
-    }
-    if (!p.located) {
-      p.map.setView(at, PIN_ZOOM);
-      p.located = true;
-    } else if (!p.map.getBounds().contains(at)) {
-      p.map.panTo(at);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generation, pin?.lat, pin?.lon]);

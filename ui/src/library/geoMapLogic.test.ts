@@ -6,12 +6,14 @@ import { MOCK_PLACES } from "../api/mock";
 import type { Place } from "../api/types";
 import { setWindowsStyleForTest, tileUrlTemplate } from "../api/uri";
 import {
+  coordFieldReducer,
   DEFAULT_MAP_CENTER,
   DEFAULT_MAP_PREFERENCES,
   DEFAULT_MAP_ZOOM,
   describeDestinations,
   describeMapCache,
   describePlaces,
+  EMPTY_COORD_FIELD,
   FIT_MAX_ZOOM,
   initialMapView,
   MAP_ATTRIBUTION,
@@ -239,6 +241,50 @@ describe("地図の座標と表示", () => {
         expect(Math.abs(r.coord.lon - g.lon)).toBeLessThan(1e-6);
       }
     }
+  });
+
+  it("座標の欄: 打つ途中では地図を動かさず、確定（Enter・欄を離れる・貼り付けの後）で動かす", () => {
+    const typed = "35.681236, 139.767125";
+    let s = EMPTY_COORD_FIELD;
+    const readable: string[] = [];
+    for (let i = 1; i <= typed.length; i++) {
+      s = coordFieldReducer(s, { kind: "input", text: typed.slice(0, i) });
+      expect(s.text).toBe(typed.slice(0, i));
+      if (parseCoordinates(s.text).ok) readable.push(s.text);
+      // 読める値になっても、打つ途中では地図を動かす先を変えない（見るつもりのない場所のタイルを取らない）。
+      expect(s.target).toBeNull();
+    }
+    // 途中にも読める値がある（"…, 1" は経度 1、"…, 13" は経度 13）。
+    expect(readable).toContain("35.681236, 1");
+    expect(readable).toContain("35.681236, 13");
+    s = coordFieldReducer(s, { kind: "commit" });
+    expect(s).toEqual({ text: typed, target: tokyo });
+    // 同じ値で確定し直しても同じもの（地図を動かし直さない）。
+    expect(coordFieldReducer(s, { kind: "commit" })).toBe(s);
+    expect(coordFieldReducer(s, { kind: "input", text: typed })).toBe(s);
+  });
+
+  it("座標の欄: 確定した後に打ち直す間は前の確定のまま。読めない値で確定すると動かす先はなし", () => {
+    let s = coordFieldReducer(EMPTY_COORD_FIELD, { kind: "set", text: "35.681236, 139.767125" });
+    expect(s.target).toEqual(tokyo);
+    s = coordFieldReducer(s, { kind: "input", text: "35.6586, 1" });
+    expect(s.target).toEqual(tokyo);
+    s = coordFieldReducer(s, { kind: "input", text: "35.6586, 139.7454" });
+    expect(s.target).toEqual(tokyo);
+    s = coordFieldReducer(s, { kind: "commit" });
+    expect(s.target).toEqual(camera);
+    s = coordFieldReducer(s, { kind: "input", text: "" });
+    expect(s.target).toEqual(camera);
+    s = coordFieldReducer(s, { kind: "commit" });
+    expect(s).toEqual({ text: "", target: null });
+    s = coordFieldReducer(s, { kind: "input", text: "35.6586, 999" });
+    expect(coordFieldReducer(s, { kind: "commit" }).target).toBeNull();
+  });
+
+  it("座標の欄: 地図・検索の結果・写真の位置から入れたときは、文字を入れてすぐ動かす", () => {
+    let s = coordFieldReducer(EMPTY_COORD_FIELD, { kind: "input", text: "35.68" });
+    s = coordFieldReducer(s, { kind: "set", text: gpsDecimal(camera) });
+    expect(s).toEqual({ text: gpsDecimal(camera), target: camera });
   });
 
   it("キャッシュの大きさの文", () => {
