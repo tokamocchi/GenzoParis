@@ -489,7 +489,7 @@
   flex: none;
   color: var(--fg-3);
 }
-/* 区切りが多い行の途中のフォルダをまとめた「…」（押すと途中のフォルダのメニュー）。 */
+/* 区切りが多い行の途中のフォルダをまとめた「…」（押すと、その行はまとめずにすべてのフォルダを出す）。 */
 .lib-tree-more {
   flex: none;
   padding: 0 4px;
@@ -501,10 +501,6 @@
 }
 .lib-tree-more:hover {
   background: var(--bg-3);
-  color: var(--fg-0);
-}
-.lib-tree-more.on {
-  background: var(--bg-4);
   color: var(--fg-0);
 }
 .lib-tree-more.warn {

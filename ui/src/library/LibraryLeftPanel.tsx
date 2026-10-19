@@ -84,7 +84,8 @@ export function LibraryLeftPanel() {
   const [volumes, setVolumes] = useState<VolumeInfo[] | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ at: MenuAt; folder: FolderInfo } | null>(null);
-  const [moreMenu, setMoreMenu] = useState<{ at: MenuAt; segments: FolderSegment[] } | null>(null);
+  // 「…」を押して、まとめずにすべての区切りを出している行（行の鍵）。
+  const [expanded, setExpanded] = useState<ReadonlySet<FolderId>>(() => new Set());
   const drag = usePhotoDrag();
   const [reload, setReload] = useState(0);
   const [stats, setStats] = useState<CatalogStats | null>(null);
@@ -320,11 +321,17 @@ export function LibraryLeftPanel() {
     );
   };
 
-  /** 行のフォルダ（区切りが多ければ、間を「…」にまとめ、「…」のメニューから選べるようにする）。 */
+  /**
+   * 行のフォルダ（区切りが多ければ、間を「…」にまとめる）。「…」を押すと、その行はまとめずにすべての区切りを
+   * 出す（どの区切りも選ぶ・右クリックの操作・写真を落とす先に使える）。選んでいるフォルダがまとめた中に
+   * あるときも、まとめない。
+   */
   const renderSegments = (node: FolderNode) => {
     const lay = layoutSegments(node.segments);
-    if (lay.hidden.length === 0) return lay.head.map((seg, i) => renderSeg(seg, i === 0));
     const hidden = lay.hidden;
+    if (hidden.length === 0 || expanded.has(node.key) || hidden.some((s) => s.id === folderId)) {
+      return node.segments.map((seg, i) => renderSeg(seg, i === 0));
+    }
     // まとめたフォルダの「!」（見つからないフォルダ・写真）は見えなくなるので、「…」を注意の色にする。
     const warn = hidden.some((s) => {
       const info = byId.get(s.id);
@@ -337,13 +344,10 @@ export function LibraryLeftPanel() {
         <span className="lib-tree-sep">›</span>
         <button
           type="button"
-          className={`lib-tree-more${hidden.some((s) => s.id === folderId) ? " on" : ""}${warn ? " warn" : ""}`}
-          title={hidden.map((s) => s.name).join(" › ")}
-          aria-label={`途中のフォルダ（${hidden.length} 個）を選ぶ`}
-          onClick={(e) => {
-            const b = e.currentTarget.getBoundingClientRect();
-            setMoreMenu({ at: { x: b.left, y: b.bottom }, segments: hidden });
-          }}
+          className={`lib-tree-more${warn ? " warn" : ""}`}
+          title={`途中のフォルダを出す: ${hidden.map((s) => s.name).join(" › ")}`}
+          aria-label={`途中のフォルダ（${hidden.length} 個）を出す`}
+          onClick={() => setExpanded((cur) => new Set(cur).add(node.key))}
         >
           …
         </button>
@@ -427,18 +431,6 @@ export function LibraryLeftPanel() {
       </Section>
 
       {menu && <PopupMenu at={menu.at} items={folderMenu(menu.folder)} onClose={() => setMenu(null)} label="フォルダの操作" />}
-      {moreMenu && (
-        <PopupMenu
-          at={moreMenu.at}
-          items={moreMenu.segments.map((s) => ({
-            label: s.name,
-            checked: s.id === folderId,
-            onSelect: () => selectFolder(s.id),
-          }))}
-          onClose={() => setMoreMenu(null)}
-          label="途中のフォルダ"
-        />
-      )}
       <CollectionPanel />
       <KeywordPanel />
     </div>
