@@ -1,5 +1,6 @@
 // 設定の「一般」（アプリの設定。カタログの外の settings.json に保存する）: FFmpeg のフォルダ（決定事項ログ
-// No.62）・GPU・終了時に毎回バックアップ。ログ・クラッシュレポート（SYS-07。SettingsLogs）。
+// No.62）・GPU・終了時に毎回バックアップ。オンラインの地図（LIB-21。SettingsMap。専用のコマンドで保存し、すぐ
+// 効く）。ログ・クラッシュレポート（SYS-07。SettingsLogs）。
 //
 // アプリはこれらをカタログを開くときにだけ読む（crates/genzo-app/src/state.rs の open_locked で ffmpeg・ffprobe を
 // 探してワーカーの環境に渡す。保存してもワーカーの環境は変えない）。同じカタログは開き直せないので、カタログを
@@ -15,6 +16,7 @@ import { actions, appStore, useApp } from "../state/app";
 import { chooseFolder } from "./native";
 import { Busy, ErrorBox, PathBox } from "./parts";
 import { SettingsLogs } from "./SettingsLogs";
+import { SettingsMap } from "./SettingsMap";
 
 function ToolLine(props: { name: string; path: string | null | undefined; checking: boolean }) {
   return (
@@ -173,6 +175,7 @@ export function SettingsGeneral() {
           保存
         </button>
       </div>
+      <SettingsMap />
       <SettingsLogs />
       {status && (
         <p className="hint">

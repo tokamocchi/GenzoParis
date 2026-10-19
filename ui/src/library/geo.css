@@ -1,0 +1,164 @@
+/* 位置を付けるダイアログの地図と地名の検索（位置情報の後付け LIB-21 の第 2 段階。library/GeoMap.tsx・
+ * dialogs/GeotagDialog.tsx）。色は base.css の変数だけを使う。Leaflet の部品の上書きは geoLeaflet.css。 */
+
+.geo-map {
+  position: relative;
+  /* Leaflet の層（z-index 400〜1000）をこの中に閉じる（ダイアログの外のメニュー・通知より上に出さない）。 */
+  isolation: isolate;
+  height: 300px;
+  margin: 6px 0 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-2);
+}
+.geo-map-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+.geo-map-status {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+
+/* 帰属の表示（右下に常に出す。OSM のタイルの利用ポリシー）。 */
+.geo-attribution {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-top-left-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--fg-1);
+  font-size: 11px;
+}
+.geo-attribution .geo-sep {
+  color: var(--fg-3);
+}
+.geo-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--fg-0);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.geo-link:hover {
+  color: var(--accent);
+}
+
+/* ピン（付ける位置。先の尖った丸）。L.divIcon の className で、大きさ 24×24・先は (12, 22)（GeoMap.tsx）。 */
+.geo-pin::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--bg-0);
+  border-radius: 50% 50% 50% 0;
+  background: var(--accent);
+  transform: rotate(-45deg);
+}
+.geo-pin::after {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--bg-0);
+}
+
+/* 表示中の写真の位置の印（丸）。大きさ 14×14・中心が位置（GeoMap.tsx）。 */
+.geo-photo-mark {
+  border: 2px solid var(--fg-0);
+  border-radius: 50%;
+  background: var(--select);
+}
+
+/* 印の説明 */
+.geo-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 2px 0 0;
+}
+.geo-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.geo-legend-pin,
+.geo-legend-photo {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+}
+.geo-legend-pin {
+  border-radius: 50% 50% 50% 0;
+  background: var(--accent);
+  transform: rotate(-45deg);
+}
+.geo-legend-photo {
+  border: 2px solid var(--fg-0);
+  border-radius: 50%;
+  background: var(--select);
+}
+
+/* 地名の検索の結果 */
+.geo-places {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+  max-height: 150px;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+}
+.geo-place {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.geo-places > li:last-child .geo-place {
+  border-bottom: 0;
+}
+.geo-place:hover:not(:disabled) {
+  background: var(--bg-3);
+}
+.geo-place .title {
+  font-weight: 600;
+}
+.geo-place .detail {
+  display: block;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+
+/* 有効にする前の説明 */
+.geo-consent ul {
+  margin: 2px 0 8px;
+  padding-left: 18px;
+}

@@ -8,15 +8,42 @@
 // - 読めたら、コアに見込み（変わる数・カメラの位置がある数・除く動画の数）を問い合わせる（何も変えない）。
 // - 「位置を付ける」「付けた位置を消す（カメラの位置に戻す）」はカタログの中だけを変え、元のファイルには書かない。
 //   最後の変更から順に「直前の変更を取り消す」で戻せる。
-// - 地図（第 2 段階）は「位置」の節の座標の欄の上に置く（地図のクリック・ピンの移動で setCoordinate を呼び、座標の
-//   欄に入れる。見込み・付ける操作は座標の欄の値をそのまま使う）。
+// - 地図と地名の検索（第 2 段階。オンラインの地図）は「位置」の節の座標の欄の上に置く（library/GeoMap.tsx）。地図の
+//   クリック・ピンのドラッグ・検索の結果の選択で setCoordinate を呼び、座標の欄に入れる（見込み・付ける操作は座標の
+//   欄の値をそのまま使う。読めた座標がピンになる）。
+//   - オンラインの地図が無効（既定）なら通信しない。地図の代わりに 1 行の案内を出し、押すと有効にする前の説明と
+//     確認（MapConsent.tsx）を出す。無効のままでも座標の貼り付けで付けられる（docs/02 の SEC-01・SEC-02）。
+//   - 地名の検索（Nominatim）は Enter か「検索」のボタンのときだけ送る（入力の途中では送らない。オートコンプリートの
+//     禁止。IME の変換を確定する Enter は除く）。前の検索が終わるまでは次の検索を受け付けず、前の要求の開始から
+//     1 秒あけて送る（library/geoMapLogic.ts の searchWaitMs。genzo-geo もプロセス全体で 1 秒に 1 回にし、結果を
+//     キャッシュする）。
 
 import { useEffect, useRef, useState } from "react";
 
+import * as app from "../api/app";
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
-import type { ErrorInfo, GpsCoord, LocationEditInfo, LocationEditPlan, VariantDetails, VariantId } from "../api/types";
+import type {
+  ErrorInfo,
+  GpsCoord,
+  LocationEditInfo,
+  LocationEditPlan,
+  MapPreferences,
+  Place,
+  VariantDetails,
+  VariantId,
+} from "../api/types";
 import { Dialog } from "../components/Dialog";
+import { GeoMap, type MapFocus } from "../library/GeoMap";
+import {
+  describePlaces,
+  mapPreferencesOf,
+  normalizeSearchQuery,
+  placeLabel,
+  placeView,
+  searchQueryProblem,
+  searchWaitMs,
+} from "../library/geoMapLogic";
 import {
   coordErrorMessage,
   describeLocationEdit,
@@ -28,7 +55,9 @@ import {
   parseCoordinates,
 } from "../library/geotagLogic";
 import { formatGps, gpsDecimal } from "../library/metadataLogic";
-import { actions } from "../state/app";
+import { actions, useApp } from "../state/app";
+import { saveMapPreferences } from "../state/map";
+import { MapConsentPanel } from "./MapConsent";
 import { Busy, ErrorBox } from "./parts";
 
 /** 見込みを問い合わせるまでの時間（ms。入力の途中で問い合わせすぎない。コアへの問い合わせで、外部への通信ではない。仮置き）。 */
@@ -57,6 +86,9 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
   const [error, setError] = useState<ErrorInfo | null>(null);
   const seq = useRef(0);
   const composing = useRef(false);
+  // オンラインの地図の設定（オブジェクトは保存するまで同じものなので、そのまま購読する）。
+  const mapSettings = useApp((s) => s.status?.settings.map);
+  const mapPrefs = mapPreferencesOf({ map: mapSettings });
 
   const parsed = parseCoordinates(text);
   const coord = parsed.ok ? parsed.coord : null;
@@ -172,7 +204,7 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
   return (
     <Dialog
       title="位置を付ける"
-      width={600}
+      width={680}
       onClose={actions.closeDialog}
       busy={busy}
       actions={
@@ -215,10 +247,16 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
 
       <div className="dlg-section">
         <h3>位置</h3>
+        {mapPrefs.online ? (
+          <MapPicker pin={coord} photo={ref?.gps ?? null} onPick={setCoordinate} disabled={busy} />
+        ) : (
+          <MapOffline preferences={mapPrefs} />
+        )}
         <div className="field">
           <label htmlFor="geo-coord">座標（緯度, 経度）</label>
           <input
             id="geo-coord"
+            type="text"
             value={text}
             placeholder="35.681236, 139.767125"
             spellCheck={false}
@@ -286,5 +324,184 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
       )}
       <ErrorBox error={error} />
     </Dialog>
+  );
+}
+
+/** 地名の検索と地図（オンラインの地図が有効なとき）。 */
+function MapPicker(props: {
+  pin: GpsCoord | null;
+  photo: GpsCoord | null;
+  onPick: (g: GpsCoord) => void;
+  disabled: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const [places, setPlaces] = useState<Place[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  const [focus, setFocus] = useState<MapFocus | null>(null);
+  // 前の検索の要求を送った時刻（ms）。
+  const lastStart = useRef<number | null>(null);
+  // 検索の途中か（待っている間も。続けて押されたときに、描き直す前でも 2 つ目を送らない）。
+  const inFlight = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const alive = useRef(true);
+  const composing = useRef(false);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      if (timer.current !== null) clearTimeout(timer.current);
+      timer.current = null;
+      inFlight.current = false;
+    };
+  }, []);
+
+  /** 検索する（Enter か「検索」のボタンのときだけ。前の検索の途中なら何もしない）。 */
+  const search = () => {
+    if (inFlight.current || props.disabled) return;
+    const p = searchQueryProblem(query);
+    setProblem(p);
+    if (p) return;
+    const q = normalizeSearchQuery(query);
+    inFlight.current = true;
+    setSearching(true);
+    setError(null);
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      lastStart.current = Date.now();
+      app
+        .searchPlaces(q)
+        .then((r) => {
+          if (alive.current) setPlaces(r);
+        })
+        .catch((e: unknown) => {
+          if (!alive.current) return;
+          setPlaces(null);
+          setError(toApiError(e).info);
+        })
+        .finally(() => {
+          inFlight.current = false;
+          if (alive.current) setSearching(false);
+        });
+    }, searchWaitMs(lastStart.current, Date.now()));
+  };
+
+  /** 検索の結果を選ぶ: 地図をその場所へ動かし、ピンを置く（座標の欄に入れる）。 */
+  const choose = (p: Place) => {
+    setFocus((f) => ({ seq: (f?.seq ?? 0) + 1, view: placeView(p) }));
+    props.onPick({ lat: p.lat, lon: p.lon });
+  };
+
+  return (
+    <div>
+      <div className="dlg-row">
+        <input
+          type="search"
+          className="dlg-grow"
+          value={query}
+          placeholder="地名・駅名・施設名で検索（例: 東京駅）"
+          aria-label="地名の検索"
+          spellCheck={false}
+          autoComplete="off"
+          onChange={(e) => {
+            // 入力の途中では検索しない（オートコンプリートの禁止）。誤りの表示だけ消す。
+            setQuery(e.target.value);
+            setProblem(null);
+          }}
+          onCompositionStart={() => {
+            composing.current = true;
+          }}
+          onCompositionEnd={() => {
+            composing.current = false;
+          }}
+          onKeyDown={(e) => {
+            // IME の変換を確定する Enter では検索しない。
+            if (composing.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (e.key === "Enter") {
+              e.preventDefault();
+              search();
+            }
+          }}
+        />
+        <button type="button" className="btn" onClick={search} disabled={searching || props.disabled}>
+          {searching ? "検索しています…" : "検索"}
+        </button>
+      </div>
+      {problem && <p className="dlg-field-error">{problem}</p>}
+      <ErrorBox error={error} title="検索できません" />
+      {places && <p className="hint">{describePlaces(places)}</p>}
+      {places && places.length > 0 && (
+        <ul className="geo-places">
+          {places.map((p, i) => {
+            const label = placeLabel(p);
+            return (
+              <li key={`${i}:${p.lat},${p.lon}`}>
+                <button type="button" className="geo-place" onClick={() => choose(p)} disabled={props.disabled}>
+                  <span className="title">{label.title}</span>
+                  {label.detail && <span className="detail">{label.detail}</span>}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <GeoMap pin={props.pin} photo={props.photo} focus={focus} onPick={props.onPick} disabled={props.disabled} />
+      <p className="hint geo-legend">
+        <span>
+          <span className="geo-legend-pin" />
+          付ける位置（地図をクリックするか、ピンをドラッグして選びます）
+        </span>
+        {props.photo && (
+          <span>
+            <span className="geo-legend-photo" />
+            表示中の写真の位置
+          </span>
+        )}
+      </p>
+    </div>
+  );
+}
+
+/** オンラインの地図が無効なとき: 1 行の案内と、押すと出す有効にする前の説明と確認。 */
+function MapOffline(props: { preferences: MapPreferences }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+
+  const enable = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await saveMapPreferences({ online: true });
+      actions.notify("success", "オンラインの地図を有効にしました", "設定の「一般」でいつでも無効にできます。");
+    } catch (e) {
+      setError(toApiError(e).info);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <div className="dlg-row" style={{ marginBottom: 6 }}>
+        <span className="hint dlg-grow">
+          地図で選ぶ・地名で検索するには、オンラインの地図（OpenStreetMap）を有効にします（今は無効で、外部と通信しません）。
+        </span>
+        <button type="button" className="btn small" onClick={() => setOpen(true)}>
+          オンラインの地図について…
+        </button>
+      </div>
+    );
+  }
+  return (
+    <MapConsentPanel
+      preferences={props.preferences}
+      busy={busy}
+      error={error}
+      onEnable={() => void enable()}
+      onCancel={() => setOpen(false)}
+    />
   );
 }

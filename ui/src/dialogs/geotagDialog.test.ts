@@ -1,6 +1,8 @@
 // 位置情報の後付け（LIB-21）の入口（右クリックのメニュー・右パネルから開くダイアログの状態）・ダイアログと右パネルの
 // GPS の行の描画・コアの命令の形のテスト（コアのコマンドは MockBridge で差し替える。部品は react-dom/server で
-// 描くので useEffect は動かず、読み込みの前の状態を確かめる）。
+// 描くので useEffect は動かず、読み込みの前の状態を確かめる）。第 2 段階のオンラインの地図（有効・無効の描画・
+// 有効にする前の説明・設定の画面）も確かめる（アプリのコマンドの形は state/map.test.ts）。地図（library/GeoMap.tsx）は
+// Leaflet を useEffect の中で読むので、描いても Leaflet は読まない（地図の部品そのものはテストから import しない）。
 
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
@@ -8,13 +10,24 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { installBridge } from "../api/bridge";
 import * as core from "../api/core";
-import { MOCK_GEOTAGGED_DETAILS, MOCK_LOCATION_EDITS, MOCK_LOCATION_PLAN, MockBridge, mockSummary } from "../api/mock";
+import {
+  MOCK_GEOTAGGED_DETAILS,
+  MOCK_LOCATION_EDITS,
+  MOCK_LOCATION_PLAN,
+  MOCK_MAP_PREFERENCES,
+  mockAppStatus,
+  MockBridge,
+  mockSummary,
+} from "../api/mock";
 import type { VariantDetails } from "../api/types";
+import { DEFAULT_MAP_PREFERENCES, DEFAULT_TILE_URL } from "../library/geoMapLogic";
 import { GpsValue } from "../library/MetadataPanel";
 import { appStore } from "../state/app";
 import { openGeotagDialog, runPhotoMenu } from "../state/stacks";
 import { Dialogs } from "./Dialogs";
 import { GeotagDialog } from "./GeotagDialog";
+import { MapConsentPanel } from "./MapConsent";
+import { SettingsDialog } from "./SettingsDialog";
 
 let mock: MockBridge;
 /** core_execute で送ったコマンド。 */
@@ -165,5 +178,96 @@ describe("位置情報の後付けのコアの命令（genzo-api の JSON の形
     // 履歴がなければ null。
     mock.responses.set("core_execute", () => ({ type: "location_undone", undone: null }));
     expect(await core.undoLocationEdit()).toBeNull();
+  });
+});
+
+
+describe("位置を付けるダイアログのオンラインの地図（LIB-21 の第 2 段階）", () => {
+  const dialog = () => render(createElement(GeotagDialog, { variantIds: [3, 4], current: 4 }));
+
+  it("無効（既定）: 地図は出さず、1 行の案内だけ（通信しない。座標の貼り付けは使える）", () => {
+    for (const status of [mockAppStatus(DEFAULT_MAP_PREFERENCES), mockAppStatus(), null]) {
+      appStore.set({ status });
+      const html = dialog();
+      expect(html).toContain("今は無効で、外部と通信しません");
+      expect(html).toContain("オンラインの地図について…");
+      expect(html).not.toContain("geo-map");
+      expect(html).not.toContain("地名の検索");
+      expect(html).toContain("座標（緯度, 経度）");
+    }
+  });
+
+  it("有効: 地名の検索・地図（読み込みの前）・右下の帰属の表示・地図の誤りの報告・印の説明", () => {
+    appStore.set({ status: mockAppStatus(MOCK_MAP_PREFERENCES) });
+    const html = dialog();
+    expect(html).toContain('aria-label="地名の検索"');
+    expect(html).toContain("地名・駅名・施設名で検索");
+    expect(html).toContain(">検索</button>");
+    expect(html).toContain('class="geo-map"');
+    expect(html).toContain("地図を読み込んでいます");
+    expect(html).toContain('class="geo-attribution"');
+    expect(html).toContain("© OpenStreetMap contributors");
+    expect(html).toContain("地図の誤りを報告");
+    expect(html).toContain("付ける位置（地図をクリックするか、ピンをドラッグして選びます）");
+    expect(html).not.toContain("オンラインの地図について…");
+    // 座標の欄は地図の後ろ（地図で選んだ位置がここに入る）。
+    expect(html.indexOf('class="geo-map"')).toBeLessThan(html.indexOf("座標（緯度, 経度）"));
+  });
+
+  it("有効にする前の説明: 送るもの・送り先・守ること・注意・利用ポリシーのページ", () => {
+    const html = render(
+      createElement(MapConsentPanel, {
+        preferences: DEFAULT_MAP_PREFERENCES,
+        busy: false,
+        error: null,
+        onEnable: () => undefined,
+        onCancel: () => undefined,
+      }),
+    );
+    expect(html).toContain("オンラインの地図（OpenStreetMap）を有効にしますか");
+    expect(html).toContain("tile.openstreetmap.org");
+    expect(html).toContain("nominatim.openstreetmap.org");
+    expect(html).toContain("1 秒以上あけ");
+    expect(html).toContain("入力の途中では送りません");
+    expect(html).toContain("個人の情報を検索語にしないでください");
+    expect(html).toContain("タイルの利用ポリシー");
+    expect(html).toContain("地名の検索（Nominatim）の利用ポリシー");
+    expect(html).toContain("オンラインの地図を有効にする");
+    expect(html).toContain("やめる");
+    // 有効にするボタンは .primary にしない（Dialog の初めのフォーカスと Enter で有効にしない）。
+    expect(html).not.toContain("btn primary");
+    const noCancel = render(
+      createElement(MapConsentPanel, {
+        preferences: DEFAULT_MAP_PREFERENCES,
+        busy: true,
+        error: null,
+        onEnable: () => undefined,
+      }),
+    );
+    expect(noCancel).not.toContain("やめる");
+    expect(noCancel).toContain("有効にしています…");
+  });
+
+  it("設定の一般: オンラインの地図の節（有効・無効、キャッシュ、詳細の URL、利用ポリシー）", () => {
+    appStore.set({ status: mockAppStatus(), catalog: null });
+    const off = render(createElement(SettingsDialog, { tab: "general" }));
+    expect(off).toContain("オンラインの地図（OpenStreetMap）");
+    expect(off).toContain("オンラインの地図を使う");
+    expect(off).toContain("初めて有効にするときに、送るものと送り先を確かめてもらいます");
+    expect(off).toContain("この節の設定はすぐに効きます");
+    expect(off).toContain("tile.openstreetmap.org");
+    expect(off).toContain("キャッシュを消す");
+    expect(off).toContain("200 MB を超えたら古いものから消します");
+    expect(off).toContain("詳細（地図の提供元）");
+    expect(off).toContain(`placeholder="${DEFAULT_TILE_URL}"`);
+    expect(off).toContain("最大のズームは 19");
+    expect(off).toContain("タイルの利用ポリシー");
+
+    const tile_url = "https://tiles.example.org/{z}/{x}/{y}.png";
+    appStore.set({ status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, tile_url }) });
+    const on = render(createElement(SettingsDialog, { tab: "general" }));
+    expect(on).toContain("初めて有効にした日時: 2026-10-20");
+    expect(on).toContain("tiles.example.org（設定で変えた提供元）");
+    expect(on).toContain('value="https://tiles.example.org/{z}/{x}/{y}.png"');
   });
 });
