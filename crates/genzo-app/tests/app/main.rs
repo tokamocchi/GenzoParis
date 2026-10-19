@@ -29,6 +29,7 @@ mod catalog;
 mod develop;
 mod events;
 mod library;
+mod location;
 mod runner;
 mod support;
 
@@ -113,6 +114,10 @@ const TESTS: &[(&str, fn())] = &[
     (
         "library::videos_are_streamed_only_from_the_catalog",
         library::videos_are_streamed_only_from_the_catalog,
+    ),
+    (
+        "location::locations_through_the_app",
+        location::locations_through_the_app,
     ),
     (
         "develop::develop_and_region_frames_match_their_headers",

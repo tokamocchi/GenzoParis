@@ -913,8 +913,16 @@ pub struct VariantDetails {
     pub shutter_s: Option<f64>,
     /// 焦点距離（mm）。
     pub focal_mm: Option<f64>,
-    /// GPS の座標。
+    /// 使う位置（LIB-21。後から付けた位置があればそれ、なければカメラ（ファイル）の位置。書き出しの Exif に
+    /// 入る位置と同じ）。
     pub gps: Option<GpsCoord>,
+    /// `gps` の出どころ（LIB-21。`camera`・`assigned`。位置がなければ `null`。LIB-21 より前のコアには無い）。
+    #[serde(default)]
+    pub gps_source: Option<GpsSource>,
+    /// カメラ（ファイル）が記録した位置（LIB-21。後から付けた位置を使っていても、ファイルの値。なければ
+    /// `null`。LIB-21 より前のコアには無い）。
+    #[serde(default)]
+    pub camera_gps: Option<GpsCoord>,
     /// キャプション（[`VariantDetails::metadata`] の `caption` と同じ。MVP からの項目）。
     pub caption: Option<String>,
     /// カタログの中で編集した説明のメタデータ（LIB-15。タイトル・キャプション・作成者・著作権など。asset に
@@ -2657,6 +2665,91 @@ pub struct Timeline {
     pub days: u64,
     /// 撮影日時の分からない写真・動画の数。
     pub without_time: u64,
+}
+
+// ---------------------------------------------------------------------------
+// 位置情報の後付け（LIB-21。ジオタグ付け）
+// ---------------------------------------------------------------------------
+
+/// 使う位置の出どころ（[`VariantDetails::gps_source`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpsSource {
+    /// カメラ（ファイル）が記録した位置。
+    Camera,
+    /// 後から付けた位置（カタログの中だけに持つ。元のファイルには書かない）。
+    Assigned,
+}
+
+impl GpsSource {
+    /// 使う位置の出どころ（付けた位置があれば `Assigned`、なければカメラの位置があれば `Camera`）。
+    pub fn of(assigned: Option<GpsCoord>, camera: Option<GpsCoord>) -> Option<Self> {
+        match (assigned, camera) {
+            (Some(_), _) => Some(Self::Assigned),
+            (None, Some(_)) => Some(Self::Camera),
+            (None, None) => None,
+        }
+    }
+}
+
+/// 位置の変更の見込み・結果（[`crate::Core::plan_location_edit`]・[`crate::Core::edit_locations`]）。数は
+/// どれも写真の数（asset の数。同じ写真の仮想コピーは位置を共有するので 1 枚）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LocationEditPlan {
+    /// 対象の写真の数（動画・見つからないものを除く）。
+    pub photos: u64,
+    /// 変わる（変えた）数。
+    pub changed: u64,
+    /// 変わらない数（同じ位置がすでに付いている。消すときは付けた位置がない）。
+    pub unchanged: u64,
+    /// 対象のうち、カメラ（ファイル）の位置がある数（付けた位置があれば、そちらを使う）。
+    pub with_camera_gps: u64,
+    /// 対象のうち、変える前に付けた位置がある数（付けるときは置き換える）。
+    pub with_assigned: u64,
+    /// 除いた動画の数（asset の数。動画には位置を付けない。書き出しは元のファイルのままコピーするため）。
+    pub skipped_videos: u64,
+    /// 見つからなかった写真の数（削除されたものなど。variant の数）。
+    pub missing: u64,
+    /// 記録した変更（結果のとき。変わったものがなければ `null`。見込みでは常に `null`）。
+    pub edit_id: Option<i64>,
+}
+
+/// 位置の変更の履歴の 1 件（[`crate::Core::location_edits`]）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocationEditInfo {
+    /// ID。
+    pub id: i64,
+    /// 種類（`set`: 位置を付けた・`clear`: 付けた位置を消した）。
+    pub kind: String,
+    /// 付けた位置（`set`。`clear` は `null`）。
+    pub location: Option<GpsCoord>,
+    /// 変えた写真の数。
+    pub asset_count: u64,
+    /// 変更した日時（UTC）。
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<genzo_catalog::LocationEditRecord> for LocationEditInfo {
+    fn from(r: genzo_catalog::LocationEditRecord) -> Self {
+        Self {
+            id: r.id,
+            kind: r.kind.as_str().to_owned(),
+            location: r.location,
+            asset_count: r.asset_count,
+            created_at: r.created_at,
+        }
+    }
+}
+
+/// 位置の変更の取り消しの結果（[`crate::Core::undo_location_edit`]）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocationUndo {
+    /// 取り消した変更。
+    pub edit: LocationEditInfo,
+    /// 戻した写真の数（今の位置と同じだったものを除く）。
+    pub restored: u64,
+    /// 変更の後に削除された写真の数（戻すものがない）。
+    pub removed: u64,
 }
 
 // ---------------------------------------------------------------------------

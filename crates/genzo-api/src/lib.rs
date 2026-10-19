@@ -68,6 +68,7 @@
 //! | `snapshots` | スナップショット（[`Core::snapshots`]・[`Core::create_snapshot`]（今の状態・履歴の段階）・[`Core::rename_snapshot`]・[`Core::delete_snapshot`]・[`Core::apply_snapshot`]（履歴に 1 件残す））。ビフォーには [`BeforeSource::Snapshot`] | DEV-28、3.1 節 |
 //! | `presets` | 現像プリセット・書き出しプリセット（[`PresetStore`]。アプリのデータのフォルダ（[`default_presets_dir`]）に 1 件 1 ファイルの版付きの JSON。[`Core::create_develop_preset`]・[`Core::apply_develop_preset`]（設定の貼り付けと同じく処理バージョンを変えない）・[`Core::create_export_preset`]・名前・フォルダ・削除・ファイルの読み込みと書き出し） | DEV-29・EXP-02、2.5 節・6.4 節 |
 //! | `capture_time` | 撮影日時の一括修正（[`Core::capture_devices`]・[`Core::plan_capture_time_edit`]・[`Core::edit_capture_times`]・[`Core::undo_capture_time_edit`]。ずらす・基準の写真に合わせる・タイムゾーンの指定。カタログの中だけで、元のファイルには書かない） | LIB-16、3.13 節 |
+//! | `location` | 位置情報の後付け（[`Core::plan_location_edit`]・[`Core::edit_locations`]・[`Core::location_edits`]・[`Core::undo_location_edit`]。選んだ写真にまとめて同じ位置を付ける・付けた位置を消す。動画は除く。カタログの中だけで、元のファイルには書かない。使う位置は詳細の [`VariantDetails::gps`] と書き出しの Exif） | LIB-21、3.16 節 |
 //! | `timeline` | 写真と動画の統合タイムライン（[`Core::timeline`]。表示中の検索結果を撮影日と、撮影の間隔によるイベントでまとめる） | ORG-01、3.13 節 |
 //! | `volumes` | ボリュームの識別（OS のボリューム ID。取れなければパスの先頭。OS ごとの取り方は `volumes::os`）・つながりの確認（[`Core::volumes`]・[`Core::refresh_volumes`]）・以前の形式のボリュームの移し替え | FILE-03、3.3 節・3.14 節 |
 //! | `fileops` | アプリの中でのファイル操作（[`Core::move_files`]・[`Core::rename_files`]・[`Core::create_folder`]・[`Core::rename_folder`]・[`Core::move_folder`]・[`Core::remove_folder`]）と、途中で終わった移動・名前の変更の確定 | FILE-02、6.4 節・3.14 節、DATA-07 |
@@ -136,6 +137,7 @@ mod identity;
 mod import;
 mod jobs;
 mod library;
+mod location;
 mod lock;
 pub mod logging;
 pub mod maintenance;
@@ -213,14 +215,14 @@ pub use watermark::{
 
 // 型付きのメソッドの引数・応答で使う、依存先の crate の型（UI がまとめて使えるように）。
 pub use genzo_catalog::{
-    MAX_CAPTURE_SHIFT_SECONDS, MAX_CAPTURE_TIME_EDITS, MAX_SNAPSHOT_NAME_CHARS,
+    MAX_CAPTURE_SHIFT_SECONDS, MAX_CAPTURE_TIME_EDITS, MAX_LOCATION_EDITS, MAX_SNAPSHOT_NAME_CHARS,
 };
 pub use genzo_model::{
     AssetId, AssetKind, CaptureTime, CollectionId, CollectionKind, ColorLabel, DevelopSettings,
-    ExportFormat, ExportSettings, ExportSize, FileStatus, Flag, KeywordId, OutputColorSpace,
-    OutputSharpening, Rating, RenderQuality, RgbColor, SharpenAmount, SharpenMedia, SmartCondition,
-    SmartRule, StackId, VariantId, VideoExport, Watermark, WatermarkAnchor, WatermarkContent,
-    ZoneMode,
+    ExportFormat, ExportSettings, ExportSize, FileStatus, Flag, GpsCoord, KeywordId,
+    OutputColorSpace, OutputSharpening, Rating, RenderQuality, RgbColor, SharpenAmount,
+    SharpenMedia, SmartCondition, SmartRule, StackId, VariantId, VideoExport, Watermark,
+    WatermarkAnchor, WatermarkContent, ZoneMode,
 };
 pub use genzo_worker::{Lane, TestHook, TestHookOutput};
 
