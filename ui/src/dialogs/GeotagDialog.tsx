@@ -67,8 +67,9 @@ const PREVIEW_DELAY_MS = 300;
 /** 貼り付けられる形の案内（library/geotagLogic.ts の冒頭の一覧の主なもの）。 */
 const FORMATS_HINT =
   "貼り付けられる形: Google マップで地点を右クリックしてコピーした値（35.681236, 139.767125）・度分秒" +
-  "（35°40'52.4\"N 139°46'01.7\"E）・北緯と東経（北緯 35.681236°、東経 139.767125°）・Google マップの URL" +
-  "（@緯度,経度・q=緯度,経度）。";
+  "（35°40'52.4\"N 139°46'01.7\"E）・北緯と東経（北緯 35.681236°、東経 139.767125°）・Google マップの場所の URL" +
+  "（/place/…。ピンの位置を読みます）。URL の @緯度,経度 は地図の中心で、ピンとずれることがあります（場所の URL か、" +
+  "ピンを右クリックしてコピーした座標を使ってください）。";
 
 export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantId | null }) {
   const ids = props.variantIds;

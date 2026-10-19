@@ -667,7 +667,9 @@ pub enum LocationCommand {
         #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
         variants: Vec<VariantId>,
         /// 座標（例:「35.681236, 139.767125」「-33.8568, 151.2153」「35°40'52.4"N 139°46'01.7"E」
-        /// 「北緯 35.681236°、東経 139.767125°」・Google マップの URL。記号のない 2 つの数は緯度・経度の順）
+        /// 「北緯 35.681236°、東経 139.767125°」・Google マップの場所の URL（/place/…。ピンの位置を読む）。記号のない
+        /// 2 つの数は緯度・経度の順。URL の @緯度,経度 は地図の中心で、ピンとずれることがある。場所の URL
+        /// か、ピンを右クリックしてコピーした座標を使う）
         #[arg(
             long,
             value_name = "COORDS",
@@ -3673,6 +3675,43 @@ mod tests {
             let e = parse(args).unwrap_err();
             assert_eq!(e.exit_code(), 2, "{args:?}");
         }
+    }
+
+    /// `location set --at`（LIB-21）: 説明で、@ は地図の中心でピンとずれることがあるので、場所の URL かピンの
+    /// 座標を勧める。場所の URL は @ ではなくピンの位置（data= の !3d!4d）を読む（1s の値は仮の値）。
+    #[test]
+    fn location_set_at_prefers_place_urls_over_the_map_center() {
+        let cmd = Cli::command();
+        let set = cmd
+            .find_subcommand("location")
+            .and_then(|c| c.find_subcommand("set"))
+            .unwrap();
+        let help = set
+            .get_arguments()
+            .find(|a| a.get_id() == "at")
+            .and_then(|a| a.get_help())
+            .unwrap()
+            .to_string();
+        for part in [
+            "Google マップの場所の URL（/place/…。ピンの位置を読む）",
+            "URL の @緯度,経度 は地図の中心で、ピンとずれることがある",
+            "場所の URL か、ピンを右クリックしてコピーした座標を使う",
+        ] {
+            assert!(help.contains(part), "{help}");
+        }
+        let cli = parse(&[
+            "genzo",
+            "location",
+            "set",
+            "3",
+            "--at",
+            "https://www.google.com/maps/place/Tokyo+Station/@35.6812362,139.7645445,17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d35.6812362!4d139.7671248",
+        ])
+        .unwrap();
+        let Command::Location(LocationCommand::Set { at, .. }) = cli.command else {
+            panic!()
+        };
+        assert_eq!((at.lat, at.lon), (35.6812362, 139.7671248));
     }
 
     #[test]
