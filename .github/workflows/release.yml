@@ -8,7 +8,7 @@
 # - 成果物は Actions の artifact に置く（GitHub の Releases には出さない。誰に・どこで配るかは人の判断）
 #
 # 手順（OS ごと）: 公開の範囲の確認 →（タグのときは版の確認）→ 画面のビルド → LibRaw を入れる → ワーカーのビルドと LibRaw の収集
-# （scripts/prepare-worker.mjs）→ tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json
+# （LGPL-2.1 の全文・案内を含む。scripts/prepare-worker.mjs）→ tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json
 # （scripts/build-app.mjs）→ 確認（ワーカーが同梱の LibRaw で起動できるか）→ artifact に置く。
 # Windows は、ワーカーと LibRaw の DLL が使う Visual C++ のランタイムの DLL も同梱する（ランナーの Visual Studio の
 # 再頒布用のフォルダから。決定事項ログ No.73）。
@@ -180,6 +180,12 @@ jobs:
             if (-not (Test-Path (Join-Path $dir $name))) { throw "同梱したはずの $name がインストール先にない" }
           }
           Write-Output "インストール先にある同梱の DLL: $($listed -join ', ')"
+          # LibRaw の LGPL-2.1 の全文・著作権表示・案内（scripts/lib/notice.mjs）が、インストール先にあるか。
+          foreach ($name in 'LICENSE.LGPL', 'COPYRIGHT', 'README.txt') {
+            $f = Join-Path $dir "licenses\LibRaw\$name"
+            if (-not (Test-Path $f)) { throw "LibRaw のライセンスの文書 $name がインストール先にない" }
+          }
+          Get-Content (Join-Path $dir 'licenses\LibRaw\README.txt') -Encoding utf8 | Select-Object -First 5
           # DLL をインストール先と OS のフォルダからだけ探すよう、PATH を OS のフォルダだけにして起動する
           # （ランナーの PATH に LibRaw などの DLL があると、同梱の漏れを見逃すため）。
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
@@ -211,6 +217,13 @@ jobs:
           if [ "$min_actual" != "$EXPECTED_MIN_MACOS" ]; then
             echo "::error::.app の最小の版（${min_actual}）が、同梱するものに合わせた版（${EXPECTED_MIN_MACOS}）と違う"; exit 1
           fi
+          # LibRaw の LGPL-2.1 の全文・著作権表示・案内（scripts/lib/notice.mjs）が、.app の中にあるか。
+          for name in LICENSE.LGPL COPYRIGHT README.txt; do
+            if [ ! -f "$app/Contents/Resources/licenses/LibRaw/$name" ]; then
+              echo "::error::LibRaw のライセンスの文書 ${name} が .app の Contents/Resources/licenses/LibRaw にない"; exit 1
+            fi
+          done
+          head -5 "$app/Contents/Resources/licenses/LibRaw/README.txt"
           shopt -s nullglob
           dmgs=(target/release/bundle/dmg/*.dmg)
           if [ ${#dmgs[@]} -eq 0 ]; then echo "::error::.dmg がない"; exit 1; fi
@@ -262,6 +275,7 @@ jobs:
             target/release/bundle/dmg/*.dmg
             target/release/bundle/GenzoParis.app.tar.gz
             crates/genzo-app/binaries/bundled-libs.txt
+            crates/genzo-app/binaries/licenses/
           if-no-files-found: error
           # 仮置き: 30 日（配布が済んだら消えてよい）。
           retention-days: 30
@@ -276,6 +290,7 @@ jobs:
             target/release/bundle/dmg/*.dmg
             target/release/bundle/GenzoParis.app.tar.gz
             crates/genzo-app/binaries/bundled-libs.txt
+            crates/genzo-app/binaries/licenses/
             target/verify-logs/
           if-no-files-found: ignore
           retention-days: 7

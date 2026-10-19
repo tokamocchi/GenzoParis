@@ -18,7 +18,7 @@ use super::params::{
     DetailParams, EffectsParams, Geometry, GradingWheel, Grain, HighlightRecovery, HueBand,
     LensCorrection, MAX_ASPECT_TERM, MAX_CURVE_POINTS, MIN_CROP_SIZE, NoiseReduction,
     ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings, RenderDeps, Sharpening,
-    ToneCurve, ToneParams, ValueRange, WhiteBalance, is_valid_profile_id, ranges,
+    ToneCurve, ToneParams, ValueRange, VignetteCenter, WhiteBalance, is_valid_profile_id, ranges,
 };
 use crate::{CURRENT_PROCESS_VERSION, CURRENT_SCHEMA_VERSION};
 
@@ -709,6 +709,10 @@ impl EffectsParams {
             v.highlights,
             ranges::AMOUNT_0_100,
         );
+        if let Some(p) = &v.center {
+            c.range("effects.vignette.center.x", p.x, ranges::CROP_COORD);
+            c.range("effects.vignette.center.y", p.y, ranges::CROP_COORD);
+        }
         let g = &self.grain;
         c.range("effects.grain.amount", g.amount, ranges::AMOUNT_0_100);
         c.range("effects.grain.size", g.size, ranges::AMOUNT_0_100);
@@ -723,6 +727,13 @@ impl EffectsParams {
         clamp0(&mut v.roundness, ranges::SLIDER);
         v.feather = r.clamp_or(v.feather, PostCropVignette::DEFAULT_FEATHER);
         clamp0(&mut v.highlights, r);
+        // 手動の中心は、範囲の外なら端に寄せ、NaN・無限大なら切り抜きの中心に戻す。
+        v.center = v.center.and_then(|p| {
+            (p.x.is_finite() && p.y.is_finite()).then(|| VignetteCenter {
+                x: ranges::CROP_COORD.clamp_or(p.x, 0.5),
+                y: ranges::CROP_COORD.clamp_or(p.y, 0.5),
+            })
+        });
         let g = &mut self.grain;
         clamp0(&mut g.amount, r);
         g.size = r.clamp_or(g.size, Grain::DEFAULT_SIZE);

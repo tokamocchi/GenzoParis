@@ -723,3 +723,29 @@
   border-radius: 50%;
   vertical-align: 1px;
 }
+
+/* 切り抜き後の周辺光量補正の中心の印（VignetteLayer.tsx。DEV-24）。印だけがポインターを受ける。 */
+.dv-vignette {
+  overflow: hidden;
+  pointer-events: none;
+}
+.dv-vignette-center line {
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+.dv-vignette-knob {
+  fill: transparent;
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+  pointer-events: all;
+  cursor: grab;
+}
+.dv-vignette-center.manual .dv-vignette-knob {
+  fill: rgba(232, 232, 232, 0.35);
+  stroke-dasharray: none;
+}
+.dv-vignette-knob:active {
+  cursor: grabbing;
+}

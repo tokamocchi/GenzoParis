@@ -337,6 +337,17 @@ export interface PostCropVignette {
   feather: number;
   /** ハイライトの保護（0〜100。既定 0）。 */
   highlights: number;
+  /**
+   * 手動の中心（切り抜く前の画像の幅・高さに対する割合。各軸 0〜1）。ない（null）なら切り抜きの中心
+   * （切り抜きを動かすと一緒に動く）。コアは、ないときはこの項目を返さない。
+   */
+  center?: VignetteCenter | null;
+}
+
+/** 切り抜き後の周辺光量補正の手動の中心（genzo-model の VignetteCenter。座標は切り抜きと同じ）。 */
+export interface VignetteCenter {
+  x: number;
+  y: number;
 }
 
 /** 粒子（DEV-24。genzo-model の Grain。処理バージョン 2 から）。 */

@@ -1,4 +1,4 @@
-//! 比較明・比較暗合成（DEV-34。docs/composite_design.md、決定事項ログ No.175〜178）。
+//! 比較明・比較暗合成（DEV-34。docs/composite_design.md、決定事項ログ No.177〜180）。
 //!
 //! 三脚で固定して撮った複数の写真（花火・星の軌跡・光跡）を、画素ごとの最大・最小で 1 枚にする。Lightroom Classic から
 //! Photoshop へ「レイヤーとして開く」で渡し、描画モードを「比較（明）」にするのと同じく、**各写真に現像の設定をかけた
@@ -143,7 +143,7 @@ fn oriented_size(s: &VariantSummary) -> Option<(u32, u32)> {
     })
 }
 
-/// 保存するファイルの名前（`<1 枚目の元のファイル名>-<モード>-<枚数>.<拡張子>`。決定事項ログ No.177）。
+/// 保存するファイルの名前（`<1 枚目の元のファイル名>-<モード>-<枚数>.<拡張子>`。決定事項ログ No.179）。
 fn output_file_name(first: &VariantSummary, settings: &CompositeSettings, count: usize) -> String {
     let stem = Path::new(&first.file_name)
         .file_stem()

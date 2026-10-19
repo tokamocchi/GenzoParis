@@ -2,7 +2,7 @@
 // ジョブの結果のまとめ（DOM を使わない純粋な計算）。
 //
 // CompositeSettings の JSON の形は genzo-model の composite.rs（形式・色空間は書き出しと同じ形）。既定は TIFF 16bit・
-// Adobe RGB・元の写真とスタックにまとめる（決定事項ログ No.177・178）。
+// Adobe RGB・元の写真とスタックにまとめる（決定事項ログ No.179・180）。
 
 import type {
   CompositeCheck,

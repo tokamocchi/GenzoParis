@@ -2153,7 +2153,7 @@ pub struct CompositeReport {
     pub cpu_renders: u64,
     /// 現像の警告（写真ごと）。
     pub warnings: Vec<CompositeWarning>,
-    /// 失敗（1 枚でも現像に失敗したら全体を失敗にする。決定事項ログ No.176）。
+    /// 失敗（1 枚でも現像に失敗したら全体を失敗にする。決定事項ログ No.178）。
     pub failure: Option<CompositeFailure>,
     /// 取り消されて途中で終わったか（何も書かない）。
     pub cancelled: bool,

@@ -19,6 +19,8 @@
 //   （MaskLayer.tsx）。重ねて表示（O）は選んでいるマスクの重みを赤で重ねる。色域のスポイトはクリックした点の色を
 //   見本にする。ビフォー / アフターの表示・切り抜きの編集の間は出さない。全体表示でも等倍表示でも、画像の箱と
 //   FrameInfo.g_bounds で位置を合わせる。
+// - 切り抜き後の周辺光量補正の中心（DEV-24）: 効果の区切りを開いている間、中心に印を出し、ドラッグで動かす
+//   （VignetteLayer.tsx）。
 // - 画像のまわりは色みのない灰色だけにする（写真の色の判断に影響しないように）。
 
 import {
@@ -60,6 +62,7 @@ import {
   splitX,
 } from "./compareMath";
 import { colorControls, toggleBlackWhite } from "./colorLogic";
+import { detailControls } from "./detailLogic";
 import { type CropHandle, cropFractionAspect, dragCrop, rotatedImageCorners } from "./cropMath";
 import { useGeometryInfo, useLoadedSummary, useLoadedSummaryObject } from "./hooks";
 import { activatesOnEnter } from "./keyTargets";
@@ -90,6 +93,7 @@ import {
   useDevelopView,
   viewStore,
 } from "./viewState";
+import { VignetteLayer } from "./VignetteLayer";
 import { clampCenter, fitBox, zoomOrigin } from "./zoomMath";
 import "./develop.css";
 
@@ -418,6 +422,7 @@ function Stage() {
   const componentIndex = useDevelopView((s) => s.componentIndex);
   const overlayOn = useDevelopView(overlayShown);
   const brush = useDevelopView((s) => s.brush);
+  const vignetteHandle = useDevelopView((s) => s.vignetteHandle);
 
   const header: FrameInfo | null = frame?.header ?? null;
   const outW = header?.output_width ?? 0;
@@ -575,6 +580,17 @@ function Stage() {
   const sel = !crop && !comparing && hasState ? currentMask(settings, { maskIndex, componentIndex }) : null;
   const gb = boundsOrDefault(header?.g_bounds);
   const maskEditable = !!settings && maskControls(settings, !hasState || opening).editable;
+  // 周辺光量補正の中心の印: 効果の区切りを開いていて量が 0 でなく、マスク・道具・切り抜きの編集・ビフォー / アフターの
+  // 表示を使っていないとき（つまみが重ならないように）。
+  const showVignette =
+    vignetteHandle &&
+    !!settings &&
+    !crop &&
+    !comparing &&
+    !sel &&
+    tool === "none" &&
+    !!info &&
+    detailControls(settings, !hasState || opening).vignetteOptions;
   const overlay = useMaskOverlay(
     sel && overlayOn && variantId !== null && header
       ? { variantId, index: sel.index, generation: header.generation, uncropped }
@@ -657,6 +673,16 @@ function Stage() {
           editable={maskEditable}
           overlayOn={overlayOn}
           overlayGeneration={overlay?.header.generation ?? null}
+        />
+      )}
+      {showVignette && settings && info && imageBox && (
+        <VignetteLayer
+          width={size.width}
+          height={size.height}
+          box={imageBox}
+          gb={gb}
+          settings={settings}
+          info={info}
         />
       )}
       {comparing && split && <div className="dv-split-line" style={{ left: splitAt }} />}

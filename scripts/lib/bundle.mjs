@@ -155,22 +155,30 @@ export function isVcRedistFolder(name) {
  * macOS で `minimumSystemVersion` を渡したときは、.app の最小の版（Info.plist の LSMinimumSystemVersion）も
  * 上書きする（同梱する dylib の minos に合わせて上げるとき。scripts/lib/worker.mjs）。
  *
+ * `resources` は、Windows・macOS で `bundle.resources` に足す対応表（LibRaw のライセンスの文書と案内。
+ * scripts/lib/notice.mjs。Windows はインストール先、macOS は .app の Contents/Resources からの場所）。
+ *
  * @param {"windows" | "macos" | "linux" | "other"} os
  * @param {string[]} fileNames 同梱するファイルの名前（LIBS_DIR の中）
- * @param {{ minimumSystemVersion?: string }} [options]
+ * @param {{ minimumSystemVersion?: string, resources?: Record<string, string> }} [options]
  */
 export function libsTauriConfig(os, fileNames, options = {}) {
   const sorted = [...fileNames].sort();
+  const extra = options.resources ?? {};
   if (os === "windows") {
-    if (sorted.length === 0) return {};
-    return { bundle: { resources: Object.fromEntries(sorted.map((n) => [`${LIBS_DIR}/${n}`, n])) } };
+    const resources = { ...Object.fromEntries(sorted.map((n) => [`${LIBS_DIR}/${n}`, n])), ...extra };
+    return Object.keys(resources).length === 0 ? {} : { bundle: { resources } };
   }
   if (os === "macos") {
     /** @type {{ frameworks?: string[], minimumSystemVersion?: string }} */
     const macOS = {};
     if (sorted.length > 0) macOS.frameworks = sorted.map((n) => `${LIBS_DIR}/${n}`);
     if (options.minimumSystemVersion) macOS.minimumSystemVersion = options.minimumSystemVersion;
-    return Object.keys(macOS).length === 0 ? {} : { bundle: { macOS } };
+    /** @type {{ macOS?: typeof macOS, resources?: Record<string, string> }} */
+    const bundle = {};
+    if (Object.keys(macOS).length > 0) bundle.macOS = macOS;
+    if (Object.keys(extra).length > 0) bundle.resources = { ...extra };
+    return Object.keys(bundle).length === 0 ? {} : { bundle };
   }
   return {};
 }

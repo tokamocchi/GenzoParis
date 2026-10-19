@@ -1,4 +1,4 @@
-//! 比較明・比較暗合成の設定（DEV-34。docs/composite_design.md、決定事項ログ No.175〜178）。
+//! 比較明・比較暗合成の設定（DEV-34。docs/composite_design.md、決定事項ログ No.177〜180）。
 
 use serde::{Deserialize, Serialize};
 
@@ -77,7 +77,7 @@ impl Default for CompositeSettings {
 impl CompositeSettings {
     /// 合成できる写真の数の下限。
     pub const MIN_SOURCES: usize = 2;
-    /// 合成できる写真の数の上限（仮置き。決定事項ログ No.176）。
+    /// 合成できる写真の数の上限（仮置き。決定事項ログ No.178）。
     pub const MAX_SOURCES: usize = 999;
 
     /// 値を検証する（JPEG の品質）。
