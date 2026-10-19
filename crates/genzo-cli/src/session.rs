@@ -310,6 +310,7 @@ pub fn job_kind_text(kind: JobKind) -> &'static str {
         JobKind::CheckMissing => "見つからない写真の確認",
         JobKind::FindRelinkCandidates => "再リンクの候補の探索",
         JobKind::VideoProxy => "再生用のファイルの作成",
+        JobKind::Composite => "合成",
     }
 }
 

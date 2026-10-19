@@ -202,6 +202,9 @@ pub enum Command {
     Preset(PresetCommand),
     /// 書き出す（P3 のジョブ。進捗は標準エラー）
     Export(ExportArgs),
+    /// 比較明・比較暗合成（DEV-34。P3 のジョブ）: 選んだ写真を撮影日時の順に現像して画素ごとに比べ、1 枚にして保存し、
+    /// カタログに登録する（既定は 16bit の TIFF・Adobe RGB・1 枚目の写真と同じフォルダ・元の写真とスタックにまとめる）
+    Composite(CompositeArgs),
     /// カタログなしで 1 つのファイルを現像して書き出す（ワーカーで展開する）
     Render(RenderArgs),
     /// 透かしの見本・フォントのフォルダ（EXP-03。カタログは使わない）
@@ -2591,6 +2594,62 @@ pub struct ExportOpts {
     /// プリセットの値）
     #[arg(long, value_enum)]
     pub on_conflict: Option<ConflictArg>,
+}
+
+/// 合成の比べ方（DEV-34）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompositeModeArg {
+    /// 比較明（チャンネルごとの最大。Photoshop の「比較（明）」）
+    Lighten,
+    /// 比較暗（チャンネルごとの最小）
+    Darken,
+    /// カラー比較明（輝度が最大の写真の画素をそのまま採る）
+    LighterColor,
+    /// カラー比較暗（輝度が最小の写真の画素をそのまま採る）
+    DarkerColor,
+}
+
+impl From<CompositeModeArg> for genzo_model::CompositeMode {
+    fn from(m: CompositeModeArg) -> Self {
+        match m {
+            CompositeModeArg::Lighten => Self::Lighten,
+            CompositeModeArg::Darken => Self::Darken,
+            CompositeModeArg::LighterColor => Self::LighterColor,
+            CompositeModeArg::DarkerColor => Self::DarkerColor,
+        }
+    }
+}
+
+/// `composite` の引数（DEV-34）。
+#[derive(Debug, Args)]
+pub struct CompositeArgs {
+    /// variant の ID（2 枚以上。動画は除く）
+    #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+    pub variants: Vec<VariantId>,
+    /// 比べ方（省略時は lighten）
+    #[arg(long, value_enum, default_value_t = CompositeModeArg::Lighten)]
+    pub mode: CompositeModeArg,
+    /// 形式（省略時は tiff（16bit））
+    #[arg(long, value_enum)]
+    pub format: Option<FormatArg>,
+    /// JPEG の品質（1〜100。--format jpeg のときだけ）
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub quality: Option<u8>,
+    /// 色空間（比べるのもこの色空間の値。省略時は adobergb）
+    #[arg(long, value_enum)]
+    pub color_space: Option<ColorSpaceArg>,
+    /// 保存先のフォルダ（省略時は 1 枚目（撮影日時が最も早い写真）と同じフォルダ）
+    #[arg(long, value_name = "DIR")]
+    pub out: Option<PathBuf>,
+    /// 元の写真とスタックにまとめない
+    #[arg(long)]
+    pub no_stack: bool,
+    /// GPS 情報を書かない
+    #[arg(long)]
+    pub remove_gps: bool,
+    /// 合成せずに、確認の結果（写真の並び・設定の違い・保存先とファイル名）だけを表示する
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// `export` の引数。

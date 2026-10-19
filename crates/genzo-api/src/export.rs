@@ -92,7 +92,7 @@ use crate::types::{
 
 /// 書き出し先のフォルダにある、カタログに登録されたファイルの絶対パス（パスのままと、リンクを解決した
 /// もの）。
-fn catalog_files_in(inner: &Inner, dir: &Path) -> Result<Vec<PathBuf>, ApiError> {
+pub(crate) fn catalog_files_in(inner: &Inner, dir: &Path) -> Result<Vec<PathBuf>, ApiError> {
     let mut candidates = vec![dir.to_path_buf()];
     if let Ok(c) = std::fs::canonicalize(dir) {
         candidates.push(c);

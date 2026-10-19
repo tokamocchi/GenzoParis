@@ -153,4 +153,14 @@ describe("写真の右クリックのメニュー", () => {
     expect(byAction(photoMenuEntries(1, mockSummary({ kind: "video" }))).get("upgrade_process")?.enabled).toBe(false);
     expect(byAction(photoMenuEntries(0, undefined)).get("upgrade_process")?.enabled).toBe(false);
   });
+
+  it("比較明・比較暗合成は 2 枚以上を選んでいるときだけ（DEV-34）", () => {
+    const one = byAction(photoMenuEntries(1, mockSummary()));
+    expect(one.get("composite_lighten")?.enabled).toBe(false);
+    expect(one.get("composite_darken")?.enabled).toBe(false);
+    const two = byAction(photoMenuEntries(2, mockSummary()));
+    expect(two.get("composite_lighten")?.label).toBe("比較明合成…");
+    expect(two.get("composite_lighten")?.enabled).toBe(true);
+    expect(two.get("composite_darken")?.enabled).toBe(true);
+  });
 });

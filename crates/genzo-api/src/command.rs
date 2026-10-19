@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use genzo_model::{
-    CollectionId, CollectionKind, ColorLabel, CropRect, DevelopSettings, ExportFormat,
-    ExportSettings, Flag, FolderId, HistoryEntryId, KeywordId, MetadataField, Rating, SmartRule,
-    SnapshotId, StackId, VariantId, Watermark,
+    CollectionId, CollectionKind, ColorLabel, CompositeSettings, CropRect, DevelopSettings,
+    ExportFormat, ExportSettings, Flag, FolderId, HistoryEntryId, KeywordId, MetadataField, Rating,
+    SmartRule, SnapshotId, StackId, VariantId, Watermark,
 };
 use serde::{Deserialize, Serialize};
 
@@ -819,6 +819,30 @@ pub enum Command {
         file_naming: Option<RenameRule>,
     },
 
+    // --- 比較明・比較暗合成（DEV-34） ---
+    /// 合成する前の確認（[`crate::Core::composite_check`]）。→ [`Response::CompositeCheck`]
+    CompositeCheck {
+        /// variant（動画は除く）。
+        variant_ids: Vec<VariantId>,
+        /// 合成の設定（省いた項目は既定値）。
+        #[serde(default)]
+        settings: CompositeSettings,
+        /// 保存先のフォルダ（省略・`null` なら 1 枚目の写真と同じフォルダ）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dest_dir: Option<PathBuf>,
+    },
+    /// 合成する（P3 のジョブ。[`crate::Core::composite`]）。→ [`Response::JobStarted`]
+    Composite {
+        /// variant（動画は除く）。
+        variant_ids: Vec<VariantId>,
+        /// 合成の設定（省いた項目は既定値）。
+        #[serde(default)]
+        settings: CompositeSettings,
+        /// 保存先のフォルダ（省略・`null` なら 1 枚目の写真と同じフォルダ）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dest_dir: Option<PathBuf>,
+    },
+
     // --- 削除 ---
     /// 削除の計画（影響の一覧）。→ [`Response::DeletePlan`]
     PlanDelete {
@@ -1297,6 +1321,8 @@ pub enum Response {
     NamePreview(NamePreview),
     /// 透かしの見本。
     WatermarkPreview(crate::watermark::WatermarkPreview),
+    /// 合成する前の確認（DEV-34）。
+    CompositeCheck(crate::types::CompositeCheck),
     /// 動画の再生の情報（VID-04）。
     VideoPlayback(VideoPlayback),
     /// 再生用のファイルのキャッシュの状況。
@@ -1820,6 +1846,22 @@ impl Core {
                     &dest_dir,
                     file_naming.as_ref(),
                 )?,
+            },
+            C::CompositeCheck {
+                variant_ids,
+                settings,
+                dest_dir,
+            } => R::CompositeCheck(self.composite_check(
+                &variant_ids,
+                &settings,
+                dest_dir.as_deref(),
+            )?),
+            C::Composite {
+                variant_ids,
+                settings,
+                dest_dir,
+            } => R::JobStarted {
+                job_id: self.composite(&variant_ids, &settings, dest_dir.as_deref())?,
             },
             C::PlanDelete { kind, variant_ids } => {
                 R::DeletePlan(self.plan_delete(kind, &variant_ids)?)
@@ -2653,6 +2695,22 @@ mod tests {
             },
             Command::CreateVideoProxy {
                 variant_id: VariantId::new(9),
+            },
+            Command::CompositeCheck {
+                variant_ids: vec![VariantId::new(1), VariantId::new(2)],
+                settings: CompositeSettings::default(),
+                dest_dir: None,
+            },
+            Command::Composite {
+                variant_ids: vec![VariantId::new(3), VariantId::new(4)],
+                settings: CompositeSettings {
+                    mode: genzo_model::CompositeMode::LighterColor,
+                    format: ExportFormat::Jpeg { quality: 92 },
+                    color_space: genzo_model::OutputColorSpace::DisplayP3,
+                    remove_gps: true,
+                    stack_with_sources: false,
+                },
+                dest_dir: Some("/out".into()),
             },
             Command::VideoProxyCache,
             Command::ClearVideoProxies,

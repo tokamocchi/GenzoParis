@@ -17,6 +17,7 @@
 pub mod cache_key;
 pub mod capture_time;
 pub mod catalog;
+pub mod composite;
 pub mod develop;
 pub mod export;
 pub mod fs_sync;
@@ -32,6 +33,7 @@ pub use catalog::{
     AssetKind, CollectionKind, ColorLabel, FileOpKind, FileOpState, FileRole, FileStatus, Flag,
     FolderStatus, ParseEnumError, Rating, TzSource,
 };
+pub use composite::{CompositeMode, CompositeSettings};
 pub use develop::{
     AspectRatio, BlackWhite, BrushStroke, ColorGrading, ColorMixer, ColorParams, ColorSample,
     CropRect, CurvePoint, DataRef, DetailParams, DevelopError, DevelopSettings, EffectsParams,
