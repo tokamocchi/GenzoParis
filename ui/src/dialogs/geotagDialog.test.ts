@@ -24,6 +24,7 @@ import { DEFAULT_MAP_PREFERENCES, DEFAULT_TILE_URL } from "../library/geoMapLogi
 import { GpsValue } from "../library/MetadataPanel";
 import { appStore } from "../state/app";
 import { openGeotagDialog, runPhotoMenu } from "../state/stacks";
+import { formatLocalDateTime } from "./dialogFormat";
 import { Dialogs } from "./Dialogs";
 import { GeotagDialog } from "./GeotagDialog";
 import { MapConsentPanel } from "./MapConsent";
@@ -266,7 +267,11 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     const tile_url = "https://tiles.example.org/{z}/{x}/{y}.png";
     appStore.set({ status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, tile_url }) });
     const on = render(createElement(SettingsDialog, { tab: "general" }));
-    expect(on).toContain("初めて有効にした日時: 2026-10-20");
+    // 日時は実行環境の時間帯で出す（UTC の 01:02:03 は時間帯によって前の日になるので、同じ関数で作った値と比べる）。
+    const consented = MOCK_MAP_PREFERENCES.consented_at;
+    expect(consented).not.toBeNull();
+    expect(on).toContain(`初めて有効にした日時: ${formatLocalDateTime(consented ?? "")}`);
+    expect(on).toMatch(/初めて有効にした日時: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
     expect(on).toContain("tiles.example.org（設定で変えた提供元）");
     expect(on).toContain('value="https://tiles.example.org/{z}/{x}/{y}.png"');
   });
