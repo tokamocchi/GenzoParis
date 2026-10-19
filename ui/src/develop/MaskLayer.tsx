@@ -3,7 +3,8 @@
 // - MaskLayer: 選んでいるマスクの線形・円形のつまみ（ドラッグで動かす。ドラッグの間は dragging で送り、離したら
 //   end_drag で履歴に 1 件）、色域の見本の点の印、ブラシで描く（tool が brush の間。押してから離すまでを 1 本の
 //   ストロークにして、離したときに設定に足す。Alt を押しながらなら消しゴム）。位置は G 座標で、画面の画像の箱との
-//   対応は FrameInfo.g_bounds（maskLogic の gToBox・boxToG）。
+//   対応は FrameInfo.g_bounds（maskLogic の gToBox・boxToG）。離したストロークは、それを含む重ねて表示が届くまで
+//   描いたままにする（重ねて表示をしていなければ、コアが受け付けるまで）。描いたところがいったん消えて見えないように。
 // - MaskOverlayCanvas / useMaskOverlay: 重ねて表示（O）。コアの mask_overlay_frame（プレビューと同じ格子の重み）を
 //   赤の半透明にして、画像の箱に重ねる。プレビューが更新されるたびに取り直す（取得中に更新が来たら、終わってから
 //   もう一度。古い結果は捨てる）。
@@ -12,12 +13,13 @@ import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } f
 
 import { type Frame, fetchMaskOverlay } from "../api/frames";
 import type { LinearShape, LocalAdjustment, MaskOverlayInfo, RadialShape, VariantId } from "../api/types";
-import { applySettings, developStore, endDrag } from "../state/develop";
+import { applySettings, developStore, endDrag, useDevelop } from "../state/develop";
 import {
   type Box,
   type BrushOptions,
   type GBounds,
   type LinearHandle,
+  type PendingStroke,
   type RadialHandle,
   boxToG,
   dragLinear,
@@ -26,6 +28,7 @@ import {
   overlayRgba,
   pixelsPerG,
   radialAxes,
+  settlePendingStrokes,
   withShape,
 } from "./maskLogic";
 import { commitBrushStroke, selectComponent } from "./viewState";
@@ -51,21 +54,34 @@ export function MaskLayer(props: {
   painting: boolean;
   brush: BrushOptions;
   editable: boolean;
+  /** 重ねて表示をしているか。 */
+  overlayOn: boolean;
+  /** 重ねて表示している画像の世代（まだ届いていなければ null）。 */
+  overlayGeneration: number | null;
 }) {
   const { box, gb, mask, index, component, editable } = props;
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<Drag | null>(null);
   const [stroke, setStroke] = useState<{ points: [number, number][]; erase: boolean; pointer: number } | null>(null);
   const [cursor, setCursor] = useState<{ x: number; y: number; erase: boolean } | null>(null);
+  const [pending, setPending] = useState<PendingStroke[]>([]);
+  const ack = useDevelop((s) => s.settingsAck);
   const ppg = pixelsPerG(gb, box);
+  const { overlayOn, overlayGeneration } = props;
 
-  // ブラシをやめたら、描きかけのストロークと印を消す。
+  // ブラシをやめたら、描きかけ・離したストロークと印を消す。
   useEffect(() => {
     if (!props.painting) {
       setStroke(null);
+      setPending([]);
       setCursor(null);
     }
   }, [props.painting]);
+
+  // 離したストロークを、コアが受け付けて重ねて表示に入ったら消す。
+  useEffect(() => {
+    setPending((p) => settlePendingStrokes(p, ack, overlayOn, overlayGeneration));
+  }, [ack, overlayOn, overlayGeneration]);
 
   /** ポインターの位置（ステージの CSS の画素）。 */
   const local = (e: { clientX: number; clientY: number }): [number, number] => {
@@ -127,7 +143,9 @@ export function MaskLayer(props: {
     if (stroke && stroke.pointer === e.pointerId) {
       const points = [...stroke.points, toG(e)];
       setStroke(null);
-      commitBrushStroke(points, stroke.erase);
+      const size = props.brush.size;
+      const seq = commitBrushStroke(points, stroke.erase);
+      if (seq !== null) setPending((p) => [...p, { points, erase: stroke.erase, size, seq, generation: null }]);
       return;
     }
     const d = drag.current;
@@ -262,6 +280,14 @@ export function MaskLayer(props: {
       }}
     >
       {shapes}
+      {pending.map((p) => (
+        <polyline
+          key={p.seq}
+          className={`dv-mask-stroke${p.erase ? " erase" : ""}`}
+          points={p.points.map(([u, v]) => at(u, v).join(",")).join(" ")}
+          strokeWidth={Math.max(1, 2 * p.size * ppg)}
+        />
+      ))}
       {stroke && stroke.points.length > 0 && (
         <polyline
           className={`dv-mask-stroke${stroke.erase ? " erase" : ""}`}

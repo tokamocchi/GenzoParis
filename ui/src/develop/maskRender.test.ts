@@ -66,7 +66,7 @@ describe("マスクのパネルを描く", () => {
   afterEach(() => {
     delete (globalThis as { localStorage?: unknown }).localStorage;
     developStore.set({ variantId: null, state: null, settings: null });
-    viewStore.set({ tool: "none", maskIndex: null, componentIndex: null, maskOverlay: false, brush: DEFAULT_BRUSH, pickTarget: null });
+    viewStore.set({ tool: "none", maskIndex: null, componentIndex: null, maskOverlay: false, brushOverlay: true, brush: DEFAULT_BRUSH, pickTarget: null });
   });
 
   /** マスク `mask`・部品 `component` を選んだ現像のパネル。 */
@@ -173,6 +173,8 @@ describe("プレビューの上のマスクの層を描く", () => {
         painting: false,
         brush: DEFAULT_BRUSH,
         editable: true,
+        overlayOn: false,
+        overlayGeneration: null,
         ...over,
       }),
     );

@@ -529,6 +529,43 @@ export function clearStrokes(s: DevelopSettings, i: number, j: number): DevelopS
 // 表示
 // ---------------------------------------------------------------------------
 
+/** 離したストローク（コアに渡した設定の通し番号 `seq`。受け付けた世代 `generation` が分かるまでは null）。 */
+export interface PendingStroke {
+  points: [number, number][];
+  erase: boolean;
+  /** 大きさ（半径。G 座標）。 */
+  size: number;
+  seq: number;
+  generation: number | null;
+}
+
+/**
+ * 離したストロークのうち、まだ描いておくもの（コアが受け付けた `ack` で世代を埋め、その世代以降の重ねて表示
+ * `overlayGeneration` が届いたら除く。重ねて表示をしていなければ（`overlayOn` が false）、受け付けたら除く）。
+ * 変わらなければ同じ配列を返す。
+ */
+export function settlePendingStrokes(
+  pending: PendingStroke[],
+  ack: { seq: number; generation: number } | null,
+  overlayOn: boolean,
+  overlayGeneration: number | null,
+): PendingStroke[] {
+  let changed = false;
+  const next: PendingStroke[] = [];
+  for (const p of pending) {
+    const generation = p.generation ?? (ack && ack.seq >= p.seq ? ack.generation : null);
+    const done =
+      generation !== null && (!overlayOn || (overlayGeneration !== null && overlayGeneration >= generation));
+    if (done) {
+      changed = true;
+      continue;
+    }
+    if (generation !== p.generation) changed = true;
+    next.push(generation === p.generation ? p : { ...p, generation });
+  }
+  return changed ? next : pending;
+}
+
 /** 重ねて表示の色（赤）と、重み 1 のときの不透明度。 */
 export const OVERLAY_RGB: [number, number, number] = [255, 40, 40];
 export const OVERLAY_ALPHA = 0.5;

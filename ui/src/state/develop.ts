@@ -48,6 +48,11 @@ export interface DevelopStoreState {
   before: BeforeInfo | null;
   /** ビフォーの最新のプレビュー。 */
   beforeFrame: Frame<FrameInfo> | null;
+  /**
+   * コアが最後に受け付けた設定（applySettings の通し番号 `seq` と、コアが割り当てた世代）。`seq` 以前に渡した設定は、
+   * 世代 `generation` 以降のプレビュー・重ねて表示に入っている（後の設定は前の設定を含むため）。
+   */
+  settingsAck: { seq: number; generation: number } | null;
 }
 
 export const developStore = createStore<DevelopStoreState>({
@@ -60,6 +65,7 @@ export const developStore = createStore<DevelopStoreState>({
   historyVersion: 0,
   before: null,
   beforeFrame: null,
+  settingsAck: null,
 });
 
 export function useDevelop<T>(selector: (s: DevelopStoreState) => T, equal?: (a: T, b: T) => boolean): T {
@@ -144,11 +150,13 @@ export async function closeDevelopSession(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 type Op =
-  | { kind: "settings"; settings: DevelopSettings; dragging: boolean }
+  | { kind: "settings"; settings: DevelopSettings; dragging: boolean; seq: number }
   | { kind: "end_drag" }
   | { kind: "call"; run: () => Promise<void> };
 
 let running = false;
+/** applySettings の通し番号（最後に渡した設定の番号）。 */
+let applySeq = 0;
 /** 送信待ちの設定（最新の 1 つ）。 */
 let pending: Op | null = null;
 /** 設定の後に順に実行する操作（end_drag・Undo など）。 */
@@ -202,9 +210,11 @@ async function pump(): Promise<void> {
 
 async function runOp(op: Op): Promise<void> {
   switch (op.kind) {
-    case "settings":
-      await core.setSettings(op.settings, op.dragging);
+    case "settings": {
+      const generation = await core.setSettings(op.settings, op.dragging);
+      developStore.set({ settingsAck: { seq: op.seq, generation } });
       break;
+    }
     case "end_drag": {
       const state = await core.endDrag();
       developStore.set((s) => ({ state, before: beforeOf(state, s), historyVersion: s.historyVersion + 1 }));
@@ -221,13 +231,17 @@ async function runOp(op: Op): Promise<void> {
  *
  * - スライダーのドラッグ中は `dragging: true` で送り、離したら [`endDrag`] を呼ぶ（履歴に 1 件）。
  * - ドラッグでない変更（数値の入力・プリセット）は `dragging: false`（コアが 1 秒後に保存して履歴に記録）。
+ *
+ * 戻り値は通し番号（コアが受け付けたら [`DevelopStoreState.settingsAck`] に出る）。写真を開いていなければ null。
  */
-export function applySettings(settings: DevelopSettings, dragging: boolean): void {
+export function applySettings(settings: DevelopSettings, dragging: boolean): number | null {
   const s = developStore.get();
-  if (!s.state) return;
+  if (!s.state) return null;
   developStore.set({ settings });
-  pending = { kind: "settings", settings, dragging };
+  applySeq += 1;
+  pending = { kind: "settings", settings, dragging, seq: applySeq };
   void pump();
+  return applySeq;
 }
 
 /** ドラッグを終える（最後の値を送ってから。履歴に 1 件記録して保存）。 */
