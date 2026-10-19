@@ -55,11 +55,13 @@ export interface DevelopStoreState {
 /**
  * 送った設定の結果（applySettings の通し番号 `seq` と、コアが割り当てた世代）。`seq` 以前に渡して、まだ結果の出ていない
  * 設定は、この操作でまとめて送った（後の設定は前の設定を含むため）。受け付けたら、世代 `generation` 以降のプレビュー・
- * 重ねて表示に入っている。受け付けなかった（送信が失敗した）ら `generation` は null。
+ * 重ねて表示に入っている。受け付けなかった（送信が失敗した）ら `generation` は null で、`superseded` はそのときに後の
+ * 設定（失敗した設定を含む。画面の設定から作るため）がすでに渡されていたか（その結果を待てばよい）。
  */
 export interface SettingsAck {
   seq: number;
   generation: number | null;
+  superseded?: boolean;
 }
 
 /** 覚えておく設定の結果の件数。 */
@@ -205,7 +207,7 @@ async function pump(): Promise<void> {
         // なので消さない）。
         if (developStore.get().error && developStore.get().state) developStore.set({ error: null });
       } catch (e) {
-        if (op.kind === "settings") recordAck({ seq: op.seq, generation: null });
+        if (op.kind === "settings") recordAck({ seq: op.seq, generation: null, superseded: applySeq > op.seq });
         const err = toApiError(e);
         if (err.kind !== "cancelled") {
           console.error("現像の操作に失敗", err.info);

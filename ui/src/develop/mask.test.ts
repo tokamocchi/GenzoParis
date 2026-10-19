@@ -287,6 +287,22 @@ describe("重ねて表示と見本の色", () => {
       10,
     );
     expect(both.map((x) => [x.seq, x.generation])).toEqual([[3, 11]]);
+    // 失敗したが、そのときに後の設定（失敗したストロークを含む）が渡されていた: 後の設定の結果を待つ。
+    const carried = settlePendingStrokes(pending, [{ seq: 3, generation: null, superseded: true }], true, 10);
+    expect(carried).toBe(pending);
+    const later = settlePendingStrokes(
+      pending,
+      [
+        { seq: 3, generation: null, superseded: true },
+        { seq: 4, generation: 12 },
+      ],
+      true,
+      10,
+    );
+    expect(later.map((x) => [x.seq, x.generation])).toEqual([
+      [3, 12],
+      [4, 12],
+    ]);
   });
 
   it("OKLab の見本の色を CSS の色にする（無彩色は R = G = B）", () => {
@@ -447,7 +463,7 @@ describe("マスクの道具（コアとのやり取り）", () => {
     );
     const third = commitBrushStroke([[0.4, 0.4]], false);
     await enqueue(async () => undefined);
-    expect(developStore.get().settingsAcks.at(-1)).toEqual({ seq: third, generation: null });
+    expect(developStore.get().settingsAcks.at(-1)).toEqual({ seq: third, generation: null, superseded: false });
     mock.responses.set("core_execute", base);
     // ブラシでない部品を選んでいれば描き始めない。
     viewStore.set({ tool: "none" });
