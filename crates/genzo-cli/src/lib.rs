@@ -38,6 +38,7 @@
 //! genzo preset create-export "Web 用" --format jpeg --long-edge 2048 --remove-gps --rename "{date}-{seq}"   # EXP-02
 //! genzo export 12 13 --preset "Web 用" --out ~/out
 //! genzo export 12 13 --out ~/out --format jpeg --quality 90 --long-edge 2048 --remove-gps
+//! genzo composite 21 22 23 24 --mode lighten   # 比較明合成（DEV-34。1 枚目と同じフォルダに 16bit の TIFF）
 //! genzo render DSC00001.ARW --out out.tif --settings settings.json   # カタログなし
 //! genzo render DSC00001.ARW --out out.jpg --dcp camera.dcp --cube film.cube   # ファイルのプロファイル・ルック
 //! genzo bench preview --synthetic 7008x4672 --out bench-results
@@ -92,6 +93,7 @@
 //! | `profile` | `profile import / list / show / remove / inspect`（カメラプロファイル（DCP）・ルック（3D LUT の .cube）。DEV-17） |
 //! | `preset` | `preset dir / list / show / create-develop / update-develop / apply / create-export / update-export / rename / move / rename-folder / delete / import / export-files`（現像プリセット・書き出しプリセット。DEV-29・EXP-02。アプリと同じフォルダ（`--presets-dir`・`GENZO_PRESETS_DIR`）。写真の設定を使うものだけカタログを開く） |
 //! | `export` | `export` と書き出しの設定（`--preset` の書き出しプリセット・`--rename` などのファイル名の規則（EXP-02）・`--ppi`・`--output-sharpen`・`--watermark-*`（EXP-03）・`--skip-videos`（動画は既定で元のファイルのままコピーする。EXP-05）） |
+//! | `composite` | `composite`（比較明・比較暗合成。DEV-34。`--check` で確認だけ。docs/composite_design.md） |
 //! | `watermark` | `watermark preview / font-dirs`（透かしの見本の PNG・OS のフォントのフォルダ。カタログは使わない。EXP-03） |
 //! | `standalone` | カタログなしの `render`・`info`（ワーカーを直接使う） |
 //! | `bench` | `bench preview / export`（genzo-testkit の計測と記録。計測の設定に `develop set` と同じオプション・`--dcp`・`--cube`・`--masks`・`--sample-masks` を当てられる） |
@@ -135,6 +137,7 @@
 pub mod args;
 mod bench;
 mod catalog;
+mod composite;
 mod develop;
 mod error;
 mod export;
@@ -368,6 +371,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         Command::Profile(c) => profile::run(&g, out, c),
         Command::Preset(c) => preset::run(&g, out, c),
         Command::Export(a) => export::run(&g, out, a),
+        Command::Composite(a) => composite::run(&g, out, a),
         Command::Render(a) => standalone::render(&g, out, a),
         Command::Watermark(c) => watermark::run(out, c),
         Command::Info { file } => standalone::info(out, &file),

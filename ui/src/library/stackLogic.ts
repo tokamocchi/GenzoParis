@@ -132,7 +132,9 @@ export type PhotoMenuAction =
   | "apply_preset"
   | "move_to_folder"
   | "rename_files"
-  | "relink";
+  | "relink"
+  | "composite_lighten"
+  | "composite_darken";
 
 export interface PhotoMenuEntry {
   action: PhotoMenuAction;
@@ -185,5 +187,9 @@ export function photoMenuEntries(
     { action: "move_to_folder", label: "フォルダへ移動…", enabled: any },
     { action: "rename_files", label: "ファイルの名前を変える…", keys: "F2", enabled: any },
     { action: "relink", label: "見つからない写真を探す…", enabled: current?.file_status === "missing" },
+    PHOTO_MENU_SEPARATOR,
+    // 比較明・比較暗合成（DEV-34）: 2 枚以上を選んでいるとき（動画はコアが除く）。
+    { action: "composite_lighten", label: "比較明合成…", enabled: targets >= 2 },
+    { action: "composite_darken", label: "比較暗合成…", enabled: targets >= 2 },
   ];
 }

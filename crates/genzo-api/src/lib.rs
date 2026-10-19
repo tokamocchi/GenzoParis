@@ -122,6 +122,7 @@
 mod before;
 mod capture_time;
 pub mod command;
+mod composite;
 pub mod config;
 mod copy_import;
 mod core;
@@ -216,11 +217,11 @@ pub use genzo_catalog::{
     MAX_CAPTURE_SHIFT_SECONDS, MAX_CAPTURE_TIME_EDITS, MAX_SNAPSHOT_NAME_CHARS,
 };
 pub use genzo_model::{
-    AssetId, AssetKind, CaptureTime, CollectionId, CollectionKind, ColorLabel, DevelopSettings,
-    ExportFormat, ExportSettings, ExportSize, FileStatus, Flag, KeywordId, OutputColorSpace,
-    OutputSharpening, Rating, RenderQuality, RgbColor, SharpenAmount, SharpenMedia, SmartCondition,
-    SmartRule, StackId, VariantId, VideoExport, Watermark, WatermarkAnchor, WatermarkContent,
-    ZoneMode,
+    AssetId, AssetKind, CaptureTime, CollectionId, CollectionKind, ColorLabel, CompositeMode,
+    CompositeSettings, DevelopSettings, ExportFormat, ExportSettings, ExportSize, FileStatus, Flag,
+    KeywordId, OutputColorSpace, OutputSharpening, Rating, RenderQuality, RgbColor, SharpenAmount,
+    SharpenMedia, SmartCondition, SmartRule, StackId, VariantId, VideoExport, Watermark,
+    WatermarkAnchor, WatermarkContent, ZoneMode,
 };
 pub use genzo_worker::{Lane, TestHook, TestHookOutput};
 

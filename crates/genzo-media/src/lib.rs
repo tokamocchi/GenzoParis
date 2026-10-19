@@ -102,7 +102,8 @@ pub use error::{MediaError, Result};
 pub use exif_read::AdobeRgbBasis;
 pub use exif_write::{EXIF_SOFTWARE, ExifData, exif_tiff_bytes};
 pub use export::{
-    EXPORT_ICC_VERSION, encode_export, export_icc_profile, export_image, standard_profile_for,
+    EXPORT_ICC_VERSION, encode_export, export_icc_profile, export_image, export_image_cancellable,
+    standard_profile_for,
 };
 pub use orientation::{apply_orientation, apply_orientation_dyn};
 pub use rename::{RENAME_TEMP_PREFIX, case_rename_temp_path, rename_case_safe, rename_no_replace};

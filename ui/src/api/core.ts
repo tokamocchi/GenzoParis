@@ -25,6 +25,8 @@ import type {
   CollectionKind,
   ColorLabel,
   Command,
+  CompositeCheck,
+  CompositeSettings,
   ContentHashStatus,
   CopySettings,
   CoreSettings,
@@ -520,6 +522,22 @@ export const exportVariants = async (
       "job_started",
     )
   ).job_id;
+
+// --- 比較明・比較暗合成（DEV-34） ---
+/** 合成する前の確認（`dest_dir` が null なら 1 枚目の写真と同じフォルダ）。 */
+export const compositeCheck = async (
+  variant_ids: VariantId[],
+  settings: CompositeSettings,
+  dest_dir: string | null = null,
+): Promise<CompositeCheck> =>
+  strip(await execute({ type: "composite_check", variant_ids, settings, dest_dir }, "composite_check"));
+/** 合成する（ジョブの ID を返す。結果は job の composite）。 */
+export const composite = async (
+  variant_ids: VariantId[],
+  settings: CompositeSettings,
+  dest_dir: string | null = null,
+): Promise<number> => (await execute({ type: "composite", variant_ids, settings, dest_dir }, "job_started")).job_id;
+
 export const planDelete = async (kind: DeleteKind, variant_ids: VariantId[]): Promise<DeletePlan> =>
   strip(await execute({ type: "plan_delete", kind, variant_ids }, "delete_plan"));
 export const executeDelete = async (plan_id: number): Promise<DeleteReport> =>

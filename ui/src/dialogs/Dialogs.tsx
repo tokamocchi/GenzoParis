@@ -7,6 +7,7 @@ import * as appApi from "../api/app";
 import { actions, appStore, useApp } from "../state/app";
 import { CaptureTimeDialog } from "./CaptureTimeDialog";
 import { CloseFailedDialog } from "./CloseFailedDialog";
+import { CompositeDialog } from "./CompositeDialog";
 import { CrashReportsDialog } from "./CrashReportsDialog";
 import { DeleteDialog } from "./DeleteDialog";
 import "./dialogs.css";
@@ -114,6 +115,9 @@ export function Dialogs() {
       break;
     case "export":
       body = <ExportDialog variantIds={dialog.variantIds} />;
+      break;
+    case "composite":
+      body = <CompositeDialog variantIds={dialog.variantIds} mode={dialog.mode} />;
       break;
     case "delete":
       body = <DeleteDialog deleteKind={dialog.deleteKind} variantIds={dialog.variantIds} />;

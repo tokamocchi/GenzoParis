@@ -104,7 +104,8 @@ impl OutputSharpenParams {
     }
 }
 
-fn rgb_space(space: OutputColorSpace) -> RgbColorSpace {
+/// 書き出しの色空間の原色・伝達関数（合成（[`crate::composite`]）でも使う）。
+pub(crate) fn rgb_space(space: OutputColorSpace) -> RgbColorSpace {
     match space {
         OutputColorSpace::Srgb => RgbColorSpace::Srgb,
         OutputColorSpace::DisplayP3 => RgbColorSpace::DisplayP3,

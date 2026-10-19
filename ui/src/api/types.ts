@@ -791,7 +791,8 @@ export type JobKind =
   | "move_files"
   | "check_missing"
   | "find_relink_candidates"
-  | "video_proxy";
+  | "video_proxy"
+  | "composite";
 export type JobState = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface FileIssue {
@@ -1002,6 +1003,69 @@ export interface ExportReport {
   cancelled: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// 比較明・比較暗合成（DEV-34。docs/composite_design.md）
+// ---------------------------------------------------------------------------
+
+/** 合成の比べ方（genzo-model の CompositeMode）。 */
+export type CompositeMode = "lighten" | "darken" | "lighter_color" | "darker_color";
+
+/** 合成の設定（genzo-model の CompositeSettings。省いた項目はコアの既定値）。 */
+export interface CompositeSettings {
+  mode: CompositeMode;
+  format: ExportFormat;
+  color_space: OutputColorSpace;
+  remove_gps: boolean;
+  stack_with_sources: boolean;
+}
+
+/** 合成する前の確認（genzo-api の CompositeCheck）。 */
+export interface CompositeCheck {
+  /** 合成する写真（撮影日時の順）。 */
+  sources: VariantId[];
+  skipped_videos: number;
+  /** 合成できない理由（空なら合成できる）。 */
+  problems: string[];
+  missing: VariantId[];
+  size_differs: VariantId[];
+  geometry_differs: VariantId[];
+  settings_differ: VariantId[];
+  /** 合成の元の写真が入っているスタックの数。 */
+  stacks: number;
+  estimated_buffer_bytes: number;
+  dest_dir: string | null;
+  file_name: string | null;
+}
+
+export interface CompositeWarning {
+  variant_id: VariantId;
+  message: string;
+}
+
+export interface CompositeFailure {
+  variant_id: VariantId | null;
+  error: ErrorInfo;
+}
+
+/** 合成の結果（genzo-api の CompositeReport）。 */
+export interface CompositeReport {
+  mode: CompositeMode;
+  sources: VariantId[];
+  skipped_videos: number;
+  composited: number;
+  /** 幅・高さ。 */
+  size: [number, number] | null;
+  path: string | null;
+  registered: VariantId | null;
+  registration_error: string | null;
+  stacked: boolean;
+  stack_error: string | null;
+  cpu_renders: number;
+  warnings: CompositeWarning[];
+  failure: CompositeFailure | null;
+  cancelled: boolean;
+}
+
 export interface RegenerateReport {
   rendered: number;
   skipped: number;
@@ -1034,7 +1098,8 @@ export type JobResult =
   | ({ type: "move_files" } & FileMoveReport)
   | ({ type: "check_missing" } & MissingCheckReport)
   | ({ type: "relink_candidates" } & RelinkSearch)
-  | ({ type: "video_proxy" } & VideoProxyReport);
+  | ({ type: "video_proxy" } & VideoProxyReport)
+  | ({ type: "composite" } & CompositeReport);
 
 export interface JobInfo {
   job_id: number;
@@ -1920,6 +1985,14 @@ export type Command =
       /** ファイル名の規則（EXP-02。省略・null なら元のファイル名）。 */
       file_naming?: RenameRule | null;
     }
+  | {
+      type: "composite_check";
+      variant_ids: VariantId[];
+      settings: CompositeSettings;
+      /** 保存先のフォルダ（省略・null なら 1 枚目の写真と同じフォルダ）。 */
+      dest_dir?: string | null;
+    }
+  | { type: "composite"; variant_ids: VariantId[]; settings: CompositeSettings; dest_dir?: string | null }
   | { type: "plan_delete"; kind: DeleteKind; variant_ids: VariantId[] }
   | { type: "execute_delete"; plan_id: number }
   | { type: "get_settings" }
@@ -2036,6 +2109,7 @@ export type Response =
   | ({ type: "file_identity" } & FileIdentity)
   | ({ type: "name_preview" } & NamePreview)
   | ({ type: "watermark_preview" } & WatermarkPreview)
+  | ({ type: "composite_check" } & CompositeCheck)
   | ({ type: "video_playback" } & VideoPlayback)
   | ({ type: "video_proxy_cache" } & VideoProxyCacheStatus)
   | { type: "capture_devices"; devices: CaptureDevice[] }

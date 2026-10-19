@@ -28,7 +28,10 @@ use crate::types::{AutoStackReport, SearchFilter, StackInfo};
 pub const MAX_AUTO_STACK_GAP_SECONDS: f64 = genzo_catalog::MAX_AUTO_STACK_GAP.as_secs() as f64;
 
 /// `ids` が入っているスタックの写真すべて（変える前の印を消すため）。
-fn stack_members_of(c: &Catalog, ids: &[VariantId]) -> genzo_catalog::Result<Vec<VariantId>> {
+pub(crate) fn stack_members_of(
+    c: &Catalog,
+    ids: &[VariantId],
+) -> genzo_catalog::Result<Vec<VariantId>> {
     Ok(c.stacks_of_variants(ids)?
         .into_iter()
         .flat_map(|s| s.members)
@@ -36,7 +39,11 @@ fn stack_members_of(c: &Catalog, ids: &[VariantId]) -> genzo_catalog::Result<Vec
 }
 
 /// スタックを変えた後: 写真を知らせて、表示中の検索結果を作り直す。
-fn after_change(inner: &Inner, change: CatalogChange, ids: impl IntoIterator<Item = VariantId>) {
+pub(crate) fn after_change(
+    inner: &Inner,
+    change: CatalogChange,
+    ids: impl IntoIterator<Item = VariantId>,
+) {
     let unique: BTreeSet<VariantId> = ids.into_iter().collect();
     inner.events.emit(Event::CatalogChanged {
         change,

@@ -104,6 +104,8 @@ pub enum JobKind {
     /// 動画の再生用のファイルの作成（VID-04。WebView で再生できない動画を、利用者の ffmpeg で変換する。専用の
     /// 1 本のスレッドで、1 度に 1 本だけ）。
     VideoProxy,
+    /// 比較明・比較暗合成（DEV-34。docs/composite_design.md）。
+    Composite,
 }
 
 /// ジョブの状態。
@@ -186,6 +188,8 @@ pub enum JobResult {
     RelinkCandidates(RelinkSearch),
     /// 動画の再生用のファイルの作成。
     VideoProxy(VideoProxyReport),
+    /// 比較明・比較暗合成。
+    Composite(CompositeReport),
 }
 
 /// ファイルの問題（読めない・登録できないなど）。
@@ -2068,6 +2072,90 @@ pub struct ExportReport {
     /// 失敗した数。
     pub failed: u64,
     /// 取り消されて途中で終わったか。
+    pub cancelled: bool,
+}
+
+// ---------------------------------------------------------------------------
+// 比較明・比較暗合成（DEV-34。docs/composite_design.md）
+// ---------------------------------------------------------------------------
+
+/// 合成する前の確認（[`crate::Core::composite_check`]。docs/composite_design.md の 6.1 節）。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct CompositeCheck {
+    /// 合成する写真（撮影日時の順。分からないものは最後、同じなら variant の ID の順）。
+    pub sources: Vec<VariantId>,
+    /// 除いた動画の数。
+    pub skipped_videos: u64,
+    /// 合成できない理由（写真の数が足りない・多すぎる・見つからない写真がある）。空なら合成できる。
+    pub problems: Vec<String>,
+    /// 見つからない（または読めなかった）写真。
+    pub missing: Vec<VariantId>,
+    /// 元の写真の寸法・向きが 1 枚目と違う写真（現像した後の寸法が違えば合成できない）。
+    pub size_differs: Vec<VariantId>,
+    /// 切り抜き・角度・歪曲補正（画素の位置を動かす設定）が 1 枚目と違う写真（画素の位置がずれる。警告だけ）。
+    pub geometry_differs: Vec<VariantId>,
+    /// それ以外の現像の設定が 1 枚目と違う写真（警告だけ）。
+    pub settings_differ: Vec<VariantId>,
+    /// 合成の元の写真が入っているスタックの数（元の写真とまとめると、これらは 1 つになる）。
+    pub stacks: u64,
+    /// 累積のバッファのメモリの見込み（バイト。元の写真の寸法から。切り抜くと小さくなる）。
+    pub estimated_buffer_bytes: u64,
+    /// 保存先のフォルダ（指定がなければ 1 枚目の写真と同じフォルダ）。
+    #[serde(serialize_with = "lossy_path")]
+    pub dest_dir: Option<PathBuf>,
+    /// 保存するファイルの名前（同じ名前があれば、保存するときに連番を付ける）。
+    pub file_name: Option<String>,
+}
+
+/// 合成の元の写真の警告（現像の警告など）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompositeWarning {
+    /// 写真。
+    pub variant_id: VariantId,
+    /// 説明。
+    pub message: String,
+}
+
+/// 合成の失敗（どの写真で失敗したか）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompositeFailure {
+    /// 失敗した写真（写真によらない失敗（書き込みなど）なら `None`）。
+    pub variant_id: Option<VariantId>,
+    /// エラーの情報。
+    pub error: ErrorInfo,
+}
+
+/// 合成の結果（[`JobResult::Composite`]）。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct CompositeReport {
+    /// 比べ方。
+    pub mode: genzo_model::CompositeMode,
+    /// 合成した（する）写真（撮影日時の順）。
+    pub sources: Vec<VariantId>,
+    /// 除いた動画の数。
+    pub skipped_videos: u64,
+    /// 重ねた枚数（失敗・取り消しのときは途中までの数）。
+    pub composited: u64,
+    /// 合成した画像の寸法（幅・高さ）。
+    pub size: Option<(u32, u32)>,
+    /// 書いたファイル（失敗・取り消しでは `None`。何も書かない）。
+    #[serde(serialize_with = "lossy_path")]
+    pub path: Option<PathBuf>,
+    /// カタログに登録した写真（登録に失敗したら `None`）。
+    pub registered: Option<VariantId>,
+    /// 登録できなかった理由（ファイルは残す。取り込み直せる）。
+    pub registration_error: Option<String>,
+    /// 元の写真とスタックにまとめたか。
+    pub stacked: bool,
+    /// スタックにまとめられなかった理由。
+    pub stack_error: Option<String>,
+    /// CPU 版で現像した写真の数（GPU が使えない・GPU 版で失敗した）。
+    pub cpu_renders: u64,
+    /// 現像の警告（写真ごと）。
+    pub warnings: Vec<CompositeWarning>,
+    /// 失敗（1 枚でも現像に失敗したら全体を失敗にする。決定事項ログ No.178）。
+    pub failure: Option<CompositeFailure>,
+    /// 取り消されて途中で終わったか（何も書かない）。
     pub cancelled: bool,
 }
 
