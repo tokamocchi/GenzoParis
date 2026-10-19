@@ -256,26 +256,37 @@ describe("重ねて表示と見本の色", () => {
     });
     const pending = [p(3), p(4)];
     // まだ受け付けていない（前の設定の受け付けだけ）: 変わらない。
-    expect(settlePendingStrokes(pending, { seq: 2, generation: 10 }, true, 10)).toBe(pending);
+    expect(settlePendingStrokes(pending, [{ seq: 2, generation: 10 }], true, 10)).toBe(pending);
     // 3 番を世代 11 で受け付けた: 世代を埋めるが、重ねて表示は前の世代なので描いておく。
-    const a = settlePendingStrokes(pending, { seq: 3, generation: 11 }, true, 10);
+    const a = settlePendingStrokes(pending, [{ seq: 3, generation: 11 }], true, 10);
     expect(a.map((x) => [x.seq, x.generation])).toEqual([
       [3, 11],
       [4, null],
     ]);
     // 世代 11 の重ねて表示が届いた: 3 番を除く。
-    const b = settlePendingStrokes(a, { seq: 3, generation: 11 }, true, 11);
+    const b = settlePendingStrokes(a, [{ seq: 3, generation: 11 }], true, 11);
     expect(b.map((x) => x.seq)).toEqual([4]);
     // 後の設定（4 番は前の設定を含む）を受け付け、その重ねて表示が届いた: すべて除く。
-    expect(settlePendingStrokes(b, { seq: 5, generation: 13 }, true, 12).map((x) => x.generation)).toEqual([13]);
-    expect(settlePendingStrokes(b, { seq: 5, generation: 13 }, true, 13)).toEqual([]);
+    expect(settlePendingStrokes(b, [{ seq: 5, generation: 13 }], true, 12).map((x) => x.generation)).toEqual([13]);
+    expect(settlePendingStrokes(b, [{ seq: 5, generation: 13 }], true, 13)).toEqual([]);
     // 重ねて表示をしていない・まだ届いていない。
-    expect(settlePendingStrokes(pending, { seq: 4, generation: 12 }, false, null)).toEqual([]);
-    expect(settlePendingStrokes(pending, { seq: 4, generation: 12 }, true, null)).toHaveLength(2);
+    expect(settlePendingStrokes(pending, [{ seq: 4, generation: 12 }], false, null)).toEqual([]);
+    expect(settlePendingStrokes(pending, [{ seq: 4, generation: 12 }], true, null)).toHaveLength(2);
     // コアが受け付けなかった（送信が失敗した）: その番号までの、まだ世代の分からないストロークはすぐに除く。
-    expect(settlePendingStrokes(pending, { seq: 3, generation: null }, true, null).map((x) => x.seq)).toEqual([4]);
-    const failed = settlePendingStrokes(a, { seq: 4, generation: null }, true, 10);
+    expect(settlePendingStrokes(pending, [{ seq: 3, generation: null }], true, null).map((x) => x.seq)).toEqual([4]);
+    const failed = settlePendingStrokes(a, [{ seq: 4, generation: null }], true, 10);
     expect(failed.map((x) => [x.seq, x.generation])).toEqual([[3, 11]]);
+    // 前の設定を受け付けた直後に、後の設定が失敗した（両方の結果を同時に見る）: 前のストロークは受け付けたものとして残す。
+    const both = settlePendingStrokes(
+      pending,
+      [
+        { seq: 3, generation: 11 },
+        { seq: 4, generation: null },
+      ],
+      true,
+      10,
+    );
+    expect(both.map((x) => [x.seq, x.generation])).toEqual([[3, 11]]);
   });
 
   it("OKLab の見本の色を CSS の色にする（無彩色は R = G = B）", () => {
@@ -428,7 +439,7 @@ describe("マスクの道具（コアとのやり取り）", () => {
       [true, 1],
     ]);
     // コアが受け付けた設定の番号と世代（離したストロークを、重ねて表示に入るまで描いておくのに使う）。
-    expect(developStore.get().settingsAck).toEqual({ seq: second, generation: 2 });
+    expect(developStore.get().settingsAcks.at(-1)).toEqual({ seq: second, generation: 2 });
     // コアが受け付けなかったら、世代は null（離したストロークを残さない）。
     const base = mock.responses.get("core_execute") as (a?: Record<string, unknown>) => unknown;
     mock.responses.set("core_execute", (args?: Record<string, unknown>) =>
@@ -436,7 +447,7 @@ describe("マスクの道具（コアとのやり取り）", () => {
     );
     const third = commitBrushStroke([[0.4, 0.4]], false);
     await enqueue(async () => undefined);
-    expect(developStore.get().settingsAck).toEqual({ seq: third, generation: null });
+    expect(developStore.get().settingsAcks.at(-1)).toEqual({ seq: third, generation: null });
     mock.responses.set("core_execute", base);
     // ブラシでない部品を選んでいれば描き始めない。
     viewStore.set({ tool: "none" });

@@ -65,7 +65,7 @@ export function MaskLayer(props: {
   const [stroke, setStroke] = useState<{ points: [number, number][]; erase: boolean; pointer: number } | null>(null);
   const [cursor, setCursor] = useState<{ x: number; y: number; erase: boolean } | null>(null);
   const [pending, setPending] = useState<PendingStroke[]>([]);
-  const ack = useDevelop((s) => s.settingsAck);
+  const acks = useDevelop((s) => s.settingsAcks);
   const ppg = pixelsPerG(gb, box);
   const { overlayOn, overlayGeneration } = props;
 
@@ -80,8 +80,8 @@ export function MaskLayer(props: {
 
   // 離したストロークを、コアが受け付けて重ねて表示に入ったら消す。
   useEffect(() => {
-    setPending((p) => settlePendingStrokes(p, ack, overlayOn, overlayGeneration));
-  }, [ack, overlayOn, overlayGeneration]);
+    setPending((p) => settlePendingStrokes(p, acks, overlayOn, overlayGeneration));
+  }, [acks, overlayOn, overlayGeneration]);
 
   /** ポインターの位置（ステージの CSS の画素）。 */
   const local = (e: { clientX: number; clientY: number }): [number, number] => {

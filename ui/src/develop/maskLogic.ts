@@ -540,26 +540,26 @@ export interface PendingStroke {
 }
 
 /**
- * 離したストロークのうち、まだ描いておくもの（コアが受け付けた `ack` で世代を埋め、その世代以降の重ねて表示
- * `overlayGeneration` が届いたら除く。重ねて表示をしていなければ（`overlayOn` が false）、受け付けたら除く。
- * コアが受け付けなかった（`ack.generation` が null）ら、まだ世代の分からないストロークはすぐに除く）。
+ * 離したストロークのうち、まだ描いておくもの。送った設定の結果 `acks`（送った順）のうち、ストロークの番号以降で最初の
+ * もので決める: 受け付けたら世代を埋め、その世代以降の重ねて表示 `overlayGeneration` が届いたら除く（重ねて表示を
+ * していなければ（`overlayOn` が false）、受け付けたら除く）。受け付けなかった（世代が null）ら、すぐに除く。
  * 変わらなければ同じ配列を返す。
  */
 export function settlePendingStrokes(
   pending: PendingStroke[],
-  ack: { seq: number; generation: number | null } | null,
+  acks: readonly { seq: number; generation: number | null }[],
   overlayOn: boolean,
   overlayGeneration: number | null,
 ): PendingStroke[] {
   let changed = false;
   const next: PendingStroke[] = [];
   for (const p of pending) {
-    const covered = p.generation === null && ack !== null && ack.seq >= p.seq;
-    if (covered && ack.generation === null) {
+    const ack = p.generation === null ? acks.find((a) => a.seq >= p.seq) : undefined;
+    if (ack && ack.generation === null) {
       changed = true;
       continue;
     }
-    const generation = covered ? ack.generation : p.generation;
+    const generation = ack ? ack.generation : p.generation;
     const done =
       generation !== null && (!overlayOn || (overlayGeneration !== null && overlayGeneration >= generation));
     if (done) {
