@@ -37,6 +37,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+Linux では、オンラインの地図（LIB-21）の HTTPS（`genzo-geo` の `native-tls`）がシステムの OpenSSL に動的リンクするので、OpenSSL の開発用のパッケージと pkg-config が要ります（Ubuntu: `sudo apt install libssl-dev pkg-config`）。Windows・macOS は OS の TLS（SChannel・Security.framework）を使い、追加のものは要りません（[docs/third_party.md](docs/third_party.md) の 1.1 節）。
+
 Linux（Ubuntu）から、Windows 向けのコード（`cfg(windows)`）の型と警告を確かめられます（コンパイルの検査だけで、リンク・実行はしません）。C のライブラリ（SQLite・lcms2 など）は mingw-w64 で Windows 向けにビルドします。
 
 ```sh
@@ -98,6 +100,7 @@ npm run app:dev
 ```
 
 - 本体（`genzo-paris`）は、ワーカー（`genzo-worker`）を「環境変数 `GENZO_WORKER_PATH` → 本体と同じフォルダ」の順に探します。開発用の起動では、同じ `target/debug` に置かれたものを使います。
+- オンラインの地図（LIB-21 の第 2 段階。位置を付けるダイアログの地図と地名の検索）は **既定で無効** です。設定の「一般」か位置を付けるダイアログで有効にしたときだけ、OpenStreetMap Foundation のサーバー（`tile.openstreetmap.org`・`nominatim.openstreetmap.org`）と通信します。守る利用ポリシーは、タイル（https://operations.osmfoundation.org/policies/tiles/ ）と Nominatim（https://operations.osmfoundation.org/policies/nominatim/ ）です: 地名の検索は 1 秒に 1 回まで（アプリの全利用者の合計）・入力の途中で検索しない（オートコンプリートの禁止）・結果をキャッシュする、タイルは HTTP のキャッシュの指示に従い、先読み・一括取得をしない。開発で試すときもこれを守ってください。テスト・CI からは本物のサーバーに問い合わせません。ポリシーの順守と、OSM を使い続けるかは人の確認待ちです（[docs/implementation_status.md](docs/implementation_status.md) の人の判断の表 No.187〜189。設計は [docs/04_architecture.md](docs/04_architecture.md) の 3.16 節）。
 - 配布物の作り方（`npm run app:worker`・`npm run app:build`、GitHub Actions の `release.yml`）と、FFmpeg・署名・ライセンスの注意は [docs/packaging.md](docs/packaging.md) を見てください。**`release.yml` は手動でだけ動き、公開のリポジトリでは、成果物を誰でも取得できる状態にしてよいかの確認の印がないと止まります**（2.5 節）。
 - E2E（Linux の開発環境用）: `e2e/run.sh <アプリの実行ファイル> e2e/scenario.mjs [出力のフォルダ]`。Xvfb・WebKitWebDriver・`tauri-driver` が要ります（`e2e/run.sh` の冒頭）。写真のフォルダは `cargo run -p genzo-testkit --example e2e_fixtures -- <フォルダ>` で作り、動画を 1 本 FFmpeg で足して（合成の映像。例: `ffmpeg -f lavfi -i testsrc=duration=2:size=640x360:rate=30 -pix_fmt yuv420p "<フォルダ>/動画 01.mp4"`）、環境変数 `E2E_PHOTOS` で渡します。写真・動画の数は、シナリオが取り込んだ後にカタログから数えます（動画がなくても通りますが、そのときは動画の扱い（GPS を削除する設定では書き出さないこと）を確かめません）。アプリは `npm --prefix ui run build` の後に `cargo build -p genzo-app --features custom-protocol` で（実行ファイルは `target/debug/genzo-paris`）、ワーカーは同じフォルダに `cargo build -p genzo-worker --features libraw` でビルドします。出力のフォルダ（画面の保存先）の既定は `e2e/out` です（git の対象外）。Windows・macOS の WebView の確認の代わりにはなりません。
 
@@ -233,7 +236,7 @@ cargo run -p genzo-cli -- watermark font-dirs        # OS の既定のフォン�
 - Windows: 現像設定の JSON は、引数に直接書かずにファイル（`--json settings.json`）で渡すことをおすすめします（PowerShell・cmd.exe では引用符の扱いが違うため）。ファイルは UTF-8（BOM 付きも可）か BOM 付きの UTF-16 で読めます。PowerShell で `--json` の出力を受け取るときに日本語が化ける場合は、`[Console]::OutputEncoding = [Text.Encoding]::UTF8` を先に実行してください（出力は UTF-8）。
 - `bench` は release ビルドで実行してください（debug ビルドの時間は記録に「debug」と残り、参考値になります）。
 - ログ（SYS-07。外部へは送信しません）: CLI は標準エラー（`--log`・`GENZO_LOG`）に加えて、ログのフォルダの `cli.log` に info の水準で書き、パニックのときはクラッシュレポートを `crash/` に残します。ログのフォルダは `--log-dir`・環境変数 `GENZO_LOG_DIR`、なければアプリと同じ場所（Windows は `%LOCALAPPDATA%\io.github.tokamocchi.genzoparis\logs`、macOS は `~/Library/Logs/io.github.tokamocchi.genzoparis`、Linux は `~/.local/share/io.github.tokamocchi.genzoparis/logs`）です。ファイルに書かないときは `--no-log-file`（環境変数 `GENZO_LOG_FILE=off`）を付けてください。ログには写真のファイル名・フォルダの場所が含まれます。実行したコマンドは、サブコマンドの名前と引数の数だけを書きます（`--set` のメタデータの値・パスなどの引数の値は書きません）。
-- カタログを外部のツールから読むときは、読み取り専用で開き（`sqlite3 -readonly catalog.db`）、公開ビュー（`photos_v1`・`photo_keywords_v1`・`photo_collections_v1`・`photo_stacks_v1`・`photo_files_v1`）を使ってください（[docs/catalog_schema.md](docs/catalog_schema.md)）。
+- カタログを外部のツールから読むときは、読み取り専用で開き（`sqlite3 -readonly catalog.db`）、公開ビュー（`photos_v1`・`photo_keywords_v1`・`photo_collections_v1`・`photo_stacks_v1`・`photo_files_v1`）を使ってください（[docs/catalog_schema.md](docs/catalog_schema.md)）。`photos_v1` の `gps_lat`・`gps_lon` はカメラ（ファイル）が記録した位置で、後から付けた位置（LIB-21）を含む使う位置は `location_lat`・`location_lon`（出どころは `location_source`。スキーマの版 13 から）です。
 
 ### 依存ライブラリのライセンスと脆弱性の確認
 
