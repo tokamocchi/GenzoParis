@@ -6,7 +6,9 @@
 //   取り、ディスクにキャッシュして返す（WebView は外部と通信しない。CSP は変えない）。オンラインの地図が無効なら
 //   genzo-app が 403 を返すので、この部品は有効なときだけ出す（GeotagDialog）。
 // - タイルの層: 最大のズームは MAP_MAX_ZOOM。サブドメイン・detectRetina・crossOrigin は使わない（要求を増やさない）。
-//   先読みはしない（Leaflet の既定の、表示している範囲と、その周りの keepBuffer の分だけ）。
+//   先読みはしない（Leaflet が取るのは、表示している範囲に一部でもかかるタイルだけ。keepBuffer（既定の 2）は、
+//   地図を動かしたときに表示の外に出た読み終えたタイルを、捨てずに残しておく範囲で、新しくは取らない。Leaflet 1.9.4
+//   の GridLayer の _update。版を上げたら確かめ直す）。
 // - 帰属の表示「© OpenStreetMap contributors」は、Leaflet の帰属の表示（Leaflet へのリンクと旗が付き、リンクを押すと
 //   WebView が外部のページへ移る）を使わず、この部品が地図の右下に常に出す（Leaflet の前から出し、畳まない）。押すと
 //   既定のブラウザで OSM の著作権のページを開く（openMapLink）。「地図の誤りを報告」（fixthemap）も並べる。
