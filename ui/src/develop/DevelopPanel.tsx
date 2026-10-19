@@ -1242,10 +1242,11 @@ function VignetteCenterControls(props: { settings: DevelopSettings; controls: De
     viewStore.set({ vignetteHandle: true });
     return () => viewStore.set({ vignetteHandle: false });
   }, []);
+  const info = useGeometryInfo();
   const manual = fullEffects(settings.effects).vignette.center != null;
-  const center = vignetteCenterOf(settings);
-  const crop = settings.geometry.crop;
-  const cropCenter = { x: (crop.left + crop.right) / 2, y: (crop.top + crop.bottom) / 2 };
+  const center = vignetteCenterOf(settings, info);
+  // 切り抜きの中心（描くときの切り抜きの中心。手動の値を消した位置）。
+  const cropCenter = vignetteCenterOf(withVignette(settings, { center: null }), info);
   return (
     <>
       <label
@@ -1258,7 +1259,7 @@ function VignetteCenterControls(props: { settings: DevelopSettings; controls: De
           disabled={!c.vignetteOptions}
           onChange={(e) => {
             const on = e.target.checked;
-            update((s) => withVignette(s, { center: on ? vignetteCenterOf(s) : null }), false);
+            update((s) => withVignette(s, { center: on ? vignetteCenterOf(s, info) : null }), false);
           }}
         />
         中心を手動で設定
@@ -1278,7 +1279,7 @@ function VignetteCenterControls(props: { settings: DevelopSettings; controls: De
           disabled={!c.vignetteCenter}
           onChange={(v, dragging) =>
             update((s) => {
-              const cur = vignetteCenterOf(s);
+              const cur = vignetteCenterOf(s, info);
               const next = Number((Math.min(100, Math.max(0, Math.round(v * 2) / 2)) / 100).toFixed(4));
               if (cur[a.key] === next) return null;
               return withVignette(s, { center: { ...cur, [a.key]: next } });

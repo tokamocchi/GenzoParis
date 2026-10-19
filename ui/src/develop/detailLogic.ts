@@ -11,6 +11,7 @@ import type {
   Sharpening,
   VignetteCenter,
 } from "../api/types";
+import type { GeometryInfo } from "./cropMath";
 
 /** テクスチャ・明瞭度・かすみの除去・シャープ・効果を使える最初の処理バージョン（genzo-pipeline の ProcessVersion::V2）。 */
 export const DETAIL_PROCESS_VERSION = 2;
@@ -79,12 +80,29 @@ export function withVignette(s: DevelopSettings, patch: Partial<PostCropVignette
 /**
  * 周辺光量補正の中心として表示する位置（手動の中心か、切り抜きの中心。切り抜く前の画像の幅・高さに対する割合）。
  * 手動に切り替えたときの最初の位置にも使う（切り替えても見え方が変わらない）。
+ *
+ * 切り抜きの中心は、パイプラインが描くときの切り抜き（genzo-pipeline の constrain_crop で回転した画像の内側に
+ * 制限したもの）の中心に合わせる: 制限は中心を保って縮めるが、**中心が回転した画像の外なら G の外接矩形の中心
+ * （0.5, 0.5）を使う**（切り抜きの編集の外で角度を変えたときなど、設定の切り抜きは制限されていないことがある）。
+ * `info`（元の画像と G の外接矩形の大きさ）がなければ、この判定はしない。
  */
-export function vignetteCenterOf(s: DevelopSettings): VignetteCenter {
+export function vignetteCenterOf(s: DevelopSettings, info: GeometryInfo | null = null): VignetteCenter {
   const c = fullEffects(s.effects).vignette.center;
   if (c) return c;
   const r = s.geometry.crop;
-  return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+  const center = { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+  const angle = s.geometry.angle_deg;
+  if (!info || angle === 0) return center;
+  // G → D（回転だけ。CoordinateFrames::g_to_undistorted と同じ式）で、画像（[0, ow] × [0, oh]）の内側か。
+  const t = (angle * Math.PI) / 180;
+  const cos = Math.cos(t);
+  const sin = Math.sin(t);
+  const dx = (center.x - 0.5) * info.gw;
+  const dy = (center.y - 0.5) * info.gh;
+  const u = cos * dx - sin * dy + info.ow / 2;
+  const v = sin * dx + cos * dy + info.oh / 2;
+  const inside = u >= 0 && u <= info.ow && v >= 0 && v <= info.oh;
+  return inside ? center : { x: 0.5, y: 0.5 };
 }
 
 /** 粒子の一部を変えた設定。 */

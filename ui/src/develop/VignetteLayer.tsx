@@ -9,6 +9,7 @@ import { type PointerEvent as ReactPointerEvent, useRef } from "react";
 
 import type { DevelopSettings } from "../api/types";
 import { applySettings, developStore, endDrag } from "../state/develop";
+import type { GeometryInfo } from "./cropMath";
 import { fullEffects, gToVignetteCenter, vignetteCenterOf, vignetteCenterToG, withVignette } from "./detailLogic";
 import { type Box, type GBounds, boxToG, gToBox } from "./maskLogic";
 
@@ -24,15 +25,15 @@ export function VignetteLayer(props: {
   box: Box;
   gb: GBounds;
   settings: DevelopSettings;
-  /** G の外接矩形の大きさ（比だけを使う。GeometryInfo の gw・gh）。 */
-  gw: number;
-  gh: number;
+  /** 元の画像と G の外接矩形の大きさ（中心の割合と G 座標の変換・切り抜きの中心の判定に使う）。 */
+  info: GeometryInfo;
 }) {
-  const { box, gb, gw, gh } = props;
+  const { box, gb, info } = props;
+  const { gw, gh } = info;
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<number | null>(null);
   const manual = fullEffects(props.settings.effects).vignette.center != null;
-  const [u, v] = vignetteCenterToG(vignetteCenterOf(props.settings), gw, gh);
+  const [u, v] = vignetteCenterToG(vignetteCenterOf(props.settings, info), gw, gh);
   const [cx, cy] = gToBox(gb, box, u, v);
 
   const toCenter = (e: { clientX: number; clientY: number }) => {

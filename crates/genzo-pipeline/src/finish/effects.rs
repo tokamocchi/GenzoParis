@@ -532,6 +532,45 @@ mod tests {
     }
 
     #[test]
+    fn automatic_vignette_center_follows_the_constrained_crop() {
+        // 角度補正で切り抜きの中心が回転した画像の外に出ると、描くときの切り抜き（constrain_crop）は G の外接矩形の
+        // 中心を使う。周辺光量補正の中心もそれに合わせる（UI の detailLogic の vignetteCenterOf も同じ規則）。
+        let mut s = DevelopSettings::default();
+        s.effects.vignette.amount = -50.0;
+        s.geometry.angle_deg = 20.0;
+        s.geometry.crop = CropRect {
+            left: 0.0,
+            top: 0.0,
+            right: 0.2,
+            bottom: 0.2,
+        };
+        let frames = CoordinateFrames::new(600, 400, Orientation::Normal)
+            .unwrap()
+            .with_rotation(20.0)
+            .unwrap();
+        let grid = SensorGrid::new(600, 400, (600.0, 400.0)).unwrap();
+        let c = StageContext::new(ProcessVersion::V2, frames)
+            .with_sensor_grid(grid)
+            .with_resolution_scale(grid.resolution_scale());
+        let plan = GeometryPlan::from_settings(&s.normalized(), &c).unwrap();
+        assert_ne!(plan.crop(), s.geometry.crop, "画像の内側に制限される");
+        let (gw, gh) = plan.frames().g_size_px();
+        let (dx, dy) = plan.density();
+        let cl = plan.crop_lattice();
+        let v = params(&s, &c).vignette.unwrap();
+        let expect = [
+            gw * 0.5 * dx - f64::from(cl.x),
+            gh * 0.5 * dy - f64::from(cl.y),
+        ];
+        assert!(
+            (f64::from(v.center[0]) - expect[0]).abs() < 1e-3
+                && (f64::from(v.center[1]) - expect[1]).abs() < 1e-3,
+            "{:?} {expect:?}",
+            v.center
+        );
+    }
+
+    #[test]
     fn grain_is_deterministic_and_matches_the_area_average() {
         let mut s = DevelopSettings::default();
         s.effects.grain.amount = 50.0;

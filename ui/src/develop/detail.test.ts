@@ -117,6 +117,29 @@ describe("テクスチャ・明瞭度・かすみの除去・シャープ・効�
     const back = withVignette(manual, { center: null });
     expect("center" in back.effects.vignette).toBe(false);
     expect(vignetteCenterOf(back)).toEqual(vignetteCenterOf(cropped));
+    // 角度補正で切り抜きの中心が回転した画像の外に出たら、描くときと同じく外接矩形の中心（constrain_crop）。
+    const info = { ow: 6000, oh: 4000, gw: 6000, gh: 4000 };
+    const rotate = (crop: { left: number; top: number; right: number; bottom: number }) => {
+      const t = (20 * Math.PI) / 180;
+      const g = { gw: 6000 * Math.cos(t) + 4000 * Math.sin(t), gh: 6000 * Math.sin(t) + 4000 * Math.cos(t) };
+      return {
+        s: { ...cropped, geometry: { ...cropped.geometry, angle_deg: 20, crop } },
+        info: { ...info, ...g },
+      };
+    };
+    const corner = rotate({ left: 0, top: 0, right: 0.2, bottom: 0.2 });
+    expect(vignetteCenterOf(corner.s, corner.info)).toEqual({ x: 0.5, y: 0.5 });
+    // info がなければ判定しない（設定の切り抜きの中心）。
+    expect(vignetteCenterOf(corner.s)).toEqual({ x: 0.1, y: 0.1 });
+    const inner = rotate({ left: 0.3, top: 0.4, right: 0.5, bottom: 0.5 });
+    const ic = vignetteCenterOf(inner.s, inner.info);
+    expect(ic.x).toBeCloseTo(0.4, 12);
+    expect(ic.y).toBeCloseTo(0.45, 12);
+    // 手動の中心は判定しない。
+    expect(vignetteCenterOf(withVignette(corner.s, { center: { x: 0.05, y: 0.05 } }), corner.info)).toEqual({
+      x: 0.05,
+      y: 0.05,
+    });
     // コアから null が来ても、既定と同じに扱う。
     const fromNull = fullEffects({ vignette: { ...defaultEffects().vignette, center: null } });
     expect("center" in fromNull.vignette).toBe(false);

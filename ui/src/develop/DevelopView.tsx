@@ -682,8 +682,7 @@ function Stage() {
           box={imageBox}
           gb={gb}
           settings={settings}
-          gw={info.gw}
-          gh={info.gh}
+          info={info}
         />
       )}
       {comparing && split && <div className="dv-split-line" style={{ left: splitAt }} />}

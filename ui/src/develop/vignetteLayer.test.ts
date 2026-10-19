@@ -40,7 +40,14 @@ describe("周辺光量補正の中心の印を描く", () => {
 
   function render(settings: DevelopSettings): string {
     return renderToString(
-      createElement(VignetteLayer, { width: 600, height: 600, box, gb, settings, gw: 4000, gh: 2000 }),
+      createElement(VignetteLayer, {
+        width: 600,
+        height: 600,
+        box,
+        gb,
+        settings,
+        info: { ow: 4000, oh: 2000, gw: 4000, gh: 2000 },
+      }),
     );
   }
 
