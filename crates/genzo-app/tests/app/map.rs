@@ -1,5 +1,6 @@
-//! (v1 の map) オンラインの地図（位置情報の後付け LIB-21 の第 2 段階）: 設定の保存と読み直し、地名の検索が
-//! 有効なときだけ通信すること、タイルのキャッシュの大きさと消去。
+//! (v1 の map) オンラインの地図（位置情報の後付け LIB-21 の第 2 段階）: 設定の保存と読み直し、地名の検索と
+//! 地図のタイル（`genzo://localhost/tile/{z}/{x}/{y}`）が有効なときだけ通信すること、タイルのキャッシュの
+//! 大きさと消去。
 //!
 //! 通信は差し替える（[`FakeHttp`]。本物の OSM のサーバーに問い合わせない。SEC-01・CI）。地名の検索の
 //! 「1 秒に 1 回」の間隔はプロセス全体の関所（genzo-geo）が守るので、通信する検索を続けると 1 秒ずつ待つ
@@ -9,12 +10,13 @@ use std::sync::Arc;
 
 use genzo_api::ErrorKind;
 use genzo_app::map::{self, MapService};
+use genzo_app::protocol;
 use genzo_app::settings::MapPreferences;
 use genzo_app::state::AppState;
-use genzo_geo::{GeoError, HttpClient, HttpResponse};
+use genzo_geo::{CacheInfo, GeoError, HttpClient, HttpResponse};
 use parking_lot::Mutex;
 
-use crate::support::{Env, assert_kind};
+use crate::support::{Env, WAIT_LIMIT, assert_kind};
 
 /// 要求の URL から応答を決める関数。
 type Respond = Box<dyn Fn(&str) -> Result<HttpResponse, GeoError> + Send + Sync>;
@@ -171,13 +173,10 @@ pub fn map_preferences_are_saved_and_read_again() {
     assert_eq!(again.settings().map, on.map);
 
     // タイルがなければキャッシュは空で、消してもよい（通信しない）。
-    assert_eq!(map::cache_info(&state), genzo_geo::CacheInfo::default());
-    assert_eq!(
-        map::clear_cache(&state).unwrap(),
-        genzo_geo::CacheInfo::default()
-    );
+    assert_eq!(map::cache_info(&state), CacheInfo::default());
+    assert_eq!(map::clear_cache(&state).unwrap(), CacheInfo::default());
     // キャッシュの場所がない（ディスクにキャッシュしない）ときも同じ。
-    assert_eq!(map::cache_info(&again), genzo_geo::CacheInfo::default());
+    assert_eq!(map::cache_info(&again), CacheInfo::default());
     assert_eq!(fake.count(), 0);
 }
 
@@ -289,4 +288,133 @@ pub fn places_are_searched_only_when_online_maps_are_enabled() {
         ErrorKind::InvalidInput,
     );
     assert_eq!(fake.count(), 4);
+}
+
+/// PNG の署名で始まる本文（タイルの画像の代わり。genzo-geo は署名だけを確かめ、デコードしない）。
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n tile";
+
+/// 地図のタイルは、オンラインの地図が有効なときだけ、カタログを開いていなくても返す。2 回目はキャッシュから
+/// 返す。範囲外は 400、上流の 404 は 404、上流のエラー・通信の失敗・PNG でない応答は 502。キャッシュは専用の
+/// フォルダの中の提供元のフォルダだけを消す。
+pub fn tiles_are_served_only_when_online_maps_are_enabled() {
+    let env = Env::new();
+    let fake = FakeHttp::new(|url| match url {
+        "https://tile.openstreetmap.org/1/0/0.png" | "https://tiles.example.org/1/0/0.png" => {
+            Ok(response(
+                200,
+                &[
+                    ("content-type", "image/png"),
+                    ("cache-control", "max-age=86400"),
+                ],
+                PNG,
+            ))
+        }
+        "https://tile.openstreetmap.org/1/1/1.png" => Ok(response(404, &[], b"")),
+        "https://tile.openstreetmap.org/1/0/1.png" => Ok(response(500, &[], b"")),
+        "https://tile.openstreetmap.org/1/1/0.png" => {
+            Err(GeoError::Network("接続できません".to_owned()))
+        }
+        "https://tile.openstreetmap.org/2/0/0.png" => Ok(response(
+            200,
+            &[("content-type", "text/html")],
+            b"<html></html>",
+        )),
+        other => panic!("思わない要求: {other}"),
+    });
+    let state = Arc::new(state_with_fake(&env, &fake));
+    let get = |path: &str| protocol::reply(&state, path, None);
+
+    // 無効なら 403 で、通信しない。カタログを開いていなくても 503 にしない（サムネイルは 503）。
+    assert_eq!(get("/tile/1/0/0").status, 403);
+    assert_eq!(get("/thumb/1").status, 503);
+    // 形の違う URI・範囲外の番号は 400。
+    for bad in ["/tile/1/2/0", "/tile/1/0/0.png", "/tile/1/0", "/tile/x/0/0"] {
+        assert_eq!(get(bad).status, 400, "{bad}");
+    }
+    assert_eq!(fake.count(), 0);
+
+    enable(&state);
+    let r = get("/tile/1/0/0");
+    assert_eq!(
+        (r.status, r.content_type, r.cache_control),
+        (200, "image/png", "no-cache")
+    );
+    assert_eq!(r.body, PNG);
+    assert_eq!(fake.urls(), ["https://tile.openstreetmap.org/1/0/0.png"]);
+    // 2 回目はキャッシュから返す（期限内なので通信しない）。
+    assert_eq!(get("/tile/1/0/0").body, PNG);
+    assert_eq!(fake.count(), 1);
+    // 提供元の最大のズーム（OSM は 19）を超えるズームは、通信せずに 400。
+    assert_eq!(get("/tile/20/0/0").status, 400);
+    assert_eq!(fake.count(), 1);
+    assert_eq!(get("/tile/1/1/1").status, 404);
+    assert_eq!(
+        get("/tile/1/0/1").status,
+        502,
+        "上流のエラー（キャッシュなし）"
+    );
+    assert_eq!(get("/tile/1/1/0").status, 502, "通信の失敗");
+    assert_eq!(get("/tile/2/0/0").status, 502, "PNG でない応答");
+    assert_eq!(fake.count(), 5);
+
+    // 画面の要求の経路（handle → タイル専用のスレッド）でも同じ答え。
+    let (tx, rx) = crossbeam_channel::unbounded();
+    for tile in [(1, 0, 0), (1, 1, 1)] {
+        let tx = tx.clone();
+        protocol::submit_tile(
+            Arc::clone(&state),
+            tile,
+            Box::new(move |r| {
+                let _ = tx.send((tile, r.status, r.body));
+            }),
+        );
+    }
+    let mut replies: Vec<_> = (0..2)
+        .map(|_| rx.recv_timeout(WAIT_LIMIT).expect("タイルの答え"))
+        .collect();
+    replies.sort();
+    assert_eq!(
+        replies,
+        [((1, 0, 0), 200, PNG.to_vec()), ((1, 1, 1), 404, Vec::new())]
+    );
+    assert_eq!(fake.count(), 6, "404 はキャッシュしない");
+
+    // キャッシュの大きさ（本文と付随の情報）。消すのは専用のフォルダの中の提供元のフォルダだけ（Windows では、
+    // 親のフォルダに WebView2 のデータとログがある）。
+    let info = map::cache_info(&state);
+    assert_eq!(info.files, 2, "{info:?}");
+    assert!(info.bytes > PNG.len() as u64, "{info:?}");
+    let parent = env.root().join("キャッシュ");
+    let tiles_dir = parent.join(map::MAP_CACHE_DIR);
+    std::fs::write(parent.join("WebView2 のデータ.txt"), b"x").unwrap();
+    std::fs::write(tiles_dir.join("メモ.txt"), b"x").unwrap();
+    assert_eq!(map::clear_cache(&state).unwrap(), CacheInfo::default());
+    assert!(parent.join("WebView2 のデータ.txt").exists());
+    assert!(tiles_dir.join("メモ.txt").exists());
+    // 消した後は取り直す。
+    assert_eq!(get("/tile/1/0/0").status, 200);
+    assert_eq!(fake.count(), 7);
+
+    // 提供元を設定で変えると、次の要求からその URL に送る（キャッシュは提供元ごとのフォルダに分ける）。
+    map::save_preferences(
+        &state,
+        MapPreferences {
+            online: true,
+            tile_url: Some("https://tiles.example.org/{z}/{x}/{y}.png".to_owned()),
+            ..MapPreferences::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(get("/tile/1/0/0").status, 200);
+    assert_eq!(
+        fake.urls().last().map(String::as_str),
+        Some("https://tiles.example.org/1/0/0.png")
+    );
+    assert_eq!(map::cache_info(&state).files, 4);
+
+    // 無効に戻すと、キャッシュにあっても 403 で、通信しない（キャッシュの大きさは無効でも返す）。
+    map::save_preferences(&state, MapPreferences::default()).unwrap();
+    assert_eq!(get("/tile/1/0/0").status, 403);
+    assert_eq!(fake.count(), 8);
+    assert_eq!(map::cache_info(&state).files, 4);
 }

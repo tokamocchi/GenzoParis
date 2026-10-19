@@ -6,7 +6,7 @@
 //!
 //! | 画面からの入口 | 内容 |
 //! |---|---|
-//! | `genzo://localhost/tile/{z}/{x}/{y}`（Windows は `http://genzo.localhost/tile/...`） | 地図のタイル（PNG。[`crate::protocol`]。ディスクにキャッシュする） |
+//! | `genzo://localhost/tile/{z}/{x}/{y}`（Windows は `http://genzo.localhost/tile/...`） | 地図のタイル（PNG。[`crate::protocol::reply_tile`]。ディスクにキャッシュする） |
 //! | コマンド `search_places` | 地名の検索（[`search_places`]） |
 //! | コマンド `save_map_preferences` | 有効・無効と提供元の URL の保存（[`save_preferences`]） |
 //! | コマンド `map_cache_info`・`clear_map_cache` | タイルのキャッシュの大きさと消去（[`cache_info`]・[`clear_cache`]） |

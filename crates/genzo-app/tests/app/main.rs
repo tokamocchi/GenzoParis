@@ -129,6 +129,10 @@ const TESTS: &[(&str, fn())] = &[
         map::places_are_searched_only_when_online_maps_are_enabled,
     ),
     (
+        "map::tiles_are_served_only_when_online_maps_are_enabled",
+        map::tiles_are_served_only_when_online_maps_are_enabled,
+    ),
+    (
         "develop::develop_and_region_frames_match_their_headers",
         develop::develop_and_region_frames_match_their_headers,
     ),
