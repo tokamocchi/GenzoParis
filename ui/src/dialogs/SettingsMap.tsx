@@ -245,11 +245,12 @@ export function SettingsMap() {
 
       <div className="dlg-row" style={{ marginTop: 6 }}>
         <span>地図のキャッシュ: {cache ? describeMapCache(cache) : "—"}</span>
+        {/* ディスクのファイルが 0 でも押せる（ディスクに書けないときのメモリーの分は数えに入らないため）。 */}
         <button
           type="button"
           className="btn small"
           onClick={() => void clearCache()}
-          disabled={clearing || !cache || cache.files === 0}
+          disabled={clearing || !cache}
         >
           {clearing ? "消しています…" : "キャッシュを消す"}
         </button>
