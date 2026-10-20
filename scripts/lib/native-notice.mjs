@@ -236,9 +236,12 @@ export function kegUpstreamVersion(kegVersion) {
 // ---------------------------------------------------------------------------------------------------------------
 // 文書
 
-/** libjpeg（IJG のコード）を含むか（名前に jpeg があるか、ライセンスの表示に IJG があるか）。 */
+/**
+ * libjpeg（IJG のコード）を含むか（パッケージが libjpeg・libjpeg-turbo か、ライセンスの表示に IJG があるか。
+ * openjpeg（JPEG 2000）などは当たらない）。
+ */
 export function needsIjgStatement(components) {
-  return components.some((c) => /jpeg/i.test(c.name) || /\bIJG\b/.test(c.license ?? ""));
+  return components.some((c) => /^(lib)?jpeg(-turbo)?$/i.test(c.name) || /\bIJG\b/.test(c.license ?? ""));
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   isNativeLicenseFile,
   kegUpstreamVersion,
   mergeComponents,
+  needsIjgStatement,
   parseCellarPath,
   parseVcpkgFromGithub,
   parseVcpkgListName,
@@ -200,6 +201,16 @@ test("文書: パッケージごとにまとめ、libjpeg を含むときは IJG
   assert.match(win, /\n3\. Microsoft Visual C\+\+ のランタイム \/ Microsoft Visual C\+\+ Runtime\n/);
   assert.match(win, /VC\\Redist\\MSVC\\14\.51\.36231\\x64\\Microsoft\.VC145\.CRT/);
   assert.match(win, /ライセンス \/ License: （入手元に表示なし/);
+});
+
+test("IJG の一文は libjpeg・libjpeg-turbo（またはライセンスの表示が IJG）のときだけ", () => {
+  const c = (name, license = null) => ({ name, version: "1", license, homepage: null, recipe: null, source: null, files: [], texts: [] });
+  assert.ok(needsIjgStatement([c("jpeg-turbo")]));
+  assert.ok(needsIjgStatement([c("libjpeg-turbo")]));
+  assert.ok(needsIjgStatement([c("jpeg")]));
+  assert.ok(needsIjgStatement([c("something", "IJG AND Zlib")]));
+  assert.ok(!needsIjgStatement([c("openjpeg", "BSD-2-Clause")]));
+  assert.ok(!needsIjgStatement([c("jasper", "JasPer-2.0")]));
 });
 
 test("文書: ライセンスの文書が見つからないパッケージがあれば止める", () => {
