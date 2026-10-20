@@ -134,22 +134,29 @@ impl GeocoderProvider {
 
     /// 検索の URL に問い合わせのパラメータ（エンコード済み）を足した URL。
     pub(crate) fn url_with_query(&self, query: &str) -> String {
-        let base = &self.search_url;
-        let sep = if base.ends_with('?') || base.ends_with('&') {
-            ""
-        } else if base.contains('?') {
-            "&"
-        } else {
-            "?"
-        };
-        format!("{base}{sep}{query}")
+        join_query(&self.search_url, query)
     }
+}
+
+/// `base` に問い合わせのパラメータ（エンコード済み）を足す。
+fn join_query(base: &str, query: &str) -> String {
+    let sep = if base.ends_with('?') || base.ends_with('&') {
+        ""
+    } else if base.contains('?') {
+        "&"
+    } else {
+        "?"
+    };
+    format!("{base}{sep}{query}")
 }
 
 /// タイルの URL のひな形を確かめる。
 ///
 /// - `https://` で始まり、ホスト名がある（利用者名・パスワードは不可）。空白・制御文字・ASCII でない文字・`#` は不可。
 /// - `{z}`・`{x}`・`{y}` をちょうど 1 つずつ含む。ほかの置換子（サブドメインの `{s}` など）は不可。
+/// - 置換子を数に置き換えた URL が、要求に使う http の URI として読める（パスの `<`・`>`・`` ` `` や、問い合わせの
+///   `"`・`<`・`>` は不可。長すぎる URL も不可）。読めない URL を保存すると、要求のたびに「URL を読めません」に
+///   なるため。
 pub fn validate_tile_url_template(template: &str) -> Result<(), GeoError> {
     check_https_url(template, "タイルの URL")?;
     let mut rest = template.to_string();
@@ -167,10 +174,17 @@ pub fn validate_tile_url_template(template: &str) -> Result<(), GeoError> {
                 .to_string(),
         ));
     }
-    Ok(())
+    // 実際に送る形（番号は桁のいちばん多いもの）で確かめる。
+    let max = ((1u32 << MAX_ZOOM_LIMIT) - 1).to_string();
+    let sample = template
+        .replace("{z}", &MAX_ZOOM_LIMIT.to_string())
+        .replace("{x}", &max)
+        .replace("{y}", &max);
+    check_request_uri(&sample, "タイルの URL")
 }
 
-/// 検索の URL を確かめる（`https://` で始まり、ホスト名がある。置換子 `{…}` は不可）。
+/// 検索の URL を確かめる（`https://` で始まり、ホスト名がある。置換子 `{…}` は不可。検索のパラメータを足した
+/// URL が http の URI として読める）。
 pub fn validate_search_url(url: &str) -> Result<(), GeoError> {
     check_https_url(url, "検索の URL")?;
     if url.contains(['{', '}']) {
@@ -178,7 +192,21 @@ pub fn validate_search_url(url: &str) -> Result<(), GeoError> {
             "検索の URL に { } は使えません".to_string(),
         ));
     }
-    Ok(())
+    // 実際に送る形（genzo-geo が後ろに足す問い合わせの例）で確かめる。
+    check_request_uri(
+        &join_query(url, "q=x&format=jsonv2&limit=10&accept-language=ja"),
+        "検索の URL",
+    )
+}
+
+/// 要求に使う http の URI として読めるか（ureq が使う http の crate の検査。文字の表を自前で持たない）。
+fn check_request_uri(url: &str, what: &str) -> Result<(), GeoError> {
+    match ureq::http::Uri::try_from(url) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(GeoError::InvalidInput(format!(
+            "{what}: 使えない文字があるか、長すぎます（\"・<・>・` などは %XX の形で書いてください）"
+        ))),
+    }
 }
 
 /// https の URL の形を確かめる（`url` crate を使わない最小の検査。読めない URL は要求のときに ureq が誤りにする）。
@@ -276,6 +304,9 @@ mod tests {
             "https://example.org/{y}/{x}/{z}",
             "https://[2001:db8::1]:443/{z}/{x}/{y}.png",
             "https://[2001:db8::1]/{z}/{x}/{y}.png",
+            // http の URI として読める記号（問い合わせの ` と、パスの "）。
+            "https://tiles.example.org/{z}/{x}/{y}.png?a=`b`",
+            "https://tiles.example.org/\"a\"/{z}/{x}/{y}.png",
         ] {
             assert!(validate_tile_url_template(ok).is_ok(), "{ok}");
             assert!(TileProvider::new(ok, 19, "© OpenStreetMap contributors").is_ok());
@@ -301,6 +332,11 @@ mod tests {
             "https://tile_example.org/{z}/{x}/{y}.png",
             "https://[2001:db8::1/{z}/{x}/{y}.png",
             "https://[]/{z}/{x}/{y}.png",
+            // http の URI として読めない記号（要求のたびに「URL を読めません」になり、タイルがすべて 400 になる）。
+            "https://tiles.example.org/{z}/{x}/{y}.png?style=\"dark\"",
+            "https://tiles.example.org/{z}/{x}/{y}.png?a=<b>",
+            "https://tiles.example.org/<a>/{z}/{x}/{y}.png",
+            "https://tiles.example.org/`a`/{z}/{x}/{y}.png",
         ] {
             assert!(
                 matches!(
@@ -309,7 +345,17 @@ mod tests {
                 ),
                 "{ng}"
             );
+            assert!(TileProvider::new(ng, 19, "x").is_err(), "{ng}");
         }
+        // 長すぎる URL（http の URI のパスと問い合わせの上限を超える）。
+        let long = format!(
+            "https://tiles.example.org/{}/{{z}}/{{x}}/{{y}}.png",
+            "a".repeat(70_000)
+        );
+        assert!(matches!(
+            validate_tile_url_template(&long),
+            Err(GeoError::InvalidInput(_))
+        ));
     }
 
     #[test]
@@ -344,6 +390,8 @@ mod tests {
             "https://nominatim.openstreetmap.org/search?q={q}",
             "https://nominatim.openstreetmap.org/search#x",
             "ftp://nominatim.openstreetmap.org/search",
+            "https://nominatim.example.org/search?x=\"a\"",
+            "https://nominatim.example.org/<search>",
         ] {
             assert!(
                 matches!(validate_search_url(ng), Err(GeoError::InvalidInput(_))),

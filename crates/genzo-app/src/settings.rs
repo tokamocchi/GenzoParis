@@ -319,6 +319,7 @@ mod tests {
             "http://tile.openstreetmap.org/{z}/{x}/{y}.png",
             "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
             "https://tiles.example.org/{z}/{x}.png",
+            "https://tiles.example.org/{z}/{x}/{y}.png?style=\"dark\"",
         ] {
             let r = MapPreferences {
                 tile_url: Some(bad.to_owned()),
