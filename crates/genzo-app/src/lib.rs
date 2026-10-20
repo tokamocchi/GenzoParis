@@ -299,11 +299,11 @@ pub fn run() {
             });
             // 地図のタイルのキャッシュは、OS のキャッシュのフォルダの下の専用のサブフォルダ（Windows ではこの
             // フォルダが WebView2 のデータとログの親なので、直下には置かない。map の doc）。場所が分からなくても
-            // 起動は止めない（ディスクにキャッシュせずに動く）。
+            // 起動は止めない（メモリーにだけキャッシュして動く。genzo-geo の tiles の doc）。
             let map_cache = match app.path().app_cache_dir() {
                 Ok(dir) => Some(dir.join(map::MAP_CACHE_DIR)),
                 Err(e) => {
-                    tracing::warn!(error = %e, "キャッシュのフォルダが分からないので、地図のタイルをディスクにキャッシュしない");
+                    tracing::warn!(error = %e, "キャッシュのフォルダが分からないので、地図のタイルをメモリーにだけキャッシュする");
                     None
                 }
             };

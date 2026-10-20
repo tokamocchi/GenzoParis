@@ -23,6 +23,14 @@
 //! - [`TileService::clear_cache`] と [`TileService::cache_info`] は、`cache_dir` の中の提供元のフォルダ
 //!   （16 桁の 16 進の名前）だけを扱う（ほかのファイル・フォルダには触らない）。
 //!
+//! メモリーのキャッシュ: ディスクのキャッシュがない（genzo-app がキャッシュのフォルダを得られない）か、
+//! 書けない（ディスクがいっぱい・フォルダが読み取り専用など）ときは、代わりにメモリーに持つ（本文の合計が
+//! [`MEMORY_CACHE_LIMIT_BYTES`] まで（仮置き）。最近使っていないものから捨てる）。期限・条件付きの要求・
+//! stale-on-error はディスクと同じ規則。WebView には期限を任せない（genzo-app は `no-cache` で返す）ので、
+//! これがないと、同じタイルの再訪がすべて上流への要求になる（タイルのポリシーの「再訪で取り直さない手元の
+//! キャッシュ」に反する）。メモリーの分は、作り直す（提供元を変える）と消える。[`TileService::cache_info`] には
+//! 数えず、[`TileService::clear_cache`] では消す。
+//!
 //! ログには、タイルの番号・パスを info 以上で書かない（見ている場所がわかるため。決定事項ログ No.75 の方針）。
 
 use std::collections::HashMap;
@@ -49,6 +57,9 @@ pub const DEFAULT_CACHE_LIMIT_BYTES: u64 = 200 * 1024 * 1024;
 
 /// 容量の上限を確かめる間隔（書き込みの回数。仮置き。毎回フォルダを走査しないため）。
 pub const EVICTION_CHECK_EVERY: u64 = 128;
+
+/// メモリーのキャッシュ（ディスクのキャッシュがない・書けないときの代わり）の本文の合計の上限（32 MiB。仮置き）。
+pub const MEMORY_CACHE_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
 
 /// タイルの種類（PNG だけを扱う）。
 pub const TILE_CONTENT_TYPE: &str = "image/png";
@@ -114,6 +125,7 @@ pub struct TileService {
     client: Arc<dyn HttpClient>,
     provider: TileProvider,
     cache: Option<DiskCache>,
+    memory: Mutex<MemoryCache>,
     clock: Arc<dyn Clock>,
     in_flight: Mutex<HashMap<TileKey, Arc<Flight>>>,
 }
@@ -149,6 +161,7 @@ impl TileService {
             client,
             provider,
             cache,
+            memory: Mutex::new(MemoryCache::new(MEMORY_CACHE_LIMIT_BYTES)),
             clock: Arc::new(SystemClock),
             in_flight: Mutex::new(HashMap::new()),
         }
@@ -159,6 +172,12 @@ impl TileService {
         if let Some(cache) = &mut self.cache {
             cache.limit_bytes = bytes;
         }
+        self
+    }
+
+    /// メモリーのキャッシュの上限を変える（既定は [`MEMORY_CACHE_LIMIT_BYTES`]）。
+    pub fn with_memory_cache_limit(self, bytes: u64) -> Self {
+        lock(&self.memory).limit_bytes = bytes;
         self
     }
 
@@ -238,9 +257,10 @@ impl TileService {
         info
     }
 
-    /// ディスクのキャッシュを消す（`cache_dir` の中の提供元のフォルダだけ。`cache_dir` 自体と、ほかの
-    /// ファイル・フォルダは消さない）。
+    /// キャッシュを消す（メモリーの分と、ディスクの `cache_dir` の中の提供元のフォルダだけ。`cache_dir` 自体と、
+    /// ほかのファイル・フォルダは消さない）。
     pub fn clear_cache(&self) -> Result<(), GeoError> {
+        lock(&self.memory).clear();
         let Some(cache) = &self.cache else {
             return Ok(());
         };
@@ -266,7 +286,7 @@ impl TileService {
     /// キャッシュを見て、要れば通信する（待ち合わせの先頭の呼び出しだけが通る）。
     fn fetch(&self, z: u8, x: u32, y: u32) -> Result<Tile, GeoError> {
         let now = self.clock.now_utc();
-        let cached = self.cache.as_ref().and_then(|c| c.read(z, x, y));
+        let cached = self.read_cached(z, x, y);
         if let Some(entry) = &cached
             && let Some(meta) = &entry.meta
             && now < meta.expires_at
@@ -299,12 +319,13 @@ impl TileService {
                         "条件付きでない要求に 304 が返りました".to_string(),
                     ));
                 };
+                let from_memory = entry.from_memory;
                 let stored = Stored {
                     cache_control: meta.cache_control.as_deref(),
                     expires: meta.expires.as_deref(),
                 };
                 let policy = freshness::policy(&response, now, Some(stored));
-                if let Some(cache) = &self.cache {
+                {
                     if policy.store {
                         // 304 にあるヘッダーだけを置き換える（RFC 9111 の 4.3.4 節）。
                         let updated = |name: &str, old: Option<String>| {
@@ -319,9 +340,17 @@ impl TileService {
                             expires: updated("expires", meta.expires),
                             ..meta_for(&policy, now, &response)
                         };
-                        cache.write_meta(z, x, y, &meta);
+                        // ディスクから読んだものは期限だけを書き直す。書けなければ、メモリーに持つ。
+                        let on_disk = !from_memory
+                            && self
+                                .cache
+                                .as_ref()
+                                .is_some_and(|c| c.write_meta(z, x, y, &meta));
+                        if !on_disk {
+                            self.store(z, x, y, &entry.bytes, &meta);
+                        }
                     } else {
-                        cache.remove(z, x, y);
+                        self.remove_cached(z, x, y);
                     }
                 }
                 Ok(tile(entry.bytes, false))
@@ -329,13 +358,11 @@ impl TileService {
             200 => {
                 check_png(&response)?;
                 let policy = freshness::policy(&response, now, None);
-                if let Some(cache) = &self.cache {
-                    if policy.store {
-                        let meta = meta_for(&policy, now, &response);
-                        cache.write(z, x, y, &response.body, &meta);
-                    } else {
-                        cache.remove(z, x, y);
-                    }
+                if policy.store {
+                    let meta = meta_for(&policy, now, &response);
+                    self.store(z, x, y, &response.body, &meta);
+                } else {
+                    self.remove_cached(z, x, y);
                 }
                 Ok(tile(response.body, false))
             }
@@ -348,12 +375,44 @@ impl TileService {
     }
 }
 
+impl TileService {
+    /// キャッシュから読む（メモリーを先に見る。メモリーに持つのはディスクに書けなかったときだけで、ディスクに
+    /// 書けたら捨てるので、メモリーにあるものがいちばん新しい）。
+    fn read_cached(&self, z: u8, x: u32, y: u32) -> Option<CachedTile> {
+        let in_memory = lock(&self.memory).get(&(z, x, y));
+        in_memory.or_else(|| self.cache.as_ref().and_then(|c| c.read(z, x, y)))
+    }
+
+    /// キャッシュに書く（ディスクに書けたらメモリーの分は捨てる。ディスクがない・書けなければメモリーに持つ）。
+    fn store(&self, z: u8, x: u32, y: u32, bytes: &[u8], meta: &TileMeta) {
+        let key = (z, x, y);
+        if self
+            .cache
+            .as_ref()
+            .is_some_and(|c| c.write(z, x, y, bytes, meta))
+        {
+            lock(&self.memory).remove(&key);
+        } else {
+            lock(&self.memory).put(key, bytes.to_vec(), meta.clone());
+        }
+    }
+
+    /// キャッシュから消す（保存してはいけない応答のとき）。
+    fn remove_cached(&self, z: u8, x: u32, y: u32) {
+        if let Some(cache) = &self.cache {
+            cache.remove(z, x, y);
+        }
+        lock(&self.memory).remove(&(z, x, y));
+    }
+}
+
 /// 期限の切れたキャッシュがあり、古いものを使ってよければそれを、なければ `error` を返す。
 fn stale_or(cached: Option<CachedTile>, error: GeoError) -> Result<Tile, GeoError> {
     match cached {
         Some(CachedTile {
             bytes,
             meta: Some(meta),
+            ..
         }) if meta.stale_ok => {
             tracing::debug!("通信に失敗したので、期限の切れた地図のタイルを使います: {error}");
             Ok(tile(bytes, true))
@@ -474,6 +533,94 @@ struct CachedTile {
     bytes: Vec<u8>,
     /// 付随の情報（読めなければ `None`。期限がわからないので使う前に取り直す）。
     meta: Option<TileMeta>,
+    /// メモリーのキャッシュから読んだ。
+    from_memory: bool,
+}
+
+/// メモリーのキャッシュの 1 枚。
+struct MemoryEntry {
+    bytes: Vec<u8>,
+    meta: TileMeta,
+    /// 最後に使った順番（大きいほど新しい）。
+    last_used: u64,
+}
+
+/// メモリーのキャッシュ（ディスクのキャッシュがない・書けないときの代わり。モジュールの doc）。
+struct MemoryCache {
+    entries: HashMap<TileKey, MemoryEntry>,
+    /// 本文の合計。
+    total_bytes: u64,
+    limit_bytes: u64,
+    /// 使った順番を数える。
+    uses: u64,
+}
+
+impl MemoryCache {
+    fn new(limit_bytes: u64) -> Self {
+        Self {
+            entries: HashMap::new(),
+            total_bytes: 0,
+            limit_bytes,
+            uses: 0,
+        }
+    }
+
+    fn next_use(&mut self) -> u64 {
+        self.uses += 1;
+        self.uses
+    }
+
+    fn get(&mut self, key: &TileKey) -> Option<CachedTile> {
+        let now = self.next_use();
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = now;
+        Some(CachedTile {
+            bytes: entry.bytes.clone(),
+            meta: Some(entry.meta.clone()),
+            from_memory: true,
+        })
+    }
+
+    /// 入れる（上限を超えたら、最近使っていないものから捨てる。1 枚で上限を超えるものは入れない）。
+    fn put(&mut self, key: TileKey, bytes: Vec<u8>, meta: TileMeta) {
+        self.remove(&key);
+        let len = bytes.len() as u64;
+        if len > self.limit_bytes {
+            return;
+        }
+        let last_used = self.next_use();
+        self.total_bytes += len;
+        self.entries.insert(
+            key,
+            MemoryEntry {
+                bytes,
+                meta,
+                last_used,
+            },
+        );
+        while self.total_bytes > self.limit_bytes {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            self.remove(&oldest);
+        }
+    }
+
+    fn remove(&mut self, key: &TileKey) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.total_bytes -= entry.bytes.len() as u64;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.total_bytes = 0;
+    }
 }
 
 /// キャッシュの中のファイル。
@@ -516,17 +663,24 @@ impl DiskCache {
         let meta = fs::read(dir.join(format!("{y}.json")))
             .ok()
             .and_then(|json| serde_json::from_slice::<TileMeta>(&json).ok());
-        Some(CachedTile { bytes, meta })
+        Some(CachedTile {
+            bytes,
+            meta,
+            from_memory: false,
+        })
     }
 
-    /// 本文と付随の情報を書く（失敗してもタイルは返すので、ログに残すだけ）。
-    fn write(&self, z: u8, x: u32, y: u32, bytes: &[u8], meta: &TileMeta) {
+    /// 本文と付随の情報を書く（書けたら true。失敗してもタイルは返すので、ログに残して、呼び出し元がメモリーに
+    /// 持つ）。
+    fn write(&self, z: u8, x: u32, y: u32, bytes: &[u8], meta: &TileMeta) -> bool {
         let dir = self.tile_dir(z, x);
         let result = write_atomic(&dir, &format!("{y}.png"), bytes)
             .and_then(|()| write_atomic(&dir, &format!("{y}.json"), &meta_json(meta)));
         if let Err(e) = result {
             self.log_write_failure("地図のタイルをキャッシュに書けませんでした", &e);
-            return;
+            // 書きかけの組（本文だけが新しく、付随の情報が古い、など）を残さない。
+            self.remove(z, x, y);
+            return false;
         }
         self.write_failures.store(0, Ordering::Relaxed);
         if self
@@ -536,13 +690,19 @@ impl DiskCache {
         {
             self.enforce_limit();
         }
+        true
     }
 
-    fn write_meta(&self, z: u8, x: u32, y: u32, meta: &TileMeta) {
+    /// 付随の情報だけを書き直す（書けたら true）。
+    fn write_meta(&self, z: u8, x: u32, y: u32, meta: &TileMeta) -> bool {
         match write_atomic(&self.tile_dir(z, x), &format!("{y}.json"), &meta_json(meta)) {
-            Ok(()) => self.write_failures.store(0, Ordering::Relaxed),
+            Ok(()) => {
+                self.write_failures.store(0, Ordering::Relaxed);
+                true
+            }
             Err(e) => {
-                self.log_write_failure("地図のタイルのキャッシュの期限を書けませんでした", &e)
+                self.log_write_failure("地図のタイルのキャッシュの期限を書けませんでした", &e);
+                false
             }
         }
     }

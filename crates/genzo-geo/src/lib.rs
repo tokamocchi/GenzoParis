@@ -9,8 +9,8 @@
 //! - HTTP: [`HttpClient`]（テストで差し替える trait）と [`UreqClient`]（ureq と rustls による本物の実装。
 //!   暗号の実装は ring、証明書の検証は OS に任せる）。User-Agent は [`user_agent`]
 //! - 提供元: [`TileProvider`]・[`GeocoderProvider`]（既定は OSM Foundation のサーバー。設定で変えられる。https だけ）
-//! - タイル: [`TileService`]（ディスクのキャッシュ。HTTP のキャッシュの指示に従い、読めなければ 7 日。期限切れは
-//!   条件付きの要求。同じタイルの同時の要求は 1 つにまとめる）
+//! - タイル: [`TileService`]（ディスクのキャッシュ。ディスクがない・書けなければメモリー。HTTP のキャッシュの指示に
+//!   従い、読めなければ 7 日。期限切れは条件付きの要求。同じタイルの同時の要求は 1 つにまとめる）
 //! - 地名の検索: [`Geocoder`]（1 秒に 1 回まで。結果はキャッシュする。jsonv2）
 //! - 時計: [`Clock`]（テストで差し替える）
 //!
@@ -55,6 +55,6 @@ pub use provider::{
     OSM_TILE_URL, TileProvider, validate_search_url, validate_tile_url_template,
 };
 pub use tiles::{
-    CacheInfo, DEFAULT_CACHE_LIMIT_BYTES, EVICTION_CHECK_EVERY, MAX_TILE_BYTES, TILE_CONTENT_TYPE,
-    Tile, TileService,
+    CacheInfo, DEFAULT_CACHE_LIMIT_BYTES, EVICTION_CHECK_EVERY, MAX_TILE_BYTES,
+    MEMORY_CACHE_LIMIT_BYTES, TILE_CONTENT_TYPE, Tile, TileService,
 };

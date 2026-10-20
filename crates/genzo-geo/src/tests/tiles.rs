@@ -440,6 +440,94 @@ fn clear_cache_removes_only_the_provider_folders() {
 }
 
 #[test]
+fn without_a_disk_cache_tiles_are_kept_in_memory() {
+    // キャッシュのフォルダがない（app_cache_dir() が取れない）ときも、再訪で上流から取り直さない（タイルの
+    // ポリシーの「再訪で取り直さない手元のキャッシュ」）。期限と条件付きの要求はディスクと同じ規則。
+    let clock = FakeClock::new();
+    let client = FakeClient::scripted(vec![
+        Ok(http(
+            200,
+            &[
+                ("Content-Type", "image/png"),
+                ("ETag", "\"m1\""),
+                ("Cache-Control", "max-age=60"),
+            ],
+            &png("a"),
+        )),
+        Ok(http(304, &[("Cache-Control", "max-age=60")], b"")),
+        Ok(http(200, &[("Content-Type", "image/png")], &png("b"))),
+    ]);
+    let tiles = service(&client, None, &clock);
+    tiles.tile(6, 1, 2).unwrap();
+    clock.advance(Duration::from_secs(30));
+    assert_eq!(tiles.tile(6, 1, 2).unwrap().bytes, png("a"));
+    assert_eq!(client.count(), 1);
+    // 期限が切れたら条件付きの要求。304 ならメモリーのものを返し、期限を延ばす。
+    clock.advance(Duration::from_secs(31));
+    assert_eq!(tiles.tile(6, 1, 2).unwrap().bytes, png("a"));
+    assert_eq!(client.requests()[1].header("if-none-match"), Some("\"m1\""));
+    clock.advance(Duration::from_secs(30));
+    tiles.tile(6, 1, 2).unwrap();
+    assert_eq!(client.count(), 2);
+    // ディスクのキャッシュの大きさには数えない。消すとメモリーの分も消える。
+    assert_eq!(tiles.cache_info(), crate::CacheInfo::default());
+    tiles.clear_cache().unwrap();
+    assert_eq!(tiles.tile(6, 1, 2).unwrap().bytes, png("b"));
+    assert_eq!(client.count(), 3);
+    assert_eq!(client.requests()[2].header("if-none-match"), None);
+}
+
+#[test]
+fn tiles_are_kept_in_memory_when_the_disk_cache_cannot_be_written() {
+    let dir = TempDir::new().unwrap();
+    // キャッシュのフォルダの位置に普通のファイルがある（フォルダを作れない。root で動いても書けない）。
+    let root = dir.path().join("map-tiles");
+    fs::write(&root, b"not a folder").unwrap();
+    let clock = FakeClock::new();
+    let client = FakeClient::new(|_| Ok(http(200, &[("Content-Type", "image/png")], &png("a"))));
+    let tiles = service(&client, Some(&root), &clock);
+    assert_eq!(tiles.tile(3, 1, 1).unwrap().bytes, png("a"));
+    assert_eq!(tiles.tile(3, 1, 1).unwrap().bytes, png("a"));
+    assert_eq!(client.count(), 1);
+    // 作り直す（提供元を変える・設定を保存し直す）とメモリーの分はなくなる。
+    let again = service(&client, Some(&root), &clock);
+    again.tile(3, 1, 1).unwrap();
+    assert_eq!(client.count(), 2);
+}
+
+#[test]
+fn the_memory_cache_keeps_the_most_recent_tiles_within_its_limit() {
+    let clock = FakeClock::new();
+    let client = FakeClient::new(|_| Ok(http(200, &[("Content-Type", "image/png")], &png("t"))));
+    let one = png("t").len() as u64;
+    let tiles = service(&client, None, &clock).with_memory_cache_limit(2 * one);
+    tiles.tile(4, 0, 0).unwrap();
+    tiles.tile(4, 1, 0).unwrap();
+    // (4, 0, 0) を使い直すと新しくなり、次に追い出されるのは (4, 1, 0)。
+    tiles.tile(4, 0, 0).unwrap();
+    assert_eq!(client.count(), 2);
+    tiles.tile(4, 2, 0).unwrap();
+    assert_eq!(client.count(), 3);
+    tiles.tile(4, 0, 0).unwrap();
+    tiles.tile(4, 2, 0).unwrap();
+    assert_eq!(client.count(), 3);
+    tiles.tile(4, 1, 0).unwrap();
+    assert_eq!(client.count(), 4);
+    // no-store のタイルはメモリーにも残さない。
+    let client = FakeClient::new(|_| {
+        Ok(http(
+            200,
+            &[("Content-Type", "image/png"), ("Cache-Control", "no-store")],
+            &png("n"),
+        ))
+    });
+    let tiles = service(&client, None, &clock);
+    tiles.tile(4, 0, 0).unwrap();
+    tiles.tile(4, 0, 0).unwrap();
+    assert_eq!(client.count(), 2);
+}
+
+#[test]
 fn concurrent_requests_for_one_tile_are_coalesced() {
     let clock = FakeClock::new();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
@@ -451,10 +539,15 @@ fn concurrent_requests_for_one_tile_are_coalesced() {
             while !*open {
                 open = cv.wait(open).unwrap();
             }
-            Ok(http(200, &[("Content-Type", "image/png")], &png("shared")))
+            // no-store（メモリーのキャッシュにも残さない）。
+            Ok(http(
+                200,
+                &[("Content-Type", "image/png"), ("Cache-Control", "no-store")],
+                &png("shared"),
+            ))
         })
     };
-    // ディスクのキャッシュなし（まとめているのがキャッシュでないことを確かめる）。
+    // ディスクのキャッシュなし・保存しない応答（まとめているのがキャッシュでないことを確かめる）。
     let tiles = Arc::new(service(&client, None, &clock));
     let threads: Vec<_> = (0..8)
         .map(|_| {

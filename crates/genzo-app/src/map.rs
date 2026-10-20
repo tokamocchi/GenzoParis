@@ -21,8 +21,8 @@
 //!   genzo-geo がプロセス全体で 1 つ持つので、作り直しても間隔は保たれる。
 //! - タイルのキャッシュは、OS のキャッシュのフォルダ（`app_cache_dir()`）の下の専用のサブフォルダ
 //!   [`MAP_CACHE_DIR`] に置く。Windows ではこのフォルダが WebView2 のデータとログの親なので、消すのは
-//!   サブフォルダの中の提供元のフォルダだけ（genzo-geo の `TileService::clear_cache`）。場所が分からなければ、
-//!   ディスクにキャッシュせずに動く（起動を止めない。lib.rs の `setup`）。
+//!   サブフォルダの中の提供元のフォルダだけ（genzo-geo の `TileService::clear_cache`）。場所が分からないか、
+//!   書けなければ、メモリーにだけキャッシュして動く（起動を止めない。lib.rs の `setup`。genzo-geo の tiles の doc）。
 //! - ログには検索語・タイルの番号・座標を書かない（決定事項ログ No.75 の方針）。
 //!
 //! OSM Foundation の利用ポリシー（タイル: <https://operations.osmfoundation.org/policies/tiles/> 、Nominatim:
@@ -79,7 +79,7 @@ impl std::fmt::Debug for MapService {
 
 impl MapService {
     /// 本物の通信（genzo-geo の `UreqClient`。初めて通信するときに作る）で作る。`cache_dir` はタイルの
-    /// キャッシュの専用のフォルダ（`None` ならディスクにキャッシュしない）。
+    /// キャッシュの専用のフォルダ（`None` ならディスクにキャッシュせず、メモリーにだけ持つ）。
     pub fn new(cache_dir: Option<PathBuf>) -> Self {
         Self::with_client(Arc::new(LazyClient::default()), cache_dir)
     }
