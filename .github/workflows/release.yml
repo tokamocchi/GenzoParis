@@ -9,7 +9,9 @@
 #
 # 手順（OS ごと）: 公開の範囲の確認 →（タグのときは版の確認）→ 画面のビルド → LibRaw を入れる → ワーカーのビルドと LibRaw の収集
 # （LGPL-2.1 の全文・案内を含む。scripts/prepare-worker.mjs）→ tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json
-# （scripts/build-app.mjs）→ 確認（ワーカーが同梱の LibRaw で起動できるか）→ artifact に置く。
+# （scripts/build-app.mjs。第三者のライセンスの文書が今の lock のファイルから作ったものかと、画面のバンドルに入った
+# npm のパッケージがすべて載っているかも確かめる）→ 確認（ワーカーが同梱の LibRaw で起動できるか。ライセンスの文書が
+# 入っているか）→ artifact に置く。
 # Windows は、ワーカーと LibRaw の DLL が使う Visual C++ のランタイムの DLL も同梱する（ランナーの Visual Studio の
 # 再頒布用のフォルダから。決定事項ログ No.73）。
 # 確認に通らなかった配布物は、配る用の artifact には置かない（調べるために「-unverified」の名前で置く）。
@@ -185,6 +187,12 @@ jobs:
             $f = Join-Path $dir "licenses\LibRaw\$name"
             if (-not (Test-Path $f)) { throw "LibRaw のライセンスの文書 $name がインストール先にない" }
           }
+          # アプリ自体のライセンス（GPL-3.0）と、第三者のライセンスの文書（Rust の crate・画面の npm のパッケージ。
+          # scripts/third-party.mjs。tauri.conf.json の resources）が、インストール先にあるか。
+          foreach ($name in 'README.txt', 'GenzoParis\LICENSE.txt', 'third-party\rust.txt', 'third-party\npm.txt') {
+            $f = Join-Path $dir "licenses\$name"
+            if (-not (Test-Path $f)) { throw "ライセンスの文書 licenses\$name がインストール先にない" }
+          }
           Get-Content (Join-Path $dir 'licenses\LibRaw\README.txt') -Encoding utf8 | Select-Object -First 5
           # DLL をインストール先と OS のフォルダからだけ探すよう、PATH を OS のフォルダだけにして起動する
           # （ランナーの PATH に LibRaw などの DLL があると、同梱の漏れを見逃すため）。
@@ -221,6 +229,13 @@ jobs:
           for name in LICENSE.LGPL COPYRIGHT README.txt; do
             if [ ! -f "$app/Contents/Resources/licenses/LibRaw/$name" ]; then
               echo "::error::LibRaw のライセンスの文書 ${name} が .app の Contents/Resources/licenses/LibRaw にない"; exit 1
+            fi
+          done
+          # アプリ自体のライセンス（GPL-3.0）と、第三者のライセンスの文書（scripts/third-party.mjs。tauri.conf.json の
+          # resources）が、.app の中にあるか。
+          for name in README.txt GenzoParis/LICENSE.txt third-party/rust.txt third-party/npm.txt; do
+            if [ ! -f "$app/Contents/Resources/licenses/$name" ]; then
+              echo "::error::ライセンスの文書 licenses/${name} が .app の Contents/Resources にない"; exit 1
             fi
           done
           head -5 "$app/Contents/Resources/licenses/LibRaw/README.txt"

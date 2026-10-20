@@ -15,6 +15,7 @@ import type {
   DisplayTarget,
   ExternalTools,
   ImportPreferences,
+  LicenseDocuments,
   LogFolderInfo,
   RestoreOutcome,
   VariantId,
@@ -62,6 +63,11 @@ export function reportUiError(message: string, detail: string | null): void {
     .invoke<void>("report_ui_error", { message, detail })
     .catch(() => undefined);
 }
+
+// 同梱したライセンスの文書（DIST-05。設定の「このアプリについて」）。読めるのは一覧にある文書だけ。
+export const licenseDocuments = () => call<LicenseDocuments>("license_documents");
+export const readLicenseDocument = (path: string) => call<string>("read_license_document", { path });
+export const openLicenseFolder = () => call<void>("open_license_folder");
 
 /** 閉じる・終了の結果（失敗は CloseFailure。カタログが開いたままなら still_open）。 */
 export type CloseResult = { ok: true } | { ok: false; failure: CloseFailure };

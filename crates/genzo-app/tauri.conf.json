@@ -58,6 +58,12 @@
     "shortDescription": "写真の現像（RAW 現像・非破壊編集）とカタログ管理",
     "longDescription": "Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカタログ管理を行うデスクトップアプリです。",
     "licenseFile": "../../LICENSE",
+    "resources": {
+      "licenses/README.txt": "licenses/README.txt",
+      "../../LICENSE": "licenses/GenzoParis/LICENSE.txt",
+      "licenses/third-party/rust.txt": "licenses/third-party/rust.txt",
+      "licenses/third-party/npm.txt": "licenses/third-party/npm.txt"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

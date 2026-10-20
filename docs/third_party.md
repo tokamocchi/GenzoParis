@@ -7,7 +7,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 > この台帳は AI が作成した記録で、個々のコードやデータの法的な適合性を確定するものではありません。
 > わからないことは「要確認」と書き、推測で断定しません。特許の扱いは、ライセンスとは別の未決事項として扱います。
 
-- 作成: 2026-10-09（AI）。2026-10-10 更新（判断の表への回答: LibRaw のライセンスの選択と Windows での指定方法、RCD の出典の調査、ColorChecker の照合、追加した依存。決定事項ログ No.32・34・37）
+- 作成: 2026-10-09（AI）。2026-10-10 更新（判断の表への回答: LibRaw のライセンスの選択と Windows での指定方法、RCD の出典の調査、ColorChecker の照合、追加した依存。決定事項ログ No.32・34・37）。2026-10-20 更新（配布物の第三者のライセンスの文書。1.4 節。決定事項ログ No.193・194）
 - アプリのライセンス: GPL-3.0-or-later（[決定事項ログ](decision_log.md) No.27、[LICENSE](../LICENSE)）
 
 ## 1. 範囲と使い方
@@ -44,6 +44,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - 描画の違い（置き換えの前後で画素を比べた結果）と、壊れたフォントの扱いは決定事項ログ No.173。フォントのファイル自体は、これまでどおり同梱・ダウンロードしない。
   - **ライセンスの表記の要否・方法は、ほかの Rust の crate と同じ扱いで、AI の判断で確定しない**（DIST-05）。
 - 2026-10-19（CI の修正。マスクの重ねて表示の修正の PR #5 で見つかった）: CI の `lint` ジョブの cargo-deny（advisories）が、新しく公開された **メンテナンス終了の通知 3 件**（RUSTSEC-2026-0370 `zvariant`・RUSTSEC-2026-0371 `zbus_names`・RUSTSEC-2026-0372 `zvariant_derive`。どれも zbus 6 に統合されたため）で失敗した。依存の木は `genzo-app` → `tauri-plugin-opener` 2.5.5 → `zbus` 5.19.0 で、**Linux だけ**の依存（Windows・macOS の配布物には入らない。`cargo tree -i zbus --target` で確かめた）。`tauri-plugin-opener` の最新の安定版は 2.5.5（3.0 は alpha だけ）で更新先がないため、2026-10-12 の Tauri の依存と同じく `deny.toml` で除外した（理由と見直しの時期は `deny.toml`）。脆弱性ではない。依存の crate・版・`Cargo.lock` は変えていない。**除外でよいかは人の確認待ち**。
+- **配布物のライセンスの表示（DIST-05）**: 2026-10-20 から、配布物に入る crate の一覧とライセンスの本文を cargo-about で作り、配布物に入れます（1.4 節）。cargo-deny（許可するライセンスの確認）とは別の道具で、許可するライセンスの一覧は両方で同じにします（`about.toml` の `accepted` は `deny.toml` の `allow` に含まれることを `scripts/lib/third-party.test.mjs` で確かめる）。
 - **cargo-deny が見るのは、各クレートの `Cargo.toml` の `license` と、ライセンスのファイルだけです。** C のソースを同梱してビルドするクレートについて、同梱したソースの版やファイルのヘッダは確認しません。現在の依存では次の 3 つが該当します。
   - `lcms2-sys`（Little CMS 2）と `libsqlite3-sys`（SQLite）: 2 章の一覧に記録します。
   - `blake3`: BLAKE3 の作者たち自身による C とアセンブリの実装を同梱しています（`c/` ディレクトリ）。crate のライセンスは `Cargo.toml` で CC0-1.0 / Apache-2.0 / Apache-2.0 WITH LLVM-exception の選択です。`c/blake3.c` の先頭にはライセンスの表示がなく（1.8.7 で確認）、C の部分にも crate と同じライセンスが及ぶと考えていますが、要確認です。
@@ -64,7 +65,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | @tauri-apps/plugin-dialog | 2.7.3 | MIT OR Apache-2.0 | フォルダ・ファイルの選択と確認のダイアログ |
 
 - **開発・ビルドだけで使うもの（配布物に入らない）**: Vite 8.3.1（Rolldown・lightningcss など）、@vitejs/plugin-react 6.1.1、TypeScript 6.0.3、vitest 5.0.2、@tauri-apps/cli 2.11.5 ほか。ライセンスは MIT が大半で、ほかに Apache-2.0（TypeScript・detect-libc・expect-type）、MPL-2.0（lightningcss。CSS の変換で、出力に lightningcss のコードは入らないと考えるが要確認）、ISC（picocolors）、BSD-3-Clause（source-map-js）。
-- 配布物のライセンス表記（DIST-05）に、上の配布物の 7 つを含める必要がある（未対応。4 章）。
+- 配布物のライセンス表記（DIST-05）: **2026-10-20 から、配布物に入りうるパッケージ（`ui/package-lock.json` の開発用の印のないもの。2026-10-20 の時点で上の 7 つ）の一覧とライセンスの本文を `crates/genzo-app/licenses/third-party/npm.txt` に作り、配布物に入れる**（1.4 節）。新しい依存を足したら、この節の表に追記し、`node scripts/third-party.mjs` で作り直す。画面から import したパッケージは `dependencies` に入れる（`devDependencies` に入れるとバンドルに入るのに一覧から漏れる。CI と配布のビルドで、Vite の `build.license` の出力と照合して止める）。
 
 ### 1.2 この台帳で管理するもの
 
@@ -83,13 +84,53 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 - ライセンスは、確認した資料（個別の LICENSE ファイル、ソースのファイルのヘッダ、パッケージの copyright ファイル）を書きます。GPL / LGPL は、版だけのもの（-only）と「以降の版」を含むもの（-or-later）を区別します。
 - 確認状況は「AI 記入（日付）」→「人が確認済み（日付・確認者）」の順に更新します。未確認の点は 3 章に「要確認」として挙げます。
 
+### 1.4 配布物のライセンスの表示（DIST-05）
+
+2026-10-20 から、配布物に入る第三者のソフトウェアのライセンスの一覧と本文を、配布物の `licenses` フォルダに入れます（決定事項ログ No.193・194。AI 記入）。**どのライセンスに何が要るか、この内容で条件を満たすかは、法的な事項なので AI では確定しません。下の「人の確認が必要な事項」を、配布の前に人（必要なら専門家）が確かめてください。**
+
+- **配布物の中の場所**: Windows はインストール先（既定は `%LOCALAPPDATA%\GenzoParis`）の `licenses\`、macOS は `GenzoParis.app/Contents/Resources/licenses/`。アプリの設定の「このアプリについて」のタブで、文書を選んで読めます（フォルダも開けます。`crates/genzo-app/src/licenses.rs`。一覧にあるファイルだけを読む）。
+
+| ファイル（`licenses/` の下） | 内容 | 元 |
+|---|---|---|
+| `README.txt` | このフォルダの案内（日本語・英語） | `crates/genzo-app/licenses/README.txt`（手で書いたもの） |
+| `GenzoParis/LICENSE.txt` | アプリ自体のライセンス（GPL-3.0）の全文 | リポジトリの `LICENSE` |
+| `third-party/rust.txt` | 本体（genzo-paris）とワーカー（genzo-worker）に組み込んだ Rust の crate の一覧と本文（2026-10-20 の時点で 380 crate・本文 202 件・約 0.5 MB） | `node scripts/third-party.mjs` が作る（cargo-about） |
+| `third-party/npm.txt` | 画面に組み込んだ npm のパッケージの一覧と本文（7 パッケージ・本文 3 件） | `node scripts/third-party.mjs` が作る |
+| `LibRaw/` | LibRaw の LGPL-2.1 の全文・著作権表示・案内・ビルドの手順の写し（Windows・macOS） | 配布のビルドで作る（3.1 節、決定事項ログ No.175） |
+
+- 上の 4 つ（`LibRaw/` 以外）はリポジトリに置き、`crates/genzo-app/tauri.conf.json` の `bundle.resources` で同梱します（開発用のビルドでも `target/debug/licenses` に置かれる）。`LibRaw/` は配布のビルドの追加の設定（`binaries/tauri.libs.conf.json`）で足します（Tauri は設定の `resources` を合わせる。RFC 7396 の merge）。
+- **作り方**（`scripts/third-party.mjs`。処理は `scripts/lib/third-party.mjs`・`scripts/lib/third-party-files.mjs`）
+  - Rust: **cargo-about 0.9.2**（EmbarkStudios。cargo-deny と同じ作者。crates.io の公式の crate。2026-08-18 公開。`cargo install cargo-about --version 0.9.2 --locked --features cli`。0.9 から CLI は機能フラグ `cli` が要る）を、配布物に入る実行ファイルの crate ごと（本体 `genzo-app` に機能フラグ `custom-protocol`、ワーカー `genzo-worker` に `libraw`）に実行し（`cargo about generate --format json`）、結果を合わせます。設定は `about.toml`: 対象の OS は Windows x64・macOS Apple Silicon、開発用の依存を除く、**ビルド用の依存と手続きマクロは含める**（生成したコードが実行ファイルに入りうるので、多めに載せる側にした）、このリポジトリの crate を除く、許可するライセンスと優先の順。cargo-about 0.8 以降は clearlydefined.io に問い合わせず、git から取るのは `clarify` の `git` を書いたときだけです（このリポジトリでは書いていない）。
+  - **cargo-about の取りこぼしの補い**: cargo-about は `LICENSE`・`LICENSE-*`・`LICENSE.*` などの名前のファイルしか見ないため、`LICENSE_MIT`（Tauri）・`license-mit`（windows-rs）などを取りこぼし、SPDX の標準の文（著作権の行が「<year> <copyright holders>」の雛形）にします。また、同じ本文をまとめて、代表の 1 つの crate のファイルの場所だけを返します。そのため `scripts/lib/third-party.mjs` が crate ごとに出典を決め直し、取りこぼしたものは crate の直下のファイルから名前と中身（MIT なら「Permission is hereby granted, free of charge」など）で選んで補います。2026-10-20 の時点で、これで補えないもの（crate にライセンスのファイルがない）は 27 crate で、`rust.txt` の 3 章に作者（authors）とリポジトリを書き、本文は SPDX の標準の文です（下の「人の確認が必要な事項」の 3）。下のフォルダまで探しても、これらの crate にライセンスのファイルはありませんでした（2026-10-20 に確かめた）。
+  - npm: `ui/package-lock.json` の開発用の印（`dev`・`devOptional`）のないパッケージ（`ui/package.json` の dependencies と、その推移的な依存）。ライセンスは package.json の `license` を `about.toml` の `accepted` の順で選び（Rust と同じ選び方。cargo-about の選択と、2026-10-20 の 380 crate すべてで一致することを確かめた）、本文はパッケージのフォルダのファイルから取ります。本文がなければ、上流のリポジトリのファイルの写し（`crates/genzo-app/licenses/third-party/supplements/`。SHA-256 で固定）を使い、それもなければ止めます（人が写しを足す）。2026-10-20 の時点で写しを使うのは `@tauri-apps/plugin-dialog` 2.7.3 だけです（npm のパッケージには `LICENSE.spdx` しかない。上流 `tauri-apps/plugins-workspace` のタグ `dialog-js-v2.7.3`（コミット 6aa2854f314481a459be1189b02c65a2450789ab）の `plugins/dialog/LICENSE_MIT`。SHA-256 `89ff9689dcf9dd53968785d05a26f7898bb169dbfcada8d032b3e68cf0d55607`。`LICENSE.spdx` は npm のものと同じ内容）。
+  - **Vite の `build.license`**（Vite 8.3.1。`ui/vite.config.ts` で有効にし、`ui/dist/.vite/license.json` に出す）: バンドルに実際に入ったパッケージを列挙しますが、本文のファイルを 1 つしか拾わず（2026-10-20 の出力では、`@tauri-apps/api` は選んでいない Apache-2.0 の本文、`@tauri-apps/plugin-dialog` は SPDX の記述の `LICENSE.spdx`）、NOTICE も見ないため、文書には使いません。**バンドルに入ったものがすべて `npm.txt` に載っているかの照合だけ**に使います。
+  - NOTICE のファイル（`NOTICE`・`NOTICES.md` など）は、ライセンスによらず載せます。2026-10-20 の時点で、Apache-2.0 を選んだ 7 crate（codespan-reporting・dpi・gl_generator・glutin_wgl_sys・khronos_api・spirv・tao）の直下に NOTICE のファイルはありません。`cfg_aliases` の `NOTICES.md`（tectonic の MIT の表示）は、本文として載っています。
+- **ライセンスの選び方**（決定事項ログ No.194。**AI の仮決定・人の確認待ち**）: 複数のライセンスから選べるもの（"MIT OR Apache-2.0" など）は、`about.toml` の `accepted` の順（CC0-1.0 → MIT → ISC → BSD-2-Clause → BSD-3-Clause → Zlib → Unicode-3.0 → BSL-1.0 → Apache-2.0 → Apache-2.0 WITH LLVM-exception。表示の義務の少ないものを先にした）で先のものを選び、その本文だけを載せます。brotli-decompressor 5.0.3（"BSD-3-Clause/MIT"。crate の本文は BSD-3-Clause の LICENSE だけ）は、本文のある BSD-3-Clause を選びます（`about.toml` の `clarify`。LICENSE の SHA-256 で固定し、変わると MIT の標準の文に戻って 3 章に出る）。MPL-2.0 の 5 crate は deny.toml と同じく crate ごとに許可しています。
+  - 2026-10-20 の時点の内訳（選んだライセンスごとの crate の数。AND のものは両方に数える）: MIT 339・Unicode-3.0 19・Apache-2.0 7・BSD-3-Clause 6・MPL-2.0 5（cssparser・cssparser-macros・dtoa-short・option-ext・selectors）・CC0-1.0 3（blake3・constant_time_eq・dunce）・BSD-2-Clause 2・ISC 1・Zlib 1。npm は 7 パッケージとも MIT（`@tauri-apps/api`・`@tauri-apps/plugin-dialog` は "Apache-2.0 OR MIT" から MIT を選んだ）。
+- **更新のしかた**: `Cargo.lock`・`ui/package-lock.json`・`about.toml` を変えたら、`node scripts/third-party.mjs` を実行し（Rust は cargo-about、npm は `ui/` の `npm ci` が要る。Rust は約 1 分）、作り直した文書をコミットします。文書には元にした lock のファイルの SHA-256（改行を LF にそろえた値）を書くので、作り直していなければ次で止まります。
+  - CI（`.github/workflows/ci.yml`）: `third-party` ジョブが cargo-about で作り直して `rust.txt` と比べ、`ui` ジョブが `npm.txt` を作り直して比べ、Vite の出力と照合します（`node scripts/third-party.mjs --check --only npm --vite`）。`scripts/lib/third-party.test.mjs` も lock の SHA-256 を比べます（cargo-about なしで分かる）。
+  - 配布のビルド（`scripts/build-app.mjs`）: ビルドの前に `rust.txt` の SHA-256 と今の `Cargo.lock` を比べ、`npm.txt` を作り直して比べます。ビルドの後に Vite の出力と照合します。`release.yml` の確認の手順は、インストール先・`.app` に `licenses/` の 4 つのファイルがあるかを見ます。
+- **含まないもの（未対応）**: 次は、この文書に入っていません。
+  - **同梱する C / C++ の共有ライブラリ**: LibRaw 以外（Windows の `lcms2-2.dll`・`z.dll`、macOS の `libomp.dylib`・`libjpeg.8.dylib`・`liblcms2.2.dylib`。2026-10-12 の配布物の記録。2 章の「LibRaw の同梱（配布物）」の行）のライセンスの本文。LibRaw の案内（`LibRaw/README.txt`）は名前を挙げるだけです。
+  - **Visual C++ のランタイム**（Windows。2 章の行。再頒布の条件は人の確認待ち）、WebView2 の配布の仕組み・NSIS のスタブ（2 章の行。要確認）。
+  - Rust の crate が同梱して静的にリンクする C のコードのうち、crate のライセンスのファイルと別の表示があるもの（`blake3` の `c/`、`libsqlite3-sys` の SQLite（パブリックドメイン）など）。`lcms2-sys` は、crate の `vendor/LICENSE`（Little CMS の MIT の表示）を cargo-about が本文として拾っています。
+- **人の確認が必要な事項**（**AI は判断しません**）
+  1. この文書（一覧・本文・NOTICE）で、MIT・BSD-2-Clause・BSD-3-Clause・ISC・Zlib・Unicode-3.0（著作権表示と許諾の文）、Apache-2.0（全文と NOTICE）、MPL-2.0（ソースの入手先の告知。MPL-2.0 の 3.2 節。文書には crate の名前と版だけを書いていて、入手先（crates.io の同じ版）は明記していない）、CC0-1.0 の条件を満たすか。
+  2. 複数のライセンスから選ぶ順（`accepted`）と、brotli-decompressor を BSD-3-Clause として扱うこと。
+  3. crate にライセンスのファイルがない 27 crate（objc2 系 10・unic 系 5・webview2-com 系 3・alloc-stdlib・block2・dispatch2・gl_generator・khronos_api・profiling・selectors・spirv・tauri-plugin）を、SPDX の標準の文と作者・リポジトリで載せていること（著作権の行は雛形のまま）。上流のリポジトリからファイルを取るか（cargo-about の `clarify` の `git`）。
+  4. ビルド用の依存・手続きマクロも載せていること（多めに載せる側）と、開発用の依存を除いていること。
+  5. `@tauri-apps/plugin-dialog` の本文を上流のリポジトリから補ったこと。
+  6. アプリ自体の GPL-3.0 の全文と、`README.txt`・設定の画面に書いたソースコードの場所（GitHub のリポジトリと版のタグ）で、GPL-3.0 の対応するソースの提供（6 条）として足りるか。
+  7. 上の「含まないもの」の扱い（同梱の C / C++ の共有ライブラリ・Visual C++ のランタイムのライセンスの表示を、どう入れるか）。
+  8. **2026-10-19 に公開した v0.1.0 の配布物（GitHub の Release。決定事項ログ No.181）には、この文書が入っていない**（main の 05fc227 から作った）。次の版で入る。v0.1.0 の添付を差し替えるかは人の判断。
+
 ## 2. 一覧
 
 | 名前 | 用途 | 版またはコミット | 取得元 | ライセンス（確認した資料） | リンク方法・ビルドの設定 | 配布するバイナリと対応するソース | 必要な表記 | 確認状況 |
 |---|---|---|---|---|---|---|---|---|
 | LibRaw | RAW の展開とメタデータの取得。ワーカープロセスだけで使う（[04](04_architecture.md) の 1.2 節、`genzo-raw` の機能フラグ `libraw`） | 開発環境は 0.21.2。macOS の CI は実行時点の Homebrew の版（2026-10-10 の時点で 0.22 系。コミット 966b379 の記録による。CI では版を記録していない）。Windows は vcpkg などで入手する（2026-10-10 に手順を記載。版は未定・実機で未確認）。0.21 以降を想定（`genzo-raw` の build.rs で 0.21 以上を要求） | Ubuntu 24.04 の apt（`libraw-dev` 0.21.2-2.1ubuntu0.24.04.2）、macOS は Homebrew（`libraw`）、Windows は vcpkg（`libraw:x64-windows`）など（3.1 節）。上流は https://www.libraw.org/ | LGPL-2.1 または CDDL-1.0 の選択（`libraw.h` のヘッダで確認）。**LGPL-2.1 を選ぶ**（2026-10-10、AI の推奨。決定事項ログ No.32。**人・専門家の確認待ち**）。上流の配布物の LICENSE ファイルは未確認（3.1 節） | 動的リンク。pkg-config で `libraw_r`（スレッドセーフ版）を探し、なければ `libraw`（この場合は LibRaw の使用をプロセスの中で 1 つずつに制限する）。C++ のシム（`crates/genzo-raw/src/shim/`）を cc でビルドする。pkg-config が返す lcms2 はリンクしない（3.2 節）。Windows は環境変数 `LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR`（必要なら `LIBRAW_LIB_NAME`）で指定する（実機で未確認） | 配布するアプリでは、ワーカーの実行ファイル（`genzo-worker`）だけが LibRaw に依存し、本体の実行ファイルは依存しない（決定事項ログ No.32）。同梱する場合の共有ライブラリと、対応するソースの提供方法は未定 | 選んだライセンス（LGPL-2.1）の全文と著作権表示（要確認） | AI 記入（2026-10-09、2026-10-10 更新）。ライセンスの選択は人・専門家の確認待ち |
-| Little CMS 2 | ICC プロファイルの変換と 3D LUT の作成（`genzo-color`。04 の 2.6 節・5 章） | 2.19（`lcms2-sys` 4.0.7 が同梱するソース。Rust のラッパーは `lcms2` 6.2.0） | crates.io の `lcms2-sys`（`vendor/` に上流のソースを同梱）。上流は Marti Maria Saguer による Little CMS | MIT（`vendor/LICENSE` と、`vendor/src/*.c` のファイルのヘッダで確認）。ラッパーの crate も MIT | 静的リンク。workspace の `Cargo.toml` で `lcms2` の機能フラグ `static` を有効にし、同梱のソースを cc でビルドする（3.2 節） | 実行ファイルに含まれる。対応するソースは crates.io の `lcms2-sys` 4.0.7 | MIT の著作権表示と許諾文 | AI 記入（2026-10-09）。人の確認待ち |
-| SQLite | カタログ DB とサムネイル DB（`genzo-catalog`。04 の 3 章） | 3.53.2（`libsqlite3-sys` 0.38.2 が同梱する amalgamation。`rusqlite` 0.40.2） | crates.io の `libsqlite3-sys`（`sqlite3/` に同梱）。上流は https://sqlite.org/ | パブリックドメイン（`sqlite3.c` のヘッダの「The author disclaims copyright to this source code」で確認）。バインディングの crate は MIT | 静的リンク。`rusqlite` の機能フラグ `bundled` と `backup`。コンパイルの設定は `libsqlite3-sys` の build.rs の既定（3.3 節）。システムの SQLite は使わない | 実行ファイルに含まれる。対応するソースは crates.io の `libsqlite3-sys` 0.38.2 | SQLite 自体は不要とされる（パブリックドメイン）。バインディングの MIT の表記は Rust のクレートとして扱う | AI 記入（2026-10-09）。人の確認待ち |
+| Little CMS 2 | ICC プロファイルの変換と 3D LUT の作成（`genzo-color`。04 の 2.6 節・5 章） | 2.19（`lcms2-sys` 4.0.7 が同梱するソース。Rust のラッパーは `lcms2` 6.2.0） | crates.io の `lcms2-sys`（`vendor/` に上流のソースを同梱）。上流は Marti Maria Saguer による Little CMS | MIT（`vendor/LICENSE` と、`vendor/src/*.c` のファイルのヘッダで確認）。ラッパーの crate も MIT | 静的リンク。workspace の `Cargo.toml` で `lcms2` の機能フラグ `static` を有効にし、同梱のソースを cc でビルドする（3.2 節） | 実行ファイルに含まれる。対応するソースは crates.io の `lcms2-sys` 4.0.7 | MIT の著作権表示と許諾文（2026-10-20 から、`lcms2-sys` の `vendor/LICENSE` を配布物の `licenses/third-party/rust.txt` に載せる。1.4 節） | AI 記入（2026-10-09）。人の確認待ち |
+| SQLite | カタログ DB とサムネイル DB（`genzo-catalog`。04 の 3 章） | 3.53.2（`libsqlite3-sys` 0.38.2 が同梱する amalgamation。`rusqlite` 0.40.2） | crates.io の `libsqlite3-sys`（`sqlite3/` に同梱）。上流は https://sqlite.org/ | パブリックドメイン（`sqlite3.c` のヘッダの「The author disclaims copyright to this source code」で確認）。バインディングの crate は MIT | 静的リンク。`rusqlite` の機能フラグ `bundled` と `backup`。コンパイルの設定は `libsqlite3-sys` の build.rs の既定（3.3 節）。システムの SQLite は使わない | 実行ファイルに含まれる。対応するソースは crates.io の `libsqlite3-sys` 0.38.2 | SQLite 自体は不要とされる（パブリックドメイン）。バインディングの MIT の表記は Rust のクレートとして扱う（2026-10-20 から `rust.txt` に載せる。1.4 節） | AI 記入（2026-10-09）。人の確認待ち |
 | FFmpeg / ffprobe | 動画のメタデータの取得とサムネイルの生成（`genzo-media`）。子プロセスとして実行する（04 の 1.2 節） | 開発環境は 6.1.1。配布する版は未定 | 開発環境は Ubuntu 24.04 の apt（`ffmpeg` 7:6.1.1-3ubuntu5）。配布物での入手方法は未定 | ビルドの構成で LGPL-2.1-or-later・GPL-2.0-or-later・(L)GPL-3.0-or-later のいずれかになり、`--enable-nonfree` のビルドは再配布できないとされる。開発環境の版は `--enable-gpl` のビルド（`ffmpeg -version` の configure の引数と、Ubuntu の copyright ファイルで確認）。上流の LICENSE.md は未確認 | リンクしない（子プロセス）。同梱する場合は configure の引数を記録する | 未定（同梱するか、利用者に入れてもらうか）。同梱する場合は対応するソースとビルドの構成の提供が必要 | 同梱する場合は、ライセンスの全文、ビルドの構成、組み込んだ外部ライブラリの表記（要確認） | AI 記入（2026-10-09）。配布の方針は人の判断待ち |
 | RCD デモザイク | デモザイク（04 の 2.1 節のステージ 5。最終品質。既定のまま。決定事項ログ No.34） | CPU 版は `crates/genzo-pipeline/src/sensor/demosaic/rcd.rs`（2026-10-10。調査の時点の SHA-256 `3fe730d9b5bf8e4a876aae7d7c5bbed0075e3778c5271d1edf0dff7b471313fc`、追加したコミット 527f911）。GPU 版は未実装（書き出しのセンサー処理は CPU 版を使う）。第三者のファイルは取り込んでいない | アルゴリズムの考案者は Luis Sanz Rodríguez。考案者の実装は https://github.com/LuisSR/RCD-Demosaicing （`rcd_demosaicing.c`、Release 2.3）。改変した実装は RawTherapee・darktable・librtprocess にある（3.5 節に URL・コミット）。**`rcd.rs` は、これらの実装（特に 2021 年以降の改変版）と手順・定数・式の書き方・変数名が一致する**（2026-10-10 の AI の調査。3.5 節） | 自前のファイルとして、アプリと同じ GPL-3.0-or-later。比べた実装のファイルの表示は、RawTherapee・darktable・librtprocess が GPL-3.0-or-later、考案者の実装は LICENSE が GPL 第 3 版の全文でソースに表示なし（3.5 節）。由来の扱いと元の著作権表示の書き方は**人・専門家の確認待ち** | 該当なし（自前の Rust のコード） | アプリのソースに含まれる | 考案者の名前は doc コメントに記載済み。RawTherapee・darktable の版を参考にした実装として扱い、元の著作権表示（RawTherapee: Luis Sanz Rodriguez・Ingo Weyrich、darktable: darktable developers）と出典を `rcd.rs` のヘッダに記載した（2026-10-10。3.5 節）。書き方の妥当性は人・専門家の確認待ち | AI 記入（2026-10-10）。出典の調査は済み（2026-10-10）。扱いは人・専門家の確認待ち |
 | darktable のレンズ補正（埋め込みのメタデータの解釈。参考） | Sony の ARW に埋め込まれたレンズ補正の値（0x7032・0x7035・0x7037）の意味と、DNG の opcode（WarpRectilinear・FixVignetteRadial）の形・式の確認（DEV-14。決定事項ログ No.121。04 の 2.1 節のステージ 7・9） | darktable のブランチ master（2026-10-13 に取得。コミットは記録していない）の `src/iop/lens.cc`・`src/common/exif.cc`・`src/common/dng_opcode.c`（SHA-256 は 3.9 節） | https://github.com/darktable-org/darktable | GPL-3.0-or-later（3 つのファイルのヘッダの「either version 3 of the License, or (at your option) any later version」で確認） | 該当なし（第三者のファイルは取り込んでいない。自前の Rust のコード `crates/genzo-raw/src/lens.rs`・`crates/genzo-pipeline/src/lens.rs`） | アプリのソースに含まれる（自前のコード） | 値の解釈（節点の位置・尺度・式）が darktable と同じなので、参考にした実装として、darktable の著作権表示（「Copyright (C) 2019-2026 darktable developers」）と出典・SHA-256 を `crates/genzo-pipeline/src/lens.rs` の doc に記載した（2026-10-13）。書き方の妥当性は人・専門家の確認待ち | AI 記入（2026-10-13）。扱いは人・専門家の確認待ち |
@@ -341,7 +382,8 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 - Exiv2（使う場合。GPL-2.0-or-later とされる。03 の 2.1 節）
 - LibRaw が依存するライブラリ（libjpeg、OpenMP のランタイム、lcms2 など）を同梱する場合
 - Windows の DirectX のシェーダーコンパイラ（wgpu の Direct3D 12 のバックエンドで、DXC のライブラリを同梱するか。要確認）
-- UI の npm の依存の、配布物のライセンス表記への反映（確認の方法は 1.1a 節。2026-10-12）
+- ~~UI の npm の依存の、配布物のライセンス表記への反映（確認の方法は 1.1a 節。2026-10-12）~~ 2026-10-20 に対応（1.4 節の `npm.txt`）
 - OS のランタイム（Visual C++ のランタイムなど）を同梱する場合
 - ONNX Runtime（将来の ML 推論）
-- 配布物のライセンス表記の自動生成（02 の DIST-05）。Rust のクレートについては、生成するツールを検討する（要検討）
+- ~~配布物のライセンス表記の自動生成（02 の DIST-05）。Rust のクレートについては、生成するツールを検討する（要検討）~~ 2026-10-20 に対応（1.4 節。cargo-about 0.9.2。条件を満たすかは人の確認待ち）
+- 同梱する C / C++ の共有ライブラリ（LibRaw の依存の lcms2・zlib・libjpeg-turbo・libomp など）と Visual C++ のランタイムの、配布物のライセンスの表示（1.4 節の「含まないもの」）

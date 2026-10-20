@@ -22,6 +22,7 @@ GenzoParis を社内の数名に配るための、配布物の作り方・入れ
 - **本体は LibRaw に依存しません。** LibRaw を読み込むのはワーカーだけです（決定 No.32）。本体はワーカーを「環境変数 `GENZO_WORKER_PATH` → 本体と同じフォルダ」の順に探します（`crates/genzo-worker/src/client.rs` の `locate_worker_executable`）。Tauri の `externalBin` は、ワーカーを本体と同じフォルダ（Windows はインストール先、macOS は `Contents/MacOS`、.deb は `/usr/bin`）に置くので、そのまま見つかります。
 - **LibRaw のライブラリはワーカーから読める場所に置きます。** Windows は、実行ファイルと同じフォルダの DLL を最初に探すので、インストール先のフォルダに置きます（Tauri の `bundle.resources`。Windows の resource のフォルダはインストール先）。macOS は `Contents/Frameworks` に置き（Tauri の `bundle.macOS.frameworks`）、ワーカーと dylib の参照を `@executable_path/../Frameworks/…`・`@loader_path/…` に書き換えます（`install_name_tool`）。
 - **LibRaw の LGPL-2.1 の全文・著作権表示・案内を同梱します**（2026-10-19。決定事項ログ No.175）。Windows はインストール先の `licenses\LibRaw\`、macOS は `GenzoParis.app/Contents/Resources/licenses/LibRaw/` に、`LICENSE.LGPL`（LGPL-2.1 の全文）・`COPYRIGHT`（LibRaw の著作権表示）・`README.txt`（使っている LibRaw の版・同梱したファイル・ソースの入手先・差し替えの方法）と、LibRaw をビルドした手順の写し `build-recipe/`（Windows は vcpkg の port「libraw」の定義とパッチ、macOS は Homebrew の formula。案内には vcpkg・homebrew-core のビルドの時点のコミットを固定した URL を書く。取れなければ「記録できなかった」と書く）を置きます。`LICENSE.LGPL`・`COPYRIGHT` は上流の LibRaw（GitHub の 0.22.0 のタグ）のファイルをそのまま `crates/genzo-app/licenses/LibRaw/` に置いたもの、`README.txt` は `scripts/prepare-worker.mjs` がビルドのときに作るもの（版は LibRaw のヘッダ `libraw_version.h` から、`genzo-raw` の `build.rs` と同じ場所を探して読む。文面は `scripts/lib/notice.mjs`）。同じものを Actions の artifact（`crates/genzo-app/binaries/licenses/`）にも入れます。
+- **アプリ自体のライセンス（GPL-3.0）の全文と、第三者のライセンスの文書を同梱します**（2026-10-20。決定事項ログ No.193・194、[第三者の台帳](third_party.md) の 1.4 節）。Windows はインストール先の `licenses\`、macOS は `GenzoParis.app/Contents/Resources/licenses/` に、`README.txt`（案内）・`GenzoParis/LICENSE.txt`（GPL-3.0 の全文）・`third-party/rust.txt`（本体とワーカーに組み込んだ Rust の crate の一覧とライセンスの本文）・`third-party/npm.txt`（画面に組み込んだ npm のパッケージの一覧と本文）を置きます。アプリの設定の「このアプリについて」のタブでも読めます。文書は `node scripts/third-party.mjs` で作ってリポジトリに置いたもので（Cargo.lock・ui/package-lock.json を変えたら作り直す）、`scripts/build-app.mjs` は古い文書のまま配布物を作らないよう、ビルドの前後に確かめます（1.3）。同梱する C / C++ の共有ライブラリ（LibRaw 以外）と Visual C++ のランタイムのライセンスの本文は、まだ入っていません（8 章の 2・3）。**この内容で各ライセンスの条件を満たすかは、人・専門家の確認待ちです**（8 章の 8）。
 - **FFmpeg（ffmpeg・ffprobe）は同梱しません**（決定 No.62）。各自が入れます（4 章）。
 - 自動更新はありません（DIST-04 は later）。新しい版は、同じ手順で上から入れ直します。
 
@@ -29,11 +30,11 @@ GenzoParis を社内の数名に配るための、配布物の作り方・入れ
 
 | ファイル | 内容 | いつ使うか |
 |---|---|---|
-| `crates/genzo-app/tauri.conf.json` | アプリの設定と、配布物の基本（種類・アイコン・NSIS・macOS の最小の版） | いつも |
+| `crates/genzo-app/tauri.conf.json` | アプリの設定と、配布物の基本（種類・アイコン・NSIS・macOS の最小の版）。リポジトリにあるライセンスの文書（`licenses/`。1.1）の同梱（`bundle.resources`） | いつも |
 | `crates/genzo-app/tauri.bundle.conf.json` | ワーカーの同梱（`bundle.externalBin: ["binaries/genzo-worker"]`）と、macOS のアドホック署名（`signingIdentity: "-"`・`hardenedRuntime: false`） | 配布物を作るときだけ（`tauri build --config`） |
 | `crates/genzo-app/binaries/tauri.libs.conf.json` | LibRaw のライブラリの同梱（Windows は `bundle.resources`、macOS は `bundle.macOS.frameworks`）と、LibRaw のライセンスの文書・案内（両 OS とも `bundle.resources`）。`scripts/prepare-worker.mjs` が作る（コミットしない） | 配布物を作るときだけ |
 
-`externalBin`・`resources`・`frameworks` を `tauri.conf.json` に書かないのは、Tauri のビルドスクリプト（tauri-build）が `cargo build` のたびにこれらのファイルを探してコピーし、ないと失敗するためです（tauri-build 2.6.3 の `lib.rs`）。分けておくと、ふだんの `cargo build`・`cargo clippy`・CI はワーカーのビルドなしで通ります。
+`externalBin`・`resources`・`frameworks` を `tauri.conf.json` に書かないのは、Tauri のビルドスクリプト（tauri-build）が `cargo build` のたびにこれらのファイルを探してコピーし、ないと失敗するためです（tauri-build 2.6.3 の `lib.rs`）。分けておくと、ふだんの `cargo build`・`cargo clippy`・CI はワーカーのビルドなしで通ります。例外として、リポジトリにあるライセンスの文書（`crates/genzo-app/licenses/README.txt`・`licenses/third-party/rust.txt`・`npm.txt` とリポジトリの `LICENSE`。いつもある）は `tauri.conf.json` の `bundle.resources` に書きます（`cargo build` でも `target/<profile>/licenses/` に置かれるので、開発中の画面からも読める）。Tauri は `--config` の設定を RFC 7396 の merge で合わせるので、`tauri.libs.conf.json` の `resources`（LibRaw の文書）と足し合わされます。
 
 macOS の `hardenedRuntime: false` は、Hardened Runtime のライブラリの検証（同じ Team ID の署名を求める）で、アドホック署名の dylib を読み込めなくなるのを避けるためです。Hardened Runtime は公証に必要なもので、公証しない今は要りません（公証する場合は有効にし、Developer ID で署名し直す）。
 
@@ -42,10 +43,11 @@ macOS の `hardenedRuntime: false` は、Hardened Runtime のライブラリの�
 | スクリプト | 内容 | ui/ からの起動 |
 |---|---|---|
 | `scripts/prepare-worker.mjs` | ワーカーを LibRaw ありで release ビルドし（`cargo build --release --locked -p genzo-worker --features libraw`。macOS は同じ内容を `cargo rustc` で実行し、リンカーの引数を足す。2.3）、`crates/genzo-app/binaries/genzo-worker-<target triple>` に置く。LibRaw のライブラリを `binaries/libs/` に集め、`binaries/tauri.libs.conf.json` と同梱の一覧 `binaries/bundled-libs.txt` を作る | `npm run app:worker` |
-| `scripts/build-app.mjs` | 上の処理の後、`tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json <引数> -- --locked` を実行する。`--skip-worker` でワーカーのビルドを省く | `npm run app:build -- --bundles nsis` など |
+| `scripts/build-app.mjs` | 第三者のライセンスの文書（`crates/genzo-app/licenses/third-party/`）が今の `Cargo.lock`・`ui/package-lock.json` から作ったものかを確かめ（古ければ止める）、上の処理の後、`tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json <引数> -- --locked` を実行する。最後に、画面のバンドルに入った npm のパッケージ（Vite の `build.license` の出力）がすべて文書に載っているかを確かめる。`--skip-worker` でワーカーのビルドを省く | `npm run app:build -- --bundles nsis` など |
+| `scripts/third-party.mjs` | 第三者のライセンスの文書（`rust.txt`・`npm.txt`）を作る（cargo-about 0.9.2 と `ui/node_modules` が要る）。`--check` で、リポジトリの文書と同じかを確かめる（CI） | — |
 | `scripts/tauri.mjs` | Tauri の CLI を、この構成で起動する（下の説明） | `npm run app:dev`（`tauri dev`） |
 
-スクリプトは Node（22）だけで動き、新しい npm の依存はありません。上の 3 つは入口だけで、処理の本体は `scripts/lib/`（`worker.mjs`・`build.mjs`・`tauri-cli.mjs` など）にあります（入口は「直接実行されたか」を判定せずに必ず処理を実行する。判定はシンボリックリンクを含むパスで起動したときに成り立たず、何もせずに成功で終わってしまうため）。テストは `node --test "scripts/**/*.test.mjs"`（CI の ui のジョブでも実行）。
+スクリプトは Node（22）だけで動き、新しい npm の依存はありません（`scripts/third-party.mjs` の Rust の文書だけ、別に cargo-about が要る）。上の入口のスクリプトは入口だけで、処理の本体は `scripts/lib/`（`worker.mjs`・`build.mjs`・`tauri-cli.mjs` など）にあります（入口は「直接実行されたか」を判定せずに必ず処理を実行する。判定はシンボリックリンクを含むパスで起動したときに成り立たず、何もせずに成功で終わってしまうため）。テストは `node --test "scripts/**/*.test.mjs"`（CI の ui のジョブでも実行）。
 
 **Tauri の CLI の起動のしかた**: Tauri の CLI（`ui/` の devDependencies の `@tauri-apps/cli` 2.11.5）は、`tauri.conf.json` を「今のフォルダとその下」から探します。この構成では `tauri.conf.json` が `ui/` の外（`crates/genzo-app/`）にあるため、`ui/` で `npx tauri build` を実行しても見つかりません（`npx tauri info` の「App」の欄が空になることで確認）。`scripts/tauri.mjs` は、環境変数 `TAURI_APP_PATH`（Tauri のアプリのフォルダが画面のフォルダの下にない構成のためのもの。@tauri-apps/cli の CHANGELOG）に `crates/genzo-app` を入れ、今のフォルダを `ui/` にして CLI を起動します（`beforeBuildCommand` の `npm run build` は `ui/` で実行される）。手で起動する場合は次のとおりです（先に `npm run app:worker` でワーカーと `binaries/tauri.libs.conf.json` を作っておく。`npm run tauri -- …` は `TAURI_APP_PATH` がないと設定を見つけられません）。
 
@@ -282,3 +284,4 @@ main の c0681eb（PR #2 をマージしたもの）で、手動で 2 回実行�
 5. ~~**macOS の最小の版**（2.3）~~ **決定済み（2026-10-12。決定事項ログ No.74）**: 配る相手の Mac はすべて macOS 26 以降なので、`.app` の最小の版を 26.0 に上げて配る。
 6. **署名・公証の要否**（SYS-08）: 社内の数名への配布なら不要としていますが、配る範囲が広がる場合や、会社の規則で署名が求められる場合は、Windows のコード署名の証明書（有償の場合あり）と、Apple Developer Program（有償）が要ります。費用・手続きは確認していません。
 7. **成果物を置く場所の公開の範囲**（2.5・2.6）: GitHub Actions の artifact、社内の共有フォルダなどを、配る相手だけが見られるか。
+8. **第三者のライセンスの文書**（2026-10-20。決定事項ログ No.193・194、台帳の 1.4 節、implementation_status の判断の表 No.198・199）: 配布物の `licenses/` に入れた Rust の crate・npm のパッケージの一覧と本文（ライセンスの選び方、本文のファイルがない 27 crate の扱いを含む）と、アプリ自体の GPL-3.0 の全文・ソースの場所の書き方で、各ライセンスの条件を満たすか。同梱の C / C++ の共有ライブラリ（2 の依存ライブラリ）と Visual C++ のランタイム（3）のライセンスの本文は入っていない。**2026-10-19 に公開した v0.1.0 の配布物には、これらの文書が入っていない**（v0.1.0 の添付を差し替えるか、次の版を待つかは人の判断）。

@@ -241,11 +241,23 @@ cargo deny check
 
 設定は [deny.toml](deny.toml) です。cargo-deny で確認できない C / C++ のライブラリ・同梱データ・外部の実行ファイル（FFmpeg）は、[docs/third_party.md](docs/third_party.md) の台帳で管理します。
 
+### 配布物に入れる第三者のライセンスの文書（DIST-05）
+
+`Cargo.lock`・`ui/package-lock.json` を変えたら、配布物に入れるライセンスの文書（`crates/genzo-app/licenses/third-party/rust.txt`・`npm.txt`）を作り直してコミットします（作り直していないと、CI と配布物のビルドが止まります）。
+
+```sh
+cargo install cargo-about --version 0.9.2 --locked --features cli   # 初回だけ
+npm --prefix ui ci                                                  # npm の文書に要る
+node scripts/third-party.mjs                                        # 作り直す（--check で確かめるだけ）
+```
+
+設定は [about.toml](about.toml)、方式と人の確認待ちの点は [docs/third_party.md](docs/third_party.md) の 1.4 節です。配布物では `licenses/` に入り、アプリの設定の「このアプリについて」でも読めます。
+
 ### CI
 
 GitHub Actions（[.github/workflows/ci.yml](.github/workflows/ci.yml)）で、push と pull request のたびに次を実行します。
 
-- Linux: フォーマットの確認と cargo-deny。画面（`ui/`）の型の検査・テスト・ビルドと、配布のスクリプト（`scripts/`）のテスト
+- Linux: フォーマットの確認と cargo-deny。画面（`ui/`）の型の検査・テスト・ビルドと、配布のスクリプト（`scripts/`）のテスト。第三者のライセンスの文書が最新か（cargo-about で作り直して比べる）
 - Windows と macOS（Apple Silicon）: clippy（警告をエラーとして扱う）とテスト（デスクトップアプリの `genzo-app` を含む）。macOS では LibRaw を入れて、機能フラグ `libraw` を有効にした確認も行う
 
 外部のアクションはコミットの SHA で固定しています（[docs/packaging.md](docs/packaging.md) の 2.5 節）。配布物は別のワークフロー（`release.yml`。手動で実行）で作ります。

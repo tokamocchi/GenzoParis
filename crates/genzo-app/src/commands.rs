@@ -25,6 +25,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::catalog_file::{self, CatalogFileState};
 use crate::frames;
+use crate::licenses::{self, LicenseDocuments};
 use crate::settings::AppSettings;
 use crate::state::{AppState, CatalogStatus, DisplayTarget, RestoreOutcome, error};
 use crate::tools::{self, ExternalTools};
@@ -615,6 +616,86 @@ pub async fn open_log_folder(app: AppHandle, state: Shared<'_>) -> Result<(), Er
                 error(
                     ErrorKind::FileAccess,
                     format!("ログのフォルダ {} を開けません: {e}", dir.display()),
+                    None,
+                )
+            })
+    })
+    .await
+}
+
+/// 同梱したライセンスの文書のフォルダ（資源のフォルダの `licenses`。なければ `None`）。
+fn licenses_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|d| d.join(licenses::LICENSES_DIR))
+        .filter(|d| d.is_dir())
+}
+
+/// 同梱したライセンスの文書の一覧（DIST-05。設定の「このアプリについて」のタブ）。
+#[tauri::command]
+pub async fn license_documents(app: AppHandle) -> Result<LicenseDocuments, ErrorInfo> {
+    blocking(move || {
+        let Some(dir) = licenses_dir(&app) else {
+            return Ok(LicenseDocuments {
+                dir: None,
+                documents: Vec::new(),
+            });
+        };
+        let documents = licenses::list_documents(&dir).map_err(|e| {
+            error(
+                ErrorKind::FileAccess,
+                format!(
+                    "ライセンスの文書のフォルダ {} を読めません: {e}",
+                    dir.display()
+                ),
+                None,
+            )
+        })?;
+        Ok(LicenseDocuments {
+            dir: Some(dir),
+            documents,
+        })
+    })
+    .await
+}
+
+/// 同梱したライセンスの文書を読む（`path` は [`license_documents`] の一覧にあるものだけ）。
+#[tauri::command]
+pub async fn read_license_document(app: AppHandle, path: String) -> Result<String, ErrorInfo> {
+    blocking(move || {
+        let dir = licenses_dir(&app).ok_or_else(|| {
+            error(
+                ErrorKind::NotFound,
+                "ライセンスの文書のフォルダがありません",
+                None,
+            )
+        })?;
+        licenses::read_document(&dir, &path)
+    })
+    .await
+}
+
+/// 同梱したライセンスの文書のフォルダを OS のファイル管理（エクスプローラー・Finder）で開く。
+#[tauri::command]
+pub async fn open_license_folder(app: AppHandle) -> Result<(), ErrorInfo> {
+    blocking(move || {
+        let dir = licenses_dir(&app).ok_or_else(|| {
+            error(
+                ErrorKind::NotFound,
+                "ライセンスの文書のフォルダがありません",
+                None,
+            )
+        })?;
+        app.opener()
+            .open_path(dir.to_string_lossy(), None::<&str>)
+            .map_err(|e| {
+                error(
+                    ErrorKind::FileAccess,
+                    format!(
+                        "ライセンスの文書のフォルダ {} を開けません: {e}",
+                        dir.display()
+                    ),
                     None,
                 )
             })

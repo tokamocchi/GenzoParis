@@ -34,6 +34,7 @@ import type {
   KeywordInfo,
   KeywordUsage,
   LensCorrectionInfo,
+  LicenseDocuments,
   LogFolderInfo,
   LogStatus,
   MaskOverlayInfo,
@@ -190,6 +191,28 @@ export function mockLogCommands(b: MockBridge): void {
   b.responses.set("open_log_folder", undefined);
   b.responses.set("clear_logs", { removed: 2, truncated: 1, failed: [] } satisfies ClearReport);
   b.responses.set("report_ui_error", undefined);
+}
+
+/** 同梱したライセンスの文書の一覧の見本（配布物の licenses。DIST-05）。 */
+export const MOCK_LICENSE_DOCUMENTS: LicenseDocuments = {
+  dir: "C:\\Users\\u\\AppData\\Local\\GenzoParis\\licenses",
+  documents: [
+    { path: "GenzoParis/LICENSE.txt", size: 35149 },
+    { path: "LibRaw/COPYRIGHT", size: 4000 },
+    { path: "LibRaw/LICENSE.LGPL", size: 26530 },
+    { path: "LibRaw/README.txt", size: 3200 },
+    { path: "LibRaw/build-recipe/vcpkg-ports-libraw/portfile.cmake", size: 900 },
+    { path: "README.txt", size: 2600 },
+    { path: "third-party/npm.txt", size: 7247 },
+    { path: "third-party/rust.txt", size: 485278 },
+  ],
+};
+
+/** ライセンスの文書のコマンド（license_documents・read_license_document・open_license_folder）の応答を入れる。 */
+export function mockLicenseCommands(b: MockBridge): void {
+  b.responses.set("license_documents", MOCK_LICENSE_DOCUMENTS);
+  b.responses.set("read_license_document", (args?: Record<string, unknown>) => `${String(args?.path)} の本文`);
+  b.responses.set("open_license_folder", undefined);
 }
 
 // ---------------------------------------------------------------------------

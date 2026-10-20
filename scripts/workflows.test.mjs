@@ -29,3 +29,13 @@ test("ワークフローのシェルの変数は、すぐ後に ASCII でない�
   }
   assert.deepEqual(found, []);
 });
+
+test("CI で入れる cargo-about の版は、第三者のライセンスの文書を作る版（CARGO_ABOUT_VERSION）と同じ", async () => {
+  const { CARGO_ABOUT_VERSION } = await import("./lib/third-party.mjs");
+  const ci = fs.readFileSync(path.join(WORKFLOWS_DIR, "ci.yml"), "utf8");
+  const m = /^\s*CARGO_ABOUT_VERSION:\s*"([^"]+)"/m.exec(ci);
+  assert.ok(m, "ci.yml に CARGO_ABOUT_VERSION がない");
+  assert.equal(m[1], CARGO_ABOUT_VERSION);
+  assert.match(ci, /node scripts\/third-party\.mjs --check --only rust/);
+  assert.match(ci, /node scripts\/third-party\.mjs --check --only npm --vite/);
+});

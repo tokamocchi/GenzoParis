@@ -511,6 +511,13 @@ button.dlg-list-item:focus-visible {
   user-select: text;
 }
 
+/* 設定の「このアプリについて」: ライセンスの文書の本文（DIST-05）。長い行は折り返す。 */
+.license-text {
+  max-height: 50vh;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* 設定の「表示」: ルーペ上の撮影情報の項目（LIB-17） */
 .info-items {
   border-collapse: collapse;
