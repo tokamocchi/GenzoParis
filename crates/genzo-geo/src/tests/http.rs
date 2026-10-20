@@ -177,8 +177,9 @@ fn connection_failures_are_network_errors() {
 
 #[test]
 fn the_real_client_can_be_built() {
-    // 準備できること（通信はしない）。
-    UreqClient::new().unwrap();
+    // 準備できること（通信はしない）。`new` は環境変数・レジストリのプロキシを読み、読めない値では誤りにするので、
+    // 開発者の環境に左右されないよう、プロキシなしで本物と同じ設定（https だけ）を作る。
+    UreqClient::build(true, None).unwrap();
 }
 
 #[test]
