@@ -51,7 +51,8 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - 既に `Cargo.lock` にあって、新しく使うもの（新しい crate ではない）: `winreg` 0.56.0（MIT。2026-03-14 公開。`embed-resource` と同じ版。Windows で `genzo-geo` の直接の依存にした。プロキシの設定を読む。ureq の機能 `win-system-proxy` は使わない）、`windows-sys` 0.61.2（Windows で `rustls-platform-verifier` と `winreg` が使う）、`core-foundation` 0.10.1・`core-foundation-sys` 0.8.7（macOS で `rustls-platform-verifier`・`security-framework` が使う）、`log`・`once_cell`・`percent-encoding`・`base64` 0.23.1・`http`・`httparse`（ureq・rustls の依存）、`cc`（ring のビルド）、`tempfile`（キャッシュの書き込み）など。
   - `ring` 0.17.14 は C とアセンブリを同梱してビルドする（下の「C のソースを同梱してビルドするクレート」と 2 章の一覧）。
   - cargo-deny 0.20.2 で、CI と同じ `cargo deny check licenses advisories bans sources` を実行した（2026-10-20。コミット `1d3078e` の木）: **advisories・bans・licenses・sources がすべて通った**。ただし、**`rustls` 0.23.45 の脆弱性の通知 4 件（RUSTSEC-2026-0346〜0349。どれも 2026-10-14 の通知で、直した版は 0.23.46 以上）は、`deny.toml` の `ignore` で除いている**（0.23.46 は公開から 2 週間たっていないため。どれもこのアプリの使い方では当たらないと AI がソースで確かめた。理由は `deny.toml`。**人の確認待ち**。2026-10-28 以降に 0.23.46 以上へ上げて、除外を消す予定。3.14 節）。警告（同じ crate の複数の版）は 38 件で、LIB-21 の前（`2fd05a1`）と同じ（native-tls のときは 40 件だった）。`webpki-root-certs`（CDLA-Permissive-2.0）は `deny.toml` の `targets` のどの依存の木にも入らないので、cargo-deny は見ない。
-  - `genzo-geo` の `tls.rs`（コミット `8cfeb81` で足し、`8ac4eda` で消した）は、ureq 3.4.2 の `src/tls/native_tls.rs`（MIT OR Apache-2.0）を参考に、同じ流れで書いた（3.14 節）。
+  - 2026-10-20: `rustls-platform-verifier` 0.7.1（既定の機能なし。ureq 3.4.2 が使う版・機能と同じ）を `genzo-geo` の **dev-dependency** にした（OS による証明書の検証が自己署名の証明書を拒むことを確かめるテスト `tests::os_verifier`。コミット `2ee7461`）。**新しい crate はない**（`Cargo.lock` で増えたのは `genzo-geo` の依存の一覧の 1 行だけ）。
+  - `genzo-geo` の `tls.rs`（コミット `8cfeb81` で足し、`8ac4eda` で消した）は、ureq 3.4.2 の `src/tls/native_tls.rs`（MIT OR Apache-2.0）を参考に、同じ流れで書いた（ureq の著作権の表示と許諾の文は 3.14 節）。
   - **ライセンスの表記の要否・方法は、ほかの Rust の crate と同じ扱いで、AI の判断で確定しない**（DIST-05）。
   - 新しく入った 24 個の crate（`created_at` は crates.io の API の値。UTC。「入る対象」は上の 5 つの対象の依存の木）:
 
@@ -149,9 +150,9 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | tauri-driver | E2E の WebDriver の中継（開発環境だけ） | 2.0.6（`cargo install tauri-driver --version 2.0.6 --locked`） | crates.io | Apache-2.0 OR MIT（crates.io の表示） | 開発環境だけ | 配布しない | — | AI 記入（2026-10-12） |
 | アプリのアイコン | アプリ・インストーラーのアイコン（`crates/genzo-app/icons/icon.svg` から `tauri icon` で作成） | — | このリポジトリ（自作） | アプリと同じ GPL-3.0-or-later | 同梱 | アプリ・インストーラー | — | AI 記入（2026-10-12） |
 | OpenStreetMap の地図のタイル（`tile.openstreetmap.org`） | 位置を付けるダイアログの地図（LIB-21 の第 2 段階。04 の 3.16 節）。利用者が有効にしたときだけ、表示している範囲のタイルを取る | 外部のサービス（OSM Foundation の標準のラスターのタイル） | `https://tile.openstreetmap.org/{z}/{x}/{y}.png`（設定で別の提供元に変えられる） | 地図のデータは ODbL（/copyright の本文の元）。利用はタイルの利用ポリシー（GitHub のソースで読んだ。公開ページは未確認）。タイルの画像のライセンスは要確認 | 実行時に HTTPS で取り、利用者の PC のキャッシュのフォルダ（`map-tiles`）に保存する（`genzo-geo`。フォルダがない・書けないときはメモリーだけ） | **配布物に含めない**（同梱・先読みしない） | 地図の右下に「© OpenStreetMap contributors」（/copyright を開く。文言・位置は人の確認待ち） | AI 記入（2026-10-20）。ポリシー・帰属・ODbL は人の確認待ち（3.14 節） |
-| Nominatim（地名の検索。`nominatim.openstreetmap.org`） | 位置を付けるダイアログの地名の検索（LIB-21 の第 2 段階）。利用者が Enter かボタンで検索したときだけ | 外部のサービス（OSM Foundation の Nominatim のサーバー） | `https://nominatim.openstreetmap.org/search`（設定で別の提供元に変えられる） | 結果のデータは ODbL（ポリシーの原文と、応答の `licence`）。利用は Nominatim の利用ポリシー（GitHub のソースで読んだ。公開ページは未確認） | 実行時に HTTPS で問い合わせ、結果はプロセスの中だけにキャッシュする（`genzo-geo`） | **配布物に含めない** | 地図の右下の表示を共用する（検索の結果の一覧には出していない） | AI 記入（2026-10-20）。ポリシーの LLM の条項・ODbL は人の確認待ち（3.14 節） |
+| Nominatim（地名の検索。`nominatim.openstreetmap.org`） | 位置を付けるダイアログの地名の検索（LIB-21 の第 2 段階）。**既定では使わない**。設定の「OSM の公開の地名の検索（Nominatim）を使う」を ON にしたときだけ使う（2026-10-20。決定事項ログ No.193）。設定した検索サービスで置き換えられる。利用者が Enter かボタンで検索したときだけ | 外部のサービス（OSM Foundation の Nominatim のサーバー） | `https://nominatim.openstreetmap.org/search`（設定で ON のときだけ。検索サービスの URL を設定したときはそちら） | 結果のデータは ODbL（ポリシーの原文と、応答の `licence`）。利用は Nominatim の利用ポリシー（GitHub のソースで読んだ。公開ページは未確認） | 実行時に HTTPS で問い合わせ、結果はプロセスの中だけにキャッシュする（`genzo-geo`） | **配布物に含めない** | 地図の右下の表示を共用する（検索の結果の一覧には出していない） | AI 記入（2026-10-20）。公開の Nominatim の扱いは利用者の決定（既定 OFF・設定で ON）。ポリシーの順守・ODbL の法的な最終の確認は人の確認待ち（3.14 節） |
 | 証明書の検証（Windows: CryptoAPI、macOS: Security.framework、Linux: OS の証明書の保管場所） | オンラインの地図の HTTPS のサーバーの証明書の検証（`rustls-platform-verifier` を通して使う。LIB-21。2026-10-20 に、OS の TLS（native-tls。Windows: SChannel、macOS: Security.framework、Linux: OpenSSL）から置き換えた。TLS そのものは rustls と ring） | OS のもの（同梱しない） | Windows・macOS・Linux の OS | OS の構成要素 | 実行時に OS の機能を呼ぶ・OS の証明書の保管場所を読む（同梱しない）。Linux は検証そのものを rustls-webpki が行う | 同梱しない | — | AI 記入（2026-10-20）。Windows・macOS の実機で未確認 |
-| ring（暗号の実装） | オンラインの地図の HTTPS の暗号（`rustls` 0.23.45 の暗号の実装。LIB-21。`genzo-geo`。2026-10-20 追加。それまで Linux の開発環境で動的リンクしていた OpenSSL は、同じ日にやめた（1.1 節）） | 0.17.14（crate。checksum は 1.1 節） | crates.io の `ring`（C とアセンブリを同梱）。上流は https://github.com/briansmith/ring （BoringSSL を元にした部分を含む） | crate の `Cargo.toml` は Apache-2.0 AND ISC。`LICENSE` によると、ring の新しいコードは ISC、BoringSSL から来たコードは Apache-2.0（一部は ISC。ファイルの先頭に書いてある）、`third_party/fiat`（fiat-crypto）は Apache-2.0（1.1 節）。ファイルごとのヘッダは未確認（要確認） | C のファイルとアセンブリを `cc` でビルドして静的にリンクする（C のコンパイラが要る） | アプリの実行ファイル（`genzo-app`）に入る。対応するソースは crates.io の ring 0.17.14 | 要確認（DIST-05） | AI 記入（2026-10-20）。GPL-3.0-or-later との両立と表記の方法は人の確認待ち（3.14 節） |
+| ring（暗号の実装） | オンラインの地図の HTTPS の暗号（`rustls` 0.23.45 の暗号の実装。LIB-21。`genzo-geo`。2026-10-20 追加。それまで Linux の開発環境で動的リンクしていた OpenSSL は、同じ日にやめた（1.1 節）） | 0.17.14（crate。checksum は 1.1 節） | crates.io の `ring`（C とアセンブリを同梱）。上流は https://github.com/briansmith/ring （BoringSSL を元にした部分を含む） | crate の `Cargo.toml` は Apache-2.0 AND ISC。`LICENSE` によると、ring の新しいコードは ISC、BoringSSL から来たコードは Apache-2.0（一部は ISC。ファイルの先頭に書いてある）、`third_party/fiat`（fiat-crypto）は Apache-2.0（1.1 節）。ファイルごとのヘッダは未確認（要確認） | C のファイルとアセンブリを `cc` でビルドして静的にリンクする（C のコンパイラが要る） | アプリの実行ファイル（`genzo-app`）に入る。対応するソースは crates.io の ring 0.17.14 | 要確認。DIST-05 の全体の作業で扱う（未対応。初めての配布の前に要る） | AI 記入（2026-10-20）。FSF の一覧で Apache-2.0 と ISC は GPLv3 と両立するとされる（AI の理解）。GPL-3.0-or-later との両立の法的な最終の確認と表記の方法は人の確認待ち（3.14 節） |
 
 ## 3. 項目ごとの詳細と要確認の点
 
@@ -384,23 +385,48 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 - Nominatim の利用ポリシー（https://operations.osmfoundation.org/policies/nominatim/ ）: 同じリポジトリの `policies/nominatim.md`（SHA-256 `f802152c4c878124f51d6660378d2655438fb91d3e4de3cca5a427ec33ae8576`）。
 - 著作権とライセンス（https://www.openstreetmap.org/copyright ）: `openstreetmap/openstreetmap-website` の master の `config/locales/en.yml`（ページの本文の元）と `app/views/site/copyright.html.erb`。
 - Nominatim の検索の API の資料: `osm-search/Nominatim` の master の `docs/api/Search.md`・`Output.md`（master なので、公開サーバーの版より先の機能が載っている可能性がある）。
-- **読めなかったもの**: 公開ページそのもの、Attribution Guidelines（https://wiki.osmfoundation.org/wiki/Licence/Attribution_Guidelines 。取得できなかった）、OSMF Terms of Use（https://wiki.osmfoundation.org/wiki/Terms_of_Use 。両方のポリシーが、OSMF のすべてのサービスにかかるとして参照する。読んでいない）。ソースのコミットの SHA と、公開ページへの反映の時期も確かめていない。タイルのサーバーの実際の応答ヘッダーも確かめていない（`tile.openstreetmap.org`・`nominatim.openstreetmap.org` にも接続できなかった）。
+- **読めなかったもの**: 公開ページそのもの、Attribution Guidelines（https://wiki.osmfoundation.org/wiki/Licence/Attribution_Guidelines 。取得できなかった）、OSMF Terms of Use（https://wiki.osmfoundation.org/wiki/Terms_of_Use 。両方のポリシーが、OSMF のすべてのサービスにかかるとして参照する。読んでいない）。2026-10-20 にも、公開ページ（operations.osmfoundation.org・wiki.osmfoundation.org）は curl・WebFetch で名前解決できず読めない（WebSearch の抜粋で、公式の Nominatim のページの LLM の条項の文がソースの写しと一致した（一部の確認）。Attribution Guidelines は、抜粋によると OSMF の理事会が 2021-06-25 に採択）。ソースのコミットの SHA と、公開ページへの反映の時期も確かめていない。タイルのサーバーの実際の応答ヘッダーも確かめていない（`tile.openstreetmap.org`・`nominatim.openstreetmap.org` にも接続できなかった）。
 
-**実装の状況**（2026-10-20、AI 記入。決定事項ログ No.182・186〜191、04 の 3.16 節）
-- 外部のサービスとして実行時に HTTPS で使うだけで、**配布物には何も含めない**（タイルを同梱・先読みしない）。既定で無効で、利用者が有効にしたときだけ通信する。守るようにした規則（User-Agent・キャッシュ・条件付きの要求・1 秒に 1 回（1 つのプロセスの中の間隔。ポリシーの上限はアプリの全利用者の合計）・オートコンプリートの禁止・結果のキャッシュ・提供元の切り替え）は決定事項ログ No.188・189。
+**実装の状況**（2026-10-20、AI 記入。決定事項ログ No.182・186〜191・193、04 の 3.16 節）
+- 外部のサービスとして実行時に HTTPS で使うだけで、**配布物には何も含めない**（タイルを同梱・先読みしない）。既定で無効で、利用者が有効にしたときだけ通信する。地名の検索の公開の Nominatim は、さらに設定で ON にしたときだけ使う（既定 OFF。利用者の決定。決定事項ログ No.193）。守るようにした規則（User-Agent・キャッシュ・条件付きの要求・1 秒に 1 回（1 つのプロセスの中の間隔。ポリシーの上限はアプリの全利用者の合計）・オートコンプリートの禁止・結果のキャッシュ・提供元の切り替え）は決定事項ログ No.188・189。
 - 帰属の表示: 地図の右下に「© OpenStreetMap contributors」（押すと /copyright を既定のブラウザで開く）と「地図の誤りを報告」（/fixthemap）を常に出す。設定でタイルの提供元を変えたときは、その提供元の帰属の表示（設定の `tile_attribution`）を、その前に文字だけで並べる（決定事項ログ No.191）。Leaflet の帰属の表示（Leaflet へのリンクと旗。`attributionControl` の prefix）は出していない（`attributionControl: false`）。これとは別に、Leaflet の BSD-2-Clause の第 2 項は、バイナリで配る場合に、著作権表示・条件・免責を資料などに再掲することを求めていると読める（地図の上の「Leaflet」のリンクは、この再掲には当たらないと考える）。要否と方法は AI の判断で確定せず、人が確かめる（DIST-05。未対応。4 章）。
 - TLS: rustls（Rust）と ring（C とアセンブリ。アプリの実行ファイルに静的にリンクされる。1.1 節・2 章）。証明書の検証は OS（Windows の CryptoAPI・macOS の Security.framework・Linux の OS の証明書の保管場所。同梱しない）。初めに使った native-tls（Windows の SChannel・macOS の Security.framework・Linux のシステムの OpenSSL）は、2026-10-20 にやめた（1.1 節）。
 - `genzo-geo` の `tls.rs`（native-tls で TLS の接続を組む部品。コミット `8cfeb81` で足し、`8ac4eda` で消した。今の木にはないが、git の履歴には残る）は、ureq 3.4.2 の `src/tls/native_tls.rs`（MIT OR Apache-2.0）を参考に、同じ流れ（構造）で書いた。両方のファイルから `//` で始まる行と空行を除き、行の前後の空白を除いて比べると、`tls.rs` の 117 行のうち、ureq のファイルにある行と同じものが 58 行（記号だけの行（`}`・`};`・`);` など）を除くと 31 行。行の順を保った一致（Python の difflib）では 47 行）。同じ行には、ureq の unversioned の API の trait のシグネチャのほか、処理の本体の行（`needs_tls` の判定、`LazyBuffers` の作成、`transmit_output`・`await_input` の本体の行など）も含まれる（2026-10-20 に、消す前の版の `tls.rs` と ureq 3.4.2 のソースで数え直した。前にこの台帳に書いた「21 行」は、数え方を書いておらず、再現できなかった）。
+- ureq の著作権の表示と許諾の文（2026-10-20 追加。旧 `tls.rs` が参考にした ureq 3.4.2 は MIT OR Apache-2.0。ここには crate の `LICENSE-MIT` をそのまま写す。この表示で足りるか・どちらの条件で表示するかの法的な最終の確認は人）:
+
+  ```text
+  MIT License
+
+  Copyright (c) 2019 Martin Algesten
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+  ```
 
 **人の確認が必要な事項**（**法的な事項は AI の判断で確定しない**）
 1. 公開ページ（タイル・Nominatim のポリシー、/copyright）と、読めなかった Attribution Guidelines・OSMF Terms of Use を読み、実装の規則と合うかを確かめる（implementation_status の人の判断の表 No.188）。
-2. Nominatim のポリシーの「Usage in LLMs」の節（「LLM がこのサービスを提案するときは、ポリシーをはっきり示して制限を説明すること」「LLM が生成したコードはすべての条項を守ること」「no-code・low-code・vibe-coding のプラットフォームが、公開の API を汎用の地名の検索などとして組み込む・提供する・提案する・自動で生成することはできない」「公開の API は、アプリの開発者がよく知ったうえで意図して使うと決め、順守に直接責任を持つ場合だけ使える」）に照らして、この使い方でよいかを利用者が決める（人の判断の表 No.187）。
+2. Nominatim のポリシーの「Usage in LLMs」の節（「LLM がこのサービスを提案するときは、ポリシーをはっきり示して制限を説明すること」「LLM が生成したコードはすべての条項を守ること」「no-code・low-code・vibe-coding のプラットフォームが、公開の API を汎用の地名の検索などとして組み込む・提供する・提案する・自動で生成することはできない」「公開の API は、アプリの開発者がよく知ったうえで意図して使うと決め、順守に直接責任を持つ場合だけ使える」）に照らして、この使い方でよいかを利用者が決める（人の判断の表 No.187）。→ 2026-10-20 に、AI（まとめ役）が原文を示して説明し、利用者が公開の Nominatim を既定 OFF・設定で ON と決めた（決定事項ログ No.193）。法的な最終の確認だけが人に残る。
 3. 帰属の表示の文言・位置、ODbL の share-alike が付けた座標（カタログと書き出しの Exif に入る）に及ぶか、検索の結果の一覧の帰属（人の判断の表 No.189）。
 4. タイルの画像（地図の描き方）のライセンスの扱い（読んだ資料には、地図のデータの ODbL と資料の CC BY-SA 2.0 は書かれているが、タイルの画像については確かめていない）。
-5. 期限の切れたタイルを通信の失敗のときに出すこと（人の判断の表 No.190）と、User-Agent（アプリの名前とリポジトリの URL）が OSM の公開の利用統計に載りうること・連絡先（No.193）。
-6. `tls.rs`（今の木にはなく、git の履歴にだけ残る）が ureq のコードを参考にしたことについて、履歴ごと main に入れる場合に著作権表示が要るか（AI は判断しない。上の行の数と、流れを ureq に合わせたことを判断の材料にする）。
-7. ring（Apache-2.0 AND ISC。BoringSSL・fiat-crypto のコードを含む）の GPL-3.0-or-later との両立と、2 章の一覧・配布物のライセンスの表記（DIST-05）での書き方（2 章の「ring」「証明書の検証」の行は AI の案）。
-8. `rustls` 0.23.45 の脆弱性の通知 4 件（RUSTSEC-2026-0346〜0349）を `deny.toml` で除いたこと（このアプリの使い方では当たらないという AI の判断。理由は `deny.toml`）と、0.23.46 以上へ上げる時期（2026-10-28 以降の予定。公開から 2 週間のきまりの例外にして今すぐ上げるかも含む）。
+5. 期限の切れたタイルを通信の失敗のときに出すこと（人の判断の表 No.190。2026-10-20 に AI が確認して続けると決めた。決定事項ログ No.188）と、User-Agent（アプリの名前とリポジトリの URL）が OSM の公開の利用統計に載りうること・連絡先（No.193）。
+6. `tls.rs`（今の木にはなく、git の履歴にだけ残る）が ureq のコードを参考にしたことについて、履歴ごと main に入れる場合に著作権表示が要るか（AI は判断しない。上の行の数と、流れを ureq に合わせたことを判断の材料にする）。2026-10-20 に、ureq の著作権の表示と許諾の文を上の「実装の状況」に写した。法的な最終の確認だけが人に残る。
+7. ring（Apache-2.0 AND ISC。BoringSSL・fiat-crypto のコードを含む）の GPL-3.0-or-later との両立と、2 章の一覧・配布物のライセンスの表記（DIST-05）での書き方（2 章の「ring」「証明書の検証」の行は AI の案）。FSF の一覧で Apache-2.0 と ISC は GPLv3 と両立するとされる（AI の理解。法的な最終の確認は人）。ring と Leaflet の表記は DIST-05 の全体の作業で扱う（未対応。初めての配布の前に要る）。
+8. `rustls` 0.23.45 の脆弱性の通知 4 件（RUSTSEC-2026-0346〜0349）を `deny.toml` で除いたこと（このアプリの使い方では当たらないという AI の判断。理由は `deny.toml`）と、0.23.46 以上へ上げる時期（2026-10-28 以降の予定。公開から 2 週間のきまりの例外にして今すぐ上げるかも含む）。→ 2026-10-20 に AI が確かめ、除外を続けて 2026-10-28 に上げる予定（確認を予約済み。人の判断の表 No.194）。
 9. タイルのポリシーの推奨（should）「HTTP/2 か HTTP/3 で多重化してダウンロードする」に沿っていないこと（`ureq` 3.4.2 は HTTP/1.1 だけ。上流へ同時に送るのはタイル専用のスレッド 2 本（`genzo-app` の `TILE_THREADS`）までで、接続は keep-alive で使い回す。決定事項ログ No.187）。沿ってよいかは人が決める（人の判断の表 No.187）。
 
 ## 4. 今後記入する対象
