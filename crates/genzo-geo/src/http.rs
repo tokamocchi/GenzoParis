@@ -116,8 +116,7 @@ impl std::fmt::Debug for UreqClient {
 
 impl UreqClient {
     /// https だけを使う本物のクライアントを作る（プロキシは環境変数・Windows のレジストリから。読み方は
-    /// src/proxy.rs の doc）。
-    /// プロキシの設定を読めなければ [`GeoError::Network`]（直接つながない）。
+    /// src/proxy.rs の doc）。プロキシの設定を読めなければ [`GeoError::Network`]（直接つながない）。
     pub fn new() -> Result<Self, GeoError> {
         Self::build(true, crate::proxy::system_proxy()?)
     }
