@@ -96,7 +96,6 @@ import {
   githubArchiveUrl,
   homebrewFormulaInfo,
   isNativeLicenseFile,
-  kegUpstreamVersion,
   parseCellarPath,
   parseVcpkgAbiInfo,
   parseVcpkgFromGithub,
@@ -725,13 +724,21 @@ export function nativeComponentsMacos(libs, env) {
   const formulae = homebrewFormulae([...new Set(kegs.map((k) => k.formula))], env);
   return kegs.map((k) => {
     const info = homebrewFormulaInfo(formulae.get(k.formula));
+    // ライセンスの表示・formula の URL は今の formula のもの。同梱する keg がそれと違う版なら止める（文書がビルドと
+    // 食い違うため）。
+    if (k.version !== info.kegVersion) {
+      throw new Error(
+        `Homebrew の ${k.formula} は ${k.version} が入っているが、formula の版は ${info.kegVersion ?? "不明"}` +
+          `（brew upgrade ${k.formula} してからビルドし直す）`,
+      );
+    }
     return {
       name: k.formula,
       version: k.version,
       license: info.license,
       homepage: info.homepage,
       recipe: info.recipe,
-      source: kegUpstreamVersion(k.version) === info.stable ? info.source : null,
+      source: info.source,
       files: [k.lib.name],
       texts: kegLicenseTexts(k.keg),
     };
@@ -846,8 +853,8 @@ export function collectLibrawSource(os, dir, components, vcpkgRoot, env) {
   } else {
     const info = homebrewFormulaInfo(homebrewFormulae(["libraw"], env).get("libraw"));
     if (!info.source || !info.sourceSha256) throw new Error("Homebrew の libraw の formula に、ソースの URL・SHA-256 がない");
-    if (kegUpstreamVersion(libraw.version) !== info.stable) {
-      throw new Error(`Homebrew の libraw は ${libraw.version} が入っているが、formula の版は ${info.stable}（ソースが合わない。brew upgrade libraw）`);
+    if (libraw.version !== info.kegVersion) {
+      throw new Error(`Homebrew の libraw は ${libraw.version} が入っているが、formula の版は ${info.kegVersion}（ソースが合わない。brew upgrade libraw）`);
     }
     const name = decodeURIComponent(new URL(info.source).pathname.split("/").pop() ?? "");
     if (!/^[\w.+-]+$/.test(name)) throw new Error(`ソースのファイルの名前が読めない: ${info.source}`);

@@ -240,7 +240,8 @@ export function isNativeLicenseFile(name) {
  *
  * @param {any} f
  * @returns {{ license: string | null, homepage: string | null, recipe: string | null, source: string | null,
- *   sourceSha256: string | null, stable: string | null, installed: string[] }}
+ *   sourceSha256: string | null, stable: string | null, kegVersion: string | null, installed: string[] }}
+ *   `kegVersion` は今の formula でインストールしたときの keg の版のフォルダの名前（revision があれば `_<数>` を付ける）
  */
 export function homebrewFormulaInfo(f) {
   const recipe =
@@ -255,17 +256,14 @@ export function homebrewFormulaInfo(f) {
     source: typeof stable?.url === "string" ? stable.url : null,
     sourceSha256: typeof stable?.checksum === "string" ? stable.checksum.toLowerCase() : null,
     stable: typeof f?.versions?.stable === "string" ? f.versions.stable : null,
+    kegVersion:
+      typeof f?.versions?.stable === "string"
+        ? Number.isInteger(f?.revision) && f.revision > 0
+          ? `${f.versions.stable}_${f.revision}`
+          : f.versions.stable
+        : null,
     installed: Array.isArray(f?.installed) ? f.installed.map((i) => i?.version).filter((v) => typeof v === "string") : [],
   };
-}
-
-/**
- * keg の版のフォルダの名前（`3.2.0`・`2.19.1_1` など。`_<数>` は Homebrew の revision）から、上流の版。
- *
- * @param {string} kegVersion
- */
-export function kegUpstreamVersion(kegVersion) {
-  return kegVersion.replace(/_\d+$/, "");
 }
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -10,7 +10,6 @@ import {
   githubArchiveUrl,
   homebrewFormulaInfo,
   isNativeLicenseFile,
-  kegUpstreamVersion,
   mergeComponents,
   needsIjgStatement,
   parseCellarPath,
@@ -127,8 +126,6 @@ test("Homebrew: Cellar の場所から formula を読み、keg のライセン�
     keg: "/opt/homebrew/Cellar/jpeg-turbo/3.2.0",
   });
   assert.equal(parseCellarPath("/usr/lib/libz.1.dylib"), null);
-  assert.equal(kegUpstreamVersion("2.19.1_1"), "2.19.1");
-  assert.equal(kegUpstreamVersion("23.1.3"), "23.1.3");
   for (const n of ["LICENSE.md", "COPYING", "COPYRIGHT", "LICENSE.TXT", "LICENSE.LGPL", "LICENSE.CDDL", "NOTICE", "README.ijg"]) {
     assert.ok(isNativeLicenseFile(n), n);
   }
@@ -151,8 +148,11 @@ test("Homebrew: Cellar の場所から formula を読み、keg のライセン�
     source: "https://example.com/libjpeg-turbo-3.2.0.tar.gz",
     sourceSha256: "6f30",
     stable: "3.2.0",
+    kegVersion: "3.2.0",
     installed: ["3.2.0"],
   });
+  assert.equal(homebrewFormulaInfo({ versions: { stable: "2.19.1" }, revision: 1 }).kegVersion, "2.19.1_1");
+  assert.equal(homebrewFormulaInfo({ versions: { stable: "2.19.1" }, revision: 0 }).kegVersion, "2.19.1");
   assert.equal(homebrewFormulaInfo({}).recipe, null);
 });
 

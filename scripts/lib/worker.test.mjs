@@ -200,6 +200,7 @@ test("macOS: 同梱した dylib を入れた Homebrew の formula と keg の文
       formulae: [
         formula("jpeg-turbo", "3.2.0"),
         formula("libraw", "0.22.2", {
+          revision: 1,
           urls: {
             stable: {
               url: "https://www.libraw.org/data/LibRaw-0.22.2.tar.gz",
@@ -235,6 +236,12 @@ test("macOS: 同梱した dylib を入れた Homebrew の formula と keg の文
     assert.equal(components[0].texts.find((t) => t.file === "LICENSE.CDDL").text, "CDDL ©");
     assert.equal(components[1].source, "https://example.com/jpeg-turbo-3.2.0.tar.gz");
     assert.throws(() => nativeComponentsMacos([{ name: "x.dylib", source: "/usr/local/lib/x.dylib" }], env), /Cellar の中にない/);
+    // 同梱する keg が今の formula と違う版なら止める（ライセンスの表示・formula の URL が食い違うため）。
+    write("Cellar/jpeg-turbo/3.1.0/LICENSE.md", "old");
+    assert.throws(
+      () => nativeComponentsMacos([{ name: "libjpeg.8.dylib", source: path.join(root, "Cellar/jpeg-turbo/3.1.0/lib/libjpeg.8.dylib") }], env),
+      /jpeg-turbo は 3\.1\.0 が入っているが、formula の版は 3\.2\.0/,
+    );
 
     assert.deepEqual(collectLibrawSource("macos", out, components, null, env), ["LibRaw-0.22.2.tar.gz"]);
     assert.equal(fs.readFileSync(path.join(out, "LibRaw-0.22.2.tar.gz"), "utf8"), archive);
