@@ -49,6 +49,8 @@ test("ライセンスの文書・案内・ビルドの手順の写しを、配�
   const r = licenseResources(["vcpkg-ports-libraw/vcpkg.json", "vcpkg-ports-libraw/portfile.cmake"]);
   assert.equal(r["binaries/licenses/LibRaw/build-recipe/vcpkg-ports-libraw/portfile.cmake"], "licenses/LibRaw/build-recipe/vcpkg-ports-libraw/portfile.cmake");
   assert.equal(Object.keys(r).length, 5);
+  const withSource = licenseResources([], ["LibRaw-LibRaw-0.22.2.tar.gz"]);
+  assert.equal(withSource["binaries/licenses/LibRaw/source/LibRaw-LibRaw-0.22.2.tar.gz"], "licenses/LibRaw/source/LibRaw-LibRaw-0.22.2.tar.gz");
 });
 
 test("ビルドの手順の案内は、コミットを固定した URL にする", () => {
@@ -92,6 +94,7 @@ test("案内に版・同梱したファイル・ソースの入手先・差し�
   assert.match(win, /%LOCALAPPDATA%\\GenzoParis/);
   assert.match(win, /vcpkg\/tree\/abc123\/ports\/libraw/);
   assert.doesNotMatch(win, /codesign/);
+  assert.doesNotMatch(win, /source\//, "ソースを同梱しないときは書かない");
   assert.match(win, /GNU Lesser General Public\nLicense version 2\.1/);
 
   const mac = librawNotice({
@@ -99,7 +102,10 @@ test("案内に版・同梱したファイル・ソースの入手先・差し�
     version: "0.22.2",
     bundled: ["libraw_r.25.dylib", "libomp.dylib"],
     recipe: { kind: "homebrew", version: "0.22.2", revision: "def456", copied: true },
+    source: ["LibRaw-0.22.2.tar.gz"],
   });
+  assert.match(mac, /このフォルダの source。入手元が取得したアーカイブをそのまま）:\n      source\/LibRaw-0\.22\.2\.tar\.gz\n/);
+  assert.match(mac, /included in the source folder: LibRaw-0\.22\.2\.tar\.gz\./);
   assert.match(mac, /GenzoParis\.app\/Contents\/Frameworks の libraw_r\.25\.dylib/);
   assert.match(mac, /codesign --force --deep --sign - \/Applications\/GenzoParis\.app/);
   assert.match(mac, /homebrew-core\/blob\/def456\/Formula\/lib\/libraw\.rb/);

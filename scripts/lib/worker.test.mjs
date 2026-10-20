@@ -1,12 +1,20 @@
 // worker.mjs のテスト（node --test）。Windows の Visual Studio の再頒布用のフォルダの探し方を、偽のフォルダで確かめる。
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { collectLibrawRecipe, findVcRedistDirs, readLibrawVersion } from "./worker.mjs";
+import {
+  collectLibrawRecipe,
+  collectLibrawSource,
+  findVcRedistDirs,
+  nativeComponentsMacos,
+  nativeComponentsWindows,
+  readLibrawVersion,
+} from "./worker.mjs";
 
 test("Visual C++ のランタイムを探すフォルダ（環境変数の指定と VCToolsRedistDir）", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "genzo-vcredist-"));
@@ -77,6 +85,143 @@ test("LibRaw をビルドした手順: vcpkg の port の写しと版（git の�
     assert.equal(fs.readFileSync(path.join(out, "vcpkg-ports-libraw", "sub", "fix.patch"), "utf8"), "--- a\n+++ b\n");
     // vcpkg を使っていない（LIBRAW_INCLUDE_DIR などを自分で指定した）なら、手順は分からない。
     assert.deepEqual(collectLibrawRecipe("windows", out, null, {}), { recipe: { kind: "unknown" }, files: [] });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows: 同梱した DLL を入れた vcpkg の port と著作権の文書を調べ、LibRaw のソースを downloads から集める", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "genzo-vcpkg-"));
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "genzo-source-"));
+  try {
+    const write = (rel, text) => {
+      const f = path.join(root, ...rel.split("/"));
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, text);
+    };
+    write("installed/vcpkg/info/libraw_0.22.2_x64-windows.list", "x64-windows/bin/raw_r.dll\nx64-windows/share/libraw/copyright\n");
+    write("installed/vcpkg/info/zlib_1.3.2_x64-windows.list", "x64-windows/bin/z.dll\n");
+    write("installed/x64-windows/share/libraw/copyright", "Copyright (C) 2008-2024 LibRaw LLC\n");
+    write("installed/x64-windows/share/zlib/copyright", "Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler\n");
+    write("ports/libraw/vcpkg.json", JSON.stringify({ name: "libraw", version: "0.22.2", license: "(LGPL-2.1-only OR CDDL-1.0) AND BSD-3-Clause", homepage: "https://www.libraw.org" }));
+    write("ports/zlib/vcpkg.json", JSON.stringify({ name: "zlib", version: "1.3.2", "port-version": 2, license: "Zlib" }));
+    const archive = "LibRaw source archive";
+    const cmake = "LibRaw-cmake archive";
+    const sha512 = (t) => createHash("sha512").update(t).digest("hex");
+    write("downloads/LibRaw-LibRaw-0.22.2.tar.gz", archive);
+    write("downloads/LibRaw-LibRaw-cmake-eb98e43.tar.gz", cmake);
+    write(
+      "ports/libraw/portfile.cmake",
+      `vcpkg_from_github(\n OUT_SOURCE_PATH SOURCE_PATH\n REPO LibRaw/LibRaw\n REF "\${VERSION}"\n SHA512 ${sha512(archive)}\n HEAD_REF master\n)\n` +
+        `vcpkg_from_github(\n OUT_SOURCE_PATH C\n REPO LibRaw/LibRaw-cmake\n REF eb98e43\n SHA512 ${sha512(cmake)}\n PATCHES a.patch\n)\n`,
+    );
+
+    const libs = [
+      { name: "raw_r.dll", source: path.join(root, "installed", "x64-windows", "bin", "raw_r.dll") },
+      { name: "Z.dll", source: path.join(root, "installed", "x64-windows", "bin", "z.dll") },
+    ];
+    const components = nativeComponentsWindows(libs, root, "x64-windows", {});
+    assert.deepEqual(
+      components.map((c) => [c.name, c.version, c.license, c.files, c.texts.map((t) => t.file)]),
+      [
+        ["libraw", "0.22.2", "(LGPL-2.1-only OR CDDL-1.0) AND BSD-3-Clause", ["raw_r.dll"], ["share/libraw/copyright"]],
+        ["zlib", "1.3.2", "Zlib", ["Z.dll"], ["share/zlib/copyright"]],
+      ],
+    );
+    assert.match(components[1].texts[0].text, /Jean-loup Gailly/);
+    // 持ち主の分からない DLL・vcpkg でない LibRaw では止める。
+    assert.throws(() => nativeComponentsWindows([{ name: "other.dll", source: "x" }], root, "x64-windows", {}), /other\.dll を入れた vcpkg の port が分からない/);
+    assert.throws(() => nativeComponentsWindows(libs, null, "x64-windows", {}), /vcpkg の LibRaw を使う/);
+
+    assert.deepEqual(collectLibrawSource("windows", out, components, root, {}), [
+      "LibRaw-LibRaw-0.22.2.tar.gz",
+      "LibRaw-LibRaw-cmake-eb98e43.tar.gz",
+    ]);
+    assert.equal(fs.readFileSync(path.join(out, "LibRaw-LibRaw-0.22.2.tar.gz"), "utf8"), archive);
+
+    // downloads のファイルが portfile の SHA512 と違えば止める（置いたファイルは消す）。
+    write("downloads/LibRaw-LibRaw-0.22.2.tar.gz", "changed");
+    assert.throws(() => collectLibrawSource("windows", out, components, root, {}), /LibRaw-LibRaw-0\.22\.2\.tar\.gz の SHA512 が違う/);
+    assert.ok(!fs.existsSync(path.join(out, "LibRaw-LibRaw-0.22.2.tar.gz")));
+    // 入っている版と ports の版が違えば止める。
+    const older = components.map((c) => (c.name === "libraw" ? { ...c, version: "0.22.1" } : c));
+    assert.throws(() => collectLibrawSource("windows", out, older, root, {}), /0\.22\.1 が入っているが、ports の版は 0\.22\.2/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("macOS: 同梱した dylib を入れた Homebrew の formula と keg の文書を調べ、LibRaw のソースを集める（偽の brew）", { skip: process.platform === "win32" }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "genzo-brew-"));
+  const out = path.join(root, "out");
+  try {
+    const write = (rel, text) => {
+      const f = path.join(root, ...rel.split("/"));
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, text);
+    };
+    write("Cellar/jpeg-turbo/3.2.0/LICENSE.md", "libjpeg-turbo Licenses");
+    write("Cellar/jpeg-turbo/3.2.0/README.md", "readme");
+    write("Cellar/jpeg-turbo/3.2.0/share/doc/libjpeg-turbo/README.ijg", "The Independent JPEG Group's JPEG software");
+    write("Cellar/jpeg-turbo/3.2.0/share/doc/libjpeg-turbo/example.c", "int main");
+    write("Cellar/libraw/0.22.2_1/COPYRIGHT", "LibRaw LLC");
+    write("Cellar/libraw/0.22.2_1/LICENSE.LGPL", "GNU LESSER");
+    fs.writeFileSync(path.join(root, "Cellar/libraw/0.22.2_1/LICENSE.CDDL"), Buffer.from([0x43, 0x44, 0x44, 0x4c, 0x20, 0xa9]));
+    const archive = "LibRaw-0.22.2 archive";
+    write("cache/LibRaw-0.22.2.tar.gz", archive);
+    const formula = (name, version, extra = {}) => ({
+      name,
+      license: name === "libraw" ? "LGPL-2.1-only OR CDDL-1.0" : "IJG AND Zlib AND BSD-3-Clause",
+      homepage: `https://example.com/${name}`,
+      tap_git_head: "abc123",
+      ruby_source_path: `Formula/${name[0]}/${name}.rb`,
+      versions: { stable: version },
+      urls: { stable: { url: `https://example.com/${name}-${version}.tar.gz`, checksum: "0" } },
+      ...extra,
+    });
+    const info = {
+      formulae: [
+        formula("jpeg-turbo", "3.2.0"),
+        formula("libraw", "0.22.2", {
+          urls: {
+            stable: {
+              url: "https://www.libraw.org/data/LibRaw-0.22.2.tar.gz",
+              checksum: createHash("sha256").update(archive).digest("hex"),
+            },
+          },
+        }),
+      ],
+    };
+    write("info.json", JSON.stringify(info));
+    const bin = path.join(root, "bin");
+    write(
+      "bin/brew",
+      `#!/bin/sh\nif [ "$1" = "info" ]; then cat "${path.join(root, "info.json")}"; exit 0; fi\n` +
+        `if [ "$1" = "--cache" ]; then echo "${path.join(root, "cache", "LibRaw-0.22.2.tar.gz")}"; exit 0; fi\nexit 1\n`,
+    );
+    fs.chmodSync(path.join(bin, "brew"), 0o755);
+    const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+
+    const libs = [
+      { name: "libraw_r.25.dylib", source: path.join(root, "Cellar/libraw/0.22.2_1/lib/libraw_r.25.dylib") },
+      { name: "libjpeg.8.dylib", source: path.join(root, "Cellar/jpeg-turbo/3.2.0/lib/libjpeg.8.3.2.dylib") },
+    ];
+    const components = nativeComponentsMacos(libs, env);
+    assert.deepEqual(
+      components.map((c) => [c.name, c.version, c.recipe, c.texts.map((t) => t.file).sort()]),
+      [
+        ["libraw", "0.22.2_1", "https://github.com/Homebrew/homebrew-core/blob/abc123/Formula/l/libraw.rb", ["COPYRIGHT", "LICENSE.CDDL", "LICENSE.LGPL"]],
+        ["jpeg-turbo", "3.2.0", "https://github.com/Homebrew/homebrew-core/blob/abc123/Formula/j/jpeg-turbo.rb", ["LICENSE.md", "share/doc/libjpeg-turbo/README.ijg"]],
+      ],
+    );
+    // UTF-8 でない文書は Latin-1 として読む。
+    assert.equal(components[0].texts.find((t) => t.file === "LICENSE.CDDL").text, "CDDL ©");
+    assert.equal(components[1].source, "https://example.com/jpeg-turbo-3.2.0.tar.gz");
+    assert.throws(() => nativeComponentsMacos([{ name: "x.dylib", source: "/usr/local/lib/x.dylib" }], env), /Cellar の中にない/);
+
+    assert.deepEqual(collectLibrawSource("macos", out, components, null, env), ["LibRaw-0.22.2.tar.gz"]);
+    assert.equal(fs.readFileSync(path.join(out, "LibRaw-0.22.2.tar.gz"), "utf8"), archive);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

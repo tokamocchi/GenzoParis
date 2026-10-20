@@ -8,6 +8,8 @@
 //   （版と同梱したファイルは、ビルドで入ったものによって変わるため）
 // - build-recipe/: LibRaw をビルドした手順（vcpkg の port の定義とパッチ、Homebrew の formula）の写し。案内には、
 //   その手順のリポジトリのコミット（ビルドの時点のもの）を固定した URL も書く（scripts/lib/worker.mjs が集める）
+// - source/: 同梱した LibRaw をビルドしたソースのアーカイブ（vcpkg・Homebrew が取得したもの。SHA を確かめて同梱する。
+//   vcpkg は LibRaw-cmake（ビルドの CMake のファイル）も。LGPL-2.1 の第 4 節・第 6 節。scripts/lib/worker.mjs が集める）
 // 案内の文言が LGPL の条件を満たすかは、人（必要なら専門家）が確かめる（docs/packaging.md の 8 章）。
 
 /** 上流の LibRaw のファイル（crates/genzo-app からの相対）。 */
@@ -22,6 +24,8 @@ export const LICENSES_BUILD_DIR = "binaries/licenses/LibRaw";
 export const LICENSES_TARGET_DIR = "licenses/LibRaw";
 /** ビルドの手順の写しを置くフォルダ（LICENSES_BUILD_DIR・LICENSES_TARGET_DIR の中）。 */
 export const RECIPE_DIR = "build-recipe";
+/** ソースのアーカイブを置くフォルダ（LICENSES_BUILD_DIR・LICENSES_TARGET_DIR の中）。 */
+export const SOURCE_DIR = "source";
 
 /**
  * LibRaw の版のヘッダ（libraw_version.h）を探す場所。genzo-raw の build.rs と同じく、include のフォルダは
@@ -54,10 +58,16 @@ export function parseLibrawVersion(header) {
  * （フォルダのまま渡さない）。
  *
  * @param {string[]} [recipeFiles] ビルドの手順の写しのファイル（RECIPE_DIR からの相対。区切りは "/"）
+ * @param {string[]} [sourceFiles] ソースのアーカイブ（SOURCE_DIR からの相対）
  * @returns {Record<string, string>}
  */
-export function licenseResources(recipeFiles = []) {
-  const files = [...LIBRAW_LICENSE_FILES, LIBRAW_NOTICE_FILE, ...[...recipeFiles].sort().map((f) => `${RECIPE_DIR}/${f}`)];
+export function licenseResources(recipeFiles = [], sourceFiles = []) {
+  const files = [
+    ...LIBRAW_LICENSE_FILES,
+    LIBRAW_NOTICE_FILE,
+    ...[...recipeFiles].sort().map((f) => `${RECIPE_DIR}/${f}`),
+    ...[...sourceFiles].sort().map((f) => `${SOURCE_DIR}/${f}`),
+  ];
   return Object.fromEntries(files.map((f) => [`${LICENSES_BUILD_DIR}/${f}`, `${LICENSES_TARGET_DIR}/${f}`]));
 }
 
@@ -101,11 +111,12 @@ export function recipeLines(recipe) {
 /**
  * 案内（README.txt）の本文。
  *
- * @param {{ os: "windows" | "macos", version: string, bundled: string[], recipe: LibrawRecipe }} info
- *   `bundled` は同梱した共有ライブラリのファイル名（LibRaw とその依存。Windows は Visual C++ のランタイムを含む）
+ * @param {{ os: "windows" | "macos", version: string, bundled: string[], recipe: LibrawRecipe, source?: string[] }} info
+ *   `bundled` は同梱した共有ライブラリのファイル名（LibRaw とその依存。Windows は Visual C++ のランタイムを含む）、
+ *   `source` は同梱したソースのアーカイブ（SOURCE_DIR の中の名前）
  * @returns {string}
  */
-export function librawNotice({ os, version, bundled, recipe }) {
+export function librawNotice({ os, version, bundled, recipe, source = [] }) {
   const libraw = bundled.filter((n) => /raw/i.test(n));
   if (libraw.length === 0) throw new Error("同梱したファイルに LibRaw がない");
   const others = bundled.filter((n) => !libraw.includes(n)).sort();
@@ -145,7 +156,13 @@ export function librawNotice({ os, version, bundled, recipe }) {
     `  - LibRaw: ${libraw.join(", ")}`,
     ...(others.length > 0 ? [`  - LibRaw などが使うライブラリ: ${others.join(", ")}`] : []),
     "",
-    "■ LibRaw のソースの入手先",
+    "■ LibRaw のソース",
+    ...(source.length > 0
+      ? [
+          `  - 同梱したファイルをビルドしたソース（このフォルダの ${SOURCE_DIR}。入手元が取得したアーカイブをそのまま）:`,
+          ...[...source].sort().map((f) => `      ${SOURCE_DIR}/${f}`),
+        ]
+      : []),
     `  - LibRaw ${version} のソース: https://github.com/LibRaw/LibRaw/tree/${version}`,
     "  - LibRaw の配布ページ: https://www.libraw.org/download",
     `  - 同梱したファイルのビルドの手順: ${recipeJa}`,
@@ -164,6 +181,9 @@ export function librawNotice({ os, version, bundled, recipe }) {
     `LibRaw is bundled as a shared library (${libraw.join(", ")}) in ${whereEn}, loaded only by the`,
     "genzo-worker helper program. You may replace it with a compatible (thread-safe, ABI-compatible) build of LibRaw.",
     `Source code: https://github.com/LibRaw/LibRaw/tree/${version} (built with ${recipeEn}).`,
+    ...(source.length > 0
+      ? [`The source archives used for the bundled build are included in the ${SOURCE_DIR} folder: ${[...source].sort().join(", ")}.`]
+      : []),
     "",
   ];
   return `${lines.join("\n")}`;
