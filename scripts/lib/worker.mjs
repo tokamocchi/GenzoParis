@@ -32,12 +32,14 @@
 //    文書の見つからないライブラリがあれば止める）。
 //
 // LibRaw の場所:
-// - Windows: 環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR（genzo-raw の build.rs）。なければ
-//   VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT。GitHub Actions の Windows のランナーにある）の
-//   installed/<VCPKG_DEFAULT_TRIPLET、既定は x64-windows> を使う。LIBRAW_LIB_NAME がなければ、.lib の
+// - Windows: VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT。GitHub Actions の Windows のランナーにある）の
+//   installed/<VCPKG_DEFAULT_TRIPLET、既定は x64-windows> を使う。環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR
+//   （genzo-raw の build.rs）で指定してもよいが、その vcpkg の中でなければ止める（同梱する DLL のライセンスの文書と
+//   LibRaw のソースを vcpkg から集めるため。決定事項ログ No.196）。LIBRAW_LIB_NAME がなければ、.lib の
 //   ファイル名から選ぶ（vcpkg は raw_r）。DLL は LIBRAW_DLL_DIR、なければ LIBRAW_LIB_DIR の隣の bin と
 //   LIBRAW_LIB_DIR で探す。
-// - macOS・Linux: pkg-config（Homebrew の libraw、apt の libraw-dev）。
+// - macOS: pkg-config（Homebrew の libraw。同梱する dylib は Homebrew の Cellar の中のものでなければ止める）。
+// - Linux: pkg-config（apt の libraw-dev。同梱しない）。
 //
 // Visual C++ のランタイム（Windows。決定事項ログ No.73）: ワーカーと LibRaw の DLL が読み込むランタイムの DLL
 // （vcruntime140.dll・msvcp140.dll など）を、次の順に探したフォルダから同梱する（見つからなければエラー）。
@@ -215,16 +217,24 @@ export function prepareWorker() {
 }
 
 /**
- * Windows: LibRaw の場所を環境変数に入れ、DLL を探すフォルダと、vcpkg の LibRaw を使うならその vcpkg の場所と
- * triplet を返す。
+ * Windows: LibRaw の場所を環境変数に入れ、DLL を探すフォルダと、vcpkg の場所と triplet を返す。配布物を作るには
+ * vcpkg の LibRaw が要る（同梱する DLL のライセンスの文書と LibRaw のソースを vcpkg から集めるため。決定事項ログ
+ * No.196）ので、vcpkg の LibRaw でなければ、時間のかかるビルドの前に止める。LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR を
+ * 設定していても、LIBRAW_LIB_DIR が VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT）の installed/<triplet> の中なら
+ * vcpkg の LibRaw として扱う。
  *
- * @returns {{ dllDirs: string[], vcpkgRoot: string | null, triplet: string }}
+ * @returns {{ dllDirs: string[], vcpkgRoot: string, triplet: string }}
  */
-function setupWindowsLibraw(env) {
+export function setupWindowsLibraw(env) {
   let usedVcpkg = null;
   const triplet = env.VCPKG_DEFAULT_TRIPLET || "x64-windows";
-  if (!env.LIBRAW_INCLUDE_DIR || !env.LIBRAW_LIB_DIR) {
-    const vcpkgRoot = env.VCPKG_ROOT || env.VCPKG_INSTALLATION_ROOT;
+  const vcpkgCandidate = env.VCPKG_ROOT || env.VCPKG_INSTALLATION_ROOT;
+  if (env.LIBRAW_INCLUDE_DIR && env.LIBRAW_LIB_DIR) {
+    const installed = vcpkgCandidate ? path.resolve(vcpkgCandidate, "installed", triplet) : null;
+    const rel = installed ? path.relative(installed, path.resolve(env.LIBRAW_LIB_DIR)) : null;
+    if (rel !== null && rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) usedVcpkg = vcpkgCandidate;
+  } else {
+    const vcpkgRoot = vcpkgCandidate;
     if (!vcpkgRoot) {
       throw new Error(
         "LibRaw の場所が分からない。環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR か、VCPKG_ROOT を設定する（docs/packaging.md）",
@@ -234,6 +244,13 @@ function setupWindowsLibraw(env) {
     env.LIBRAW_INCLUDE_DIR ||= path.join(installed, "include");
     env.LIBRAW_LIB_DIR ||= path.join(installed, "lib");
     usedVcpkg = vcpkgRoot;
+  }
+  if (!usedVcpkg) {
+    throw new Error(
+      `配布物を作るには vcpkg の LibRaw が要る（LIBRAW_LIB_DIR=${env.LIBRAW_LIB_DIR} は VCPKG_ROOT の installed/${triplet} の外）。` +
+        "同梱する DLL のライセンスの文書と LibRaw のソースを vcpkg から集めるため（決定事項ログ No.196）。" +
+        "VCPKG_ROOT を設定し、LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR を消すか vcpkg の中を指す（docs/packaging.md の 2.2）",
+    );
   }
   if (!fs.existsSync(env.LIBRAW_LIB_DIR)) {
     throw new Error(`LIBRAW_LIB_DIR のフォルダがない: ${env.LIBRAW_LIB_DIR}`);

@@ -78,7 +78,7 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
 
 1. Visual Studio の C++ のビルドツール（MSVC）と、パッケージ管理の vcpkg を入れる。
 2. LibRaw を入れる: `vcpkg install libraw:x64-windows`（依存の jasper・lcms・zlib・libjpeg-turbo もソースからビルドされる。vcpkg の libraw の port は 2026-10-12 の時点で 0.22.2）。
-3. LibRaw の場所を指定する: 環境変数 `VCPKG_ROOT`（vcpkg のフォルダ）を設定すれば、スクリプトが `installed\x64-windows` の `include`・`lib`・`bin` を使います。vcpkg 以外で入手した場合は `LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR`（必要なら `LIBRAW_LIB_NAME`・`LIBRAW_DLL_DIR`）を設定します（`crates/genzo-raw/build.rs` の doc、README）。`LIBRAW_LIB_NAME` を指定しなければ、`.lib` のファイル名から選びます（`raw_r.lib` → `libraw_r.lib` → `libraw.lib` → `raw.lib` の順。vcpkg はスレッドセーフな版を `lib\raw_r.lib`、そうでない版を `lib\manual-link\raw.lib` に置く）。
+3. LibRaw の場所を指定する: 環境変数 `VCPKG_ROOT`（vcpkg のフォルダ）を設定すれば、スクリプトが `installed\x64-windows` の `include`・`lib`・`bin` を使います。`LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR`（必要なら `LIBRAW_LIB_NAME`・`LIBRAW_DLL_DIR`）でも指定できますが、**配布物を作るときは、`VCPKG_ROOT` の `installed\<triplet>` の中の LibRaw でなければ、ビルドの前に止まります**（2026-10-20 から。同梱する DLL のライセンスの文書（`native.txt`）と LibRaw のソースを vcpkg から集めるため。決定事項ログ No.196）。vcpkg 以外で入手した LibRaw は、`cargo build`・`cargo test` では使えますが（`crates/genzo-raw/build.rs` の doc、README）、配布物は作れません。`LIBRAW_LIB_NAME` を指定しなければ、`.lib` のファイル名から選びます（`raw_r.lib` → `libraw_r.lib` → `libraw.lib` → `raw.lib` の順。vcpkg はスレッドセーフな版を `lib\raw_r.lib`、そうでない版を `lib\manual-link\raw.lib` に置く）。
 4. 作る（PowerShell、`ui\` で）:
 
    ```powershell

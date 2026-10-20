@@ -14,6 +14,7 @@ import {
   nativeComponentsMacos,
   nativeComponentsWindows,
   readLibrawVersion,
+  setupWindowsLibraw,
 } from "./worker.mjs";
 
 test("Visual C++ のランタイムを探すフォルダ（環境変数の指定と VCToolsRedistDir）", () => {
@@ -245,6 +246,42 @@ test("macOS: 同梱した dylib を入れた Homebrew の formula と keg の文
 
     assert.deepEqual(collectLibrawSource("macos", out, components, null, env), ["LibRaw-0.22.2.tar.gz"]);
     assert.equal(fs.readFileSync(path.join(out, "LibRaw-0.22.2.tar.gz"), "utf8"), archive);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows: 配布物を作るには vcpkg の LibRaw が要る（vcpkg の外の LIBRAW_LIB_DIR はビルドの前に止める）", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "genzo-setup-"));
+  try {
+    const vcpkg = path.join(root, "vcpkg");
+    const lib = path.join(vcpkg, "installed", "x64-windows", "lib");
+    fs.mkdirSync(lib, { recursive: true });
+    fs.writeFileSync(path.join(lib, "raw_r.lib"), "");
+    const other = path.join(root, "other", "lib");
+    fs.mkdirSync(other, { recursive: true });
+    fs.writeFileSync(path.join(other, "raw_r.lib"), "");
+
+    // VCPKG_ROOT だけ: その installed/<triplet> を使う。
+    const a = setupWindowsLibraw({ VCPKG_ROOT: vcpkg });
+    assert.equal(a.vcpkgRoot, vcpkg);
+    assert.equal(a.triplet, "x64-windows");
+    // LIBRAW_* が vcpkg の中を指すなら vcpkg の LibRaw として扱う。
+    const b = setupWindowsLibraw({
+      VCPKG_ROOT: vcpkg,
+      LIBRAW_INCLUDE_DIR: path.join(vcpkg, "installed", "x64-windows", "include"),
+      LIBRAW_LIB_DIR: lib,
+    });
+    assert.equal(b.vcpkgRoot, vcpkg);
+    // vcpkg の外・VCPKG_ROOT がないときは止める。
+    for (const env of [
+      { VCPKG_ROOT: vcpkg, LIBRAW_INCLUDE_DIR: path.join(root, "other", "include"), LIBRAW_LIB_DIR: other },
+      { LIBRAW_INCLUDE_DIR: path.join(root, "other", "include"), LIBRAW_LIB_DIR: other },
+      { VCPKG_ROOT: vcpkg, VCPKG_DEFAULT_TRIPLET: "x64-windows-static-md", LIBRAW_INCLUDE_DIR: "x", LIBRAW_LIB_DIR: lib },
+    ]) {
+      assert.throws(() => setupWindowsLibraw(env), /配布物を作るには vcpkg の LibRaw が要る/);
+    }
+    assert.throws(() => setupWindowsLibraw({}), /LibRaw の場所が分からない/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
