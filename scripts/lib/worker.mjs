@@ -30,6 +30,10 @@
 // 6. Windows・macOS では、同梱した共有ライブラリのライセンスの文書（licenses/third-party/native.txt）を、入手元の
 //    パッケージ（vcpkg の port・Homebrew の formula）がインストールした文書から作る（scripts/lib/native-notice.mjs。
 //    文書の見つからないライブラリがあれば止める）。
+// 7. Windows で Visual C++ のランタイムを同梱するときは、その使用条件（crates/genzo-app/licenses/windows/
+//    vcruntime-terms.txt）をインストール先の licenses/third-party に入れ、インストーラー（NSIS）の同意の画面の文書を、
+//    使用条件と GPL-3.0 の全文をまとめたもの（binaries/installer-license.txt）に差し替える（bundle.licenseFile。
+//    Microsoft の Distributable Code の条件。決定事項ログ No.199）。
 //
 // LibRaw の場所:
 // - Windows: VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT。GitHub Actions の Windows のランナーにある）の
@@ -91,12 +95,16 @@ import {
   parseLibrawVersion,
 } from "./notice.mjs";
 import {
+  INSTALLER_LICENSE_BUILD_PATH,
   NATIVE_NOTICES_BUILD_PATH,
   NATIVE_NOTICES_TARGET_PATH,
+  VCRUNTIME_TERMS_SOURCE,
+  VCRUNTIME_TERMS_TARGET,
   formatNativeNotices,
   changedVcpkgPortFiles,
   githubArchiveUrl,
   homebrewFormulaInfo,
+  installerLicenseText,
   isNativeLicenseFile,
   parseCellarPath,
   parseVcpkgAbiInfo,
@@ -161,6 +169,8 @@ export function prepareWorker() {
   fs.rmSync(licensesDir, { recursive: true, force: true });
   const nativeNotices = path.join(APP_DIR, NATIVE_NOTICES_BUILD_PATH);
   fs.rmSync(nativeNotices, { force: true });
+  const installerLicense = path.join(APP_DIR, INSTALLER_LICENSE_BUILD_PATH);
+  fs.rmSync(installerLicense, { force: true });
 
   const sidecar = path.join(BINARIES_DIR, sidecarFileName(WORKER_NAME, triple));
   fs.rmSync(sidecar, { force: true });
@@ -205,10 +215,17 @@ export function prepareWorker() {
       ...writeNativeNotices(os, triple, components, vcRuntime, vcpkgRoot, windowsLibraw?.triplet ?? "", env, nativeNotices),
     };
   }
+  // Visual C++ のランタイムを同梱するときは、その使用条件をインストール先に入れ、インストーラーの同意の画面で
+  // 同意を求める（Microsoft の Distributable Code の条件。決定事項ログ No.199）。
+  let licenseFile;
+  if (vcRuntime.length > 0) {
+    resources = { ...resources, [VCRUNTIME_TERMS_SOURCE]: VCRUNTIME_TERMS_TARGET };
+    licenseFile = writeInstallerLicense(installerLicense);
+  }
   const config = libsTauriConfig(
     os,
     bundled.map((b) => b.name),
-    { minimumSystemVersion: raisedMinimum, resources },
+    { minimumSystemVersion: raisedMinimum, resources, licenseFile },
   );
   fs.writeFileSync(LIBS_CONFIG, `${JSON.stringify(config, null, 2)}\n`);
   console.log(`Tauri の追加の設定: ${path.relative(REPO_ROOT, LIBS_CONFIG)}`);
@@ -824,6 +841,22 @@ function writeNativeNotices(os, triple, components, vcRuntime, vcpkgRoot, triple
   fs.writeFileSync(file, text);
   console.log(`同梱したライブラリのライセンスの文書: ${path.relative(REPO_ROOT, file)}`);
   return { [NATIVE_NOTICES_BUILD_PATH]: NATIVE_NOTICES_TARGET_PATH };
+}
+
+/**
+ * インストーラーの同意の画面に出す文書（Visual C++ のランタイムの使用条件と GPL-3.0 の全文）を書き、
+ * Tauri の `bundle.licenseFile` に渡す場所（crates/genzo-app からの相対）を返す。
+ *
+ * @param {string} file 書く場所
+ * @returns {string}
+ */
+function writeInstallerLicense(file) {
+  const terms = fs.readFileSync(path.join(APP_DIR, VCRUNTIME_TERMS_SOURCE), "utf8");
+  const gpl = fs.readFileSync(path.join(REPO_ROOT, "LICENSE"), "utf8");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, installerLicenseText(terms, gpl));
+  console.log(`インストーラーの同意の画面の文書: ${path.relative(REPO_ROOT, file)}（Visual C++ のランタイムの使用条件と GPL-3.0）`);
+  return INSTALLER_LICENSE_BUILD_PATH;
 }
 
 /** ファイルのハッシュ（16 進）。 */

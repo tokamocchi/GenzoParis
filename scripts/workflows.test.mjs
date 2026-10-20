@@ -53,5 +53,6 @@ test("配布物の確認で、同梱した C / C++ のライブラリのライ�
   assert.match(release, /'licenses\\third-party\\native\.txt'/);
   assert.match(release, /licenses\/third-party\/native\.txt"/);
   assert.match(release, /'licenses\\LibRaw\\source'/);
+  assert.match(release, /'licenses\\third-party\\vcruntime-terms\.txt'/);
   assert.match(release, /licenses\/LibRaw\/source\/\*\.tar\.gz/);
 });

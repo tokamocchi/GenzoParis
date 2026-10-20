@@ -30,6 +30,15 @@ export const NATIVE_NOTICES_BUILD_PATH = `binaries/licenses/third-party/${NATIVE
 export const NATIVE_NOTICES_TARGET_PATH = `licenses/third-party/${NATIVE_NOTICES_FILE}`;
 /** LibRaw のソースを置くフォルダ（licenses/LibRaw の下）。 */
 export const LIBRAW_SOURCE_DIR = "source";
+/**
+ * Visual C++ のランタイムの使用条件（Microsoft の Distributable Code の条件の「利用者に、同じ以上に保護する条件へ
+ * 同意させる」ための文書。crates/genzo-app からの相対。リポジトリに置く。docs/license_compliance.md の 4 章の 1）。
+ */
+export const VCRUNTIME_TERMS_SOURCE = "licenses/windows/vcruntime-terms.txt";
+/** 配布物の中の場所（Windows のインストール先の licenses の下）。 */
+export const VCRUNTIME_TERMS_TARGET = "licenses/third-party/vcruntime-terms.txt";
+/** インストーラー（NSIS）の同意の画面に出す文書（ビルドのときに作る。crates/genzo-app からの相対）。 */
+export const INSTALLER_LICENSE_BUILD_PATH = "binaries/installer-license.txt";
 
 /**
  * IJG のライセンス（libjpeg の README.ijg）が、実行形式だけを配るときに添付の文書に書くよう求める一文
@@ -405,8 +414,48 @@ export function formatNativeNotices({ os, triple, manager, components, vcRuntime
       "  これらのファイルは Microsoft Corporation のもので、Visual Studio の再頒布用のファイルを変更せずに同梱しています。",
       "  These files are owned by Microsoft Corporation and are included unmodified from the Visual Studio",
       "  redistributable files.",
+      `  使用条件 / Terms of use: ${VCRUNTIME_TERMS_TARGET}（インストールのときに同意を求めたもの / agreed to in the installer）`,
       "",
     );
   }
   return `${lines.join("\n").replace(/\s+$/, "")}\n`;
+}
+
+/**
+ * インストーラー（NSIS）の同意の画面に出す文書。Visual C++ のランタイムの使用条件（同意が要る）と、GenzoParis の
+ * ライセンス（GPL-3.0。参考。受け取る・実行するのに同意は要らない）を並べる。NSIS の文書の欄のため、改行は CRLF
+ * にする（UTF-8 の BOM は Tauri が付ける）。
+ *
+ * @param {string} terms VCRUNTIME_TERMS_SOURCE の中身
+ * @param {string} gpl GenzoParis のライセンス（リポジトリの LICENSE）の中身
+ * @returns {string}
+ */
+export function installerLicenseText(terms, gpl) {
+  const lines = [
+    "GenzoParis のインストール / Installing GenzoParis",
+    RULE,
+    "",
+    "このインストーラーには、GenzoParis（GPL-3.0-or-later）と、Microsoft Corporation の Microsoft Visual C++ の",
+    "ランタイムのファイルが入っています。",
+    "  1. Microsoft Visual C++ のランタイムのファイルの使用条件: インストールするには、この条件への同意が必要です。",
+    "  2. GenzoParis のライセンス（GNU General Public License version 3）の全文: 参考のために示すものです。",
+    "     GenzoParis を受け取る・実行するために、このライセンスに同意する必要はありません（GPL-3.0 の 9 条）。",
+    "「同意する」は、1 の条件への同意です。",
+    "This installer contains GenzoParis (GPL-3.0-or-later) and the Microsoft Visual C++ runtime files of",
+    "Microsoft Corporation.",
+    "  1. Terms of use for the Microsoft Visual C++ runtime files: you must agree to these terms to install.",
+    "  2. The full text of the license of GenzoParis (GNU General Public License version 3), for your reference.",
+    "     You are not required to accept it in order to receive or run GenzoParis (section 9 of the GPL-3.0).",
+    '"I Agree" means that you agree to the terms in 1.',
+    "",
+    RULE,
+    "1.",
+    normalizeText(terms),
+    "",
+    RULE,
+    "2. GenzoParis のライセンス / License of GenzoParis (GPL-3.0-or-later)",
+    THIN,
+    normalizeText(gpl),
+  ];
+  return `${lines.join("\n")}\n`.replace(/\n/g, "\r\n");
 }

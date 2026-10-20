@@ -14,6 +14,7 @@ const KNOWN_DOCUMENTS: { path: string; title: string }[] = [
   { path: "third-party/rust.txt", title: "Rust のライブラリ（crate）のライセンス" },
   { path: "third-party/npm.txt", title: "画面のライブラリ（npm のパッケージ）のライセンス" },
   { path: "third-party/native.txt", title: "同梱した C / C++ のライブラリのライセンス（LibRaw の依存など）" },
+  { path: "third-party/vcruntime-terms.txt", title: "Visual C++ のランタイムの使用条件（Windows。インストールのときに同意したもの）" },
   { path: "LibRaw/README.txt", title: "LibRaw の案内（ソース・差し替えの方法）" },
   { path: "LibRaw/LICENSE.LGPL", title: "LibRaw のライセンス（LGPL-2.1）" },
   { path: "LibRaw/COPYRIGHT", title: "LibRaw の著作権表示" },

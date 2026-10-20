@@ -16,6 +16,9 @@ GenzoParis のライセンスの文書
 - third-party/native.txt（Windows・macOS の配布物）
   同梱した C / C++ の共有ライブラリ（LibRaw と、LibRaw などが使うライブラリ。Windows では Visual C++ の
   ランタイムを含む）の一覧と、そのライセンスの文書です。
+- third-party/vcruntime-terms.txt（Windows の配布物）
+  同梱した Microsoft Visual C++ のランタイムのファイルの使用条件です。インストールのときに、この条件への
+  同意を求めています。GenzoParis 自体と、そのほかのソフトウェアには適用されません。
 - LibRaw/（Windows・macOS の配布物）
   RAW の展開に使う LibRaw（共有ライブラリとして同梱しています）のライセンスの全文・著作権表示と、ソースの
   入手先・差し替えの方法の案内（LibRaw/README.txt）、同梱した LibRaw をビルドしたソースのアーカイブ
@@ -34,6 +37,8 @@ viewed in the app, in the "About this app" tab of Settings.
 - third-party/npm.txt: the JavaScript libraries (npm packages) bundled into the user interface, with their licenses.
 - third-party/native.txt (Windows and macOS packages): the C / C++ shared libraries bundled with GenzoParis (LibRaw
   and the libraries it uses; on Windows, also the Visual C++ runtime), with their license documents.
+- third-party/vcruntime-terms.txt (Windows package): the terms of use for the bundled Microsoft Visual C++ runtime
+  files, agreed to in the installer. They do not apply to GenzoParis itself or to any other software.
 - LibRaw/ (Windows and macOS packages): the license, copyright notice, source code location and replacement
   instructions for LibRaw, which is bundled as a shared library to decode raw images, and the source archives used
   for the bundled build (LibRaw/source).

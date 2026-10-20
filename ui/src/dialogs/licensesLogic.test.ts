@@ -23,6 +23,7 @@ describe("ライセンスの文書の並びと見出し", () => {
       "third-party/rust.txt",
       "third-party/npm.txt",
       "third-party/native.txt",
+      "third-party/vcruntime-terms.txt",
       "LibRaw/README.txt",
       "LibRaw/LICENSE.LGPL",
       "LibRaw/COPYRIGHT",
