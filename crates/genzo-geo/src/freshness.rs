@@ -12,6 +12,12 @@
 //! - `s-maxage`（共有のキャッシュ向け）・`private`・`public` などは期限に使わない。
 //! - 期限が切れた後に通信に失敗したら、古いタイルを使ってよいか（stale-on-error）: `no-cache` か
 //!   `must-revalidate` があれば使わない（RFC 9111 の 4.2.4 節）。この扱い自体は人の確認待ち。
+//! - 304 の応答では、保存した応答の `Cache-Control`・`Expires` を 304 にあるものだけ置き換えてから、上の
+//!   規則で決め直す（RFC 9111 の 4.3.4 節。[`Stored`]）。304 に `Cache-Control` がなければ保存した
+//!   `Cache-Control`（`max-age`・`no-cache`・`must-revalidate`）が残り、304 の `Expires` より優先される。
+//!   304 に `Expires` がなければ保存した `Expires` が残り、304 の `Date` との差で測る（絶対の時刻の
+//!   `Expires` だけを返す提供元が、304 で `Expires` を返さなければ、期限はほぼ 0 になり、使うたびに
+//!   条件付きの要求で確かめる。サーバーの指示どおりの扱い）。
 
 use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
 
@@ -30,7 +36,7 @@ pub(crate) struct Policy {
     pub(crate) store: bool,
     /// 受け取った時刻から、問い合わせずに使ってよい秒数（`Age` を引いた後。0 以上）。
     pub(crate) fresh_secs: i64,
-    /// 期限の長さ（`Age` を引く前）。304 の応答にキャッシュの指示がないとき、前の値を使い直すため。
+    /// 期限の長さ（`Age` を引く前）。
     pub(crate) lifetime_secs: i64,
     /// 期限が切れた後、通信に失敗したら古いものを使ってよいか。
     pub(crate) stale_ok: bool,
@@ -43,42 +49,32 @@ impl Policy {
     }
 }
 
-/// 前に保存した扱い（304 の応答にキャッシュの指示がないときに使い直す）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Previous {
-    /// 前の期限の長さ。
-    pub(crate) lifetime_secs: i64,
-    /// 前の stale-on-error の可否。
-    pub(crate) stale_ok: bool,
+/// 保存した応答の、期限にかかわるヘッダー（304 の応答のときに渡す）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Stored<'a> {
+    /// 保存した `Cache-Control`（複数の行は「, 」でつないだもの）。
+    pub(crate) cache_control: Option<&'a str>,
+    /// 保存した `Expires`。
+    pub(crate) expires: Option<&'a str>,
 }
 
-/// `response`（200 か 304）のキャッシュの扱いを決める。`now` は受け取った時刻。`previous` は 304 のときの
-/// 前の扱い（RFC 9111 の 4.3.4 節: 304 の応答のヘッダーで、保存したヘッダーを更新する）。304 に
-/// `Cache-Control` がなければ、前の扱い（期限の長さと stale-on-error の可否）を使い直す。前の
-/// `no-cache`・`must-revalidate` を 304 の `Expires` だけで緩めないため（`Expires` だけの提供元では、
-/// 前の期限の長さも `Expires` と `Date` の差なので、ふつうは同じ長さになる）。
+/// `response`（200 か 304）のキャッシュの扱いを決める。`now` は受け取った時刻。`stored` は 304 のときの
+/// 保存した応答のヘッダー（304 にない `Cache-Control`・`Expires` は保存した値を使う。RFC 9111 の 4.3.4 節。
+/// モジュールの doc）。`Date`・`Age` は `response` のものだけを使う。
 pub(crate) fn policy(
     response: &HttpResponse,
     now: DateTime<Utc>,
-    previous: Option<Previous>,
+    stored: Option<Stored<'_>>,
 ) -> Policy {
-    let cache_control = response.header_list("cache-control");
-    let expires = response.header("expires");
+    let stored = stored.unwrap_or_default();
+    let cache_control = response
+        .header_list("cache-control")
+        .or_else(|| stored.cache_control.map(str::to_string));
+    let expires = response.header("expires").or(stored.expires);
     let age = response
         .header("age")
         .and_then(parse_delta_seconds)
         .unwrap_or(0);
-
-    if cache_control.is_none()
-        && let Some(prev) = previous
-    {
-        return Policy {
-            store: true,
-            fresh_secs: (prev.lifetime_secs - age).max(0),
-            lifetime_secs: prev.lifetime_secs,
-            stale_ok: prev.stale_ok,
-        };
-    }
 
     let cc = CacheControl::parse(cache_control.as_deref().unwrap_or(""));
     let lifetime_secs = if cc.no_cache {
@@ -342,31 +338,78 @@ mod tests {
     }
 
     #[test]
-    fn not_modified_without_cache_headers_keeps_the_previous_policy() {
-        let prev = Previous {
-            lifetime_secs: 3_600,
-            stale_ok: false,
+    fn not_modified_without_cache_control_keeps_the_stored_cache_control() {
+        let stored = Stored {
+            cache_control: Some("max-age=3600, must-revalidate"),
+            expires: None,
         };
         let mut r = resp(&[("ETag", "\"v2\""), ("Age", "60")]);
         r.status = 304;
-        let p = policy(&r, now(), Some(prev));
+        let p = policy(&r, now(), Some(stored));
         assert_eq!(p.lifetime_secs, 3_600);
         assert_eq!(p.fresh_secs, 3_540);
         assert!(p.store);
         assert!(!p.stale_ok);
-        // Expires だけの 304 でも、前の扱いを使い直す（前の must-revalidate を緩めない）。
+        // Expires だけの 304 でも、保存した max-age・must-revalidate が残り、Expires より優先される。
         let mut r = resp(&[
             ("Date", "Mon, 19 Oct 2026 12:00:00 GMT"),
             ("Expires", "Tue, 20 Oct 2026 12:00:00 GMT"),
         ]);
         r.status = 304;
-        let p = policy(&r, now(), Some(prev));
+        let p = policy(&r, now(), Some(stored));
         assert_eq!((p.lifetime_secs, p.stale_ok), (3_600, false));
         // 304 に Cache-Control があれば、それで決め直す。
         let mut r = resp(&[("Cache-Control", "max-age=120")]);
         r.status = 304;
-        let p = policy(&r, now(), Some(prev));
+        let p = policy(&r, now(), Some(stored));
         assert_eq!(p.lifetime_secs, 120);
         assert!(p.stale_ok);
+        // 保存した no-cache も、Expires だけの 304 では緩めない。
+        let stored = Stored {
+            cache_control: Some("no-cache"),
+            expires: None,
+        };
+        let mut r = resp(&[("Expires", "Tue, 20 Oct 2026 12:00:00 GMT")]);
+        r.status = 304;
+        let p = policy(&r, now(), Some(stored));
+        assert_eq!((p.fresh_secs, p.stale_ok), (0, false));
+    }
+
+    #[test]
+    fn not_modified_expires_replaces_the_stored_expires() {
+        // 保存した応答は Expires だけ（7 日）。304 の Expires で期限が短くなる。
+        let stored = Stored {
+            cache_control: None,
+            expires: Some("Mon, 26 Oct 2026 12:00:00 GMT"),
+        };
+        let mut r = resp(&[
+            ("Date", "Mon, 19 Oct 2026 12:00:01 GMT"),
+            ("Expires", "Mon, 19 Oct 2026 13:00:01 GMT"),
+        ]);
+        r.status = 304;
+        let p = policy(&r, now(), Some(stored));
+        assert_eq!(p.lifetime_secs, 3_600);
+        assert!(p.stale_ok);
+        // `Expires: 0`（すでに切れている）の 304。
+        let mut r = resp(&[("Date", "Mon, 19 Oct 2026 12:00:01 GMT"), ("Expires", "0")]);
+        r.status = 304;
+        assert_eq!(policy(&r, now(), Some(stored)).lifetime_secs, 0);
+        // 304 に Expires がなければ、保存した Expires を 304 の Date との差で測る。
+        let mut r = resp(&[("Date", "Mon, 19 Oct 2026 12:00:00 GMT")]);
+        r.status = 304;
+        assert_eq!(
+            policy(&r, now(), Some(stored)).lifetime_secs,
+            7 * 24 * 3_600
+        );
+        let mut r = resp(&[("Date", "Tue, 27 Oct 2026 12:00:00 GMT")]);
+        r.status = 304;
+        assert_eq!(policy(&r, now(), Some(stored)).lifetime_secs, 0);
+        // 保存した応答にも 304 にも指示がなければ 7 日。
+        let mut r = resp(&[("ETag", "\"v2\"")]);
+        r.status = 304;
+        assert_eq!(
+            policy(&r, now(), Some(Stored::default())).lifetime_secs,
+            DEFAULT_LIFETIME_SECS
+        );
     }
 }

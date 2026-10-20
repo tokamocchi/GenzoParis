@@ -154,6 +154,57 @@ fn expired_tiles_are_revalidated_with_conditional_requests() {
 }
 
 #[test]
+fn not_modified_responses_with_only_expires_update_the_lifetime() {
+    // Cache-Control を返さず、Expires を絶対の時刻で返す提供元。304 のヘッダーで保存したヘッダーを更新して
+    // から期限を決め直す（RFC 9111 の 4.3.4 節）。サーバーが期限を短くしたら従う。
+    let dir = TempDir::new().unwrap();
+    let clock = FakeClock::new();
+    let client = FakeClient::scripted(vec![
+        Ok(http(
+            200,
+            &[
+                ("Content-Type", "image/png"),
+                ("ETag", "\"v1\""),
+                ("Date", "Mon, 19 Oct 2026 12:00:00 GMT"),
+                ("Expires", "Mon, 26 Oct 2026 12:00:00 GMT"),
+            ],
+            &png("a"),
+        )),
+        Ok(http(
+            304,
+            &[
+                ("Date", "Mon, 26 Oct 2026 12:00:01 GMT"),
+                ("Expires", "Mon, 26 Oct 2026 13:00:01 GMT"),
+            ],
+            b"",
+        )),
+        Ok(http(
+            304,
+            &[("Date", "Mon, 26 Oct 2026 13:01:01 GMT"), ("Expires", "0")],
+            b"",
+        )),
+        Ok(http(304, &[("Date", "Mon, 26 Oct 2026 13:01:01 GMT")], b"")),
+    ]);
+    let tiles = service(&client, Some(dir.path()), &clock);
+    tiles.tile(5, 1, 1).unwrap();
+    // 7 日（200 の Expires − Date）の後に切れて、304 が 1 時間の期限を返す。
+    clock.advance(Duration::from_secs(7 * 24 * 3600 + 1));
+    assert_eq!(tiles.tile(5, 1, 1).unwrap().bytes, png("a"));
+    assert_eq!(client.count(), 2);
+    clock.advance(59 * MINUTE);
+    tiles.tile(5, 1, 1).unwrap();
+    assert_eq!(client.count(), 2);
+    // 1 時間で切れる（前の 7 日を使い続けない）。
+    clock.advance(Duration::from_secs(60));
+    tiles.tile(5, 1, 1).unwrap();
+    assert_eq!(client.count(), 3);
+    // `Expires: 0`（すでに切れている）の 304 の後は、使うたびに確かめる。304 に Expires がなければ、
+    // 保存した Expires（`0`）が残る。
+    assert_eq!(tiles.tile(5, 1, 1).unwrap().bytes, png("a"));
+    assert_eq!(client.count(), 4);
+}
+
+#[test]
 fn tiles_without_cache_headers_are_kept_for_seven_days() {
     let dir = TempDir::new().unwrap();
     let clock = FakeClock::new();

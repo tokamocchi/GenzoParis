@@ -16,7 +16,7 @@
 //!
 //! ディスクのキャッシュの形（`cache_dir` は genzo-app が渡す専用のフォルダ）:
 //! - `cache_dir/<提供元>/<z>/<x>/<y>.png`（本文）と同じ名前の `.json`（`TileMeta`: ETag・Last-Modified・
-//!   期限・取得した日時）。`<提供元>` は URL のひな形の SHA-256 の先頭 16 桁（提供元を変えても混ざらない）。
+//!   期限・取得した日時・期限にかかわるヘッダー（304 のときに更新して期限を決め直す））。`<提供元>` は URL のひな形の SHA-256 の先頭 16 桁（提供元を変えても混ざらない）。
 //! - 書き込みは同じフォルダの一時ファイルに書いてから名前を変える（読み手が書きかけを読まない）。
 //! - 容量の上限（既定 [`DEFAULT_CACHE_LIMIT_BYTES`]。仮置き）を超えたら、更新日時の古いタイルから消す。
 //!   上限の確かめは書き込みの [`EVICTION_CHECK_EVERY`] 回ごと（最初の書き込みを含む）。
@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::clock::{Clock, SystemClock};
-use crate::freshness::{self, Policy, Previous};
+use crate::freshness::{self, Policy, Stored};
 use crate::{GeoError, HttpClient, HttpResponse, TileProvider};
 
 /// タイルの本文の上限（2 MiB。仮置き。地図のタイルの画像 1 枚には十分な大きさとして置いた値）。
@@ -88,10 +88,15 @@ pub(crate) struct TileMeta {
     pub(crate) expires_at: DateTime<Utc>,
     /// 取得した（または 304 で確かめた）日時（UTC）。
     pub(crate) fetched_at: DateTime<Utc>,
-    /// 期限の長さ（秒。304 の応答にキャッシュの指示がないときに使い直す）。
-    pub(crate) lifetime_secs: i64,
     /// 期限が切れた後、通信に失敗したら使ってよいか。
     pub(crate) stale_ok: bool,
+    /// 保存した応答の `Cache-Control`（304 の応答のヘッダーで更新してから期限を決め直す。RFC 9111 の
+    /// 4.3.4 節。src/freshness.rs の doc）。この欄がない前の形の `.json` は、ないものとして読む。
+    #[serde(default)]
+    pub(crate) cache_control: Option<String>,
+    /// 保存した応答の `Expires`（同上）。
+    #[serde(default)]
+    pub(crate) expires: Option<String>,
 }
 
 type TileKey = (u8, u32, u32);
@@ -294,20 +299,25 @@ impl TileService {
                         "条件付きでない要求に 304 が返りました".to_string(),
                     ));
                 };
-                let previous = Previous {
-                    lifetime_secs: meta.lifetime_secs,
-                    stale_ok: meta.stale_ok,
+                let stored = Stored {
+                    cache_control: meta.cache_control.as_deref(),
+                    expires: meta.expires.as_deref(),
                 };
-                let policy = freshness::policy(&response, now, Some(previous));
+                let policy = freshness::policy(&response, now, Some(stored));
                 if let Some(cache) = &self.cache {
                     if policy.store {
+                        // 304 にあるヘッダーだけを置き換える（RFC 9111 の 4.3.4 節）。
+                        let updated = |name: &str, old: Option<String>| {
+                            response.header(name).map(str::to_string).or(old)
+                        };
                         let meta = TileMeta {
-                            etag: response.header("etag").map(str::to_string).or(meta.etag),
-                            last_modified: response
-                                .header("last-modified")
-                                .map(str::to_string)
-                                .or(meta.last_modified),
-                            ..meta_for(&policy, now, None, None)
+                            etag: updated("etag", meta.etag),
+                            last_modified: updated("last-modified", meta.last_modified),
+                            cache_control: response
+                                .header_list("cache-control")
+                                .or(meta.cache_control),
+                            expires: updated("expires", meta.expires),
+                            ..meta_for(&policy, now, &response)
                         };
                         cache.write_meta(z, x, y, &meta);
                     } else {
@@ -321,12 +331,7 @@ impl TileService {
                 let policy = freshness::policy(&response, now, None);
                 if let Some(cache) = &self.cache {
                     if policy.store {
-                        let meta = meta_for(
-                            &policy,
-                            now,
-                            response.header("etag"),
-                            response.header("last-modified"),
-                        );
+                        let meta = meta_for(&policy, now, &response);
                         cache.write(z, x, y, &response.body, &meta);
                     } else {
                         cache.remove(z, x, y);
@@ -365,19 +370,16 @@ fn tile(bytes: Vec<u8>, stale: bool) -> Tile {
     }
 }
 
-fn meta_for(
-    policy: &Policy,
-    now: DateTime<Utc>,
-    etag: Option<&str>,
-    last_modified: Option<&str>,
-) -> TileMeta {
+/// `response` の付随の情報（304 のときは、呼び出し元が保存した値と合わせる）。
+fn meta_for(policy: &Policy, now: DateTime<Utc>, response: &HttpResponse) -> TileMeta {
     TileMeta {
-        etag: etag.map(str::to_string),
-        last_modified: last_modified.map(str::to_string),
+        etag: response.header("etag").map(str::to_string),
+        last_modified: response.header("last-modified").map(str::to_string),
         expires_at: policy.expires_at(now),
         fetched_at: now,
-        lifetime_secs: policy.lifetime_secs,
         stale_ok: policy.stale_ok,
+        cache_control: response.header_list("cache-control"),
+        expires: response.header("expires").map(str::to_string),
     }
 }
 
