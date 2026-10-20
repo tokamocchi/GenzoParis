@@ -446,8 +446,8 @@ const joinPath = (dir, name) => `${dir}/${name}`;
  * 1. `source_path` がその crate のフォルダの中なら、そのファイル。ソースのファイル（ヘッダにライセンスの文がある
  *    `.rs`・`.h` など。cargo-about はファイル全体を本文として返す）は、先頭の注釈だけを載せる（leadingComment。
  *    注釈にライセンスの文がなければ止める）。
- * 2. ほかの crate のファイルの場所が返ったら、crate の直下に同じ本文のファイルがあればそれ、なければ本文だけを載せる
- *    （cargo-about がこの crate の中で見つけた本文なので）。
+ * 2. ほかの crate のファイルの場所が返ったら、crate の直下に同じ本文のファイルがあればそれ（なければ 3・4。
+ *    cargo-about は、ファイルがなくて返した標準の文も、同じ文のファイルを持つほかの crate とまとめるため）。
  * 3. 1・2 がなければ（cargo-about が本文のファイルを見つけられず、標準の文を返した）、crate の直下のファイルから
  *    名前と中身で選んだもの（findLicenseTexts。cargo-about が取りこぼした `LICENSE_MIT` などもここで見つかる）。
  * 4. それもなければ、cargo-about の本文（SPDX の標準の文）をそのまま載せ、ファイルがない crate として印を付ける。
@@ -526,7 +526,9 @@ export function rustModel(reports, io) {
           continue;
         }
         // ほかの crate のファイルの場所が返った（同じ本文）か、ファイルがなかった（標準の文）。crate の直下に同じ
-        // 本文のファイルがあれば、それを出典にする。
+        // 本文のファイルがあれば、それを出典にする。なければ下の 3・4 に回す（cargo-about は、ファイルがなくて返した
+        // 標準の文も、同じ文のファイルを持つほかの crate とまとめ、その crate の場所を付けるため（selectors と
+        // option-ext）、場所が付いていても、この crate のファイルとは限らない）。
         const same = names
           .filter((n) => isLicenseFileName(n) && !used.has(n))
           .sort(compareNatural)
@@ -535,10 +537,6 @@ export function rustModel(reports, io) {
           parts.push({ license, text: x.text });
           c.pkg.files.push(same);
           used.add(same);
-          included++;
-        } else if (x.source !== null) {
-          // cargo-about がこの crate の中で見つけた本文（ほかの crate のファイルと同じ）。場所は分からないが載せる。
-          parts.push({ license, text: x.text });
           included++;
         }
       }

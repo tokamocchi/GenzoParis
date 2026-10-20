@@ -277,6 +277,19 @@ test("Rust: ソースのファイルから拾った本文は先頭の注釈だ�
   assert.ok(texts.includes(bsd("Radzivon Bartoshyk 7/2025")));
   assert.ok(!texts.some((t) => /mod erf|secret/.test(t)), "コードは載せない");
 
+  // ファイルがなくて標準の文を返した crate が、同じ文のファイルを持つ crate とまとめられた（selectors と option-ext）。
+  // 場所が付いていても、この crate のファイルではないので、ファイルがない crate として扱う。
+  const mpl = "Mozilla Public License Version 2.0\n==================================";
+  const oe = crate("option-ext", "0.2.0", "MPL-2.0");
+  const se = crate("selectors", "0.36.1", "MPL-2.0", { authors: ["The Servo Project Developers"] });
+  const grouped = aboutReport([oe, se], [{ id: "MPL-2.0", text: mpl, source_path: "/reg/option-ext-0.2.0/LICENSE.txt", users: [oe.id, se.id] }]);
+  const g = rustModel([grouped], fakeIo({ "/reg/option-ext-0.2.0": { "LICENSE.txt": mpl }, "/reg/selectors-0.36.1": { "lib.rs": "" } }));
+  const byName = Object.fromEntries(g.packages.map((x) => [x.name, x]));
+  assert.deepEqual(byName["option-ext"].files, ["LICENSE.txt"]);
+  assert.deepEqual(byName["option-ext"].standard, []);
+  assert.deepEqual(byName.selectors.files, []);
+  assert.deepEqual(byName.selectors.standard, ["MPL-2.0"]);
+
   // 先頭の注釈にライセンスの文がなければ止める（about.toml の clarify で本文のファイルを指定する）。
   const bad = aboutReport([p], [{ id: "BSD-3-Clause", text: "//! docs\nfn f() {}\n", source_path: "/reg/pxfm-0.1.30/src/lib.rs", users: [p.id] }]);
   assert.throws(() => rustModel([bad], io), /pxfm 0\.1\.30 のソースのファイル src\/lib\.rs を BSD-3-Clause の本文として拾った/);
