@@ -86,7 +86,7 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
    npm run app:build -- --bundles nsis
    ```
 
-5. 成果物: `target\release\bundle\nsis\GenzoParis_0.1.0_x64-setup.exe`。同梱した DLL は `crates\genzo-app\binaries\bundled-libs.txt` で確かめられます。
+5. 成果物: `target\release\bundle\nsis\GenzoParis_<版>_x64-setup.exe`（版は `tauri.conf.json` の `version`。0.1.1 なら `GenzoParis_0.1.1_x64-setup.exe`）。同梱した DLL は `crates\genzo-app\binaries\bundled-libs.txt` で確かめられます。
 
 スクリプトは、ワーカー（`genzo-worker.exe`）の PE のヘッダから読み込む DLL をたどり、LibRaw のフォルダ（vcpkg の `bin`）にある DLL と、Visual C++ のランタイムの DLL を集めます（`scripts/lib/pe.mjs`・`scripts/lib/bundle.mjs`。dumpbin は使わない）。OS の DLL（UCRT の `api-ms-win-crt-*`・`ucrtbase.dll` を含む。Windows 10 以降は OS の一部）は集めません。
 
@@ -106,7 +106,7 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
    npm run app:build -- --bundles app,dmg
    ```
 
-4. 成果物: `target/release/bundle/dmg/GenzoParis_0.1.0_aarch64.dmg` と `target/release/bundle/macos/GenzoParis.app`。
+4. 成果物: `target/release/bundle/dmg/GenzoParis_<版>_aarch64.dmg`（0.1.1 なら `GenzoParis_0.1.1_aarch64.dmg`）と `target/release/bundle/macos/GenzoParis.app`。
 
 スクリプトは、`otool -l` でワーカーの依存をたどって Homebrew の dylib を `binaries/libs/` に写し、参照を書き換え（ワーカーは `@executable_path/../Frameworks/<名前>`、dylib どうしは `@loader_path/<名前>`、dylib の識別名は `@rpath/<名前>`）、`codesign --force --sign -` で署名し直します（書き換えると署名が壊れ、Apple Silicon では署名の壊れた実行ファイルは起動しないため）。書き換えた後に Homebrew の場所への参照が残っていればエラーにします。書き換えの余白のため、ワーカーはリンカーの `-headerpad_max_install_names` 付きでビルドします。Tauri は `.app` に入れた後、`signingIdentity: "-"` で中身を内側から順にアドホック署名し直します。
 
@@ -129,7 +129,7 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 手動（Actions の画面の「Run workflow」）だけで、Windows（windows-latest）と macOS（macos-latest。Apple Silicon）の配布物を作ります（タグの push では動きません。2026-10-12 の独立レビューの指摘で変更）。手順は 2.2・2.3 と同じで、LibRaw は vcpkg（ランナーにある `VCPKG_INSTALLATION_ROOT`）と Homebrew で入れます。
 
 - **公開の範囲の確認**: リポジトリが公開（public）のときは、Actions の artifact を GitHub にログインした誰でも取得できます（2026-10-12 時点で、このリポジトリは公開）。そのため、入力の「allow_public_artifacts」に印を付けないと、最初の段階で何も作らずに止まります。印を付けるのは、配布の責任者が、配布物を誰でも取得できる状態にしてよいこと（LibRaw の LGPL などの条件・署名のない配布物を社外に出してよいか。8 章）を確かめた後だけにしてください。配る相手だけに渡したい場合は、非公開のリポジトリで実行するか、手元で作って（2.2・2.3）社内の共有の場所に置いてください。非公開のリポジトリでは、この確認は行いません。
-- 実行の画面で「Use workflow from」に `v` で始まるタグ（`v0.1.0` など）を選んだときは、最初にタグの版（`v0.1.0` なら 0.1.0）と、`tauri.conf.json` の `version`・Cargo の版（genzo-app・genzo-worker）が同じかを確かめ、違えば止めます（配布物のファイル名・中の版は `tauri.conf.json` の版になるため。版を直してからタグを付け直す）。
+- 実行の画面で「Use workflow from」に `v` で始まるタグ（`v0.1.1` など）を選んだときは、最初にタグの版（`v0.1.1` なら 0.1.1）と、`tauri.conf.json` の `version`・Cargo の版（genzo-app・genzo-worker）が同じかを確かめ、違えば止めます（配布物のファイル名・中の版は `tauri.conf.json` の版になるため。版を直してからタグを付け直す）。
 - macOS では、同梱する dylib が `.app` の最小の版より新しい macOS 向けだと止まります（2.3）。配る相手の Mac がすべてその版以降なら、実行の画面で「allow_newer_macos_libs」に印を付けて実行します。このとき、artifact の名前に `-macos<版>-or-later` が付き、ジョブの summary に各ファイルの `minos` が出ます。
 - 配布物を作る前に、`licenses` ジョブ（Linux）で、Rust の crate のライセンスの文書（`crates/genzo-app/licenses/third-party/rust.txt`）を cargo-about 0.9.2 で作り直し、リポジトリのものと同じかを確かめます（CI の `third-party` ジョブと同じ。通らなければ配布物のジョブは動かない。[第三者の台帳](third_party.md) の 1.4 節）。
 - 配布物を作った後、artifact に置く **前に**、配布物の中のワーカーが同梱の LibRaw で起動できるかを確かめます。
@@ -145,8 +145,8 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 
 1. 入れて起動し、ARW を 1 枚取り込んでサムネイルと現像の画面が出ることを確かめる（[M5 の受け入れの手順](m5_acceptance.md) の 0 章）。設定の画面の「カタログ」で、「RAW のデコーダ」が「なし（RAW を開けません）」でないこと（LibRaw の識別子が出る）、「ワーカーのエラー」が出ていないことも確かめる（ワーカーや LibRaw のライブラリが見つからない場合は、ここに出る。`ui/src/dialogs/SettingsCatalog.tsx` の表示。実機で未確認）。
 2. 配布物の SHA-256 を記録し、配る相手に伝える（受け取った人が、改ざんされていないかを確かめられるように）:
-   - Windows（PowerShell）: `Get-FileHash .\GenzoParis_0.1.0_x64-setup.exe -Algorithm SHA256`
-   - macOS: `shasum -a 256 GenzoParis_0.1.0_aarch64.dmg`
+   - Windows（PowerShell）: `Get-FileHash .\GenzoParis_0.1.1_x64-setup.exe -Algorithm SHA256`（版は配る配布物のもの）
+   - macOS: `shasum -a 256 GenzoParis_0.1.1_aarch64.dmg`
 3. 配る場所（社内の共有フォルダ・チャットなど）は、**見られる人の範囲が配る相手に限られているかを確かめてから** 置いてください。共有フォルダに置く場合は、上書きで前の版を壊さないよう、版ごとに別の名前（ファイル名に版が入る）で置いてください。
 
 ## 3. 署名なしのアプリを開く

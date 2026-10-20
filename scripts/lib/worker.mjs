@@ -225,40 +225,33 @@ function isInsideDir(dir, file) {
 /**
  * Windows: LibRaw の場所を環境変数に入れ、DLL を探すフォルダと、vcpkg の場所と triplet を返す。配布物を作るには
  * vcpkg の LibRaw が要る（同梱する DLL のライセンスの文書と LibRaw のソースを vcpkg から集めるため。決定事項ログ
- * No.196）ので、vcpkg の LibRaw でなければ、時間のかかるビルドの前に止める。LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR を
- * 設定していても、LIBRAW_LIB_DIR が VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT）の installed/<triplet> の中なら
- * vcpkg の LibRaw として扱う。
+ * No.196）ので、vcpkg の LibRaw でなければ、時間のかかるビルドの前に止める。LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR・
+ * LIBRAW_DLL_DIR は指定してもよいが、すべて VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT）の installed/<triplet> の
+ * 中でなければ止める（指定のないものは、その vcpkg の場所で埋める）。
  *
  * @returns {{ dllDirs: string[], vcpkgRoot: string, triplet: string }}
  */
 export function setupWindowsLibraw(env) {
-  let usedVcpkg = null;
   const triplet = env.VCPKG_DEFAULT_TRIPLET || "x64-windows";
-  const vcpkgCandidate = env.VCPKG_ROOT || env.VCPKG_INSTALLATION_ROOT;
-  if (env.LIBRAW_INCLUDE_DIR && env.LIBRAW_LIB_DIR) {
-    // 指定したフォルダ（.lib・ヘッダ・DLL）がすべて、その vcpkg の installed/<triplet> の中なら vcpkg の LibRaw。
-    const installed = vcpkgCandidate ? path.join(vcpkgCandidate, "installed", triplet) : null;
-    const dirs = [env.LIBRAW_INCLUDE_DIR, env.LIBRAW_LIB_DIR, env.LIBRAW_DLL_DIR].filter((d) => d);
-    if (installed && dirs.every((d) => isInsideDir(installed, d))) usedVcpkg = vcpkgCandidate;
-  } else {
-    const vcpkgRoot = vcpkgCandidate;
-    if (!vcpkgRoot) {
-      throw new Error(
-        "LibRaw の場所が分からない。環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR か、VCPKG_ROOT を設定する（docs/packaging.md）",
-      );
-    }
-    const installed = path.join(vcpkgRoot, "installed", triplet);
-    env.LIBRAW_INCLUDE_DIR ||= path.join(installed, "include");
-    env.LIBRAW_LIB_DIR ||= path.join(installed, "lib");
-    usedVcpkg = vcpkgRoot;
+  const vcpkgRoot = env.VCPKG_ROOT || env.VCPKG_INSTALLATION_ROOT;
+  const vcpkgRequired =
+    "配布物を作るには vcpkg の LibRaw が要る（同梱する DLL のライセンスの文書と LibRaw のソースを vcpkg から集めるため。" +
+    "決定事項ログ No.196）。VCPKG_ROOT を設定し、LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR・LIBRAW_DLL_DIR を消すか、" +
+    "すべて vcpkg の中を指す（docs/packaging.md の 2.2）";
+  if (!vcpkgRoot) {
+    if (env.LIBRAW_INCLUDE_DIR || env.LIBRAW_LIB_DIR || env.LIBRAW_DLL_DIR) throw new Error(`${vcpkgRequired}（VCPKG_ROOT がない）`);
+    throw new Error("LibRaw の場所が分からない。環境変数 VCPKG_ROOT を設定する（docs/packaging.md の 2.2）");
   }
-  if (!usedVcpkg) {
-    throw new Error(
-      "配布物を作るには vcpkg の LibRaw が要る（LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR・LIBRAW_DLL_DIR のどれかが、" +
-        `VCPKG_ROOT の installed/${triplet} の外）。` +
-        "同梱する DLL のライセンスの文書と LibRaw のソースを vcpkg から集めるため（決定事項ログ No.196）。" +
-        "VCPKG_ROOT を設定し、LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR を消すか vcpkg の中を指す（docs/packaging.md の 2.2）",
-    );
+  // 指定のないものは vcpkg の場所で埋め、指定したもの（ヘッダ・.lib・DLL）を含めてすべて、その vcpkg の
+  // installed/<triplet> の中かを確かめる（片方だけの指定も確かめる）。
+  const installed = path.join(vcpkgRoot, "installed", triplet);
+  env.LIBRAW_INCLUDE_DIR ||= path.join(installed, "include");
+  env.LIBRAW_LIB_DIR ||= path.join(installed, "lib");
+  const outside = ["LIBRAW_INCLUDE_DIR", "LIBRAW_LIB_DIR", "LIBRAW_DLL_DIR"].filter(
+    (k) => env[k] && !isInsideDir(installed, env[k]),
+  );
+  if (outside.length > 0) {
+    throw new Error(`${vcpkgRequired}（${outside.map((k) => `${k}=${env[k]}`).join("、")} は ${installed} の外）`);
   }
   if (!fs.existsSync(env.LIBRAW_LIB_DIR)) {
     throw new Error(`LIBRAW_LIB_DIR のフォルダがない: ${env.LIBRAW_LIB_DIR}`);
@@ -277,7 +270,7 @@ export function setupWindowsLibraw(env) {
   const dllDirs = env.LIBRAW_DLL_DIR
     ? [env.LIBRAW_DLL_DIR]
     : [path.join(env.LIBRAW_LIB_DIR, "..", "bin"), env.LIBRAW_LIB_DIR];
-  return { dllDirs, vcpkgRoot: usedVcpkg, triplet };
+  return { dllDirs, vcpkgRoot, triplet };
 }
 
 /**

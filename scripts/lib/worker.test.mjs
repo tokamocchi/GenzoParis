@@ -288,6 +288,9 @@ test("Windows: 配布物を作るには vcpkg の LibRaw が要る（vcpkg の�
       LIBRAW_DLL_DIR: path.join(vcpkg, "installed", "x64-windows", "bin"),
     });
     assert.equal(c.vcpkgRoot, vcpkg);
+    const env = { VCPKG_ROOT: vcpkg, LIBRAW_LIB_DIR: lib };
+    assert.equal(setupWindowsLibraw(env).vcpkgRoot, vcpkg);
+    assert.equal(env.LIBRAW_INCLUDE_DIR, path.join(vcpkg, "installed", "x64-windows", "include"));
     // vcpkg の外・VCPKG_ROOT がないときは止める。
     for (const env of [
       { VCPKG_ROOT: vcpkg, LIBRAW_INCLUDE_DIR: path.join(root, "other", "include"), LIBRAW_LIB_DIR: other },
@@ -296,6 +299,10 @@ test("Windows: 配布物を作るには vcpkg の LibRaw が要る（vcpkg の�
       // .lib は vcpkg の中でも、DLL・ヘッダが外なら止める。
       { VCPKG_ROOT: vcpkg, LIBRAW_INCLUDE_DIR: path.join(vcpkg, "installed", "x64-windows", "include"), LIBRAW_LIB_DIR: lib, LIBRAW_DLL_DIR: other },
       { VCPKG_ROOT: vcpkg, LIBRAW_INCLUDE_DIR: path.join(root, "other", "include"), LIBRAW_LIB_DIR: lib },
+      // 片方だけの指定も確かめる（指定のないものは vcpkg の場所で埋める）。
+      { VCPKG_ROOT: vcpkg, LIBRAW_INCLUDE_DIR: path.join(root, "other", "include") },
+      { VCPKG_ROOT: vcpkg, LIBRAW_LIB_DIR: other },
+      { VCPKG_ROOT: vcpkg, LIBRAW_DLL_DIR: other },
     ]) {
       assert.throws(() => setupWindowsLibraw(env), /配布物を作るには vcpkg の LibRaw が要る/);
     }
