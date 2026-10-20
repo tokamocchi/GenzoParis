@@ -1699,6 +1699,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "ureq",
+ "winreg",
 ]
 
 [[package]]
@@ -5618,7 +5619,6 @@ dependencies = [
  "rustls-platform-verifier",
  "ureq-proto",
  "utf8-zero",
- "winreg",
 ]
 
 [[package]]

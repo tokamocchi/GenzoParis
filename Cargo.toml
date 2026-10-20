@@ -85,11 +85,12 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 # 証明書の保管場所）に任せる。ureq の既定の機能（rustls）は webpki-roots（CDLA-Permissive-2.0。deny.toml で許して
 # いない）を入れるので切り、rustls-no-provider と platform-verifier を選ぶ。ring は rustls を直接の依存にして機能で選ぶ
 # （ureq の機能 rustls は webpki-roots も入れるため。aws-lc-rs は入れない）。genzo-geo の UreqClient を作るときに、
-# プロセスの既定の暗号の実装として ring を入れる（crates/genzo-geo/src/http.rs）。win-system-proxy は Windows の
-# レジストリのプロキシの設定を読む（環境変数の HTTPS_PROXY などは既定で読む）。ureq 3.4.2 は 2026-09-13、rustls
+# プロセスの既定の暗号の実装として ring を入れる（crates/genzo-geo/src/http.rs）。プロキシの設定（環境変数と
+# Windows のレジストリ）は genzo-geo が自分で読む（crates/genzo-geo/src/proxy.rs。ureq の機能 win-system-proxy は、
+# Windows のプロトコルごとのプロキシの設定を読めずに直接つなぐので入れない）。ureq 3.4.2 は 2026-09-13、rustls
 # 0.23.45 は 2026-09-14 の公開（rustls の最新の 0.23.46 は 2026-10-14 の公開で 2 週間たっていないため、0.23.45 に
 # 固定する）。docs/third_party.md。
-ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "platform-verifier", "win-system-proxy"] }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 
 # CLI・ログ

@@ -30,5 +30,11 @@ tempfile.workspace = true
 ureq.workspace = true
 rustls.workspace = true
 
+# Windows: レジストリのプロキシの設定（ProxyEnable・ProxyServer・ProxyOverride・AutoConfigURL）を読む（src/proxy.rs。
+# ureq の機能 win-system-proxy は、プロトコルごとの形の ProxyServer を読めずに直接つなぐので使わない）。版は依存の木に
+# 既にあるもの（embed-resource と同じ 0.56.0）。
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56.0"
+
 [lints]
 workspace = true

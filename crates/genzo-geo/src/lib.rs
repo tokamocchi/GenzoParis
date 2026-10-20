@@ -37,6 +37,7 @@ mod freshness;
 mod geocode;
 mod http;
 mod provider;
+mod proxy;
 mod tiles;
 
 #[cfg(test)]

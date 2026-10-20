@@ -18,11 +18,11 @@
 //! - タイムアウトは接続 [`CONNECT_TIMEOUT`]・全体 [`TOTAL_TIMEOUT`]（どちらも仮置き）。
 //! - 本文は呼び出し元が決めた上限まで読む（超えたら [`GeoError::BadResponse`]）。
 //! - 状態コードが 2xx でなくても誤りにせず返す（304 や 404 を呼び出し元が見分けるため）。
-//! - プロキシは環境変数（`HTTPS_PROXY`・`NO_PROXY` など）と、Windows ではレジストリの設定（ureq の機能
-//!   win-system-proxy）に従う。macOS のシステムの設定のプロキシは読まない（ureq が対応していない）。SOCKS の
-//!   プロキシは使えない（ureq の機能 socks-proxy を入れていない）。SOCKS が設定されていたら、直接つながずに
-//!   誤りにする（ureq の既定は、環境変数の SOCKS を警告するだけで直接つなぐ。利用者がプロキシを通すつもりの
-//!   通信を直接送らないため）。`NO_PROXY` に当たるホストへは直接つなぐが、そのときは転送をたどらない（転送先が
+//! - プロキシは環境変数（`HTTPS_PROXY`・`NO_PROXY` など）と、Windows ではレジストリの設定に従う（読み方と
+//!   読まないもの（PAC・WPAD・macOS のシステムの設定）は src/proxy.rs の doc。読めない設定は、直接つながずに誤りに
+//!   する）。SOCKS のプロキシは使えない（ureq の機能 socks-proxy を入れていない）。SOCKS が設定されていたら、
+//!   直接つながずに誤りにする（ureq の既定は、環境変数の SOCKS を警告するだけで直接つなぐ。利用者がプロキシを
+//!   通すつもりの通信を直接送らないため）。`NO_PROXY` に当たるホストへは直接つなぐが、そのときは転送をたどらない（転送先が
 //!   `NO_PROXY` の外なら、SOCKS を通さずに直接つないでしまうため）。
 
 use std::time::Duration;
@@ -115,9 +115,11 @@ impl std::fmt::Debug for UreqClient {
 }
 
 impl UreqClient {
-    /// https だけを使う本物のクライアントを作る（プロキシは環境変数・Windows のレジストリから）。
+    /// https だけを使う本物のクライアントを作る（プロキシは環境変数・Windows のレジストリから。読み方は
+    /// src/proxy.rs の doc）。
+    /// プロキシの設定を読めなければ [`GeoError::Network`]（直接つながない）。
     pub fn new() -> Result<Self, GeoError> {
-        Self::build(true, ureq::Proxy::try_from_env())
+        Self::build(true, crate::proxy::system_proxy()?)
     }
 
     /// テスト用: プロキシを使わない（手元の `TcpListener` のサーバーと話すため）。`allow_http` なら http の URL も使う。
