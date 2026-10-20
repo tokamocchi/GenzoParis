@@ -11,6 +11,7 @@ import {
   NPM_NOTICES_FILE,
   NPM_SUPPLEMENTS,
   RUST_NOTICES_FILE,
+  RUST_SUPPLEMENTS,
   RUST_TARGETS,
   STATIC_LICENSE_RESOURCES,
   THIRD_PARTY_SOURCE_DIR,
@@ -34,6 +35,7 @@ import {
   readLockHash,
   rustModel,
   textMatchesLicense,
+  unusedSupplements,
 } from "./third-party.mjs";
 
 const MIT = (holder) =>
@@ -192,7 +194,7 @@ test("Rust: cargo-about の本文の出典を crate ごとに決め、取りこ�
     "/reg/cfg_aliases-0.2.2": { LICENSE: MIT("2021 N"), "NOTICES.md": `# 3rd Party Notices\n${MIT("tectonic")}` },
   });
   // 本体とワーカーの両方に同じ crate があっても、1 つにまとめる。
-  const model = rustModel([report, report], io);
+  const model = rustModel([report, report], io, {});
   const byName = Object.fromEntries(model.packages.map((p) => [p.name, p]));
   assert.deepEqual(Object.keys(byName), ["aaa", "bbb", "cfg_aliases", "objc2", "tauri"]);
   assert.deepEqual(byName.aaa.files, ["LICENSE-MIT"]);
@@ -276,7 +278,7 @@ test("Rust: ソースのファイルから拾った本文は先頭の注釈だ�
     "/reg/moxcms-0.8.1": { "LICENSE.md": shared, "LICENSE-APACHE.md": APACHE },
     "/reg/pxfm-0.1.30": { "LICENSE.md": shared, "LICENSE-APACHE.md": APACHE },
   });
-  const model = rustModel([report], io);
+  const model = rustModel([report], io, {});
   const px = model.packages.find((x) => x.name === "pxfm");
   assert.deepEqual(px.files, ["LICENSE.md", "src/err/mod.rs の先頭の注釈"]);
   assert.deepEqual(px.standard, []);
@@ -291,16 +293,72 @@ test("Rust: ソースのファイルから拾った本文は先頭の注釈だ�
   const oe = crate("option-ext", "0.2.0", "MPL-2.0");
   const se = crate("selectors", "0.36.1", "MPL-2.0", { authors: ["The Servo Project Developers"] });
   const grouped = aboutReport([oe, se], [{ id: "MPL-2.0", text: mpl, source_path: "/reg/option-ext-0.2.0/LICENSE.txt", users: [oe.id, se.id] }]);
-  const g = rustModel([grouped], fakeIo({ "/reg/option-ext-0.2.0": { "LICENSE.txt": mpl }, "/reg/selectors-0.36.1": { "lib.rs": "" } }));
+  const g = rustModel([grouped], fakeIo({ "/reg/option-ext-0.2.0": { "LICENSE.txt": mpl }, "/reg/selectors-0.36.1": { "lib.rs": "" } }), {});
   const byName = Object.fromEntries(g.packages.map((x) => [x.name, x]));
   assert.deepEqual(byName["option-ext"].files, ["LICENSE.txt"]);
   assert.deepEqual(byName["option-ext"].standard, []);
   assert.deepEqual(byName.selectors.files, []);
   assert.deepEqual(byName.selectors.standard, ["MPL-2.0"]);
+  // MPL-2.0 の crate は、ソースコードの入手先（crates.io の同じ版）を書く（MPL-2.0 の 3.2 節）。
+  const mplText = formatNotices(g, { kind: "rust", sources: [], facts: [] });
+  assert.match(mplText, /\n4\. ソースコードの入手先 \/ Where to obtain the source code\n/);
+  assert.match(
+    mplText,
+    /\n  selectors 0\.36\.1（MPL-2\.0）\n    https:\/\/crates\.io\/crates\/selectors\/0\.36\.1\n    https:\/\/static\.crates\.io\/crates\/selectors\/selectors-0\.36\.1\.crate\n/,
+  );
+  assert.match(mplText, /\n  option-ext 0\.2\.0（MPL-2\.0）\n/);
 
   // 先頭の注釈にライセンスの文がなければ止める（about.toml の clarify で本文のファイルを指定する）。
   const bad = aboutReport([p], [{ id: "BSD-3-Clause", text: "//! docs\nfn f() {}\n", source_path: "/reg/pxfm-0.1.30/src/lib.rs", users: [p.id] }]);
-  assert.throws(() => rustModel([bad], io), /pxfm 0\.1\.30 のソースのファイル src\/lib\.rs を BSD-3-Clause の本文として拾った/);
+  assert.throws(() => rustModel([bad], io, {}), /pxfm 0\.1\.30 のソースのファイル src\/lib\.rs を BSD-3-Clause の本文として拾った/);
+});
+
+test("Rust: 本文のファイルがない crate は上流の写し（版と SHA-256 を確かめる）で補い、NOTICE の写しも載せる", () => {
+  const upstream = MIT("2021 Bill Avery");
+  const copyright = "* Copyright 2017 The UNIC Project developers.";
+  const sha = (t) => createHash("sha256").update(t).digest("hex");
+  const supplements = {
+    "webview2-com": [
+      { version: "0.38.2", license: "MIT", file: "supplements/rust/webview2-rs/LICENSE", sha256: sha(upstream), source: "https://example.com/LICENSE" },
+    ],
+    "unic-common": [
+      { version: "0.9.0", license: "NOTICE", file: "supplements/rust/rust-unic/COPYRIGHT.md", sha256: sha(copyright), source: "https://example.com/COPYRIGHT.md" },
+    ],
+    "old-crate": [{ version: "1.0.0", license: "MIT", file: "x", sha256: "0".repeat(64), source: "https://example.com/x" }],
+  };
+  const w = crate("webview2-com", "0.38.2", "MIT");
+  const u = crate("unic-common", "0.9.0", "MIT/Apache-2.0");
+  const canonical = MIT("<year> <copyright holders>");
+  const report = aboutReport([w, u], [{ id: "MIT", text: canonical, source_path: null, users: [w.id, u.id] }]);
+  const files = { "supplements/rust/webview2-rs/LICENSE": upstream, "supplements/rust/rust-unic/COPYRIGHT.md": copyright };
+  const io = {
+    ...fakeIo({ "/reg/webview2-com-0.38.2": {}, "/reg/unic-common-0.9.0": {} }),
+    readSupplement: (f) => files[f],
+  };
+  const model = rustModel([report], io, supplements);
+  const byName = Object.fromEntries(model.packages.map((p) => [p.name, p]));
+  assert.deepEqual(byName["webview2-com"].supplemented, ["MIT"]);
+  assert.deepEqual(byName["webview2-com"].standard, []);
+  assert.deepEqual(byName["webview2-com"].files, ["LICENSE（上流 / upstream）"]);
+  // unic-common は MIT の本文がないので標準の文のまま（3 章）。著作権者の表示は NOTICE として載せる。
+  assert.deepEqual(byName["unic-common"].standard, ["MIT"]);
+  assert.deepEqual(byName["unic-common"].files, ["COPYRIGHT.md（上流 / upstream）"]);
+  assert.deepEqual(model.texts.find((t) => t.notice)?.users, ["unic-common 0.9.0"]);
+  assert.deepEqual(model.supplements, [
+    "unic-common 0.9.0（NOTICE）: https://example.com/COPYRIGHT.md",
+    "webview2-com 0.38.2（MIT）: https://example.com/LICENSE",
+  ]);
+  assert.deepEqual(unusedSupplements(supplements, model), ["old-crate 1.0.0（MIT）"]);
+
+  const text = formatNotices(model, { kind: "rust", sources: [], facts: [] });
+  assert.match(text, /\n4\. 上流のリポジトリから補った本文 \/ License texts taken from the upstream repositories\n/);
+  assert.match(text, /\n  webview2-com 0\.38\.2: MIT \[\d+\]（LICENSE（上流 \/ upstream））\n/);
+
+  // 写しの中身が変わっていたら止める。写しは記録した版にだけ使う。
+  assert.throws(() => rustModel([report], { ...io, readSupplement: (f) => `${files[f]}x` }, supplements), /SHA-256 が違う/);
+  const nw = crate("webview2-com", "0.39.0", "MIT");
+  const newer = aboutReport([nw], [{ id: "MIT", text: canonical, source_path: null, users: [nw.id] }]);
+  assert.deepEqual(rustModel([newer], fakeIo({}), supplements).packages[0].standard, ["MIT"]);
 });
 
 test("npm: 配布物に入りうるパッケージは、開発用の印のないもの", () => {
@@ -417,7 +475,7 @@ test("lock のファイルの SHA-256 は、改行が CRLF でも同じ", () => 
 });
 
 test("上流の写しは、記録した SHA-256 のとおり（改行を変えずに置いてある）", () => {
-  for (const [name, list] of Object.entries(NPM_SUPPLEMENTS)) {
+  for (const [name, list] of [...Object.entries(NPM_SUPPLEMENTS), ...Object.entries(RUST_SUPPLEMENTS)]) {
     for (const s of list) {
       assert.match(s.version, /^\d+\.\d+\.\d+/, `${name}: 版を固定する`);
       const file = path.join(APP_DIR, THIRD_PARTY_SOURCE_DIR, s.file);

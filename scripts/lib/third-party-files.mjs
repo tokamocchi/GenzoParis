@@ -22,8 +22,10 @@ import { APP_DIR, REPO_ROOT, UI_DIR, capture } from "./proc.mjs";
 import {
   CARGO_ABOUT_VERSION,
   NPM_NOTICES_FILE,
+  NPM_SUPPLEMENTS,
   RUST_NOTICES_FILE,
   RUST_ROOTS,
+  RUST_SUPPLEMENTS,
   THIRD_PARTY_SOURCE_DIR,
   formatNotices,
   lockHash,
@@ -34,6 +36,7 @@ import {
   parseTargets,
   readLockHash,
   rustModel,
+  unusedSupplements,
 } from "./third-party.mjs";
 
 /** cargo-about の設定。 */
@@ -75,7 +78,18 @@ const fileIo = {
     }
   },
   readText: (file) => fs.readFileSync(file, "utf8"),
+  readSupplement: (file) => fs.readFileSync(path.join(THIRD_PARTY_DIR, file), "utf8"),
 };
+
+/** 一覧のどの crate・パッケージにも使われなかった上流の写しを警告する（版を上げたら足し直すか消す）。 */
+function warnUnusedSupplements(supplements, model, where) {
+  const unused = unusedSupplements(supplements, model);
+  if (unused.length > 0) {
+    console.warn(
+      `警告: 使われなかった上流の写し（${where}。版を上げたなら、新しい版のファイルを確かめて足し直すか消す）: ${unused.join(", ")}`,
+    );
+  }
+}
 
 /**
  * Rust の crate の文書を作る（cargo-about を実行する）。
@@ -110,6 +124,7 @@ export function generateRustNotices() {
     );
   });
   const model = rustModel(reports, fileIo);
+  warnUnusedSupplements(RUST_SUPPLEMENTS, model, "RUST_SUPPLEMENTS");
   return formatNotices(model, {
     kind: "rust",
     sources: sourceHashes("rust"),
@@ -162,7 +177,7 @@ function buildNpmModel() {
       const f = path.join(UI_DIR, p, "package.json");
       return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : null;
     },
-    readSupplement: (f) => fs.readFileSync(path.join(THIRD_PARTY_DIR, f), "utf8"),
+    readSupplement: fileIo.readSupplement,
   });
 }
 
@@ -173,6 +188,7 @@ function buildNpmModel() {
  */
 export function generateNpmNotices() {
   const model = buildNpmModel();
+  warnUnusedSupplements(NPM_SUPPLEMENTS, model, "NPM_SUPPLEMENTS");
   const text = formatNotices(model, {
     kind: "npm",
     sources: sourceHashes("npm"),
