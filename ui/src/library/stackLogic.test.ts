@@ -147,6 +147,15 @@ describe("写真の右クリックのメニュー", () => {
     expect(byAction(photoMenuEntries(1, undefined)).get("create_copy")?.enabled).toBe(false);
   });
 
+  it("位置を付ける（LIB-21）は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
+    const entry = byAction(photoMenuEntries(2, undefined)).get("edit_location");
+    expect(entry).toMatchObject({ label: "位置を付ける…", enabled: true });
+    expect(byAction(photoMenuEntries(1, mockSummary())).get("edit_location")?.enabled).toBe(true);
+    expect(byAction(photoMenuEntries(3, mockSummary({ kind: "video" }))).get("edit_location")?.enabled).toBe(true);
+    expect(byAction(photoMenuEntries(1, mockSummary({ kind: "video" }))).get("edit_location")?.enabled).toBe(false);
+    expect(byAction(photoMenuEntries(0, undefined)).get("edit_location")?.enabled).toBe(false);
+  });
+
   it("処理バージョンの更新は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
     expect(byAction(photoMenuEntries(1, mockSummary())).get("upgrade_process")?.enabled).toBe(true);
     expect(byAction(photoMenuEntries(3, mockSummary({ kind: "video" }))).get("upgrade_process")?.enabled).toBe(true);

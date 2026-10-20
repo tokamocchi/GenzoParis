@@ -282,6 +282,9 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
     case "edit_capture_time":
       openCaptureTimeDialog();
       return;
+    case "edit_location":
+      openGeotagDialog();
+      return;
     case "upgrade_process": {
       const targets = actions.targets();
       if (targets.length > 0) actions.openDialog({ kind: "upgrade_process", targets });
@@ -320,4 +323,9 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
 /** 撮影日時の修正のダイアログを開く（LIB-16。対象は操作の対象の写真、基準は表示中の写真）。 */
 export function openCaptureTimeDialog(): void {
   actions.openDialog({ kind: "capture_time", variantIds: actions.targets(), current: appStore.get().selection.current });
+}
+
+/** 位置を付けるダイアログを開く（LIB-21。対象は操作の対象の写真、今の位置を出すのは表示中の写真）。 */
+export function openGeotagDialog(): void {
+  actions.openDialog({ kind: "geotag", variantIds: actions.targets(), current: appStore.get().selection.current });
 }

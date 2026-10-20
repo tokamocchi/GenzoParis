@@ -1,6 +1,20 @@
-// モーダルのダイアログ（Esc で閉じる。最初の入力にフォーカス）。
+// モーダルのダイアログ（Esc で閉じる。開いたときに最初の入力にフォーカス）。
 
 import { type ReactNode, useEffect, useRef } from "react";
+
+/** 開いたときにフォーカスを移す先（data-autofocus がないとき。文書の順で最初に一致するもの）。 */
+const FIRST_FIELD = "[autofocus], input:not([type=hidden]), select, textarea, button.primary";
+
+/**
+ * 開いたときにフォーカスを移す先: `data-autofocus` の付いた要素、なければ文書の順で最初の入力か .primary の
+ * ボタン。最初の入力より後ろの欄にフォーカスを置くときは `data-autofocus` を付ける（React の autoFocus は DOM に
+ * 属性を書かず、描いたときに focus() を呼ぶだけなので `[autofocus]` では見つからず、この後の effect が最初の
+ * 入力へ移し直す。位置を付けるダイアログでは、地名の検索の欄より後ろにある座標の欄に付ける）。
+ */
+export function initialFocusTarget(root: ParentNode | null | undefined): HTMLElement | null {
+  if (!root) return null;
+  return root.querySelector<HTMLElement>("[data-autofocus]") ?? root.querySelector<HTMLElement>(FIRST_FIELD);
+}
 
 export function Dialog(props: {
   title: string;
@@ -14,11 +28,7 @@ export function Dialog(props: {
   const ref = useRef<HTMLDivElement>(null);
   const { onClose, busy } = props;
   useEffect(() => {
-    const el = ref.current;
-    const first = el?.querySelector<HTMLElement>(
-      "[autofocus], input:not([type=hidden]), select, textarea, button.primary",
-    );
-    first?.focus();
+    initialFocusTarget(ref.current)?.focus();
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

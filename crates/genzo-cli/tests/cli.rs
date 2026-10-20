@@ -4877,6 +4877,250 @@ fn time_commands_correct_capture_times_and_timeline_groups_them() {
     assert_eq!(hashes(&env.photos), before);
 }
 
+/// JSON の座標（`{"lat", "lon"}`）。
+fn lat_lon(v: &Value) -> (f64, f64) {
+    let f = |k: &str| v[k].as_f64().unwrap_or_else(|| panic!("{k} がない: {v}"));
+    (f("lat"), f("lon"))
+}
+
+/// 書き出したファイルの Exif の GPS の値（genzo-media で読み直す。なければ `None`）。
+fn exported_gps(path: &Path) -> Option<GpsCoord> {
+    genzo_media::decode_image_file(path).unwrap().metadata.gps
+}
+
+/// `location`（LIB-21）: 位置を付ける（見込み・実行）・`show` の注記・書き出しの Exif・付けた位置を消す・
+/// 履歴・元に戻す・座標と対象の誤り・動画を除く。元ファイルは変わらない。
+#[test]
+fn location_commands_assign_clear_and_undo_positions() {
+    let env = Env::new();
+    // A はカメラの位置なし、B はカメラの位置あり（write_jpeg の 35.0116, 135.7681）。
+    write_jpeg(
+        &env.photos.join("A.jpg"),
+        (64, 48),
+        1,
+        Some("2024-05-01 10:00:00"),
+        false,
+    );
+    write_jpeg(
+        &env.photos.join("B.jpg"),
+        (64, 48),
+        2,
+        Some("2024-05-01 10:20:00"),
+        true,
+    );
+    let video = make_video(&env.photos.join("V.mp4"));
+    let before = hashes(&env.photos);
+    let photos = env.photos.to_string_lossy().into_owned();
+    env.json(&["catalog", "init"]);
+    env.json(&["import", &photos]);
+    let found = env.json(&["search"]);
+    let a = id_of(&found, "A.jpg").to_string();
+    let b = id_of(&found, "B.jpg").to_string();
+    let tokyo = "35.681236, 139.767125";
+
+    // 見込みでは変えない。
+    let dry = env.json(&["location", "set", &a, &b, "--at", tokyo, "--dry-run"]);
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(
+        dry["location"],
+        json!({"lat": 35.681236, "lon": 139.767125})
+    );
+    assert_eq!(dry["plan"]["photos"], 2, "{dry}");
+    assert_eq!(dry["plan"]["changed"], 2);
+    assert_eq!(dry["plan"]["with_camera_gps"], 1);
+    assert_eq!(dry["plan"]["edit_id"], Value::Null);
+    assert!(env.json(&["show", &a])["details"]["gps"].is_null());
+
+    // 付ける。カメラの位置（B）は変えず、付けた位置を使う。
+    let r = env.run(&["location", "set", &a, &b, "--at", tokyo]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout
+            .contains("2 枚に位置（35.681236, 139.767125）を付けました"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("カメラの位置がある 1 枚は"),
+        "{}",
+        r.stdout
+    );
+    let shown_a = env.json(&["show", &a]);
+    assert_eq!(lat_lon(&shown_a["details"]["gps"]), (35.681236, 139.767125));
+    assert_eq!(shown_a["details"]["gps_source"], "assigned");
+    assert!(shown_a["details"]["camera_gps"].is_null());
+    let shown_b = env.json(&["show", &b]);
+    assert_eq!(shown_b["details"]["gps_source"], "assigned");
+    let (lat, lon) = lat_lon(&shown_b["details"]["camera_gps"]);
+    assert!(
+        (lat - 35.0116).abs() < 1e-6 && (lon - 135.7681).abs() < 1e-6,
+        "{shown_b}"
+    );
+    let human_b = env.run(&["show", &b]);
+    assert!(
+        human_b
+            .stdout
+            .contains("35.681236, 139.767125（後から付けた位置。カメラの位置: 35.0116"),
+        "{}",
+        human_b.stdout
+    );
+    let human_a = env.run(&["show", &a]);
+    assert!(
+        human_a
+            .stdout
+            .contains("（後から付けた位置。カメラの位置: なし）"),
+        "{}",
+        human_a.stdout
+    );
+    // 同じ位置をもう一度付けても変わらない（履歴に残さない）。
+    let again = env.json(&["location", "set", &a, "--at", tokyo]);
+    assert_eq!(again["plan"]["changed"], 0);
+    assert_eq!(again["plan"]["unchanged"], 1);
+    assert_eq!(again["plan"]["edit_id"], Value::Null);
+
+    // 書き出しの Exif には付けた位置が入る（--remove-gps では入らない）。
+    let out_dir = env.path("out");
+    let out_text = out_dir.to_str().unwrap();
+    let e = env.json(&["export", &a, "--out", out_text]);
+    let g = exported_gps(&written_path(&e)).expect("付けた位置が Exif に入る");
+    assert!(
+        (g.lat - 35.681236).abs() < 1e-6 && (g.lon - 139.767125).abs() < 1e-6,
+        "{g:?}"
+    );
+    let e = env.json(&["export", &a, "--out", out_text, "--remove-gps"]);
+    assert!(
+        !has_gps(&written_path(&e)),
+        "--remove-gps では付けた位置も入らない"
+    );
+
+    // 負の座標（南緯）も --at の値として読む。度分秒も読む。
+    let south = env.json(&["location", "set", &a, "--at", "-33.8568, 151.2153"]);
+    assert_eq!(south["location"]["lat"], -33.8568);
+    assert_eq!(south["plan"]["changed"], 1);
+    let dms = env.json(&[
+        "location",
+        "set",
+        &a,
+        "--at",
+        "33°51'24.5\"S 151°12'55.1\"E",
+        "--dry-run",
+    ]);
+    let (lat, lon) = lat_lon(&dms["location"]);
+    let want = (
+        -(33.0 + 51.0 / 60.0 + 24.5 / 3600.0),
+        151.0 + 12.0 / 60.0 + 55.1 / 3600.0,
+    );
+    assert!(
+        (lat - want.0).abs() < 1e-9 && (lon - want.1).abs() < 1e-9,
+        "{dms}"
+    );
+
+    // 読めない・範囲外の座標、座標・対象の省略は使い方の誤り（終了コード 2）。見つからない写真は 1。
+    for bad in ["1000, 0", "35.68", "東京駅"] {
+        let r = env.run(&["location", "set", &a, "--at", bad]);
+        assert_eq!(r.code, 2, "{bad}: {}", r.stderr);
+    }
+    let r = env.run(&["location", "set", &a, "--at", "91, 0", "--json"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    let err = r.json();
+    assert_eq!(err["error"]["kind"], "usage");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("緯度が範囲外です"),
+        "{err}"
+    );
+    assert_eq!(env.run(&["location", "set", &a]).code, 2);
+    assert_eq!(env.run(&["location", "set", "--at", tokyo]).code, 2);
+    assert_eq!(env.run(&["location", "clear"]).code, 2);
+    assert_eq!(
+        env.run(&["location", "set", "99999", "--at", tokyo]).code,
+        1
+    );
+
+    // 動画は除く（数だけ返し、何も変えない）。
+    if video {
+        let v = id_of(&found, "V.mp4").to_string();
+        let r = env.run(&["location", "set", &v, "--at", tokyo, "--json"]);
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        let j = r.json();
+        assert_eq!(j["plan"]["photos"], 0, "{j}");
+        assert_eq!(j["plan"]["skipped_videos"], 1);
+        assert_eq!(j["plan"]["changed"], 0);
+        assert!(r.stderr.contains("動画 1 本は対象外"), "{}", r.stderr);
+    }
+
+    // 付けた位置を消すと、カメラの位置に戻る（B）・位置がなくなる（A）。
+    let cleared = env.json(&["location", "clear", &a, &b]);
+    assert_eq!(cleared["location"], Value::Null);
+    assert_eq!(cleared["plan"]["changed"], 2, "{cleared}");
+    let shown_b = env.json(&["show", &b]);
+    assert_eq!(shown_b["details"]["gps_source"], "camera");
+    assert_eq!(shown_b["details"]["gps"], shown_b["details"]["camera_gps"]);
+    assert!(env.json(&["show", &a])["details"]["gps"].is_null());
+    let r = env.run(&["location", "clear", &a]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("1 枚は付けた位置がないため変わりません"),
+        "{}",
+        r.stdout
+    );
+
+    // 履歴（新しい順。変わらなかった変更・見込みは残さない）。
+    let history = env.json(&["location", "history"]);
+    let edits = history["edits"].as_array().unwrap();
+    assert_eq!(edits.len(), 3, "{history}");
+    assert_eq!(edits[0]["kind"], "clear");
+    assert_eq!(edits[0]["location"], Value::Null);
+    assert_eq!(edits[0]["asset_count"], 2);
+    assert_eq!(edits[1]["kind"], "set");
+    assert_eq!(edits[1]["location"]["lat"], -33.8568);
+    let human = env.run(&["location", "history"]);
+    assert!(
+        human.stdout.contains("位置を付ける 35.681236, 139.767125"),
+        "{}",
+        human.stdout
+    );
+    assert!(
+        human.stdout.contains("付けた位置を消す"),
+        "{}",
+        human.stdout
+    );
+
+    // 元に戻す（最後の変更から順に）。消す前の位置（A は南緯、B は東京駅）に戻る。
+    let undo = env.run(&["location", "undo"]);
+    assert_eq!(undo.code, 0, "{}", undo.stderr);
+    assert!(
+        undo.stdout
+            .contains("位置の変更（付けた位置を消す）を取り消しました（2 枚を戻しました）"),
+        "{}",
+        undo.stdout
+    );
+    assert_eq!(
+        lat_lon(&env.json(&["show", &a])["details"]["gps"]),
+        (-33.8568, 151.2153)
+    );
+    assert_eq!(env.json(&["show", &b])["details"]["gps_source"], "assigned");
+    let undo = env.json(&["location", "undo"]);
+    assert_eq!(undo["undone"]["edit"]["kind"], "set");
+    assert_eq!(undo["undone"]["restored"], 1);
+    assert_eq!(
+        lat_lon(&env.json(&["show", &a])["details"]["gps"]),
+        (35.681236, 139.767125)
+    );
+    env.json(&["location", "undo"]);
+    assert_eq!(env.json(&["show", &b])["details"]["gps_source"], "camera");
+    assert_eq!(env.json(&["location", "undo"])["undone"], Value::Null);
+    let r = env.run(&["location", "undo"]);
+    assert!(
+        r.stdout.contains("取り消す位置の変更はありません"),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(hashes(&env.photos), before);
+}
+
 /// フォルダの一覧の中で、パスが `dir` のフォルダの ID。
 fn folder_id_of(env: &Env, dir: &Path) -> i64 {
     let list = env.json(&["folder", "list"]);

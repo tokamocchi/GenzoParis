@@ -10,6 +10,7 @@ mod folders;
 mod identity;
 mod iptc;
 mod keywords;
+mod location;
 mod public_views;
 mod register;
 mod schema;

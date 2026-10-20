@@ -25,6 +25,7 @@ genzo-catalog = { path = "crates/genzo-catalog" }
 genzo-jobs = { path = "crates/genzo-jobs" }
 genzo-worker = { path = "crates/genzo-worker" }
 genzo-api = { path = "crates/genzo-api" }
+genzo-geo = { path = "crates/genzo-geo" }
 genzo-testkit = { path = "crates/genzo-testkit" }
 
 # シリアライズ・ハッシュ
@@ -76,6 +77,21 @@ trash = "5.2.9"
 wgpu = "30.0.1"
 pollster = "1.0.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
+
+# オンラインの地図（LIB-21 の第 2 段階）の HTTPS。地図のタイルと地名の検索を、利用者が有効にしたときだけ取る。
+# 使うのは genzo-geo だけ（docs/04_architecture.md の 3.16 節）。ureq は同期の HTTP/1.1 のクライアント（タイル専用の
+# スレッドと spawn_blocking で使うので非同期の実行環境は要らない）。TLS は ureq の公開の API の rustls で、暗号の実装は
+# ring、証明書の検証は OS（rustls-platform-verifier。Windows は CryptoAPI、macOS は Security.framework、Linux は OS の
+# 証明書の保管場所）に任せる。ureq の既定の機能（rustls）は webpki-roots（CDLA-Permissive-2.0。deny.toml で許して
+# いない）を入れるので切り、rustls-no-provider と platform-verifier を選ぶ。ring は rustls を直接の依存にして機能で選ぶ
+# （ureq の機能 rustls は webpki-roots も入れるため。aws-lc-rs は入れない）。genzo-geo の UreqClient を作るときに、
+# プロセスの既定の暗号の実装として ring を入れる（crates/genzo-geo/src/http.rs）。プロキシの設定（環境変数と
+# Windows のレジストリ）は genzo-geo が自分で読む（crates/genzo-geo/src/proxy.rs。ureq の機能 win-system-proxy は、
+# Windows のプロトコルごとのプロキシの設定を読めずに直接つなぐので入れない）。ureq 3.4.2 は 2026-09-13、rustls
+# 0.23.45 は 2026-09-14 の公開（rustls の最新の 0.23.46 は 2026-10-14 の公開で 2 週間たっていないため、0.23.45 に
+# 固定する）。docs/third_party.md。
+ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 
 # CLI・ログ
 clap = { version = "4.6.7", features = ["derive"] }

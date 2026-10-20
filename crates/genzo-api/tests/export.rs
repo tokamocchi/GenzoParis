@@ -193,6 +193,113 @@ fn export_formats_sizes_gps_and_original_protection() {
     );
 }
 
+/// 書き出したファイルの Exif の GPS の値（genzo-media で読み直す。なければ `None`）。
+fn exported_gps(path: &Path) -> Option<GpsCoord> {
+    genzo_media::decode_image_file(path).unwrap().metadata.gps
+}
+
+/// Exif の度分秒（秒は 1/10000 単位）で書いて読み直した値なので、1e-6 度の違いを許す。
+fn assert_near(g: Option<GpsCoord>, expected: GpsCoord, what: &str) {
+    let g = g.unwrap_or_else(|| panic!("{what}: GPS がない"));
+    assert!(
+        (g.lat - expected.lat).abs() < 1e-6 && (g.lon - expected.lon).abs() < 1e-6,
+        "{what}: {g:?}（期待 {expected:?}）"
+    );
+}
+
+/// 後から付けた位置（LIB-21）は書き出しの Exif に入る: 位置のない写真に付けると入り、カメラの位置は付けた位置で
+/// 置き換え、GPS を削除する設定では付けた位置も書かず、付けた位置を消すとカメラの位置に戻る。元のファイルは
+/// 変わらない（DATA-01）。
+#[test]
+fn assigned_locations_are_written_to_the_exported_exif() {
+    let env = Env::new();
+    let camera = GpsCoord::new(34.985_849, 135.758_766).unwrap();
+    write_jpeg(
+        &env.photos.join("CAM.jpg"),
+        (64, 48),
+        1,
+        Some(&exif(
+            Some("2024-05-01 10:00:00"),
+            Some(JST_MINUTES),
+            Some(camera),
+        )),
+    );
+    write_jpeg(
+        &env.photos.join("NOGPS.jpg"),
+        (64, 48),
+        2,
+        Some(&exif(Some("2024-05-01 10:01:00"), Some(JST_MINUTES), None)),
+    );
+    let before = hashes(&env.photos);
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let cam = by_name(&items, "CAM.jpg").variant_id;
+    let nogps = by_name(&items, "NOGPS.jpg").variant_id;
+    let out = env.dir.path().join("out");
+    let keep = ExportSettings {
+        format: ExportFormat::Jpeg { quality: 85 },
+        color_space: OutputColorSpace::Srgb,
+        size: ExportSize::LongEdge(32),
+        remove_gps: false,
+        on_conflict: ConflictPolicy::Sequence,
+        remove_keywords: false,
+        ..ExportSettings::default()
+    };
+
+    // 付ける前: カメラの位置だけ。
+    let r = export(&core, &[cam, nogps], &keep, &out);
+    assert_near(exported_gps(&written_path(&r, 0)), camera, "カメラの位置");
+    assert_eq!(exported_gps(&written_path(&r, 1)), None);
+
+    // 付けると、位置のない写真にも入り、カメラの位置は置き換える。
+    let tokyo = GpsCoord::new(35.681_236, 139.767_125).unwrap();
+    assert_eq!(
+        core.edit_locations(&[cam, nogps], Some(tokyo))
+            .unwrap()
+            .changed,
+        2
+    );
+    let r = export(&core, &[cam, nogps], &keep, &out);
+    assert_near(exported_gps(&written_path(&r, 0)), tokyo, "置き換えた位置");
+    assert_near(exported_gps(&written_path(&r, 1)), tokyo, "付けた位置");
+    // 南半球・西経（S・W の記号）。
+    let rio = GpsCoord::new(-22.951_916, -43.210_487).unwrap();
+    core.edit_locations(&[nogps], Some(rio)).unwrap();
+    let r = export(&core, &[nogps], &keep, &out);
+    assert_near(exported_gps(&written_path(&r, 0)), rio, "南半球・西経");
+
+    // GPS を削除する設定では、付けた位置も書かない。
+    let remove = ExportSettings {
+        remove_gps: true,
+        ..keep.clone()
+    };
+    let r = export(&core, &[cam, nogps], &remove, &out);
+    for i in 0..2 {
+        assert!(
+            !has_gps(&written_path(&r, i)),
+            "{i}: GPS を書かない（SEC-03）"
+        );
+    }
+
+    // 付けた位置を消すと、カメラの位置に戻る（カメラの位置がなければ書かない）。
+    core.edit_locations(&[cam, nogps], None).unwrap();
+    let r = export(&core, &[cam, nogps], &keep, &out);
+    assert_near(
+        exported_gps(&written_path(&r, 0)),
+        camera,
+        "戻したカメラの位置",
+    );
+    assert_eq!(exported_gps(&written_path(&r, 1)), None);
+
+    core.close().unwrap();
+    assert_eq!(
+        hashes(&env.photos),
+        before,
+        "元ファイルは変わらない（DATA-01）"
+    );
+}
+
 /// 書き出しの設定の誤りは、ジョブを投入する前に知らせる。
 #[test]
 fn invalid_export_settings_are_rejected() {

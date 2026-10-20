@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use genzo_model::{
     CollectionId, CollectionKind, ColorLabel, CompositeSettings, CropRect, DevelopSettings,
-    ExportFormat, ExportSettings, Flag, FolderId, HistoryEntryId, KeywordId, MetadataField, Rating,
-    SmartRule, SnapshotId, StackId, VariantId, Watermark,
+    ExportFormat, ExportSettings, Flag, FolderId, GpsCoord, HistoryEntryId, KeywordId,
+    MetadataField, Rating, SmartRule, SnapshotId, StackId, VariantId, Watermark,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,11 +32,12 @@ use crate::types::{
     CaptureTimeUndo, CatalogSchema, CatalogStats, CollectionInfo, ContentHashStatus, CopySettings,
     CoreSettings, DeleteKind, DeletePlan, DeleteReport, DevelopState, DisplayInfo,
     DuplicateGroupList, Facets, FileCheckReport, FileIdentity, FolderInfo, FrameInfo, HistoryItem,
-    ImportOptions, IndexOf, JobInfo, KeywordHit, KeywordInfo, KeywordUsage, MaskOverlayInfo,
-    MetadataSummary, NamePreview, PasteReport, PasteVersion, PickedMaskColor, PickedWhiteBalance,
-    RangeResult, RegionInfo, RegionRequest, SearchFilter, SearchResult, SearchSort, SettingGroups,
-    SettingsUpdate, ShownVariants, StackInfo, StartupReport, ThumbnailData, Timeline,
-    VariantDetails, VariantKeywords, VideoPlayback, VideoProxyCacheStatus, ViewOutputSize,
+    ImportOptions, IndexOf, JobInfo, KeywordHit, KeywordInfo, KeywordUsage, LocationEditInfo,
+    LocationEditPlan, LocationUndo, MaskOverlayInfo, MetadataSummary, NamePreview, PasteReport,
+    PasteVersion, PickedMaskColor, PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest,
+    SearchFilter, SearchResult, SearchSort, SettingGroups, SettingsUpdate, ShownVariants,
+    StackInfo, StartupReport, ThumbnailData, Timeline, VariantDetails, VariantKeywords,
+    VideoPlayback, VideoProxyCacheStatus, ViewOutputSize,
 };
 use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, ProfileEntry, ProfileImportReport, ProfileKind,
@@ -969,6 +970,30 @@ pub enum Command {
         gap_seconds: u32,
     },
 
+    // --- 位置情報の後付け（LIB-21） ---
+    /// 位置の変更の見込み（何も変えない。[`crate::Core::plan_location_edit`]）。
+    /// → [`Response::LocationEditPlan`]
+    PlanLocationEdit {
+        /// 写真（動画は除く。同じ写真の仮想コピーは位置を共有する）。
+        variant_ids: Vec<VariantId>,
+        /// 付ける位置（`{"lat": 35.681236, "lon": 139.767125}`）。`null` は付けた位置を消して、カメラの位置に
+        /// 戻す。省略はできない（`required_option`）。
+        #[serde(deserialize_with = "required_option")]
+        location: Option<GpsCoord>,
+    },
+    /// 位置を付ける・付けた位置を消す（[`crate::Core::edit_locations`]）。→ [`Response::LocationEditPlan`]
+    EditLocations {
+        /// 写真（動画は除く）。
+        variant_ids: Vec<VariantId>,
+        /// 付ける位置（`null` は付けた位置を消す。省略はできない）。
+        #[serde(deserialize_with = "required_option")]
+        location: Option<GpsCoord>,
+    },
+    /// 位置の変更の履歴。→ [`Response::LocationEdits`]
+    LocationEdits,
+    /// 最後の位置の変更を取り消す。→ [`Response::LocationUndone`]
+    UndoLocationEdit,
+
     // --- ボリューム・ファイル操作・見つからない写真（FILE-02〜FILE-04） ---
     /// ボリュームの一覧（`refresh` なら、つながりを確かめ直す。[`crate::Core::refresh_volumes`]）。
     /// → [`Response::Volumes`]
@@ -1077,6 +1102,17 @@ fn default_true() -> bool {
 /// [`Command::DuplicateGroups`] の上限の既定値。
 fn default_duplicate_groups_limit() -> usize {
     100
+}
+
+/// 省略できない `Option` の項目を読む（`null` は `None`、項目がなければエラー）。serde の既定では、省いた
+/// `Option` の項目は `None` になる。位置（[`Command::EditLocations`]）の `null` は「付けた位置を消す」なので、
+/// 項目の書き忘れを「消す」と読まないようにする。
+fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 /// 応答（[`Command`] ごとの結果）。
@@ -1348,6 +1384,18 @@ pub enum Response {
     },
     /// タイムライン（ORG-01）。
     Timeline(Timeline),
+    /// 位置の変更の見込み・結果（LIB-21）。
+    LocationEditPlan(LocationEditPlan),
+    /// 位置の変更の履歴（新しい順）。
+    LocationEdits {
+        /// 履歴。
+        edits: Vec<LocationEditInfo>,
+    },
+    /// 位置の変更を取り消した（履歴がなければ `null`）。
+    LocationUndone {
+        /// 取り消したもの。
+        undone: Option<LocationUndo>,
+    },
     /// ボリュームの一覧（FILE-03）。
     Volumes {
         /// ボリューム。
@@ -1922,6 +1970,20 @@ impl Core {
                 generation,
                 gap_seconds,
             } => R::Timeline(self.timeline(generation, gap_seconds)?),
+            C::PlanLocationEdit {
+                variant_ids,
+                location,
+            } => R::LocationEditPlan(self.plan_location_edit(&variant_ids, location)?),
+            C::EditLocations {
+                variant_ids,
+                location,
+            } => R::LocationEditPlan(self.edit_locations(&variant_ids, location)?),
+            C::LocationEdits => R::LocationEdits {
+                edits: self.location_edits()?,
+            },
+            C::UndoLocationEdit => R::LocationUndone {
+                undone: self.undo_location_edit()?,
+            },
             C::Volumes { refresh } => R::Volumes {
                 volumes: if refresh {
                     self.refresh_volumes()?
@@ -2393,6 +2455,122 @@ mod tests {
         );
     }
 
+    /// 画面（ui/src/api/types.ts）が使う位置情報の後付けの形（LIB-21）。`location` の `null` は消す、省略は誤り。
+    #[test]
+    fn location_commands_have_the_ui_forms() {
+        use serde_json::json;
+        let tokyo = GpsCoord::new(35.681_236, 139.767_125).unwrap();
+        let c: Command = serde_json::from_value(json!({
+            "type": "edit_locations",
+            "variant_ids": [1, 2],
+            "location": {"lat": 35.681_236, "lon": 139.767_125}
+        }))
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::EditLocations {
+                variant_ids: vec![VariantId::new(1), VariantId::new(2)],
+                location: Some(tokyo),
+            }
+        );
+        let c: Command = serde_json::from_value(json!({
+            "type": "plan_location_edit", "variant_ids": [3], "location": null
+        }))
+        .unwrap();
+        assert_eq!(
+            c,
+            Command::PlanLocationEdit {
+                variant_ids: vec![VariantId::new(3)],
+                location: None,
+            }
+        );
+        // 位置の書き忘れを「消す」と読まない。
+        for t in ["edit_locations", "plan_location_edit"] {
+            let err = serde_json::from_value::<Command>(json!({"type": t, "variant_ids": [3]}))
+                .unwrap_err();
+            assert!(err.to_string().contains("location"), "{t}: {err}");
+        }
+        for (json, command) in [
+            (json!({"type": "location_edits"}), Command::LocationEdits),
+            (
+                json!({"type": "undo_location_edit"}),
+                Command::UndoLocationEdit,
+            ),
+        ] {
+            assert_eq!(serde_json::from_value::<Command>(json).unwrap(), command);
+        }
+        let r = Response::LocationEditPlan(LocationEditPlan {
+            photos: 2,
+            changed: 1,
+            unchanged: 1,
+            with_camera_gps: 1,
+            with_assigned: 0,
+            skipped_videos: 1,
+            missing: 0,
+            edit_id: Some(4),
+        });
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "location_edit_plan", "photos": 2, "changed": 1, "unchanged": 1,
+                   "with_camera_gps": 1, "with_assigned": 0, "skipped_videos": 1, "missing": 0,
+                   "edit_id": 4})
+        );
+        let edit = LocationEditInfo {
+            id: 4,
+            kind: "set".to_owned(),
+            location: Some(tokyo),
+            asset_count: 1,
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-10-20T01:02:03Z")
+                .unwrap()
+                .to_utc(),
+        };
+        let r = Response::LocationEdits {
+            edits: vec![edit.clone()],
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "location_edits", "edits": [{
+                "id": 4, "kind": "set", "location": {"lat": 35.681_236, "lon": 139.767_125},
+                "asset_count": 1, "created_at": "2026-10-20T01:02:03Z"
+            }]})
+        );
+        let r = Response::LocationUndone {
+            undone: Some(LocationUndo {
+                edit: LocationEditInfo {
+                    kind: "clear".to_owned(),
+                    location: None,
+                    ..edit
+                },
+                restored: 1,
+                removed: 0,
+            }),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["type"], "location_undone");
+        assert_eq!(v["undone"]["edit"]["kind"], "clear");
+        assert_eq!(v["undone"]["edit"]["location"], serde_json::Value::Null);
+        assert_eq!(
+            (
+                v["undone"]["restored"].as_u64(),
+                v["undone"]["removed"].as_u64()
+            ),
+            (Some(1), Some(0))
+        );
+        assert_eq!(
+            serde_json::to_value(Response::LocationUndone { undone: None }).unwrap(),
+            json!({"type": "location_undone", "undone": null})
+        );
+        // 詳細の位置の出どころ（LIB-21 より前の応答には gps_source・camera_gps が無い）。
+        assert_eq!(
+            serde_json::to_value(crate::types::GpsSource::Assigned).unwrap(),
+            json!("assigned")
+        );
+        assert_eq!(
+            serde_json::to_value(crate::types::GpsSource::Camera).unwrap(),
+            json!("camera")
+        );
+    }
+
     #[test]
     fn every_command_round_trips() {
         let commands = vec![
@@ -2470,6 +2648,16 @@ mod tests {
             },
             Command::CaptureTimeEdits,
             Command::UndoCaptureTimeEdit,
+            Command::PlanLocationEdit {
+                variant_ids: vec![VariantId::new(1), VariantId::new(2)],
+                location: GpsCoord::new(-33.856_784, 151.215_297),
+            },
+            Command::EditLocations {
+                variant_ids: vec![VariantId::new(1)],
+                location: None,
+            },
+            Command::LocationEdits,
+            Command::UndoLocationEdit,
             Command::Volumes { refresh: true },
             Command::PlanMoveFiles {
                 variant_ids: vec![VariantId::new(1)],

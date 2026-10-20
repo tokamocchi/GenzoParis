@@ -7,7 +7,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 > この台帳は AI が作成した記録で、個々のコードやデータの法的な適合性を確定するものではありません。
 > わからないことは「要確認」と書き、推測で断定しません。特許の扱いは、ライセンスとは別の未決事項として扱います。
 
-- 作成: 2026-10-09（AI）。2026-10-10 更新（判断の表への回答: LibRaw のライセンスの選択と Windows での指定方法、RCD の出典の調査、ColorChecker の照合、追加した依存。決定事項ログ No.32・34・37）。2026-10-20 更新（配布物の第三者のライセンスの文書。1.4 節。決定事項ログ No.193・194）
+- 作成: 2026-10-09（AI）。2026-10-10 更新（判断の表への回答: LibRaw のライセンスの選択と Windows での指定方法、RCD の出典の調査、ColorChecker の照合、追加した依存。決定事項ログ No.32・34・37）。2026-10-20 更新（配布物の第三者のライセンスの文書。1.4 節。決定事項ログ No.194・195）
 - アプリのライセンス: GPL-3.0-or-later（[決定事項ログ](decision_log.md) No.27、[LICENSE](../LICENSE)）
 
 ## 1. 範囲と使い方
@@ -44,10 +44,50 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - 描画の違い（置き換えの前後で画素を比べた結果）と、壊れたフォントの扱いは決定事項ログ No.173。フォントのファイル自体は、これまでどおり同梱・ダウンロードしない。
   - **ライセンスの表記の要否・方法は、ほかの Rust の crate と同じ扱いで、AI の判断で確定しない**（DIST-05）。
 - 2026-10-19（CI の修正。マスクの重ねて表示の修正の PR #5 で見つかった）: CI の `lint` ジョブの cargo-deny（advisories）が、新しく公開された **メンテナンス終了の通知 3 件**（RUSTSEC-2026-0370 `zvariant`・RUSTSEC-2026-0371 `zbus_names`・RUSTSEC-2026-0372 `zvariant_derive`。どれも zbus 6 に統合されたため）で失敗した。依存の木は `genzo-app` → `tauri-plugin-opener` 2.5.5 → `zbus` 5.19.0 で、**Linux だけ**の依存（Windows・macOS の配布物には入らない。`cargo tree -i zbus --target` で確かめた）。`tauri-plugin-opener` の最新の安定版は 2.5.5（3.0 は alpha だけ）で更新先がないため、2026-10-12 の Tauri の依存と同じく `deny.toml` で除外した（理由と見直しの時期は `deny.toml`）。脆弱性ではない。依存の crate・版・`Cargo.lock` は変えていない。**除外でよいかは人の確認待ち**。
+- 2026-10-20（位置情報の後付け LIB-21 の第 2 段階。オンラインの地図の HTTPS。決定事項ログ No.187）: **新しい crate を 24 個足した**（LIB-21 の前のコミット `2fd05a1` の `Cargo.lock` と比べた数。workspace の crate の `genzo-geo` は数えない。消えた crate はない）。workspace の依存は `ureq` 3.4.2（`default-features = false`・機能は `rustls-no-provider`・`platform-verifier`）と `rustls` 0.23.45（`default-features = false`・機能は `ring`・`std`・`tls12`。ureq 3.4.2 の rustls の依存が `logging` も付ける）で、使うのは新しい crate `genzo-geo` だけ（`genzo-geo` を使うのは `genzo-app` だけ）。TLS は rustls で、暗号の実装は `ring`、証明書の検証は OS（`rustls-platform-verifier`。Windows は CryptoAPI、macOS は Security.framework、Linux は OS の証明書の保管場所を読み、rustls-webpki で確かめる）。`webpki-roots`・`aws-lc-rs`・`aws-lc-sys`・`native-tls`・`openssl`・`openssl-sys` は `Cargo.lock` にない。公開日（crates.io の `created_at`。UTC）・ライセンス・checksum は crates.io の API（`https://crates.io/api/v1/crates/<名前>/<版>`）で確かめ、`Cargo.lock` の checksum は 24 個とも API の値と一致した。どの対象の依存の木に入るかは `cargo tree --workspace --target <対象>` で確かめた（Linux は `x86_64-unknown-linux-gnu`、Windows は `x86_64-pc-windows-msvc`・`aarch64-pc-windows-msvc`、macOS は `aarch64-apple-darwin`・`x86_64-apple-darwin`）。どれも 2026-10-20 に確かめた（下の表）。
+  - **経緯**: 初めは ureq の TLS の機能を使わず、`native-tls` 0.2.18（OS の TLS。Windows は SChannel、macOS は Security.framework、Linux はシステムの OpenSSL に動的リンク）と、ureq の unversioned の API（semver の約束の外）で接続を組む `genzo-geo` の `tls.rs` にした（コミット `8cfeb81`。このとき新しく入った crate は 13 個）。同じ日のレビューの後、unversioned の API に頼らないよう、ureq の公開の機能の rustls に置き換えた（コミット `8ac4eda`。決定事項ログ No.187）。そのときに `Cargo.lock` から消えたもの: `native-tls` 0.2.18・`openssl` 0.10.81・`openssl-sys` 0.9.117・`openssl-macros` 0.1.1・`foreign-types` 0.3.2・`foreign-types-shared` 0.1.1。Linux の開発環境でも OpenSSL（`libssl-dev`）は要らなくなった。`tls.rs` も消したが、git の履歴（`8cfeb81` から `8ac4eda` の前まで）には残る（3.14 節）。
+  - 既存の crate の行で変わったのは、`genzo-app` の依存に `genzo-geo` が増えたことと、`jni` が 2 つの版（0.21.1・0.22.4）になったための名前の付け直し（`tao`・`tauri`・`tauri-runtime`・`tauri-runtime-wry`・`wry` の依存の `"jni"` が `"jni 0.21.1"` になった）だけ。既存の crate の版（`windows-sys` など）は `2fd05a1` と同じ。
+  - 版は、公開から 2 週間以上たったものにした。Cargo の解決が選ぶ版のうち、2 週間たっていないものは前の版に下げた: `rustls` 0.23.46（2026-10-14 公開）→ 0.23.45、`rustls-native-certs` 0.8.5（2026-10-13）→ 0.8.4、`ureq-proto` 0.6.5（2026-10-17）→ 0.6.4、`schannel` 0.1.30（2026-10-16）→ 0.1.29、`webpki-root-certs` 1.0.10（2026-10-19）→ 1.0.9、`zeroize` 1.9.1（2026-10-06）→ 1.9.0（公開日は crates.io の API の値。UTC）。
+  - 既に `Cargo.lock` にあって、新しく使うもの（新しい crate ではない）: `winreg` 0.56.0（MIT。2026-03-14 公開。`embed-resource` と同じ版。Windows で `genzo-geo` の直接の依存にした。プロキシの設定を読む。ureq の機能 `win-system-proxy` は使わない）、`windows-sys` 0.61.2（Windows で `rustls-platform-verifier` と `winreg` が使う）、`core-foundation` 0.10.1・`core-foundation-sys` 0.8.7（macOS で `rustls-platform-verifier`・`security-framework` が使う）、`log`・`once_cell`・`percent-encoding`・`base64` 0.23.1・`http`・`httparse`（ureq・rustls の依存）、`cc`（ring のビルド）、`tempfile`（キャッシュの書き込み）など。
+  - `ring` 0.17.14 は C とアセンブリを同梱してビルドする（下の「C のソースを同梱してビルドするクレート」と 2 章の一覧）。
+  - cargo-deny 0.20.2 で、CI と同じ `cargo deny check licenses advisories bans sources` を実行した（2026-10-20。コミット `1d3078e` の木）: **advisories・bans・licenses・sources がすべて通った**。ただし、**`rustls` 0.23.45 の脆弱性の通知 4 件（RUSTSEC-2026-0346〜0349。どれも 2026-10-14 の通知で、直した版は 0.23.46 以上）は、`deny.toml` の `ignore` で除いている**（0.23.46 は公開から 2 週間たっていないため。どれもこのアプリの使い方では当たらないと AI がソースで確かめた。理由は `deny.toml`。**人の確認待ち**。2026-10-28 以降に 0.23.46 以上へ上げて、除外を消す予定。3.14 節）。警告（同じ crate の複数の版）は 38 件で、LIB-21 の前（`2fd05a1`）と同じ（native-tls のときは 40 件だった）。`webpki-root-certs`（CDLA-Permissive-2.0）は `deny.toml` の `targets` のどの依存の木にも入らないので、cargo-deny は見ない。
+  - 2026-10-20: `rustls-platform-verifier` 0.7.1（既定の機能なし。ureq 3.4.2 が使う版・機能と同じ）を `genzo-geo` の **dev-dependency** にした（OS による証明書の検証が自己署名の証明書を拒むことを確かめるテスト `tests::os_verifier`。コミット `2ee7461`）。**新しい crate はない**（`Cargo.lock` で増えたのは `genzo-geo` の依存の一覧の 1 行だけ）。
+  - `genzo-geo` の `tls.rs`（コミット `8cfeb81` で足し、`8ac4eda` で消した）は、ureq 3.4.2 の `src/tls/native_tls.rs`（MIT OR Apache-2.0）を参考に、同じ流れで書いた（ureq の著作権の表示と許諾の文は 3.14 節）。
+  - **ライセンスの表記の要否・方法は、ほかの Rust の crate と同じ扱いで、AI の判断で確定しない**（DIST-05）。
+  - 新しく入った 24 個の crate（`created_at` は crates.io の API の値。UTC。「入る対象」は上の 5 つの対象の依存の木）:
+
+| crate | 版 | 公開日 | ライセンス（crates.io） | checksum（`Cargo.lock`） | 入る対象・用途 |
+|---|---|---|---|---|---|
+| `ureq` | 3.4.2 | 2026-09-13 | MIT OR Apache-2.0 | `9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc` | すべて。直接の依存（HTTPS のクライアント。同期の HTTP/1.1） |
+| `ureq-proto` | 0.6.4 | 2026-09-16 | MIT OR Apache-2.0 | `f86fd172ccca569e458f61b6bdd6220965a9ef36e672a6852953b51a0e1583be` | すべて（ureq の HTTP/1.1 の解釈） |
+| `utf8-zero` | 0.8.1 | 2026-02-28 | MIT OR Apache-2.0 | `b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e` | すべて（ureq の依存） |
+| `rustls` | 0.23.45 | 2026-09-14 | Apache-2.0 OR ISC OR MIT | `0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634` | すべて。直接の依存（TLS）。脆弱性の通知 4 件を `deny.toml` で除いた（上） |
+| `rustls-pki-types` | 1.15.1 | 2026-07-23 | MIT OR Apache-2.0 | `2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96` | すべて（証明書などの型） |
+| `rustls-webpki` | 0.103.15 | 2026-08-21 | ISC | `f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2` | すべて（証明書の検証の部品） |
+| `rustls-platform-verifier` | 0.7.1 | 2026-09-24 | MIT OR Apache-2.0 | `1167586491e2b18b8bfbb293e8180ec17c201c4f076d7cb3070ca964e7598f98` | すべて（証明書の検証を OS に任せる） |
+| `ring` | 0.17.14 | 2025-03-11 | Apache-2.0 AND ISC | `a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7` | すべて（暗号の実装。C とアセンブリを含む。2 章） |
+| `untrusted` | 0.9.0 | 2021-07-13 | ISC | `8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1` | すべて（ring などの依存） |
+| `subtle` | 2.6.1 | 2024-06-24 | BSD-3-Clause | `13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292` | すべて（rustls などの依存） |
+| `zeroize` | 1.9.0 | 2026-06-12 | Apache-2.0 OR MIT | `e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e` | すべて（rustls などの依存） |
+| `getrandom` | 0.2.17 | 2026-01-11 | MIT OR Apache-2.0 | `ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0` | すべて（ring が使う。依存の木の 0.3.4・0.4.3 と別の版） |
+| `rustls-native-certs` | 0.8.4 | 2026-06-01 | Apache-2.0 OR ISC OR MIT | `dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d` | Linux だけ（OS の証明書の保管場所を読む） |
+| `openssl-probe` | 0.2.1 | 2026-01-20 | MIT OR Apache-2.0 | `7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe` | Linux だけ（証明書のファイルの場所を探す Rust の crate。OpenSSL のライブラリは使わない） |
+| `security-framework` | 3.7.0 | 2026-02-20 | MIT OR Apache-2.0 | `b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d` | macOS だけ（Security.framework） |
+| `security-framework-sys` | 2.17.0 | 2026-02-20 | MIT OR Apache-2.0 | `6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3` | macOS だけ |
+| `windows-sys` | 0.52.0 | 2023-11-15 | MIT OR Apache-2.0 | `282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d` | `aarch64-pc-windows-msvc` だけ（ring が使う。`x86_64-pc-windows-msvc` の木には入らない。依存の木の 0.59.0・0.60.2・0.61.2 と別の版） |
+| `schannel` | 0.1.29 | 2026-03-10 | MIT | `91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939` | `Cargo.lock` だけ（`rustls-native-certs` の Windows 用の依存。どの対象の木にも入らない） |
+| `webpki-root-certs` | 1.0.9 | 2026-07-18 | CDLA-Permissive-2.0 | `b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b` | `Cargo.lock` だけ（`rustls-platform-verifier` の WebAssembly 用の依存。どの対象の木にも入らない） |
+| `jni` | 0.22.4 | 2026-03-16 | MIT OR Apache-2.0 | `5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498` | `Cargo.lock` だけ（Android 用。どの対象の木にも入らない） |
+| `jni-macros` | 0.22.4 | 2026-03-16 | MIT OR Apache-2.0 | `a00109accc170f0bdb141fed3e393c565b6f5e072365c3bd58f5b062591560a3` | `Cargo.lock` だけ（Android 用） |
+| `rustls-platform-verifier-android` | 0.2.0 | 2026-09-24 | MIT OR Apache-2.0 | `eec689c0bc40ff2458a5977b6619cb718087084a18e02a131c599b62d05e1a5f` | `Cargo.lock` だけ（Android 用） |
+| `simd_cesu8` | 1.2.0 | 2026-07-13 | Apache-2.0 OR MIT | `11031e251abf8611c80f460e19dbdeb54a66db918e49c65a7065b46ac7aec520` | `Cargo.lock` だけ（Android 用） |
+| `simdutf8` | 0.1.5 | 2024-09-22 | MIT OR Apache-2.0 | `e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e` | `Cargo.lock` だけ（Android 用） |
+
 - **配布物のライセンスの表示（DIST-05）**: 2026-10-20 から、配布物に入る crate の一覧とライセンスの本文を cargo-about で作り、配布物に入れます（1.4 節）。cargo-deny（許可するライセンスの確認）とは別の道具で、許可するライセンスの一覧は両方で同じにします（`about.toml` の `accepted` は `deny.toml` の `allow` に含まれることを `scripts/lib/third-party.test.mjs` で確かめる）。
-- **cargo-deny が見るのは、各クレートの `Cargo.toml` の `license` と、ライセンスのファイルだけです。** C のソースを同梱してビルドするクレートについて、同梱したソースの版やファイルのヘッダは確認しません。現在の依存では次の 3 つが該当します。
+- **cargo-deny が見るのは、各クレートの `Cargo.toml` の `license` と、ライセンスのファイルだけです。** C のソースを同梱してビルドするクレートについて、同梱したソースの版やファイルのヘッダは確認しません。現在の依存では次の 4 つが該当します。
   - `lcms2-sys`（Little CMS 2）と `libsqlite3-sys`（SQLite）: 2 章の一覧に記録します。
   - `blake3`: BLAKE3 の作者たち自身による C とアセンブリの実装を同梱しています（`c/` ディレクトリ）。crate のライセンスは `Cargo.toml` で CC0-1.0 / Apache-2.0 / Apache-2.0 WITH LLVM-exception の選択です。`c/blake3.c` の先頭にはライセンスの表示がなく（1.8.7 で確認）、C の部分にも crate と同じライセンスが及ぶと考えていますが、要確認です。
+  - `ring` 0.17.14（2026-10-20 追加。LIB-21 の HTTPS の暗号の実装。`genzo-geo` の `rustls` が使う）: C のファイル 17（うち `crypto/constant_time_test.c` はテスト用）と、あらかじめ生成したアセンブリ（`pregenerated/` の `.S` 69・NASM の `.asm` 17・Windows 用のオブジェクトのファイル `.o` 17）、手書きのアセンブリ（`.S` 4）を同梱し、`cc` の crate で C のコンパイラを使ってビルドします（数は crates.io の 0.17.14 のソースで数えた。2026-10-20）。crate のライセンスは `Cargo.toml` で Apache-2.0 AND ISC です。`LICENSE` によると、ring の新しいコードは ISC（`LICENSE-other-bits`）、BoringSSL から来たコードは Apache-2.0（`LICENSE-BoringSSL`。一部は ISC。どちらかはファイルの先頭に書いてある）、`third_party/fiat`（fiat-crypto）は Apache-2.0、`src/polyfill/once_cell` は once_cell の MIT・Apache-2.0 です。ファイルごとのヘッダは確かめていません（要確認）。2 章の一覧に記録します。
 
 ### 1.1a 画面（`ui/`）の npm の依存（cargo-deny の対象外）
 
@@ -55,7 +95,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - `ui/package.json` で版を固定し（`save-exact`）、`ui/package-lock.json` をコミットする。CI は `npm ci` で lock のとおりに入れる。
   - 版は、公開から 2 週間以上たったものを選ぶ（公開の直後に乗っ取られた版を避けるため）。`legacy-peer-deps`（npm 10 の依存の解決の不具合の回避。`ui/.npmrc`）。
   - 新しい依存を足すときは、この節の表に追記し、ライセンスを確かめる。
-- **配布物（`ui/dist` に入り、アプリに埋め込まれるもの）**: 次の 7 つ（2026-10-12 の `package-lock.json` と、各パッケージの `package.json` の `license` で確認。ファイルのヘッダ・LICENSE の本文は未確認）。
+- **配布物（`ui/dist` に入り、アプリに埋め込まれるもの）**: 次の 8 つ（2026-10-12 の `package-lock.json` と、各パッケージの `package.json` の `license` で確認。ファイルのヘッダ・LICENSE の本文は未確認。leaflet は 2026-10-20 に追加し、`LICENSE` の本文も確かめた）。
 
 | パッケージ | 版 | ライセンス（package.json） | 用途 |
 |---|---|---|---|
@@ -63,9 +103,10 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | @tanstack/react-virtual / @tanstack/virtual-core | 3.14.13 / 3.17.11 | MIT | グリッド・フィルムストリップの仮想スクロール |
 | @tauri-apps/api | 2.11.1 | Apache-2.0 OR MIT | Tauri のコマンド・イベントの呼び出し |
 | @tauri-apps/plugin-dialog | 2.7.3 | MIT OR Apache-2.0 | フォルダ・ファイルの選択と確認のダイアログ |
+| leaflet | 1.9.4 | BSD-2-Clause | 位置を付けるダイアログの地図（LIB-21 の第 2 段階。2026-10-20 追加。2023-05-18 公開・依存なし。地図を出すときに読む別のファイルにまとまる。`LICENSE` は「BSD 2-Clause License」「Copyright (c) 2010-2023, Volodymyr Agafonkin」「Copyright (c) 2010-2011, CloudMade」。バイナリで再配布するときは、資料などに表示が要ると読める（第 2 項。人が確認する）。`package-lock.json` の integrity `sha512-nxS1yn…FA74PA==` は npm のレジストリの値と一致した） |
 
-- **開発・ビルドだけで使うもの（配布物に入らない）**: Vite 8.3.1（Rolldown・lightningcss など）、@vitejs/plugin-react 6.1.1、TypeScript 6.0.3、vitest 5.0.2、@tauri-apps/cli 2.11.5 ほか。ライセンスは MIT が大半で、ほかに Apache-2.0（TypeScript・detect-libc・expect-type）、MPL-2.0（lightningcss。CSS の変換で、出力に lightningcss のコードは入らないと考えるが要確認）、ISC（picocolors）、BSD-3-Clause（source-map-js）。
-- 配布物のライセンス表記（DIST-05）: **2026-10-20 から、配布物に入りうるパッケージ（`ui/package-lock.json` の開発用の印のないもの。2026-10-20 の時点で上の 7 つ）の一覧とライセンスの本文を `crates/genzo-app/licenses/third-party/npm.txt` に作り、配布物に入れる**（1.4 節）。新しい依存を足したら、この節の表に追記し、`node scripts/third-party.mjs` で作り直す。画面から import したパッケージは `dependencies` に入れる（`devDependencies` に入れるとバンドルに入るのに一覧から漏れる。CI と配布のビルドで、Vite の `build.license` の出力と照合して止める）。
+- **開発・ビルドだけで使うもの（配布物に入らない）**: Vite 8.3.1（Rolldown・lightningcss など）、@vitejs/plugin-react 6.1.1、TypeScript 6.0.3、vitest 5.0.2、@tauri-apps/cli 2.11.5、@types/leaflet 1.9.22（2026-08-01 公開）と、その依存の @types/geojson 7946.0.16（2025-01-23 公開。どちらも MIT。2026-10-20 に LIB-21 で追加）ほか。ライセンスは MIT が大半で、ほかに Apache-2.0（TypeScript・detect-libc・expect-type）、MPL-2.0（lightningcss。CSS の変換で、出力に lightningcss のコードは入らないと考えるが要確認）、ISC（picocolors）、BSD-3-Clause（source-map-js）。
+- 配布物のライセンス表記（DIST-05）: **2026-10-20 から、配布物に入りうるパッケージ（`ui/package-lock.json` の開発用の印のないもの。2026-10-20 の時点で上の 8 つ）の一覧とライセンスの本文を `crates/genzo-app/licenses/third-party/npm.txt` に作り、配布物に入れる**（1.4 節）。新しい依存を足したら、この節の表に追記し、`node scripts/third-party.mjs` で作り直す。画面から import したパッケージは `dependencies` に入れる（`devDependencies` に入れるとバンドルに入るのに一覧から漏れる。CI と配布のビルドで、Vite の `build.license` の出力と照合して止める）。leaflet の BSD-2-Clause の第 2 項の扱いは 3.14 節（条件を満たすかは人の確認待ち）。
 
 ### 1.2 この台帳で管理するもの
 
@@ -76,6 +117,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 - 移植・参考にするアルゴリズムとコード（RCD デモザイクなど）
 - テスト・評価の基準に使う公表データ（ColorChecker の基準値など）
 - 開発環境だけで使うもの（配布物に含めないことを確認するため）
+- 実行時に使う外部のサービス（利用ポリシー・利用規約のあるもの。2026-10-20 追加: OpenStreetMap のタイルと Nominatim。配布物には含めない。3.14 節）
 
 ### 1.3 記入のルール
 
@@ -86,7 +128,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 
 ### 1.4 配布物のライセンスの表示（DIST-05）
 
-2026-10-20 から、配布物に入る第三者のソフトウェアのライセンスの一覧と本文を、配布物の `licenses` フォルダに入れます（決定事項ログ No.193・194。AI 記入）。**どのライセンスに何が要るか、この内容で条件を満たすかは、法的な事項なので AI では確定しません。下の「人の確認が必要な事項」を、配布の前に人（必要なら専門家）が確かめてください。**
+2026-10-20 から、配布物に入る第三者のソフトウェアのライセンスの一覧と本文を、配布物の `licenses` フォルダに入れます（決定事項ログ No.194・195。AI 記入）。**どのライセンスに何が要るか、この内容で条件を満たすかは、法的な事項なので AI では確定しません。下の「人の確認が必要な事項」を、配布の前に人（必要なら専門家）が確かめてください。**
 
 - **配布物の中の場所**: Windows はインストール先（既定は `%LOCALAPPDATA%\GenzoParis`）の `licenses\`、macOS は `GenzoParis.app/Contents/Resources/licenses/`。アプリの設定の「このアプリについて」のタブで、文書を選んで読めます（フォルダも開けます。`crates/genzo-app/src/licenses.rs`。一覧にあるファイルだけを読む）。
 
@@ -105,7 +147,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - npm: `ui/package-lock.json` の開発用の印（`dev`・`devOptional`）のないパッケージ（`ui/package.json` の dependencies と、その推移的な依存）。ライセンスは package.json の `license` を `about.toml` の `accepted` の順で選び（Rust と同じ選び方。cargo-about の選択と、2026-10-20 の 380 crate すべてで一致することを確かめた）、本文はパッケージのフォルダのファイルから取ります。本文がなければ、上流のリポジトリのファイルの写し（`crates/genzo-app/licenses/third-party/supplements/`。SHA-256 で固定）を使い、それもなければ止めます（人が写しを足す）。2026-10-20 の時点で写しを使うのは `@tauri-apps/plugin-dialog` 2.7.3 だけです（npm のパッケージには `LICENSE.spdx` しかない。上流 `tauri-apps/plugins-workspace` のタグ `dialog-js-v2.7.3`（コミット 6aa2854f314481a459be1189b02c65a2450789ab）の `plugins/dialog/LICENSE_MIT`。SHA-256 `89ff9689dcf9dd53968785d05a26f7898bb169dbfcada8d032b3e68cf0d55607`。`LICENSE.spdx` は npm のものと同じ内容）。
   - **Vite の `build.license`**（Vite 8.3.1。`ui/vite.config.ts` で有効にし、`ui/dist/.vite/license.json` に出す）: バンドルに実際に入ったパッケージを列挙しますが、本文のファイルを 1 つしか拾わず（2026-10-20 の出力では、`@tauri-apps/api` は選んでいない Apache-2.0 の本文、`@tauri-apps/plugin-dialog` は SPDX の記述の `LICENSE.spdx`）、NOTICE も見ないため、文書には使いません。**バンドルに入ったものがすべて `npm.txt` に載っているかの照合だけ**に使います。
   - NOTICE のファイル（`NOTICE`・`NOTICES.md` など）は、ライセンスによらず載せます。2026-10-20 の時点で、Apache-2.0 を選んだ 7 crate（codespan-reporting・dpi・gl_generator・glutin_wgl_sys・khronos_api・spirv・tao）の直下に NOTICE のファイルはありません。`cfg_aliases` の `NOTICES.md`（tectonic の MIT の表示）は、本文として載っています。
-- **ライセンスの選び方**（決定事項ログ No.194。**AI の仮決定・人の確認待ち**）: 複数のライセンスから選べるもの（"MIT OR Apache-2.0" など）は、`about.toml` の `accepted` の順（CC0-1.0 → MIT → ISC → BSD-2-Clause → BSD-3-Clause → Zlib → Unicode-3.0 → BSL-1.0 → Apache-2.0 → Apache-2.0 WITH LLVM-exception。表示の義務の少ないものを先にした）で先のものを選び、その本文だけを載せます。brotli-decompressor 5.0.3（"BSD-3-Clause/MIT"。crate の本文は BSD-3-Clause の LICENSE だけ）は、本文のある BSD-3-Clause を選びます（`about.toml` の `clarify`。LICENSE の SHA-256 で固定し、変わると MIT の標準の文に戻って 3 章に出る）。MPL-2.0 の 5 crate は deny.toml と同じく crate ごとに許可しています。
+- **ライセンスの選び方**（決定事項ログ No.195。**AI の仮決定・人の確認待ち**）: 複数のライセンスから選べるもの（"MIT OR Apache-2.0" など）は、`about.toml` の `accepted` の順（CC0-1.0 → MIT → ISC → BSD-2-Clause → BSD-3-Clause → Zlib → Unicode-3.0 → BSL-1.0 → Apache-2.0 → Apache-2.0 WITH LLVM-exception。表示の義務の少ないものを先にした）で先のものを選び、その本文だけを載せます。brotli-decompressor 5.0.3（"BSD-3-Clause/MIT"。crate の本文は BSD-3-Clause の LICENSE だけ）は、本文のある BSD-3-Clause を選びます（`about.toml` の `clarify`。LICENSE の SHA-256 で固定し、変わると MIT の標準の文に戻って 3 章に出る）。MPL-2.0 の 5 crate は deny.toml と同じく crate ごとに許可しています。
   - 2026-10-20 の時点の内訳（選んだライセンスごとの crate の数。AND のものは両方に数える）: MIT 339・Unicode-3.0 19・Apache-2.0 7・BSD-3-Clause 6・MPL-2.0 5（cssparser・cssparser-macros・dtoa-short・option-ext・selectors）・CC0-1.0 3（blake3・constant_time_eq・dunce）・BSD-2-Clause 2・ISC 1・Zlib 1。npm は 7 パッケージとも MIT（`@tauri-apps/api`・`@tauri-apps/plugin-dialog` は "Apache-2.0 OR MIT" から MIT を選んだ）。
 - **更新のしかた**: `Cargo.lock`・`ui/package-lock.json`・`about.toml` を変えたら、`node scripts/third-party.mjs` を実行し（Rust は cargo-about、npm は `ui/` の `npm ci` が要る。Rust は約 1 分）、作り直した文書をコミットします。文書には元にした lock のファイルの SHA-256（改行を LF にそろえた値）を書くので、作り直していなければ次で止まります。
   - CI（`.github/workflows/ci.yml`）: `third-party` ジョブが cargo-about で作り直して `rust.txt` と比べ、`ui` ジョブが `npm.txt` を作り直して比べ、Vite の出力と照合します（`node scripts/third-party.mjs --check --only npm --vite`）。`scripts/lib/third-party.test.mjs` も lock の SHA-256 を比べます（cargo-about なしで分かる）。
@@ -148,6 +190,10 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | WebKitGTK・WebKitWebDriver | 開発環境（Linux のコンテナ）でアプリを動かす・E2E（`e2e/`） | 2.52.6（`libwebkit2gtk-4.1-dev`・`webkit2gtk-driver` 2.52.6-0ubuntu0.24.04.1） | Ubuntu 24.04 の apt | LGPL-2.1 / BSD とされる（要確認） | 開発環境だけ | 配布しない | — | AI 記入（2026-10-12） |
 | tauri-driver | E2E の WebDriver の中継（開発環境だけ） | 2.0.6（`cargo install tauri-driver --version 2.0.6 --locked`） | crates.io | Apache-2.0 OR MIT（crates.io の表示） | 開発環境だけ | 配布しない | — | AI 記入（2026-10-12） |
 | アプリのアイコン | アプリ・インストーラーのアイコン（`crates/genzo-app/icons/icon.svg` から `tauri icon` で作成） | — | このリポジトリ（自作） | アプリと同じ GPL-3.0-or-later | 同梱 | アプリ・インストーラー | — | AI 記入（2026-10-12） |
+| OpenStreetMap の地図のタイル（`tile.openstreetmap.org`） | 位置を付けるダイアログの地図（LIB-21 の第 2 段階。04 の 3.16 節）。利用者が有効にしたときだけ、表示している範囲のタイルを取る | 外部のサービス（OSM Foundation の標準のラスターのタイル） | `https://tile.openstreetmap.org/{z}/{x}/{y}.png`（設定で別の提供元に変えられる） | 地図のデータは ODbL（/copyright の本文の元）。利用はタイルの利用ポリシー（GitHub のソースで読んだ。公開ページは未確認）。タイルの画像のライセンスは要確認 | 実行時に HTTPS で取り、利用者の PC のキャッシュのフォルダ（`map-tiles`）に保存する（`genzo-geo`。フォルダがない・書けないときはメモリーだけ） | **配布物に含めない**（同梱・先読みしない） | 地図の右下に「© OpenStreetMap contributors」（/copyright を開く。文言・位置は人の確認待ち） | AI 記入（2026-10-20）。ポリシー・帰属・ODbL は人の確認待ち（3.14 節） |
+| Nominatim（地名の検索。`nominatim.openstreetmap.org`） | 位置を付けるダイアログの地名の検索（LIB-21 の第 2 段階）。**既定では使わない**。設定の「OSM の公開の地名の検索（Nominatim）を使う」を ON にしたときだけ使う（2026-10-20。決定事項ログ No.193）。設定した検索サービスで置き換えられる。利用者が Enter かボタンで検索したときだけ | 外部のサービス（OSM Foundation の Nominatim のサーバー） | `https://nominatim.openstreetmap.org/search`（設定で ON のときだけ。検索サービスの URL を設定したときはそちら） | 結果のデータは ODbL（ポリシーの原文と、応答の `licence`）。利用は Nominatim の利用ポリシー（GitHub のソースで読んだ。公開ページは未確認） | 実行時に HTTPS で問い合わせ、結果はプロセスの中だけにキャッシュする（`genzo-geo`） | **配布物に含めない** | 地図の右下の表示を共用する（検索の結果の一覧には出していない） | AI 記入（2026-10-20）。公開の Nominatim の扱いは利用者の決定（既定 OFF・設定で ON）。ポリシーの順守・ODbL の法的な最終の確認は人の確認待ち（3.14 節） |
+| 証明書の検証（Windows: CryptoAPI、macOS: Security.framework、Linux: OS の証明書の保管場所） | オンラインの地図の HTTPS のサーバーの証明書の検証（`rustls-platform-verifier` を通して使う。LIB-21。2026-10-20 に、OS の TLS（native-tls。Windows: SChannel、macOS: Security.framework、Linux: OpenSSL）から置き換えた。TLS そのものは rustls と ring） | OS のもの（同梱しない） | Windows・macOS・Linux の OS | OS の構成要素 | 実行時に OS の機能を呼ぶ・OS の証明書の保管場所を読む（同梱しない）。Linux は検証そのものを rustls-webpki が行う | 同梱しない | — | AI 記入（2026-10-20）。Windows・macOS の実機で未確認 |
+| ring（暗号の実装） | オンラインの地図の HTTPS の暗号（`rustls` 0.23.45 の暗号の実装。LIB-21。`genzo-geo`。2026-10-20 追加。それまで Linux の開発環境で動的リンクしていた OpenSSL は、同じ日にやめた（1.1 節）） | 0.17.14（crate。checksum は 1.1 節） | crates.io の `ring`（C とアセンブリを同梱）。上流は https://github.com/briansmith/ring （BoringSSL を元にした部分を含む） | crate の `Cargo.toml` は Apache-2.0 AND ISC。`LICENSE` によると、ring の新しいコードは ISC、BoringSSL から来たコードは Apache-2.0（一部は ISC。ファイルの先頭に書いてある）、`third_party/fiat`（fiat-crypto）は Apache-2.0（1.1 節）。ファイルごとのヘッダは未確認（要確認） | C のファイルとアセンブリを `cc` でビルドして静的にリンクする（C のコンパイラが要る） | アプリの実行ファイル（`genzo-app`）に入る。対応するソースは crates.io の ring 0.17.14 | 要確認。DIST-05 の全体の作業で扱う（未対応。初めての配布の前に要る） | AI 記入（2026-10-20）。FSF の一覧で Apache-2.0 と ISC は GPLv3 と両立するとされる（AI の理解）。GPL-3.0-or-later との両立の法的な最終の確認と表記の方法は人の確認待ち（3.14 節） |
 
 ## 3. 項目ごとの詳細と要確認の点
 
@@ -372,6 +418,57 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   1. 手法の権利（特許など）の有無と扱い（一般的な手法と考えているが、**AI は判断しない**）。
   2. 画面の構成・操作を Lightroom Classic に近づけたことの扱い（**AI は判断しない**）。
   3. 実写での画質（implementation_status の人の判断の表 No.163・164）。
+
+### 3.14 オンラインの地図（OpenStreetMap のタイル・Nominatim）と HTTPS（LIB-21。外部のサービス）
+
+**確認した資料**（2026-10-20（日本時間）、AI 記入。この環境からは公開ページに接続できなかったので、ページの元の GitHub のソースを `raw.githubusercontent.com` から読んだ）
+- タイルの利用ポリシー（https://operations.osmfoundation.org/policies/tiles/ ）: `openstreetmap/owg-website` の `policies/tiles.md`（`permalink: /policies/tiles/`。gh-pages・main・master のブランチで同じ中身。SHA-256 `33e26f327a55107dd8a8f078facd27f3538b1621578e182b0815b6a5ec0e4041`）。
+- Nominatim の利用ポリシー（https://operations.osmfoundation.org/policies/nominatim/ ）: 同じリポジトリの `policies/nominatim.md`（SHA-256 `f802152c4c878124f51d6660378d2655438fb91d3e4de3cca5a427ec33ae8576`）。
+- 著作権とライセンス（https://www.openstreetmap.org/copyright ）: `openstreetmap/openstreetmap-website` の master の `config/locales/en.yml`（ページの本文の元）と `app/views/site/copyright.html.erb`。
+- Nominatim の検索の API の資料: `osm-search/Nominatim` の master の `docs/api/Search.md`・`Output.md`（master なので、公開サーバーの版より先の機能が載っている可能性がある）。
+- **読めなかったもの**: 公開ページそのもの、Attribution Guidelines（https://wiki.osmfoundation.org/wiki/Licence/Attribution_Guidelines 。取得できなかった）、OSMF Terms of Use（https://wiki.osmfoundation.org/wiki/Terms_of_Use 。両方のポリシーが、OSMF のすべてのサービスにかかるとして参照する。読んでいない）。2026-10-20 にも、公開ページ（operations.osmfoundation.org・wiki.osmfoundation.org）は curl・WebFetch で名前解決できず読めない（WebSearch の抜粋で、公式の Nominatim のページの LLM の条項の文がソースの写しと一致した（一部の確認）。Attribution Guidelines は、抜粋によると OSMF の理事会が 2021-06-25 に採択）。ソースのコミットの SHA と、公開ページへの反映の時期も確かめていない。タイルのサーバーの実際の応答ヘッダーも確かめていない（`tile.openstreetmap.org`・`nominatim.openstreetmap.org` にも接続できなかった）。
+
+**実装の状況**（2026-10-20、AI 記入。決定事項ログ No.182・186〜191・193、04 の 3.16 節）
+- 外部のサービスとして実行時に HTTPS で使うだけで、**配布物には何も含めない**（タイルを同梱・先読みしない）。既定で無効で、利用者が有効にしたときだけ通信する。地名の検索の公開の Nominatim は、さらに設定で ON にしたときだけ使う（既定 OFF。利用者の決定。決定事項ログ No.193）。守るようにした規則（User-Agent・キャッシュ・条件付きの要求・1 秒に 1 回（1 つのプロセスの中の間隔。ポリシーの上限はアプリの全利用者の合計）・オートコンプリートの禁止・結果のキャッシュ・提供元の切り替え）は決定事項ログ No.188・189。
+- 帰属の表示: 地図の右下に「© OpenStreetMap contributors」（押すと /copyright を既定のブラウザで開く）と「地図の誤りを報告」（/fixthemap）を常に出す。設定でタイルの提供元を変えたときは、その提供元の帰属の表示（設定の `tile_attribution`）を、その前に文字だけで並べる（決定事項ログ No.191）。Leaflet の帰属の表示（Leaflet へのリンクと旗。`attributionControl` の prefix）は出していない（`attributionControl: false`）。これとは別に、Leaflet の BSD-2-Clause の第 2 項は、バイナリで配る場合に、著作権表示・条件・免責を資料などに再掲することを求めていると読める（地図の上の「Leaflet」のリンクは、この再掲には当たらないと考える）。要否と方法は AI の判断で確定せず、人が確かめる（DIST-05。未対応。4 章）。
+- TLS: rustls（Rust）と ring（C とアセンブリ。アプリの実行ファイルに静的にリンクされる。1.1 節・2 章）。証明書の検証は OS（Windows の CryptoAPI・macOS の Security.framework・Linux の OS の証明書の保管場所。同梱しない）。初めに使った native-tls（Windows の SChannel・macOS の Security.framework・Linux のシステムの OpenSSL）は、2026-10-20 にやめた（1.1 節）。
+- `genzo-geo` の `tls.rs`（native-tls で TLS の接続を組む部品。コミット `8cfeb81` で足し、`8ac4eda` で消した。今の木にはないが、git の履歴には残る）は、ureq 3.4.2 の `src/tls/native_tls.rs`（MIT OR Apache-2.0）を参考に、同じ流れ（構造）で書いた。両方のファイルから `//` で始まる行と空行を除き、行の前後の空白を除いて比べると、`tls.rs` の 117 行のうち、ureq のファイルにある行と同じものが 58 行（記号だけの行（`}`・`};`・`);` など）を除くと 31 行。行の順を保った一致（Python の difflib）では 47 行）。同じ行には、ureq の unversioned の API の trait のシグネチャのほか、処理の本体の行（`needs_tls` の判定、`LazyBuffers` の作成、`transmit_output`・`await_input` の本体の行など）も含まれる（2026-10-20 に、消す前の版の `tls.rs` と ureq 3.4.2 のソースで数え直した。前にこの台帳に書いた「21 行」は、数え方を書いておらず、再現できなかった）。
+- ureq の著作権の表示と許諾の文（2026-10-20 追加。旧 `tls.rs` が参考にした ureq 3.4.2 は MIT OR Apache-2.0。ここには crate の `LICENSE-MIT` をそのまま写す。この表示で足りるか・どちらの条件で表示するかの法的な最終の確認は人）:
+
+  ```text
+  MIT License
+
+  Copyright (c) 2019 Martin Algesten
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+  ```
+
+**人の確認が必要な事項**（**法的な事項は AI の判断で確定しない**）
+1. 公開ページ（タイル・Nominatim のポリシー、/copyright）と、読めなかった Attribution Guidelines・OSMF Terms of Use を読み、実装の規則と合うかを確かめる（implementation_status の人の判断の表 No.188）。
+2. Nominatim のポリシーの「Usage in LLMs」の節（「LLM がこのサービスを提案するときは、ポリシーをはっきり示して制限を説明すること」「LLM が生成したコードはすべての条項を守ること」「no-code・low-code・vibe-coding のプラットフォームが、公開の API を汎用の地名の検索などとして組み込む・提供する・提案する・自動で生成することはできない」「公開の API は、アプリの開発者がよく知ったうえで意図して使うと決め、順守に直接責任を持つ場合だけ使える」）に照らして、この使い方でよいかを利用者が決める（人の判断の表 No.187）。→ 2026-10-20 に、AI（まとめ役）が原文を示して説明し、利用者が公開の Nominatim を既定 OFF・設定で ON と決めた（決定事項ログ No.193）。法的な最終の確認だけが人に残る。
+3. 帰属の表示の文言・位置、ODbL の share-alike が付けた座標（カタログと書き出しの Exif に入る）に及ぶか、検索の結果の一覧の帰属（人の判断の表 No.189）。
+4. タイルの画像（地図の描き方）のライセンスの扱い（読んだ資料には、地図のデータの ODbL と資料の CC BY-SA 2.0 は書かれているが、タイルの画像については確かめていない）。
+5. 期限の切れたタイルを通信の失敗のときに出すこと（人の判断の表 No.190。2026-10-20 に AI が確認して続けると決めた。決定事項ログ No.188）と、User-Agent（アプリの名前とリポジトリの URL）が OSM の公開の利用統計に載りうること・連絡先（No.193）。
+6. `tls.rs`（今の木にはなく、git の履歴にだけ残る）が ureq のコードを参考にしたことについて、履歴ごと main に入れる場合に著作権表示が要るか（AI は判断しない。上の行の数と、流れを ureq に合わせたことを判断の材料にする）。2026-10-20 に、ureq の著作権の表示と許諾の文を上の「実装の状況」に写した。法的な最終の確認だけが人に残る。
+7. ring（Apache-2.0 AND ISC。BoringSSL・fiat-crypto のコードを含む）の GPL-3.0-or-later との両立と、2 章の一覧・配布物のライセンスの表記（DIST-05）での書き方（2 章の「ring」「証明書の検証」の行は AI の案）。FSF の一覧で Apache-2.0 と ISC は GPLv3 と両立するとされる（AI の理解。法的な最終の確認は人）。ring と Leaflet の表記は DIST-05 の全体の作業で扱う（未対応。初めての配布の前に要る）。
+8. `rustls` 0.23.45 の脆弱性の通知 4 件（RUSTSEC-2026-0346〜0349）を `deny.toml` で除いたこと（このアプリの使い方では当たらないという AI の判断。理由は `deny.toml`）と、0.23.46 以上へ上げる時期（2026-10-28 以降の予定。公開から 2 週間のきまりの例外にして今すぐ上げるかも含む）。→ 2026-10-20 に AI が確かめ、除外を続けて 2026-10-28 に上げる予定（確認を予約済み。人の判断の表 No.194）。
+9. タイルのポリシーの推奨（should）「HTTP/2 か HTTP/3 で多重化してダウンロードする」に沿っていないこと（`ureq` 3.4.2 は HTTP/1.1 だけ。上流へ同時に送るのはタイル専用のスレッド 2 本（`genzo-app` の `TILE_THREADS`）までで、接続は keep-alive で使い回す。決定事項ログ No.187）。沿ってよいかは人が決める（人の判断の表 No.187）。
 
 ## 4. 今後記入する対象
 

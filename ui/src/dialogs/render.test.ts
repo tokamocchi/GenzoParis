@@ -185,6 +185,8 @@ describe("ダイアログ", () => {
     const html = render(createElement(ExportDialog, { variantIds: [1, 2, 3] }));
     expect(html).toContain("書き出し（3 枚）");
     expect(html).toContain("位置情報（GPS）を削除する");
+    // 後から付けた位置（LIB-21）も、この設定では書かない。
+    expect(html).toContain("後から付けた位置も書きません");
     // 書き出しプリセット（EXP-02）とファイル名。
     expect(html).toContain("プリセット");
     expect(html).toContain("新しく保存…");

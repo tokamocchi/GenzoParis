@@ -19,7 +19,7 @@ GenzoParis のカタログ（SQLite のデータベース）の構造と、外�
 
 スキーマの版は `PRAGMA user_version`、GenzoParis のファイルであることの印は `PRAGMA application_id` に入っています。
 
-- catalog.db のスキーマの版: **12**（`application_id` は 1197097812 = 16 進数の 0x475A4354 = ASCII の `GZCT`）
+- catalog.db のスキーマの版: **13**（`application_id` は 1197097812 = 16 進数の 0x475A4354 = ASCII の `GZCT`）
 - thumbs.db のスキーマの版: **2**（`application_id` は 1197102152 = 16 進数の 0x475A5448 = ASCII の `GZTH`）
 
 アプリは、古い版のカタログを開くと、自動でバックアップを作ってから新しい版に移行します。新しい版のカタログは、古いアプリでは開けません（壊さないため）。
@@ -38,6 +38,7 @@ GenzoParis のカタログ（SQLite のデータベース）の構造と、外�
 | 10 | 内容による同一性（ORG-03・IMP-04・IMP-06）: クイックハッシュ・全体のハッシュの索引（`file_quick_hash`・`file_full_hash`）、公開ビュー `photo_files_v1`。既存のファイルの全体のハッシュは移行では計算しない（アプリがバックグラウンドで計算する） | `catalog_0010_content_identity.sql` |
 | 11 | 撮影日時の一括修正（LIB-16）: カメラの本体のシリアル番号（`asset.camera_serial`）と UTC の計算に使ったオフセット（`asset.tz_basis`）の列、修正の履歴（`capture_time_edit`・`capture_time_edit_item`）、`photos_v1` の列 `camera_serial`。既存の行の 2 つの列は NULL のまま（撮影日時は変わらない） | `catalog_0011_capture_time_edits.sql` |
 | 12 | 外付けドライブの識別（FILE-03）・見つからない写真（FILE-04）: ボリュームのファイルシステムの種類（`volume.fs_type`）と最後につながった日時（`volume.last_seen_at`）、フォルダの状態（`folder.status`・`folder.status_at`）、状態が `ok` でないファイルの部分索引（`file_not_ok`）。版 11 までのパスから作ったボリュームの ID（`path:`）は移行では変えない（アプリが開いたときに、見えるフォルダから OS のボリューム ID へ移す。2.4 節） | `catalog_0012_volumes_and_missing.sql` |
+| 13 | 位置情報の後付け（LIB-21。ジオタグ付け）: 後から付けた位置（`asset_location`。元のファイルには書かない）、位置の変更の履歴（`location_edit`・`location_edit_item`）、`photos_v1` の列 `location_lat`・`location_lon`・`location_source`（使う位置とその出どころ）。`asset` の表は変えない（`gps_lat`・`gps_lon` はカメラの記録の値のまま）。既存の asset には行を作らない | `catalog_0013_asset_locations.sql` |
 
 ## 2. 読み方
 
@@ -48,7 +49,7 @@ SQLite の CLI（`sqlite3`）:
 ```sh
 # 読み取り専用で開く（-readonly）。Windows ではパスを "C:\Users\...\catalog.db" のように書く。
 sqlite3 -readonly ~/Pictures/GenzoParis/catalog.db
-sqlite> PRAGMA user_version;            -- スキーマの版（12）
+sqlite> PRAGMA user_version;            -- スキーマの版（13）
 sqlite> .mode box
 sqlite> SELECT variant_id, file_name, captured_at_local, rating
    ...> FROM photos_v1 WHERE rating >= 4 ORDER BY captured_at_utc;
@@ -102,12 +103,14 @@ volume ─< folder ─< file >─ asset ─< variant ─< history_entry
                                  │           ├─< collection_member >─ collection（階層）
                                  │           └─  stack_member >─ stack
                                  ├─  video_meta（動画だけ）
+                                 ├─  asset_location（後から付けた位置。付けた asset だけ）
                                  └─  asset_text（検索用の文字列）─ asset_fts（全文検索の索引）
 ```
 
 - **asset** は写真・動画の実体（1 回の撮影）です。RAW と JPEG のペアは 1 つの asset に 2 つの **file**（`role` が `primary` と `sidecar_jpeg`）として属します。
 - **variant** は画面のグリッドに並ぶ単位で、asset ごとにマスター（`is_master = 1`）が 1 つと、仮想コピー（`is_master = 0`）が 0 個以上あります。評価・フラグ・カラーラベル・現像設定・キーワードは variant に付きます。キャプションと説明のメタデータ（タイトル・作成者・著作権など。`asset_iptc`）は asset に付きます（仮想コピーも同じ値）。
 - 画面・CLI の「写真の ID」は variant の ID（`variant.id`）です。
+- 位置（LIB-21。版 13 から）: `asset.gps_lat`・`gps_lon` はカメラ（元のファイル）の記録の値で、取り込み・ファイルの読み直しのたびにファイルの値で上書きされます。利用者が後から付けた位置は `asset_location`（asset と 1 対 1。仮想コピーも同じ位置）にあり、元のファイルには書きません。アプリが使う位置（書き出しの Exif・詳細の表示）は、付けた位置があればそれ、なければカメラの位置で、`photos_v1` の `location_lat`・`location_lon`・`location_source` で読めます。
 - `asset.id`・`variant.id`・`file.id`・`history_entry.id`・`snapshot.id`・`file_op.id` は、削除した後も同じ値を使い回しません（`AUTOINCREMENT`。サムネイル DB などの外部のキャッシュが ID で参照するため）。`folder.id`・`keyword.id`・`collection.id` も、版 8 から使い回しません（スマートコレクションの条件や画面のターゲットコレクションが ID で参照し、削除したものを参照する条件が、後から作ったものに付け替わらないようにするため。版 7 までに削除したものも、条件が参照している ID は使いません）。`stack.id` も版 9 から使い回しません（画面・CLI がスタックを ID で指すため）。`volume` の ID は使い回すことがあります。
 - 外部キーは、asset を消すと file・variant・履歴・キーワードの付与などが消える（`ON DELETE CASCADE`）ように定義しています。キーワード・コレクションそのものは残ります。外部キーの確認は接続ごとの設定（`PRAGMA foreign_keys`）で、アプリはすべての接続で有効にしています。
 - 元ファイルの絶対パスは「ボリュームのマウント先（`volume.last_mount_path`）＋ フォルダ（`folder.rel_path`。区切りは `/`）＋ ファイル名（`file.name`）」です。版 12 から（FILE-03）、ボリュームは OS のボリューム ID で識別し（`volume.uuid` が `uuid:<ファイルシステムの UUID>`（Linux・macOS）・`winvol:<ファイルシステム>:<シリアル番号>`（Windows）・`net:<共有の名前>`（ネットワークのボリューム）の形）、ドライブ文字やマウント先が変わると、アプリが `last_mount_path` を新しいマウント先にします。ボリューム ID を取れないファイルシステム（コンテナの中・一時的なファイルシステムなど）と版 11 までに登録したものは、パスの先頭のマウント先から作った `path:/`・`path:C:\` の形です。**つながっていないボリュームの `last_mount_path` には、別のドライブがつながっていることがあります**（外部のツールでそのパスを開くと、別のファイルを読みうる）。
@@ -173,11 +176,15 @@ SELECT master_variant_id, folder_path, file_name FROM photo_files_v1 WHERE role 
 SELECT full_hash, count(*) AS files, group_concat(folder_path || '/' || file_name, ' | ') AS paths
 FROM photo_files_v1 WHERE full_hash IS NOT NULL
 GROUP BY full_hash HAVING count(*) > 1;
+
+-- 位置（後から付けた位置があればそれ、なければカメラの位置）のある写真と、その出どころ（版 13 から）。
+SELECT variant_id, file_name, location_lat, location_lon, location_source
+FROM photos_v1 WHERE location_source IS NOT NULL;
 ```
 
 ## 3. 公開ビュー
 
-外部から読むための安定した入口です（スキーマの版 5 から。版 6・版 11 で `photos_v1` に列を足した。版 7 で `photo_collections_v1`、版 9 で `photo_stacks_v1`、版 10 で `photo_files_v1` を足した）。
+外部から読むための安定した入口です（スキーマの版 5 から。版 6・版 11・版 13 で `photos_v1` に列を足した。版 7 で `photo_collections_v1`、版 9 で `photo_stacks_v1`、版 10 で `photo_files_v1` を足した）。
 
 - **約束**: 名前の末尾の版（`_v1`）が同じ間は、列の名前・意味・値の形を変えず、列を減らしません。変える必要があれば、別の名前（`_v2`）のビューを足します。列を足すことはあるので、`SELECT *` ではなく列の名前を指定して読んでください。行の並び順は決めていないので、`ORDER BY` を指定してください。
 - ビューは読むためのものです（書き込めません）。
@@ -211,8 +218,8 @@ GROUP BY full_hash HAVING count(*) > 1;
 | `width` | INTEGER | 画像の幅（画素。向き（`orientation`）を適用する前） |
 | `height` | INTEGER | 画像の高さ（画素。向きを適用する前） |
 | `orientation` | INTEGER | 向き（EXIF の Orientation の 1〜8） |
-| `gps_lat` | REAL | 緯度（度。北が正） |
-| `gps_lon` | REAL | 経度（度。東が正） |
+| `gps_lat` | REAL | 緯度（度。北が正。カメラ（元のファイル）の記録の値。後から付けた位置は `location_lat`） |
+| `gps_lon` | REAL | 経度（度。東が正。カメラの記録の値。後から付けた位置は `location_lon`） |
 | `caption` | TEXT | キャプション（asset に付く。仮想コピーも同じ値） |
 | `file_name` | TEXT | 元ファイルの名前 |
 | `folder_path` | TEXT | 元ファイルのフォルダ（ボリュームの中の相対パス。区切りは `/`。ボリュームの最上位は空文字列） |
@@ -231,6 +238,9 @@ GROUP BY full_hash HAVING count(*) > 1;
 | `creator` | TEXT | 作成者（`asset_iptc.creator`。版 6 から） |
 | `copyright` | TEXT | 著作権表示（`asset_iptc.copyright`。版 6 から） |
 | `camera_serial` | TEXT | カメラの本体のシリアル番号（`asset.camera_serial`。版 11 から。記録しないカメラ・版 11 より前に取り込んだものは NULL） |
+| `location_lat` | （式） | 使う位置の緯度（度。北が正。版 13 から）: 後から付けた位置（`asset_location.lat`）があればそれ、なければカメラの位置（`gps_lat`）。位置がなければ NULL |
+| `location_lon` | （式） | 使う位置の経度（度。東が正。版 13 から。緯度と同じ出どころ） |
+| `location_source` | （式） | 使う位置の出どころ: `assigned`（後から付けた位置）/ `camera`（カメラの記録）/ NULL（位置なし）。版 13 から。カメラの記録が緯度・経度の片方だけなら位置なし（3 列とも NULL） |
 
 そのほかの説明のメタデータ（見出し・連絡先・撮影場所など）は、表 `asset_iptc`（4 章）を `asset_id` で結んで読みます（表の構造は変わることがあります）。
 
@@ -340,8 +350,8 @@ GROUP BY full_hash HAVING count(*) > 1;
 | `width` | INTEGER | 可 | | 幅（画素。向きを適用する前） |
 | `height` | INTEGER | 可 | | 高さ（画素。向きを適用する前） |
 | `orientation` | INTEGER | 不可 | `1` | 向き（EXIF の 1〜8。`CHECK`） |
-| `gps_lat` | REAL | 可 | | 緯度（度） |
-| `gps_lon` | REAL | 可 | | 経度（度） |
+| `gps_lat` | REAL | 可 | | 緯度（度。カメラ（ファイル）の記録の値。取り込み・読み直しのたびにファイルの値にする。後から付けた位置は `asset_location`） |
+| `gps_lon` | REAL | 可 | | 経度（度。同上） |
 | `caption` | TEXT | 可 | | キャプション |
 | `created_at` | TEXT | 不可 | | 登録した日時（UTC） |
 | `camera_serial` | TEXT | 可 | | カメラの本体のシリアル番号（Exif の BodySerialNumber。機材ごとの時刻の補正に機種と組で使う。版 11 から） |
@@ -584,6 +594,42 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 | `prev_tz_basis` | TEXT | 可 | | 変える前の `tz_basis` |
 | `prev_correction_s` | INTEGER | 不可 | | 変える前の `time_correction_s` |
 
+### `asset_location`
+
+後から付けた位置（01 の LIB-21。版 13 から）。元のファイルには書かず、カタログの中だけに持ちます（書き出したファイルには Exif の GPS として入れる。書き出しの設定で位置情報を削除するときは入れない）。asset と 1 対 1 で、**位置を付けた asset だけが行を持ちます**（消すと行も消し、カメラの位置に戻る）。座標は WGS 84 の 10 進の度です。
+
+| 列 | 型 | NULL | 既定値 | 意味 |
+|---|---|---|---|---|
+| `asset_id` | INTEGER | 不可 | | asset（→ `asset.id`。主キー。asset を消すと消える） |
+| `lat` | REAL | 不可 | | 緯度（度。北が正。-90〜90。`CHECK`） |
+| `lon` | REAL | 不可 | | 経度（度。東が正。-180〜180。`CHECK`） |
+| `set_at` | TEXT | 不可 | | 付けた日時（UTC） |
+
+### `location_edit`
+
+位置の変更の履歴（LIB-21。版 13 から）。1 行が 1 回の変更（位置を付ける・付けた位置を消す）です。アプリは新しい順に 20 回分を残し（`location.rs` の `MAX_LOCATION_EDITS`）、最後の変更から順に取り消せます。
+
+| 列 | 型 | NULL | 既定値 | 意味 |
+|---|---|---|---|---|
+| `id` | INTEGER | 不可 | | 主キー（`AUTOINCREMENT`） |
+| `kind` | TEXT | 不可 | | `set`（位置を付けた）/ `clear`（付けた位置を消した）（`CHECK`） |
+| `lat` | REAL | 可 | | 付けた緯度（`set`。`clear` は NULL。`CHECK`） |
+| `lon` | REAL | 可 | | 付けた経度（`set`。`clear` は NULL） |
+| `asset_count` | INTEGER | 不可 | | 変えた asset の数（`CHECK`） |
+| `created_at` | TEXT | 不可 | | 変更した日時（UTC） |
+
+### `location_edit_item`
+
+変更で変えた asset ごとの、変える前の付けた位置（版 13 から。`WITHOUT ROWID`）。カメラの位置（`asset.gps_lat`・`gps_lon`）は変更で変えないので記録しません。
+
+| 列 | 型 | NULL | 既定値 | 意味 |
+|---|---|---|---|---|
+| `edit_id` | INTEGER | 不可 | | `location_edit.id`（主キーの 1 つ目。変更の行を消すと消える） |
+| `asset_id` | INTEGER | 不可 | | `asset.id`（主キーの 2 つ目。asset を消すと消える） |
+| `prev_lat` | REAL | 可 | | 変える前の付けた緯度（付けていなければ NULL。`CHECK`） |
+| `prev_lon` | REAL | 可 | | 変える前の付けた経度 |
+| `prev_set_at` | TEXT | 可 | | 変える前の付けた日時（UTC） |
+
 ### `app_state`
 
 アプリの状態（キー・値。`WITHOUT ROWID`）。
@@ -651,6 +697,7 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 | `stack_top_variant` | `stack(top_variant_id)` | variant を消すときの参照の確認（版 2） |
 | `file_op_unfinished` | `file_op(id) WHERE state IN ('planned', 'executing')` | 起動時に終わっていない記録を探す |
 | `capture_time_edit_item_asset` | `capture_time_edit_item(asset_id)` | asset を消すときの参照の確認（版 11） |
+| `location_edit_item_asset` | `location_edit_item(asset_id)` | asset を消すときの参照の確認（版 13） |
 
 `UNIQUE` の制約と主キーには、SQLite が自動で索引（`sqlite_autoindex_*`）を作ります。
 
