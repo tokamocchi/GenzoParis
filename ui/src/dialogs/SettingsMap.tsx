@@ -1,5 +1,6 @@
 // 設定の「一般」の「オンラインの地図（OpenStreetMap）」（位置情報の後付け LIB-21 の第 2 段階。docs/04 の 3.16 節）:
-// 有効・無効、タイルのキャッシュの大きさと消去、詳細（地図の提供元の URL）、利用ポリシーのページ。
+// 有効・無効、タイルのキャッシュの大きさと消去、詳細（地図の提供元の URL・帰属の表示と、プロキシの説明）、利用ポリシーの
+// ページ。
 //
 // - 既定で無効（docs/02 の SEC-02）。初めて有効にするとき（consented_at がまだない）は、位置を付けるダイアログと
 //   同じ説明と確認（MapConsent.tsx）を出す。
@@ -7,8 +8,12 @@
 //   「再起動すると有効」とは別）。
 // - 提供元の URL（OSM のポリシーの「ソフトウェアの更新なしに切り替えられること」）は空なら OpenStreetMap の標準。
 //   https の URL だけ（形はアプリが確かめ、使えなければ何も保存しない）。PNG のタイルを配る提供元だけ（genzo-geo は
-//   Content-Type が image/png で PNG の署名で始まる応答だけを受け取る。保存のときには種類を確かめられないので、
-//   説明に書く）。
+//   Content-Type が image/png で PNG の署名で始まる応答だけを受け取る。保存のときにアプリが断るのは、URL の拡張子で
+//   わかる PNG でないもの（.jpg・.webp・.pbf など。genzo-geo の validate_tile_url_template。目安）だけで、拡張子のない
+//   URL は応答で確かめるので、説明に書く）。
+// - プロキシの説明: genzo-geo（proxy.rs）が読むのは、環境変数と Windows の手動のプロキシの設定だけ。PAC・設定の
+//   自動検出・Windows 以外のシステムの設定は読まずに直接つなぎ、SOCKS は誤りにする。読まない設定は誤りにならない
+//   （つながらないときに、通信の失敗としか分からない）ので、説明に書く。
 // - 地図の帰属の表示（tile_attribution）: タイルの URL を変えたときだけ使い、地図の右下に「© OpenStreetMap
 //   contributors」と並べて文字だけで出す（GeoMap.tsx。多くの提供元は自分の帰属の表示を利用の条件にしている）。
 //   タイルの URL が空の間は入力できない（アプリも保存のときに null にする）。タイルの URL があるのに空なら案内する。
@@ -61,8 +66,9 @@ const CACHE_NOTE =
 /** 提供元の URL の説明。 */
 const PROVIDER_NOTE =
   "空なら OpenStreetMap の標準を使います。OpenStreetMap のサーバーが使えないときや、利用の量が多いときは、OSM の" +
-  "データを使う別の提供元に切り替えられます（https の URL で、PNG のタイルを配る提供元だけ。JPEG・WebP などの" +
-  "タイルは読み込めません。その提供元の利用条件を確かめてください。最大の" +
+  "データを使う別の提供元に切り替えられます（https の URL で、PNG のタイルを配る提供元だけ。JPEG・WebP・ベクトルの" +
+  "タイルなどは読み込めません（URL の拡張子が .jpg・.webp などなら、保存のときに断ります）。その提供元の利用条件を" +
+  "確かめてください。最大の" +
   `ズームは ${MAP_MAX_ZOOM} とみなします）。地図の右下には「${MAP_ATTRIBUTION}」を常に出し、その提供元の帰属の` +
   "表示は、下の「地図の帰属の表示」に入れると並べて出します。";
 
@@ -71,6 +77,14 @@ const PROVIDER_FIELDS_NOTE =
   "タイルの URL は {z}・{x}・{y} を 1 つずつ含めてください。地名の検索は Nominatim と同じ形の /search の API です。" +
   "地図の帰属の表示は、タイルの URL を変えたときだけ使い、地図の右下に文字だけで出します（リンクにはしません。" +
   `${MAX_TILE_ATTRIBUTION_CHARS} 文字まで）。`;
+
+/** 通信のプロキシの説明（genzo-geo の proxy.rs が読む設定）。 */
+const PROXY_NOTE =
+  "通信のプロキシは、環境変数（HTTPS_PROXY・ALL_PROXY・HTTP_PROXY と NO_PROXY）か、Windows の手動のプロキシの設定" +
+  "（例外のアドレスを含む）を使います。自動構成スクリプト（PAC）・設定の自動検出と、Windows 以外のシステムの設定の" +
+  "プロキシは読みません（それらだけが設定されているときは、直接つなぎます。プロキシが要るときは、環境変数" +
+  " HTTPS_PROXY を設定してください）。" +
+  "SOCKS のプロキシには対応していません。";
 
 /** タイルの URL を変えたのに、地図の帰属の表示が空のときの案内。 */
 const ATTRIBUTION_MISSING_NOTE =
@@ -201,7 +215,7 @@ export function SettingsMap() {
       <ErrorBox error={cacheError} title="キャッシュを消せません" />
 
       <details>
-        <summary className="hint">詳細（地図の提供元）</summary>
+        <summary className="hint">詳細（地図の提供元・プロキシ）</summary>
         <p className="hint">
           {PROVIDER_NOTE}
         </p>
@@ -265,6 +279,9 @@ export function SettingsMap() {
             提供元を保存
           </button>
         </div>
+        <p className="hint">
+          {PROXY_NOTE}
+        </p>
       </details>
 
       <div className="dlg-row" style={{ marginTop: 6 }}>

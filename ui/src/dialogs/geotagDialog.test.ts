@@ -300,11 +300,19 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     expect(off).toContain("tile.openstreetmap.org");
     expect(off).toContain("キャッシュを消す");
     expect(off).toContain("200 MB を超えたら古いものから消します");
-    expect(off).toContain("詳細（地図の提供元）");
+    expect(off).toContain("詳細（地図の提供元・プロキシ）");
     expect(off).toContain(`placeholder="${DEFAULT_TILE_URL}"`);
     expect(off).toContain("最大のズームは 19");
-    // 提供元は PNG のタイルを配るものだけ（genzo-geo は PNG でない応答を受け取らない）。
+    // 提供元は PNG のタイルを配るものだけ（genzo-geo は PNG でない応答を受け取らない）。拡張子でわかるものは、
+    // 保存のときにアプリが断る（genzo-geo の validate_tile_url_template）。
     expect(off).toContain("PNG のタイルを配る提供元だけ");
+    expect(off).toContain("URL の拡張子が .jpg・.webp などなら、保存のときに断ります");
+    // プロキシは環境変数と Windows の手動の設定だけを読む（PAC・自動検出・Windows 以外のシステムの設定は読まない。
+    // genzo-geo の proxy.rs）。SOCKS は使えない。
+    expect(off).toContain("環境変数（HTTPS_PROXY・ALL_PROXY・HTTP_PROXY と NO_PROXY）");
+    expect(off).toContain("Windows の手動のプロキシの設定");
+    expect(off).toContain("自動構成スクリプト（PAC）・設定の自動検出");
+    expect(off).toContain("SOCKS のプロキシには対応していません");
     expect(off).toContain("地図のタイルの要求");
     expect(off).toContain("タイルの利用ポリシー");
 

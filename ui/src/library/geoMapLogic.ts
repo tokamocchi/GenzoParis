@@ -110,7 +110,7 @@ export function urlFieldValue(text: string): string | null {
   return trimmedOrNull(text);
 }
 
-/** 設定の画面の「詳細（地図の提供元）」の欄の文字。 */
+/** 設定の画面の「詳細（地図の提供元・プロキシ）」の提供元の欄の文字。 */
 export interface ProviderFields {
   tileUrl: string;
   searchUrl: string;
