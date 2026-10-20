@@ -131,6 +131,7 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 - **公開の範囲の確認**: リポジトリが公開（public）のときは、Actions の artifact を GitHub にログインした誰でも取得できます（2026-10-12 時点で、このリポジトリは公開）。そのため、入力の「allow_public_artifacts」に印を付けないと、最初の段階で何も作らずに止まります。印を付けるのは、配布の責任者が、配布物を誰でも取得できる状態にしてよいこと（LibRaw の LGPL などの条件・署名のない配布物を社外に出してよいか。8 章）を確かめた後だけにしてください。配る相手だけに渡したい場合は、非公開のリポジトリで実行するか、手元で作って（2.2・2.3）社内の共有の場所に置いてください。非公開のリポジトリでは、この確認は行いません。
 - 実行の画面で「Use workflow from」に `v` で始まるタグ（`v0.1.0` など）を選んだときは、最初にタグの版（`v0.1.0` なら 0.1.0）と、`tauri.conf.json` の `version`・Cargo の版（genzo-app・genzo-worker）が同じかを確かめ、違えば止めます（配布物のファイル名・中の版は `tauri.conf.json` の版になるため。版を直してからタグを付け直す）。
 - macOS では、同梱する dylib が `.app` の最小の版より新しい macOS 向けだと止まります（2.3）。配る相手の Mac がすべてその版以降なら、実行の画面で「allow_newer_macos_libs」に印を付けて実行します。このとき、artifact の名前に `-macos<版>-or-later` が付き、ジョブの summary に各ファイルの `minos` が出ます。
+- 配布物を作る前に、`licenses` ジョブ（Linux）で、Rust の crate のライセンスの文書（`crates/genzo-app/licenses/third-party/rust.txt`）を cargo-about 0.9.2 で作り直し、リポジトリのものと同じかを確かめます（CI の `third-party` ジョブと同じ。通らなければ配布物のジョブは動かない。[第三者の台帳](third_party.md) の 1.4 節）。
 - 配布物を作った後、artifact に置く **前に**、配布物の中のワーカーが同梱の LibRaw で起動できるかを確かめます。
   - Windows: インストーラーを `/S` で無人インストールし、`PATH` を OS のフォルダだけにして `genzo-worker.exe --version` を実行する（終了コードと「genzo-worker <版>」の出力）。
   - macOS: `codesign --verify`、Info.plist の最小の版、`hdiutil verify`（.dmg）を見た後、`DYLD_PRINT_LIBRARIES=1` でワーカーを起動し、終了コード・「genzo-worker <版>」の出力・dyld のエラー（`Library not loaded`）がないこと・`Contents/Frameworks` のすべての dylib を `.app` の中から読み込んだこと・Homebrew の場所から読み込んでいないことを確かめる。

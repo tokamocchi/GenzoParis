@@ -11,7 +11,8 @@
 # （LGPL-2.1 の全文・案内を含む。scripts/prepare-worker.mjs）→ tauri build --config tauri.bundle.conf.json --config binaries/tauri.libs.conf.json
 # （scripts/build-app.mjs。第三者のライセンスの文書が今の lock のファイルから作ったものかと、画面のバンドルに入った
 # npm のパッケージがすべて載っているかも確かめる）→ 確認（ワーカーが同梱の LibRaw で起動できるか。ライセンスの文書が
-# 入っているか）→ artifact に置く。
+# 入っているか）→ artifact に置く。その前に licenses ジョブ（Linux）で、Rust の crate のライセンスの文書を cargo-about で
+# 作り直して比べる（通らなければ配布物を作らない）。
 # Windows は、ワーカーと LibRaw の DLL が使う Visual C++ のランタイムの DLL も同梱する（ランナーの Visual Studio の
 # 再頒布用のフォルダから。決定事項ログ No.73）。
 # 確認に通らなかった配布物は、配る用の artifact には置かない（調べるために「-unverified」の名前で置く）。
@@ -56,7 +57,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 配布物に入れる Rust の crate のライセンスの文書（crates/genzo-app/licenses/third-party/rust.txt）が、今の
+  # Cargo.toml・Cargo.lock・about.toml から cargo-about で作ったものと同じかを確かめる（ci.yml の third-party ジョブと
+  # 同じ。DIST-05。docs/third_party.md の 1.4 節）。配布のビルド（scripts/build-app.mjs）は cargo-about を使わずに
+  # Cargo.lock・about.toml の SHA-256 だけを比べるので、Cargo.toml の機能フラグ・対象の OS ごとの依存の変更
+  # （Cargo.lock は変わらないことがある）を見逃しうる。配布物を作る前に、ここで作り直して比べる。
+  licenses:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # scripts/lib/third-party.mjs の CARGO_ABOUT_VERSION と同じ版（scripts/workflows.test.mjs で確かめる）。
+      CARGO_ABOUT_VERSION: "0.9.2"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable（2026-10-12 のブランチの先頭）
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: cargo-about を入れる
+        shell: bash
+        run: |
+          if [ "$(cargo about --version 2>/dev/null)" != "cargo-about ${CARGO_ABOUT_VERSION}" ]; then
+            cargo install cargo-about --version "${CARGO_ABOUT_VERSION}" --locked --features cli
+          fi
+          cargo about --version
+      - name: Rust の crate のライセンスの文書の確認
+        run: node scripts/third-party.mjs --check --only rust
+
   bundle:
+    needs: licenses
     strategy:
       fail-fast: false
       matrix:
