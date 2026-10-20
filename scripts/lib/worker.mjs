@@ -216,6 +216,12 @@ export function prepareWorker() {
   return { triple, os, sidecar, libs: bundled.map((b) => b.name) };
 }
 
+/** `file` が `dir` の中か（`dir` そのものは含めない。パスを解決して比べる。Windows では大文字・小文字を区別しない）。 */
+function isInsideDir(dir, file) {
+  const rel = path.relative(path.resolve(dir), path.resolve(file));
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 /**
  * Windows: LibRaw の場所を環境変数に入れ、DLL を探すフォルダと、vcpkg の場所と triplet を返す。配布物を作るには
  * vcpkg の LibRaw が要る（同梱する DLL のライセンスの文書と LibRaw のソースを vcpkg から集めるため。決定事項ログ
@@ -230,9 +236,10 @@ export function setupWindowsLibraw(env) {
   const triplet = env.VCPKG_DEFAULT_TRIPLET || "x64-windows";
   const vcpkgCandidate = env.VCPKG_ROOT || env.VCPKG_INSTALLATION_ROOT;
   if (env.LIBRAW_INCLUDE_DIR && env.LIBRAW_LIB_DIR) {
-    const installed = vcpkgCandidate ? path.resolve(vcpkgCandidate, "installed", triplet) : null;
-    const rel = installed ? path.relative(installed, path.resolve(env.LIBRAW_LIB_DIR)) : null;
-    if (rel !== null && rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) usedVcpkg = vcpkgCandidate;
+    // 指定したフォルダ（.lib・ヘッダ・DLL）がすべて、その vcpkg の installed/<triplet> の中なら vcpkg の LibRaw。
+    const installed = vcpkgCandidate ? path.join(vcpkgCandidate, "installed", triplet) : null;
+    const dirs = [env.LIBRAW_INCLUDE_DIR, env.LIBRAW_LIB_DIR, env.LIBRAW_DLL_DIR].filter((d) => d);
+    if (installed && dirs.every((d) => isInsideDir(installed, d))) usedVcpkg = vcpkgCandidate;
   } else {
     const vcpkgRoot = vcpkgCandidate;
     if (!vcpkgRoot) {
@@ -247,7 +254,8 @@ export function setupWindowsLibraw(env) {
   }
   if (!usedVcpkg) {
     throw new Error(
-      `配布物を作るには vcpkg の LibRaw が要る（LIBRAW_LIB_DIR=${env.LIBRAW_LIB_DIR} は VCPKG_ROOT の installed/${triplet} の外）。` +
+      "配布物を作るには vcpkg の LibRaw が要る（LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR・LIBRAW_DLL_DIR のどれかが、" +
+        `VCPKG_ROOT の installed/${triplet} の外）。` +
         "同梱する DLL のライセンスの文書と LibRaw のソースを vcpkg から集めるため（決定事項ログ No.196）。" +
         "VCPKG_ROOT を設定し、LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR を消すか vcpkg の中を指す（docs/packaging.md の 2.2）",
     );
@@ -676,7 +684,13 @@ export function nativeComponentsWindows(libs, vcpkgRoot, triplet, env) {
     : [];
   const owners = vcpkgDllOwners(lists, triplet);
   const revision = vcpkgRevision(vcpkgRoot, env);
+  const bin = path.join(vcpkgRoot, "installed", triplet, "bin");
   return libs.map((lib) => {
+    // 持ち主は名前で決めるので、同梱するファイルがその vcpkg の bin のものかを先に確かめる（外の同じ名前の DLL に、
+    // vcpkg の文書を付けないため）。
+    if (!isInsideDir(bin, lib.source)) {
+      throw new Error(`同梱する ${lib.name}（${lib.source}）が vcpkg の ${bin} の中にない。入手元が分からない`);
+    }
     const owner = owners.get(lib.name.toLowerCase());
     if (!owner) {
       throw new Error(`同梱する ${lib.name} を入れた vcpkg の port が分からない（${infoDir} の *_${triplet}.list にない）`);

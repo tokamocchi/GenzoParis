@@ -139,7 +139,15 @@ test("Windows: 同梱した DLL を入れた vcpkg の port と著作権の文�
     );
     assert.match(components[1].texts[0].text, /Jean-loup Gailly/);
     // 持ち主の分からない DLL・vcpkg でない LibRaw では止める。
-    assert.throws(() => nativeComponentsWindows([{ name: "other.dll", source: "x" }], root, "x64-windows", {}), /other\.dll を入れた vcpkg の port が分からない/);
+    assert.throws(
+      () => nativeComponentsWindows([{ name: "other.dll", source: path.join(root, "installed", "x64-windows", "bin", "other.dll") }], root, "x64-windows", {}),
+      /other\.dll を入れた vcpkg の port が分からない/,
+    );
+    // 同じ名前でも、vcpkg の bin の外の DLL には vcpkg の文書を付けない。
+    assert.throws(
+      () => nativeComponentsWindows([{ name: "raw_r.dll", source: path.join(root, "elsewhere", "raw_r.dll") }], root, "x64-windows", {}),
+      /raw_r\.dll（.*）が vcpkg の .* の中にない/,
+    );
     assert.throws(() => nativeComponentsWindows(libs, null, "x64-windows", {}), /vcpkg の LibRaw を使う/);
     // ports のファイルが、入っているものをビルドしたときと違えば止める（vcpkg を更新して入れ直していない）。
     const zlibManifest = fs.readFileSync(path.join(root, "ports/zlib/vcpkg.json"), "utf8");
@@ -273,11 +281,21 @@ test("Windows: 配布物を作るには vcpkg の LibRaw が要る（vcpkg の�
       LIBRAW_LIB_DIR: lib,
     });
     assert.equal(b.vcpkgRoot, vcpkg);
+    const c = setupWindowsLibraw({
+      VCPKG_ROOT: vcpkg,
+      LIBRAW_INCLUDE_DIR: path.join(vcpkg, "installed", "x64-windows", "include"),
+      LIBRAW_LIB_DIR: lib,
+      LIBRAW_DLL_DIR: path.join(vcpkg, "installed", "x64-windows", "bin"),
+    });
+    assert.equal(c.vcpkgRoot, vcpkg);
     // vcpkg の外・VCPKG_ROOT がないときは止める。
     for (const env of [
       { VCPKG_ROOT: vcpkg, LIBRAW_INCLUDE_DIR: path.join(root, "other", "include"), LIBRAW_LIB_DIR: other },
       { LIBRAW_INCLUDE_DIR: path.join(root, "other", "include"), LIBRAW_LIB_DIR: other },
       { VCPKG_ROOT: vcpkg, VCPKG_DEFAULT_TRIPLET: "x64-windows-static-md", LIBRAW_INCLUDE_DIR: "x", LIBRAW_LIB_DIR: lib },
+      // .lib は vcpkg の中でも、DLL・ヘッダが外なら止める。
+      { VCPKG_ROOT: vcpkg, LIBRAW_INCLUDE_DIR: path.join(vcpkg, "installed", "x64-windows", "include"), LIBRAW_LIB_DIR: lib, LIBRAW_DLL_DIR: other },
+      { VCPKG_ROOT: vcpkg, LIBRAW_INCLUDE_DIR: path.join(root, "other", "include"), LIBRAW_LIB_DIR: lib },
     ]) {
       assert.throws(() => setupWindowsLibraw(env), /配布物を作るには vcpkg の LibRaw が要る/);
     }
