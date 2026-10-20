@@ -14,6 +14,7 @@
 // - 配布物を作るとき（scripts/lib/build.mjs）: Rust は cargo-about がなくても確かめられるよう、文書に書いた
 //   Cargo.lock の SHA-256 と今の Cargo.lock を比べる。npm は作り直して比べる。
 
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -77,12 +78,8 @@ export function generateRustNotices() {
   const toml = fs.readFileSync(ABOUT_TOML, "utf8");
   const reports = RUST_ROOTS.map((root) => {
     console.log(`cargo-about: ${root.manifest}（機能フラグ ${root.features.join(" ")}）`);
-    const json = capture(
-      "cargo",
-      [
-        "about",
-        "-L",
-        "error",
+    return JSON.parse(
+      runCargoAbout([
         "generate",
         "--format",
         "json",
@@ -94,10 +91,8 @@ export function generateRustNotices() {
         path.join(REPO_ROOT, root.manifest),
         "--features",
         root.features.join(" "),
-      ],
-      { cwd: REPO_ROOT },
+      ]),
     );
-    return JSON.parse(json);
   });
   const model = rustModel(reports, fileIo);
   return formatNotices(model, {
@@ -110,6 +105,32 @@ export function generateRustNotices() {
       `依存とライセンスの調査 / Dependency and license data: cargo-about ${CARGO_ABOUT_VERSION}（about.toml。開発用の依存を除く / excluding dev-dependencies）`,
     ],
   });
+}
+
+/**
+ * cargo-about を実行して標準出力を返す。about.toml の clarify が効かなかったとき（指定したファイルの SHA-256 が
+ * 合わないなど。cargo-about は警告を出すだけで、ファイルを走査した結果に戻る）は止める（crate の版が上がって
+ * ファイルが変わったら、中身を確かめて clarify を直す）。
+ *
+ * @param {string[]} args `cargo about` の後の引数
+ * @returns {string}
+ */
+function runCargoAbout(args) {
+  const r = spawnSync("cargo", ["about", ...args], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  if (r.error) throw new Error(`cargo about を実行できない: ${r.error.message}`);
+  if (r.status !== 0) throw new Error(`cargo about ${args[0]} が失敗した（終了コード ${r.status ?? r.signal}）\n${r.stderr}`);
+  const failed = r.stderr
+    .split("\n")
+    .filter((l) => /failed to validate all files specified in clarification/.test(l));
+  if (failed.length > 0) {
+    throw new Error(`about.toml の clarify が効かなかった（ファイルの中身を確かめて直す）:\n${failed.join("\n")}`);
+  }
+  return r.stdout;
 }
 
 /**

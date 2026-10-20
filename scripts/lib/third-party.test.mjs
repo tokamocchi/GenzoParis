@@ -20,6 +20,8 @@ import {
   formatNotices,
   isLicenseFileName,
   isNoticeFileName,
+  isSourceFileName,
+  leadingComment,
   lockHash,
   missingFromNpmModel,
   normalizeText,
@@ -221,6 +223,63 @@ test("Rust: cargo-about の本文の出典を crate ごとに決め、取りこ�
   assert.equal(readLockHash(text, "Cargo.lock"), "a".repeat(64));
   assert.equal(readLockHash(text, "ui/package-lock.json"), null);
   assert.ok(text.endsWith("\n") && !text.endsWith("\n\n"));
+});
+
+test("ソースのファイルの先頭の注釈（ライセンスの表示）だけを取り出す", () => {
+  const rs = [
+    "#![allow(clippy::all)]",
+    "// Copied from regex_syntax crate",
+    "//",
+    "// Copyright (c) 2014 The Rust Project Developers",
+    "//",
+    "//    indented line",
+    "",
+    "pub fn escape(text: &str) -> String {",
+    "    // コードの中の注釈は含めない",
+    "}",
+  ].join("\n");
+  assert.equal(
+    leadingComment(rs),
+    "Copied from regex_syntax crate\n\nCopyright (c) 2014 The Rust Project Developers\n\n   indented line",
+  );
+  const c = ["/*", " * // Copyright (c) Radzivon Bartoshyk 6/2025.", " *", " * // Redistribution and use", " */", "mod a;"].join("\r\n");
+  assert.equal(leadingComment(c), "Copyright (c) Radzivon Bartoshyk 6/2025.\n\nRedistribution and use");
+  assert.equal(leadingComment("/* Copyright 2015 Google Inc. */\nint x;"), "Copyright 2015 Google Inc.");
+  assert.equal(leadingComment("fn main() {}\n// late"), "");
+  assert.ok(isSourceFileName("src/io.rs") && isSourceFileName("crypto/x.h") && !isSourceFileName("LICENSE.md"));
+});
+
+test("Rust: ソースのファイルから拾った本文は先頭の注釈だけ。同じ本文がほかの crate にあるときは、自分のファイルを出典にする", () => {
+  const bsd = (holder) => `Copyright (c) ${holder}\n\nRedistribution and use in source and binary forms, with or without modification`;
+  const m = crate("moxcms", "0.8.1", "BSD-3-Clause OR Apache-2.0");
+  const p = crate("pxfm", "0.1.30", "BSD-3-Clause OR Apache-2.0");
+  const shared = bsd("Radzivon Bartoshyk");
+  const header = `/*\n * // ${bsd("Radzivon Bartoshyk 7/2025")}\n */\nmod erf;\nfn secret() {}\n`;
+  const report = aboutReport(
+    [m, p],
+    [
+      // 同じ作者の LICENSE.md は同じ本文。cargo-about は moxcms のファイルの場所だけを返す。
+      { id: "BSD-3-Clause", text: shared, source_path: "/reg/moxcms-0.8.1/LICENSE.md", users: [m.id, p.id] },
+      // pxfm のソースのファイル（ファイル全体が本文として返る）。
+      { id: "BSD-3-Clause", text: header, source_path: "/reg/pxfm-0.1.30/src/err/mod.rs", users: [p.id] },
+    ],
+  );
+  const io = fakeIo({
+    "/reg/moxcms-0.8.1": { "LICENSE.md": shared, "LICENSE-APACHE.md": APACHE },
+    "/reg/pxfm-0.1.30": { "LICENSE.md": shared, "LICENSE-APACHE.md": APACHE },
+  });
+  const model = rustModel([report], io);
+  const px = model.packages.find((x) => x.name === "pxfm");
+  assert.deepEqual(px.files, ["LICENSE.md", "src/err/mod.rs の先頭の注釈"]);
+  assert.deepEqual(px.standard, []);
+  const texts = model.texts.filter((t) => t.users.includes("pxfm 0.1.30")).map((t) => t.text);
+  assert.ok(texts.includes(normalizeText(shared)));
+  assert.ok(texts.includes(bsd("Radzivon Bartoshyk 7/2025")));
+  assert.ok(!texts.some((t) => /mod erf|secret/.test(t)), "コードは載せない");
+
+  // 先頭の注釈にライセンスの文がなければ止める（about.toml の clarify で本文のファイルを指定する）。
+  const bad = aboutReport([p], [{ id: "BSD-3-Clause", text: "//! docs\nfn f() {}\n", source_path: "/reg/pxfm-0.1.30/src/lib.rs", users: [p.id] }]);
+  assert.throws(() => rustModel([bad], io), /pxfm 0\.1\.30 のソースのファイル src\/lib\.rs を BSD-3-Clause の本文として拾った/);
 });
 
 test("npm: 配布物に入りうるパッケージは、開発用の印のないもの", () => {

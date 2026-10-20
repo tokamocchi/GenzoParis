@@ -196,6 +196,48 @@ export function parseTargets(toml) {
 /** コード・データの拡張子（ライセンスの文書として扱わない）。LICENSE.spdx は SPDX の記述でライセンスの本文ではない。 */
 const NOT_TEXT_EXT = /\.(rs|[cm]?js|ts|json|spdx|toml|ya?ml|html?|xml|sh|py|c|h|cc|cpp)$/i;
 
+/** ソースのファイルの拡張子（cargo-about は、ヘッダにライセンスの文があるソースのファイルを本文として拾う）。 */
+const SOURCE_EXT = /\.(rs|c|h|cc|cpp|hpp|inc|s|asm|pl|py|go|java|[cm]?js|ts)$/i;
+
+/** ソースのファイルか（名前の拡張子で決める）。 */
+export function isSourceFileName(name) {
+  return SOURCE_EXT.test(name);
+}
+
+/**
+ * ソースのファイルの先頭の注釈（ライセンスの表示）を取り出す。注釈の記号（`//`・`/*`・`*` など）を除いた文を返し、
+ * コードは含めない。先頭の空行・`#!` の行（Rust の内側の属性・シバン）は飛ばす。注釈がなければ空。
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function leadingComment(text) {
+  const lines = normalizeText(text).split("\n");
+  const out = [];
+  let i = 0;
+  while (i < lines.length && (lines[i].trim() === "" || lines[i].trim().startsWith("#!"))) i++;
+  let block = false;
+  for (; i < lines.length; i++) {
+    let t = lines[i].trim();
+    if (!block && t !== "" && !t.startsWith("//") && !t.startsWith("/*")) break;
+    if (!block && t.startsWith("/*")) {
+      block = true;
+      t = t.slice(2);
+    }
+    if (block) {
+      const end = t.indexOf("*/");
+      if (end !== -1) {
+        t = t.slice(0, end);
+        block = false;
+      }
+      t = t.replace(/^\*/, "");
+    }
+    t = t.trim().replace(/^\/\/[/!]?/, "");
+    out.push(t.startsWith(" ") ? t.slice(1) : t);
+  }
+  return normalizeText(out.join("\n").replace(/^\n+/, ""));
+}
+
 /** ライセンスの本文のファイルらしい名前か（LICENSE・LICENSE-MIT・LICENSE_APACHE-2.0・license-mit・COPYING など）。 */
 export function isLicenseFileName(name) {
   return /^(licen[cs]e|copying|copyright|unlicense)([-_.].*)?$/i.test(name) && !NOT_TEXT_EXT.test(name);
@@ -401,17 +443,21 @@ const joinPath = (dir, name) => `${dir}/${name}`;
  *
  * cargo-about は、ライセンスと本文が同じものを 1 つにまとめ、`source_path` には最初に入れた crate のファイル
  * （または、ファイルがなかったときの null）だけを残す。そのため crate ごとの本文の出典は次の順で決める。
- * 1. `source_path` がその crate のフォルダの中なら、そのファイル。
- * 2. でなければ、crate の直下のファイルから名前と中身で選んだもの（findLicenseTexts。cargo-about が取りこぼした
- *    `LICENSE_MIT` などもここで見つかる）。
- * 3. それもなければ、cargo-about の本文（SPDX の標準の文）をそのまま載せ、ファイルがない crate として印を付ける。
+ * 1. `source_path` がその crate のフォルダの中なら、そのファイル。ソースのファイル（ヘッダにライセンスの文がある
+ *    `.rs`・`.h` など。cargo-about はファイル全体を本文として返す）は、先頭の注釈だけを載せる（leadingComment。
+ *    注釈にライセンスの文がなければ止める）。
+ * 2. ほかの crate のファイルの場所が返ったら、crate の直下に同じ本文のファイルがあればそれ、なければ本文だけを載せる
+ *    （cargo-about がこの crate の中で見つけた本文なので）。
+ * 3. 1・2 がなければ（cargo-about が本文のファイルを見つけられず、標準の文を返した）、crate の直下のファイルから
+ *    名前と中身で選んだもの（findLicenseTexts。cargo-about が取りこぼした `LICENSE_MIT` などもここで見つかる）。
+ * 4. それもなければ、cargo-about の本文（SPDX の標準の文）をそのまま載せ、ファイルがない crate として印を付ける。
  *
  * @param {Array<{ licenses: Array<{ id: string, text: string, source_path: string | null, used_by: Array<{ crate: any }> }>, crates: Array<{ package: any, license: string }> }>} reports
  * @param {NoticeIo} io crate のフォルダのファイルを読む
  * @returns {NoticeModel}
  */
 export function rustModel(reports, io) {
-  /** @type {Map<string, { pkg: NoticePackage, dir: string, parts: Map<string, Array<{ text: string, file: string | null }>> }>} */
+  /** @type {Map<string, { pkg: NoticePackage, dir: string, parts: Map<string, Array<{ text: string, file: string | null, source: string | null }>> }>} */
   const crates = new Map();
   for (const report of reports) {
     for (const c of report.crates) {
@@ -439,9 +485,10 @@ export function rustModel(reports, io) {
         const c = crates.get(u.crate.id);
         if (!c) throw new Error(`cargo-about の crates にない crate: ${u.crate.id}`);
         const list = c.parts.get(l.id) ?? [];
-        const file = l.source_path ? relativeInside(c.dir, l.source_path) : null;
+        const source = l.source_path ?? null;
+        const file = source ? relativeInside(c.dir, source) : null;
         const text = normalizeText(l.text);
-        if (!list.some((x) => x.text === text && x.file === file)) list.push({ text, file });
+        if (!list.some((x) => x.text === text && x.file === file)) list.push({ text, file, source });
         c.parts.set(l.id, list);
       }
     }
@@ -450,23 +497,57 @@ export function rustModel(reports, io) {
   for (const c of crates.values()) {
     if (c.parts.size === 0) throw new Error(`ライセンスの本文がない crate: ${packageKey(c.pkg)}`);
     const names = io.listDir(c.dir);
+    const readRoot = (n) => io.readText(joinPath(c.dir, n));
     const used = new Set();
     for (const list of c.parts.values()) for (const x of list) if (x.file) used.add(x.file);
     const parts = [];
     for (const [license, list] of [...c.parts.entries()].sort(([a], [b]) => compareNatural(a, b))) {
       c.pkg.chosen.push(license);
-      const own = list.filter((x) => x.file !== null);
-      if (own.length > 0) {
-        for (const x of own) {
+      let included = 0;
+      for (const x of list) {
+        // ソースのファイル（ヘッダにライセンスの文がある）は、ファイル全体ではなく先頭の注釈だけを載せる。
+        if (x.source !== null && isSourceFileName(x.source)) {
+          const header = leadingComment(x.text);
+          if (header === "" || !textMatchesLicense(header, license)) {
+            throw new Error(
+              `cargo-about が ${packageKey(c.pkg)} のソースのファイル ${x.file ?? baseOf(x.source)} を ${license} の本文として` +
+                "拾ったが、先頭の注釈にその文がない。about.toml の clarify で本文のファイルを指定する（docs/third_party.md の 1.4 節）",
+            );
+          }
+          parts.push({ license, text: header });
+          if (x.file) c.pkg.files.push(`${x.file} の先頭の注釈`);
+          included++;
+          continue;
+        }
+        if (x.file) {
           parts.push({ license, text: x.text });
           c.pkg.files.push(x.file);
+          included++;
+          continue;
         }
-        continue;
+        // ほかの crate のファイルの場所が返った（同じ本文）か、ファイルがなかった（標準の文）。crate の直下に同じ
+        // 本文のファイルがあれば、それを出典にする。
+        const same = names
+          .filter((n) => isLicenseFileName(n) && !used.has(n))
+          .sort(compareNatural)
+          .find((n) => normalizeText(readRoot(n)) === x.text);
+        if (same !== undefined) {
+          parts.push({ license, text: x.text });
+          c.pkg.files.push(same);
+          used.add(same);
+          included++;
+        } else if (x.source !== null) {
+          // cargo-about がこの crate の中で見つけた本文（ほかの crate のファイルと同じ）。場所は分からないが載せる。
+          parts.push({ license, text: x.text });
+          included++;
+        }
       }
+      if (included > 0) continue;
+      // cargo-about が本文のファイルを見つけられなかった（標準の文）。crate の直下を名前と中身で探して補う。
       const found = findLicenseTexts(
         names.filter((n) => !used.has(n)),
         license,
-        (n) => io.readText(joinPath(c.dir, n)),
+        readRoot,
       );
       if (found.length > 0) {
         for (const f of found) {
@@ -480,7 +561,7 @@ export function rustModel(reports, io) {
       }
     }
     for (const n of names.filter((n) => isNoticeFileName(n) && !used.has(n)).sort(compareNatural)) {
-      parts.push({ license: "NOTICE", notice: true, text: io.readText(joinPath(c.dir, n)) });
+      parts.push({ license: "NOTICE", notice: true, text: readRoot(n) });
       c.pkg.files.push(n);
     }
     c.pkg.files = [...new Set(c.pkg.files)].sort(compareNatural);
