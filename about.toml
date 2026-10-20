@@ -39,8 +39,9 @@ ignore = true
 
 # MPL-2.0 は crate ごとに許可する（deny.toml の licenses.exceptions と同じ 5 つ。Tauri の tauri-utils の HTML の
 # 処理と dirs の依存。Exhibit B の表示がないことは 2026-10-12 に確かめた。法的な最終確認は人が行う）。
-# MPL-2.0 のファイルを実行ファイルで配るときは、ソースの入手先を知らせる（MPL-2.0 の 3.2 節）。文書には crate の
-# 版を書き、ソースは crates.io の同じ版で入手できる（docs/third_party.md の 1.4 節。**人の確認待ち**）。
+# MPL-2.0 のファイルを実行ファイルで配るときは、ソースの入手先を知らせる（MPL-2.0 の 3.2 節）。rust.txt の
+# 「ソースコードの入手先」の節に crates.io の同じ版の URL を書く（scripts/lib/third-party.mjs の
+# SOURCE_OFFER_LICENSES。docs/license_compliance.md。**人の確認待ち**）。
 [cssparser]
 accepted = ["MPL-2.0"]
 

@@ -7,6 +7,8 @@ import { installBridge } from "../api/bridge";
 import { MOCK_LICENSE_DOCUMENTS, MockBridge, mockLicenseCommands } from "../api/mock";
 import {
   APP_LICENSE_NOTE,
+  LIBRAW_CREDIT,
+  hasLibrawDocuments,
   licenseOptionLabel,
   licenseTitle,
   noLicenseDocumentsMessage,
@@ -20,6 +22,7 @@ describe("ライセンスの文書の並びと見出し", () => {
       "GenzoParis/LICENSE.txt",
       "third-party/rust.txt",
       "third-party/npm.txt",
+      "third-party/native.txt",
       "LibRaw/README.txt",
       "LibRaw/LICENSE.LGPL",
       "LibRaw/COPYRIGHT",
@@ -36,6 +39,14 @@ describe("ライセンスの文書の並びと見出し", () => {
       "GenzoParis のライセンス（GPL-3.0-or-later）（2.00 KB）",
     );
     expect(APP_LICENSE_NOTE).toContain("GPL-3.0-or-later");
+  });
+
+  it("LibRaw を同梱した配布物だけ、LibRaw の著作権表示とライセンスの案内を出す", () => {
+    expect(hasLibrawDocuments(MOCK_LICENSE_DOCUMENTS.documents)).toBe(true);
+    expect(hasLibrawDocuments([{ path: "third-party/rust.txt", size: 1 }])).toBe(false);
+    expect(LIBRAW_CREDIT).toContain("Copyright (C) LibRaw LLC");
+    expect(LIBRAW_CREDIT).toContain("LibRaw のライセンス（LGPL-2.1）");
+    expect(licenseTitle("LibRaw/LICENSE.LGPL")).toBe("LibRaw のライセンス（LGPL-2.1）");
   });
 
   it("文書がないときの案内", () => {

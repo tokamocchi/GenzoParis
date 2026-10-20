@@ -45,3 +45,13 @@ test("CI・配布で入れる cargo-about の版は、第三者のライセン�
   const release = fs.readFileSync(path.join(WORKFLOWS_DIR, "release.yml"), "utf8");
   assert.match(release, /^  bundle:\n    needs: licenses\n/m);
 });
+
+test("配布物の確認で、同梱した C / C++ のライブラリのライセンスの文書と LibRaw のソースがあるかを見る（Windows・macOS）", async () => {
+  const { NATIVE_NOTICES_TARGET_PATH } = await import("./lib/native-notice.mjs");
+  assert.equal(NATIVE_NOTICES_TARGET_PATH, "licenses/third-party/native.txt");
+  const release = fs.readFileSync(path.join(WORKFLOWS_DIR, "release.yml"), "utf8");
+  assert.match(release, /'licenses\\third-party\\native\.txt'/);
+  assert.match(release, /licenses\/third-party\/native\.txt"/);
+  assert.match(release, /'licenses\\LibRaw\\source'/);
+  assert.match(release, /licenses\/LibRaw\/source\/\*\.tar\.gz/);
+});

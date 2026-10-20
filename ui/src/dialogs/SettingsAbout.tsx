@@ -1,5 +1,6 @@
 // 設定の「このアプリについて」（DIST-05）: アプリの版とライセンス、同梱したライセンスの文書（アプリ自体・
-// Rust の crate・画面の npm のパッケージ・LibRaw）を選んで読む。フォルダを OS のファイル管理で開ける。
+// Rust の crate・画面の npm のパッケージ・同梱した C / C++ のライブラリ・LibRaw）を選んで読む。フォルダを OS の
+// ファイル管理で開ける。LibRaw を同梱した配布物では、LibRaw の著作権表示とライセンスの案内を出す。
 //
 // 文書の一覧は、このタブを初めて開いたときに読む（設定を開くたびに読まない）。本文は選んだものだけを読む
 // （Rust の crate の文書は約 0.5 MB）。
@@ -12,7 +13,9 @@ import type { ErrorInfo, LicenseDocuments } from "../api/types";
 import { useApp } from "../state/app";
 import {
   APP_LICENSE_NOTE,
+  LIBRAW_CREDIT,
   SOURCE_URL,
+  hasLibrawDocuments,
   licenseOptionLabel,
   noLicenseDocumentsMessage,
   orderLicenseDocuments,
@@ -89,6 +92,7 @@ export function SettingsAbout(props: { active: boolean }) {
         <p className="hint">
           {APP_LICENSE_NOTE}ソースコード: <span className="dlg-path">{SOURCE_URL}</span>
         </p>
+        {docs && hasLibrawDocuments(docs.documents) && <p className="hint">{LIBRAW_CREDIT}</p>}
       </div>
       <div className="dlg-section">
         <h3>ライセンス</h3>

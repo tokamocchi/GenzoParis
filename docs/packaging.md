@@ -21,8 +21,8 @@ GenzoParis を社内の数名に配るための、配布物の作り方・入れ
 
 - **本体は LibRaw に依存しません。** LibRaw を読み込むのはワーカーだけです（決定 No.32）。本体はワーカーを「環境変数 `GENZO_WORKER_PATH` → 本体と同じフォルダ」の順に探します（`crates/genzo-worker/src/client.rs` の `locate_worker_executable`）。Tauri の `externalBin` は、ワーカーを本体と同じフォルダ（Windows はインストール先、macOS は `Contents/MacOS`、.deb は `/usr/bin`）に置くので、そのまま見つかります。
 - **LibRaw のライブラリはワーカーから読める場所に置きます。** Windows は、実行ファイルと同じフォルダの DLL を最初に探すので、インストール先のフォルダに置きます（Tauri の `bundle.resources`。Windows の resource のフォルダはインストール先）。macOS は `Contents/Frameworks` に置き（Tauri の `bundle.macOS.frameworks`）、ワーカーと dylib の参照を `@executable_path/../Frameworks/…`・`@loader_path/…` に書き換えます（`install_name_tool`）。
-- **LibRaw の LGPL-2.1 の全文・著作権表示・案内を同梱します**（2026-10-19。決定事項ログ No.175）。Windows はインストール先の `licenses\LibRaw\`、macOS は `GenzoParis.app/Contents/Resources/licenses/LibRaw/` に、`LICENSE.LGPL`（LGPL-2.1 の全文）・`COPYRIGHT`（LibRaw の著作権表示）・`README.txt`（使っている LibRaw の版・同梱したファイル・ソースの入手先・差し替えの方法）と、LibRaw をビルドした手順の写し `build-recipe/`（Windows は vcpkg の port「libraw」の定義とパッチ、macOS は Homebrew の formula。案内には vcpkg・homebrew-core のビルドの時点のコミットを固定した URL を書く。取れなければ「記録できなかった」と書く）を置きます。`LICENSE.LGPL`・`COPYRIGHT` は上流の LibRaw（GitHub の 0.22.0 のタグ）のファイルをそのまま `crates/genzo-app/licenses/LibRaw/` に置いたもの、`README.txt` は `scripts/prepare-worker.mjs` がビルドのときに作るもの（版は LibRaw のヘッダ `libraw_version.h` から、`genzo-raw` の `build.rs` と同じ場所を探して読む。文面は `scripts/lib/notice.mjs`）。同じものを Actions の artifact（`crates/genzo-app/binaries/licenses/`）にも入れます。
-- **アプリ自体のライセンス（GPL-3.0）の全文と、第三者のライセンスの文書を同梱します**（2026-10-20。決定事項ログ No.194・195、[第三者の台帳](third_party.md) の 1.4 節）。Windows はインストール先の `licenses\`、macOS は `GenzoParis.app/Contents/Resources/licenses/` に、`README.txt`（案内）・`GenzoParis/LICENSE.txt`（GPL-3.0 の全文）・`third-party/rust.txt`（本体とワーカーに組み込んだ Rust の crate の一覧とライセンスの本文）・`third-party/npm.txt`（画面に組み込んだ npm のパッケージの一覧と本文）を置きます。アプリの設定の「このアプリについて」のタブでも読めます。文書は `node scripts/third-party.mjs` で作ってリポジトリに置いたもので（Cargo.lock・ui/package-lock.json・about.toml を変えたら作り直す）、`scripts/build-app.mjs` は古い文書のまま配布物を作らないよう、ビルドの前後に確かめます（1.3）。同梱する C / C++ の共有ライブラリ（LibRaw 以外）と Visual C++ のランタイムのライセンスの本文は、まだ入っていません（8 章の 2・3）。**この内容で各ライセンスの条件を満たすかは、人・専門家の確認待ちです**（8 章の 8）。
+- **LibRaw の LGPL-2.1 の全文・著作権表示・案内を同梱します**（2026-10-19。決定事項ログ No.175）。Windows はインストール先の `licenses\LibRaw\`、macOS は `GenzoParis.app/Contents/Resources/licenses/LibRaw/` に、`LICENSE.LGPL`（LGPL-2.1 の全文）・`COPYRIGHT`（LibRaw の著作権表示）・`README.txt`（使っている LibRaw の版・同梱したファイル・ソースの入手先・差し替えの方法）と、LibRaw をビルドした手順の写し `build-recipe/`（Windows は vcpkg の port「libraw」の定義とパッチ、macOS は Homebrew の formula。案内には vcpkg・homebrew-core のビルドの時点のコミットを固定した URL を書く。取れなければ「記録できなかった」と書く）、**ビルドに使った LibRaw のソースのアーカイブ `source/`**（2026-10-20 から。決定事項ログ No.196。vcpkg は portfile の LibRaw と LibRaw-cmake、Homebrew は formula の配布物。入手元が取得したものを使い、なければ同じ URL から取る。portfile の SHA512・formula の SHA-256 と違えば止まる）を置きます。`LICENSE.LGPL`・`COPYRIGHT` は上流の LibRaw（GitHub の 0.22.0 のタグ）のファイルをそのまま `crates/genzo-app/licenses/LibRaw/` に置いたもの、`README.txt` は `scripts/prepare-worker.mjs` がビルドのときに作るもの（版は LibRaw のヘッダ `libraw_version.h` から、`genzo-raw` の `build.rs` と同じ場所を探して読む。文面は `scripts/lib/notice.mjs`）。同じものを Actions の artifact（`crates/genzo-app/binaries/licenses/`）にも入れます。
+- **アプリ自体のライセンス（GPL-3.0）の全文と、第三者のライセンスの文書を同梱します**（2026-10-20。決定事項ログ No.194・195、[第三者の台帳](third_party.md) の 1.4 節）。Windows はインストール先の `licenses\`、macOS は `GenzoParis.app/Contents/Resources/licenses/` に、`README.txt`（案内）・`GenzoParis/LICENSE.txt`（GPL-3.0 の全文）・`third-party/rust.txt`（本体とワーカーに組み込んだ Rust の crate の一覧とライセンスの本文）・`third-party/npm.txt`（画面に組み込んだ npm のパッケージの一覧と本文）を置きます。アプリの設定の「このアプリについて」のタブでも読めます。文書は `node scripts/third-party.mjs` で作ってリポジトリに置いたもので（Cargo.lock・ui/package-lock.json・about.toml を変えたら作り直す）、`scripts/build-app.mjs` は古い文書のまま配布物を作らないよう、ビルドの前後に確かめます（1.3）。**2026-10-20 から、同梱した C / C++ の共有ライブラリのライセンスの文書 `third-party/native.txt` も置きます**（決定事項ログ No.196。`scripts/prepare-worker.mjs` が、同梱したファイルごとに入手元（vcpkg の port・Homebrew の formula）を調べ、そのパッケージがインストールした文書を載せる。文書の見つからないライブラリがあれば止まる。Visual C++ のランタイムは名前・著作権者・入手元だけ。8 章の 2・3）。**この内容で各ライセンスの条件を満たすかは、人・専門家の確認待ちです**（8 章の 8、[license_compliance.md](license_compliance.md)）。
 - **FFmpeg（ffmpeg・ffprobe）は同梱しません**（決定 No.62）。各自が入れます（4 章）。
 - 自動更新はありません（DIST-04 は later）。新しい版は、同じ手順で上から入れ直します。
 
@@ -78,7 +78,7 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
 
 1. Visual Studio の C++ のビルドツール（MSVC）と、パッケージ管理の vcpkg を入れる。
 2. LibRaw を入れる: `vcpkg install libraw:x64-windows`（依存の jasper・lcms・zlib・libjpeg-turbo もソースからビルドされる。vcpkg の libraw の port は 2026-10-12 の時点で 0.22.2）。
-3. LibRaw の場所を指定する: 環境変数 `VCPKG_ROOT`（vcpkg のフォルダ）を設定すれば、スクリプトが `installed\x64-windows` の `include`・`lib`・`bin` を使います。vcpkg 以外で入手した場合は `LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR`（必要なら `LIBRAW_LIB_NAME`・`LIBRAW_DLL_DIR`）を設定します（`crates/genzo-raw/build.rs` の doc、README）。`LIBRAW_LIB_NAME` を指定しなければ、`.lib` のファイル名から選びます（`raw_r.lib` → `libraw_r.lib` → `libraw.lib` → `raw.lib` の順。vcpkg はスレッドセーフな版を `lib\raw_r.lib`、そうでない版を `lib\manual-link\raw.lib` に置く）。
+3. LibRaw の場所を指定する: 環境変数 `VCPKG_ROOT`（vcpkg のフォルダ）を設定すれば、スクリプトが `installed\x64-windows` の `include`・`lib`・`bin` を使います。`LIBRAW_INCLUDE_DIR`・`LIBRAW_LIB_DIR`（必要なら `LIBRAW_LIB_NAME`・`LIBRAW_DLL_DIR`）でも指定できますが、**配布物を作るときは、`VCPKG_ROOT` の `installed\<triplet>` の中の LibRaw（指定したフォルダ・同梱する DLL がすべてその中）でなければ止まります**（2026-10-20 から。同梱する DLL のライセンスの文書（`native.txt`）と LibRaw のソースを vcpkg から集めるため。決定事項ログ No.196）。vcpkg 以外で入手した LibRaw は、`cargo build`・`cargo test` では使えますが（`crates/genzo-raw/build.rs` の doc、README）、配布物は作れません。`LIBRAW_LIB_NAME` を指定しなければ、`.lib` のファイル名から選びます（`raw_r.lib` → `libraw_r.lib` → `libraw.lib` → `raw.lib` の順。vcpkg はスレッドセーフな版を `lib\raw_r.lib`、そうでない版を `lib\manual-link\raw.lib` に置く）。
 4. 作る（PowerShell、`ui\` で）:
 
    ```powershell
@@ -86,7 +86,7 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
    npm run app:build -- --bundles nsis
    ```
 
-5. 成果物: `target\release\bundle\nsis\GenzoParis_0.1.0_x64-setup.exe`。同梱した DLL は `crates\genzo-app\binaries\bundled-libs.txt` で確かめられます。
+5. 成果物: `target\release\bundle\nsis\GenzoParis_<版>_x64-setup.exe`（版は `tauri.conf.json` の `version`。0.1.1 なら `GenzoParis_0.1.1_x64-setup.exe`）。同梱した DLL は `crates\genzo-app\binaries\bundled-libs.txt` で確かめられます。
 
 スクリプトは、ワーカー（`genzo-worker.exe`）の PE のヘッダから読み込む DLL をたどり、LibRaw のフォルダ（vcpkg の `bin`）にある DLL と、Visual C++ のランタイムの DLL を集めます（`scripts/lib/pe.mjs`・`scripts/lib/bundle.mjs`。dumpbin は使わない）。OS の DLL（UCRT の `api-ms-win-crt-*`・`ucrtbase.dll` を含む。Windows 10 以降は OS の一部）は集めません。
 
@@ -106,7 +106,7 @@ npx tauri build --config ..\crates\genzo-app\tauri.bundle.conf.json --config ..\
    npm run app:build -- --bundles app,dmg
    ```
 
-4. 成果物: `target/release/bundle/dmg/GenzoParis_0.1.0_aarch64.dmg` と `target/release/bundle/macos/GenzoParis.app`。
+4. 成果物: `target/release/bundle/dmg/GenzoParis_<版>_aarch64.dmg`（0.1.1 なら `GenzoParis_0.1.1_aarch64.dmg`）と `target/release/bundle/macos/GenzoParis.app`。
 
 スクリプトは、`otool -l` でワーカーの依存をたどって Homebrew の dylib を `binaries/libs/` に写し、参照を書き換え（ワーカーは `@executable_path/../Frameworks/<名前>`、dylib どうしは `@loader_path/<名前>`、dylib の識別名は `@rpath/<名前>`）、`codesign --force --sign -` で署名し直します（書き換えると署名が壊れ、Apple Silicon では署名の壊れた実行ファイルは起動しないため）。書き換えた後に Homebrew の場所への参照が残っていればエラーにします。書き換えの余白のため、ワーカーはリンカーの `-headerpad_max_install_names` 付きでビルドします。Tauri は `.app` に入れた後、`signingIdentity: "-"` で中身を内側から順にアドホック署名し直します。
 
@@ -129,11 +129,12 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 手動（Actions の画面の「Run workflow」）だけで、Windows（windows-latest）と macOS（macos-latest。Apple Silicon）の配布物を作ります（タグの push では動きません。2026-10-12 の独立レビューの指摘で変更）。手順は 2.2・2.3 と同じで、LibRaw は vcpkg（ランナーにある `VCPKG_INSTALLATION_ROOT`）と Homebrew で入れます。
 
 - **公開の範囲の確認**: リポジトリが公開（public）のときは、Actions の artifact を GitHub にログインした誰でも取得できます（2026-10-12 時点で、このリポジトリは公開）。そのため、入力の「allow_public_artifacts」に印を付けないと、最初の段階で何も作らずに止まります。印を付けるのは、配布の責任者が、配布物を誰でも取得できる状態にしてよいこと（LibRaw の LGPL などの条件・署名のない配布物を社外に出してよいか。8 章）を確かめた後だけにしてください。配る相手だけに渡したい場合は、非公開のリポジトリで実行するか、手元で作って（2.2・2.3）社内の共有の場所に置いてください。非公開のリポジトリでは、この確認は行いません。
-- 実行の画面で「Use workflow from」に `v` で始まるタグ（`v0.1.0` など）を選んだときは、最初にタグの版（`v0.1.0` なら 0.1.0）と、`tauri.conf.json` の `version`・Cargo の版（genzo-app・genzo-worker）が同じかを確かめ、違えば止めます（配布物のファイル名・中の版は `tauri.conf.json` の版になるため。版を直してからタグを付け直す）。
+- 実行の画面で「Use workflow from」に `v` で始まるタグ（`v0.1.1` など）を選んだときは、最初にタグの版（`v0.1.1` なら 0.1.1）と、`tauri.conf.json` の `version`・Cargo の版（genzo-app・genzo-worker）が同じかを確かめ、違えば止めます（配布物のファイル名・中の版は `tauri.conf.json` の版になるため。版を直してからタグを付け直す）。
 - macOS では、同梱する dylib が `.app` の最小の版より新しい macOS 向けだと止まります（2.3）。配る相手の Mac がすべてその版以降なら、実行の画面で「allow_newer_macos_libs」に印を付けて実行します。このとき、artifact の名前に `-macos<版>-or-later` が付き、ジョブの summary に各ファイルの `minos` が出ます。
 - 配布物を作る前に、`licenses` ジョブ（Linux）で、Rust の crate のライセンスの文書（`crates/genzo-app/licenses/third-party/rust.txt`）を cargo-about 0.9.2 で作り直し、リポジトリのものと同じかを確かめます（CI の `third-party` ジョブと同じ。通らなければ配布物のジョブは動かない。[第三者の台帳](third_party.md) の 1.4 節）。
 - 配布物を作った後、artifact に置く **前に**、配布物の中のワーカーが同梱の LibRaw で起動できるかを確かめます。
   - Windows: インストーラーを `/S` で無人インストールし、`PATH` を OS のフォルダだけにして `genzo-worker.exe --version` を実行する（終了コードと「genzo-worker <版>」の出力）。
+  - 両 OS: `licenses/` の文書があるか、`third-party/native.txt` に同梱したファイル（Windows は `bundled-libs.txt` の DLL、macOS は `Contents/Frameworks` の dylib）がすべて載っているか、`LibRaw/source/` にソースのアーカイブがあるか（2026-10-20 から）。
   - macOS: `codesign --verify`、Info.plist の最小の版、`hdiutil verify`（.dmg）を見た後、`DYLD_PRINT_LIBRARIES=1` でワーカーを起動し、終了コード・「genzo-worker <版>」の出力・dyld のエラー（`Library not loaded`）がないこと・`Contents/Frameworks` のすべての dylib を `.app` の中から読み込んだこと・Homebrew の場所から読み込んでいないことを確かめる。
 - 外部のアクション（actions/checkout など）は、コミットの SHA で固定しています（ci.yml も同じ。タグの付け替えで、配布物を作る処理が変わらないように）。SHA は 2026-10-12 に `git ls-remote` で、その時点の各タグ（コメントに書いた版）が指すコミットを調べたものです。更新するときは、新しい版のタグが指す SHA を同じ方法で調べ、差分を確かめてから書き換えてください。
 - 成果物は Actions の artifact（`genzoparis-windows-x64`・`genzoparis-macos-arm64`。30 日で消える。仮置き）に置きます。GitHub の Releases には出しません。**artifact は、リポジトリを読める人なら誰でも取得できます。リポジトリの公開の範囲を確かめてから実行してください。**
@@ -144,8 +145,8 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
 
 1. 入れて起動し、ARW を 1 枚取り込んでサムネイルと現像の画面が出ることを確かめる（[M5 の受け入れの手順](m5_acceptance.md) の 0 章）。設定の画面の「カタログ」で、「RAW のデコーダ」が「なし（RAW を開けません）」でないこと（LibRaw の識別子が出る）、「ワーカーのエラー」が出ていないことも確かめる（ワーカーや LibRaw のライブラリが見つからない場合は、ここに出る。`ui/src/dialogs/SettingsCatalog.tsx` の表示。実機で未確認）。
 2. 配布物の SHA-256 を記録し、配る相手に伝える（受け取った人が、改ざんされていないかを確かめられるように）:
-   - Windows（PowerShell）: `Get-FileHash .\GenzoParis_0.1.0_x64-setup.exe -Algorithm SHA256`
-   - macOS: `shasum -a 256 GenzoParis_0.1.0_aarch64.dmg`
+   - Windows（PowerShell）: `Get-FileHash .\GenzoParis_0.1.1_x64-setup.exe -Algorithm SHA256`（版は配る配布物のもの）
+   - macOS: `shasum -a 256 GenzoParis_0.1.1_aarch64.dmg`
 3. 配る場所（社内の共有フォルダ・チャットなど）は、**見られる人の範囲が配る相手に限られているかを確かめてから** 置いてください。共有フォルダに置く場合は、上書きで前の版を壊さないよう、版ごとに別の名前（ファイル名に版が入る）で置いてください。
 
 ## 3. 署名なしのアプリを開く
@@ -278,11 +279,11 @@ main の c0681eb（PR #2 をマージしたもの）で、手動で 2 回実行�
 
 **次の事項は AI では決められません。社外に配る前（社内でも、必要と判断した場合は配る前）に、人（必要なら専門家）が確認し、結果を [決定事項ログ](decision_log.md) と [第三者の台帳](third_party.md) に書いてください。**
 
-1. **LibRaw の同梱と LGPL-2.1**（決定 No.32・175、台帳の 3.1 節）: 配布物に LibRaw の共有ライブラリを入れるときに、LGPL の条件を満たす方法（ライセンスの文書を同梱するか、対応するソースの提供の方法、利用者がライブラリを差し替えられること）。**2026-10-19 から、LGPL-2.1 の全文・LibRaw の著作権表示・案内（ソースの入手先として上流の LibRaw の版のタグと、ビルドの手順（vcpkg の port・Homebrew の formula）の場所、差し替えの方法）を配布物に入れます**（1.1）。ソースそのものは同梱せず、上流の場所を案内するだけです。この案内で LGPL-2.1 の第 6 節（ソースの提供）などの条件を満たすか、vcpkg の port が当てるパッチの扱い、依存ライブラリ（lcms2・zlib・libomp・jpeg-turbo など）の表記の要否は、人（必要なら専門家）が確認してください。macOS では、`.app` の中の dylib を差し替えると署名が壊れるため、差し替えた人がアドホック署名し直す必要があります（案内に書いた）。
-2. **LibRaw の依存ライブラリのライセンス**: 2026-10-12 の配布物で同梱したのは、Windows（vcpkg）は lcms2（`lcms2-2.dll`）・zlib（`z.dll`）、macOS（Homebrew）は libomp・little-cms2・jpeg-turbo（6.2。一覧と SHA-256 は artifact の中の `bundled-libs.txt`）。それぞれのライセンスと、表記の要否を確認し、台帳に追加してください。
-3. **Visual C++ のランタイムの扱い**（2.2）: DLL をインストール先に同梱する（決定事項ログ No.73。利用者の指示、2026-10-12）。Microsoft の再頒布の条件（`REDIST.TXT`）の確認と、Windows Update で更新されないことの扱い（ビルドし直して配る）は人が判断する。
+1. **LibRaw の同梱と LGPL-2.1**（決定 No.32・175、台帳の 3.1 節）: 配布物に LibRaw の共有ライブラリを入れるときに、LGPL の条件を満たす方法（ライセンスの文書を同梱するか、対応するソースの提供の方法、利用者がライブラリを差し替えられること）。**2026-10-19 から、LGPL-2.1 の全文・LibRaw の著作権表示・案内（ソースの入手先として上流の LibRaw の版のタグと、ビルドの手順（vcpkg の port・Homebrew の formula）の場所、差し替えの方法）を配布物に入れます**（1.1）。**2026-10-20 から、ビルドに使った LibRaw のソースのアーカイブ（vcpkg は LibRaw と LibRaw-cmake、Homebrew は LibRaw の配布物）も `licenses/LibRaw/source/` に入れます**（決定事項ログ No.196。portfile の SHA512・formula の SHA-256 と同じかを確かめる）。これで LGPL-2.1 の第 4 節・第 6 節（ソースの提供）などの条件を満たすか（ソースの範囲を含む）は、人（必要なら専門家）が確認してください（[license_compliance.md](license_compliance.md) の 4 章の 3）。macOS では、`.app` の中の dylib を差し替えると署名が壊れるため、差し替えた人がアドホック署名し直す必要があります（案内に書いた）。
+2. **LibRaw の依存ライブラリのライセンス**: 2026-10-12 の配布物で同梱したのは、Windows（vcpkg）は lcms2（`lcms2-2.dll`）・zlib（`z.dll`）、macOS（Homebrew）は libomp・little-cms2・jpeg-turbo（6.2。一覧と SHA-256 は artifact の中の `bundled-libs.txt`）。**2026-10-20 から、同梱したものごとに入手元のパッケージがインストールしたライセンスの文書を `licenses/third-party/native.txt` に載せます**（決定事項ログ No.196。文書が見つからなければ止まる。libjpeg を同梱したときは IJG の一文を書く）。ライセンスごとの条件と対応は [license_compliance.md](license_compliance.md)。この内容で足りるかは人が確認してください。
+3. **Visual C++ のランタイムの扱い**（2.2）: DLL をインストール先に同梱する（決定事項ログ No.73。利用者の指示、2026-10-12）。Microsoft の再頒布の条件の確認と、Windows Update で更新されないことの扱い（ビルドし直して配る）は人が判断する。**2026-10-20 に AI が調べた Visual Studio 2026 の条項（第三者の写しで読んだ）には、配布する人と利用者に保護の条件への同意を求めること・Microsoft を補償すること、という文書だけでは満たせない条件があり、GPL との関係も含めて、Windows の配布物を公開する前に人（専門家）の確認が要る**（implementation_status の判断の表 No.200、[license_compliance.md](license_compliance.md) の 4 章の 1）。`native.txt` には名前・著作権者・入手元だけを書く。
 4. **FFmpeg**（決定 No.62、台帳の 3.4 節）: 各自が入れる FFmpeg のビルドの構成と、H.264 / H.265 の特許の扱い。
 5. ~~**macOS の最小の版**（2.3）~~ **決定済み（2026-10-12。決定事項ログ No.74）**: 配る相手の Mac はすべて macOS 26 以降なので、`.app` の最小の版を 26.0 に上げて配る。
 6. **署名・公証の要否**（SYS-08）: 社内の数名への配布なら不要としていますが、配る範囲が広がる場合や、会社の規則で署名が求められる場合は、Windows のコード署名の証明書（有償の場合あり）と、Apple Developer Program（有償）が要ります。費用・手続きは確認していません。
 7. **成果物を置く場所の公開の範囲**（2.5・2.6）: GitHub Actions の artifact、社内の共有フォルダなどを、配る相手だけが見られるか。
-8. **第三者のライセンスの文書**（2026-10-20。決定事項ログ No.194・195、台帳の 1.4 節、implementation_status の判断の表 No.198・199）: 配布物の `licenses/` に入れた Rust の crate・npm のパッケージの一覧と本文（ライセンスの選び方、本文のファイルがない 27 crate の扱いを含む）と、アプリ自体の GPL-3.0 の全文・ソースの場所の書き方で、各ライセンスの条件を満たすか。同梱の C / C++ の共有ライブラリ（2 の依存ライブラリ）と Visual C++ のランタイム（3）のライセンスの本文は入っていない。**2026-10-19 に公開した v0.1.0 の配布物には、これらの文書が入っていない**（v0.1.0 の添付を差し替えるか、次の版を待つかは人の判断）。
+8. **第三者のライセンスの文書**（2026-10-20。決定事項ログ No.194〜197、台帳の 1.4 節、implementation_status の判断の表 No.198〜201、照合の資料 [license_compliance.md](license_compliance.md)）: 配布物の `licenses/` に入れた Rust の crate・npm のパッケージ・同梱の C / C++ の共有ライブラリの一覧と文書（ライセンスの選び方、本文のファイルがない crate の扱いを含む）、LibRaw のソース、アプリ自体の GPL-3.0 の全文・ソースの場所の書き方で、各ライセンスの条件を満たすか。**2026-10-19 に公開した v0.1.0 の配布物には、これらの文書が入っていない**（v0.1.0 の添付を差し替えるか、次の版を待つかは人の判断）。

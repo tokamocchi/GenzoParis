@@ -24,14 +24,22 @@
 //    （scripts/lib/notice.mjs。版は LibRaw のヘッダ libraw_version.h から、genzo-raw の build.rs と同じ場所を探して
 //    読む）。LibRaw をビルドした手順（vcpkg の port の定義とパッチ・Homebrew の formula）の写しと、その手順の
 //    リポジトリのコミットも記録する（取れなければ案内に「記録できなかった」と書く。止めない）。
+//    同梱した LibRaw をビルドしたソースのアーカイブ（vcpkg は LibRaw と LibRaw-cmake、Homebrew は LibRaw の配布物）を
+//    licenses/LibRaw/source に入れる（入手元が取得したものを使い、なければ同じ URL から取る。vcpkg の portfile の
+//    SHA512・Homebrew の formula の SHA-256 と同じかを確かめ、違えば止める）。
+// 6. Windows・macOS では、同梱した共有ライブラリのライセンスの文書（licenses/third-party/native.txt）を、入手元の
+//    パッケージ（vcpkg の port・Homebrew の formula）がインストールした文書から作る（scripts/lib/native-notice.mjs。
+//    文書の見つからないライブラリがあれば止める）。
 //
 // LibRaw の場所:
-// - Windows: 環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR（genzo-raw の build.rs）。なければ
-//   VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT。GitHub Actions の Windows のランナーにある）の
-//   installed/<VCPKG_DEFAULT_TRIPLET、既定は x64-windows> を使う。LIBRAW_LIB_NAME がなければ、.lib の
+// - Windows: VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT。GitHub Actions の Windows のランナーにある）の
+//   installed/<VCPKG_DEFAULT_TRIPLET、既定は x64-windows> を使う。環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR
+//   （genzo-raw の build.rs）で指定してもよいが、その vcpkg の中でなければ止める（同梱する DLL のライセンスの文書と
+//   LibRaw のソースを vcpkg から集めるため。決定事項ログ No.196）。LIBRAW_LIB_NAME がなければ、.lib の
 //   ファイル名から選ぶ（vcpkg は raw_r）。DLL は LIBRAW_DLL_DIR、なければ LIBRAW_LIB_DIR の隣の bin と
 //   LIBRAW_LIB_DIR で探す。
-// - macOS・Linux: pkg-config（Homebrew の libraw、apt の libraw-dev）。
+// - macOS: pkg-config（Homebrew の libraw。同梱する dylib は Homebrew の Cellar の中のものでなければ止める）。
+// - Linux: pkg-config（apt の libraw-dev。同梱しない）。
 //
 // Visual C++ のランタイム（Windows。決定事項ログ No.73）: ワーカーと LibRaw の DLL が読み込むランタイムの DLL
 // （vcruntime140.dll・msvcp140.dll など）を、次の順に探したフォルダから同梱する（見つからなければエラー）。
@@ -76,11 +84,28 @@ import {
   LIBRAW_NOTICE_FILE,
   LICENSES_BUILD_DIR,
   RECIPE_DIR,
+  SOURCE_DIR,
   licenseResources,
   librawNotice,
   librawVersionHeaderCandidates,
   parseLibrawVersion,
 } from "./notice.mjs";
+import {
+  NATIVE_NOTICES_BUILD_PATH,
+  NATIVE_NOTICES_TARGET_PATH,
+  formatNativeNotices,
+  changedVcpkgPortFiles,
+  githubArchiveUrl,
+  homebrewFormulaInfo,
+  isNativeLicenseFile,
+  parseCellarPath,
+  parseVcpkgAbiInfo,
+  parseVcpkgFromGithub,
+  vcRedistFolderLabel,
+  vcpkgArchiveName,
+  vcpkgDllOwners,
+  vcpkgPortInfo,
+} from "./native-notice.mjs";
 import { readPeImports } from "./pe.mjs";
 import { APP_DIR, BINARIES_DIR, LIBS_CONFIG, REPO_ROOT, capture, run } from "./proc.mjs";
 import { parseHostTriple, sidecarFileName, targetOs } from "./target.mjs";
@@ -134,6 +159,8 @@ export function prepareWorker() {
   fs.mkdirSync(libsDir, { recursive: true });
   const licensesDir = path.join(APP_DIR, LICENSES_BUILD_DIR);
   fs.rmSync(licensesDir, { recursive: true, force: true });
+  const nativeNotices = path.join(APP_DIR, NATIVE_NOTICES_BUILD_PATH);
+  fs.rmSync(nativeNotices, { force: true });
 
   const sidecar = path.join(BINARIES_DIR, sidecarFileName(WORKER_NAME, triple));
   fs.rmSync(sidecar, { force: true });
@@ -145,11 +172,14 @@ export function prepareWorker() {
   let bundled = [];
   /** @type {string[]} 一覧の先頭に足す注記 */
   const notes = [];
+  /** @type {Array<{ name: string, source: string }>} Visual C++ のランタイム（Windows。bundled にも含む） */
+  let vcRuntime = [];
   /** @type {string | undefined} .app の最小の版を上げるとき、その版 */
   let raisedMinimum;
   if (os === "windows") {
     const r = collectWindowsDlls(sidecar, dllDirs, findVcRedistDirs(env, triple), libsDir);
     bundled = r.bundled;
+    vcRuntime = r.vcRuntime;
     notes.push(...r.notes);
   } else if (os === "macos") {
     const r = collectMacosDylibs(built, sidecar, libsDir);
@@ -160,17 +190,21 @@ export function prepareWorker() {
     reportLinuxLibraw(sidecar);
   }
 
-  const resources =
-    os === "windows" || os === "macos"
-      ? writeLibrawLicenses(
-          os,
-          readLibrawVersion(os, env),
-          bundled.map((b) => b.name),
-          licensesDir,
-          windowsLibraw?.vcpkgRoot ?? null,
-          env,
-        )
-      : undefined;
+  let resources;
+  if (os === "windows" || os === "macos") {
+    const vcpkgRoot = windowsLibraw?.vcpkgRoot ?? null;
+    const vcName = new Set(vcRuntime.map((v) => v.name));
+    const libs = bundled.filter((b) => !vcName.has(b.name));
+    const components =
+      os === "windows"
+        ? nativeComponentsWindows(libs, vcpkgRoot, windowsLibraw?.triplet ?? "", env)
+        : nativeComponentsMacos(libs, env);
+    const sourceFiles = collectLibrawSource(os, path.join(licensesDir, SOURCE_DIR), components, vcpkgRoot, env);
+    resources = {
+      ...writeLibrawLicenses(os, readLibrawVersion(os, env), bundled.map((b) => b.name), licensesDir, vcpkgRoot, sourceFiles, env),
+      ...writeNativeNotices(os, triple, components, vcRuntime, vcpkgRoot, windowsLibraw?.triplet ?? "", env, nativeNotices),
+    };
+  }
   const config = libsTauriConfig(
     os,
     bundled.map((b) => b.name),
@@ -182,24 +216,42 @@ export function prepareWorker() {
   return { triple, os, sidecar, libs: bundled.map((b) => b.name) };
 }
 
+/** `file` が `dir` の中か（`dir` そのものは含めない。パスを解決して比べる。Windows では大文字・小文字を区別しない）。 */
+function isInsideDir(dir, file) {
+  const rel = path.relative(path.resolve(dir), path.resolve(file));
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 /**
- * Windows: LibRaw の場所を環境変数に入れ、DLL を探すフォルダと、vcpkg の LibRaw を使うならその vcpkg の場所を返す。
+ * Windows: LibRaw の場所を環境変数に入れ、DLL を探すフォルダと、vcpkg の場所と triplet を返す。配布物を作るには
+ * vcpkg の LibRaw が要る（同梱する DLL のライセンスの文書と LibRaw のソースを vcpkg から集めるため。決定事項ログ
+ * No.196）ので、vcpkg の LibRaw でなければ、時間のかかるビルドの前に止める。LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR・
+ * LIBRAW_DLL_DIR は指定してもよいが、すべて VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT）の installed/<triplet> の
+ * 中でなければ止める（指定のないものは、その vcpkg の場所で埋める）。
  *
- * @returns {{ dllDirs: string[], vcpkgRoot: string | null }}
+ * @returns {{ dllDirs: string[], vcpkgRoot: string, triplet: string }}
  */
-function setupWindowsLibraw(env) {
-  let usedVcpkg = null;
-  if (!env.LIBRAW_INCLUDE_DIR || !env.LIBRAW_LIB_DIR) {
-    const vcpkgRoot = env.VCPKG_ROOT || env.VCPKG_INSTALLATION_ROOT;
-    if (!vcpkgRoot) {
-      throw new Error(
-        "LibRaw の場所が分からない。環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR か、VCPKG_ROOT を設定する（docs/packaging.md）",
-      );
-    }
-    const installed = path.join(vcpkgRoot, "installed", env.VCPKG_DEFAULT_TRIPLET || "x64-windows");
-    env.LIBRAW_INCLUDE_DIR ||= path.join(installed, "include");
-    env.LIBRAW_LIB_DIR ||= path.join(installed, "lib");
-    usedVcpkg = vcpkgRoot;
+export function setupWindowsLibraw(env) {
+  const triplet = env.VCPKG_DEFAULT_TRIPLET || "x64-windows";
+  const vcpkgRoot = env.VCPKG_ROOT || env.VCPKG_INSTALLATION_ROOT;
+  const vcpkgRequired =
+    "配布物を作るには vcpkg の LibRaw が要る（同梱する DLL のライセンスの文書と LibRaw のソースを vcpkg から集めるため。" +
+    "決定事項ログ No.196）。VCPKG_ROOT を設定し、LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR・LIBRAW_DLL_DIR を消すか、" +
+    "すべて vcpkg の中を指す（docs/packaging.md の 2.2）";
+  if (!vcpkgRoot) {
+    if (env.LIBRAW_INCLUDE_DIR || env.LIBRAW_LIB_DIR || env.LIBRAW_DLL_DIR) throw new Error(`${vcpkgRequired}（VCPKG_ROOT がない）`);
+    throw new Error("LibRaw の場所が分からない。環境変数 VCPKG_ROOT を設定する（docs/packaging.md の 2.2）");
+  }
+  // 指定のないものは vcpkg の場所で埋め、指定したもの（ヘッダ・.lib・DLL）を含めてすべて、その vcpkg の
+  // installed/<triplet> の中かを確かめる（片方だけの指定も確かめる）。
+  const installed = path.join(vcpkgRoot, "installed", triplet);
+  env.LIBRAW_INCLUDE_DIR ||= path.join(installed, "include");
+  env.LIBRAW_LIB_DIR ||= path.join(installed, "lib");
+  const outside = ["LIBRAW_INCLUDE_DIR", "LIBRAW_LIB_DIR", "LIBRAW_DLL_DIR"].filter(
+    (k) => env[k] && !isInsideDir(installed, env[k]),
+  );
+  if (outside.length > 0) {
+    throw new Error(`${vcpkgRequired}（${outside.map((k) => `${k}=${env[k]}`).join("、")} は ${installed} の外）`);
   }
   if (!fs.existsSync(env.LIBRAW_LIB_DIR)) {
     throw new Error(`LIBRAW_LIB_DIR のフォルダがない: ${env.LIBRAW_LIB_DIR}`);
@@ -218,7 +270,7 @@ function setupWindowsLibraw(env) {
   const dllDirs = env.LIBRAW_DLL_DIR
     ? [env.LIBRAW_DLL_DIR]
     : [path.join(env.LIBRAW_LIB_DIR, "..", "bin"), env.LIBRAW_LIB_DIR];
-  return { dllDirs, vcpkgRoot: usedVcpkg };
+  return { dllDirs, vcpkgRoot, triplet };
 }
 
 /**
@@ -302,7 +354,8 @@ function indexDlls(dirs) {
 /**
  * Windows: ワーカーの読み込む DLL をたどり、LibRaw のフォルダにあるものと、Visual C++ のランタイムを集める。
  *
- * @returns {{ bundled: Array<{ name: string, source: string }>, notes: string[] }}
+ * @returns {{ bundled: Array<{ name: string, source: string }>, vcRuntime: Array<{ name: string, source: string }>, notes: string[] }}
+ *   `bundled` は Visual C++ のランタイムを含むすべて
  */
 function collectWindowsDlls(worker, dllDirs, vcRedistDirs, libsDir) {
   const index = indexDlls(dllDirs);
@@ -342,7 +395,7 @@ function collectWindowsDlls(worker, dllDirs, vcRedistDirs, libsDir) {
             `${plan.vcRuntime.map((v) => v.name).join(", ")}（${vcRedistDirs.join(", ")}）`,
         ]
       : [];
-  return { bundled: all, notes };
+  return { bundled: all, vcRuntime: plan.vcRuntime, notes };
 }
 
 /**
@@ -558,9 +611,10 @@ function listFiles(dir) {
  * LibRaw のライセンスの文書（上流のファイルをそのまま）・ビルドの手順の写し・案内を `dir` に置き、Tauri の
  * resources の対応を返す。
  *
+ * @param {string[]} sourceFiles `dir` の SOURCE_DIR に置いたソースのアーカイブ
  * @returns {Record<string, string>}
  */
-function writeLibrawLicenses(os, version, bundledNames, dir, vcpkgRoot, env) {
+function writeLibrawLicenses(os, version, bundledNames, dir, vcpkgRoot, sourceFiles, env) {
   fs.mkdirSync(path.join(dir, RECIPE_DIR), { recursive: true });
   for (const f of LIBRAW_LICENSE_FILES) {
     fs.copyFileSync(path.join(APP_DIR, LIBRAW_LICENSE_SOURCE_DIR, f), path.join(dir, f));
@@ -568,9 +622,277 @@ function writeLibrawLicenses(os, version, bundledNames, dir, vcpkgRoot, env) {
   const { recipe, files } = collectLibrawRecipe(os, path.join(dir, RECIPE_DIR), vcpkgRoot, env);
   if (files.length === 0) fs.rmSync(path.join(dir, RECIPE_DIR), { recursive: true, force: true });
   console.log(`LibRaw のビルドの手順: ${JSON.stringify(recipe)}`);
-  fs.writeFileSync(path.join(dir, LIBRAW_NOTICE_FILE), librawNotice({ os, version, bundled: bundledNames, recipe }));
+  fs.writeFileSync(
+    path.join(dir, LIBRAW_NOTICE_FILE),
+    librawNotice({ os, version, bundled: bundledNames, recipe, source: sourceFiles }),
+  );
   console.log(`LibRaw のライセンスの文書と案内: ${path.relative(REPO_ROOT, dir)}`);
-  return licenseResources(files);
+  return licenseResources(files, sourceFiles);
+}
+
+/**
+ * ライセンスの文書を読む（UTF-8 として読めなければ Latin-1 として読む。古い文書の © などのため）。
+ *
+ * @param {string} file
+ */
+function readLicenseText(file) {
+  const bytes = fs.readFileSync(file);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return bytes.toString("latin1");
+  }
+}
+
+/** vcpkg のフォルダの git のコミット（取れなければ null）。 */
+function vcpkgRevision(vcpkgRoot, env) {
+  try {
+    return capture("git", ["-C", vcpkgRoot, "rev-parse", "HEAD"], { env }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Windows: 同梱した DLL（Visual C++ のランタイムを除く）を入れた vcpkg の port と、その著作権の文書を調べる。
+ *
+ * @param {Array<{ name: string, source: string }>} libs
+ * @param {string | null} vcpkgRoot
+ * @param {string} triplet
+ * @returns {import("./native-notice.mjs").NativeComponent[]}
+ */
+export function nativeComponentsWindows(libs, vcpkgRoot, triplet, env) {
+  if (!vcpkgRoot) {
+    throw new Error(
+      "同梱する DLL の入手元が分からず、ライセンスの文書（native.txt）を作れない。vcpkg の LibRaw を使う" +
+        "（環境変数 LIBRAW_INCLUDE_DIR・LIBRAW_LIB_DIR を設定せず、VCPKG_ROOT を設定する。docs/packaging.md の 2.2）",
+    );
+  }
+  const infoDir = path.join(vcpkgRoot, "installed", "vcpkg", "info");
+  const lists = fs.existsSync(infoDir)
+    ? fs
+        .readdirSync(infoDir)
+        .filter((n) => n.endsWith(`_${triplet}.list`))
+        .map((n) => ({ name: n, text: fs.readFileSync(path.join(infoDir, n), "utf8") }))
+    : [];
+  const owners = vcpkgDllOwners(lists, triplet);
+  const revision = vcpkgRevision(vcpkgRoot, env);
+  const bin = path.join(vcpkgRoot, "installed", triplet, "bin");
+  return libs.map((lib) => {
+    // 持ち主は名前で決めるので、同梱するファイルがその vcpkg の bin のものかを先に確かめる（外の同じ名前の DLL に、
+    // vcpkg の文書を付けないため）。
+    if (!isInsideDir(bin, lib.source)) {
+      throw new Error(`同梱する ${lib.name}（${lib.source}）が vcpkg の ${bin} の中にない。入手元が分からない`);
+    }
+    const owner = owners.get(lib.name.toLowerCase());
+    if (!owner) {
+      throw new Error(`同梱する ${lib.name} を入れた vcpkg の port が分からない（${infoDir} の *_${triplet}.list にない）`);
+    }
+    const share = path.join(vcpkgRoot, "installed", triplet, "share", owner.port);
+    const copyright = path.join(share, "copyright");
+    const portDir = path.join(vcpkgRoot, "ports", owner.port);
+    const manifest = path.join(portDir, "vcpkg.json");
+    const info = vcpkgPortInfo(fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, "utf8")) : null);
+    checkVcpkgPortIsInstalledOne(owner, info, portDir, path.join(share, "vcpkg_abi_info.txt"));
+    return {
+      name: owner.port,
+      version: owner.version,
+      license: info.license,
+      homepage: info.homepage,
+      recipe: revision ? `https://github.com/microsoft/vcpkg/tree/${revision}/ports/${owner.port}` : null,
+      source: null,
+      files: [lib.name],
+      texts: fs.existsSync(copyright) ? [{ file: `share/${owner.port}/copyright`, text: readLicenseText(copyright) }] : [],
+    };
+  });
+}
+
+/**
+ * Windows: ports/<port>（ライセンスの表示・portfile を読む）が、入っている port をビルドしたときのものと同じかを
+ * 確かめる（違えば止める。vcpkg を更新したのに port を入れ直していないと、文書がビルドと食い違うため）。
+ * vcpkg の ABI の情報（vcpkg_abi_info.txt）の port のファイルの SHA-256 と比べる。ABI の情報がなければ止める（info の
+ * 一覧の名前の版には port-version が入らず、版だけでは port の定義の違いを見分けられないため）。
+ *
+ * @param {{ port: string, version: string }} owner
+ * @param {{ version: string | null }} info ports の vcpkg.json
+ * @param {string} portDir
+ * @param {string} abiFile
+ */
+function checkVcpkgPortIsInstalledOne(owner, info, portDir, abiFile) {
+  const hint = `vcpkg の ports と入っている ${owner.port} が違う。vcpkg install（または vcpkg upgrade）し直す`;
+  const base = (v) => v.replace(/#\d+$/, "");
+  if (!info.version || base(info.version) !== base(owner.version)) {
+    throw new Error(`${hint}（入っている版 ${owner.version}、ports の版 ${info.version ?? "不明"}）`);
+  }
+  if (!fs.existsSync(abiFile)) {
+    // 版だけでは port-version の違い（同じ上流の版で、port の定義・パッチが違う）を見分けられないので止める。
+    throw new Error(`${hint}（${abiFile} がなく、ports のファイルが入っているものと同じかを確かめられない）`);
+  }
+  const portFiles = listFiles(portDir).map((f) => ({ file: f, sha256: fileHash(path.join(portDir, ...f.split("/")), "sha256") }));
+  const changed = changedVcpkgPortFiles(parseVcpkgAbiInfo(fs.readFileSync(abiFile, "utf8")), portFiles);
+  if (changed.length > 0) throw new Error(`${hint}（ビルドしたときと違うファイル: ${changed.join(", ")}）`);
+}
+
+/**
+ * macOS: 同梱した dylib を入れた Homebrew の formula と、keg のライセンスの文書を調べる。
+ *
+ * @param {Array<{ name: string, source: string }>} libs `source` は実体の場所（Cellar の中）
+ * @returns {import("./native-notice.mjs").NativeComponent[]}
+ */
+export function nativeComponentsMacos(libs, env) {
+  const kegs = libs.map((lib) => {
+    const keg = parseCellarPath(lib.source);
+    if (!keg) throw new Error(`同梱する ${lib.name} が Homebrew の Cellar の中にない（${lib.source}）。入手元が分からない`);
+    return { lib, ...keg };
+  });
+  const formulae = homebrewFormulae([...new Set(kegs.map((k) => k.formula))], env);
+  return kegs.map((k) => {
+    const info = homebrewFormulaInfo(formulae.get(k.formula));
+    // ライセンスの表示・formula の URL は今の formula のもの。同梱する keg がそれと違う版なら止める（文書がビルドと
+    // 食い違うため）。
+    if (k.version !== info.kegVersion) {
+      throw new Error(
+        `Homebrew の ${k.formula} は ${k.version} が入っているが、formula の版は ${info.kegVersion ?? "不明"}` +
+          `（brew upgrade ${k.formula} してからビルドし直す）`,
+      );
+    }
+    return {
+      name: k.formula,
+      version: k.version,
+      license: info.license,
+      homepage: info.homepage,
+      recipe: info.recipe,
+      source: info.source,
+      files: [k.lib.name],
+      texts: kegLicenseTexts(k.keg),
+    };
+  });
+}
+
+/** `brew info --json=v2` の formula（名前 → 情報）。 */
+function homebrewFormulae(names, env) {
+  if (names.length === 0) return new Map();
+  const json = JSON.parse(capture("brew", ["info", "--json=v2", ...names], { env }));
+  return new Map((json.formulae ?? []).map((f) => [f.name, f]));
+}
+
+/** keg の直下と share/doc/<名前> の、ライセンス・NOTICE のファイル（Homebrew の keg の構成）。 */
+function kegLicenseTexts(keg) {
+  const out = [];
+  const add = (dir, rel) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.isFile() && isNativeLicenseFile(e.name)) {
+        out.push({ file: rel ? `${rel}/${e.name}` : e.name, text: readLicenseText(path.join(dir, e.name)) });
+      }
+    }
+  };
+  add(keg, "");
+  const doc = path.join(keg, "share", "doc");
+  if (fs.existsSync(doc)) {
+    for (const e of fs.readdirSync(doc, { withFileTypes: true })) {
+      if (e.isDirectory()) add(path.join(doc, e.name), `share/doc/${e.name}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * 同梱した共有ライブラリのライセンスの文書（native.txt）を書き、Tauri の resources の対応を返す。
+ *
+ * @returns {Record<string, string>}
+ */
+function writeNativeNotices(os, triple, components, vcRuntime, vcpkgRoot, triplet, env, file) {
+  let manager = "Homebrew（homebrew-core）";
+  if (os === "windows") {
+    const revision = vcpkgRoot ? vcpkgRevision(vcpkgRoot, env) : null;
+    manager = `vcpkg（triplet ${triplet}${revision ? `。https://github.com/microsoft/vcpkg/tree/${revision}` : ""}）`;
+  }
+  const text = formatNativeNotices({
+    os,
+    triple,
+    manager,
+    components,
+    vcRuntime:
+      vcRuntime.length > 0
+        ? {
+            files: vcRuntime.map((v) => v.name),
+            folders: [...new Set(vcRuntime.map((v) => vcRedistFolderLabel(path.dirname(v.source))).filter((f) => f !== null))],
+          }
+        : null,
+  });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text);
+  console.log(`同梱したライブラリのライセンスの文書: ${path.relative(REPO_ROOT, file)}`);
+  return { [NATIVE_NOTICES_BUILD_PATH]: NATIVE_NOTICES_TARGET_PATH };
+}
+
+/** ファイルのハッシュ（16 進）。 */
+function fileHash(file, algorithm) {
+  return createHash(algorithm).update(fs.readFileSync(file)).digest("hex");
+}
+
+/**
+ * `cached`（入手元が取得したもの）があれば写し、なければ `url` から取り、ハッシュを確かめる（違えば止める）。
+ */
+function placeArchive(dest, cached, url, algorithm, expected) {
+  if (cached && fs.existsSync(cached)) {
+    fs.copyFileSync(cached, dest);
+  } else {
+    console.log(`取得: ${url}`);
+    run("curl", ["-fsSL", "--retry", "3", "-o", dest, url]);
+  }
+  const actual = fileHash(dest, algorithm);
+  if (actual !== expected) {
+    fs.rmSync(dest, { force: true });
+    throw new Error(`${path.basename(dest)} の ${algorithm.toUpperCase()} が違う（${actual}。期待: ${expected}）`);
+  }
+  console.log(`LibRaw のソース: ${path.basename(dest)}（${algorithm.toUpperCase()} を確かめた）`);
+}
+
+/**
+ * 同梱した LibRaw をビルドしたソースのアーカイブを `dir` に置き、置いたファイルの名前を返す。
+ *
+ * @param {import("./native-notice.mjs").NativeComponent[]} components 同梱したライブラリ（LibRaw の版を使う）
+ * @returns {string[]}
+ */
+export function collectLibrawSource(os, dir, components, vcpkgRoot, env) {
+  const libraw = components.find((c) => c.name === "libraw");
+  if (!libraw) throw new Error(`同梱したライブラリに LibRaw（vcpkg の port・Homebrew の formula「libraw」）がない`);
+  fs.mkdirSync(dir, { recursive: true });
+  const placed = [];
+  if (os === "windows") {
+    if (!vcpkgRoot) throw new Error("vcpkg の場所が分からず、LibRaw のソースを集められない");
+    const port = path.join(vcpkgRoot, "ports", "libraw");
+    const manifest = vcpkgPortInfo(JSON.parse(fs.readFileSync(path.join(port, "vcpkg.json"), "utf8")));
+    if (manifest.version !== libraw.version && manifest.version?.replace(/#\d+$/, "") !== libraw.version) {
+      throw new Error(`vcpkg の libraw は ${libraw.version} が入っているが、ports の版は ${manifest.version}（ソースが合わない）`);
+    }
+    const version = (manifest.version ?? "").replace(/#\d+$/, "");
+    for (const a of parseVcpkgFromGithub(fs.readFileSync(path.join(port, "portfile.cmake"), "utf8"), version)) {
+      const name = vcpkgArchiveName(a.repo, a.ref);
+      const downloads = env.VCPKG_DOWNLOADS || path.join(vcpkgRoot, "downloads");
+      placeArchive(path.join(dir, name), path.join(downloads, name), githubArchiveUrl(a.repo, a.ref), "sha512", a.sha512);
+      placed.push(name);
+    }
+  } else {
+    const info = homebrewFormulaInfo(homebrewFormulae(["libraw"], env).get("libraw"));
+    if (!info.source || !info.sourceSha256) throw new Error("Homebrew の libraw の formula に、ソースの URL・SHA-256 がない");
+    if (libraw.version !== info.kegVersion) {
+      throw new Error(`Homebrew の libraw は ${libraw.version} が入っているが、formula の版は ${info.kegVersion}（ソースが合わない。brew upgrade libraw）`);
+    }
+    const name = decodeURIComponent(new URL(info.source).pathname.split("/").pop() ?? "");
+    if (!/^[\w.+-]+$/.test(name)) throw new Error(`ソースのファイルの名前が読めない: ${info.source}`);
+    let cached = null;
+    try {
+      cached = capture("brew", ["--cache", "--build-from-source", "libraw"], { env }).trim() || null;
+    } catch {
+      // キャッシュの場所が分からなければ取りに行く。
+    }
+    placeArchive(path.join(dir, name), cached, info.source, "sha256", info.sourceSha256);
+    placed.push(name);
+  }
+  if (placed.length === 0) throw new Error("LibRaw のソースのアーカイブが 1 つもない（vcpkg の portfile を確かめる）");
+  return placed.sort();
 }
 
 /** tauri.conf.json の bundle.macOS.minimumSystemVersion を読む（ないときはエラー。最小の版を確かめられないため）。 */

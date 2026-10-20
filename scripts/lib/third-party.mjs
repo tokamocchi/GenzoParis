@@ -6,8 +6,10 @@
 //   （about.toml の accepted の順）は cargo-about のもの。cargo-about は `LICENSE`・`LICENSE-*`・`LICENSE.*` の形の
 //   ファイルしか見ないため、`LICENSE_MIT`（Tauri）・`license-mit`（windows-rs）などを取りこぼして SPDX の標準の文
 //   （著作権の行のない雛形）にする。そのときは crate の直下のファイルを名前と中身で選んで補う（findLicenseTexts。
-//   rustModel の doc）。補えなければ標準の文のまま載せ、「ライセンスのファイルがない crate」として著作権者の
-//   手がかり（Cargo.toml の authors）を書く。
+//   rustModel の doc）。crate にファイルがなければ、上流のリポジトリのその版のコミットのファイルの写し
+//   （RUST_SUPPLEMENTS。版と SHA-256 を固定）で補う。それもなければ標準の文のまま載せ、「ライセンスのファイルが
+//   ない crate」として著作権者の手がかり（Cargo.toml の authors）を書く。MPL-2.0 の crate は、ソースコードの
+//   入手先（crates.io の同じ版）の節を作る（SOURCE_OFFER_LICENSES）。
 // - npm: ui/package-lock.json の、開発用でない（`dev` の印のない）パッケージ（ui/package.json の dependencies と、
 //   その推移的な依存）。ライセンスは package.json の `license`（SPDX の式）を about.toml の accepted の順で選び、
 //   本文はパッケージのフォルダのファイルから取る。パッケージに本文がなければ、上流のリポジトリの同じ版のファイルの
@@ -73,6 +75,77 @@ export const NPM_SUPPLEMENTS = {
     },
   ],
 };
+
+/**
+ * Rust の crate に選んだライセンスの本文のファイルがない（cargo-about が SPDX の標準の文を返し、crate の直下にも
+ * ない）ときに使う、上流のリポジトリの、その版を公開したコミット（crate の .cargo_vcs_info.json の git.sha1）の
+ * リポジトリの直下のファイルの写し（supplements/rust。同じ中身のファイルは 1 つにまとめて置く）。`license` が
+ * "NOTICE" のものは、ライセンスの本文ではなく、著作権者・ライセンスの説明として NOTICE の扱いで載せる。
+ * `version` の crate にだけ使う（版を上げたら、その版のコミットのファイルを確かめて足し直す。使われなかった写しは
+ * scripts/third-party.mjs が警告する）。2026-10-20 に取得。
+ *
+ * 各行: [crate, 版, ライセンス（または "NOTICE"）, 写し（supplements/rust からの相対。名前は上流と同じ）, リポジトリ, コミット]
+ */
+const RUST_SUPPLEMENT_ROWS = [
+  ["alloc-stdlib", "0.2.4", "BSD-3-Clause", "rust-alloc-no-stdlib/LICENSE", "dropbox/rust-alloc-no-stdlib", "ae42d22078b98549e987d2f03d12df7b984fde47"],
+  ["block2", "0.6.2", "NOTICE", "objc2/LICENSE.md", "madsmtm/objc2", "b4167b582b2f75f9a1be75495c41b765344fd03c"],
+  ["dispatch2", "0.3.1", "NOTICE", "objc2/LICENSE.md", "madsmtm/objc2", "8852b424193ca41602281b3d7540d7c8ed51e49a"],
+  ["gl_generator", "0.14.0", "Apache-2.0", "gl-rs/LICENSE", "brendanzab/gl-rs", "ea503e8d5fb6d73c6030e6191ce738cd3bf3433e"],
+  ["khronos_api", "3.1.0", "Apache-2.0", "gl-rs/LICENSE", "brendanzab/gl-rs", "f150967b1c44ae888e6676f93f639ebc82771bdc"],
+  ["objc2", "0.6.5", "NOTICE", "objc2/LICENSE.md", "madsmtm/objc2", "d7d2fa23ceaa5e6096c923b081040e5d81b3b9df"],
+  ...[
+    "objc2-app-kit",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-foundation",
+    "objc2-metal",
+    "objc2-quartz-core",
+    "objc2-web-kit",
+  ].map((name) => [name, "0.3.2", "NOTICE", "objc2/LICENSE.md", "madsmtm/objc2", "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"]),
+  ["objc2-encode", "4.1.0", "NOTICE", "objc2/LICENSE.md", "madsmtm/objc2", "8d214f5477365ffcbcbb7de058c86ed9a518efb7"],
+  ["objc2-exception-helper", "0.1.1", "NOTICE", "objc2/LICENSE.md", "madsmtm/objc2", "8d214f5477365ffcbcbb7de058c86ed9a518efb7"],
+  ["profiling", "1.0.18", "MIT", "profiling/LICENSE-MIT", "aclysma/profiling", "8271551172eb6fa4cba47369aedd93790c623df9"],
+  ["spirv", "0.4.0+sdk-1.4.341.0", "Apache-2.0", "rspirv/LICENSE", "gfx-rs/rspirv", "8afc3d0ac8e158128cd1410bb2e4b4c26ab11bb4"],
+  ["tauri-plugin", "2.6.3", "MIT", "tauri/LICENSE_MIT", "tauri-apps/tauri", "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a"],
+  ...["unic-char-property", "unic-char-range", "unic-common", "unic-ucd-version"].flatMap((name) => [
+    [name, "0.9.0", "MIT", "rust-unic/LICENSE-MIT", "open-i18n/rust-unic", "5878605364af97a3358368a6eaef02104af2e016"],
+    [name, "0.9.0", "NOTICE", "rust-unic/COPYRIGHT.md", "open-i18n/rust-unic", "5878605364af97a3358368a6eaef02104af2e016"],
+  ]),
+  ["unic-ucd-ident", "0.9.0", "MIT", "rust-unic/LICENSE-MIT", "open-i18n/rust-unic", "8a6ce83063d90b91ae2ce59eddb803edd393fca9"],
+  ["unic-ucd-ident", "0.9.0", "NOTICE", "rust-unic/COPYRIGHT.md", "open-i18n/rust-unic", "8a6ce83063d90b91ae2ce59eddb803edd393fca9"],
+  ["webview2-com", "0.38.2", "MIT", "webview2-rs/LICENSE", "wravery/webview2-rs", "b74dc5e2b394044bea5191052868ce7a106c202c"],
+  ["webview2-com-macros", "0.8.1", "MIT", "webview2-rs/LICENSE", "wravery/webview2-rs", "dffa41a8a46d3f5565eefbff2de57d38d399f158"],
+  ["webview2-com-sys", "0.38.2", "MIT", "webview2-rs/LICENSE", "wravery/webview2-rs", "b74dc5e2b394044bea5191052868ce7a106c202c"],
+];
+
+/** RUST_SUPPLEMENT_ROWS の写しの SHA-256（中身が変わったら止める）。 */
+const RUST_SUPPLEMENT_SHA256 = {
+  "gl-rs/LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "objc2/LICENSE.md": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+  "profiling/LICENSE-MIT": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333",
+  "rspirv/LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "rust-alloc-no-stdlib/LICENSE": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+  "rust-unic/COPYRIGHT.md": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+  "rust-unic/LICENSE-MIT": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+  "tauri/LICENSE_MIT": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
+  "webview2-rs/LICENSE": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+};
+
+/**
+ * Rust の crate の上流の写し（NPM_SUPPLEMENTS と同じ形）。
+ *
+ * @type {Record<string, Array<{ version: string, license: string, file: string, sha256: string, source: string }>>}
+ */
+export const RUST_SUPPLEMENTS = {};
+for (const [name, version, license, file, repo, commit] of RUST_SUPPLEMENT_ROWS) {
+  (RUST_SUPPLEMENTS[name] ??= []).push({
+    version,
+    license,
+    file: `supplements/rust/${file}`,
+    sha256: RUST_SUPPLEMENT_SHA256[file],
+    source: `https://github.com/${repo}/blob/${commit}/${file.replace(/^.*\//, "")}`,
+  });
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // SPDX の式
@@ -450,13 +523,17 @@ const joinPath = (dir, name) => `${dir}/${name}`;
  *    cargo-about は、ファイルがなくて返した標準の文も、同じ文のファイルを持つほかの crate とまとめるため）。
  * 3. 1・2 がなければ（cargo-about が本文のファイルを見つけられず、標準の文を返した）、crate の直下のファイルから
  *    名前と中身で選んだもの（findLicenseTexts。cargo-about が取りこぼした `LICENSE_MIT` などもここで見つかる）。
- * 4. それもなければ、cargo-about の本文（SPDX の標準の文）をそのまま載せ、ファイルがない crate として印を付ける。
+ * 4. それもなければ、上流のリポジトリの同じ版のファイルの写し（RUST_SUPPLEMENTS。SHA-256 を確かめる）。
+ * 5. それもなければ、cargo-about の本文（SPDX の標準の文）をそのまま載せ、ファイルがない crate として印を付ける。
+ * RUST_SUPPLEMENTS の NOTICE の写し（著作権者・ライセンスの説明）は、ライセンスによらず載せる。
  *
  * @param {Array<{ licenses: Array<{ id: string, text: string, source_path: string | null, used_by: Array<{ crate: any }> }>, crates: Array<{ package: any, license: string }> }>} reports
- * @param {NoticeIo} io crate のフォルダのファイルを読む
+ * @param {NoticeIo & { readSupplement?: (file: string) => string }} io crate のフォルダのファイルを読む。
+ *   `readSupplement` は THIRD_PARTY_SOURCE_DIR からの相対のファイル（写しを使うときに要る）
+ * @param {typeof RUST_SUPPLEMENTS} [supplements]
  * @returns {NoticeModel}
  */
-export function rustModel(reports, io) {
+export function rustModel(reports, io, supplements = RUST_SUPPLEMENTS) {
   /** @type {Map<string, { pkg: NoticePackage, dir: string, parts: Map<string, Array<{ text: string, file: string | null, source: string | null }>> }>} */
   const crates = new Map();
   for (const report of reports) {
@@ -493,6 +570,17 @@ export function rustModel(reports, io) {
       }
     }
   }
+  /** 写しの出典（文書に書く）。 */
+  const sources = [];
+  const supplementsOf = (pkg, license) =>
+    (supplements[pkg.name] ?? []).filter((s) => s.version === pkg.version && s.license === license);
+  const useSupplement = (pkg, s) => {
+    if (!io.readSupplement) throw new Error(`上流の写し ${s.file} を読む処理（readSupplement）がない`);
+    const text = readVerifiedSupplement(io.readSupplement, s);
+    pkg.files.push(`${baseOf(s.file)}（上流 / upstream）`);
+    sources.push(`${packageKey(pkg)}（${s.license}）: ${s.source}`);
+    return text;
+  };
   const items = [];
   for (const c of crates.values()) {
     if (c.parts.size === 0) throw new Error(`ライセンスの本文がない crate: ${packageKey(c.pkg)}`);
@@ -553,19 +641,58 @@ export function rustModel(reports, io) {
           c.pkg.files.push(f.name);
           used.add(f.name);
         }
-      } else {
-        for (const x of list) parts.push({ license, standard: true, text: x.text });
-        c.pkg.standard.push(license);
+        continue;
       }
+      // 上流のリポジトリの同じ版のファイルの写しで補う。
+      const sup = supplementsOf(c.pkg, license);
+      if (sup.length > 0) {
+        for (const s of sup) parts.push({ license, text: useSupplement(c.pkg, s) });
+        c.pkg.supplemented.push(license);
+        continue;
+      }
+      for (const x of list) parts.push({ license, standard: true, text: x.text });
+      c.pkg.standard.push(license);
     }
     for (const n of names.filter((n) => isNoticeFileName(n) && !used.has(n)).sort(compareNatural)) {
       parts.push({ license: "NOTICE", notice: true, text: readRoot(n) });
       c.pkg.files.push(n);
     }
+    for (const s of supplementsOf(c.pkg, "NOTICE")) {
+      parts.push({ license: "NOTICE", notice: true, text: useSupplement(c.pkg, s) });
+    }
     c.pkg.files = [...new Set(c.pkg.files)].sort(compareNatural);
     items.push({ pkg: c.pkg, parts });
   }
-  return buildModel(items);
+  return buildModel(items, sources);
+}
+
+/**
+ * 上流の写しを読み、記録した SHA-256 と同じかを確かめる（違えば止める）。
+ *
+ * @param {(file: string) => string} read THIRD_PARTY_SOURCE_DIR からの相対のファイルを読む
+ * @param {{ file: string, sha256: string }} s
+ */
+function readVerifiedSupplement(read, s) {
+  const text = read(s.file);
+  const actual = sha256Hex(text);
+  if (actual !== s.sha256) throw new Error(`${s.file} の SHA-256 が違う（${actual}。期待: ${s.sha256}）`);
+  return text;
+}
+
+/**
+ * 写しのうち、一覧の crate・パッケージ（名前と版）に使われなかったもの（版を上げたなど。足し直すか消す）。
+ *
+ * @param {typeof RUST_SUPPLEMENTS} supplements
+ * @param {NoticeModel} model
+ * @returns {string[]} "名前 版（ライセンス）"
+ */
+export function unusedSupplements(supplements, model) {
+  const listed = new Set(model.packages.map(packageKey));
+  return Object.entries(supplements)
+    .flatMap(([name, list]) => list.map((s) => ({ key: `${name} ${s.version}`, license: s.license })))
+    .filter((x) => !listed.has(x.key))
+    .map((x) => `${x.key}（${x.license}）`)
+    .sort(compareNatural);
 }
 
 /** `file` の `dir` からの相対のパス（区切りは /）。`dir` の外なら null。 */
@@ -653,9 +780,7 @@ export function npmModel(packages, accepted, io, supplements = NPM_SUPPLEMENTS) 
         );
       }
       for (const s of sup) {
-        const text = io.readSupplement(s.file);
-        const actual = sha256Hex(text);
-        if (actual !== s.sha256) throw new Error(`${s.file} の SHA-256 が違う（${actual}。期待: ${s.sha256}）`);
+        const text = readVerifiedSupplement(io.readSupplement, s);
         parts.push({ license, text });
         pkg.supplemented.push(license);
         pkg.files.push(`${baseOf(s.file)}（上流 / upstream）`);
@@ -806,11 +931,12 @@ export function formatNotices(model, meta) {
       ];
     }),
   ];
+  let section = 2;
   const standard = model.packages.filter((p) => p.standard.length > 0);
   if (standard.length > 0) {
     lines.push(
       RULE,
-      `3. ライセンスのファイルがない${sp}${what} / ${rust ? "Crates" : "Packages"} without a license file`,
+      `${++section}. ライセンスのファイルがない${sp}${what} / ${rust ? "Crates" : "Packages"} without a license file`,
       THIN,
       `次の${sp}${what}${sp}は、公開された${sp}${what}${sp}にライセンスの本文のファイルがありません。2 章には SPDX の標準の文を載せて`,
       "います。著作権者の手がかりとして、作者（authors）とリポジトリを書きます。",
@@ -828,15 +954,58 @@ export function formatNotices(model, meta) {
   if (model.supplements.length > 0) {
     lines.push(
       RULE,
-      `${standard.length > 0 ? 4 : 3}. 上流のリポジトリから補った本文 / License texts taken from the upstream repositories`,
+      `${++section}. 上流のリポジトリから補った本文 / License texts taken from the upstream repositories`,
       THIN,
-      `次の${sp}${what}${sp}は、配布物にライセンスの本文のファイルがないため、上流のリポジトリの同じ版のファイルを載せています。`,
-      `The following ${whatEn} do not include the license text in their published package; the file from the upstream`,
-      "repository at the corresponding version is included instead.",
+      `次の${sp}${what}${sp}は、公開された${sp}${what}${sp}にライセンスの本文（または著作権者の表示）のファイルがないため、上流の`,
+      "リポジトリの同じ版のファイルを 2 章に載せています（NOTICE と書いたものは、著作権者・ライセンスの説明のファイル）。",
+      `The following ${whatEn} do not include the license text (or the copyright notice) in their published package; the`,
+      "file from the upstream repository at the corresponding version is included in section 2 instead (NOTICE marks a",
+      "file describing the copyright holders or the licensing).",
       "",
       ...model.supplements.map((s) => `  ${s}`),
       "",
     );
   }
+  const offered = model.packages.filter((p) => p.chosen.some((l) => SOURCE_OFFER_LICENSES.includes(l)));
+  if (offered.length > 0) {
+    lines.push(
+      RULE,
+      `${++section}. ソースコードの入手先 / Where to obtain the source code`,
+      THIN,
+      `次の${sp}${what}（${SOURCE_OFFER_LICENSES.join("・")}）のソースコードは、次の場所で公開されています（GenzoParis が使って`,
+      `いる版。GenzoParis は、これらの${sp}${what}${sp}のソースコードを変更せずに使っています）。`,
+      `The source code of the following ${whatEn} (${SOURCE_OFFER_LICENSES.join(", ")}) is published at the locations below (the`,
+      `versions used in GenzoParis; GenzoParis uses these ${whatEn} without modifying their source code).`,
+      "",
+      ...offered.flatMap((p) => [
+        `  ${p.name} ${p.version}（${p.chosen.join(" AND ")}）`,
+        ...sourceLocations(meta.kind, p).map((u) => `    ${u}`),
+      ]),
+      "",
+    );
+  }
   return `${lines.join("\n").replace(/\s+$/, "")}\n`;
+}
+
+/**
+ * 実行ファイルで配るときに、ソースコードの入手先を知らせる必要のあるライセンス（MPL-2.0 の 3.2 節 (a)）。
+ * 文書に入手先の節を作る。
+ */
+export const SOURCE_OFFER_LICENSES = ["MPL-2.0"];
+
+/**
+ * crate・パッケージのソースコードの入手先（公開の場所の同じ版）。
+ *
+ * @param {"rust" | "npm"} kind
+ * @param {NoticePackage} p
+ * @returns {string[]}
+ */
+function sourceLocations(kind, p) {
+  if (kind === "rust") {
+    return [
+      `https://crates.io/crates/${p.name}/${p.version}`,
+      `https://static.crates.io/crates/${p.name}/${p.name}-${p.version}.crate`,
+    ];
+  }
+  return [`https://www.npmjs.com/package/${p.name}/v/${p.version}`];
 }

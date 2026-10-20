@@ -223,6 +223,17 @@ jobs:
             $f = Join-Path $dir "licenses\$name"
             if (-not (Test-Path $f)) { throw "ライセンスの文書 licenses\$name がインストール先にない" }
           }
+          # 同梱した C / C++ のライブラリのライセンスの文書（scripts/lib/native-notice.mjs）がインストール先にあり、
+          # 同梱の一覧の DLL がすべて載っているか。LibRaw のソースのアーカイブ（licenses\LibRaw\source）があるか。
+          $nativeFile = Join-Path $dir 'licenses\third-party\native.txt'
+          if (-not (Test-Path $nativeFile)) { throw "ライセンスの文書 licenses\third-party\native.txt がインストール先にない" }
+          $native = Get-Content $nativeFile -Raw -Encoding utf8
+          foreach ($name in $listed) {
+            if (-not $native.Contains("  ${name}: ")) { throw "native.txt に同梱の ${name} が載っていない" }
+          }
+          $sources = @(Get-ChildItem (Join-Path $dir 'licenses\LibRaw\source') -Filter '*.tar.gz' -ErrorAction SilentlyContinue)
+          if ($sources.Count -eq 0) { throw "LibRaw のソースのアーカイブが licenses\LibRaw\source にない" }
+          Write-Output "LibRaw のソース: $($sources.Name -join ', ')"
           Get-Content (Join-Path $dir 'licenses\LibRaw\README.txt') -Encoding utf8 | Select-Object -First 5
           # DLL をインストール先と OS のフォルダからだけ探すよう、PATH を OS のフォルダだけにして起動する
           # （ランナーの PATH に LibRaw などの DLL があると、同梱の漏れを見逃すため）。
@@ -270,6 +281,23 @@ jobs:
           done
           head -5 "$app/Contents/Resources/licenses/LibRaw/README.txt"
           shopt -s nullglob
+          # 同梱した C / C++ のライブラリのライセンスの文書（scripts/lib/native-notice.mjs）が .app の中にあり、
+          # Contents/Frameworks の dylib がすべて載っているか。LibRaw のソースのアーカイブ（licenses/LibRaw/source）があるか。
+          native="$app/Contents/Resources/licenses/third-party/native.txt"
+          if [ ! -f "$native" ]; then
+            echo "::error::ライセンスの文書 licenses/third-party/native.txt が .app の Contents/Resources にない"; exit 1
+          fi
+          for lib in "$app"/Contents/Frameworks/*.dylib; do
+            name=$(basename "$lib")
+            if ! grep -qF "  ${name}: " "$native"; then
+              echo "::error::native.txt に同梱の ${name} が載っていない"; exit 1
+            fi
+          done
+          sources=("$app"/Contents/Resources/licenses/LibRaw/source/*.tar.gz)
+          if [ ${#sources[@]} -eq 0 ]; then
+            echo "::error::LibRaw のソースのアーカイブが .app の Contents/Resources/licenses/LibRaw/source にない"; exit 1
+          fi
+          echo "LibRaw のソース: ${sources[*]##*/}"
           dmgs=(target/release/bundle/dmg/*.dmg)
           if [ ${#dmgs[@]} -eq 0 ]; then echo "::error::.dmg がない"; exit 1; fi
           for dmg in "${dmgs[@]}"; do hdiutil verify "$dmg"; done

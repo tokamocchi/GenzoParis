@@ -7,7 +7,8 @@
 //! （scripts/lib/worker.mjs）。
 //!
 //! 画面には、このフォルダの中のファイルの一覧（[`list_documents`]）を返し、一覧にあるファイルだけを読む
-//! （[`read_document`]。画面から任意のパスを読ませない）。
+//! （[`read_document`]。画面から任意のパスを読ませない）。LibRaw のソースのアーカイブ（`LibRaw/source/` の
+//! `.tar.gz` など）は文書ではないので一覧に載せない（フォルダを開いて使う）。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -71,7 +72,7 @@ fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<LicenseDocument>) 
             if depth + 1 < MAX_DEPTH {
                 walk(&entry.path(), &path, depth + 1, out)?;
             }
-        } else if meta.is_file() {
+        } else if meta.is_file() && !is_archive_name(&path) {
             out.push(LicenseDocument {
                 path,
                 size: meta.len(),
@@ -79,6 +80,14 @@ fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<LicenseDocument>) 
         }
     }
     Ok(())
+}
+
+/// アーカイブ（ソースの `.tar.gz` など）の名前か。文書の一覧に載せない。
+fn is_archive_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".zip"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 /// 一覧にある文書を読む（UTF-8 でないところは置き換える）。一覧にないパス・大きすぎるファイルはエラー。
@@ -140,7 +149,25 @@ mod tests {
             "vcpkg",
         )
         .unwrap();
+        std::fs::create_dir_all(root.join("LibRaw/source")).unwrap();
+        std::fs::write(root.join("LibRaw/source/LibRaw-0.22.2.tar.gz"), b"\x1f\x8b").unwrap();
         d
+    }
+
+    #[test]
+    fn archive_names_are_not_documents() {
+        for name in [
+            "a.tar.gz",
+            "LibRaw/source/B.TGZ",
+            "c.tar.xz",
+            "d.tar.bz2",
+            "e.zip",
+        ] {
+            assert!(is_archive_name(name), "{name}");
+        }
+        for name in ["LICENSE.txt", "LibRaw/COPYRIGHT", "native.txt", "gz.txt"] {
+            assert!(!is_archive_name(name), "{name}");
+        }
     }
 
     #[test]
@@ -173,6 +200,7 @@ mod tests {
             "(C) LibRaw \u{fffd}"
         );
         for bad in [
+            "LibRaw/source/LibRaw-0.22.2.tar.gz",
             "../secret.txt",
             "third-party/../README.txt",
             "/etc/passwd",

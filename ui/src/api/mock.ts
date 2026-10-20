@@ -210,6 +210,7 @@ export const MOCK_LICENSE_DOCUMENTS: LicenseDocuments = {
     { path: "LibRaw/README.txt", size: 3200 },
     { path: "LibRaw/build-recipe/vcpkg-ports-libraw/portfile.cmake", size: 900 },
     { path: "README.txt", size: 2600 },
+    { path: "third-party/native.txt", size: 61000 },
     { path: "third-party/npm.txt", size: 7247 },
     { path: "third-party/rust.txt", size: 485278 },
   ],
