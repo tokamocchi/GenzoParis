@@ -136,6 +136,7 @@ impl TileService {
                 provider_dir,
                 limit_bytes: DEFAULT_CACHE_LIMIT_BYTES,
                 writes: AtomicU64::new(0),
+                write_failures: AtomicU64::new(0),
                 evicting: Mutex::new(()),
             }
         });
@@ -488,6 +489,8 @@ struct DiskCache {
     provider_dir: PathBuf,
     limit_bytes: u64,
     writes: AtomicU64,
+    /// 続けて書き込みに失敗した回数（warn のログを間引く）。
+    write_failures: AtomicU64,
     /// 容量の上限の確かめを同時に 2 つ走らせない。
     evicting: Mutex<()>,
 }
@@ -520,9 +523,10 @@ impl DiskCache {
         let result = write_atomic(&dir, &format!("{y}.png"), bytes)
             .and_then(|()| write_atomic(&dir, &format!("{y}.json"), &meta_json(meta)));
         if let Err(e) = result {
-            tracing::warn!("地図のタイルをキャッシュに書けませんでした: {e}");
+            self.log_write_failure("地図のタイルをキャッシュに書けませんでした", &e);
             return;
         }
+        self.write_failures.store(0, Ordering::Relaxed);
         if self
             .writes
             .fetch_add(1, Ordering::Relaxed)
@@ -533,9 +537,25 @@ impl DiskCache {
     }
 
     fn write_meta(&self, z: u8, x: u32, y: u32, meta: &TileMeta) {
-        if let Err(e) = write_atomic(&self.tile_dir(z, x), &format!("{y}.json"), &meta_json(meta)) {
-            tracing::warn!("地図のタイルのキャッシュの期限を書けませんでした: {e}");
+        match write_atomic(&self.tile_dir(z, x), &format!("{y}.json"), &meta_json(meta)) {
+            Ok(()) => self.write_failures.store(0, Ordering::Relaxed),
+            Err(e) => {
+                self.log_write_failure("地図のタイルのキャッシュの期限を書けませんでした", &e)
+            }
         }
+    }
+
+    /// 書き込みの失敗をログに書く。
+    ///
+    /// info 以上には、誤りの種類（[`io::ErrorKind`]）だけを書く。誤りの文（`Display`・`Debug`）には、tempfile が
+    /// 一時ファイルのパス（`<提供元>/<z>/<x>/.tmp-…`。見ている経度の帯がわかる）を付けるので、debug にだけ書く
+    /// （モジュールの doc）。ディスクがいっぱいのときなどにタイルごとに並ばないよう、続けて失敗している間は
+    /// 2 回目から debug にする（書けたら戻す）。
+    fn log_write_failure(&self, what: &str, e: &io::Error) {
+        if self.write_failures.fetch_add(1, Ordering::Relaxed) == 0 {
+            tracing::warn!(kind = %e.kind(), "{}", write_failure_message(what, e));
+        }
+        tracing::debug!("{what}: {e}");
     }
 
     fn remove(&self, z: u8, x: u32, y: u32) {
@@ -629,6 +649,11 @@ impl DiskCache {
     }
 }
 
+/// 書き込みの失敗の info 以上のログの文（誤りの種類だけ。パス・タイルの番号を入れない）。
+fn write_failure_message(what: &str, e: &io::Error) -> String {
+    format!("{what}（{}）", e.kind())
+}
+
 fn meta_json(meta: &TileMeta) -> Vec<u8> {
     serde_json::to_vec(meta).expect("TileMeta は JSON にできる")
 }
@@ -685,6 +710,34 @@ mod tests {
             "map-tiles",
         ] {
             assert!(!is_provider_dir_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn write_failure_logs_carry_only_the_kind_of_error() {
+        // tempfile は、一時ファイルを作る・書くときの誤りの文に一時ファイルのパスを付ける（PathError の
+        // 「… at path "…"」）。その形の誤りでも、info 以上のログの文にパス・タイルの番号が入らないこと。
+        let e = io::Error::new(
+            io::ErrorKind::StorageFull,
+            "No space left on device (os error 28) at path \"/home/u/.cache/app/map-tiles/0123456789abcdef/17/116418/.tmp-AbC123\"",
+        );
+        let message = write_failure_message("地図のタイルをキャッシュに書けませんでした", &e);
+        assert_eq!(
+            message,
+            format!(
+                "地図のタイルをキャッシュに書けませんでした（{}）",
+                io::ErrorKind::StorageFull
+            )
+        );
+        for leaked in [
+            "116418",
+            "/17/",
+            "map-tiles",
+            "0123456789abcdef",
+            ".tmp-",
+            "at path",
+        ] {
+            assert!(!message.contains(leaked), "{leaked}: {message}");
         }
     }
 
