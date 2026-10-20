@@ -149,12 +149,21 @@ impl MapService {
     }
 }
 
-/// 設定のタイルの提供元（`None` なら OSM の標準のタイル）。設定の URL の提供元の最大のズームと帰属の表示は、
-/// OSM の標準と同じとみなす（仮置き。OSM のデータを使う別の提供元を想定。画面の地図も同じ値を使う）。
+/// 設定のタイルの提供元（`None` なら OSM の標準のタイル）。設定の URL の提供元の最大のズームは、OSM の標準と
+/// 同じとみなす（仮置き。OSM のデータを使う別の提供元を想定。画面の地図も同じ値を使う）。帰属の表示は、設定の
+/// `tile_attribution` があればそれ、なければ OSM の帰属の表示（画面は、OSM の帰属の表示を常に出し、
+/// `tile_attribution` があれば並べて出す）。
 fn tile_provider(preferences: &MapPreferences) -> Result<TileProvider, GeoError> {
     match &preferences.tile_url {
         None => Ok(TileProvider::openstreetmap()),
-        Some(url) => TileProvider::new(url, OSM_MAX_ZOOM, OSM_ATTRIBUTION),
+        Some(url) => TileProvider::new(
+            url,
+            OSM_MAX_ZOOM,
+            preferences
+                .tile_attribution
+                .as_deref()
+                .unwrap_or(OSM_ATTRIBUTION),
+        ),
     }
 }
 
@@ -418,6 +427,15 @@ mod tests {
             other.provider().url_template(),
             "https://tiles.example.org/{z}/{x}/{y}.png"
         );
+        assert_eq!(other.provider().attribution(), OSM_ATTRIBUTION);
+        // 提供元の帰属の表示を設定すると、それを使う（作り直す）。
+        let credited = MapPreferences {
+            tile_attribution: Some("Maps © 提供元".into()),
+            ..custom.clone()
+        };
+        let third = service.tiles(&credited).unwrap();
+        assert!(!Arc::ptr_eq(&other, &third));
+        assert_eq!(third.provider().attribution(), "Maps © 提供元");
         let g = service.geocoder(&custom).unwrap();
         assert_eq!(
             g.provider().search_url(),

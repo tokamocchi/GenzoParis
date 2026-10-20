@@ -108,22 +108,46 @@ pub struct MapPreferences {
     /// 地名の検索（Nominatim と同じ API の `/search`）の URL（https。`None` なら
     /// `https://nominatim.openstreetmap.org/search`）。
     pub search_url: Option<String>,
+    /// 設定のタイルの提供元の帰属の表示（例「Maps © 提供元の名前」。地図の右下に、OSM の帰属の表示
+    /// 「© OpenStreetMap contributors」と並べて出す）。多くの提供元は自分の帰属の表示を利用の条件にしている。
+    /// `tile_url` が `None`（OSM の標準のタイル）なら使わない（保存のときに `None` にする）。文言は提供元の
+    /// 利用条件で決まる（AI は決めない）。
+    pub tile_attribution: Option<String>,
 }
 
+/// 帰属の表示の長さの上限（文字数。仮置き）。
+pub const MAX_TILE_ATTRIBUTION_CHARS: usize = 200;
+
 impl MapPreferences {
-    /// 保存の前に整える: URL の前後の空白を除き、空なら `None`（既定の提供元）にして、形を確かめる
-    /// （genzo-geo の `validate_tile_url_template`・`validate_search_url`。https だけ）。
+    /// 保存の前に整える: URL と帰属の表示の前後の空白を除き、空なら `None`（既定の提供元）にして、形を確かめる
+    /// （genzo-geo の `validate_tile_url_template`・`validate_search_url`。https だけ）。帰属の表示は、タイルの
+    /// URL が既定（`None`）なら `None` にし、改行などの制御文字と [`MAX_TILE_ATTRIBUTION_CHARS`] 文字を超える
+    /// ものは誤りにする。
     pub fn normalized(mut self) -> Result<Self, GeoError> {
-        fn non_empty(url: Option<String>) -> Option<String> {
-            url.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty())
+        fn non_empty(value: Option<String>) -> Option<String> {
+            value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
         }
         self.tile_url = non_empty(self.tile_url);
         self.search_url = non_empty(self.search_url);
+        self.tile_attribution =
+            non_empty(self.tile_attribution).filter(|_| self.tile_url.is_some());
         if let Some(url) = &self.tile_url {
             genzo_geo::validate_tile_url_template(url)?;
         }
         if let Some(url) = &self.search_url {
             genzo_geo::validate_search_url(url)?;
+        }
+        if let Some(text) = &self.tile_attribution {
+            if text.chars().any(char::is_control) {
+                return Err(GeoError::InvalidInput(
+                    "地図の帰属の表示に改行などの制御文字は使えません".to_owned(),
+                ));
+            }
+            if text.chars().count() > MAX_TILE_ATTRIBUTION_CHARS {
+                return Err(GeoError::InvalidInput(format!(
+                    "地図の帰属の表示が長すぎます（{MAX_TILE_ATTRIBUTION_CHARS} 文字まで）"
+                )));
+            }
         }
         Ok(self)
     }
@@ -307,6 +331,7 @@ mod tests {
             consented_at: None,
             tile_url: Some("  https://tiles.example.org/{z}/{x}/{y}.png ".to_owned()),
             search_url: Some("   ".to_owned()),
+            tile_attribution: None,
         }
         .normalized()
         .unwrap();
@@ -334,6 +359,37 @@ mod tests {
         }
         .normalized();
         assert!(matches!(r, Err(GeoError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn tile_attribution_is_trimmed_and_checked() {
+        let custom = |attribution: &str| MapPreferences {
+            tile_url: Some("https://tiles.example.org/{z}/{x}/{y}.png".to_owned()),
+            tile_attribution: Some(attribution.to_owned()),
+            ..MapPreferences::default()
+        };
+        let p = custom("  Maps © 提供元  ").normalized().unwrap();
+        assert_eq!(p.tile_attribution.as_deref(), Some("Maps © 提供元"));
+        assert_eq!(custom("   ").normalized().unwrap().tile_attribution, None);
+        // OSM の標準のタイルには使わない。
+        let p = MapPreferences {
+            tile_attribution: Some("Maps © 提供元".to_owned()),
+            ..MapPreferences::default()
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(p.tile_attribution, None);
+        let long = "あ".repeat(MAX_TILE_ATTRIBUTION_CHARS);
+        assert!(custom(&long).normalized().is_ok());
+        for bad in [format!("{long}あ"), "Maps\n© 提供元".to_owned()] {
+            assert!(
+                matches!(custom(&bad).normalized(), Err(GeoError::InvalidInput(_))),
+                "{bad}"
+            );
+        }
+        // 前の形の settings.json（欄がない）も読める。
+        let p: MapPreferences = serde_json::from_str(r#"{"online": true}"#).unwrap();
+        assert_eq!(p.tile_attribution, None);
     }
 
     #[test]

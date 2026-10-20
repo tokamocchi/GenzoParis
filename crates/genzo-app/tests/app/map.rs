@@ -110,6 +110,7 @@ pub fn map_preferences_are_saved_and_read_again() {
             consented_at: Some("1999-01-01T00:00:00Z".to_owned()),
             tile_url: Some("  https://tiles.example.org/{z}/{x}/{y}.png ".to_owned()),
             search_url: Some(" ".to_owned()),
+            tile_attribution: Some(" Maps © 提供元 ".to_owned()),
         },
     )
     .unwrap();
@@ -126,6 +127,7 @@ pub fn map_preferences_are_saved_and_read_again() {
         Some("https://tiles.example.org/{z}/{x}/{y}.png")
     );
     assert_eq!(m.search_url, None, "空白だけなら既定の提供元");
+    assert_eq!(m.tile_attribution.as_deref(), Some("Maps © 提供元"));
     assert_eq!(state.settings().map, m);
 
     // 使えない URL（http・サブドメインの置換子）は保存しない。
@@ -145,6 +147,7 @@ pub fn map_preferences_are_saved_and_read_again() {
                     consented_at: None,
                     tile_url: tile_url.map(str::to_owned),
                     search_url: search_url.map(str::to_owned),
+                    tile_attribution: None,
                 },
             ),
             ErrorKind::InvalidInput,
