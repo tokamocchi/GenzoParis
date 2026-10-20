@@ -2573,6 +2573,19 @@ export interface AppSettingsUpdate {
   backup_on_close: boolean;
 }
 
+/** 同梱したライセンスの文書（genzo-app の licenses.rs の `LicenseDocument`。DIST-05）。 */
+export interface LicenseDocument {
+  /** ライセンスの文書のフォルダからの相対のパス（区切りは "/"。例: "third-party/rust.txt"）。 */
+  path: string;
+  size: number;
+}
+
+/** 同梱したライセンスの文書の一覧（`LicenseDocuments`）。`dir` がなければ文書はない（開発用のビルドなど）。 */
+export interface LicenseDocuments {
+  dir: string | null;
+  documents: LicenseDocument[];
+}
+
 // ---------------------------------------------------------------------------
 // ボリューム（FILE-03）・アプリの中でのファイル操作（FILE-02）・見つからない写真と再リンク（FILE-04）
 // ---------------------------------------------------------------------------

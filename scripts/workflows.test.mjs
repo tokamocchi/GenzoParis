@@ -29,3 +29,19 @@ test("ワークフローのシェルの変数は、すぐ後に ASCII でない�
   }
   assert.deepEqual(found, []);
 });
+
+test("CI・配布で入れる cargo-about の版は、第三者のライセンスの文書を作る版（CARGO_ABOUT_VERSION）と同じ", async () => {
+  const { CARGO_ABOUT_VERSION } = await import("./lib/third-party.mjs");
+  for (const file of ["ci.yml", "release.yml"]) {
+    const text = fs.readFileSync(path.join(WORKFLOWS_DIR, file), "utf8");
+    const m = /^\s*CARGO_ABOUT_VERSION:\s*"([^"]+)"/m.exec(text);
+    assert.ok(m, `${file} に CARGO_ABOUT_VERSION がない`);
+    assert.equal(m[1], CARGO_ABOUT_VERSION, file);
+    assert.match(text, /node scripts\/third-party\.mjs --check --only rust/, file);
+  }
+  const ci = fs.readFileSync(path.join(WORKFLOWS_DIR, "ci.yml"), "utf8");
+  assert.match(ci, /node scripts\/third-party\.mjs --check --only npm --vite/);
+  // 配布物のジョブは、Rust の crate のライセンスの文書の確認が通ってから動く。
+  const release = fs.readFileSync(path.join(WORKFLOWS_DIR, "release.yml"), "utf8");
+  assert.match(release, /^  bundle:\n    needs: licenses\n/m);
+});

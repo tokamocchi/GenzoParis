@@ -293,6 +293,17 @@ describe("ダイアログ", () => {
     expect(off).toContain("ログのファイルを作れません");
   });
 
+  it("設定のこのアプリについて: 版とライセンス（DIST-05）", () => {
+    // カタログを開いていなくても選べる。文書の一覧は表示してから読む（useEffect は動かない）。
+    const html = render(createElement(SettingsDialog, { tab: "about" }));
+    expect(html).toContain("このアプリについて");
+    expect(html).toContain("版 0.1.0（linux）");
+    expect(html).toContain("GPL-3.0-or-later");
+    expect(html).toContain("https://github.com/tokamocchi/GenzoParis");
+    expect(html).toContain("第三者のソフトウェア");
+    expect(html).toContain("フォルダを開く");
+  });
+
   it("設定のカタログ: カタログの構造（ORG-07）", () => {
     const html = render(createElement(SettingsDialog, { tab: "catalog" }));
     expect(html).toContain("カタログの構造（SQL で直接読む）");

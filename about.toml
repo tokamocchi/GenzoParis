@@ -1,0 +1,68 @@
+# cargo-about の設定（配布物に入れる Rust の crate のライセンスの文書。DIST-05）。
+#
+# scripts/third-party.mjs が、配布物に入る実行ファイルの crate ごと（本体 genzo-app に custom-protocol、ワーカー
+# genzo-worker に libraw）に `cargo about generate --format json` を実行して、
+# crates/genzo-app/licenses/third-party/rust.txt を作る。画面の npm のパッケージ（npm.txt）も、ここの accepted の順で
+# ライセンスを選ぶ。cargo-about の版は scripts/lib/third-party.mjs の CARGO_ABOUT_VERSION（0.9.2）。
+#
+# - accepted: 許可するライセンスと、その優先の順。複数のライセンスから選べる crate（"MIT OR Apache-2.0" など）は、
+#   この順で先のものを選び、その本文を載せる。2026-10-20 の AI の仮決定: 表示の義務の少ないものを先にする
+#   （CC0-1.0 → MIT → ISC → BSD → Zlib → Unicode-3.0 → BSL-1.0 → Apache-2.0。Apache-2.0 は NOTICE の扱いなどが
+#   加わるため後）。**どれを選ぶか・選んだ本文で条件を満たすかは、人（必要なら専門家）の確認待ち**
+#   （docs/third_party.md の 1.4 節）。許可するライセンスは deny.toml の allow と同じ（GPL-3.0-or-later と両立する
+#   もの）にする。ここに足すときは deny.toml にも足し、両立するかを人が確かめる。
+# - targets: 配布の対象（Windows の x64・macOS の Apple Silicon）。Linux の .deb は確認用で配らないので含めない。
+# - ignore-dev-dependencies: 開発用の依存（テストだけで使う）は配布物に入らないので除く。
+# - ignore-build-dependencies = false: ビルドのときだけ使う crate（build.rs・手続きマクロ）も、生成したコードが
+#   実行ファイルに入りうるので含める（多めに載せる側に倒す）。
+# - private.ignore: このリポジトリの crate（publish = false。GPL-3.0-or-later）は第三者のものではないので除く。
+
+accepted = [
+    "CC0-1.0",
+    "MIT",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+]
+targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+
+[private]
+ignore = true
+
+# MPL-2.0 は crate ごとに許可する（deny.toml の licenses.exceptions と同じ 5 つ。Tauri の tauri-utils の HTML の
+# 処理と dirs の依存。Exhibit B の表示がないことは 2026-10-12 に確かめた。法的な最終確認は人が行う）。
+# MPL-2.0 のファイルを実行ファイルで配るときは、ソースの入手先を知らせる（MPL-2.0 の 3.2 節）。文書には crate の
+# 版を書き、ソースは crates.io の同じ版で入手できる（docs/third_party.md の 1.4 節。**人の確認待ち**）。
+[cssparser]
+accepted = ["MPL-2.0"]
+
+[cssparser-macros]
+accepted = ["MPL-2.0"]
+
+[selectors]
+accepted = ["MPL-2.0"]
+
+[dtoa-short]
+accepted = ["MPL-2.0"]
+
+[option-ext]
+accepted = ["MPL-2.0"]
+
+# brotli-decompressor（Tauri の埋め込みの資源の展開）は "BSD-3-Clause/MIT"（どちらかを選べる）だが、crate には
+# BSD-3-Clause の本文（Dropbox, Inc. の著作権表示つき）の LICENSE しかない。accepted の順では MIT（本文なし）を
+# 選んでしまうので、本文のある BSD-3-Clause を選ぶ（2026-10-20 の AI の仮決定。人の確認待ち）。LICENSE の中身が
+# 変わると（SHA-256 が合わないと）この指定は効かず、MIT の標準の文に戻る（rust.txt の 3 章に出る）。
+[brotli-decompressor.clarify]
+license = "BSD-3-Clause"
+
+[[brotli-decompressor.clarify.files]]
+path = "LICENSE"
+checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"

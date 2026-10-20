@@ -14,6 +14,7 @@
 //! | [`tools`] | ffmpeg・ffprobe を探す |
 //! | [`catalog_file`] | 既定のカタログの場所、データのフォルダ、カタログのファイルの判定 |
 //! | [`logs`] | ログ・クラッシュレポート（SYS-07。起動時の初期化、前回のクラッシュの知らせ、ログのフォルダを開く・消す、画面のエラーの記録。外部へは送信しない） |
+//! | [`licenses`] | 同梱したライセンスの文書（アプリ自体・第三者・LibRaw）の一覧と読み取り（DIST-05） |
 //!
 //! # 画面への画像の表示（決定事項ログ No.60。04 の 1.5 節からの変更）
 //!
@@ -66,6 +67,7 @@
 pub mod catalog_file;
 pub mod commands;
 pub mod frames;
+pub mod licenses;
 pub mod logs;
 pub mod map;
 pub mod protocol;
@@ -347,6 +349,9 @@ pub fn run() {
             commands::open_log_folder,
             commands::clear_logs,
             commands::report_ui_error,
+            commands::license_documents,
+            commands::read_license_document,
+            commands::open_license_folder,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event

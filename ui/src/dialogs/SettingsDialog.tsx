@@ -1,4 +1,5 @@
-// 設定のダイアログ（SYS-05・SYS-04）: 「一般」「表示」（ルーペ上の撮影情報。LIB-17）「カタログ」「バックアップ」のタブ。
+// 設定のダイアログ（SYS-05・SYS-04）: 「一般」「表示」（ルーペ上の撮影情報。LIB-17）「カタログ」「バックアップ」
+// 「このアプリについて」（版・ライセンスの文書。DIST-05）のタブ。
 //
 // タブを切り替えても入力が消えないよう、すべてのタブを描いておき、選んでいないものは隠す。
 
@@ -6,21 +7,23 @@ import { useState } from "react";
 
 import { Dialog } from "../components/Dialog";
 import { actions, useApp } from "../state/app";
+import { SettingsAbout } from "./SettingsAbout";
 import { SettingsBackup } from "./SettingsBackup";
 import { SettingsCatalog } from "./SettingsCatalog";
 import { SettingsGeneral } from "./SettingsGeneral";
 import { SettingsView } from "./SettingsView";
 
-type Tab = "general" | "view" | "catalog" | "backup";
+type Tab = "general" | "view" | "catalog" | "backup" | "about";
 
 /** カタログを開いていなくても使えるタブ。 */
-const WITHOUT_CATALOG: Tab[] = ["general", "view"];
+const WITHOUT_CATALOG: Tab[] = ["general", "view", "about"];
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "general", label: "一般" },
   { id: "view", label: "表示" },
   { id: "catalog", label: "カタログ" },
   { id: "backup", label: "バックアップ" },
+  { id: "about", label: "このアプリについて" },
 ];
 
 export function SettingsDialog(props: { tab?: Tab }) {
@@ -56,6 +59,9 @@ export function SettingsDialog(props: { tab?: Tab }) {
       </div>
       <div role="tabpanel" hidden={tab !== "view"}>
         <SettingsView />
+      </div>
+      <div role="tabpanel" hidden={tab !== "about"}>
+        <SettingsAbout active={tab === "about"} />
       </div>
       {hasCatalog && (
         <>
