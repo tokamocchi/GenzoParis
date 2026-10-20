@@ -440,6 +440,55 @@ fn clear_cache_removes_only_the_provider_folders() {
 }
 
 #[test]
+fn tiles_fetched_while_the_cache_is_cleared_are_not_saved() {
+    // 取っている途中に消したら、そのタイルはディスクにもメモリーにも書かない（消した後に戻らない）。
+    for disk in [true, false] {
+        let dir = TempDir::new().unwrap();
+        let clock = FakeClock::new();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let client = {
+            let gate = gate.clone();
+            FakeClient::new(move |_| {
+                let (open, cv) = &*gate;
+                let mut open = open.lock().unwrap();
+                while !*open {
+                    open = cv.wait(open).unwrap();
+                }
+                Ok(http(200, &[("Content-Type", "image/png")], &png("late")))
+            })
+        };
+        let tiles = Arc::new(service(&client, disk.then_some(dir.path()), &clock));
+        let fetching = {
+            let tiles = tiles.clone();
+            std::thread::spawn(move || tiles.tile(1, 1, 1))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while client.count() == 0 {
+            assert!(std::time::Instant::now() < deadline, "要求が届かない");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        tiles.clear_cache().unwrap();
+        {
+            let (open, cv) = &*gate;
+            *open.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        // 取ったタイルは返すが、キャッシュには残さない。
+        assert_eq!(fetching.join().unwrap().unwrap().bytes, png("late"));
+        assert_eq!(
+            tiles.cache_info(),
+            crate::CacheInfo::default(),
+            "disk={disk}"
+        );
+        tiles.tile(1, 1, 1).unwrap();
+        assert_eq!(client.count(), 2, "disk={disk}");
+        // 消した後に取り始めたものは、今までどおり保存する。
+        tiles.tile(1, 1, 1).unwrap();
+        assert_eq!(client.count(), 2, "disk={disk}");
+    }
+}
+
+#[test]
 fn without_a_disk_cache_tiles_are_kept_in_memory() {
     // キャッシュのフォルダがない（app_cache_dir() が取れない）ときも、再訪で上流から取り直さない（タイルの
     // ポリシーの「再訪で取り直さない手元のキャッシュ」）。期限と条件付きの要求はディスクと同じ規則。

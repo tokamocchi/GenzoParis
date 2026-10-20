@@ -38,7 +38,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -128,6 +128,10 @@ pub struct TileService {
     memory: Mutex<MemoryCache>,
     clock: Arc<dyn Clock>,
     in_flight: Mutex<HashMap<TileKey, Arc<Flight>>>,
+    /// キャッシュの世代（[`TileService::clear_cache`] のたびに 1 つ進む）。キャッシュに書くときは読みの鍵を持って
+    /// 世代を確かめ、取り始めた後に消されていたら書かない（消した後に、消す前に取り始めたタイルが戻らないように）。
+    /// 消すときは書きの鍵を持つので、書いている途中のものとは重ならない。
+    generation: RwLock<u64>,
 }
 
 impl std::fmt::Debug for TileService {
@@ -164,6 +168,7 @@ impl TileService {
             memory: Mutex::new(MemoryCache::new(MEMORY_CACHE_LIMIT_BYTES)),
             clock: Arc::new(SystemClock),
             in_flight: Mutex::new(HashMap::new()),
+            generation: RwLock::new(0),
         }
     }
 
@@ -260,6 +265,12 @@ impl TileService {
     /// キャッシュを消す（メモリーの分と、ディスクの `cache_dir` の中の提供元のフォルダだけ。`cache_dir` 自体と、
     /// ほかのファイル・フォルダは消さない）。
     pub fn clear_cache(&self) -> Result<(), GeoError> {
+        // 書きの鍵を持ったまま消す（書いている途中のものを待ち、取り始めていたものは世代の違いで書かせない）。
+        let mut generation = self
+            .generation
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        *generation += 1;
         lock(&self.memory).clear();
         let Some(cache) = &self.cache else {
             return Ok(());
@@ -285,6 +296,10 @@ impl TileService {
 
     /// キャッシュを見て、要れば通信する（待ち合わせの先頭の呼び出しだけが通る）。
     fn fetch(&self, z: u8, x: u32, y: u32) -> Result<Tile, GeoError> {
+        let started = *self
+            .generation
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         let now = self.clock.now_utc();
         let cached = self.read_cached(z, x, y);
         if let Some(entry) = &cached
@@ -325,7 +340,7 @@ impl TileService {
                     expires: meta.expires.as_deref(),
                 };
                 let policy = freshness::policy(&response, now, Some(stored));
-                {
+                if let Some(_writing) = self.writing(started) {
                     if policy.store {
                         // 304 にあるヘッダーだけを置き換える（RFC 9111 の 4.3.4 節）。
                         let updated = |name: &str, old: Option<String>| {
@@ -358,11 +373,13 @@ impl TileService {
             200 => {
                 check_png(&response)?;
                 let policy = freshness::policy(&response, now, None);
-                if policy.store {
-                    let meta = meta_for(&policy, now, &response);
-                    self.store(z, x, y, &response.body, &meta);
-                } else {
-                    self.remove_cached(z, x, y);
+                if let Some(_writing) = self.writing(started) {
+                    if policy.store {
+                        let meta = meta_for(&policy, now, &response);
+                        self.store(z, x, y, &response.body, &meta);
+                    } else {
+                        self.remove_cached(z, x, y);
+                    }
                 }
                 Ok(tile(response.body, false))
             }
@@ -376,6 +393,15 @@ impl TileService {
 }
 
 impl TileService {
+    /// キャッシュに書いてよければ、書き終わるまで持つ読みの鍵を返す（`started` の後に消されていたら `None`）。
+    fn writing(&self, started: u64) -> Option<std::sync::RwLockReadGuard<'_, u64>> {
+        let generation = self
+            .generation
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        (*generation == started).then_some(generation)
+    }
+
     /// キャッシュから読む（メモリーを先に見る。メモリーに持つのはディスクに書けなかったときだけで、ディスクに
     /// 書けたら捨てるので、メモリーにあるものがいちばん新しい）。
     fn read_cached(&self, z: u8, x: u32, y: u32) -> Option<CachedTile> {
