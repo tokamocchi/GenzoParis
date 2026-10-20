@@ -136,6 +136,43 @@ fn only_one_request_is_sent_at_a_time() {
 }
 
 #[test]
+fn the_same_query_from_two_threads_is_sent_only_once() {
+    // A の要求の途中で B が同じ語で呼ぶ（B は関所で待つ）。A が結果を保存する前に関所を放すと、B は
+    // キャッシュの確認を通り抜けて同じ問い合わせをもう一度送ってしまう（大きな応答で、A の解析の間を長くする）。
+    let one = std::str::from_utf8(TOKYO).unwrap().trim();
+    let one = &one[1..one.len() - 1];
+    let body = format!("[{}]", vec![one; 2000].join(","));
+    assert!(body.len() as u64 <= MAX_SEARCH_BYTES);
+    let client = FakeClient::new(move |_| {
+        std::thread::sleep(Duration::from_millis(60));
+        Ok(http(
+            200,
+            &[("Content-Type", "application/json")],
+            body.as_bytes(),
+        ))
+    });
+    let clock = FakeClock::new();
+    let g = Arc::new(geocoder(&client, &clock));
+    let a = {
+        let g = g.clone();
+        std::thread::spawn(move || g.search("東京駅"))
+    };
+    while client.count() == 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let b = {
+        let g = g.clone();
+        std::thread::spawn(move || g.search("東京駅"))
+    };
+    let a = a.join().unwrap().unwrap();
+    let b = b.join().unwrap().unwrap();
+    assert_eq!(a, b);
+    assert_eq!(client.count(), 1);
+    // B はキャッシュから返すので、関所で 1 秒待たない。
+    assert!(clock.sleeps().is_empty(), "{:?}", clock.sleeps());
+}
+
+#[test]
 fn geocoders_share_one_gate_in_the_process() {
     let client = ok_json();
     let a = Geocoder::new(client.clone(), GeocoderProvider::nominatim());

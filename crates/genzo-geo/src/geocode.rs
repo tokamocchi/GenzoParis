@@ -152,14 +152,16 @@ impl Geocoder {
             &[("Accept", "application/json".to_string())],
             MAX_SEARCH_BYTES,
         )?;
-        // 応答を受け取ったら、次の要求は関所で待てる（間隔は開始の時刻で測る）。
-        drop(last_start);
         if response.status != 200 {
             return Err(GeoError::Status(response.status));
         }
         let places = parse_places(&response.body)?;
         tracing::debug!("地名を検索しました（{} 件）", places.len());
         self.store(key, places.clone());
+        // 関所は結果を保存してから放す（関所で待っていた同じ検索語の呼び出しが、保存の前にキャッシュの確認を
+        // 通り抜けて、同じ問い合わせをもう一度送らないように。間隔は開始の時刻で測るので、持つ時間が延びても
+        // 間隔は変わらない。誤りのときは、ここまで来ずに放す）。
+        drop(last_start);
         Ok(places)
     }
 
