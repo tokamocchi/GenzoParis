@@ -11,7 +11,9 @@
 //   の GridLayer の _update。版を上げたら確かめ直す）。
 // - 帰属の表示「© OpenStreetMap contributors」は、Leaflet の帰属の表示（Leaflet へのリンクと旗が付き、リンクを押すと
 //   WebView が外部のページへ移る）を使わず、この部品が地図の右下に常に出す（Leaflet の前から出し、畳まない）。押すと
-//   既定のブラウザで OSM の著作権のページを開く（openMapLink）。「地図の誤りを報告」（fixthemap）も並べる。
+//   既定のブラウザで OSM の著作権のページを開く（openMapLink）。「地図の誤りを報告」（fixthemap）も並べる。設定で変えた
+//   タイルの提供元の帰属の表示（credit。geoMapLogic.ts の providerAttribution）があれば、その前に文字だけで並べる
+//   （HTML として読まない。任意の URL を開かないよう、リンクにしない）。長いときは折り返し、地図の外にはみ出さない。
 // - ピン（付ける位置）と表示中の写真の位置の印は L.divIcon（CSS だけ。既定のアイコンの画像のパスの自動判定は Vite の
 //   ビルドで壊れるので使わない）。地図をクリックするか、ピンをドラッグして離すと onPick に位置を渡す（親が座標の欄に
 //   入れ、読んだ座標が pin として戻る）。表示中の写真の印を押すと、その位置を渡す。処理中（disabled）は選べず、
@@ -74,6 +76,8 @@ export function GeoMap(props: {
   /** 表示中の写真の使う位置。 */
   photo: GpsCoord | null;
   focus: MapFocus | null;
+  /** 設定で変えたタイルの提供元の帰属の表示（なければ null。OSM の帰属の表示と並べて出す）。 */
+  credit?: string | null;
   /** 地図で位置を選んだ（クリック・ピンのドラッグ・写真の印）。 */
   onPick: (g: GpsCoord) => void;
   /** 選べない（処理中）。 */
@@ -274,6 +278,16 @@ export function GeoMap(props: {
         )}
         {failed && <div className="geo-map-status error-text">地図を読み込めません（画面を開き直してください）</div>}
         <div className="geo-attribution">
+          {props.credit && (
+            <>
+              <span className="geo-credit" title="設定したタイルの提供元の帰属の表示">
+                {props.credit}
+              </span>
+              <span className="geo-sep" aria-hidden="true">
+                |
+              </span>
+            </>
+          )}
           <button
             type="button"
             className="geo-link"

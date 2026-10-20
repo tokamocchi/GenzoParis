@@ -9,6 +9,10 @@
 //   https の URL だけ（形はアプリが確かめ、使えなければ何も保存しない）。PNG のタイルを配る提供元だけ（genzo-geo は
 //   Content-Type が image/png で PNG の署名で始まる応答だけを受け取る。保存のときには種類を確かめられないので、
 //   説明に書く）。
+// - 地図の帰属の表示（tile_attribution）: タイルの URL を変えたときだけ使い、地図の右下に「© OpenStreetMap
+//   contributors」と並べて文字だけで出す（GeoMap.tsx。多くの提供元は自分の帰属の表示を利用の条件にしている）。
+//   タイルの URL が空の間は入力できない（アプリも保存のときに null にする）。タイルの URL があるのに空なら案内する。
+//   文言は提供元の利用条件で決まるので、利用者が入れる（例は出すが、決めた文は入れない）。
 // - キャッシュの大きさ・消去・ページを開くことは、無効でも使える（外部と通信しない）。
 
 import { useEffect, useState } from "react";
@@ -25,8 +29,13 @@ import {
   MAP_CACHE_LIMIT_BYTES,
   MAP_LINK_LABELS,
   MAP_MAX_ZOOM,
+  MAX_TILE_ATTRIBUTION_CHARS,
   mapPreferencesOf,
-  urlFieldValue,
+  type ProviderFields,
+  providerAttributionMissing,
+  providerFieldsOf,
+  providerPatch,
+  providersDirty,
 } from "../library/geoMapLogic";
 import { actions, useApp } from "../state/app";
 import { openMapPage, saveMapPreferences } from "../state/map";
@@ -54,7 +63,20 @@ const PROVIDER_NOTE =
   "空なら OpenStreetMap の標準を使います。OpenStreetMap のサーバーが使えないときや、利用の量が多いときは、OSM の" +
   "データを使う別の提供元に切り替えられます（https の URL で、PNG のタイルを配る提供元だけ。JPEG・WebP などの" +
   "タイルは読み込めません。その提供元の利用条件を確かめてください。最大の" +
-  `ズームは ${MAP_MAX_ZOOM}、帰属の表示は「${MAP_ATTRIBUTION}」とみなします）。`;
+  `ズームは ${MAP_MAX_ZOOM} とみなします）。地図の右下には「${MAP_ATTRIBUTION}」を常に出し、その提供元の帰属の` +
+  "表示は、下の「地図の帰属の表示」に入れると並べて出します。";
+
+/** 提供元の欄の下の説明。 */
+const PROVIDER_FIELDS_NOTE =
+  "タイルの URL は {z}・{x}・{y} を 1 つずつ含めてください。地名の検索は Nominatim と同じ形の /search の API です。" +
+  "地図の帰属の表示は、タイルの URL を変えたときだけ使い、地図の右下に文字だけで出します（リンクにはしません。" +
+  `${MAX_TILE_ATTRIBUTION_CHARS} 文字まで）。`;
+
+/** タイルの URL を変えたのに、地図の帰属の表示が空のときの案内。 */
+const ATTRIBUTION_MISSING_NOTE =
+  "タイルの提供元の帰属の表示が空です。多くの提供元は、自分の帰属の表示を利用の条件にしています。その提供元の" +
+  "利用条件を確かめて、「地図の帰属の表示」に入れてください（空のままなら「" +
+  `${MAP_ATTRIBUTION}」だけを出します）。`;
 
 export function SettingsMap() {
   const saved = useApp((s) => s.status?.settings.map);
@@ -65,8 +87,8 @@ export function SettingsMap() {
   const [cache, setCache] = useState<MapCacheInfo | null>(null);
   const [clearing, setClearing] = useState(false);
   const [cacheError, setCacheError] = useState<ErrorInfo | null>(null);
-  const [tileUrl, setTileUrl] = useState(prefs.tile_url ?? "");
-  const [searchUrl, setSearchUrl] = useState(prefs.search_url ?? "");
+  const [fields, setFields] = useState<ProviderFields>(() => providerFieldsOf(prefs));
+  const setField = (patch: Partial<ProviderFields>) => setFields((f) => ({ ...f, ...patch }));
 
   useEffect(() => {
     let alive = true;
@@ -87,11 +109,9 @@ export function SettingsMap() {
     setError(null);
     try {
       const settings = await saveMapPreferences(patch);
-      if ("tile_url" in patch || "search_url" in patch) {
-        // 提供元を保存したら、アプリが整えた値（前後の空白を除いた URL）を欄に出す。
-        const next = mapPreferencesOf(settings);
-        setTileUrl(next.tile_url ?? "");
-        setSearchUrl(next.search_url ?? "");
+      if ("tile_url" in patch || "search_url" in patch || "tile_attribution" in patch) {
+        // 提供元を保存したら、アプリが整えた値（前後の空白を除いた URL・帰属の表示）を欄に出す。
+        setFields(providerFieldsOf(mapPreferencesOf(settings)));
       }
       actions.notify("success", done);
       return true;
@@ -128,7 +148,9 @@ export function SettingsMap() {
     }
   };
 
-  const providersDirty = urlFieldValue(tileUrl) !== prefs.tile_url || urlFieldValue(searchUrl) !== prefs.search_url;
+  // 提供元の欄から保存する値と、今の設定と違うか。
+  const next = providerPatch(fields);
+  const dirty = providersDirty(prefs, fields);
 
   return (
     <div className="dlg-section">
@@ -188,11 +210,11 @@ export function SettingsMap() {
           <input
             id="map-tile-url"
             type="text"
-            value={tileUrl}
+            value={fields.tileUrl}
             placeholder={DEFAULT_TILE_URL}
             spellCheck={false}
             autoComplete="off"
-            onChange={(e) => setTileUrl(e.target.value)}
+            onChange={(e) => setField({ tileUrl: e.target.value })}
           />
         </div>
         <div className="field">
@@ -200,39 +222,45 @@ export function SettingsMap() {
           <input
             id="map-search-url"
             type="text"
-            value={searchUrl}
+            value={fields.searchUrl}
             placeholder={DEFAULT_SEARCH_URL}
             spellCheck={false}
             autoComplete="off"
-            onChange={(e) => setSearchUrl(e.target.value)}
+            onChange={(e) => setField({ searchUrl: e.target.value })}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="map-tile-attribution">地図の帰属の表示</label>
+          {/* タイルの URL が空（OSM の標準）の間は使わないので入力できない（アプリも保存のときに null にする）。 */}
+          <input
+            id="map-tile-attribution"
+            type="text"
+            value={fields.tileAttribution}
+            placeholder={next.tile_url === null ? "タイルの URL を変えたときに入れます" : "例: Maps © 提供元の名前"}
+            spellCheck={false}
+            autoComplete="off"
+            disabled={next.tile_url === null}
+            onChange={(e) => setField({ tileAttribution: e.target.value })}
           />
         </div>
         <p className="hint">
-          タイルの URL は {"{z}"}・{"{x}"}・{"{y}"} を 1 つずつ含めてください。地名の検索は Nominatim と同じ形の
-          /search の API です。
+          {PROVIDER_FIELDS_NOTE}
         </p>
+        {providerAttributionMissing(fields) && <p className="warn-text hint">{ATTRIBUTION_MISSING_NOTE}</p>}
         <div className="dlg-row end">
           <button
             type="button"
             className="btn"
-            onClick={() => {
-              setTileUrl(prefs.tile_url ?? "");
-              setSearchUrl(prefs.search_url ?? "");
-            }}
-            disabled={busy || !providersDirty}
+            onClick={() => setFields(providerFieldsOf(prefs))}
+            disabled={busy || !dirty}
           >
             元に戻す
           </button>
           <button
             type="button"
             className="btn"
-            onClick={() =>
-              void save(
-                { tile_url: urlFieldValue(tileUrl), search_url: urlFieldValue(searchUrl) },
-                "地図の提供元を保存しました",
-              )
-            }
-            disabled={busy || !providersDirty}
+            onClick={() => void save(next, "地図の提供元を保存しました")}
+            disabled={busy || !dirty}
           >
             提供元を保存
           </button>

@@ -30,7 +30,7 @@ describe("オンラインの地図のアプリのコマンド（genzo-app の ma
     appStore.set({ status: mockAppStatus({ ...DEFAULT_MAP_PREFERENCES, tile_url: tile }) });
     const saved = await saveMapPreferences({ online: true });
     expect(args("save_map_preferences")).toEqual([
-      { preferences: { online: true, consented_at: null, tile_url: tile, search_url: null } },
+      { preferences: { online: true, consented_at: null, tile_url: tile, search_url: null, tile_attribution: null } },
     ]);
     expect(saved.map?.online).toBe(true);
     expect(appStore.get().status?.settings.map).toEqual({
@@ -38,11 +38,28 @@ describe("オンラインの地図のアプリのコマンド（genzo-app の ma
       consented_at: "2026-10-20T01:02:03Z",
       tile_url: tile,
       search_url: null,
+      tile_attribution: null,
     });
     // 古いアプリの形（map が無い）からも、欄をすべて送る。
     appStore.set({ status: mockAppStatus() });
     await saveMapPreferences({ online: false });
     expect(args("save_map_preferences").at(-1)).toEqual({ preferences: DEFAULT_MAP_PREFERENCES });
+  });
+
+  it("有効・無効を切り替えても、設定した提供元の帰属の表示を消さない（コマンドは欠けた欄を既定値にする）", async () => {
+    const prefs = {
+      ...DEFAULT_MAP_PREFERENCES,
+      tile_url: "https://tiles.example.org/{z}/{x}/{y}.png",
+      tile_attribution: "Maps © 提供元",
+    };
+    appStore.set({ status: mockAppStatus(prefs) });
+    await saveMapPreferences({ online: true });
+    expect(args("save_map_preferences")).toEqual([{ preferences: { ...prefs, online: true } }]);
+    expect(currentMapPreferences().tile_attribution).toBe("Maps © 提供元");
+    await saveMapPreferences({ online: false });
+    expect(args("save_map_preferences").at(-1)).toEqual({
+      preferences: { ...prefs, online: false, consented_at: "2026-10-20T01:02:03Z" },
+    });
   });
 
   it("検索・キャッシュ・ページを開く", async () => {

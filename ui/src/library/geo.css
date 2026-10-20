@@ -29,20 +29,28 @@
   font-size: 12px;
 }
 
-/* 帰属の表示（右下に常に出す。OSM のタイルの利用ポリシー）。 */
+/* 帰属の表示（右下に常に出す。OSM のタイルの利用ポリシー。地図の外・下に隠さない）。設定したタイルの提供元の
+ * 帰属の表示（.geo-credit。200 文字まで）が長いときは、地図の幅の中で折り返す。 */
 .geo-attribution {
   position: absolute;
   right: 0;
   bottom: 0;
   z-index: 2;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
-  gap: 4px;
+  gap: 0 4px;
+  max-width: 100%;
   padding: 1px 6px;
   border-top-left-radius: var(--radius);
   background: var(--bg-1);
   color: var(--fg-1);
   font-size: 11px;
+}
+.geo-attribution .geo-credit {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .geo-attribution .geo-sep {
   color: var(--fg-3);

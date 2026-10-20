@@ -2344,6 +2344,13 @@ export interface MapPreferences {
   tile_url: string | null;
   /** 地名の検索（Nominatim と同じ API の /search）の URL（https。null なら nominatim.openstreetmap.org）。 */
   search_url: string | null;
+  /**
+   * 設定で変えたタイルの提供元の帰属の表示（例「Maps © 提供元の名前」。地図の右下に「© OpenStreetMap contributors」と
+   * 並べて文字だけで出す。geoMapLogic.ts の providerAttribution）。tile_url が null（OSM の標準）なら使わない（アプリが
+   * 保存のときに null にする）。前後の空白はアプリが除き、改行などの制御文字と 200 文字を超えるものはアプリが断る。
+   * 前のアプリには無い（mapPreferencesOf が null で埋める）。文言は提供元の利用条件で決まる（利用者が入れる）。
+   */
+  tile_attribution: string | null;
 }
 
 /** 地名の検索の結果（genzo-geo の Place）。 */

@@ -897,6 +897,7 @@ export const MOCK_MAP_PREFERENCES: MapPreferences = {
   consented_at: "2026-10-20T01:02:03Z",
   tile_url: null,
   search_url: null,
+  tile_attribution: null,
 };
 
 /**

@@ -49,6 +49,7 @@ import {
   mapPreferencesOf,
   placeLabel,
   placeView,
+  providerAttribution,
   searchInput,
   searchWaitMs,
 } from "../library/geoMapLogic";
@@ -263,6 +264,7 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
             pin={coord}
             target={field.target}
             photo={ref?.gps ?? null}
+            credit={providerAttribution(mapPrefs)}
             onPick={setCoordinate}
             disabled={busy}
           />
@@ -361,6 +363,8 @@ function MapPicker(props: {
   /** 地図を動かす先（確定した座標）。 */
   target: GpsCoord | null;
   photo: GpsCoord | null;
+  /** 設定で変えたタイルの提供元の帰属の表示（なければ null）。 */
+  credit: string | null;
   onPick: (g: GpsCoord) => void;
   disabled: boolean;
 }) {
@@ -495,6 +499,7 @@ function MapPicker(props: {
         target={props.target}
         photo={props.photo}
         focus={focus}
+        credit={props.credit}
         onPick={props.onPick}
         disabled={props.disabled}
       />

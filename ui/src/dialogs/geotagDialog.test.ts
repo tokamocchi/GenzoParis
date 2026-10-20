@@ -217,6 +217,28 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     expect(html).toContain("付近の地図のタイルを提供元（tile.openstreetmap.org）に要求します");
     // 座標の欄は地図の後ろ（地図で選んだ位置がここに入る）。
     expect(html.indexOf('class="geo-map"')).toBeLessThan(html.indexOf("座標（緯度, 経度）"));
+    // OSM の標準のタイルでは、提供元の帰属の表示は出さない。
+    expect(html).not.toContain("geo-credit");
+  });
+
+  it("有効で提供元を変えた: 右下に提供元の帰属の表示を、OSM の帰属の表示と並べて文字だけで出す", () => {
+    const tile_url = "https://tiles.example.org/{z}/{x}/{y}.png";
+    appStore.set({
+      status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, tile_url, tile_attribution: "Maps © <b>提供元</b>" }),
+    });
+    const html = dialog();
+    const box = html.match(/<div class="geo-attribution">[\s\S]*?<\/div>/)?.[0] ?? "";
+    expect(box).toContain('<span class="geo-credit"');
+    // HTML として読まない（React の文字として出す）。リンクにもしない。
+    expect(box).toContain("Maps © &lt;b&gt;提供元&lt;/b&gt;");
+    expect(box).not.toContain("<b>");
+    expect(box).toContain("© OpenStreetMap contributors");
+    expect(box).toContain("地図の誤りを報告");
+    // 帰属の表示が空なら出さない（OSM の帰属の表示だけ）。
+    appStore.set({ status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, tile_url, tile_attribution: null }) });
+    const plain = dialog();
+    expect(plain).not.toContain("geo-credit");
+    expect(plain).toContain("© OpenStreetMap contributors");
   });
 
   it("開いたときのフォーカスは座標の欄（有効なときは地名の検索の欄が先にあるが、座標を貼って Enter で検索に送らない）", () => {
@@ -296,5 +318,38 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     expect(on).toMatch(/初めて有効にした日時: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
     expect(on).toContain("tiles.example.org（設定で変えた提供元）");
     expect(on).toContain('value="https://tiles.example.org/{z}/{x}/{y}.png"');
+  });
+
+  it("設定の一般: 提供元の帰属の表示の欄（タイルの URL を変えたときだけ使う。空なら案内する）", () => {
+    const field = (html: string) => html.match(/<input[^>]*id="map-tile-attribution"[^>]*>/)?.[0] ?? "";
+    const warning = "タイルの提供元の帰属の表示が空です";
+
+    // OSM の標準（タイルの URL が空）: 欄は入力できず、案内も出さない。
+    appStore.set({ status: mockAppStatus(), catalog: null });
+    const osm = render(createElement(SettingsDialog, { tab: "general" }));
+    expect(osm).toContain('<label for="map-tile-attribution">地図の帰属の表示</label>');
+    expect(field(osm)).toContain('disabled=""');
+    expect(field(osm)).toContain('placeholder="タイルの URL を変えたときに入れます"');
+    expect(osm).not.toContain(warning);
+    // 帰属の表示は「OSM と同じとみなす」のではなく、OSM の帰属の表示に並べて出す。
+    expect(osm).not.toContain("帰属の表示は「© OpenStreetMap contributors」とみなします");
+    expect(osm).toContain("「© OpenStreetMap contributors」を常に出し");
+
+    // タイルの URL を変えたのに帰属の表示が空: 案内する。
+    const tile_url = "https://tiles.example.org/{z}/{x}/{y}.png";
+    appStore.set({ status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, tile_url }), catalog: null });
+    const missing = render(createElement(SettingsDialog, { tab: "general" }));
+    expect(field(missing)).not.toContain("disabled");
+    expect(missing).toContain(warning);
+
+    // 帰属の表示がある: 欄に出し、案内は出さない。
+    appStore.set({
+      status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, tile_url, tile_attribution: "Maps © 提供元" }),
+      catalog: null,
+    });
+    const credited = render(createElement(SettingsDialog, { tab: "general" }));
+    expect(field(credited)).toContain('value="Maps © 提供元"');
+    expect(field(credited)).not.toContain("disabled");
+    expect(credited).not.toContain(warning);
   });
 });

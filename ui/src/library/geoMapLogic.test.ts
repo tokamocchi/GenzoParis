@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { MOCK_PLACES } from "../api/mock";
-import type { Place } from "../api/types";
+import type { MapPreferences, Place } from "../api/types";
 import { setWindowsStyleForTest, tileUrlTemplate } from "../api/uri";
 import {
   coordFieldReducer,
@@ -26,11 +26,17 @@ import {
   mapPointToGps,
   mapPreferencesOf,
   MAX_QUERY_CHARS,
+  MAX_TILE_ATTRIBUTION_CHARS,
   normalizeSearchQuery,
   PIN_ZOOM,
   PLACE_ZOOM,
   placeLabel,
   placeView,
+  providerAttribution,
+  providerAttributionMissing,
+  providerFieldsOf,
+  providerPatch,
+  providersDirty,
   SEARCH_INTERVAL_MS,
   searchInput,
   searchQueryProblem,
@@ -63,13 +69,22 @@ describe("地図のタイルの URL（genzo-app の protocol.rs の /tile/{z}/{x
 describe("オンラインの地図の設定", () => {
   it("古いアプリ（map が無い）・欠けた欄は既定値（無効・OSM の既定の提供元）", () => {
     expect(mapPreferencesOf(undefined)).toEqual(DEFAULT_MAP_PREFERENCES);
-    expect(mapPreferencesOf({})).toEqual({ online: false, consented_at: null, tile_url: null, search_url: null });
+    expect(mapPreferencesOf({})).toEqual({
+      online: false,
+      consented_at: null,
+      tile_url: null,
+      search_url: null,
+      tile_attribution: null,
+    });
+    // 帰属の表示の欄が無い前のアプリの形も、欄を既定値（null）で埋める。
+    const before = { online: true, consented_at: null, tile_url: null, search_url: null } as unknown as MapPreferences;
+    expect(mapPreferencesOf({ map: before }).tile_attribution).toBeNull();
     expect(mapPreferencesOf({ map: { ...DEFAULT_MAP_PREFERENCES, online: true } }).online).toBe(true);
   });
 
   it("変える欄だけを重ねる（有効にしても、設定した提供元の URL を消さない）", () => {
     const tile_url = "https://tiles.example.org/{z}/{x}/{y}.png";
-    const cur = { online: false, consented_at: null, tile_url, search_url: null };
+    const cur = { online: false, consented_at: null, tile_url, search_url: null, tile_attribution: "Maps © 提供元" };
     expect(withMapPreferences(cur, { online: true })).toEqual({ ...cur, online: true });
     expect(withMapPreferences(cur, { tile_url: null })).toEqual({ ...cur, tile_url: null });
   });
@@ -130,6 +145,92 @@ describe("オンラインの地図の設定", () => {
     for (const item of [...t.sends, ...t.rules, ...t.cautions]) expect(item.endsWith("。")).toBe(false);
     const custom = mapConsentText({ ...DEFAULT_MAP_PREFERENCES, search_url: "https://geo.example.net/search" });
     expect(custom.destination).toContain("geo.example.net（設定で変えた提供元）");
+  });
+});
+
+describe("設定で変えたタイルの提供元の帰属の表示（genzo-app の MapPreferences の tile_attribution）", () => {
+  const tile_url = "https://tiles.example.org/{z}/{x}/{y}.png";
+  const custom = (tile_attribution: string | null): MapPreferences => ({
+    ...DEFAULT_MAP_PREFERENCES,
+    online: true,
+    tile_url,
+    tile_attribution,
+  });
+
+  it("文字数の上限は genzo-app の MAX_TILE_ATTRIBUTION_CHARS と同じ（200。仮置き）", () => {
+    expect(MAX_TILE_ATTRIBUTION_CHARS).toBe(200);
+  });
+
+  it("地図に並べて出すのは、タイルの URL を変えていて、帰属の表示が空でないときだけ", () => {
+    expect(providerAttribution(DEFAULT_MAP_PREFERENCES)).toBeNull();
+    expect(providerAttribution(custom(null))).toBeNull();
+    expect(providerAttribution(custom("   "))).toBeNull();
+    expect(providerAttribution(custom(" Maps © 提供元 "))).toBe("Maps © 提供元");
+    // OSM の標準のタイル（tile_url が null）には使わない（アプリも保存のときに null にする）。
+    expect(providerAttribution({ ...DEFAULT_MAP_PREFERENCES, tile_attribution: "Maps © 提供元" })).toBeNull();
+    // 前のアプリの形（欄が無い）。
+    const before = { online: true, consented_at: null, tile_url, search_url: null } as unknown as MapPreferences;
+    expect(providerAttribution(mapPreferencesOf({ map: before }))).toBeNull();
+  });
+
+  it("提供元の欄: 初めの値は今の設定（null は空）、保存する値は前後の空白を除き空なら null", () => {
+    expect(providerFieldsOf(DEFAULT_MAP_PREFERENCES)).toEqual({ tileUrl: "", searchUrl: "", tileAttribution: "" });
+    expect(providerFieldsOf(custom("Maps © 提供元"))).toEqual({
+      tileUrl: tile_url,
+      searchUrl: "",
+      tileAttribution: "Maps © 提供元",
+    });
+    expect(
+      providerPatch({ tileUrl: ` ${tile_url} `, searchUrl: "  ", tileAttribution: "  Maps © 提供元  " }),
+    ).toEqual({ tile_url, search_url: null, tile_attribution: "Maps © 提供元" });
+    expect(providerPatch({ tileUrl: tile_url, searchUrl: "", tileAttribution: "   " })).toEqual({
+      tile_url,
+      search_url: null,
+      tile_attribution: null,
+    });
+    // タイルの URL が空（OSM の標準）なら、帰属の表示は送らない（アプリの MapPreferences::normalized と同じ）。
+    expect(providerPatch({ tileUrl: " ", searchUrl: "", tileAttribution: "Maps © 提供元" })).toEqual({
+      tile_url: null,
+      search_url: null,
+      tile_attribution: null,
+    });
+    // 形・文字数・制御文字は確かめない（アプリが確かめ、使えなければ何も保存しない）。
+    const long = "あ".repeat(MAX_TILE_ATTRIBUTION_CHARS + 1);
+    expect(providerPatch({ tileUrl: tile_url, searchUrl: "", tileAttribution: long }).tile_attribution).toBe(long);
+  });
+
+  it("提供元の欄を変えたか（帰属の表示だけを変えても保存できる。空白だけの違いは変えていない）", () => {
+    const saved = custom("Maps © 提供元");
+    expect(providersDirty(saved, providerFieldsOf(saved))).toBe(false);
+    expect(providersDirty(saved, { ...providerFieldsOf(saved), tileAttribution: " Maps © 提供元 " })).toBe(false);
+    expect(providersDirty(saved, { ...providerFieldsOf(saved), tileAttribution: "Maps © 別の提供元" })).toBe(true);
+    expect(providersDirty(saved, { ...providerFieldsOf(saved), tileAttribution: "" })).toBe(true);
+    expect(providersDirty(saved, { ...providerFieldsOf(saved), tileUrl: "" })).toBe(true);
+    // タイルの URL が空なら、帰属の表示の欄に何を入れても保存する値は変わらない。
+    expect(providersDirty(DEFAULT_MAP_PREFERENCES, { tileUrl: "", searchUrl: "", tileAttribution: "Maps © 提供元" })).toBe(
+      false,
+    );
+    // 前のアプリの形（欄が無い）でも、変えていなければ変えていない。
+    const before = { online: true, consented_at: null, tile_url, search_url: null } as unknown as MapPreferences;
+    expect(providersDirty(before, { tileUrl: tile_url, searchUrl: "", tileAttribution: "" })).toBe(false);
+  });
+
+  it("タイルの URL を変えたのに帰属の表示が空なら、設定の画面で案内する", () => {
+    expect(providerAttributionMissing({ tileUrl: tile_url, searchUrl: "", tileAttribution: " " })).toBe(true);
+    expect(providerAttributionMissing({ tileUrl: tile_url, searchUrl: "", tileAttribution: "Maps © 提供元" })).toBe(false);
+    expect(providerAttributionMissing({ tileUrl: "", searchUrl: "https://geo.example.net/search", tileAttribution: "" })).toBe(
+      false,
+    );
+  });
+
+  it("有効にする前の説明: 設定した提供元の帰属の表示も、OSM の帰属の表示と並べて出すと書く", () => {
+    const osm = mapConsentText(DEFAULT_MAP_PREFERENCES).rules.join("\n");
+    expect(osm).toContain("地図の右下に「© OpenStreetMap contributors」を表示します");
+    expect(osm).not.toContain("提供元の帰属の表示");
+    const rules = mapConsentText(custom("Maps © 提供元")).rules.join("\n");
+    expect(rules).toContain("© OpenStreetMap contributors");
+    expect(rules).toContain("設定したタイルの提供元の帰属の表示（Maps © 提供元）");
+    expect(mapConsentText(custom(null)).rules.join("\n")).not.toContain("提供元の帰属の表示");
   });
 });
 

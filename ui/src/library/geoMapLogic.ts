@@ -1,7 +1,8 @@
 // 位置情報の後付け（LIB-21）の第 2 段階（オンラインの地図と地名の検索）の画面の計算（DOM・Leaflet を使わない
 // 純粋な計算。docs/04 の 3.16 節）。地図の部品は library/GeoMap.tsx（Leaflet を動的に読む。テストからは読まない）。
 //
-// - 設定（MapPreferences）の既定値と重ね方・送り先の説明・有効にする前の説明（同意の文）。
+// - 設定（MapPreferences）の既定値と重ね方・設定の画面の提供元の欄・送り先の説明・有効にする前の説明（同意の文）・
+//   設定で変えたタイルの提供元の帰属の表示。
 // - 地名の検索の間隔（画面でも前の要求の開始から 1 秒あける。genzo-geo もプロセス全体で守る）・検索語の検査・
 //   結果の文。
 // - 地図の座標（クリックした位置の経度を -180〜180 に戻す）・初めの表示・検索の結果へ動かすときの範囲・座標の欄と
@@ -12,6 +13,8 @@
 // genzo-geo、有効にするまで通信しないことは genzo-app）:
 // - 地名の検索は Enter か「検索」のボタンのときだけ（入力の途中で検索しない。オートコンプリートの禁止）。
 // - 帰属の表示「© OpenStreetMap contributors」を地図の右下に常に出す（リンクは WebView ではなく既定のブラウザで開く）。
+//   設定で変えたタイルの提供元の帰属の表示（tile_attribution）があれば並べて出す（文字だけ。リンクにしない。
+//   providerAttribution）。
 // - 先読み・まとめての取得をしない（Leaflet の既定の、表示している範囲のタイルだけを取る）。座標の欄に打つ途中の
 //   値では地図を動かさない（確定したときだけ動かす。見るつもりのない場所のタイルを取らない）。
 
@@ -22,8 +25,14 @@ import { coordErrorMessage, parseCoordinates } from "./geotagLogic";
 /** 地図の最大のズーム（genzo-geo の OSM_MAX_ZOOM と同じ。設定で変えた提供元も同じとみなす。仮置き）。 */
 export const MAP_MAX_ZOOM = 19;
 
-/** 地図の帰属の表示（genzo-geo の OSM_ATTRIBUTION と同じ。設定で変えた提供元も OSM のデータとみなす）。 */
+/**
+ * 地図の帰属の表示（genzo-geo の OSM_ATTRIBUTION と同じ）。設定で変えた提供元も OSM のデータとみなして常に出し、
+ * その提供元の帰属の表示（tile_attribution）は並べて出す（providerAttribution）。
+ */
 export const MAP_ATTRIBUTION = "© OpenStreetMap contributors";
+
+/** 設定で変えたタイルの提供元の帰属の表示の文字数の上限（genzo-app の MAX_TILE_ATTRIBUTION_CHARS と同じ。仮置き）。 */
+export const MAX_TILE_ATTRIBUTION_CHARS = 200;
 
 /** 地名の検索の間隔（ms。前の要求の開始から。Nominatim のポリシーの「1 秒に 1 回まで」）。 */
 export const SEARCH_INTERVAL_MS = 1000;
@@ -74,9 +83,10 @@ export const DEFAULT_MAP_PREFERENCES: MapPreferences = {
   consented_at: null,
   tile_url: null,
   search_url: null,
+  tile_attribution: null,
 };
 
-/** アプリの設定の地図の欄（古いアプリでは無いので既定値。欠けた欄も既定値）。 */
+/** アプリの設定の地図の欄（古いアプリでは無いので既定値。欠けた欄（前のアプリの tile_attribution など）も既定値）。 */
 export function mapPreferencesOf(settings: Pick<AppSettings, "map"> | null | undefined): MapPreferences {
   return { ...DEFAULT_MAP_PREFERENCES, ...(settings?.map ?? {}) };
 }
@@ -89,10 +99,71 @@ export function withMapPreferences(current: MapPreferences, patch: Partial<MapPr
   return { ...current, ...patch };
 }
 
-/** URL の欄の値（前後の空白を除き、空なら null（既定の提供元））。形はアプリが確かめる。 */
-export function urlFieldValue(text: string): string | null {
+/** 欄の値（前後の空白を除き、空なら null）。 */
+function trimmedOrNull(text: string): string | null {
   const t = text.trim();
   return t === "" ? null : t;
+}
+
+/** URL の欄の値（前後の空白を除き、空なら null（既定の提供元））。形はアプリが確かめる。 */
+export function urlFieldValue(text: string): string | null {
+  return trimmedOrNull(text);
+}
+
+/** 設定の画面の「詳細（地図の提供元）」の欄の文字。 */
+export interface ProviderFields {
+  tileUrl: string;
+  searchUrl: string;
+  /** 地図の帰属の表示（タイルの提供元）。 */
+  tileAttribution: string;
+}
+
+/** 今の設定から、提供元の欄の初めの値を作る（null は空の欄）。 */
+export function providerFieldsOf(p: MapPreferences): ProviderFields {
+  return { tileUrl: p.tile_url ?? "", searchUrl: p.search_url ?? "", tileAttribution: p.tile_attribution ?? "" };
+}
+
+/**
+ * 提供元の欄から保存する値（前後の空白を除き、空なら null）。帰属の表示は、タイルの URL が空（OSM の標準）なら null
+ * （genzo-app の MapPreferences::normalized も同じに整える）。URL の形、帰属の表示の文字数・制御文字はアプリが
+ * 確かめる（使えなければ何も保存しない）。
+ */
+export function providerPatch(f: ProviderFields): Pick<MapPreferences, "tile_url" | "search_url" | "tile_attribution"> {
+  const tile_url = urlFieldValue(f.tileUrl);
+  return {
+    tile_url,
+    search_url: urlFieldValue(f.searchUrl),
+    tile_attribution: tile_url === null ? null : trimmedOrNull(f.tileAttribution),
+  };
+}
+
+/** 提供元の欄で保存する値が、今の設定と違うか（違うときだけ「元に戻す」・「提供元を保存」を押せる）。 */
+export function providersDirty(p: MapPreferences, f: ProviderFields): boolean {
+  const next = providerPatch(f);
+  return (
+    next.tile_url !== p.tile_url ||
+    next.search_url !== p.search_url ||
+    next.tile_attribution !== (p.tile_attribution ?? null)
+  );
+}
+
+/**
+ * タイルの URL を変えたのに、帰属の表示が空か（設定の画面で案内する。多くの提供元は自分の帰属の表示を利用の条件に
+ * している。空でも保存はできる）。
+ */
+export function providerAttributionMissing(f: ProviderFields): boolean {
+  const next = providerPatch(f);
+  return next.tile_url !== null && next.tile_attribution === null;
+}
+
+/**
+ * 地図の右下に、OSM の帰属の表示と並べて出す、設定で変えたタイルの提供元の帰属の表示（なければ null）。タイルの URL を
+ * 変えていない（OSM の標準）ときは使わない。文字だけで出す（HTML として読まない。任意の URL を開かないよう、
+ * リンクにもしない）。
+ */
+export function providerAttribution(p: MapPreferences): string | null {
+  if (p.tile_url === null) return null;
+  return trimmedOrNull(p.tile_attribution ?? "");
 }
 
 /** URL のホスト名（読めなければ URL のまま）。 */
@@ -156,7 +227,7 @@ export function mapConsentText(p: MapPreferences): MapConsentText {
     rules: [
       "地名の検索は、Enter か「検索」のボタンを押したときだけ送ります（入力の途中では送りません）。続けて検索するときは 1 秒以上あけ、同じ語の結果は覚えておいて問い合わせ直しません",
       "地図のタイルは、表示している範囲の分だけを取り、このパソコンにキャッシュします（提供元のキャッシュの指示に従います）。先読みや、まとめての取得はしません（座標の欄に打つ途中の値では地図を動かしません）",
-      "地図の右下に「© OpenStreetMap contributors」を表示します",
+      attributionRule(p),
     ],
     cautions: [
       "自宅の住所など、個人の情報を検索語にしないでください（OSM の利用ポリシーは、個人の情報を送らないよう求めています）",
@@ -164,6 +235,14 @@ export function mapConsentText(p: MapPreferences): MapConsentText {
       "無効のままでも、座標の貼り付けで位置を付けられます。有効にした後も、設定の「一般」でいつでも無効にできます",
     ],
   };
+}
+
+/** 有効にする前の説明の、帰属の表示の守ること（設定したタイルの提供元の帰属の表示があれば、それも書く）。 */
+function attributionRule(p: MapPreferences): string {
+  const credit = providerAttribution(p);
+  return credit === null
+    ? `地図の右下に「${MAP_ATTRIBUTION}」を表示します`
+    : `地図の右下に「${MAP_ATTRIBUTION}」と、設定したタイルの提供元の帰属の表示（${credit}）を表示します`;
 }
 
 /**
