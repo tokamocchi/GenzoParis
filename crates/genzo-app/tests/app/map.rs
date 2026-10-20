@@ -1,6 +1,7 @@
 //! (v1 の map) オンラインの地図（位置情報の後付け LIB-21 の第 2 段階）: 設定の保存と読み直し、地名の検索と
-//! 地図のタイル（`genzo://localhost/tile/{z}/{x}/{y}`）が有効なときだけ通信すること、タイルのキャッシュの
-//! 大きさと消去。
+//! 地図のタイル（`genzo://localhost/tile/{z}/{x}/{y}`）が有効なときだけ通信すること、地名の検索は検索の
+//! サービスを設定したとき（検索サービスの URL か、OSM の公開の Nominatim を使う切り替え。既定はどちらもない）
+//! だけ通信すること、タイルのキャッシュの大きさと消去。
 //!
 //! 通信は差し替える（[`FakeHttp`]。本物の OSM のサーバーに問い合わせない。SEC-01・CI）。地名の検索の
 //! 「1 秒に 1 回」の間隔はプロセス全体の関所（genzo-geo）が守るので、通信する検索を続けると 1 秒ずつ待つ
@@ -110,6 +111,7 @@ pub fn map_preferences_are_saved_and_read_again() {
             consented_at: Some("1999-01-01T00:00:00Z".to_owned()),
             tile_url: Some("  https://tiles.example.org/{z}/{x}/{y}.png ".to_owned()),
             search_url: Some(" ".to_owned()),
+            public_nominatim: true,
             tile_attribution: Some(" Maps © 提供元 ".to_owned()),
         },
     )
@@ -126,7 +128,8 @@ pub fn map_preferences_are_saved_and_read_again() {
         m.tile_url.as_deref(),
         Some("https://tiles.example.org/{z}/{x}/{y}.png")
     );
-    assert_eq!(m.search_url, None, "空白だけなら既定の提供元");
+    assert_eq!(m.search_url, None, "空白だけなら URL なし");
+    assert!(m.public_nominatim, "公開の Nominatim の切り替えも保存する");
     assert_eq!(m.tile_attribution.as_deref(), Some("Maps © 提供元"));
     assert_eq!(state.settings().map, m);
 
@@ -137,7 +140,7 @@ pub fn map_preferences_are_saved_and_read_again() {
             Some("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"),
             None,
         ),
-        (None, Some("http://nominatim.openstreetmap.org/search")),
+        (None, Some("http://geocoder.example.org/search")),
     ] {
         let e = assert_kind(
             map::save_preferences(
@@ -147,6 +150,7 @@ pub fn map_preferences_are_saved_and_read_again() {
                     consented_at: None,
                     tile_url: tile_url.map(str::to_owned),
                     search_url: search_url.map(str::to_owned),
+                    public_nominatim: false,
                     tile_attribution: None,
                 },
             ),
@@ -161,6 +165,7 @@ pub fn map_preferences_are_saved_and_read_again() {
     assert!(!off.map.online);
     assert_eq!(off.map.consented_at.as_deref(), Some(consented.as_str()));
     assert_eq!(off.map.tile_url, None);
+    assert!(!off.map.public_nominatim, "欠けた欄は既定（OFF）");
     let on = map::save_preferences(
         &state,
         MapPreferences {
@@ -189,7 +194,9 @@ const TOKYO_STATION: &str = r#"[{"place_id": 1, "lat": "35.6812362", "lon": "139
   "display_name": "東京駅, 丸の内一丁目, 千代田区, 東京都, 日本",
   "boundingbox": ["35.6762362", "35.6862362", "139.7621248", "139.7721248"]}]"#;
 
-/// 地名の検索は、オンラインの地図が有効なときだけ通信する。結果はキャッシュし、誤りは種類で返す。
+/// 地名の検索は、オンラインの地図が有効で、検索のサービスを設定したときだけ通信する（既定はどちらもなく、
+/// 通信しない）。OSM の公開の Nominatim を使う切り替えを ON にすると公開の URL に、検索サービスの URL を書くと
+/// その URL に問い合わせる。結果はキャッシュし、誤りは種類で返す。
 pub fn places_are_searched_only_when_online_maps_are_enabled() {
     let env = Env::new();
     let fake = FakeHttp::new(|url| {
@@ -217,7 +224,29 @@ pub fn places_are_searched_only_when_online_maps_are_enabled() {
     assert!(e.hint.as_deref().unwrap().contains("有効"), "{e:?}");
     assert_eq!(fake.count(), 0);
 
+    // 有効にしても、既定（公開の Nominatim の切り替えは OFF・検索の URL なし）では、検索のサービスが設定されて
+    // いないので通信しない。
     enable(&state);
+    assert!(!state.settings().map.public_nominatim, "既定は OFF");
+    let e = assert_kind(
+        map::search_places(&state, "東京駅"),
+        ErrorKind::InvalidInput,
+    );
+    assert_eq!(e.message, "地名の検索のサービスが設定されていません");
+    let hint = e.hint.as_deref().unwrap();
+    assert!(hint.contains("Nominatim") && hint.contains("URL"), "{hint}");
+    assert_eq!(fake.count(), 0);
+
+    // 公開の Nominatim を使う切り替えを ON にすると、公開の URL に問い合わせる。
+    map::save_preferences(
+        &state,
+        MapPreferences {
+            online: true,
+            public_nominatim: true,
+            ..MapPreferences::default()
+        },
+    )
+    .unwrap();
     let places = map::search_places(&state, "東京駅").unwrap();
     assert_eq!(places.len(), 1);
     let p = &places[0];
@@ -267,11 +296,13 @@ pub fn places_are_searched_only_when_online_maps_are_enabled() {
     assert_kind(map::search_places(&state, "京都駅"), ErrorKind::Network);
     assert_eq!(fake.count(), 3);
 
-    // 提供元を設定で変えると、次の検索からその URL に送る（問い合わせの付いた URL にもつなげる）。
+    // 検索サービスの URL を書くと、切り替えが ON でも、次の検索からその URL に送る（問い合わせの付いた URL にも
+    // つなげる）。
     map::save_preferences(
         &state,
         MapPreferences {
             online: true,
+            public_nominatim: true,
             search_url: Some("https://geocoder.example.org/search?key=abc".to_owned()),
             ..MapPreferences::default()
         },
@@ -283,14 +314,50 @@ pub fn places_are_searched_only_when_online_maps_are_enabled() {
         last.starts_with("https://geocoder.example.org/search?key=abc&q="),
         "{last}"
     );
+    assert_eq!(fake.count(), 4);
 
-    // 無効に戻すと、キャッシュにある検索語でも通信の前に断る。
-    map::save_preferences(&state, MapPreferences::default()).unwrap();
-    assert_kind(
+    // 切り替えが OFF でも、URL を書けばその URL に送る。
+    map::save_preferences(
+        &state,
+        MapPreferences {
+            online: true,
+            search_url: Some("https://geocoder.example.net/search".to_owned()),
+            ..MapPreferences::default()
+        },
+    )
+    .unwrap();
+    map::search_places(&state, "東京駅").unwrap();
+    let last = fake.urls().pop().unwrap();
+    assert!(
+        last.starts_with("https://geocoder.example.net/search?q="),
+        "{last}"
+    );
+    assert_eq!(fake.count(), 5);
+
+    // URL を空にして切り替えも OFF に戻すと、検索のサービスがないので通信しない。
+    enable(&state);
+    let e = assert_kind(
         map::search_places(&state, "東京駅"),
         ErrorKind::InvalidInput,
     );
-    assert_eq!(fake.count(), 4);
+    assert_eq!(e.message, "地名の検索のサービスが設定されていません");
+    assert_eq!(fake.count(), 5);
+
+    // 無効に戻すと、キャッシュにある検索語でも通信の前に断る。
+    map::save_preferences(
+        &state,
+        MapPreferences {
+            public_nominatim: true,
+            ..MapPreferences::default()
+        },
+    )
+    .unwrap();
+    let e = assert_kind(
+        map::search_places(&state, "東京駅"),
+        ErrorKind::InvalidInput,
+    );
+    assert!(e.hint.as_deref().unwrap().contains("有効"), "{e:?}");
+    assert_eq!(fake.count(), 5);
 }
 
 /// PNG の署名で始まる本文（タイルの画像の代わり。genzo-geo は署名だけを確かめ、デコードしない）。

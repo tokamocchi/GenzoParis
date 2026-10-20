@@ -20,8 +20,15 @@ fn ok_json() -> Arc<FakeClient> {
     FakeClient::new(|_| Ok(http(200, &[("Content-Type", "application/json")], TOKYO)))
 }
 
+/// 設定した検索サービスの URL の見本（既定の提供元はない。本物のサーバーには問い合わせない）。
+const SEARCH_URL: &str = "https://geocoder.example.org/search";
+
+fn provider() -> GeocoderProvider {
+    GeocoderProvider::new(SEARCH_URL).unwrap()
+}
+
 fn geocoder(client: &Arc<FakeClient>, clock: &Arc<FakeClock>) -> Geocoder {
-    Geocoder::new(client.clone(), GeocoderProvider::nominatim()).with_clock(clock.clone())
+    Geocoder::new(client.clone(), provider()).with_clock(clock.clone())
 }
 
 #[test]
@@ -35,9 +42,10 @@ fn search_sends_the_documented_parameters() {
     let requests = client.requests();
     assert_eq!(requests.len(), 1);
     let req = &requests[0];
+    // 設定した検索サービスの URL に送る。
     assert_eq!(
         req.url,
-        "https://nominatim.openstreetmap.org/search?q=%E6%9D%B1%E4%BA%AC%E9%A7%85&format=jsonv2&limit=10&accept-language=ja"
+        "https://geocoder.example.org/search?q=%E6%9D%B1%E4%BA%AC%E9%A7%85&format=jsonv2&limit=10&accept-language=ja"
     );
     assert!(!req.url.contains("email"));
     assert_eq!(req.header("accept"), Some("application/json"));
@@ -175,14 +183,14 @@ fn the_same_query_from_two_threads_is_sent_only_once() {
 #[test]
 fn geocoders_share_one_gate_in_the_process() {
     let client = ok_json();
-    let a = Geocoder::new(client.clone(), GeocoderProvider::nominatim());
+    let a = Geocoder::new(client.clone(), provider());
     let b = Geocoder::new(
         client.clone(),
-        GeocoderProvider::new("https://geocoder.example.org/search").unwrap(),
+        GeocoderProvider::new("https://geocoder.example.net/v1/search?key=abc").unwrap(),
     );
     assert!(a.shares_gate_with(&b));
     // 時計を差し替えたものは、その検索だけの関所。
-    let c = Geocoder::new(client, GeocoderProvider::nominatim()).with_clock(FakeClock::new());
+    let c = Geocoder::new(client, provider()).with_clock(FakeClock::new());
     assert!(!a.shares_gate_with(&c));
 }
 

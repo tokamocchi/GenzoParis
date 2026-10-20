@@ -486,8 +486,9 @@ pub async fn save_map_preferences(
     blocking(move || map::save_preferences(&state, preferences)).await
 }
 
-/// 地名を検索する（オンラインの地図が有効なときだけ通信する。画面は入力の途中では呼ばず、Enter かボタンの
-/// ときだけ呼ぶ。[`map::search_places`]）。
+/// 地名を検索する（オンラインの地図が有効で、検索のサービスの URL を設定したか、OSM の公開の Nominatim を使うと
+/// 選んだときだけ問い合わせる。既定の提供元はない。画面は入力の途中では呼ばず、Enter かボタンのときだけ呼ぶ。
+/// [`map::search_places`]）。
 #[tauri::command]
 pub async fn search_places(
     state: Shared<'_>,

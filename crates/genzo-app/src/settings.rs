@@ -94,7 +94,22 @@ impl Default for ImportPreferences {
 /// 位置を付ける機能（第 1 段階）は、無効でも使える。
 ///
 /// 提供元の URL は、OSM Foundation のポリシーの「ソフトウェアの更新なしに切り替えられること」のため、
-/// `settings.json` で変えられる（`None` なら OSM の既定。https だけ。[`MapPreferences::normalized`]）。
+/// `settings.json`（と設定の画面の詳細）で変えられる（https だけ。[`MapPreferences::normalized`]）。タイルの URL は
+/// `None` なら OSM の標準のタイル。
+///
+/// **地名の検索は既定では使わない**。送り先（genzo-app の `map::geocoder_provider`）:
+///
+/// | `search_url` | `public_nominatim` | 送り先 |
+/// |---|---|---|
+/// | あり | どちらでも | `search_url`（設定した検索サービス） |
+/// | `None` | `true` | OSM Foundation の公開の Nominatim（`https://nominatim.openstreetmap.org/search`） |
+/// | `None` | `false`（既定） | なし（「地名の検索のサービスが設定されていません」で、通信しない） |
+///
+/// 公開の Nominatim を既定で使わないのは、そのポリシーの上限（1 秒に 1 回）がアプリの全利用者の合計にかかり、
+/// 公開で配布するアプリでは利用者の間の合計を数えられないため（genzo-geo の provider.rs の doc）。利用者
+/// （開発者本人）が制限を読んだうえで、既定は OFF・設定で ON にできる形に決めた（2026-10-20）。オンラインの地図を
+/// 有効にする同意とは別の切り替えで、ON にしたときだけ公開の Nominatim に検索語を送る。どちらもなくても、座標の
+/// 貼り付けと地図のクリックでは位置を付けられる。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MapPreferences {
@@ -105,9 +120,14 @@ pub struct MapPreferences {
     /// 地図のタイルの URL のひな形（`{z}`・`{x}`・`{y}` を 1 つずつ含む https の URL。`None` なら
     /// `https://tile.openstreetmap.org/{z}/{x}/{y}.png`）。
     pub tile_url: Option<String>,
-    /// 地名の検索（Nominatim と同じ API の `/search`）の URL（https。`None` なら
-    /// `https://nominatim.openstreetmap.org/search`）。
+    /// 地名の検索のサービス（Nominatim と同じ API の `/search`）の URL（https）。あればこの URL に問い合わせる。
+    /// `None`（既定）なら、`public_nominatim` が `true` のときだけ公開の Nominatim を使い、`false` なら地名の検索を
+    /// 使わない（`search_places` は通信せずに誤り）。
     pub search_url: Option<String>,
+    /// `search_url` がないときに、OSM Foundation の公開の Nominatim を使う（設定の「OSM の公開の地名の検索
+    /// （Nominatim）を使う」。**既定は `false`**。利用者が ON にしたときだけ）。`search_url` があれば使わないが、
+    /// 値は残す（URL を空に戻したときに使う）。前の形の settings.json（欄がない）は `false` として読む。
+    pub public_nominatim: bool,
     /// 設定のタイルの提供元の帰属の表示（例「Maps © 提供元の名前」。地図の右下に、OSM の帰属の表示
     /// 「© OpenStreetMap contributors」と並べて出す）。多くの提供元は自分の帰属の表示を利用の条件にしている。
     /// `tile_url` が `None`（OSM の標準のタイル）なら使わない（保存のときに `None` にする）。文言は提供元の
@@ -119,10 +139,10 @@ pub struct MapPreferences {
 pub const MAX_TILE_ATTRIBUTION_CHARS: usize = 200;
 
 impl MapPreferences {
-    /// 保存の前に整える: URL と帰属の表示の前後の空白を除き、空なら `None`（既定の提供元）にして、形を確かめる
-    /// （genzo-geo の `validate_tile_url_template`・`validate_search_url`。https だけ）。帰属の表示は、タイルの
-    /// URL が既定（`None`）なら `None` にし、改行などの制御文字と [`MAX_TILE_ATTRIBUTION_CHARS`] 文字を超える
-    /// ものは誤りにする。
+    /// 保存の前に整える: URL と帰属の表示の前後の空白を除き、空なら `None`（タイルは既定の提供元、地名の検索は
+    /// `public_nominatim` に従う）にして、形を確かめる（genzo-geo の `validate_tile_url_template`・`validate_search_url`。https
+    /// だけ）。帰属の表示は、タイルの URL が既定（`None`）なら `None` にし、改行などの制御文字と
+    /// [`MAX_TILE_ATTRIBUTION_CHARS`] 文字を超えるものは誤りにする。
     pub fn normalized(mut self) -> Result<Self, GeoError> {
         fn non_empty(value: Option<String>) -> Option<String> {
             value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
@@ -280,6 +300,7 @@ mod tests {
         s.map.online = true;
         s.map.consented_at = Some("2026-10-20T01:02:03Z".to_owned());
         s.map.search_url = Some("https://geocoder.example.org/search?key=abc".to_owned());
+        s.map.public_nominatim = true;
         save(d.path(), &s).unwrap();
         assert_eq!(load(d.path()).settings, s);
     }
@@ -322,6 +343,8 @@ mod tests {
             Some("https://tiles.example.org/{z}/{x}/{y}.png")
         );
         assert_eq!((l.map.consented_at, l.map.search_url), (None, None));
+        // 公開の Nominatim の切り替えのない前の形は OFF として読む（既定で使わない）。
+        assert!(!l.map.public_nominatim);
     }
 
     #[test]
@@ -331,6 +354,7 @@ mod tests {
             consented_at: None,
             tile_url: Some("  https://tiles.example.org/{z}/{x}/{y}.png ".to_owned()),
             search_url: Some("   ".to_owned()),
+            public_nominatim: false,
             tile_attribution: None,
         }
         .normalized()
@@ -339,7 +363,10 @@ mod tests {
             p.tile_url.as_deref(),
             Some("https://tiles.example.org/{z}/{x}/{y}.png")
         );
-        assert_eq!(p.search_url, None, "空白だけなら既定の提供元");
+        assert_eq!(
+            p.search_url, None,
+            "空白だけなら設定しない（地名の検索を使わない）"
+        );
         for bad in [
             "http://tile.openstreetmap.org/{z}/{x}/{y}.png",
             "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -354,11 +381,31 @@ mod tests {
             assert!(matches!(r, Err(GeoError::InvalidInput(_))), "{bad}");
         }
         let r = MapPreferences {
-            search_url: Some("http://nominatim.openstreetmap.org/search".to_owned()),
+            search_url: Some("http://geocoder.example.org/search".to_owned()),
             ..MapPreferences::default()
         }
         .normalized();
         assert!(matches!(r, Err(GeoError::InvalidInput(_))));
+        // 設定した検索サービスの URL は、前後の空白を除いて残す。
+        let p = MapPreferences {
+            search_url: Some(" https://geocoder.example.org/search ".to_owned()),
+            ..MapPreferences::default()
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(
+            p.search_url.as_deref(),
+            Some("https://geocoder.example.org/search")
+        );
+        // 公開の Nominatim の切り替えは、検索の URL があってもそのまま残す（URL を空に戻したときに使う）。
+        let p = MapPreferences {
+            search_url: Some("https://geocoder.example.org/search".to_owned()),
+            public_nominatim: true,
+            ..MapPreferences::default()
+        }
+        .normalized()
+        .unwrap();
+        assert!(p.public_nominatim);
     }
 
     #[test]

@@ -1,9 +1,17 @@
 //! 地図のタイルと地名の検索の提供元（URL のひな形と、その検査）。
 //!
-//! 既定は OpenStreetMap Foundation のサーバー（タイルは `tile.openstreetmap.org`、検索は
-//! `nominatim.openstreetmap.org`）。ポリシーが「ソフトウェアの更新なしに切り替えられること」を求める
-//! （Nominatim は must、タイルは should）ので、genzo-app の設定（settings.json）で URL を変えられる。
-//! 設定の URL は [`validate_tile_url_template`]・[`validate_search_url`] で確かめる（https だけ）。
+//! - タイルの既定は OpenStreetMap Foundation のサーバー（`tile.openstreetmap.org`。[`TileProvider::openstreetmap`]）。
+//!   タイルのポリシーが「ソフトウェアの更新なしに切り替えられること」を勧める（should）ので、genzo-app の設定
+//!   （settings.json）で URL を変えられる。
+//! - 地名の検索は **既定では使わない**（既定の提供元はない）。[`GeocoderProvider`] は、設定の URL
+//!   （[`GeocoderProvider::new`]）か、利用者が設定で選んだときだけ OSM Foundation の公開の Nominatim
+//!   （[`GeocoderProvider::public_nominatim`]・[`NOMINATIM_SEARCH_URL`]）から作る（どちらにするかは genzo-app の設定 `MapPreferences` が決める）。公開の
+//!   Nominatim を既定で使わないのは、そのポリシーが (1) 1 秒に 1 回の上限を **アプリの全利用者の合計** にかけ
+//!   （公開で配布するアプリでは、利用者の間の合計を数えられない）、(2) 公開の API を使えるのは **アプリの開発者が
+//!   よく知ったうえで意図して使うと決め、順守に直接責任を持つ場合だけ** とするため（利用者（開発者本人）が制限を
+//!   読んだうえで、既定は OFF・設定で ON にできる形に決めた。2026-10-20）。1 秒に 1 回・結果のキャッシュ・
+//!   オートコンプリートの禁止などの規則は、設定した提供元にもそのまま当てる（[`crate::Geocoder`]）。
+//! - 設定の URL は [`validate_tile_url_template`]・[`validate_search_url`] で確かめる（https だけ）。
 
 use crate::GeoError;
 
@@ -17,7 +25,8 @@ pub const OSM_MAX_ZOOM: u8 = 19;
 /// （画面の部品が出す。文言と出し方は人の確認待ち）。
 pub const OSM_ATTRIBUTION: &str = "© OpenStreetMap contributors";
 
-/// Nominatim の検索の URL（`search.php` は古い形なので使わない）。
+/// OSM Foundation の公開の Nominatim の検索の URL（`search.php` は古い形なので使わない）。既定では使わない
+/// （利用者が設定で選んだときだけ。モジュールの doc）。
 pub const NOMINATIM_SEARCH_URL: &str = "https://nominatim.openstreetmap.org/search";
 
 /// 設定で指定できる最大のズームの上限（タイルの番号 2^z が u32 に収まる範囲の、ゆとりのある上限。仮置き）。
@@ -97,15 +106,17 @@ impl TileProvider {
     }
 }
 
-/// 地名の検索（Nominatim の API と同じ形の `/search`）の提供元。
+/// 地名の検索（Nominatim の API と同じ形の `/search`）の提供元。既定の提供元はない（設定の URL か、利用者が
+/// 設定で選んだときの公開の Nominatim から作る。モジュールの doc）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeocoderProvider {
     search_url: String,
 }
 
 impl GeocoderProvider {
-    /// OSM Foundation の Nominatim（[`NOMINATIM_SEARCH_URL`]）。
-    pub fn nominatim() -> Self {
+    /// OSM Foundation の公開の Nominatim（[`NOMINATIM_SEARCH_URL`]）。利用者が設定で選んだときだけ使う（既定では
+    /// 使わない。モジュールの doc）。
+    pub fn public_nominatim() -> Self {
         Self {
             search_url: NOMINATIM_SEARCH_URL.to_string(),
         }
@@ -310,9 +321,11 @@ mod tests {
             "https://tile.openstreetmap.org/12/3638/1612.png"
         );
         validate_tile_url_template(OSM_TILE_URL).unwrap();
-        let g = GeocoderProvider::nominatim();
+        // 公開の Nominatim（利用者が設定で選んだときだけ使う）。
+        let g = GeocoderProvider::public_nominatim();
         assert_eq!(g.search_url(), "https://nominatim.openstreetmap.org/search");
         validate_search_url(NOMINATIM_SEARCH_URL).unwrap();
+        assert_eq!(GeocoderProvider::new(NOMINATIM_SEARCH_URL).unwrap(), g);
     }
 
     #[test]
@@ -420,20 +433,21 @@ mod tests {
     #[test]
     fn search_urls_are_checked() {
         for ok in [
-            "https://nominatim.openstreetmap.org/search",
+            "https://nominatim.example.org/search",
             "https://geocoder.example.org/v1/search?key=abc",
             "https://localhost:8080/search",
         ] {
             assert!(validate_search_url(ok).is_ok(), "{ok}");
             assert!(GeocoderProvider::new(ok).is_ok());
         }
+        // 空の URL からは作れない（既定の提供元はない。genzo-app は、検索サービスの設定がなければ検索しない）。
         for ng in [
             "",
-            "http://nominatim.openstreetmap.org/search",
+            "http://nominatim.example.org/search",
             "https://",
-            "https://nominatim.openstreetmap.org/search?q={q}",
-            "https://nominatim.openstreetmap.org/search#x",
-            "ftp://nominatim.openstreetmap.org/search",
+            "https://nominatim.example.org/search?q={q}",
+            "https://nominatim.example.org/search#x",
+            "ftp://nominatim.example.org/search",
             "https://nominatim.example.org/search?x=\"a\"",
             "https://nominatim.example.org/<search>",
         ] {
@@ -441,15 +455,19 @@ mod tests {
                 matches!(validate_search_url(ng), Err(GeoError::InvalidInput(_))),
                 "{ng}"
             );
+            assert!(
+                matches!(GeocoderProvider::new(ng), Err(GeoError::InvalidInput(_))),
+                "{ng}"
+            );
         }
     }
 
     #[test]
     fn query_parameters_are_joined_to_the_search_url() {
-        let p = GeocoderProvider::nominatim();
+        let p = GeocoderProvider::new("https://geocoder.example.org/search").unwrap();
         assert_eq!(
             p.url_with_query("q=a&format=jsonv2"),
-            "https://nominatim.openstreetmap.org/search?q=a&format=jsonv2"
+            "https://geocoder.example.org/search?q=a&format=jsonv2"
         );
         let p = GeocoderProvider::new("https://example.org/search?key=k").unwrap();
         assert_eq!(

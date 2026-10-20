@@ -1,9 +1,13 @@
-//! 地名の検索（Nominatim の `/search`。`format=jsonv2`）。
+//! 地名の検索（Nominatim と同じ API の `/search`。`format=jsonv2`）。
 //!
-//! Nominatim の利用ポリシー（<https://operations.osmfoundation.org/policies/nominatim/> 。原文はそのページの
-//! 元の GitHub のソースで確かめた。公開ページは未確認）に合わせて次のようにする:
-//! - **1 秒に 1 回まで**（ポリシーの上限は、利用者ごとではなくアプリの全利用者の合計）。プロセス全体で 1 つの
-//!   関所（`RequestGate`）を持ち、前の要求の開始から [`MIN_REQUEST_INTERVAL`] たっていなければ、その分
+//! 問い合わせる先は、利用者が設定した検索サービスか、利用者が設定で選んだときの OSM Foundation の公開の
+//! Nominatim だけ（[`GeocoderProvider`] に既定の提供元はない。公開の Nominatim を既定で使わない理由は
+//! provider.rs の doc）。規則は、OSM Foundation の Nominatim
+//! の利用ポリシー（<https://operations.osmfoundation.org/policies/nominatim/> 。原文はそのページの元の GitHub の
+//! ソースで確かめた。公開ページは未確認）に合わせたもので、設定した提供元にもそのまま当てる（提供元の利用条件は
+//! 利用者が確かめる）:
+//! - **1 秒に 1 回まで**（Nominatim のポリシーの上限は、利用者ごとではなくアプリの全利用者の合計）。プロセス
+//!   全体で 1 つの関所（`RequestGate`）を持ち、前の要求の開始から [`MIN_REQUEST_INTERVAL`] たっていなければ、その分
 //!   待ってから送る。関所は要求から結果の保存までずっと持つので、同時に送るのは 1 件だけ（同じ検索語を同時に
 //!   呼んでも、送るのは 1 回）。この関所が数えるのは 1 つのプロセスの中だけで、ほかの PC や、同じ PC で複数
 //!   起動したアプリの要求は数えられない（利用者が増えると、ポリシーの上限を超えうる。docs/04_architecture.md

@@ -1,8 +1,8 @@
 //! オンラインの地図（位置情報の後付け LIB-21 の第 2 段階。docs/04_architecture.md の 3.16 節）。
 //!
-//! 写真に位置を付けるダイアログの地図（OpenStreetMap のタイル）と地名の検索（Nominatim）は、genzo-geo で
-//! Rust の側から外部のサーバーに問い合わせる（WebView は外部と通信しない。tauri.conf.json の CSP は
-//! 変えない）。
+//! 写真に位置を付けるダイアログの地図（OpenStreetMap のタイル）と地名の検索（利用者が設定した、Nominatim と同じ
+//! API の検索サービスか、利用者が設定で選んだときの OSM Foundation の公開の Nominatim）は、genzo-geo で Rust の
+//! 側から外部のサーバーに問い合わせる（WebView は外部と通信しない。tauri.conf.json の CSP は変えない）。
 //!
 //! | 画面からの入口 | 内容 |
 //! |---|---|
@@ -15,6 +15,15 @@
 //! - オンラインの地図は **既定で無効**（docs/02 の SEC-02。SEC-01 の例外）。無効の間は、タイルの要求に 403 を
 //!   返し、検索はエラーにして、どちらも通信しない（[`crate::settings::MapPreferences`]）。キャッシュの大きさと
 //!   消去、ページを開くことは、無効でも使える（外部のサーバーと通信しない）。
+//! - 地名の検索は **既定では使わない**。送り先は設定で決まる（[`geocoder_provider`]）: 検索サービスの URL
+//!   （`search_url`）があればそれ、なければ「OSM の公開の地名の検索（Nominatim）を使う」（`public_nominatim`。
+//!   **既定は OFF**）が ON のときだけ OSM Foundation の公開の Nominatim、どちらもなければ、オンラインの地図が
+//!   有効でも検索はエラー（[`search_not_configured`]）にして通信しない。公開の Nominatim を既定で使わないのは、
+//!   そのポリシーの上限（1 秒に 1 回）がアプリの全利用者の合計にかかり、公開で配布するアプリでは数えられない
+//!   ことと、公開の API を使えるのはアプリの開発者がよく知ったうえで意図して使うと決めた場合だけとされること
+//!   のため（genzo-geo の provider.rs の doc。利用者（開発者本人）が制限を読んだうえで、既定は OFF・設定で ON に
+//!   できる形に決めた。2026-10-20）。1 秒に 1 回・結果のキャッシュなどの規則は、どの提供元にも当てる（genzo-geo
+//!   の `Geocoder`）。
 //! - 本物の HTTP のクライアント（genzo-geo の `UreqClient`）は、初めて通信するときに作る（`LazyClient`。無効の間は
 //!   TLS の準備もしない）。1 つをタイルと検索で共有する（接続を使い回す）。
 //! - 提供元は設定の URL から作り、設定が変わったら作り直す（[`MapService`]）。地名の検索の「1 秒に 1 回」の関所は
@@ -27,8 +36,9 @@
 //!
 //! OSM Foundation の利用ポリシー（タイル: <https://operations.osmfoundation.org/policies/tiles/> 、Nominatim:
 //! <https://operations.osmfoundation.org/policies/nominatim/> ）で守ることは genzo-geo の doc を参照。この
-//! モジュールが受け持つのは、有効にするまで通信しないこと・提供元を設定で切り替えられること・帰属の表示の
-//! リンクを WebView の中で開かないこと（既定のブラウザで開く）。
+//! モジュールが受け持つのは、有効にするまで通信しないこと・検索のサービスを設定するか公開の Nominatim を選ぶまで
+//! 検索しないこと・提供元を設定で切り替えられること・帰属の表示のリンクを WebView の中で開かないこと（既定の
+//! ブラウザで開く）。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -49,14 +59,15 @@ pub const MAP_CACHE_DIR: &str = "map-tiles";
 
 /// オンラインの地図が無効なときの案内。
 const HINT_ENABLE: &str = "設定でオンラインの地図を有効にしてください";
+/// 地名の検索のサービスが設定されていないときの案内。
+const HINT_SEARCH_SERVICE: &str = "設定の「一般」のオンラインの地図で、OSM の公開の地名の検索（Nominatim）を使うか、詳細で検索サービスの URL を指定してください";
 /// 通信に失敗したときの案内。
 const HINT_NETWORK: &str = "ネットワークの接続とプロキシの設定を確かめて、やり直してください";
 /// サーバーがエラー・不正な応答を返したときの案内。
 const HINT_SERVER: &str =
     "しばらくしてからやり直してください。続くときは、設定の地図の提供元（URL）を確かめてください";
 /// 設定の提供元の URL が使えないときの案内（settings.json を手で直した場合など）。
-const HINT_PROVIDER: &str =
-    "設定のタイル・検索の URL を直すか、空にして既定（OpenStreetMap）に戻してください";
+const HINT_PROVIDER: &str = "設定のタイル・検索サービスの URL を直すか、空にしてください（空のタイルの URL は OpenStreetMap の標準のタイルを使います）";
 /// キャッシュのファイルを読み書きできないときの案内。
 const HINT_CACHE: &str = "地図のキャッシュのフォルダの空き容量と権限を確かめてください";
 
@@ -118,22 +129,28 @@ impl MapService {
         Ok(service)
     }
 
-    /// 設定の提供元の地名の検索（前と同じ提供元なら作り直さない。結果のキャッシュを保つ）。設定の URL が
-    /// 使えなければ [`GeoError::InvalidInput`]。オンラインの地図が有効かは呼び出し元が確かめる。
-    pub fn geocoder(&self, preferences: &MapPreferences) -> Result<Arc<Geocoder>, GeoError> {
-        let provider = match &preferences.search_url {
-            None => GeocoderProvider::nominatim(),
-            Some(url) => GeocoderProvider::new(url)?,
-        };
+    /// 設定の提供元の地名の検索（前と同じ提供元なら作り直さない。結果のキャッシュを保つ）。検索のサービスが
+    /// 設定されていなければ（[`geocoder_provider`] が `None`）`None`（既定の提供元はない。前の提供元の結果の
+    /// キャッシュも捨てる）。設定の URL が使えなければ [`GeoError::InvalidInput`]。オンラインの地図が有効かは
+    /// 呼び出し元が確かめる。
+    pub fn geocoder(
+        &self,
+        preferences: &MapPreferences,
+    ) -> Result<Option<Arc<Geocoder>>, GeoError> {
+        let provider = geocoder_provider(preferences)?;
         let mut slot = self.geocoder.lock();
+        let Some(provider) = provider else {
+            *slot = None;
+            return Ok(None);
+        };
         if let Some(geocoder) = slot.as_ref()
             && *geocoder.provider() == provider
         {
-            return Ok(Arc::clone(geocoder));
+            return Ok(Some(Arc::clone(geocoder)));
         }
         let geocoder = Arc::new(Geocoder::new(Arc::clone(&self.client), provider));
         *slot = Some(Arc::clone(&geocoder));
-        Ok(geocoder)
+        Ok(Some(geocoder))
     }
 
     /// キャッシュの大きさと消去に使うタイル（キャッシュの中のすべての提供元のフォルダを扱うので、設定の
@@ -164,6 +181,23 @@ fn tile_provider(preferences: &MapPreferences) -> Result<TileProvider, GeoError>
                 .as_deref()
                 .unwrap_or(OSM_ATTRIBUTION),
         ),
+    }
+}
+
+/// 設定の地名の検索の提供元（モジュールの doc の送り先）。
+///
+/// | `search_url` | `public_nominatim` | 提供元 |
+/// |---|---|---|
+/// | あり | どちらでも | `search_url`（[`GeocoderProvider::new`]。使えない URL は [`GeoError::InvalidInput`]） |
+/// | `None` | `true` | OSM Foundation の公開の Nominatim（[`GeocoderProvider::public_nominatim`]） |
+/// | `None` | `false`（既定） | `None`（地名の検索を使わない） |
+pub fn geocoder_provider(
+    preferences: &MapPreferences,
+) -> Result<Option<GeocoderProvider>, GeoError> {
+    match &preferences.search_url {
+        Some(url) => GeocoderProvider::new(url).map(Some),
+        None if preferences.public_nominatim => Ok(Some(GeocoderProvider::public_nominatim())),
+        None => Ok(None),
     }
 }
 
@@ -209,7 +243,8 @@ pub enum MapLink {
     FixTheMap,
     /// タイルの利用ポリシー（有効にする前の確認で示す）。
     TilePolicy,
-    /// Nominatim（地名の検索）の利用ポリシー（有効にする前の確認で示す）。
+    /// Nominatim（地名の検索）の利用ポリシー（設定の「OSM の公開の地名の検索（Nominatim）を使う」の切り替えの
+    /// 近くと、その切り替えが ON のときの有効にする前の確認で示す）。
     NominatimPolicy,
 }
 
@@ -242,6 +277,16 @@ pub fn disabled() -> ErrorInfo {
     )
 }
 
+/// 地名の検索のサービスが設定されていないときのエラー（検索サービスの URL がなく、公開の Nominatim も選んでいない。
+/// 通信していない。既定の提供元はない）。
+pub fn search_not_configured() -> ErrorInfo {
+    error(
+        ErrorKind::InvalidInput,
+        "地名の検索のサービスが設定されていません",
+        Some(HINT_SEARCH_SERVICE),
+    )
+}
+
 /// genzo-geo のエラーを画面に返す形にする。
 ///
 /// | genzo-geo | 種類 |
@@ -271,23 +316,31 @@ fn provider_error(e: GeoError) -> ErrorInfo {
     info
 }
 
-/// 地名を検索する（`search_places` のコマンドの本体）。オンラインの地図が無効なら、通信せずに
-/// [`disabled`] のエラー。検索語の検査・1 秒に 1 回の間隔・結果のキャッシュは genzo-geo の `Geocoder`。
+/// 地名を検索する（`search_places` のコマンドの本体）。オンラインの地図が無効なら [`disabled`]、検索のサービスが
+/// 設定されていなければ（検索サービスの URL がなく、公開の Nominatim も選んでいない。既定）
+/// [`search_not_configured`] のエラーで、どちらも通信しない。送り先は [`geocoder_provider`]。検索語の検査・
+/// 1 秒に 1 回の間隔・結果のキャッシュは genzo-geo の `Geocoder`。
 ///
-/// 画面は、入力の途中では呼ばず、Enter かボタンのときだけ呼ぶ（Nominatim のポリシーのオートコンプリートの禁止）。
+/// 画面は、入力の途中では呼ばず、Enter かボタンのときだけ呼ぶ（Nominatim のポリシーのオートコンプリートの禁止を、
+/// 設定した提供元にも当てる）。
 pub fn search_places(state: &AppState, query: &str) -> Result<Vec<Place>, ErrorInfo> {
     let preferences = state.settings().map;
     if !preferences.online {
         return Err(disabled());
     }
-    let geocoder = state.map().geocoder(&preferences).map_err(provider_error)?;
+    let geocoder = state
+        .map()
+        .geocoder(&preferences)
+        .map_err(provider_error)?
+        .ok_or_else(search_not_configured)?;
     geocoder.search(query).map_err(geo_error)
 }
 
 /// オンラインの地図の設定を保存する（`save_map_preferences` のコマンドの本体）。
 ///
-/// - URL は前後の空白を除き、空なら既定の提供元にする。https でない・形の違う URL は `invalid_input` で、
-///   何も保存しない（[`MapPreferences::normalized`]）。
+/// - URL は前後の空白を除き、空なら `None` にする（タイルは既定の OpenStreetMap、地名の検索は
+///   `public_nominatim` に従う）。https でない・形の違う URL は `invalid_input` で、何も保存しない
+///   （[`MapPreferences::normalized`]）。
 /// - `consented_at`（初めて有効にした日時）はアプリが入れる: まだなく、有効にするときに今の日時（UTC）を
 ///   入れ、その後は変えない（画面が送った値は使わない）。
 /// - すぐに効く（次のタイルの要求・検索から。カタログを開き直す必要はない）。
@@ -399,6 +452,15 @@ mod tests {
         let e = geo_error(GeoError::Disabled);
         assert_eq!(e.kind, ErrorKind::InvalidInput);
         assert_eq!(e.hint.as_deref(), Some(HINT_ENABLE));
+        let e = search_not_configured();
+        assert_eq!(
+            (e.kind, e.message.as_str(), e.hint.as_deref()),
+            (
+                ErrorKind::InvalidInput,
+                "地名の検索のサービスが設定されていません",
+                Some(HINT_SEARCH_SERVICE)
+            )
+        );
         let io = std::io::Error::other("書けない");
         let e = geo_error(GeoError::Io {
             path: "/c/map-tiles".into(),
@@ -436,15 +498,44 @@ mod tests {
         let third = service.tiles(&credited).unwrap();
         assert!(!Arc::ptr_eq(&other, &third));
         assert_eq!(third.provider().attribution(), "Maps © 提供元");
-        let g = service.geocoder(&custom).unwrap();
+        let g = service
+            .geocoder(&custom)
+            .unwrap()
+            .expect("設定した検索サービス");
         assert_eq!(
             g.provider().search_url(),
             "https://geocoder.example.org/search"
         );
-        assert!(Arc::ptr_eq(&g, &service.geocoder(&custom).unwrap()));
+        assert!(Arc::ptr_eq(
+            &g,
+            &service.geocoder(&custom).unwrap().unwrap()
+        ));
+        // 検索のサービスを設定していなければ、地名の検索はない（既定の提供元はない）。設定し直すと作り直す
+        // （前の提供元の結果のキャッシュは使わない）。
+        assert!(service.geocoder(&preferences).unwrap().is_none());
+        let again = service.geocoder(&custom).unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&g, &again));
+        // 公開の Nominatim を選ぶと、検索の URL が空のときだけそれを使う（URL があれば URL）。
+        let public = MapPreferences {
+            public_nominatim: true,
+            ..MapPreferences::default()
+        };
         assert_eq!(
-            service.geocoder(&preferences).unwrap().provider(),
-            &GeocoderProvider::nominatim()
+            service.geocoder(&public).unwrap().unwrap().provider(),
+            &GeocoderProvider::public_nominatim()
+        );
+        let both = MapPreferences {
+            public_nominatim: true,
+            ..custom.clone()
+        };
+        assert_eq!(
+            service
+                .geocoder(&both)
+                .unwrap()
+                .unwrap()
+                .provider()
+                .search_url(),
+            "https://geocoder.example.org/search"
         );
         // 手で書き換えた設定の使えない URL は誤り（既定の提供元に黙って戻さない）。
         let broken = MapPreferences {
