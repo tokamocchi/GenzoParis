@@ -20,7 +20,8 @@ chrono.workspace = true
 # 検索語の正規化（NFC。結果のキャッシュのキー）。
 unicode-normalization.workspace = true
 # タイルの提供元ごとのキャッシュのフォルダの名前（URL のひな形のハッシュ）。blake3 でなく sha2 なのは、
-# C のビルドが要らず、Linux から Windows・macOS 向けの型の検査ができるため。
+# C のビルドが要らないため（足した時点では、Linux から Windows・macOS 向けの型の検査ができた。TLS の ring を
+# 入れた後は、ring の C のビルドのため、この crate も Linux からは検査できない）。
 sha2.workspace = true
 hex.workspace = true
 # タイルのキャッシュの書き込み（同じフォルダの一時ファイル → 名前の変更）。
