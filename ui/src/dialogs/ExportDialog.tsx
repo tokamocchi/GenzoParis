@@ -1032,7 +1032,9 @@ export function ExportDialog(props: { variantIds: VariantId[] }) {
           <input type="checkbox" checked={form.removeGps} onChange={(e) => update({ removeGps: e.target.checked })} />
           <span>
             位置情報（GPS）を削除する
-            <span className="desc">撮影場所を知られたくない写真を共有するときはオンのままにしてください</span>
+            <span className="desc">
+              撮影場所を知られたくない写真を共有するときはオンのままにしてください（後から付けた位置も書きません。オフにすると、付けた位置があればそれを、なければカメラの位置を書きます）
+            </span>
           </span>
         </label>
       </div>

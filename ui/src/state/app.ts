@@ -84,6 +84,8 @@ export type DialogState =
   | { kind: "auto_stack" }
   // 撮影日時の一括修正（LIB-16）: 対象の写真と、基準の写真（表示中の写真）。
   | { kind: "capture_time"; variantIds: VariantId[]; current: VariantId | null }
+  // 位置情報の後付け（LIB-21）: 対象の写真と、表示中の写真（今の位置を出す・その位置を入れる）。
+  | { kind: "geotag"; variantIds: VariantId[]; current: VariantId | null }
   // アプリの中でのファイル操作（FILE-02）: 写真の移動（落とした先のフォルダ。null ならダイアログで選ぶ）・
   // 名前の変更・フォルダの作成（folderId の中へ）と名前の変更・フォルダの移動。見つからない写真（FILE-04）:
   // 候補を探して結び付け直す（null ならすべての見つからない写真）・フォルダの場所の指定し直し・写真の登録されて

@@ -102,6 +102,7 @@ flowchart TB
   RAW["genzo-raw<br/>LibRaw FFI"]
   MEDIA["genzo-media<br/>画像入出力・FFmpeg"]
   MODEL["genzo-model<br/>ドメインの型・現像設定のスキーマ"]
+  GEO["genzo-geo<br/>地図のタイル・地名の検索（HTTPS）"]
   TAURI --> API
   NATIVE --> API
   CLI --> API
@@ -121,12 +122,15 @@ flowchart TB
   CAT --> MODEL
   PIPE --> MODEL
   API --> MODEL
+  TAURI --> GEO
+  GEO --> MODEL
 ```
 
 - 依存の方向は常に上から下です。`genzo-model` は他のどの crate にも依存しません。
 - `genzo-gpu` は `genzo-pipeline` が定義する処理ステージの GPU 版です。GPU のない環境（CI）では、`genzo-pipeline` の CPU 版だけで動きます。ソフトウェアの GPU（Windows の WARP・Mesa の llvmpipe など）は、既定では使わずに CPU 版で処理します（2026-10-10、決定事項ログ No.46。環境変数 `GENZO_GPU_ALLOW_SOFTWARE=1` または `CoreConfig::gpu_allow_software` で使える。この開発環境のテストは許可して llvmpipe で GPU 版と CPU 版を比べる）。
 - `genzo-cli` は、UI なしで登録・検索・現像・書き出しを行えます。自動テストと、AI による動作確認に使います（ORG-05）。
 - ログ・クラッシュレポート（SYS-07。6.5 節）は `genzo-api` の `logging` が受け持ち、アプリ（`genzo-app`）と CLI が起動時に使います（2026-10-13 追加）。
+- **外部と通信するのは `genzo-geo` だけ**です（位置情報の後付け LIB-21 の第 2 段階のオンラインの地図。2026-10-20 追加、決定事項ログ No.186。3.16 節）。使うのはアプリ（`genzo-app`。図の app-tauri）だけで、CLI とコア API は通信しません（依存の向きは `genzo-app → genzo-geo → genzo-model`）。オンラインの地図は既定で無効で、利用者が有効にしたときだけ通信します（02 の SEC-01 の例外・SEC-02。決定事項ログ No.190）。
 
 ### 1.5 UI とコアの間のインターフェース
 
@@ -136,6 +140,8 @@ flowchart TB
 | イベント | コア → UI | 「ジョブの進捗」「カタログが変更された」「プレビューが更新された」 | Tauri のイベント | チャネル |
 | サムネイル | コア → UI | グリッドに表示する画像 | カスタム URI スキーム `genzo://thumb/{variant_id}?rev={hash}`（ブラウザのキャッシュが効く） | テクスチャを直接渡す |
 | 動画（VID-04。2026-10-13 追加） | コア → UI | ルーペで再生する動画の元のファイル・再生用のファイル | カスタム URI スキーム `genzo://video/{variant_id}`・`genzo://video-proxy/{variant_id}`（Range の要求に応える。4.2 節） | OS の動画の再生の機能（未定） |
+| 地図のタイル（LIB-21。2026-10-20 追加） | アプリ → UI | 位置を付けるダイアログの地図のタイル（PNG） | カスタム URI スキーム `genzo://localhost/tile/{z}/{x}/{y}`（Windows は `http://genzo.localhost/tile/{z}/{x}/{y}`。拡張子なし）。コアではなくアプリ（`genzo-app`）が `genzo-geo` で取り、ディスクにキャッシュして返す。カタログによらず、オンラインの地図が無効なら 403（3.16 節） | （未定） |
+| 地名の検索（LIB-21。2026-10-20 追加） | UI → アプリ | 地名から場所の候補を探す（Nominatim と同じ API。既定では使わない） | アプリのコマンド `search_places`（コア API のコマンドではない。3.16 節） | （未定） |
 | 現像画像 | コア → 画面 | ルーペ・現像のプレビュー | **WebView を通さず、ビューポート（wgpu サーフェス）に直接描画** | 同左 |
 
 - コマンドとイベントの型は Rust 側で定義し、TypeScript の型を自動生成します（ts-rs や specta など）。型の不一致をコンパイル時に検出でき、AI による変更の誤りを防げます。
@@ -249,8 +255,9 @@ flowchart TB
 - プレビュー（縮小してから処理）と書き出し（フル解像度で処理してから縮小）は、処理の順序が異なるため、結果は一般に一致しません。両者の差は IQ-07b の許容差で管理し、テストで確認します（レビュー R-02）。
   - 比較の基準（2026-10-10、決定事項ログ No.35）: フル解像度の結果を、プレビューの各画素が覆うフル解像度の範囲で平均したもの（回転・切り抜きがなければ、面積平均の縮小と同じ格子の対応）とします。回転・切り抜きでの位置のずれ（最大でプレビューの 0.5 画素＋フル解像度の 0.5 画素。2.7 節）を比較から除くためです。実機の 2 枚でも基準は未達です（PoC-5）。
 - 書き出したファイルの安全性（原本を上書きしない、途中で失敗しても不完全なファイルを残さない）は 6.4 節で定義します。
-- **書き出すメタデータ**（2026-10-13 追記。LIB-15、決定事項ログ No.78）: Exif（撮影情報・補正した撮影日時・GPS（`remove_gps` でなければ））に加えて、カタログで編集した説明のメタデータを XMP のパケット（`genzo-media` の `xmp_write`。JPEG は APP1、PNG は iTXt の `XML:com.adobe.xmp`、TIFF はタグ 700）に書きます。Exif の ASCII のタグは 7bit の文字しか書けないので、キャプション・作成者・著作権表示は ASCII で表せるときだけ ImageDescription・Artist・Copyright にも書きます（`?` に置き換えて書くことはしない）。JPEG の XMP は APP1 の 1 つのセグメント（約 64 KiB）に収まらなければ書き出しを失敗にします（拡張 XMP は書かない）。書き出しの設定で項目を選ぶ機能（Lightroom の「著作権のみ」など）はまだなく、すべての項目を書きます。
+- **書き出すメタデータ**（2026-10-13 追記。LIB-15、決定事項ログ No.78）: Exif（撮影情報・補正した撮影日時・GPS（`remove_gps` でなければ。2026-10-20 から使う位置。下の「位置情報」））に加えて、カタログで編集した説明のメタデータを XMP のパケット（`genzo-media` の `xmp_write`。JPEG は APP1、PNG は iTXt の `XML:com.adobe.xmp`、TIFF はタグ 700）に書きます。Exif の ASCII のタグは 7bit の文字しか書けないので、キャプション・作成者・著作権表示は ASCII で表せるときだけ ImageDescription・Artist・Copyright にも書きます（`?` に置き換えて書くことはしない）。JPEG の XMP は APP1 の 1 つのセグメント（約 64 KiB）に収まらなければ書き出しを失敗にします（拡張 XMP は書かない）。書き出しの設定で項目を選ぶ機能（Lightroom の「著作権のみ」など）はまだなく、すべての項目を書きます。
   - **キーワード**（2026-10-13 追記。LIB-09、決定事項ログ No.81）: 写真に付けたキーワードと、その親（含まれるキーワード）のうち「書き出すファイルに含める」（`keyword.include_on_export`）ものの名前を、同じ XMP の `dc:subject`（`rdf:Bag`。IPTC Core の Keywords）に書きます（`genzo-catalog` の `Catalog::export_keywords`）。階層（`lr:hierarchicalSubject`）と IPTC IIM（APP13）は書きません。書き出しの設定の `remove_keywords` で、すべてのキーワードを書かないようにできます（GPS の `remove_gps` と同じ。既定は書く）。
+  - **位置情報**（2026-10-20 追記。LIB-21、決定事項ログ No.183）: Exif の GPS には **使う位置**（カタログで後から付けた位置があればそれ、なければ元のファイルの位置）を書きます（`genzo-api` の `export.rs` がカタログの `asset_location` を読み、`genzo-media` の `ExifData::with_gps` で元のファイルの値を置き換える）。`remove_gps` では付けた位置も書きません（`without_gps` が後で効く）。XMP には GPS を書きません（これまでと同じ）。動画は元のファイルのコピーなので、付けた位置は入りません（動画には位置を付けない。3.16 節）。
 - **ファイル名の規則と書き出しプリセット**（2026-10-14 追記。EXP-02、決定事項ログ No.162・163）: 書き出すファイルの名前は、既定では主となるファイルの名前（仮想コピーは「-名前」を足す）です。リネーム規則（IMP-03 と同じテンプレート）を選ぶと、書き出す前に写真ごとの名前をすべて決めます（`genzo-api` の `export.rs` の `plan_names`。連番 `{seq}` は指定した写真と動画の順に数え、重なりは 1 回だけ、書き出さない動画（下の「動画の書き出し」）は数えない。撮影日時が分からない写真・動画は、主となるファイルの更新日時を既定のタイムゾーンで読む）。決めた名前が重なる・既にあるファイルと同じときの扱いは、規則がないときと同じ（同じ名前の扱いの設定に従い、同じ書き出しの中で書いたファイルは上書きしない）です。書き出しの設定（形式・品質・大きさ・色空間・メタデータ・同じ名前の扱い）・書き出し先・ファイル名の規則を、書き出しプリセットとして保存できます（3.15 節）。
 - **書き出しの仕上げ（解像度・出力シャープ・透かし）**（2026-10-14 追記。EXP-03、決定事項ログ No.166・167）: 書き出しの設定（現像設定ではない）なので、処理バージョンに入れません。
   - **解像度**（`resolution_ppi`。既定 72・1〜1200。上限は仮置き）: 画素数は変えず、Exif の XResolution・YResolution（JPEG・TIFF）と PNG の pHYs に書きます（印刷の大きさの目安）。印刷用の出力シャープの半径にも使います。
@@ -474,6 +481,9 @@ erDiagram
   asset ||--o| asset_iptc : "説明のメタデータがある場合（v1）"
   capture_time_edit ||--|{ capture_time_edit_item : "撮影日時の修正の履歴（v1。3.13 節）"
   asset ||--o{ capture_time_edit_item : ""
+  asset ||--o| asset_location : "後から付けた位置がある場合（v1。3.16 節）"
+  location_edit ||--|{ location_edit_item : "位置の変更の履歴（v1。3.16 節）"
+  asset ||--o{ location_edit_item : ""
   file_op {
     int id PK
     text kind "move / rename / trash"
@@ -530,7 +540,7 @@ erDiagram
     real focal
     int width
     int height
-    real gps_lat
+    real gps_lat "カメラ（ファイル）の値。後から付けた位置は asset_location（版 13）"
     real gps_lon
     text caption
   }
@@ -539,6 +549,12 @@ erDiagram
     text title
     text creator "値の列は全部で 24（見出し・連絡先・著作権・撮影場所など）"
     text copyright
+  }
+  asset_location {
+    int asset_id PK "asset と 1 対 1（位置を付けた asset だけ。v1。版 13）"
+    real lat
+    real lon
+    text set_at "付けた日時（UTC）"
   }
   variant {
     int id PK
@@ -621,6 +637,7 @@ erDiagram
 - **説明のメタデータ**（LIB-15。2026-10-13 追加、スキーマの版 6、決定事項ログ No.78）: タイトル・見出し・作成者と連絡先・著作権（表示・状態・使用条件・URL）・撮影場所・クレジット・提供元・指示（IPTC Core の主要な項目。genzo-model の `MetadataField`）を、**元のファイルには書かず**カタログに保存します。キャプションは MVP からの `asset.caption`、そのほかは `asset_iptc`（asset と 1 対 1。どれかの項目に値がある asset だけが行を持ち、すべての値を消すと行を消す）。キャプションと同じく asset に付け、仮想コピーも同じ値です。値は前後の空白・制御文字を除いて整え（1 行の項目は改行を空白に）、1 つの値は 2,000 文字まで（仮置き）。複数の写真への一括編集は 1 つのトランザクションで行います（`Core::set_metadata`。画面のまとめは `Core::metadata_summary`）。書き出したファイルには XMP（UTF-8。すべての項目）と、ASCII で表せる値だけを Exif の ImageDescription・Artist・Copyright に書きます（2.4 節）。
 - 2026-10-13 更新（LIB-16。3.13 節、決定事項ログ No.102・103）: 利用者のタイムゾーンの指定には 2 つの読み方があり、撮影した瞬間を変えずに表示だけを変える指定と、UTC の印だけの値を現地時刻として読む指定のために、UTC の計算に使ったオフセット `tz_basis`（表示のオフセット `tz_assumed` と違うときだけ）を足しました（スキーマの版 11）。表示する撮影日時は常に `captured_at_utc` を `tz_assumed` で表したものです。
 - 2026-10-10 更新（決定事項ログ No.54）: `tz_source` の値に `utc_only` を加えました（カタログのスキーマの版 4。CHECK 制約を変えるため、SQLite の「12 の手順」で asset の表を作り直し、削除した id を再利用しないための連番も引き継ぐ。移行の前に自動でバックアップする（3.4 節））。版 3 までに `exif`・`+00:00` で記録した `Z` だけの値は `utc_only` に変えます（利用者がタイムゾーンを指定した行は変えない）。
+- **後から付けた位置**（LIB-21。2026-10-20 追加、スキーマの版 13、決定事項ログ No.183）: カメラ（ファイル）の位置 `asset.gps_lat`・`gps_lon` は、取り込み・ファイルの読み直しのたびにファイルの値で上書きするので、後から付けた位置は別の表 `asset_location`（asset と 1 対 1）に持ちます。使う位置は、付けた位置があればそれ、なければカメラの位置です。変更の履歴は `location_edit`・`location_edit_item`（撮影日時の修正の履歴と同じ形）です（3.16 節）。
 
 ### 3.2 主要なクエリとインデックス
 
@@ -662,7 +679,7 @@ erDiagram
 - バックアップは SQLite のオンラインバックアップ API（または `VACUUM INTO`）で、アプリを使いながら一貫性のあるコピーを作ります（DATA-04）。
   - バックアップのファイル名には、カタログのファイル名とカタログの ID（`app_state` の `catalog_id`。バックアップ・復元では変わらない）の先頭 16 文字を入れ、一覧・世代の管理・自動バックアップの経過時間の判定は同じカタログのものに限ります（同じファイル名の別のカタログが保存先を共有しても、互いのバックアップを消さないため）。今作ったバックアップは、時計が既存のバックアップより前に戻っていても世代の管理で消しません。
   - バックアップと復元の先は上書きしません（2026-10-10 追記。PR #1 の Codex の指摘）。存在の確認は、シンボリックリンクをたどらずにその名前の項目を見ます（リンク先のない壊れたリンクも「ある」として断ります）。一時ファイルに書いて `fsync` した後の公開は、「上書きしない」名前の変更（Linux・macOS は `renameat2` の `RENAME_NOREPLACE`、なければハードリンクと削除、Windows は上書きしない `MoveFileExW`。tempfile の `persist_noclobber`）で行うため、確認の後に別のプロセスが作ったファイルも置き換えません。この種類の名前の変更ができないファイルシステム（NAS など）では、空きを確かめてから通常の名前の変更をするので、確認から変更までの間の競合は防げません（`genzo-media` の書き出しと同じ制限）。復元の差し替え（`apply_restore`）の退避先の確認も、壊れたリンクを「ある」として扱います。
-- スキーマの変更は、番号付きのマイグレーションで行い、適用前に自動でバックアップします（DATA-08）。2026-10-10 の時点のカタログのスキーマは版 4（版 3 は名前の索引、版 4 は `tz_source` の `utc_only`）。2026-10-13 に版 5（外部から読むための公開ビュー。3.8 節）、版 6（説明のメタデータ `asset_iptc` と、`photos_v1` の列 `title`・`creator`・`copyright`。3.1 節）、版 7（キーワードの書き出しの印 `keyword.include_on_export`、コレクションの名前の比較用のキー `collection.name_key` と重複の禁止、公開ビュー `photo_collections_v1`。3.9 節）、版 8（`folder`・`keyword`・`collection` を `AUTOINCREMENT` で作り直し、削除した ID を使い回さない。3.9 節）、版 9（`stack` を `AUTOINCREMENT` で作り直して折りたたみの状態 `collapsed` を足し、写真が抜けた後に一番上の写真を付け替えて 1 枚以下のスタックを消すトリガー `stack_member_after_delete` と、公開ビュー `photo_stacks_v1` を足した。3.10 節）、版 10（クイックハッシュ・全体のハッシュの索引 `file_quick_hash`・`file_full_hash` と、公開ビュー `photo_files_v1`。既存のファイルの全体のハッシュは移行では計算せず、アプリがバックグラウンドで計算する。3.11 節）、版 11（`asset.camera_serial`・`asset.tz_basis`、撮影日時の修正の履歴 `capture_time_edit`・`capture_time_edit_item`、`photos_v1` の列 `camera_serial`。既存の行の 2 つの列は NULL で、撮影日時は変わらない。3.13 節）、版 12（`volume.fs_type`・`volume.last_seen_at`、`folder.status`・`folder.status_at`、状態が `ok` でないファイルの部分索引 `file_not_ok`。既存のフォルダは `ok`。パスから作ったボリュームの OS のボリューム ID への移し替えは SQL では行わず、カタログを開いたときにアプリが行う。3.14 節）。
+- スキーマの変更は、番号付きのマイグレーションで行い、適用前に自動でバックアップします（DATA-08）。2026-10-10 の時点のカタログのスキーマは版 4（版 3 は名前の索引、版 4 は `tz_source` の `utc_only`）。2026-10-13 に版 5（外部から読むための公開ビュー。3.8 節）、版 6（説明のメタデータ `asset_iptc` と、`photos_v1` の列 `title`・`creator`・`copyright`。3.1 節）、版 7（キーワードの書き出しの印 `keyword.include_on_export`、コレクションの名前の比較用のキー `collection.name_key` と重複の禁止、公開ビュー `photo_collections_v1`。3.9 節）、版 8（`folder`・`keyword`・`collection` を `AUTOINCREMENT` で作り直し、削除した ID を使い回さない。3.9 節）、版 9（`stack` を `AUTOINCREMENT` で作り直して折りたたみの状態 `collapsed` を足し、写真が抜けた後に一番上の写真を付け替えて 1 枚以下のスタックを消すトリガー `stack_member_after_delete` と、公開ビュー `photo_stacks_v1` を足した。3.10 節）、版 10（クイックハッシュ・全体のハッシュの索引 `file_quick_hash`・`file_full_hash` と、公開ビュー `photo_files_v1`。既存のファイルの全体のハッシュは移行では計算せず、アプリがバックグラウンドで計算する。3.11 節）、版 11（`asset.camera_serial`・`asset.tz_basis`、撮影日時の修正の履歴 `capture_time_edit`・`capture_time_edit_item`、`photos_v1` の列 `camera_serial`。既存の行の 2 つの列は NULL で、撮影日時は変わらない。3.13 節）、版 12（`volume.fs_type`・`volume.last_seen_at`、`folder.status`・`folder.status_at`、状態が `ok` でないファイルの部分索引 `file_not_ok`。既存のフォルダは `ok`。パスから作ったボリュームの OS のボリューム ID への移し替えは SQL では行わず、カタログを開いたときにアプリが行う。3.14 節）、版 13（後から付けた位置 `asset_location`、位置の変更の履歴 `location_edit`・`location_edit_item`（索引 `location_edit_item_asset`）、`photos_v1` の列 `location_lat`・`location_lon`・`location_source`。asset の表は変えず、既存の asset には行を作らない。3.16 節）。
 - **`app_state` の `capture_time_reresolve`**（2026-10-10 追加。決定事項ログ No.54）: 撮影日時の推定し直し（既定のタイムゾーンによる表示のオフセット）が済んでいない印です。版 4 の移行（`utc_only` にした asset があるとき、移行と同じトランザクション）と、既定のタイムゾーンを変えたとき・初めて保存したとき（設定を保存する前）に付けます。起動時に印があれば推定し直しのジョブを動かし（asset がなければ印を外す）、ジョブは、一覧を作ったときからすべてのチャンクで同じオフセットを使い、それがカタログに保存された今の値と同じときだけ印を外します（カタログのロックの中で判定。取り消し・失敗のときは外さない）。途中でアプリが終わっても、次に開いたときに推定し直すためです（独立レビューの指摘で追加）。印のある間は起動のたびにジョブが動き、50 万件での時間は未計測です。
 
 ### 3.5 カタログの制約（レビュー R-12）
@@ -712,7 +729,7 @@ ER 図に加えて、MVP の時点で次の制約を DDL に定義します。v1
 
 - **文書と実際のスキーマを食い違わせない**: 新しく作ったカタログ・サムネイル DB の `sqlite_master`・`PRAGMA table_list`・`PRAGMA table_info` から、すべての表・ビューの列と宣言した型、索引・トリガー、スキーマの版を集め、文書に載っているか（逆に、文書の表・列が実際にあるか）をテストで確かめます（`genzo-catalog` の `src/tests/schema_doc.rs`）。スキーマを変えるマイグレーションは、文書も同時に更新します。
 - **公開ビュー**（スキーマの版 5 から。`schema.rs` の `PUBLIC_VIEWS`）: 外部から読む安定した入口として、次の 5 つを置きます。名前の末尾の版（`_v1`）の間は、列の名前・意味・値の形を変えず、列を減らしません（変えるときは `_v2` を足す。列を足すことはある）。
-  - `photos_v1`（版 5。版 6 で末尾にタイトル・作成者・著作権表示の列を足した）: 写真・動画の一覧。1 行 = 1 つの variant。撮影日時の UTC と現地時刻、撮影情報、元ファイル（主なファイル）の場所と状態、評価・フラグ・ラベル、現像設定の JSON など。
+  - `photos_v1`（版 5。版 6 で末尾にタイトル・作成者・著作権表示の列を足した。版 13 で末尾に使う位置の列 `location_lat`・`location_lon`・`location_source` を足した（3.16 節））: 写真・動画の一覧。1 行 = 1 つの variant。撮影日時の UTC と現地時刻、撮影情報、元ファイル（主なファイル）の場所と状態、評価・フラグ・ラベル、現像設定の JSON など。
   - `photo_keywords_v1`（版 5）: 写真に付いたキーワード。階層は「 > 」でつなぐ。
   - `photo_collections_v1`（版 7。3.9 節）: 手動のコレクションに入れた写真（1 行 = 1 つの variant と 1 つのコレクション。コレクションの階層は「 > 」でつなぐ）。
   - `photo_stacks_v1`（版 9。3.10 節）: スタックに入っている写真（1 行 = 1 つの variant。スタックの中の順・一番上か・写真の数）。
@@ -882,6 +899,50 @@ ER 図に加えて、MVP の時点で次の制約を DDL に定義します。v1
 - **書き出しプリセット**は、書き出しの設定（genzo-model の `ExportSettings`）・書き出し先（任意）・ファイル名の規則（任意。2.4 節）を持ちます。2026-10-14 に、解像度・出力シャープ・透かし・動画の扱い（EXP-03・EXP-05。2.4 節）を `#[serde(default)]` で足しました（古いファイルは既定値（72 ppi・出力シャープなし・透かしなし・動画はコピー）で読め、形式の版は 1 のまま）。透かしのフォント・画像はパスだけを持ち、ファイルは埋め込みません（ほかの PC では同じパスにないと、その写真の書き出しが失敗する）。**別の OS で作ったプリセット**の書き出し先・透かしのファイルのうち、この OS の絶対パスでないもの（Linux・macOS で読んだ `C:\…`、Windows で読んだ `/Users/…` など）は、読むときに使わず（書き出し先はなし、透かしのファイルは空）、プリセット全体は使えるままにして、外したものを知らせます（`PresetInfo::warnings`。書き出し先は書き出すときに選び、透かしのファイルは選び直す。ファイルの中のパスは名前の変更・移動で消さない。2026-10-14 の検証で追記、決定事項ログ No.170）。CLI の `export --preset` からも使えます。
 - **読み込みと書き出し**: ほかの PC へ渡すときは、プリセットのファイルを `<名前>.json` として利用者が選んだフォルダに書き出し（上書きしない）、受け取った側で読み込みます（元のファイルは変えず、新しい ID で保存。同じフォルダに同じ名前があれば「 (2)」などを付ける）。ネットワークには何も送りません。
 - 画面: 現像の左のパネルに「プリセット」（フォルダごと。クリックで今の写真に適用）と「スナップショット」、ライブラリの写真の右クリックに「現像プリセットを適用…」、書き出しのダイアログにプリセットの選択・保存・更新とファイル名の規則を置きます（決定事項ログ No.165）。
+
+### 3.16 位置情報の後付け（LIB-21。ジオタグ付け。2026-10-20 追加、決定事項ログ No.182〜193）
+
+写真に後から位置（緯度・経度）を付けます。第 1 段階は座標の貼り付け（ネットにつながない）、第 2 段階はアプリの中の地図（OpenStreetMap のタイル）と地名の検索（Nominatim と同じ API。OSM Foundation の公開の Nominatim は設定で ON のときだけ）です（利用者の決定。決定事項ログ No.182・193。依頼書は [geotag_brief.md](geotag_brief.md)）。カタログのスキーマの版 13 で表を足しました（3.1 節・3.4 節）。座標の解釈は `genzo-model` の `location.rs`（`parse_coordinates`・`format_coordinates`）、カタログは `genzo-catalog` の `location.rs`、コア API は `genzo-api` の `location.rs`（`Core::plan_location_edit`・`edit_locations`・`location_edits`・`undo_location_edit`）、書き出しは `genzo-api` の `export.rs` と `genzo-media` の `ExifData::with_gps`、CLI は `genzo location`、オンラインの地図の通信は新しい crate `genzo-geo` と `genzo-app` の `map.rs`・`protocol.rs`、画面は `ui/src/dialogs/GeotagDialog.tsx`・`ui/src/library/GeoMap.tsx`・`ui/src/dialogs/SettingsMap.tsx` などです。
+
+**付けた位置と使う位置**（決定事項ログ No.183・184）:
+
+- **非破壊**: 付けた位置はカタログの中だけ（`asset_location`。asset と 1 対 1）に持ち、元のファイルには書きません。カメラ（ファイル）の位置 `asset.gps_lat`・`gps_lon` も変えません（取り込み・ファイルの読み直しのたびにファイルの値で上書きするため、そこには書かない）。asset に付くので、仮想コピーと RAW ＋ JPEG の組は同じ位置です。
+- **使う位置** = 付けた位置があればそれ、なければカメラの位置です（カメラの位置が緯度・経度の片方だけなら位置なし。`AssetRecord::effective_gps`）。詳細（`VariantDetails` の `gps`。出どころ `gps_source`（`camera`・`assigned`）とカメラの位置 `camera_gps` も返す）・画面の右のパネル・CLI の `show`・書き出しの Exif（2.4 節）に使います。公開ビュー `photos_v1` では `gps_lat`・`gps_lon` はカメラの位置のままで、末尾の `location_lat`・`location_lon`・`location_source` が使う位置です（[catalog_schema.md](catalog_schema.md)）。
+- **対象は写真だけ**: 動画は除いて数を返します（`skipped_videos`。すべて動画なら何も変えず、エラーにしない）。動画は書き出しで元のファイルをそのままコピーするので、付けた位置を入れる手段がないためです。
+- **変更**（`Catalog::edit_locations`・`Core::edit_locations`）: 選んだ写真にまとめて同じ位置を付ける（`set`）か、付けた位置を消してカメラの位置に戻す（`clear`）かの 2 種類です。座標は範囲内の有限の値だけで、範囲外なら何も変えずにエラーにします。**1 つのトランザクション**で、変えた asset ごとに変える前の付けた位置（付けた日時を含む）を `location_edit_item` に記録してから書きます。同じ位置がすでに付いている（消すときは付いていない）写真は変えず、変わったものがなければ履歴を残しません。履歴は新しい順に 20 回分（`MAX_LOCATION_EDITS`。仮置き）です。見込み（`plan_location_edit`）は何も変えずに、変わる数・カメラの位置がある数・すでに付けた位置がある数・除いた動画の数・見つからない数を返します。
+- **元に戻す**（`undo_location_edit`）: 最後の変更から順に取り消します（やり直しはない）。付けた位置はファイルの読み直しで変わらないので、変える前の値をそのまま書き戻します（撮影日時の修正（3.13 節）と違い、当て直しは要らない）。変更の後に削除した写真は飛ばして数えます（`removed`）。
+- **知らせ**: 変えたら `catalog_changed`（`location`）を知らせます（付ける・消すは対象の写真のすべての variant、取り消しは戻した写真が分からないのですべて）。位置は並び・絞り込み・グリッドの要約に使わないので、検索結果は作り直しません。ログには座標を書きません（決定事項ログ No.75 の方針）。
+
+**座標の貼り付け**（第 1 段階。決定事項ログ No.185）: 10 進の度（`35.681236, 139.767125`。Google マップで地点を右クリックしてコピーできる形。記号のない 2 つの数は緯度・経度の順）、方角の記号（N・S・E・W）、日本語（`北緯 35.681236°、東経 139.767125°`）、度分秒・度分、Google マップの URL（`q=` → `ll=` → 場所の URL のピン（`/data=` の後ろの `!3d緯度!4d経度`）→ `@` の順に探す。`@` は地図の中心で、ピンとずれることがあるので、場所の URL ではピンを先に読む。`!3d`・`!4d` の意味は Google の資料では確かめていない）を読みます（全角の数字・記号は半角にしてから読む）。範囲は緯度 −90〜90、経度 −180〜180 です。Rust（`parse_coordinates`。CLI の `--at`）と画面（`geotagLogic.ts` の `parseCoordinates`。このパソコンの中だけで読む）は同じ規則で、テストのケースもそろえています。オンラインの地図が無効でも、オフラインでも使えます。
+
+**オンラインの地図**（第 2 段階。案 A。決定事項ログ No.186〜191・193）:
+
+```mermaid
+flowchart LR
+  UI["画面（WebView）<br/>Leaflet の地図・地名の検索"]
+  APP["genzo-app<br/>設定・genzo: のタイル・search_places"]
+  GEO["genzo-geo<br/>ディスクのキャッシュ・1 秒に 1 回"]
+  OSM["OSM Foundation のタイルのサーバー<br/>tile.openstreetmap.org"]
+  NOM["公開の Nominatim（設定で ON のときだけ）<br/>nominatim.openstreetmap.org<br/>（設定した検索サービスで置き換えられる）"]
+  UI -->|"genzo: の /tile/z/x/y"| APP
+  UI -->|"コマンド search_places"| APP
+  APP --> GEO
+  GEO -->|"HTTPS（有効なときだけ）"| OSM
+  GEO -.->|"HTTPS（有効で、検索のサービスがあるときだけ）"| NOM
+```
+
+- **既定で無効**（02 の SEC-01 の例外（02 の SEC-01 の行にも書いた）・SEC-02。決定事項ログ No.190）: 利用者が明示的に有効にしたときだけ通信します。無効の間は、タイルの要求に 403 を返し、地名の検索はエラーにして、どちらも通信しません（キャッシュにあるタイルも返さない）。有効にする前に、送るもの（表示している範囲のタイルの要求（見ている場所が分かる。位置を付けるダイアログは、表示中の写真の位置や確定した座標を中心にズーム 15 で地図を開くので、その付近のタイルを要求する。タイル 1 枚は日本の付近でおよそ 1 km 四方）・検索語・IP アドレスと User-Agent。写真のファイルやカタログそのものは送らない）・送り先（既定は「地図のタイル: tile.openstreetmap.org、地名の検索: なし」）・守ること・注意を示して確かめます（位置を付けるダイアログと設定の「一般」）。座標の欄の注記も、無効なら「外部には送りません」、有効なら確定した座標の付近のタイルを提供元に要求することを書きます。設定は PC ごとのアプリの設定（`settings.json` の `map`。`online`・`consented_at`（初めて有効にした日時。アプリが入れる）・`tile_url`・`search_url`・`public_nominatim`（既定 false）・`tile_attribution`）で、専用のコマンド `save_map_preferences` で保存し、すぐ効きます。キャッシュの大きさと消去、利用ポリシーなどのページを開くことは、無効でも使えます（外部のサーバーと通信しない）。
+- **WebView は外部と通信しません**。タイルは `genzo-app` が `genzo-geo` で取り、`genzo:` のカスタムプロトコル（`genzo://localhost/tile/{z}/{x}/{y}`、Windows は `http://genzo.localhost/tile/{z}/{x}/{y}`。1.5 節）で渡します。カタログによらず（カタログが開いていなくても返す）、形の違う URI・範囲の外は 400 です。地名の検索はアプリのコマンド `search_places` です。`tauri.conf.json` の CSP は変えていません。外部と通信するのは `genzo-geo` だけで、使うのは `genzo-app` だけです（CLI とコア API は通信しない。1.4 節）。
+- **HTTPS**（決定事項ログ No.187）: `ureq` 3.4.2（同期の HTTP/1.1。HTTP/2・HTTP/3 は使えない）と、ureq の公開の設定で選ぶ `rustls` 0.23.45（暗号の実装は `ring` 0.17.14。証明書の検証は OS の `rustls-platform-verifier`: Windows は CryptoAPI、macOS は Security.framework、Linux は OS の証明書の保管場所）です。TLS は 1.2 と 1.3 で、検証は切りません。ureq の unversioned の API は使いません。https だけ（転送先も）。User-Agent は `GenzoParis/<版> (+https://github.com/tokamocchi/GenzoParis)` で、`no-cache` の類・`Accept-Encoding`・Referer・Cookie は送りません。タイムアウトは接続 10 秒・全体 20 秒（仮置き）。**プロキシ**は `genzo-geo` の `proxy.rs` が読みます: 環境変数（`ALL_PROXY`・`HTTPS_PROXY`・`HTTP_PROXY` など。ureq と同じ順）、なければ Windows のレジストリの手動のプロキシ（プロトコルごとの形なら `https=`。`https=` がなく `socks=` があれば誤り、どちらもなければ直接つなぐ）。直接つなぐホストは `NO_PROXY`、なければ `ProxyOverride` です。読めない設定は直接つながずに誤りにし、SOCKS のプロキシも誤りにします（`NO_PROXY` のホストへだけ直接つなぎ、そのときは転送をたどらない）。PAC・WPAD と、macOS・Linux のシステムの設定は読みません（PAC だけが設定されているときは直接つなぐ）。
+- **タイル**（`TileService`。決定事項ログ No.188）: 既定は `https://tile.openstreetmap.org/{z}/{x}/{y}.png`（サブドメインは使わない。最大のズーム 19。仮置き）です。ディスクのキャッシュ（OS のキャッシュのフォルダ `app_cache_dir()` の下の `map-tiles`。提供元ごとのフォルダ）は HTTP のキャッシュの指示（`max-age`・`Expires`。どちらもなければ 7 日）に従い、期限内は通信しません。期限切れは条件付きの要求（`If-None-Match`・`If-Modified-Since`）にし、304 では、保存した応答の `Cache-Control`・`Expires` を 304 にあるものだけ置き換えて期限を決め直します（RFC 9111 の 4.3.4 節）。通信の失敗と 5xx のときは、期限の切れたタイルを代わりに返します（stale-on-error。2026-10-20 に AI が確認して続けると決めた。決定事項ログ No.188）。保存するのは PNG だけで、デコードしません（SEC-05。WebView が描く）。容量の上限は 200 MiB（仮置き。更新日時の古いものから消す）。**キャッシュのフォルダがない・書けないときは、メモリーにキャッシュします**（32 MiB まで。仮置き。最近使っていないものから捨てる。期限の規則はディスクと同じ）。キャッシュに書けないときのログには、タイルの番号を含むパスを書きません。同じタイルの同時の要求は 1 つにまとめます。**先読み・一括取得・オフライン用の取得の機能は作りません**（画面の Leaflet が求めるのは表示している範囲にかかるタイルだけ。`keepBuffer` は読み終えたタイルを消さずに残す範囲で、新しくは取らない。座標の欄に打つ途中の値では地図を動かさない）。`genzo-app` はタイルを専用のスレッド（2 本。仮置き。サムネイルの共用のスレッドとは別）で処理し、待ちの列（64 件。仮置き）を超えたら古い要求を 503 で捨てます（地図が読み込みをやめても取り消しが伝わらないため）。WebView には `no-cache`（期限の切れたタイルを返したときは `no-store`）で返し、期限は Rust の側のキャッシュが管理します。
+- **地名の検索**（`Geocoder`。決定事項ログ No.189・193）: **既定では使いません**。送り先は `genzo-app` の `map::geocoder_provider`（画面は `geoMapLogic.ts` の `searchService`）が決めます: 検索サービスの URL（`search_url`）があればそれ、なければ設定の「OSM の公開の地名の検索（Nominatim）を使う」（`public_nominatim`。既定 OFF）を ON にしたときだけ OSM Foundation の公開の Nominatim（`https://nominatim.openstreetmap.org/search`）です。どちらもなければ、`search_places` は通信せずに `invalid_input`（「地名の検索のサービスが設定されていません」）を返し、位置を付けるダイアログは検索の欄を出さずに案内を出します（座標の貼り付けと地図のクリックでは付けられる）。送るのは `q`・`format=jsonv2`・`limit=10`・`accept-language=ja` です（email は送らない）。以下の規則は送り先によらず同じです。**1 秒に 1 回まで・同時に 1 件**（プロセス全体で 1 つの関所で、結果をキャッシュに入れるまで持つ。画面も前の要求の開始から 1 秒あける）。ポリシーの上限はアプリの全利用者の合計ですが、関所が数えるのは 1 つのプロセスの中だけです（9 章の AR-13）。**検索は Enter か「検索」のボタンのときだけ**です（入力の途中で送らない。オートコンプリートは作らない）。結果は最近の 100 件をキャッシュします（同じ語では問い合わせない。ポリシーがアプリに勧めるのは「できれば」のキャッシュで、常にキャッシュするのは AI の判断）。逆ジオコーディングは作りません。
+- **提供元の切り替え**: タイル・検索の URL は設定（画面の設定の「詳細（地図の提供元・プロキシ）」と `settings.json`）で変えられます（ポリシーの「ソフトウェアの更新なしに切り替えられること」。https だけ。タイルの URL が空なら OSM の標準のタイル、検索の URL が空なら公開の Nominatim の切り替えに従う）。公開の Nominatim の切り替えは、オンラインの地図を有効にする同意とは別のもので、設定の「一般」のオンラインの地図の節に、利用ポリシーの制限の説明と利用ポリシーのボタンと並べて置きます。保存のときに、`{z}`・`{x}`・`{y}` が 1 つずつあるか、http の URI として読めるか（`"`・`<`・`>` などは `%XX` の形で書く）、PNG でない拡張子（`.jpg`・`.jpeg`・`.webp`・`.gif`・`.avif`・`.pbf`・`.mvt`）でないかを確かめ、使えない URL は保存しません。切り替えられるのは PNG のタイルを配る提供元だけです。変えた提供元の最大のズームは OSM と同じ 19 とみなします（仮置き）。その提供元の帰属の表示は、設定の「地図の帰属の表示」（`tile_attribution`。タイルの URL を変えたときだけ使う。前後の空白を除き、改行などの制御文字と 200 文字（仮置き）を超えるものは誤り）に入れ、地図の右下に OSM の帰属の表示と並べて出します（下の「帰属の表示」）。
+- **帰属の表示**（決定事項ログ No.191）: 地図（Leaflet 1.9.4。ダイアログで地図を出すときに動的に読む）の右下に「© OpenStreetMap contributors」を常に出し、押すと既定のブラウザで OSM の著作権のページを開きます。「地図の誤りを報告」も並べます。設定でタイルの提供元を変え、その提供元の帰属の表示を入れたときは、右下を「提供元の帰属の表示 | © OpenStreetMap contributors | 地図の誤りを報告」の順にします（提供元の分は文字だけで出し、HTML として読まず、リンクにしない。長いときは地図の中で折り返す）。開けるページは決めた 4 つ（著作権・誤りの報告・タイルと Nominatim の利用ポリシー。コマンド `open_map_link`）だけです。**帰属の表示の文言・位置と ODbL の扱いは法的な事項のため、AI の判断で確定していません**（implementation_status の人の判断の表 No.189）。
+- **守る利用ポリシー**: タイル（https://operations.osmfoundation.org/policies/tiles/ ）と Nominatim（https://operations.osmfoundation.org/policies/nominatim/ ）です。原文は元の GitHub のソースで読み、公開ページは未確認です（2026-10-20 にも読めない。人の判断の表 No.187・188。9 章の AR-13）。Nominatim のポリシーは、LLM が生成したコードにすべての条項を守ることを求め、公開の API はアプリの開発者がよく知ったうえで意図して使うと決めた場合だけ使えるとしています（公開の Nominatim は、利用者が制限の説明を受けたうえで、既定 OFF・設定で ON と決めた。決定事項ログ No.193。法的な最終の確認は人に残る。人の判断の表 No.187）。テスト・CI からは本物の OSM のサーバーに問い合わせません（手元の `TcpListener` の小さなサーバーと、`HttpClient`・時計の差し替えで確かめる）。
+
+**画面と CLI**（決定事項ログ No.192）: 位置を付けるダイアログ（右クリックの「位置を付ける…」と右のパネルの GPS の行から。座標の欄・見込み・付ける・消す・直前の変更の取り消し。オンラインの地図が有効なら、座標の欄の上に地名の検索と地図。開いたときのフォーカスは座標の欄（共通の部品 `Dialog` は `data-autofocus` の付いた要素を先に探す）。地図を動かすのは、座標の欄を確定したとき（欄を離れる・貼り付けの後・付けられないときの Enter）と、地図・検索の結果・写真の位置から入れたときだけで、打つ途中の値ではピンだけを動かす。座標の形の語は地名の検索に送らない。取り消しの後の見込みは、その時点の座標で問い合わせ直す。処理の途中はピンをドラッグできない）、設定の「一般」の「オンラインの地図（OpenStreetMap）」（「詳細（地図の提供元・プロキシ）」にタイル・検索の URL と地図の帰属の表示の欄、プロキシの説明）、CLI の `genzo location` の `set`・`clear`・`history`・`undo`（通信しない）です。
+
+**確かめていないこと**: Windows・macOS の実機と CI（TLS の証明書の検証（自己署名の証明書を拒むテスト `tests::os_verifier` は Linux で成功。Windows・macOS は CI で確かめる）・プロキシ（プロトコルごとの形・PAC・`ProxyOverride`）・WebView でのタイルの表示。`genzo-geo` は ring の C のビルドのため、Linux から Windows・macOS 向けの型の検査もできない）、本物の OSM のサーバーとの通信（このコンテナから接続できない。HTTPS の取得そのものは、このコンテナのプロキシを通して crates.io の API で確かめた）、アプリの WebView での画面の目視（確認用のページを headless の Chromium で開いて一部を確かめただけ。implementation_status の進捗の表 No.54、人の判断の表 No.194・195）。
 
 ---
 
@@ -1152,6 +1213,8 @@ pub trait MlSession: Send {
 | カタログの同期の設定 | `synchronous = FULL`（macOS は `fullfsync` も） | `synchronous = NORMAL` | 電源断でもコミット済みの操作を失わないため（DATA-03b）。性能は PoC-6 で確認する |
 | WB 変更時の簡易プレビュー | 2 × 2 の画素をまとめる簡易処理 | デモザイクしてから縮小 | ドラッグ中の応答性（PERF-01b）。指を離したら最終品質で描画し直す |
 | グリッドの一覧取得 | 条件に合う id をすべて取得し、詳細は範囲ごとに取得 | ページごとに取得（LIMIT と OFFSET） | OFFSET は後ろのページほど遅くなる。任意の位置へのスクロールに対応しやすい |
+| オンラインの地図の通信（LIB-21。2026-10-20 追加） | アプリ（`genzo-app` → `genzo-geo`）がタイルと地名の検索を HTTPS で取り、タイルはディスクにキャッシュして `genzo:` で WebView に渡す（案 A） | WebView から直接タイルを読む（CSP の `img-src` に OSM を足す。案 B） | アプリを識別できる User-Agent を確実に送れ（WebView の User-Agent を変えると `ui/src/api/uri.ts` の Windows の判定が壊れる）、HTTP のキャッシュの指示に従うキャッシュ・1 秒に 1 回の制限・有効にするまで通信しないことを Rust の 1 か所で守れる。CSP を変えない。代わりに HTTP クライアントと TLS の依存が増える（決定事項ログ No.186） |
+| HTTPS の TLS（LIB-21。2026-10-20 追加。同じ日に置き換えた） | ureq の公開の機能の rustls（暗号の実装は ring）と、OS による証明書の検証（rustls-platform-verifier） | native-tls（OS の TLS）と、ureq の unversioned の API で組む自前の接続の部品（初めの実装） ／ rustls と webpki-roots・aws-lc-rs | semver の約束の外の unversioned の API に頼らない。webpki-roots（CDLA-Permissive-2.0）は `deny.toml` で許しておらず、aws-lc は C のビルドと OpenSSL のライセンスを含む。OS の証明書の設定（社内のプロキシの証明書など）に従える。代わりに ring の C のビルドが要る（決定事項ログ No.187） |
 
 ---
 
@@ -1173,3 +1236,4 @@ ID は、設計レビュー（06）の指摘 ID（R-01〜R-19）と区別する�
 | AR-10 | ワーカーとの共有メモリの実現方法と、ワーカーのメモリの上限を OS の機能で設定できるか（Windows / macOS） | SEC-05、SCL-05 | PoC-2。2026-10-10: Windows はジョブオブジェクト、Linux は `RLIMIT_DATA`、macOS は上限なしで実装（1.2 節、決定事項ログ No.39）。Windows・macOS の実機で確認する |
 | AR-11 | `synchronous = FULL` と `fullfsync` での保存の待ち時間 | DATA-03b、PERF-13 | PoC-6 |
 | AR-12 | trigram と LIKE による日本語の部分一致検索の速度（特に 1〜2 文字の検索語） | PERF-07 | PoC-6 |
+| AR-13 | OSM Foundation のサーバー（地図のタイル・Nominatim）の利用ポリシーの順守と利用の量（2026-10-20 追加。LIB-21）。ポリシーは利用者が適度な数であることを前提にし、Nominatim の 1 秒に 1 回はアプリの全利用者の合計（実装の関所が数えるのは 1 つのプロセスの中だけ）。使えることの保証はなく、予告なくブロックされうる。ポリシーの公開ページは未確認。公開の Nominatim は既定で使わず、設定で ON にしたときだけ使う（利用者の決定。全利用者の合計の上限の件も含めて判断。決定事項ログ No.193） | 位置情報の後付けの第 2 段階（地図と地名の検索。第 1 段階の座標の貼り付けは影響しない） | 既定で無効・有効にする前の確認、公開の Nominatim は既定 OFF（設定で ON）、提供元の URL を設定で切り替えられる（3.16 節）。利用者が増えたら、自前・商用の検索サービスへの切り替えを考える（決定事項ログ No.193）。公開ページの確認と法的な最終の確認は人に残る（implementation_status の人の判断の表 No.187・188） |

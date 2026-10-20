@@ -1,0 +1,315 @@
+// 位置を付けるダイアログの地図（位置情報の後付け LIB-21 の第 2 段階。docs/04 の 3.16 節）。
+//
+// - Leaflet は useEffect の中で動的に読む（library/leafletLoader.ts。node のテストでは読まない。テストはこの部品を
+//   描くだけで、地図は作らない）。読み込むまでは「地図を読み込んでいます」を出す。
+// - タイルは genzo:// の /tile/{z}/{x}/{y}（api/uri.ts の tileUrlTemplate）。genzo-app がオンラインの地図の提供元から
+//   取り、ディスクにキャッシュして返す（WebView は外部と通信しない。CSP は変えない）。オンラインの地図が無効なら
+//   genzo-app が 403 を返すので、この部品は有効なときだけ出す（GeotagDialog）。
+// - タイルの層: 最大のズームは MAP_MAX_ZOOM。サブドメイン・detectRetina・crossOrigin は使わない（要求を増やさない）。
+//   先読みはしない（Leaflet が取るのは、表示している範囲に一部でもかかるタイルだけ。keepBuffer（既定の 2）は、
+//   地図を動かしたときに表示の外に出た読み終えたタイルを、捨てずに残しておく範囲で、新しくは取らない。Leaflet 1.9.4
+//   の GridLayer の _update。版を上げたら確かめ直す）。
+// - 帰属の表示「© OpenStreetMap contributors」は、Leaflet の帰属の表示（Leaflet へのリンクと旗が付き、リンクを押すと
+//   WebView が外部のページへ移る）を使わず、この部品が地図の右下に常に出す（Leaflet の前から出し、畳まない）。押すと
+//   既定のブラウザで OSM の著作権のページを開く（openMapLink）。「地図の誤りを報告」（fixthemap）も並べる。設定で変えた
+//   タイルの提供元の帰属の表示（credit。geoMapLogic.ts の providerAttribution）があれば、その前に文字だけで並べる
+//   （HTML として読まない。任意の URL を開かないよう、リンクにしない）。長いときは折り返し、地図の外にはみ出さない。
+// - ピン（付ける位置）と表示中の写真の位置の印は L.divIcon（CSS だけ。既定のアイコンの画像のパスの自動判定は Vite の
+//   ビルドで壊れるので使わない）。地図をクリックするか、ピンをドラッグして離すと onPick に位置を渡す（親が座標の欄に
+//   入れ、読んだ座標が pin として戻る）。表示中の写真の印を押すと、その位置を渡す。処理中（disabled）は選べず、
+//   ピンのドラッグも止める（ドラッグされたら座標の欄の位置へ戻す）。
+// - 初めの表示は、確定した付ける位置（target）か表示中の写真の位置（なければ既定の範囲）。後から届いた位置も、
+//   利用者がまだ地図を動かしていなければ、そこへ動かす。target が表示の外に変わったら、そこまで動かす。
+// - ピン（pin。座標の欄で読めた値）は印を動かすだけで、地図は動かさない（印を動かすだけではタイルを要求しない）。
+//   地図を動かすのは target（座標の欄を確定したとき・地図や検索の結果から入れたとき）が変わったときだけ。打つ途中で
+//   読める値になるたびに地図を動かすと、見るつもりのない場所のタイルを提供元に要求するため（GeotagDialog）。
+// - React の StrictMode の 2 回の初期化に備え、片付けで map.remove() し、読み込みの途中で外れたら作らない。
+// - Leaflet のキーボードの操作は使わない（Dialog が keydown の伝わりを止めるので効かない）。マウスのドラッグ・
+//   ホイール・ズームのボタンで動かす。
+
+import type * as Leaflet from "leaflet";
+import { useEffect, useRef, useState } from "react";
+
+import { reportUiError } from "../api/app";
+import type { GpsCoord } from "../api/types";
+import { tileUrlTemplate } from "../api/uri";
+import { openMapPage } from "../state/map";
+import {
+  initialMapView,
+  MAP_LINK_LABELS,
+  MAP_MAX_ZOOM,
+  MAP_TILE_ERROR,
+  type MapView,
+  mapPointToGps,
+  PIN_ZOOM,
+} from "./geoMapLogic";
+import "./geo.css";
+
+/** 地図を動かす指示（検索の結果を選んだときなど。`seq` が変わったときだけ動かす）。 */
+export interface MapFocus {
+  seq: number;
+  view: MapView;
+}
+
+/** 作った地図と印。 */
+interface MapParts {
+  L: typeof Leaflet;
+  map: Leaflet.Map;
+  pin: Leaflet.Marker | null;
+  photo: Leaflet.Marker | null;
+  /** 付ける位置・写真の位置・検索の結果へ動かしたか、利用者が動かしたか（後から届いた位置へ勝手に動かさない）。 */
+  located: boolean;
+}
+
+/** ピンの印（geo.css の .geo-pin。先が位置）。 */
+const pinIcon = (L: typeof Leaflet) =>
+  L.divIcon({ className: "geo-pin", iconSize: [24, 24], iconAnchor: [12, 22] });
+/** 表示中の写真の位置の印（geo.css の .geo-photo-mark。中心が位置）。 */
+const photoIcon = (L: typeof Leaflet) =>
+  L.divIcon({ className: "geo-photo-mark", iconSize: [14, 14], iconAnchor: [7, 7] });
+
+export function GeoMap(props: {
+  /** 付ける位置の印（座標の欄で読めた値。なければ null）。変わっても地図は動かさない。 */
+  pin: GpsCoord | null;
+  /** 地図を動かす先（確定した付ける位置。なければ null）。変わったら、その位置が見えるように動かす。 */
+  target: GpsCoord | null;
+  /** 表示中の写真の使う位置。 */
+  photo: GpsCoord | null;
+  focus: MapFocus | null;
+  /** 設定で変えたタイルの提供元の帰属の表示（なければ null。OSM の帰属の表示と並べて出す）。 */
+  credit?: string | null;
+  /** 地図で位置を選んだ（クリック・ピンのドラッグ・写真の印）。 */
+  onPick: (g: GpsCoord) => void;
+  /** 選べない（処理中）。 */
+  disabled?: boolean;
+}) {
+  const container = useRef<HTMLDivElement>(null);
+  const parts = useRef<MapParts | null>(null);
+  // 地図を作るたびに増やす（印の effect を作り直した地図に当て直す）。0 はまだない。
+  const [generation, setGeneration] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const [tileError, setTileError] = useState(false);
+  // 地図の作成・イベントの中から、最新の props を読む。
+  const latest = useRef(props);
+  latest.current = props;
+
+  const pick = (lat: number, lng: number) => {
+    if (!latest.current.disabled) latest.current.onPick(mapPointToGps(lat, lng));
+  };
+  /** ピンを今の pin（座標の欄の位置）へ戻す（処理中にドラッグされたとき、ピンだけが動いて食い違わないように）。 */
+  const resetPin = (marker: Leaflet.Marker) => {
+    const cur = latest.current.pin;
+    if (cur) marker.setLatLng([cur.lat, cur.lon]);
+  };
+
+  // 地図を作る（1 回。Leaflet を読んでから）。
+  useEffect(() => {
+    let cancelled = false;
+    let made: MapParts | null = null;
+    let observer: ResizeObserver | null = null;
+    setFailed(false);
+    import("./leafletLoader")
+      .then(({ default: L }) => {
+        const el = container.current;
+        if (cancelled || !el) return;
+        const first = initialMapView(latest.current.target, latest.current.photo);
+        const map = L.map(el, {
+          attributionControl: false,
+          keyboard: false,
+          maxZoom: MAP_MAX_ZOOM,
+          worldCopyJump: true,
+        });
+        map.setView([first.center.lat, first.center.lon], first.zoom);
+        L.tileLayer(tileUrlTemplate(), { maxZoom: MAP_MAX_ZOOM })
+          .on("tileerror", () => setTileError(true))
+          .on("tileload", () => setTileError(false))
+          .addTo(map);
+        map.on("click", (e: Leaflet.LeafletMouseEvent) => pick(e.latlng.lat, e.latlng.lng));
+        made = { L, map, pin: null, photo: null, located: first.located };
+        const m = made;
+        map.on("dragstart", () => {
+          m.located = true;
+        });
+        // ダイアログの大きさが変わったら（スクロールバーが出たときなど）、地図の大きさを測り直す。
+        if (typeof ResizeObserver !== "undefined") {
+          observer = new ResizeObserver(() => map.invalidateSize());
+          observer.observe(el);
+        }
+        parts.current = made;
+        setGeneration((g) => g + 1);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setFailed(true);
+        // 読み込めない（ビルドの不具合など）ときは、アプリのログに残す。
+        reportUiError("地図（Leaflet）を読み込めません", e instanceof Error ? (e.stack ?? e.message) : String(e));
+      });
+    return () => {
+      cancelled = true;
+      observer?.disconnect();
+      made?.map.remove();
+      parts.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 検索の結果などへ動かす（確定した付ける位置より先に。動かした後の範囲で、その位置が見えるかを判定する）。
+  const focus = props.focus;
+  useEffect(() => {
+    const p = parts.current;
+    if (!p || !focus) return;
+    const v = focus.view;
+    if (v.kind === "bounds") {
+      p.map.fitBounds(
+        [
+          [v.south, v.west],
+          [v.north, v.east],
+        ],
+        { maxZoom: v.maxZoom, animate: false },
+      );
+    } else {
+      p.map.setView([v.center.lat, v.center.lon], v.zoom, { animate: false });
+    }
+    p.located = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generation, focus?.seq]);
+
+  // 確定した付ける位置へ動かす（まだ位置へ動かしていなければそこを中心に、表示の外ならそこまで。ピンより先に）。
+  const target = props.target;
+  useEffect(() => {
+    const p = parts.current;
+    if (!p || !target) return;
+    const at = p.L.latLng(target.lat, target.lon);
+    if (!p.located) {
+      p.map.setView(at, PIN_ZOOM);
+      p.located = true;
+    } else if (!p.map.getBounds().contains(at)) {
+      p.map.panTo(at);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generation, target?.lat, target?.lon]);
+
+  // ピン（付ける位置の印。印を動かすだけで、地図は動かさない）。
+  const pin = props.pin;
+  useEffect(() => {
+    const p = parts.current;
+    if (!p) return;
+    if (!pin) {
+      p.pin?.remove();
+      p.pin = null;
+      return;
+    }
+    const at = p.L.latLng(pin.lat, pin.lon);
+    if (p.pin) {
+      p.pin.setLatLng(at);
+    } else {
+      const marker = p.L.marker(at, {
+        icon: pinIcon(p.L),
+        draggable: true,
+        keyboard: false,
+        zIndexOffset: 1000,
+        title: "付ける位置（ドラッグで動かせます）",
+      });
+      marker.on("dragend", () => {
+        // 処理中は選べない（ドラッグは下の effect で止めるが、止める前に始めたドラッグもある）。ピンを戻す。
+        if (latest.current.disabled) {
+          resetPin(marker);
+          return;
+        }
+        const g = marker.getLatLng();
+        pick(g.lat, g.lng);
+      });
+      p.pin = marker.addTo(p.map);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generation, pin?.lat, pin?.lon]);
+
+  // 処理中（取り消しの途中など）はピンをドラッグできないようにする（作り直した地図・ピンにも当てる）。ドラッグの
+  // 途中で止めると、Leaflet はピンの dragend を出さずにドラッグした位置のまま残すので、ピンを座標の欄の位置へ戻す。
+  const disabled = props.disabled === true;
+  const hasPin = pin !== null;
+  useEffect(() => {
+    const m = parts.current?.pin;
+    // dragging は地図に足した後にできる（Leaflet 1.9 の Marker の _initInteraction）。
+    if (!m?.dragging) return;
+    if (disabled) {
+      m.dragging.disable();
+      resetPin(m);
+    } else {
+      m.dragging.enable();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generation, disabled, hasPin]);
+
+  // 表示中の写真の位置の印。
+  const photo = props.photo;
+  useEffect(() => {
+    const p = parts.current;
+    if (!p) return;
+    p.photo?.remove();
+    p.photo = null;
+    if (!photo) return;
+    const at = p.L.latLng(photo.lat, photo.lon);
+    const marker = p.L.marker(at, {
+      icon: photoIcon(p.L),
+      keyboard: false,
+      title: "表示中の写真の位置（押すとこの位置を入れます）",
+    });
+    marker.on("click", () => pick(photo.lat, photo.lon));
+    p.photo = marker.addTo(p.map);
+    if (!p.located) {
+      p.map.setView(at, PIN_ZOOM);
+      p.located = true;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generation, photo?.lat, photo?.lon]);
+
+  return (
+    <>
+      <div className="geo-map">
+        <div ref={container} className="geo-map-canvas" aria-label="地図" />
+        {generation === 0 && !failed && (
+          <div className="geo-map-status">
+            <span className="dlg-busy">
+              <span className="spinner" />
+              地図を読み込んでいます…
+            </span>
+          </div>
+        )}
+        {failed && <div className="geo-map-status error-text">地図を読み込めません（画面を開き直してください）</div>}
+        <div className="geo-attribution">
+          {props.credit && (
+            <>
+              <span className="geo-credit" title="設定したタイルの提供元の帰属の表示">
+                {props.credit}
+              </span>
+              <span className="geo-sep" aria-hidden="true">
+                |
+              </span>
+            </>
+          )}
+          <button
+            type="button"
+            className="geo-link"
+            onClick={() => openMapPage("copyright")}
+            title="OpenStreetMap の著作権とライセンスのページを既定のブラウザで開きます"
+          >
+            {MAP_LINK_LABELS.copyright}
+          </button>
+          <span className="geo-sep" aria-hidden="true">
+            |
+          </span>
+          <button
+            type="button"
+            className="geo-link"
+            onClick={() => openMapPage("fix_the_map")}
+            title="OpenStreetMap の地図の誤りを報告するページを既定のブラウザで開きます"
+          >
+            {MAP_LINK_LABELS.fix_the_map}
+          </button>
+        </div>
+      </div>
+      {tileError && <p className="warn-text hint">{MAP_TILE_ERROR}</p>}
+    </>
+  );
+}

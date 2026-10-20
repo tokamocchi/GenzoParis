@@ -5,6 +5,7 @@
 //! - カタログの ID と列挙値（3.1 節の ER 図）: [`ids`]、[`catalog`]
 //! - 撮影日時の扱い（3.1 節。レビュー R-18）: [`CaptureTime`]
 //! - 写真・動画のメタデータ: [`PhotoMetadata`]、[`VideoMetadata`]
+//! - 位置情報の後付け（LIB-21）の座標の文字列の解釈と書式: [`location`]
 //! - カタログの中で編集する説明のメタデータ（LIB-15。IPTC Core の主要な項目）: [`IptcMetadata`]
 //! - スマートコレクションの条件（LIB-11。版付きの JSON）: [`SmartRule`]
 //! - 書き出しの設定（EXP-01・EXP-03・EXP-04・EXP-05、6.4 節）: [`ExportSettings`]（出力シャープ・透かし・動画の扱いを含む）
@@ -23,6 +24,7 @@ pub mod export;
 pub mod fs_sync;
 pub mod ids;
 pub mod iptc;
+pub mod location;
 pub mod metadata;
 pub mod phase;
 pub mod smart;
@@ -58,6 +60,7 @@ pub use iptc::{
     CopyrightStatus, IptcMetadata, MAX_METADATA_CHARS, MetadataField, MetadataValueError,
     normalize_metadata_value,
 };
+pub use location::{CoordParseError, format_coordinates, parse_coordinates};
 pub use metadata::{
     CaptureInfo, GpsCoord, Orientation, PhotoMetadata, VideoMetadata, camera_display_name,
     normalize_serial,

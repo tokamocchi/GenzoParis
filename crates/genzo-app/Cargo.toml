@@ -44,6 +44,9 @@ genzo-model.workspace = true
 genzo-color.workspace = true
 # 壊れて開けないカタログのバックアップの一覧（カタログを開かずに探す。SYS-04）。
 genzo-catalog.workspace = true
+# オンラインの地図（地図のタイルと地名の検索。LIB-21 の第 2 段階）の通信。外部と通信するのはこの crate
+# だけで、使うのは genzo-app だけ（CLI・コア API は通信しない）。
+genzo-geo.workspace = true
 # Tauri 2（案 A。決定事項ログ No.14・No.60）。版は公開から 2 週間以上たった 2.11 系に固定する（Cargo.lock）。
 tauri = { version = "2.11.6", features = [] }
 # フォルダ・ファイルを選ぶダイアログ（取り込み・書き出し先・カタログの場所）と確認のダイアログ。

@@ -938,6 +938,14 @@
   vertical-align: baseline;
 }
 
+/* GPS の行の座標のコピー・「位置を付ける…」（LIB-21）。 */
+.lib-gps-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
 /* ------------------------------------------------------------------ フォルダの印・ドロップ（FILE-02〜04） */
 
 .lib-tree-seg.offline {

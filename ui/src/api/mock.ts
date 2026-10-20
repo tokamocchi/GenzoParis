@@ -5,6 +5,8 @@ import { ApiError } from "./errors";
 import { HUE_BANDS } from "./types";
 import type {
   ColorParams,
+  AppSettings,
+  AppStatus,
   AutoStackReport,
   BeforeInfo,
   CaptureDevice,
@@ -34,11 +36,16 @@ import type {
   KeywordInfo,
   KeywordUsage,
   LensCorrectionInfo,
+  LocationEditInfo,
+  LocationEditPlan,
   LogFolderInfo,
   LogStatus,
+  MapCacheInfo,
+  MapPreferences,
   MaskOverlayInfo,
   MetadataSummary,
   NamePreview,
+  Place,
   ProfileEntry,
   ProfileImportReport,
   RegionInfo,
@@ -842,6 +849,123 @@ export const MOCK_TIMELINE: Timeline = {
   days: 2,
   without_time: 1,
 };
+
+// ---------------------------------------------------------------------------
+// v1 の geotag: 位置情報の後付け（LIB-21）の見本
+// ---------------------------------------------------------------------------
+
+/**
+ * 位置を付ける見込みの見本（写真 3 枚。1 枚はカメラの位置があり、1 枚は前に付けた位置を置き換える。動画 1 本は
+ * 除く）。
+ */
+export const MOCK_LOCATION_PLAN: LocationEditPlan = {
+  photos: 3,
+  changed: 3,
+  unchanged: 0,
+  with_camera_gps: 1,
+  with_assigned: 1,
+  skipped_videos: 1,
+  missing: 0,
+  edit_id: null,
+};
+
+/** 位置の変更の履歴の見本（新しい順。付けた位置を 1 枚消す前に、3 枚に付けた）。 */
+export const MOCK_LOCATION_EDITS: LocationEditInfo[] = [
+  { id: 2, kind: "clear", location: null, asset_count: 1, created_at: "2026-10-20T01:10:00Z" },
+  { id: 1, kind: "set", location: { lat: 35.681236, lon: 139.767125 }, asset_count: 3, created_at: "2026-10-20T01:00:00Z" },
+];
+
+/** 後から位置を付けた写真の詳細の見本（カメラの位置もある。座標は見本の値）。 */
+export const MOCK_GEOTAGGED_DETAILS: VariantDetails = {
+  summary: mockSummary({ variant_id: 8, asset_id: 8, file_name: "DSC00008.ARW" }),
+  camera_serial: "4012345",
+  iso: 100,
+  aperture: 4,
+  shutter_s: 0.002,
+  focal_mm: 24,
+  gps: { lat: 35.681236, lon: 139.767125 },
+  gps_source: "assigned",
+  camera_gps: { lat: 35.6586, lon: 139.7454 },
+  caption: null,
+  video: null,
+  files: [],
+};
+
+/** オンラインの地図の設定の見本（有効。タイルは OSM の既定。地名の検索のサービスはない（既定のまま））。 */
+export const MOCK_MAP_PREFERENCES: MapPreferences = {
+  online: true,
+  consented_at: "2026-10-20T01:02:03Z",
+  tile_url: null,
+  search_url: null,
+  public_nominatim: false,
+  tile_attribution: null,
+};
+
+/**
+ * 地名の検索の結果の見本（Nominatim と同じ API の jsonv2 を genzo-geo が読んだ形。座標・範囲は見本の値で、実際の検索の結果
+ * ではない）。
+ */
+export const MOCK_PLACES: Place[] = [
+  {
+    name: "東京駅",
+    display_name: "東京駅, 丸の内一丁目, 千代田区, 東京都, 日本",
+    lat: 35.681236,
+    lon: 139.767125,
+    bbox: [35.6785, 35.6838, 139.7637, 139.7706],
+    category: "railway",
+    kind: "station",
+  },
+  {
+    name: "",
+    display_name: "東京駅前, 八重洲一丁目, 中央区, 東京都, 日本",
+    lat: 35.6807,
+    lon: 139.7702,
+    bbox: null,
+    category: "highway",
+    kind: "bus_stop",
+  },
+];
+
+/** 地図のタイルのキャッシュの大きさの見本。 */
+export const MOCK_MAP_CACHE: MapCacheInfo = { files: 240, bytes: 3_276_800 };
+
+/** アプリの状態の見本（カタログは開いていない。`map` を省くと、地図の設定の無い古いアプリの形）。 */
+export function mockAppStatus(map?: MapPreferences): AppStatus {
+  return {
+    version: "0.1.0",
+    platform: "linux",
+    settings: {
+      version: 1,
+      last_catalog: null,
+      recent_catalogs: [],
+      ffmpeg_dir: null,
+      gpu: "auto",
+      backup_on_close: false,
+      ...(map ? { map } : {}),
+    },
+    notice: null,
+    default_catalog: null,
+    default_catalog_in_onedrive: false,
+    catalog: null,
+    tools: { ffmpeg: null, ffprobe: null },
+    logs: MOCK_LOG_STATUS,
+    crash_reports: [],
+  };
+}
+
+/** オンラインの地図のコマンド（genzo-app の map.rs）の応答を入れる（設定の保存は送った値を有効にして返す）。 */
+export function mockMapCommands(b: MockBridge, settings: AppSettings): void {
+  b.responses.set("save_map_preferences", (args?: Record<string, unknown>) => {
+    const p = args?.preferences as MapPreferences;
+    // 初めて有効にした日時はアプリが入れる（画面が送った値は使わない）。
+    const consented = settings.map?.consented_at ?? (p.online ? "2026-10-20T01:02:03Z" : null);
+    return { ...settings, map: { ...p, consented_at: consented } } satisfies AppSettings;
+  });
+  b.responses.set("search_places", MOCK_PLACES);
+  b.responses.set("map_cache_info", MOCK_MAP_CACHE);
+  b.responses.set("clear_map_cache", { files: 0, bytes: 0 } satisfies MapCacheInfo);
+  b.responses.set("open_map_link", undefined);
+}
 
 // ---------------------------------------------------------------------------
 // v1 の files: ボリューム（FILE-03）・ファイル操作（FILE-02）・見つからない写真と再リンク（FILE-04）の見本

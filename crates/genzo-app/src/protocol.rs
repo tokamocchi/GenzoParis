@@ -6,6 +6,7 @@
 //! | `genzo://localhost/preview/{variant_id}?rev={rev}` / `http://genzo.localhost/preview/...` | 標準プレビュー（L1）。なければ作る処理を予約して 404 を返す（作ったら `thumbnail_updated` のイベント） |
 //! | `genzo://localhost/video/{variant_id}` / `http://genzo.localhost/video/...` | 動画の元のファイル（VID-04。Range の要求に応える） |
 //! | `genzo://localhost/video-proxy/{variant_id}` / `http://genzo.localhost/video-proxy/...` | 動画の再生用のファイル（H.264 ＋ AAC の MP4。なければ 404） |
+//! | `genzo://localhost/tile/{z}/{x}/{y}` / `http://genzo.localhost/tile/...` | 地図のタイル（PNG。オンラインの地図が有効なときだけ。LIB-21。[`reply_tile`]） |
 //!
 //! 動画（[`reply_media`]）:
 //!
@@ -30,19 +31,39 @@
 //!   まで B のまま。この間に `rev` = B の URI へ A の L1 を長くキャッシュさせると、後で設定を B にしたときに、
 //!   ブラウザが A の画像を表示し続ける。L1 のキーを URI に入れて比べるには、コア API に L1 のキー（または今の
 //!   設定から求めた L0 のキー）を返す口が要る（genzo-api。今はない）。
-//! - カタログが開いていない・閉じている途中なら 503、ないものは 404、URI の形が違えば 400。
+//! - カタログが開いていない・閉じている途中なら 503（地図のタイルを除く）、ないものは 404、URI の形が違えば 400。
 //! - JPEG は Display P3 の ICC を埋め込んである（genzo-api の `previews`）。モニターへの変換は WebView が
 //!   行う。
 //! - 処理はブロックしうる（カタログ・キャッシュの読み込み）ので、少数のスレッドで処理する（グリッドの
 //!   スクロールで要求が多数来ても、スレッドを作りすぎない）。
+//!
+//! 地図のタイル（[`reply_tile`]。位置情報の後付け LIB-21 の第 2 段階。[`crate::map`]）:
+//!
+//! - カタログによらない（カタログが開いていなくても返す。カタログの 503 より前で分ける）。
+//! - オンラインの地図が無効なら 403 で、通信しない（docs/02 の SEC-02）。キャッシュにあっても返さない。
+//! - URI の番号の形が違う・範囲外（`x`・`y` が `2^z` 以上、ズームが genzo-geo の `MAX_ZOOM_LIMIT` を超える）なら
+//!   400。提供元の最大のズームを超えるズームも 400（genzo-geo）。上流の 404 は 404、通信の失敗・上流のエラー・
+//!   不正な応答は 502（期限の切れたキャッシュがあれば、代わりにそれを返す。genzo-geo の stale-on-error）。
+//! - 本文は上流の PNG のまま返す（デコードしない。SEC-05）。キャッシュの期限は Rust の側のキャッシュ（genzo-geo。
+//!   ディスク。ディスクがない・書けなければメモリー）が HTTP のキャッシュの指示に従って管理するので、WebView には
+//!   長くキャッシュさせない
+//!   （`no-cache`。期限の切れたキャッシュを代わりに返したときは `no-store`）。提供元を設定で変えても URI は
+//!   同じなので、WebView に前の提供元のタイルを残さないためでもある。
+//! - 通信を待つので、サムネイルなどとは別の、タイル専用のスレッド（[`TILE_THREADS`]）で処理する
+//!   （[`submit_tile`]）。待ちの列は新しい要求から処理し（今表示している範囲を先に）、[`MAX_QUEUED_TILES`] を
+//!   超えたら古い要求を 503 で捨てる（地図を大きく動かした後に、もう見ていない範囲のタイルを取りに行かない
+//!   ため。画面の地図（Leaflet）がタイルの読み込みをやめても、この処理には取り消しが伝わらない）。
 
+use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, unbounded};
 use genzo_api::{VariantId, VideoStream};
-use parking_lot::Mutex;
+use genzo_geo::GeoError;
+use parking_lot::{Condvar, Mutex};
 
 use crate::state::AppState;
 
@@ -61,6 +82,14 @@ pub const MEDIA_CACHE_TTL: Duration = Duration::from_secs(5);
 
 /// 覚えておく動画のファイルの数。
 const MEDIA_CACHE_ENTRIES: usize = 8;
+
+/// 地図のタイルを処理するスレッドの数（**仮置き**: 2。上流のタイルのサーバーに同時に送る要求の数の上限にも
+/// なる。OSM のタイルの利用ポリシーの原文に数値はない）。
+pub const TILE_THREADS: usize = 2;
+
+/// 待ちの列に置く地図のタイルの要求の上限（**仮置き**: 64。ダイアログの地図が 1 回に表示するタイル（十数枚）より
+/// 十分に多い数。超えたら古い要求を 503 で捨てる）。
+pub const MAX_QUEUED_TILES: usize = 64;
 
 /// 応答（Tauri に依存しない形）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,12 +151,24 @@ pub enum Route {
     Video(VariantId),
     /// 動画の再生用のファイル。
     VideoProxy(VariantId),
+    /// 地図のタイル（ズーム `z` の `(x, y)`。オンラインの地図が有効なときだけ。カタログによらない）。
+    Tile {
+        /// ズーム。
+        z: u8,
+        /// 横の番号（`2^z` 未満）。
+        x: u32,
+        /// 縦の番号（`2^z` 未満）。
+        y: u32,
+    },
 }
 
-/// パス（`/thumb/12`）を解釈する。
+/// パス（`/thumb/12`・`/tile/5/28/12`）を解釈する。
 pub fn parse(path: &str) -> Option<Route> {
     let mut parts = path.trim_start_matches('/').split('/');
     let kind = parts.next()?;
+    if kind == "tile" {
+        return parse_tile(parts);
+    }
     let id: i64 = parts.next()?.parse().ok()?;
     if parts.next().is_some() || id <= 0 {
         return None;
@@ -140,6 +181,29 @@ pub fn parse(path: &str) -> Option<Route> {
         "video-proxy" => Some(Route::VideoProxy(id)),
         _ => None,
     }
+}
+
+/// 地図のタイルのパスの `{z}/{x}/{y}`（10 進の数字だけ。拡張子・符号は付けない）。ズームは genzo-geo の
+/// `MAX_ZOOM_LIMIT` まで、`x`・`y` は `2^z` 未満（提供元の最大のズームは [`reply_tile`] で genzo-geo が確かめる）。
+fn parse_tile<'a>(mut parts: impl Iterator<Item = &'a str>) -> Option<Route> {
+    fn number(s: Option<&str>) -> Option<u32> {
+        let s = s?;
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok()
+    }
+    let z = number(parts.next())?;
+    let x = number(parts.next())?;
+    let y = number(parts.next())?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let z = u8::try_from(z)
+        .ok()
+        .filter(|z| *z <= genzo_geo::MAX_ZOOM_LIMIT)?;
+    let n = 1u64 << z;
+    (u64::from(x) < n && u64::from(y) < n).then_some(Route::Tile { z, x, y })
 }
 
 /// 要求の範囲の解釈（[`parse_range`]）。
@@ -367,11 +431,58 @@ pub fn query_rev(query: Option<&str>) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
+/// 地図のタイルの要求に応える（モジュールの doc の「地図のタイル」。カタログによらない）。オンラインの地図が
+/// 無効なら 403 で、通信しない。
+pub fn reply_tile(state: &AppState, z: u8, x: u32, y: u32) -> Reply {
+    let preferences = state.settings().map;
+    if !preferences.online {
+        return Reply::empty(403);
+    }
+    let tiles = match state.map().tiles(&preferences) {
+        Ok(tiles) => tiles,
+        Err(e) => {
+            // settings.json を手で書き換えた場合など（保存のコマンドは使えない URL を保存しない）。
+            tracing::warn!(error = %e, "設定の地図のタイルの URL が使えない");
+            return Reply::empty(500);
+        }
+    };
+    match tiles.tile(z, x, y) {
+        Ok(tile) => Reply {
+            status: 200,
+            content_type: tile.content_type,
+            // 期限は Rust の側のキャッシュが管理する（モジュールの doc）。
+            cache_control: if tile.stale { "no-store" } else { "no-cache" },
+            headers: Vec::new(),
+            body: tile.bytes,
+        },
+        Err(e) => {
+            // タイルの番号は見ている場所がわかるので、info 以上で書かない（決定事項ログ No.75 の方針）。
+            tracing::debug!(error = %e, "地図のタイルを返せない");
+            Reply::empty(tile_error_status(&e))
+        }
+    }
+}
+
+/// 地図のタイルのエラーの HTTP の状態。
+fn tile_error_status(e: &GeoError) -> u16 {
+    match e {
+        GeoError::Disabled => 403,
+        GeoError::InvalidInput(_) => 400,
+        GeoError::Status(404) => 404,
+        GeoError::Network(_) | GeoError::Status(_) | GeoError::BadResponse(_) => 502,
+        GeoError::Io { .. } => 500,
+    }
+}
+
 /// 要求に応える。`rev` は URI の `rev`（なければ `None`。サムネイルだけが使う）。
 pub fn reply(state: &AppState, path: &str, rev: Option<&str>) -> Reply {
     let Some(route) = parse(path) else {
         return Reply::empty(400);
     };
+    // 地図のタイルはカタログによらないので、カタログの 503 より前で分ける。
+    if let Route::Tile { z, x, y } = route {
+        return reply_tile(state, z, x, y);
+    }
     if matches!(route, Route::Video(_) | Route::VideoProxy(_)) {
         return reply_media(state, route, None, false);
     }
@@ -406,7 +517,9 @@ pub fn reply(state: &AppState, path: &str, rev: Option<&str>) -> Reply {
                 Reply::empty(error_status(&e))
             }
         },
-        Route::Video(_) | Route::VideoProxy(_) => unreachable!("上で返した"),
+        Route::Video(_) | Route::VideoProxy(_) | Route::Tile { .. } => {
+            unreachable!("上で返した")
+        }
     }
 }
 
@@ -432,6 +545,109 @@ pub fn submit(job: Job) {
     let _ = tx.send(job);
 }
 
+/// 地図のタイルの要求の待ちの列（新しい要求から処理する。上限を超えたら古い要求を外して返す）。
+struct TileQueue<T> {
+    jobs: Mutex<VecDeque<T>>,
+    ready: Condvar,
+    limit: usize,
+}
+
+impl<T> TileQueue<T> {
+    fn new(limit: usize) -> Self {
+        Self {
+            jobs: Mutex::new(VecDeque::new()),
+            ready: Condvar::new(),
+            limit,
+        }
+    }
+
+    /// 置く。上限を超えたら、いちばん古い要求を外して返す（呼び出し元が 503 で答える）。
+    fn push(&self, job: T) -> Option<T> {
+        let mut jobs = self.jobs.lock();
+        jobs.push_back(job);
+        let dropped = if jobs.len() > self.limit {
+            jobs.pop_front()
+        } else {
+            None
+        };
+        self.ready.notify_one();
+        dropped
+    }
+
+    /// いちばん新しい要求を取る（なければ来るまで待つ）。
+    fn pop(&self) -> T {
+        let mut jobs = self.jobs.lock();
+        loop {
+            if let Some(job) = jobs.pop_back() {
+                return job;
+            }
+            self.ready.wait(&mut jobs);
+        }
+    }
+}
+
+/// 地図のタイルの要求（応え方は呼び出し元が決める。Tauri では `UriSchemeResponder`）。
+struct TileJob {
+    state: Arc<AppState>,
+    tile: (u8, u32, u32),
+    respond: Box<dyn FnOnce(Reply) + Send>,
+}
+
+/// 地図のタイルの要求を、タイル専用のスレッド（[`TILE_THREADS`]）に渡す（モジュールの doc の「地図の
+/// タイル」）。待ちの列が [`MAX_QUEUED_TILES`] を超えたら、いちばん古い要求に 503 で答える。`respond` は
+/// [`reply_tile`] の応答で 1 回だけ呼ばれる（処理が panic したら 500）。
+pub fn submit_tile(
+    state: Arc<AppState>,
+    (z, x, y): (u8, u32, u32),
+    respond: Box<dyn FnOnce(Reply) + Send>,
+) {
+    static QUEUE: OnceLock<Arc<TileQueue<TileJob>>> = OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let queue = Arc::new(TileQueue::<TileJob>::new(MAX_QUEUED_TILES));
+        for i in 0..TILE_THREADS {
+            let queue = Arc::clone(&queue);
+            let _ = std::thread::Builder::new()
+                .name(format!("genzo-tile-{i}"))
+                .spawn(move || {
+                    loop {
+                        let job = queue.pop();
+                        let (z, x, y) = job.tile;
+                        // 1 枚の失敗でスレッドを失わない（ほかのタイルの要求が答えを待ち続けないように）。
+                        let reply = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            reply_tile(&job.state, z, x, y)
+                        }))
+                        .unwrap_or_else(|_| Reply::empty(500));
+                        (job.respond)(reply);
+                    }
+                });
+        }
+        queue
+    });
+    let job = TileJob {
+        state,
+        tile: (z, x, y),
+        respond,
+    };
+    if let Some(dropped) = queue.push(job) {
+        (dropped.respond)(Reply::empty(503));
+    }
+}
+
+/// 応答を WebView に返す。
+fn respond(responder: tauri::UriSchemeResponder, r: Reply) {
+    let mut builder = tauri::http::Response::builder()
+        .status(r.status)
+        .header("Content-Type", r.content_type)
+        .header("Cache-Control", r.cache_control);
+    for (name, value) in &r.headers {
+        builder = builder.header(*name, value);
+    }
+    match builder.body(r.body) {
+        Ok(resp) => responder.respond(resp),
+        Err(e) => tracing::error!(error = %e, "URI スキームの応答を作れない"),
+    }
+}
+
 /// Tauri の非同期の URI スキームの処理。
 pub fn handle<R: tauri::Runtime>(
     ctx: tauri::UriSchemeContext<'_, R>,
@@ -441,6 +657,12 @@ pub fn handle<R: tauri::Runtime>(
     use tauri::Manager;
     let state: Arc<AppState> = Arc::clone(&ctx.app_handle().state::<Arc<AppState>>());
     let path = request.uri().path().to_owned();
+    let route = parse(&path);
+    // 地図のタイルは通信を待つので、サムネイルなどとは別のスレッドで処理する（モジュールの doc）。
+    if let Some(Route::Tile { z, x, y }) = route {
+        submit_tile(state, (z, x, y), Box::new(move |r| respond(responder, r)));
+        return;
+    }
     let rev = query_rev(request.uri().query()).map(str::to_owned);
     let range = request
         .headers()
@@ -449,24 +671,13 @@ pub fn handle<R: tauri::Runtime>(
         .map(str::to_owned);
     let head = request.method() == tauri::http::Method::HEAD;
     submit(Box::new(move || {
-        let r = match parse(&path) {
+        let r = match route {
             Some(route @ (Route::Video(_) | Route::VideoProxy(_))) => {
                 reply_media(&state, route, range.as_deref(), head)
             }
             _ => reply(&state, &path, rev.as_deref()),
         };
-        let mut builder = tauri::http::Response::builder()
-            .status(r.status)
-            .header("Content-Type", r.content_type)
-            .header("Cache-Control", r.cache_control);
-        for (name, value) in &r.headers {
-            builder = builder.header(*name, value);
-        }
-        let response = builder.body(r.body);
-        match response {
-            Ok(resp) => responder.respond(resp),
-            Err(e) => tracing::error!(error = %e, "URI スキームの応答を作れない"),
-        }
+        respond(responder, r);
     }));
 }
 
@@ -492,6 +703,86 @@ mod tests {
         assert_eq!(parse("/thumb/1/2"), None);
         assert_eq!(parse("/other/1"), None);
         assert_eq!(parse("/"), None);
+    }
+
+    #[test]
+    fn parses_tile_routes() {
+        assert_eq!(parse("/tile/0/0/0"), Some(Route::Tile { z: 0, x: 0, y: 0 }));
+        assert_eq!(
+            parse("/tile/5/28/12"),
+            Some(Route::Tile { z: 5, x: 28, y: 12 })
+        );
+        assert_eq!(
+            parse("/tile/19/524287/0"),
+            Some(Route::Tile {
+                z: 19,
+                x: 524_287,
+                y: 0
+            })
+        );
+        // 番号は 2^z 未満、ズームは genzo-geo の上限まで。
+        let top = genzo_geo::MAX_ZOOM_LIMIT;
+        assert!(parse(&format!("/tile/{top}/0/0")).is_some());
+        for bad in [
+            "/tile/1/2/0",
+            "/tile/1/0/2",
+            "/tile/0/1/0",
+            &format!("/tile/{}/0/0", top + 1),
+            "/tile/256/0/0",
+            "/tile/19/524288/0",
+            // 形の違うもの（拡張子・符号・空・足りない・多い・数字でない）。
+            "/tile/1/0/0.png",
+            "/tile/+1/0/0",
+            "/tile/-1/0/0",
+            "/tile/1/0/",
+            "/tile//0/0",
+            "/tile/1/0",
+            "/tile/1/0/0/0",
+            "/tile/a/0/0",
+            "/tile/1/0/99999999999",
+            "/tile",
+        ] {
+            assert_eq!(parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn tile_errors_get_statuses() {
+        assert_eq!(tile_error_status(&GeoError::Disabled), 403);
+        assert_eq!(
+            tile_error_status(&GeoError::InvalidInput("範囲外".into())),
+            400
+        );
+        assert_eq!(tile_error_status(&GeoError::Status(404)), 404);
+        for e in [
+            GeoError::Status(503),
+            GeoError::Status(429),
+            GeoError::Network("接続できない".into()),
+            GeoError::BadResponse("PNG ではない".into()),
+        ] {
+            assert_eq!(tile_error_status(&e), 502, "{e:?}");
+        }
+    }
+
+    /// 待ちの列は新しい要求から処理し、上限を超えたら古い要求から外す。
+    #[test]
+    fn tile_queue_serves_the_newest_first_and_drops_the_oldest() {
+        let q = TileQueue::new(3);
+        assert_eq!(q.push(1), None);
+        assert_eq!(q.push(2), None);
+        assert_eq!(q.push(3), None);
+        assert_eq!(q.push(4), Some(1));
+        assert_eq!(q.pop(), 4);
+        assert_eq!(q.push(5), None);
+        assert_eq!((q.pop(), q.pop(), q.pop()), (5, 3, 2));
+        // 空なら、来るまで待つ。
+        let q = Arc::new(TileQueue::new(3));
+        let waiter = {
+            let q = Arc::clone(&q);
+            std::thread::spawn(move || q.pop())
+        };
+        q.push(7);
+        assert_eq!(waiter.join().unwrap(), 7);
     }
 
     #[test]

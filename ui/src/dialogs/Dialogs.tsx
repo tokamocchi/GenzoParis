@@ -21,6 +21,7 @@ import {
   RemoveFolderDialog,
   RenameFilesDialog,
 } from "./FileDialogs";
+import { GeotagDialog } from "./GeotagDialog";
 import { ImportDialog } from "./ImportDialog";
 import { offerImportFolders } from "./importDrop";
 import { splitDroppedPaths } from "./importLogic";
@@ -175,6 +176,9 @@ export function Dialogs() {
       break;
     case "capture_time":
       body = <CaptureTimeDialog variantIds={dialog.variantIds} current={dialog.current} />;
+      break;
+    case "geotag":
+      body = <GeotagDialog variantIds={dialog.variantIds} current={dialog.current} />;
       break;
     case "move_files":
       body = <MoveFilesDialog variantIds={dialog.variantIds} destFolder={dialog.destFolder} />;

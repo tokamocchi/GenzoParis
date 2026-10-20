@@ -13,7 +13,8 @@ use genzo_api::{
     StackId, VariantId,
 };
 use genzo_model::{
-    ConflictPolicy, ExportFormat, HistoryEntryId, MetadataField, OutputColorSpace, SnapshotId,
+    ConflictPolicy, ExportFormat, GpsCoord, HistoryEntryId, MetadataField, OutputColorSpace,
+    SnapshotId,
 };
 
 /// GenzoParis の検証用 CLI（ORG-05。04 の 1.4 節）。
@@ -251,6 +252,11 @@ pub enum Command {
     /// 写真と動画のタイムライン（ORG-01）: 撮影日時の順に並べ、撮影日と、撮影の間隔によるイベントで
     /// まとめて表示する（条件は search と同じ）
     Timeline(Box<TimelineArgs>),
+    /// 位置情報の後付け（LIB-21。ジオタグ付け）: 位置を付ける・付けた位置を消す（カメラの位置に戻す）・履歴・
+    /// 元に戻す。カタログの中だけを変え、元のファイルには書かない（カメラの位置も変えない）。付けた位置は
+    /// 書き出しの Exif に入る（--remove-gps なら入らない）。動画は対象外
+    #[command(subcommand)]
+    Location(LocationCommand),
     /// ボリューム（ドライブ。FILE-03）: 一覧（OS のボリューム ID・つながっているか・マウント先）
     #[command(subcommand)]
     Volume(VolumeCommand),
@@ -652,6 +658,51 @@ pub struct TimelineArgs {
     /// 対象の写真の条件（search と同じ）。
     #[command(flatten)]
     pub filter: FilterArgs,
+}
+
+/// `location` のサブコマンド（LIB-21）。
+#[derive(Debug, Subcommand)]
+pub enum LocationCommand {
+    /// 位置を付ける（付けた位置があれば置き換える。カメラの位置がある写真も、付けた位置を優先して使う）
+    Set {
+        /// variant の ID（複数可。同じ写真の仮想コピーと、RAW と同時記録の JPEG の組は位置を共有する。動画は
+        /// 除く）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// 座標（例:「35.681236, 139.767125」「-33.8568, 151.2153」「35°40'52.4"N 139°46'01.7"E」
+        /// 「北緯 35.681236°、東経 139.767125°」・Google マップの場所の URL（/place/…。ピンの位置を読む）。記号のない
+        /// 2 つの数は緯度・経度の順。URL の @緯度,経度 は地図の中心で、ピンとずれることがある。場所の URL
+        /// か、ピンを右クリックしてコピーした座標を使う）
+        #[arg(
+            long,
+            value_name = "COORDS",
+            allow_hyphen_values = true,
+            value_parser = parse_location
+        )]
+        at: GpsCoord,
+        /// 変えずに、変わる数だけを出す
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 付けた位置を消す（カメラの位置があれば、それを使う）
+    Clear {
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// 変えずに、変わる数だけを出す
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 位置の変更の履歴（新しい順）
+    History,
+    /// 最後の位置の変更を取り消す
+    Undo,
+}
+
+/// 座標の文字列（`location set --at`）を解釈する（genzo-model の `parse_coordinates`。画面の貼り付けと同じ形・
+/// 同じ規則）。
+pub fn parse_location(s: &str) -> Result<GpsCoord, String> {
+    genzo_model::parse_coordinates(s).map_err(|e| e.to_string())
 }
 
 /// 撮影日時をずらす量（`+1d2h3m4s`・`-90s`・`3600`）を秒にする。
@@ -3679,6 +3730,85 @@ mod tests {
         assert_eq!(e.exit_code(), 2);
         let e = parse(&["genzo", "rate", "0", "3"]).unwrap_err();
         assert_eq!(e.exit_code(), 2, "variant の ID は 1 以上");
+    }
+
+    /// `location set --at`（LIB-21）: 負の緯度も値として読む。読めない・範囲外の座標と、座標・対象の省略は
+    /// 使い方の誤り。
+    #[test]
+    fn location_set_reads_coordinates_including_negative_ones() {
+        let cli = parse(&[
+            "genzo",
+            "location",
+            "set",
+            "3",
+            "4",
+            "--at",
+            "-33.8568,151.2153",
+        ])
+        .unwrap();
+        let Command::Location(LocationCommand::Set {
+            variants,
+            at,
+            dry_run,
+        }) = cli.command
+        else {
+            panic!()
+        };
+        assert_eq!(variants, vec![VariantId::new(3), VariantId::new(4)]);
+        assert_eq!((at.lat, at.lon), (-33.8568, 151.2153));
+        assert!(!dry_run);
+        let cli = parse(&["genzo", "location", "clear", "3", "--dry-run"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Location(LocationCommand::Clear { dry_run: true, .. })
+        ));
+        for args in [
+            &["genzo", "location", "set", "3", "--at", "91, 0"][..],
+            &["genzo", "location", "set", "3", "--at", "東京駅"],
+            &["genzo", "location", "set", "3"],
+            &["genzo", "location", "set", "--at", "35.68, 139.76"],
+            &["genzo", "location", "clear"],
+        ] {
+            let e = parse(args).unwrap_err();
+            assert_eq!(e.exit_code(), 2, "{args:?}");
+        }
+    }
+
+    /// `location set --at`（LIB-21）: 説明で、@ は地図の中心でピンとずれることがあるので、場所の URL かピンの
+    /// 座標を勧める。場所の URL は @ ではなくピンの位置（data= の !3d!4d）を読む（1s の値は仮の値）。
+    #[test]
+    fn location_set_at_prefers_place_urls_over_the_map_center() {
+        let cmd = Cli::command();
+        let set = cmd
+            .find_subcommand("location")
+            .and_then(|c| c.find_subcommand("set"))
+            .unwrap();
+        let help = set
+            .get_arguments()
+            .find(|a| a.get_id() == "at")
+            .and_then(|a| a.get_help())
+            .unwrap()
+            .to_string();
+        for part in [
+            "Google マップの場所の URL（/place/…。ピンの位置を読む）",
+            "URL の @緯度,経度 は地図の中心で、ピンとずれることがある",
+            "場所の URL か、ピンを右クリックしてコピーした座標を使う",
+        ] {
+            assert!(help.contains(part), "{help}");
+        }
+        let cli = parse(&[
+            "genzo",
+            "location",
+            "set",
+            "3",
+            "--at",
+            "https://www.google.com/maps/place/Tokyo+Station/@35.6812362,139.7645445,17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d35.6812362!4d139.7671248",
+        ])
+        .unwrap();
+        let Command::Location(LocationCommand::Set { at, .. }) = cli.command else {
+            panic!()
+        };
+        assert_eq!((at.lat, at.lon), (35.6812362, 139.7671248));
     }
 
     #[test]

@@ -13,19 +13,21 @@
 // - 仮想コピー・スタック（LIB-12・LIB-13。VersionsSection）: 同じ写真のマスターと仮想コピーの一覧（押すと選ぶ）、
 //   仮想コピーを作る・名前を変える・元の写真にする、入っているスタックの位置と操作（展開・折りたたみ、一番上に
 //   する、一緒に選んだ写真を足す、外す、解除）。
+// - GPS の行（LIB-21）: 使う位置（後から付けた位置があればそれ、なければカメラの位置）。後から付けた位置なら注記に
+//   カメラの位置も出す。座標のコピー（"35.681236, 139.767125" の形）と「位置を付ける…」（GeotagDialog）。
 
 import { useEffect, useRef, useState } from "react";
 
 import * as appApi from "../api/app";
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
-import type { ColorLabel, Flag, MetadataSummary, VariantDetails, VariantId, VariantSummary } from "../api/types";
+import type { ColorLabel, Flag, GpsCoord, MetadataSummary, VariantDetails, VariantId, VariantSummary } from "../api/types";
 import { FlagMark, LabelDot, Stars } from "../components/Marks";
 import { Section } from "../components/Section";
 import { COLOR_LABEL_NAMES, formatAperture, formatBytes, formatCaptureTime, formatFocal, formatShutter } from "../format";
 import { comboLabel } from "../keyboard";
 import { actions, useApp } from "../state/app";
-import { openCaptureTimeDialog } from "../state/stacks";
+import { openCaptureTimeDialog, openGeotagDialog } from "../state/stacks";
 import {
   addTargetsToStack,
   createVirtualCopyOf,
@@ -36,6 +38,7 @@ import {
   toggleStack,
   unstackTargets,
 } from "../state/stacks";
+import { gpsSourceNote } from "./geotagLogic";
 import { KeywordEditor, PhotoCollections } from "./KeywordEditor";
 import "./library.css";
 import { MetadataEditor, MetadataHelp } from "./MetadataEditor";
@@ -51,6 +54,7 @@ import {
   formatDimensions,
   formatGps,
   formatIso,
+  gpsDecimal,
   hasVideoInfo,
   primaryFile,
   shortHash,
@@ -249,6 +253,60 @@ function BatchMarks({ count }: { count: number }) {
 // 詳細
 // ---------------------------------------------------------------------------
 
+/** 座標を "35.681236, 139.767125" の形でクリップボードに写す（書けなければ、文字を選んで写すよう案内する）。 */
+async function copyCoordinates(g: GpsCoord): Promise<void> {
+  try {
+    if (typeof navigator === "undefined" || !navigator.clipboard) throw new Error("クリップボードを使えません");
+    await navigator.clipboard.writeText(gpsDecimal(g));
+    actions.notify("info", "座標をコピーしました");
+  } catch {
+    actions.notify("warning", "コピーできません。座標の文字を選んでコピーしてください");
+  }
+}
+
+/**
+ * GPS の行の値（LIB-21）: 使う位置、後から付けた位置ならその注記（カメラの位置も出す）、座標のコピーと「位置を
+ * 付ける…」。動画 1 本だけのときは位置を付けない（まとめて選んだ中の動画はコアが除く）。
+ */
+export function GpsValue(props: { details: VariantDetails; stale: boolean; multi: boolean }) {
+  const { details, stale, multi } = props;
+  const gps = details.gps;
+  const note = gpsSourceNote(details);
+  const canEdit = details.summary.kind !== "video" || multi;
+  return (
+    <>
+      {formatGps(gps) ?? "なし"}
+      {note && <span className="note">{note}</span>}
+      {(gps || canEdit) && (
+        <span className="lib-gps-actions">
+          {gps && (
+            <button
+              type="button"
+              className="btn small"
+              onClick={() => void copyCoordinates(gps)}
+              disabled={stale}
+              title="座標を「緯度, 経度」の 10 進の度（35.681236, 139.767125 の形）でコピーする"
+            >
+              コピー
+            </button>
+          )}
+          {canEdit && (
+            <button
+              type="button"
+              className="btn small"
+              onClick={() => openGeotagDialog()}
+              disabled={stale}
+              title="座標を貼り付けて、選んだ写真にまとめて位置を付ける（元のファイルは変えません。動画は除きます）"
+            >
+              位置を付ける…
+            </button>
+          )}
+        </span>
+      )}
+    </>
+  );
+}
+
 function Details(props: { details: VariantDetails; stale: boolean; multi: boolean; onReload: () => void }) {
   const { details, stale, multi } = props;
   const s = details.summary;
@@ -316,7 +374,9 @@ function Details(props: { details: VariantDetails; stale: boolean; multi: boolea
           <dt>ファイルの大きさ</dt>
           <dd>{formatBytes(primary?.size)}</dd>
           <dt>GPS</dt>
-          <dd>{formatGps(details.gps) ?? "なし"}</dd>
+          <dd>
+            <GpsValue details={details} stale={stale} multi={multi} />
+          </dd>
         </dl>
       </Section>
 

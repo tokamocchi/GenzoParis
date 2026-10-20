@@ -5,6 +5,9 @@
 //! （コピー先・名前の規則・まとめて付けるメタデータ。[`ImportPreferences`]）を、OS のアプリの設定のフォルダの
 //! `settings.json` に保存する。
 //!
+//! オンラインの地図（位置情報の後付け LIB-21 の第 2 段階。[`MapPreferences`]）の有効・無効と提供元も、
+//! 利用者と PC ごとのものなのでここに置く（カタログを閉じていても効く。CLI は通信しないので使わない）。
+//!
 //! - 書き込みは一時ファイルに書いてから名前を変える（途中で落ちても前の設定が残る）。
 //! - 読めない・壊れている場合は既定値で起動し、壊れたファイルは `settings.json.broken-<時刻>` に退避する
 //!   （利用者の設定を黙って捨てない）。
@@ -14,6 +17,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use genzo_api::{FolderRule, GpuMode, ImportMetadata, RenameRule};
+use genzo_geo::GeoError;
 use serde::{Deserialize, Serialize};
 
 /// 最近開いたカタログの数の上限。
@@ -41,6 +45,9 @@ pub struct AppSettings {
     pub backup_on_close: bool,
     /// 取り込みのダイアログの設定（次に取り込むときの既定。IMP-02・IMP-03・IMP-05）。
     pub import: ImportPreferences,
+    /// オンラインの地図（地図のタイルと地名の検索。LIB-21）。保存は専用のコマンド（`save_map_preferences`）で
+    /// 行う（設定の画面の `update_app_settings` では変えない）。
+    pub map: MapPreferences,
 }
 
 /// 取り込みのダイアログの設定（取り込みを始めたときに保存し、次に開いたときの初めの値にする。カタログに
@@ -80,6 +87,92 @@ impl Default for ImportPreferences {
     }
 }
 
+/// オンラインの地図の設定（位置情報の後付け LIB-21 の第 2 段階。docs/04_architecture.md の 3.16 節）。
+///
+/// オンラインの地図は **既定で無効**（docs/02 の SEC-02。SEC-01 の例外）。無効の間は、地図のタイルの要求にも
+/// 地名の検索にも外部と通信しない（genzo-app の `map`・`protocol` が通信の前に確かめる）。座標の貼り付けで
+/// 位置を付ける機能（第 1 段階）は、無効でも使える。
+///
+/// 提供元の URL は、OSM Foundation のポリシーの「ソフトウェアの更新なしに切り替えられること」のため、
+/// `settings.json`（と設定の画面の詳細）で変えられる（https だけ。[`MapPreferences::normalized`]）。タイルの URL は
+/// `None` なら OSM の標準のタイル。
+///
+/// **地名の検索は既定では使わない**。送り先（genzo-app の `map::geocoder_provider`）:
+///
+/// | `search_url` | `public_nominatim` | 送り先 |
+/// |---|---|---|
+/// | あり | どちらでも | `search_url`（設定した検索サービス） |
+/// | `None` | `true` | OSM Foundation の公開の Nominatim（`https://nominatim.openstreetmap.org/search`） |
+/// | `None` | `false`（既定） | なし（「地名の検索のサービスが設定されていません」で、通信しない） |
+///
+/// 公開の Nominatim を既定で使わないのは、そのポリシーの上限（1 秒に 1 回）がアプリの全利用者の合計にかかり、
+/// 公開で配布するアプリでは利用者の間の合計を数えられないため（genzo-geo の provider.rs の doc）。利用者
+/// （開発者本人）が制限を読んだうえで、既定は OFF・設定で ON にできる形に決めた（2026-10-20）。オンラインの地図を
+/// 有効にする同意とは別の切り替えで、ON にしたときだけ公開の Nominatim に検索語を送る。どちらもなくても、座標の
+/// 貼り付けと地図のクリックでは位置を付けられる。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MapPreferences {
+    /// オンラインの地図を使う（利用者が明示的に有効にしたときだけ `true`）。
+    pub online: bool,
+    /// 初めて有効にした日時（UTC。RFC 3339。同意の記録。保存のときにアプリが入れ、その後は変えない）。
+    pub consented_at: Option<String>,
+    /// 地図のタイルの URL のひな形（`{z}`・`{x}`・`{y}` を 1 つずつ含む https の URL。`None` なら
+    /// `https://tile.openstreetmap.org/{z}/{x}/{y}.png`）。
+    pub tile_url: Option<String>,
+    /// 地名の検索のサービス（Nominatim と同じ API の `/search`）の URL（https）。あればこの URL に問い合わせる。
+    /// `None`（既定）なら、`public_nominatim` が `true` のときだけ公開の Nominatim を使い、`false` なら地名の検索を
+    /// 使わない（`search_places` は通信せずに誤り）。
+    pub search_url: Option<String>,
+    /// `search_url` がないときに、OSM Foundation の公開の Nominatim を使う（設定の「OSM の公開の地名の検索
+    /// （Nominatim）を使う」。**既定は `false`**。利用者が ON にしたときだけ）。`search_url` があれば使わないが、
+    /// 値は残す（URL を空に戻したときに使う）。前の形の settings.json（欄がない）は `false` として読む。
+    pub public_nominatim: bool,
+    /// 設定のタイルの提供元の帰属の表示（例「Maps © 提供元の名前」。地図の右下に、OSM の帰属の表示
+    /// 「© OpenStreetMap contributors」と並べて出す）。多くの提供元は自分の帰属の表示を利用の条件にしている。
+    /// `tile_url` が `None`（OSM の標準のタイル）なら使わない（保存のときに `None` にする）。文言は提供元の
+    /// 利用条件で決まる（AI は決めない）。
+    pub tile_attribution: Option<String>,
+}
+
+/// 帰属の表示の長さの上限（文字数。仮置き）。
+pub const MAX_TILE_ATTRIBUTION_CHARS: usize = 200;
+
+impl MapPreferences {
+    /// 保存の前に整える: URL と帰属の表示の前後の空白を除き、空なら `None`（タイルは既定の提供元、地名の検索は
+    /// `public_nominatim` に従う）にして、形を確かめる（genzo-geo の `validate_tile_url_template`・`validate_search_url`。https
+    /// だけ）。帰属の表示は、タイルの URL が既定（`None`）なら `None` にし、改行などの制御文字と
+    /// [`MAX_TILE_ATTRIBUTION_CHARS`] 文字を超えるものは誤りにする。
+    pub fn normalized(mut self) -> Result<Self, GeoError> {
+        fn non_empty(value: Option<String>) -> Option<String> {
+            value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
+        }
+        self.tile_url = non_empty(self.tile_url);
+        self.search_url = non_empty(self.search_url);
+        self.tile_attribution =
+            non_empty(self.tile_attribution).filter(|_| self.tile_url.is_some());
+        if let Some(url) = &self.tile_url {
+            genzo_geo::validate_tile_url_template(url)?;
+        }
+        if let Some(url) = &self.search_url {
+            genzo_geo::validate_search_url(url)?;
+        }
+        if let Some(text) = &self.tile_attribution {
+            if text.chars().any(char::is_control) {
+                return Err(GeoError::InvalidInput(
+                    "地図の帰属の表示に改行などの制御文字は使えません".to_owned(),
+                ));
+            }
+            if text.chars().count() > MAX_TILE_ATTRIBUTION_CHARS {
+                return Err(GeoError::InvalidInput(format!(
+                    "地図の帰属の表示が長すぎます（{MAX_TILE_ATTRIBUTION_CHARS} 文字まで）"
+                )));
+            }
+        }
+        Ok(self)
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -90,6 +183,7 @@ impl Default for AppSettings {
             gpu: GpuMode::Auto,
             backup_on_close: false,
             import: ImportPreferences::default(),
+            map: MapPreferences::default(),
         }
     }
 }
@@ -203,6 +297,10 @@ mod tests {
             .metadata
             .fields
             .insert(genzo_model::MetadataField::Creator, "岡本".to_owned());
+        s.map.online = true;
+        s.map.consented_at = Some("2026-10-20T01:02:03Z".to_owned());
+        s.map.search_url = Some("https://geocoder.example.org/search?key=abc".to_owned());
+        s.map.public_nominatim = true;
         save(d.path(), &s).unwrap();
         assert_eq!(load(d.path()).settings, s);
     }
@@ -223,6 +321,122 @@ mod tests {
         assert_eq!(l.import.rename_rule, RenameRule::default());
         fs::write(d.path().join(SETTINGS_FILE), r#"{"version": 1}"#).unwrap();
         assert_eq!(load(d.path()).settings.import, ImportPreferences::default());
+    }
+
+    /// 地図の設定のない古い設定のファイルは、オンラインの地図を無効として読む（SEC-02）。
+    #[test]
+    fn map_preferences_default_to_offline() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join(SETTINGS_FILE), r#"{"version": 1}"#).unwrap();
+        let l = load(d.path()).settings;
+        assert!(!l.map.online);
+        assert_eq!(l.map, MapPreferences::default());
+        fs::write(
+            d.path().join(SETTINGS_FILE),
+            r#"{"version": 1, "map": {"online": true, "tile_url": "https://tiles.example.org/{z}/{x}/{y}.png"}}"#,
+        )
+        .unwrap();
+        let l = load(d.path()).settings;
+        assert!(l.map.online);
+        assert_eq!(
+            l.map.tile_url.as_deref(),
+            Some("https://tiles.example.org/{z}/{x}/{y}.png")
+        );
+        assert_eq!((l.map.consented_at, l.map.search_url), (None, None));
+        // 公開の Nominatim の切り替えのない前の形は OFF として読む（既定で使わない）。
+        assert!(!l.map.public_nominatim);
+    }
+
+    #[test]
+    fn map_urls_are_trimmed_and_checked() {
+        let p = MapPreferences {
+            online: true,
+            consented_at: None,
+            tile_url: Some("  https://tiles.example.org/{z}/{x}/{y}.png ".to_owned()),
+            search_url: Some("   ".to_owned()),
+            public_nominatim: false,
+            tile_attribution: None,
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(
+            p.tile_url.as_deref(),
+            Some("https://tiles.example.org/{z}/{x}/{y}.png")
+        );
+        assert_eq!(
+            p.search_url, None,
+            "空白だけなら設定しない（地名の検索を使わない）"
+        );
+        for bad in [
+            "http://tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://tiles.example.org/{z}/{x}.png",
+            "https://tiles.example.org/{z}/{x}/{y}.png?style=\"dark\"",
+        ] {
+            let r = MapPreferences {
+                tile_url: Some(bad.to_owned()),
+                ..MapPreferences::default()
+            }
+            .normalized();
+            assert!(matches!(r, Err(GeoError::InvalidInput(_))), "{bad}");
+        }
+        let r = MapPreferences {
+            search_url: Some("http://geocoder.example.org/search".to_owned()),
+            ..MapPreferences::default()
+        }
+        .normalized();
+        assert!(matches!(r, Err(GeoError::InvalidInput(_))));
+        // 設定した検索サービスの URL は、前後の空白を除いて残す。
+        let p = MapPreferences {
+            search_url: Some(" https://geocoder.example.org/search ".to_owned()),
+            ..MapPreferences::default()
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(
+            p.search_url.as_deref(),
+            Some("https://geocoder.example.org/search")
+        );
+        // 公開の Nominatim の切り替えは、検索の URL があってもそのまま残す（URL を空に戻したときに使う）。
+        let p = MapPreferences {
+            search_url: Some("https://geocoder.example.org/search".to_owned()),
+            public_nominatim: true,
+            ..MapPreferences::default()
+        }
+        .normalized()
+        .unwrap();
+        assert!(p.public_nominatim);
+    }
+
+    #[test]
+    fn tile_attribution_is_trimmed_and_checked() {
+        let custom = |attribution: &str| MapPreferences {
+            tile_url: Some("https://tiles.example.org/{z}/{x}/{y}.png".to_owned()),
+            tile_attribution: Some(attribution.to_owned()),
+            ..MapPreferences::default()
+        };
+        let p = custom("  Maps © 提供元  ").normalized().unwrap();
+        assert_eq!(p.tile_attribution.as_deref(), Some("Maps © 提供元"));
+        assert_eq!(custom("   ").normalized().unwrap().tile_attribution, None);
+        // OSM の標準のタイルには使わない。
+        let p = MapPreferences {
+            tile_attribution: Some("Maps © 提供元".to_owned()),
+            ..MapPreferences::default()
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(p.tile_attribution, None);
+        let long = "あ".repeat(MAX_TILE_ATTRIBUTION_CHARS);
+        assert!(custom(&long).normalized().is_ok());
+        for bad in [format!("{long}あ"), "Maps\n© 提供元".to_owned()] {
+            assert!(
+                matches!(custom(&bad).normalized(), Err(GeoError::InvalidInput(_))),
+                "{bad}"
+            );
+        }
+        // 前の形の settings.json（欄がない）も読める。
+        let p: MapPreferences = serde_json::from_str(r#"{"online": true}"#).unwrap();
+        assert_eq!(p.tile_attribution, None);
     }
 
     #[test]

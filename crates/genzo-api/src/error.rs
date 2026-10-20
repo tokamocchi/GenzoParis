@@ -196,6 +196,9 @@ pub enum ErrorKind {
     Worker,
     /// GPU の問題。
     Gpu,
+    /// 外部のサーバーとの通信の失敗（オンラインの地図のタイル・地名の検索。LIB-21。接続・プロキシの設定を
+    /// 確かめる。一時的なことがある）。コアは通信しないので、genzo-app だけが使う。
+    Network,
     /// コアは終了している。
     Closed,
     /// 内部のエラー（不具合）。
@@ -215,12 +218,16 @@ impl ErrorKind {
                 | Self::Storage
                 | Self::CatalogCorrupt
                 | Self::IncompatibleVersion
+                | Self::Network
         )
     }
 
     /// 同じ要求をもう一度試す意味があるか（世代を新しくして要求し直す、一時的な失敗）。
     pub const fn retryable(self) -> bool {
-        matches!(self, Self::Stale | Self::Worker | Self::Gpu | Self::Storage)
+        matches!(
+            self,
+            Self::Stale | Self::Worker | Self::Gpu | Self::Storage | Self::Network
+        )
     }
 }
 
@@ -407,6 +414,9 @@ mod tests {
         let json = serde_json::to_value(stale.info()).unwrap();
         assert_eq!(json["kind"], "stale");
         assert!(json["message"].as_str().unwrap().contains("世代"));
+        // 通信の失敗（genzo-app のオンラインの地図だけが使う）は、接続を確かめてやり直せる。
+        assert!(ErrorKind::Network.user_actionable() && ErrorKind::Network.retryable());
+        assert_eq!(serde_json::to_value(ErrorKind::Network).unwrap(), "network");
     }
 
     /// 新しい版のアプリで移行したカタログを古い版で開いたときは、バックアップからの復元ではなく、アプリの

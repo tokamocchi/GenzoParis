@@ -14,8 +14,8 @@ use crate::events::{CatalogChange, Event};
 use crate::import::{ProbeTarget, media_kind, probe_request};
 use crate::paths::join_rel;
 use crate::types::{
-    CatalogSchema, CatalogStats, FileCheckReport, FileInfo, FileIssue, FolderInfo, MetadataSummary,
-    StackInfo, VariantBrief, VariantDetails, VariantSummary,
+    CatalogSchema, CatalogStats, FileCheckReport, FileInfo, FileIssue, FolderInfo, GpsSource,
+    MetadataSummary, StackInfo, VariantBrief, VariantDetails, VariantSummary,
 };
 
 /// 選別の操作の後: カタログの変更を知らせ、表示中の検索結果を作り直す（変えた variant は残す。3.7 節）。
@@ -130,7 +130,8 @@ impl Core {
         })
     }
 
-    /// variant の詳細（メタデータの表示。LIB-14）。
+    /// variant の詳細（メタデータの表示。LIB-14）。位置（`gps`）は使う位置（後から付けた位置があればそれ。
+    /// LIB-21）。
     pub fn variant_details(&self, variant_id: VariantId) -> Result<VariantDetails, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
@@ -169,6 +170,9 @@ impl Core {
             Ok((s, a, m, files, variants, stack))
         })?;
         let rev = inner.with_cache(|c| c.thumbs.cache_key(variant_id))?;
+        // 使う位置（後から付けた位置があればそれ。LIB-21）と、カメラ（ファイル）の位置。
+        let gps = asset.effective_gps();
+        let gps_source = GpsSource::of(asset.assigned_gps, asset.gps);
         Ok(VariantDetails {
             summary: VariantSummary::from_catalog(summary, rev),
             camera_serial: asset.camera_serial,
@@ -176,7 +180,9 @@ impl Core {
             aperture: asset.aperture,
             shutter_s: asset.shutter_s,
             focal_mm: asset.focal_mm,
-            gps: asset.gps,
+            gps,
+            gps_source,
+            camera_gps: asset.gps,
             caption: asset.caption,
             metadata,
             video: asset.video,

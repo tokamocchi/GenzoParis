@@ -38,6 +38,15 @@ all-features = true
 # 見直す）:
 # - zvariant・zbus_names・zvariant_derive: tauri-plugin-opener の Linux 用の依存（zbus。D-Bus でファイルの場所を
 #   開く）。配布の対象（Windows・macOS）の依存の木には入らない（cargo tree -i zbus --target で確かめた）。
+#
+# 2026-10-20 追加（genzo-geo の HTTPS の rustls 0.23.45 の脆弱性の通知。直した版の 0.23.46 は 2026-10-14 の公開で、
+# 依存の版を公開から 2 週間以上のものにする方針に合わないため、まだ上げない。どれもこのアプリの使い方では当たらない
+# （AI がソースで確かめた。人の確認待ち）。0.23.46 が 2 週間たつ 2026-10-28 以降に rustls を上げて、この 4 つを消す）:
+# - RUSTSEC-2026-0346: 自前の ClientSessionStore が値を Debug で書くときだけ。ureq は rustls の既定の保管を使う。
+# - RUSTSEC-2026-0347: ECH（EchMode::Enable）を使うときだけ。ureq は ECH を有効にしない。
+# - RUSTSEC-2026-0348: rustls の機能 brotli を入れたときだけ。入れていない（機能は ring・std・tls12・logging）。
+# - RUSTSEC-2026-0349: 耐量子の鍵交換（X25519MLKEM768 など）を先に出すときだけ。ring の暗号の実装の鍵交換は
+#   X25519・P-256・P-384 だけ。
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error（Tauri の Linux の GTK の依存。ビルド時のみ）。Tauri の更新時に見直す" },
     { id = "RUSTSEC-2025-0075", reason = "unic-char-range（Tauri の urlpattern）。Tauri の更新時に見直す" },
@@ -48,6 +57,10 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant（tauri-plugin-opener の Linux 用の zbus 5 の依存）。tauri-plugin-opener の更新時に見直す" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names（tauri-plugin-opener の Linux 用の zbus 5 の依存）。tauri-plugin-opener の更新時に見直す" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive（tauri-plugin-opener の Linux 用の zbus 5 の依存）。tauri-plugin-opener の更新時に見直す" },
+    { id = "RUSTSEC-2026-0346", reason = "rustls 0.23.45（自前の ClientSessionStore だけが対象）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
+    { id = "RUSTSEC-2026-0347", reason = "rustls 0.23.45（ECH を有効にしたときだけが対象）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
+    { id = "RUSTSEC-2026-0348", reason = "rustls 0.23.45（機能 brotli を入れたときだけが対象）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
+    { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.45（耐量子の鍵交換を使うときだけが対象。ring にはない）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
 ]
 
 [licenses]

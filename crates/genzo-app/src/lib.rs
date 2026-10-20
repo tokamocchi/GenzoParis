@@ -7,9 +7,10 @@
 //! |---|---|
 //! | [`state`] | 開いているカタログ（コア）、カタログを開く・閉じる・復元する、イベントの転送 |
 //! | [`commands`] | Tauri のコマンド（画面 → アプリ。コアのコマンドの中継と、アプリ固有の操作） |
-//! | [`protocol`] | `genzo://` の URI スキーム（サムネイル・標準プレビューの JPEG、動画の元のファイルと再生用のファイルを Range の要求に応えて配信する。VID-04） |
+//! | [`protocol`] | `genzo://` の URI スキーム（サムネイル・標準プレビューの JPEG、動画の元のファイルと再生用のファイルを Range の要求に応えて配信する。VID-04。地図のタイル（LIB-21）も配信する） |
 //! | [`frames`] | 現像のプレビュー・表示範囲の画素のバイナリの形 |
-//! | [`settings`] | アプリの設定（カタログの場所・FFmpeg・GPU） |
+//! | [`settings`] | アプリの設定（カタログの場所・FFmpeg・GPU・オンラインの地図） |
+//! | [`map`] | オンラインの地図（位置情報の後付け LIB-21 の第 2 段階。地図のタイルと地名の検索を genzo-geo で外部のサーバーに問い合わせる。既定で無効で、利用者が有効にしたときだけ通信する。SEC-02） |
 //! | [`tools`] | ffmpeg・ffprobe を探す |
 //! | [`catalog_file`] | 既定のカタログの場所、データのフォルダ、カタログのファイルの判定 |
 //! | [`logs`] | ログ・クラッシュレポート（SYS-07。起動時の初期化、前回のクラッシュの知らせ、ログのフォルダを開く・消す、画面のエラーの記録。外部へは送信しない） |
@@ -66,6 +67,7 @@ pub mod catalog_file;
 pub mod commands;
 pub mod frames;
 pub mod logs;
+pub mod map;
 pub mod protocol;
 pub mod settings;
 pub mod state;
@@ -295,8 +297,20 @@ pub fn run() {
                     tracing::debug!(error = %e, "イベントを画面に送れない");
                 }
             });
+            // 地図のタイルのキャッシュは、OS のキャッシュのフォルダの下の専用のサブフォルダ（Windows ではこの
+            // フォルダが WebView2 のデータとログの親なので、直下には置かない。map の doc）。場所が分からなくても
+            // 起動は止めない（メモリーにだけキャッシュして動く。genzo-geo の tiles の doc）。
+            let map_cache = match app.path().app_cache_dir() {
+                Ok(dir) => Some(dir.join(map::MAP_CACHE_DIR)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "キャッシュのフォルダが分からないので、地図のタイルをメモリーにだけキャッシュする");
+                    None
+                }
+            };
             app.manage(Arc::new(
-                AppState::new(config_dir, sink).with_logs(logs::AppLogs::new(log_status)),
+                AppState::new(config_dir, sink)
+                    .with_logs(logs::AppLogs::new(log_status))
+                    .with_map(map::MapService::new(map_cache)),
             ));
             Ok(())
         })
@@ -318,6 +332,11 @@ pub fn run() {
             commands::restore_catalog,
             commands::update_app_settings,
             commands::save_import_preferences,
+            commands::save_map_preferences,
+            commands::search_places,
+            commands::map_cache_info,
+            commands::clear_map_cache,
+            commands::open_map_link,
             commands::locate_tools,
             commands::path_kinds,
             commands::reveal_variant_file,

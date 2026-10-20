@@ -40,6 +40,18 @@ pub(crate) fn write_capture(
         ])?)
 }
 
+/// 行の緯度・経度の列（`lat`・`lon` 番目）を座標にする（範囲内の両方の値があるときだけ。片方だけ・範囲外は
+/// `None`）。
+pub(crate) fn gps_columns(
+    row: &rusqlite::Row<'_>,
+    lat: usize,
+    lon: usize,
+) -> rusqlite::Result<Option<GpsCoord>> {
+    let lat: Option<f64> = row.get(lat)?;
+    let lon: Option<f64> = row.get(lon)?;
+    Ok(lat.zip(lon).and_then(|(lat, lon)| GpsCoord::new(lat, lon)))
+}
+
 /// asset の詳細（メタデータの表示用。LIB-14）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssetRecord {
@@ -69,14 +81,24 @@ pub struct AssetRecord {
     pub height: Option<u32>,
     /// 向き。
     pub orientation: Orientation,
-    /// GPS の座標。
+    /// GPS の座標（カメラ（ファイル）の記録の値。後から付けた位置は [`AssetRecord::assigned_gps`]）。
     pub gps: Option<GpsCoord>,
+    /// 後から付けた位置（LIB-21。カタログの中だけに持つ。付けていなければ `None`）。使う位置は
+    /// [`AssetRecord::effective_gps`]。
+    pub assigned_gps: Option<GpsCoord>,
     /// キャプション。
     pub caption: Option<String>,
     /// 登録した日時。
     pub created_at: DateTime<Utc>,
     /// 動画の情報（動画の場合）。
     pub video: Option<VideoMetadata>,
+}
+
+impl AssetRecord {
+    /// 使う位置（LIB-21）: 後から付けた位置があればそれ、なければカメラの位置。
+    pub fn effective_gps(&self) -> Option<GpsCoord> {
+        self.assigned_gps.or(self.gps)
+    }
 }
 
 impl Catalog {
@@ -172,8 +194,9 @@ impl Catalog {
                     a.shutter, a.focal, a.width, a.height, a.orientation, a.gps_lat, a.gps_lon,
                     a.caption, a.created_at,
                     m.asset_id, m.duration_s, m.fps, m.codec, m.bit_depth, m.color_transfer,
-                    m.color_primaries, a.tz_basis, a.camera_serial
+                    m.color_primaries, a.tz_basis, a.camera_serial, al.lat, al.lon
              FROM asset a LEFT JOIN video_meta m ON m.asset_id = a.id
+             LEFT JOIN asset_location al ON al.asset_id = a.id
              WHERE a.id = ?1",
         )?;
         let mut rows = stmt.query([asset_id.get()])?;
@@ -185,13 +208,8 @@ impl Catalog {
         let utc: Option<String> = row.get(6)?;
         let to_u32 = |v: Option<i64>, what: &str| v.map(|x| i64_to_u32(x, what)).transpose();
         let orientation: i64 = row.get(15)?;
-        let gps = match (
-            row.get::<_, Option<f64>>(16)?,
-            row.get::<_, Option<f64>>(17)?,
-        ) {
-            (Some(lat), Some(lon)) => GpsCoord::new(lat, lon),
-            _ => None,
-        };
+        let gps = gps_columns(row, 16, 17)?;
+        let assigned_gps = gps_columns(row, 29, 30)?;
         let created_at: String = row.get(19)?;
         let video = match row.get::<_, Option<i64>>(20)? {
             Some(_) => Some(VideoMetadata {
@@ -239,6 +257,7 @@ impl Catalog {
                     CatalogError::Corrupt(format!("向きの値が不正です: {orientation}"))
                 })?,
             gps,
+            assigned_gps,
             caption: row.get(18)?,
             created_at: parse_db_utc(&created_at)?,
             video,
