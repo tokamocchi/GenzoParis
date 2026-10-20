@@ -258,6 +258,7 @@
 //! （回転・切り抜きなしでは約 0.2。このコンテナでの参考値）。
 
 pub mod border;
+pub mod composite;
 pub mod contract;
 pub mod coords;
 pub mod engine;
@@ -279,6 +280,7 @@ pub mod sensor;
 pub mod stage;
 pub mod version;
 
+pub use composite::{Compositor, compositor_bytes};
 pub use contract::ColorContract;
 pub use coords::{CoordinateFrames, SensorGrid};
 pub use engine::{

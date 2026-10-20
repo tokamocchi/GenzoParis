@@ -18,6 +18,7 @@
 pub mod cache_key;
 pub mod capture_time;
 pub mod catalog;
+pub mod composite;
 pub mod develop;
 pub mod export;
 pub mod fs_sync;
@@ -34,6 +35,7 @@ pub use catalog::{
     AssetKind, CollectionKind, ColorLabel, FileOpKind, FileOpState, FileRole, FileStatus, Flag,
     FolderStatus, ParseEnumError, Rating, TzSource,
 };
+pub use composite::{CompositeMode, CompositeSettings};
 pub use develop::{
     AspectRatio, BlackWhite, BrushStroke, ColorGrading, ColorMixer, ColorParams, ColorSample,
     CropRect, CurvePoint, DataRef, DetailParams, DevelopError, DevelopSettings, EffectsParams,
@@ -42,7 +44,8 @@ pub use develop::{
     MAX_COLOR_SAMPLES, MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_PROFILE_ID_CHARS,
     MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS, MaskComponent, MaskMode, MaskShape, NoiseReduction,
     ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings, RenderDeps, Sharpening,
-    ToneCurve, ToneParams, ValidationError, WbPreset, WhiteBalance, is_valid_profile_id,
+    ToneCurve, ToneParams, ValidationError, VignetteCenter, WbPreset, WhiteBalance,
+    is_valid_profile_id,
 };
 pub use export::{
     Align, ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize,

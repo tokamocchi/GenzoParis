@@ -17,6 +17,7 @@ import { appStore } from "../state/app";
 import { presetsStore } from "../state/presets";
 import { CatalogErrorScreen } from "./CatalogErrorScreen";
 import { CloseFailedDialog } from "./CloseFailedDialog";
+import { CompositeDialog } from "./CompositeDialog";
 import { CrashReportsDialog } from "./CrashReportsDialog";
 import { DeleteDialog } from "./DeleteDialog";
 import { Dialogs } from "./Dialogs";
@@ -344,6 +345,23 @@ describe("ダイアログ", () => {
     expect(html).toContain("再試行");
     const closed = render(createElement(CloseFailedDialog, { failure: { ...failure, still_open: false }, quitting: false }));
     expect(closed).toContain("カタログは閉じました");
+  });
+
+  it("比較明・比較暗合成（DEV-34）", () => {
+    const html = render(createElement(CompositeDialog, { variantIds: [1, 2, 3], mode: "lighten" }));
+    expect(html).toContain("比較明合成（3 枚を選択）");
+    expect(html).toContain("比べ方");
+    expect(html).toContain("詳しい設定");
+    expect(html).toContain("TIFF（16bit）");
+    expect(html).toContain("Adobe RGB (1998)");
+    expect(html).toContain("1 枚目の写真と同じフォルダ");
+    expect(html).toContain("元の写真とスタックにまとめる");
+    // 確認の結果が来るまでは「合成」を押せない。
+    expect(html).toMatch(/<button class="btn primary" disabled="">合成<\/button>/);
+    // カラー比較明は詳しい設定の中（比較暗で開いたときは出さない）。
+    const darken = render(createElement(CompositeDialog, { variantIds: [1, 2], mode: "darken" }));
+    expect(darken).toContain("比較暗合成（2 枚を選択）");
+    expect(darken).not.toContain("カラー比較明合成");
   });
 
   it("切り替え（appStore.dialog）", () => {

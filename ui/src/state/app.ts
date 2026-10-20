@@ -14,6 +14,7 @@ import type {
   CollectionId,
   CollectionKind,
   ColorLabel,
+  CompositeMode,
   CoreEvent,
   CoreSettings,
   CrashReportSummary,
@@ -52,6 +53,8 @@ export type Mode = "grid" | "loupe" | "compare" | "survey" | "develop";
 export type DialogState =
   | { kind: "import" }
   | { kind: "export"; variantIds: VariantId[] }
+  // 比較明・比較暗合成（DEV-34）: 選んだ写真と、最初に選ぶ比べ方。
+  | { kind: "composite"; variantIds: VariantId[]; mode: CompositeMode }
   | { kind: "delete"; deleteKind: DeleteKind; variantIds: VariantId[] }
   | { kind: "paste_settings"; targets: VariantId[] }
   // 処理バージョンをまとめて最新に更新する（DATA-09。写真の右クリックのメニュー）。
@@ -319,6 +322,7 @@ export const JOB_LABEL: Record<JobKind, string> = {
   check_missing: "見つからない写真の確認",
   find_relink_candidates: "再リンクの候補の探索",
   video_proxy: "再生用のファイルの作成",
+  composite: "合成",
 };
 
 const jobWaiters = new Map<number, ((info: JobInfo) => void)[]>();

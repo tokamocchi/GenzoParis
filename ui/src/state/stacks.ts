@@ -305,6 +305,18 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
     case "relink":
       openRelink(actions.targets());
       return;
+    case "composite_lighten":
+    case "composite_darken": {
+      const targets = actions.targets();
+      if (targets.length >= 2) {
+        actions.openDialog({
+          kind: "composite",
+          variantIds: targets,
+          mode: action === "composite_lighten" ? "lighten" : "darken",
+        });
+      }
+      return;
+    }
   }
 }
 

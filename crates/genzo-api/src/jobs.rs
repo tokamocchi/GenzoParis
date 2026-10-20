@@ -281,6 +281,7 @@ impl JobResult {
             JobResult::MoveFiles(r) => r.cancelled,
             JobResult::CheckMissing(r) => r.cancelled,
             JobResult::RelinkCandidates(r) => r.cancelled,
+            JobResult::Composite(r) => r.cancelled,
             _ => false,
         }
     }

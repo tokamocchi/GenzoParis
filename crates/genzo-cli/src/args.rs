@@ -203,6 +203,9 @@ pub enum Command {
     Preset(PresetCommand),
     /// 書き出す（P3 のジョブ。進捗は標準エラー）
     Export(ExportArgs),
+    /// 比較明・比較暗合成（DEV-34。P3 のジョブ）: 選んだ写真を撮影日時の順に現像して画素ごとに比べ、1 枚にして保存し、
+    /// カタログに登録する（既定は 16bit の TIFF・Adobe RGB・1 枚目の写真と同じフォルダ・元の写真とスタックにまとめる）
+    Composite(CompositeArgs),
     /// カタログなしで 1 つのファイルを現像して書き出す（ワーカーで展開する）
     Render(RenderArgs),
     /// 透かしの見本・フォントのフォルダ（EXP-03。カタログは使わない）
@@ -2295,6 +2298,10 @@ pub struct DetailArgs {
     /// 切り抜き後の周辺光量補正のハイライトの保護（0〜100。既定 0。effects.vignette.highlights）
     #[arg(long, value_name = "N")]
     pub vignette_highlights: Option<f32>,
+    /// 切り抜き後の周辺光量補正の中心（`X,Y` で手動の位置。切り抜く前の画像の幅・高さに対する割合（0〜1）。
+    /// `auto` で切り抜きの中心に戻す。effects.vignette.center）
+    #[arg(long, value_name = "X,Y|auto", value_parser = parse_vignette_center)]
+    pub vignette_center: Option<VignetteCenterArg>,
     /// 粒子の量（0〜100。effects.grain.amount）
     #[arg(long, value_name = "N")]
     pub grain_amount: Option<f32>,
@@ -2330,11 +2337,16 @@ impl DetailArgs {
 
     /// どれかを指定したか。
     pub fn any(&self) -> bool {
-        self.fields().iter().any(Option::is_some)
+        self.fields().iter().any(Option::is_some) || self.vignette_center.is_some()
     }
 
     /// 指定した項目を `settings` に当てる（指定しなかった項目は今の値のまま）。
     pub fn apply(&self, settings: &mut genzo_model::DevelopSettings) {
+        match self.vignette_center {
+            Some(VignetteCenterArg::Auto) => settings.effects.vignette.center = None,
+            Some(VignetteCenterArg::Manual(c)) => settings.effects.vignette.center = Some(c),
+            None => {}
+        }
         let p = &mut settings.presence;
         let sh = &mut settings.detail.sharpening;
         let v = &mut settings.effects.vignette;
@@ -2361,6 +2373,35 @@ impl DetailArgs {
                 *dst = value;
             }
         }
+    }
+}
+
+/// `--vignette-center` の指定。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VignetteCenterArg {
+    /// 切り抜きの中心（`auto`）。
+    Auto,
+    /// 手動の位置。
+    Manual(genzo_model::VignetteCenter),
+}
+
+/// `--vignette-center` を解釈する（`auto` か `X,Y`。値の範囲は genzo-model の検証で確かめる）。
+pub fn parse_vignette_center(s: &str) -> Result<VignetteCenterArg, String> {
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("auto") {
+        return Ok(VignetteCenterArg::Auto);
+    }
+    let parsed = t.split_once(',').and_then(|(x, y)| {
+        Some(genzo_model::VignetteCenter {
+            x: x.trim().parse().ok()?,
+            y: y.trim().parse().ok()?,
+        })
+    });
+    match parsed {
+        Some(c) if c.x.is_finite() && c.y.is_finite() => Ok(VignetteCenterArg::Manual(c)),
+        _ => Err(format!(
+            "周辺光量補正の中心は「X,Y」（0〜1 の割合）か「auto」で指定してください（{s}）"
+        )),
     }
 }
 
@@ -2642,6 +2683,62 @@ pub struct ExportOpts {
     /// プリセットの値）
     #[arg(long, value_enum)]
     pub on_conflict: Option<ConflictArg>,
+}
+
+/// 合成の比べ方（DEV-34）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompositeModeArg {
+    /// 比較明（チャンネルごとの最大。Photoshop の「比較（明）」）
+    Lighten,
+    /// 比較暗（チャンネルごとの最小）
+    Darken,
+    /// カラー比較明（輝度が最大の写真の画素をそのまま採る）
+    LighterColor,
+    /// カラー比較暗（輝度が最小の写真の画素をそのまま採る）
+    DarkerColor,
+}
+
+impl From<CompositeModeArg> for genzo_model::CompositeMode {
+    fn from(m: CompositeModeArg) -> Self {
+        match m {
+            CompositeModeArg::Lighten => Self::Lighten,
+            CompositeModeArg::Darken => Self::Darken,
+            CompositeModeArg::LighterColor => Self::LighterColor,
+            CompositeModeArg::DarkerColor => Self::DarkerColor,
+        }
+    }
+}
+
+/// `composite` の引数（DEV-34）。
+#[derive(Debug, Args)]
+pub struct CompositeArgs {
+    /// variant の ID（2 枚以上。動画は除く）
+    #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+    pub variants: Vec<VariantId>,
+    /// 比べ方（省略時は lighten）
+    #[arg(long, value_enum, default_value_t = CompositeModeArg::Lighten)]
+    pub mode: CompositeModeArg,
+    /// 形式（省略時は tiff（16bit））
+    #[arg(long, value_enum)]
+    pub format: Option<FormatArg>,
+    /// JPEG の品質（1〜100。--format jpeg のときだけ）
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub quality: Option<u8>,
+    /// 色空間（比べるのもこの色空間の値。省略時は adobergb）
+    #[arg(long, value_enum)]
+    pub color_space: Option<ColorSpaceArg>,
+    /// 保存先のフォルダ（省略時は 1 枚目（撮影日時が最も早い写真）と同じフォルダ）
+    #[arg(long, value_name = "DIR")]
+    pub out: Option<PathBuf>,
+    /// 元の写真とスタックにまとめない
+    #[arg(long)]
+    pub no_stack: bool,
+    /// GPS 情報を書かない
+    #[arg(long)]
+    pub remove_gps: bool,
+    /// 合成せずに、確認の結果（写真の並び・設定の違い・保存先とファイル名）だけを表示する
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// `export` の引数。
@@ -4058,7 +4155,31 @@ mod tests {
         assert_eq!(s.effects.vignette.feather, 70.0);
         assert_eq!(s.effects.grain.amount, 20.0);
         assert_eq!(s.effects.grain.roughness, 0.0);
+        assert_eq!(
+            s.effects.vignette.center, None,
+            "指定しなければ切り抜きの中心のまま"
+        );
         assert!(parse(&["genzo", "develop", "set", "7", "--clarity", "abc"]).is_err());
+        // 周辺光量補正の中心（手動・auto）。
+        let center = |arg: &str| {
+            let cli = parse(&["genzo", "develop", "set", "7", "--vignette-center", arg])?;
+            let Command::Develop(DevelopCommand::Set { detail, .. }) = cli.command else {
+                panic!()
+            };
+            assert!(detail.any());
+            let mut s = genzo_model::DevelopSettings::default();
+            s.effects.vignette.center = Some(genzo_model::VignetteCenter { x: 0.9, y: 0.9 });
+            detail.apply(&mut s);
+            Ok::<_, clap::Error>(s.effects.vignette.center)
+        };
+        assert_eq!(
+            center("0.25, 0.6").unwrap(),
+            Some(genzo_model::VignetteCenter { x: 0.25, y: 0.6 })
+        );
+        assert_eq!(center("auto").unwrap(), None);
+        for bad in ["0.5", "a,b", "NaN,0.5", ""] {
+            assert!(center(bad).is_err(), "{bad}");
+        }
     }
 
     /// `bench` にも `develop set` と同じ色・外観・シャープ・効果のオプションがある（計測の設定に当てる）。

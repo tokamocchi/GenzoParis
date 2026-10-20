@@ -74,6 +74,7 @@ export const JOB_KIND_LABEL: Record<JobKind, string> = {
   check_missing: "見つからない写真の確認",
   find_relink_candidates: "再リンクの候補の探索",
   video_proxy: "再生用のファイルの作成",
+  composite: "合成",
 };
 
 export const JOB_STATE_LABEL: Record<JobState, string> = {

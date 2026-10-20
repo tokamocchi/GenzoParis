@@ -200,7 +200,25 @@ pub fn export_image(
     desired_path: &Path,
     protected: &ProtectedFiles,
 ) -> Result<WriteOutcome> {
+    export_image_cancellable(image, settings, exif, desired_path, protected, &|| false)
+}
+
+/// [`export_image`] と同じで、取り消しを確かめる（`cancelled` が `true` を返したら [`MediaError::Cancelled`]）。
+///
+/// エンコードの前と、一時ファイルに書き終えて公開（名前の変更）する前に確かめる。取り消したときは一時ファイルを
+/// 消し、何も公開しない（エンコードそのものは途中で止めない）。
+pub fn export_image_cancellable(
+    image: &DynRgbImage,
+    settings: &ExportSettings,
+    exif: Option<&ExifData>,
+    desired_path: &Path,
+    protected: &ProtectedFiles,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<WriteOutcome> {
     settings.validate()?;
+    if cancelled() {
+        return Err(MediaError::Cancelled);
+    }
     let fitted = fit_to_export_size(image, settings)?;
     let exif = exif_for(settings, exif);
     write_atomically(desired_path, settings.on_conflict, protected, |file| {
@@ -211,7 +229,11 @@ pub fn export_image(
             settings.resolution_ppi,
             exif.as_ref(),
             file,
-        )
+        )?;
+        if cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        Ok(())
     })
 }
 
@@ -220,6 +242,39 @@ mod tests {
     use super::*;
     use crate::buffer::{RgbImage8, RgbImage16};
     use genzo_model::{ExportSize, GpsCoord};
+
+    /// 取り消したら、一時ファイルを残さず何も公開しない（エンコードの前・公開の前のどちらでも）。
+    #[test]
+    fn cancelled_export_publishes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = DynRgbImage::Rgb16(RgbImage16::from_raw(4, 2, vec![1000; 4 * 2 * 3]).unwrap());
+        let settings = ExportSettings {
+            format: ExportFormat::Tiff16,
+            ..ExportSettings::default()
+        };
+        let target = dir.path().join("a.tif");
+        let protected = ProtectedFiles::new();
+        // 最初から取り消している。
+        let r = export_image_cancellable(&img, &settings, None, &target, &protected, &|| true);
+        assert!(matches!(r, Err(MediaError::Cancelled)), "{r:?}");
+        // 書き終えた後（2 回目の確認）で取り消す。
+        let calls = std::cell::Cell::new(0);
+        let r = export_image_cancellable(&img, &settings, None, &target, &protected, &|| {
+            calls.set(calls.get() + 1);
+            calls.get() >= 2
+        });
+        assert!(matches!(r, Err(MediaError::Cancelled)), "{r:?}");
+        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "何も残さない"
+        );
+        // 取り消さなければ書く。
+        let r = export_image_cancellable(&img, &settings, None, &target, &protected, &|| false);
+        assert!(matches!(r, Ok(WriteOutcome::Written { .. })), "{r:?}");
+        assert!(target.exists());
+    }
 
     #[test]
     fn profile_mapping() {
