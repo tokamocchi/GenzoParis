@@ -93,6 +93,41 @@ export function vcpkgDllOwners(lists, triplet) {
 }
 
 /**
+ * vcpkg が port をビルドしたときに記録する ABI の情報（`installed/<triplet>/share/<port>/vcpkg_abi_info.txt`。
+ * 1 行に「キー 値」。port のフォルダのファイルは、キーが port のフォルダからの相対のパス、値がその SHA-256）を読む。
+ *
+ * @param {string} text
+ * @returns {Map<string, string>}
+ */
+export function parseVcpkgAbiInfo(text) {
+  const out = new Map();
+  for (const line of text.split(/\r?\n/)) {
+    const i = line.indexOf(" ");
+    if (i > 0) out.set(line.slice(0, i), line.slice(i + 1).trim());
+  }
+  return out;
+}
+
+/**
+ * 今の ports/<port> のファイルが、入っている port をビルドしたときのもの（ABI の情報）と同じか。違う・記録のない
+ * ファイルの相対のパスを返す（空なら同じ）。vcpkg を更新したのに port を入れ直していないと、ports の vcpkg.json の
+ * ライセンスの表示・portfile が、同梱するもののビルドと食い違うため。
+ *
+ * @param {Map<string, string>} abi parseVcpkgAbiInfo の結果
+ * @param {Array<{ file: string, sha256: string }>} portFiles port のフォルダのファイル（相対のパスは "/" 区切り）
+ * @returns {string[]}
+ */
+export function changedVcpkgPortFiles(abi, portFiles) {
+  return portFiles
+    .filter((f) => {
+      const recorded = abi.get(f.file) ?? abi.get(f.file.replaceAll("/", "\\"));
+      return recorded === undefined || recorded.toLowerCase() !== f.sha256.toLowerCase();
+    })
+    .map((f) => f.file)
+    .sort(compareNatural);
+}
+
+/**
  * vcpkg の port の vcpkg.json から、ライセンスの表示・ホームページ・版（port-version を `#` で付ける）を読む。
  *
  * @param {any} manifest

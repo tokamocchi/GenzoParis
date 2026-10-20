@@ -116,6 +116,14 @@ test("Windows: 同梱した DLL を入れた vcpkg の port と著作権の文�
         `vcpkg_from_github(\n OUT_SOURCE_PATH C\n REPO LibRaw/LibRaw-cmake\n REF eb98e43\n SHA512 ${sha512(cmake)}\n PATCHES a.patch\n)\n`,
     );
 
+    // vcpkg がビルドしたときの port のファイルの SHA-256（vcpkg_abi_info.txt）。
+    const sha256 = (rel) => createHash("sha256").update(fs.readFileSync(path.join(root, ...rel.split("/")))).digest("hex");
+    write(
+      "installed/x64-windows/share/libraw/vcpkg_abi_info.txt",
+      `cmake 3.31\nportfile.cmake ${sha256("ports/libraw/portfile.cmake")}\nvcpkg.json ${sha256("ports/libraw/vcpkg.json")}\n`,
+    );
+    write("installed/x64-windows/share/zlib/vcpkg_abi_info.txt", `vcpkg.json ${sha256("ports/zlib/vcpkg.json")}\n`);
+
     const libs = [
       { name: "raw_r.dll", source: path.join(root, "installed", "x64-windows", "bin", "raw_r.dll") },
       { name: "Z.dll", source: path.join(root, "installed", "x64-windows", "bin", "z.dll") },
@@ -132,6 +140,14 @@ test("Windows: 同梱した DLL を入れた vcpkg の port と著作権の文�
     // 持ち主の分からない DLL・vcpkg でない LibRaw では止める。
     assert.throws(() => nativeComponentsWindows([{ name: "other.dll", source: "x" }], root, "x64-windows", {}), /other\.dll を入れた vcpkg の port が分からない/);
     assert.throws(() => nativeComponentsWindows(libs, null, "x64-windows", {}), /vcpkg の LibRaw を使う/);
+    // ports のファイルが、入っているものをビルドしたときと違えば止める（vcpkg を更新して入れ直していない）。
+    const zlibManifest = fs.readFileSync(path.join(root, "ports/zlib/vcpkg.json"), "utf8");
+    write("ports/zlib/vcpkg.json", JSON.stringify({ name: "zlib", version: "1.3.2", "port-version": 3, license: "Zlib" }));
+    assert.throws(() => nativeComponentsWindows(libs, root, "x64-windows", {}), /入っている zlib が違う.*ビルドしたときと違うファイル: vcpkg\.json/);
+    write("ports/zlib/vcpkg.json", JSON.stringify({ name: "zlib", version: "1.3.3", license: "Zlib" }));
+    assert.throws(() => nativeComponentsWindows(libs, root, "x64-windows", {}), /入っている版 1\.3\.2、ports の版 1\.3\.3/);
+    write("ports/zlib/vcpkg.json", zlibManifest);
+    assert.equal(nativeComponentsWindows(libs, root, "x64-windows", {}).length, 2);
 
     assert.deepEqual(collectLibrawSource("windows", out, components, root, {}), [
       "LibRaw-LibRaw-0.22.2.tar.gz",

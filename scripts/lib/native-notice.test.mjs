@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import {
   IJG_STATEMENT,
+  changedVcpkgPortFiles,
   formatNativeNotices,
   githubArchiveUrl,
   homebrewFormulaInfo,
@@ -13,6 +14,7 @@ import {
   mergeComponents,
   needsIjgStatement,
   parseCellarPath,
+  parseVcpkgAbiInfo,
   parseVcpkgFromGithub,
   parseVcpkgListName,
   vcRedistFolderLabel,
@@ -50,6 +52,25 @@ test("vcpkg: info の一覧から、DLL の持ち主の port を決める", () =
     version: "2.19.1#1",
   });
   assert.deepEqual(vcpkgPortInfo({}), { license: null, homepage: null, version: null });
+});
+
+test("vcpkg: ABI の情報の port のファイルの SHA-256 と、今の ports のファイルを比べる", () => {
+  const abi = parseVcpkgAbiInfo(
+    "cmake 3.31.6\nfeatures core\nportfile.cmake AAA111\npatches\\fix.patch bbb222\nvcpkg.json ccc333\nvcpkg_from_github 0123\r\n",
+  );
+  assert.equal(abi.get("portfile.cmake"), "AAA111");
+  assert.equal(abi.get("vcpkg_from_github"), "0123");
+  const files = [
+    { file: "portfile.cmake", sha256: "aaa111" },
+    { file: "patches/fix.patch", sha256: "bbb222" },
+    { file: "vcpkg.json", sha256: "ccc333" },
+  ];
+  assert.deepEqual(changedVcpkgPortFiles(abi, files), []);
+  // 中身が変わったファイル・記録のないファイルを返す。
+  assert.deepEqual(
+    changedVcpkgPortFiles(abi, [...files.slice(0, 2), { file: "vcpkg.json", sha256: "ddd444" }, { file: "usage", sha256: "eee" }]),
+    ["usage", "vcpkg.json"],
+  );
 });
 
 test("vcpkg: portfile の vcpkg_from_github を読み、downloads のファイルの名前と URL を作る", () => {

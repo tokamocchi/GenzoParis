@@ -92,11 +92,13 @@ import {
   NATIVE_NOTICES_BUILD_PATH,
   NATIVE_NOTICES_TARGET_PATH,
   formatNativeNotices,
+  changedVcpkgPortFiles,
   githubArchiveUrl,
   homebrewFormulaInfo,
   isNativeLicenseFile,
   kegUpstreamVersion,
   parseCellarPath,
+  parseVcpkgAbiInfo,
   parseVcpkgFromGithub,
   vcRedistFolderLabel,
   vcpkgArchiveName,
@@ -663,13 +665,12 @@ export function nativeComponentsWindows(libs, vcpkgRoot, triplet, env) {
     if (!owner) {
       throw new Error(`同梱する ${lib.name} を入れた vcpkg の port が分からない（${infoDir} の *_${triplet}.list にない）`);
     }
-    const copyright = path.join(vcpkgRoot, "installed", triplet, "share", owner.port, "copyright");
-    const manifest = path.join(vcpkgRoot, "ports", owner.port, "vcpkg.json");
+    const share = path.join(vcpkgRoot, "installed", triplet, "share", owner.port);
+    const copyright = path.join(share, "copyright");
+    const portDir = path.join(vcpkgRoot, "ports", owner.port);
+    const manifest = path.join(portDir, "vcpkg.json");
     const info = vcpkgPortInfo(fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, "utf8")) : null);
-    const base = (v) => v.replace(/#\d+$/, "");
-    if (info.version && base(info.version) !== base(owner.version)) {
-      console.warn(`警告: vcpkg の ${owner.port} は ${owner.version} が入っているが、ports の版は ${info.version}（ライセンスの表示は ports のもの）`);
-    }
+    checkVcpkgPortIsInstalledOne(owner, info, portDir, path.join(share, "vcpkg_abi_info.txt"));
     return {
       name: owner.port,
       version: owner.version,
@@ -681,6 +682,32 @@ export function nativeComponentsWindows(libs, vcpkgRoot, triplet, env) {
       texts: fs.existsSync(copyright) ? [{ file: `share/${owner.port}/copyright`, text: readLicenseText(copyright) }] : [],
     };
   });
+}
+
+/**
+ * Windows: ports/<port>（ライセンスの表示・portfile を読む）が、入っている port をビルドしたときのものと同じかを
+ * 確かめる（違えば止める。vcpkg を更新したのに port を入れ直していないと、文書がビルドと食い違うため）。
+ * vcpkg の ABI の情報（vcpkg_abi_info.txt）の port のファイルの SHA-256 と比べる。ABI の情報がなければ版だけを比べる
+ * （info の一覧の名前の版には port-version が入らない）。
+ *
+ * @param {{ port: string, version: string }} owner
+ * @param {{ version: string | null }} info ports の vcpkg.json
+ * @param {string} portDir
+ * @param {string} abiFile
+ */
+function checkVcpkgPortIsInstalledOne(owner, info, portDir, abiFile) {
+  const hint = `vcpkg の ports と入っている ${owner.port} が違う。vcpkg install（または vcpkg upgrade）し直す`;
+  const base = (v) => v.replace(/#\d+$/, "");
+  if (!info.version || base(info.version) !== base(owner.version)) {
+    throw new Error(`${hint}（入っている版 ${owner.version}、ports の版 ${info.version ?? "不明"}）`);
+  }
+  if (!fs.existsSync(abiFile)) {
+    console.warn(`警告: ${abiFile} がなく、ports の ${owner.port} のファイルが入っているものと同じかは版だけで確かめた`);
+    return;
+  }
+  const portFiles = listFiles(portDir).map((f) => ({ file: f, sha256: fileHash(path.join(portDir, ...f.split("/")), "sha256") }));
+  const changed = changedVcpkgPortFiles(parseVcpkgAbiInfo(fs.readFileSync(abiFile, "utf8")), portFiles);
+  if (changed.length > 0) throw new Error(`${hint}（ビルドしたときと違うファイル: ${changed.join(", ")}）`);
 }
 
 /**
