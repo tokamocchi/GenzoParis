@@ -553,7 +553,11 @@ function MapOffline(props: { preferences: MapPreferences }) {
     return (
       <div className="dlg-row" style={{ marginBottom: 6 }}>
         <span className="hint dlg-grow">
-          地図で選ぶ・地名で検索するには、オンラインの地図（OpenStreetMap）を有効にします（今は無効で、外部と通信しません）。
+          {/* 地名の検索は、オンラインの地図を有効にするだけでは使えない（検索サービスがあるときだけ。searchService）。 */}
+          {searchService(props.preferences).kind === "none"
+            ? "地図で選ぶには、オンラインの地図（OpenStreetMap）を有効にします（今は無効で、外部と通信しません。地名で検索" +
+              "するには、設定の「一般」で検索サービスも選びます）。"
+            : "地図で選ぶ・地名で検索するには、オンラインの地図（OpenStreetMap）を有効にします（今は無効で、外部と通信しません）。"}
         </span>
         <button type="button" className="btn small" onClick={() => setOpen(true)}>
           オンラインの地図について…

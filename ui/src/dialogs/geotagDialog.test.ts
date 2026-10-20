@@ -202,9 +202,19 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
       expect(html).toContain("オンラインの地図について…");
       expect(html).not.toContain("geo-map");
       expect(html).not.toContain("地名の検索");
+      // 検索のサービスがない（既定）ので、有効にするだけで地名で検索できるとは書かない。
+      expect(html).toContain("地図で選ぶには、オンラインの地図（OpenStreetMap）を有効にします");
+      expect(html).not.toContain("地図で選ぶ・地名で検索するには");
       expect(html).toContain("座標（緯度, 経度）");
       expect(html).toContain("座標はこのパソコンの中で読み、外部には送りません。");
     }
+  });
+
+  it("無効で検索のサービスがある（公開の Nominatim が ON）: 案内に地名で検索できることも書く", () => {
+    appStore.set({ status: mockAppStatus({ ...DEFAULT_MAP_PREFERENCES, public_nominatim: true }) });
+    const html = dialog();
+    expect(html).toContain("地図で選ぶ・地名で検索するには、オンラインの地図（OpenStreetMap）を有効にします");
+    expect(html).not.toContain("geo-map");
   });
 
   it("有効: 地名の検索・地図（読み込みの前）・右下の帰属の表示・地図の誤りの報告・印の説明", () => {
