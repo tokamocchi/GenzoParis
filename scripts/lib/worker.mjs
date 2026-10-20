@@ -710,8 +710,8 @@ export function nativeComponentsWindows(libs, vcpkgRoot, triplet, env) {
 /**
  * Windows: ports/<port>（ライセンスの表示・portfile を読む）が、入っている port をビルドしたときのものと同じかを
  * 確かめる（違えば止める。vcpkg を更新したのに port を入れ直していないと、文書がビルドと食い違うため）。
- * vcpkg の ABI の情報（vcpkg_abi_info.txt）の port のファイルの SHA-256 と比べる。ABI の情報がなければ版だけを比べる
- * （info の一覧の名前の版には port-version が入らない）。
+ * vcpkg の ABI の情報（vcpkg_abi_info.txt）の port のファイルの SHA-256 と比べる。ABI の情報がなければ止める（info の
+ * 一覧の名前の版には port-version が入らず、版だけでは port の定義の違いを見分けられないため）。
  *
  * @param {{ port: string, version: string }} owner
  * @param {{ version: string | null }} info ports の vcpkg.json
@@ -725,8 +725,8 @@ function checkVcpkgPortIsInstalledOne(owner, info, portDir, abiFile) {
     throw new Error(`${hint}（入っている版 ${owner.version}、ports の版 ${info.version ?? "不明"}）`);
   }
   if (!fs.existsSync(abiFile)) {
-    console.warn(`警告: ${abiFile} がなく、ports の ${owner.port} のファイルが入っているものと同じかは版だけで確かめた`);
-    return;
+    // 版だけでは port-version の違い（同じ上流の版で、port の定義・パッチが違う）を見分けられないので止める。
+    throw new Error(`${hint}（${abiFile} がなく、ports のファイルが入っているものと同じかを確かめられない）`);
   }
   const portFiles = listFiles(portDir).map((f) => ({ file: f, sha256: fileHash(path.join(portDir, ...f.split("/")), "sha256") }));
   const changed = changedVcpkgPortFiles(parseVcpkgAbiInfo(fs.readFileSync(abiFile, "utf8")), portFiles);

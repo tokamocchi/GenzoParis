@@ -157,6 +157,12 @@ test("Windows: 同梱した DLL を入れた vcpkg の port と著作権の文�
     assert.throws(() => nativeComponentsWindows(libs, root, "x64-windows", {}), /入っている版 1\.3\.2、ports の版 1\.3\.3/);
     write("ports/zlib/vcpkg.json", zlibManifest);
     assert.equal(nativeComponentsWindows(libs, root, "x64-windows", {}).length, 2);
+    // ABI の情報がなければ、版が同じでも止める（port-version の違いを見分けられない）。
+    const abi = path.join(root, "installed", "x64-windows", "share", "zlib", "vcpkg_abi_info.txt");
+    const abiText = fs.readFileSync(abi, "utf8");
+    fs.rmSync(abi);
+    assert.throws(() => nativeComponentsWindows(libs, root, "x64-windows", {}), /vcpkg_abi_info\.txt がなく/);
+    fs.writeFileSync(abi, abiText);
 
     assert.deepEqual(collectLibrawSource("windows", out, components, root, {}), [
       "LibRaw-LibRaw-0.22.2.tar.gz",
