@@ -157,6 +157,9 @@ fn join_query(base: &str, query: &str) -> String {
 /// - 置換子を数に置き換えた URL が、要求に使う http の URI として読める（パスの `<`・`>`・`` ` `` や、問い合わせの
 ///   `"`・`<`・`>` は不可。長すぎる URL も不可）。読めない URL を保存すると、要求のたびに「URL を読めません」に
 ///   なるため。
+/// - パスの拡張子が PNG でない画像・ベクトルのタイルのもの（`.jpg`・`.jpeg`・`.webp`・`.gif`・`.avif`・`.pbf`・
+///   `.mvt`）は不可（扱うのは PNG のタイルだけ。保存した後にすべてのタイルが 502 になるのを避ける目安。拡張子の
+///   ない URL は、応答の `Content-Type` と署名で確かめる）。
 pub fn validate_tile_url_template(template: &str) -> Result<(), GeoError> {
     check_https_url(template, "タイルの URL")?;
     let mut rest = template.to_string();
@@ -174,6 +177,19 @@ pub fn validate_tile_url_template(template: &str) -> Result<(), GeoError> {
                 .to_string(),
         ));
     }
+    let path = template.split(['?', '#']).next().unwrap_or("");
+    let extension = path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    if let Some(ext) = extension
+        && NOT_PNG_EXTENSIONS.contains(&ext.as_str())
+    {
+        return Err(GeoError::InvalidInput(format!(
+            "タイルの URL: PNG のタイルだけを使えます（.{ext} のタイルは使えません）"
+        )));
+    }
     // 実際に送る形（番号は桁のいちばん多いもの）で確かめる。
     let max = ((1u32 << MAX_ZOOM_LIMIT) - 1).to_string();
     let sample = template
@@ -182,6 +198,9 @@ pub fn validate_tile_url_template(template: &str) -> Result<(), GeoError> {
         .replace("{y}", &max);
     check_request_uri(&sample, "タイルの URL")
 }
+
+/// PNG でないタイルの拡張子（[`validate_tile_url_template`]）。
+const NOT_PNG_EXTENSIONS: [&str; 7] = ["jpg", "jpeg", "webp", "gif", "avif", "pbf", "mvt"];
 
 /// 検索の URL を確かめる（`https://` で始まり、ホスト名がある。置換子 `{…}` は不可。検索のパラメータを足した
 /// URL が http の URI として読める）。
@@ -356,6 +375,31 @@ mod tests {
             validate_tile_url_template(&long),
             Err(GeoError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn tile_templates_for_other_image_kinds_are_rejected() {
+        // 扱うのは PNG のタイルだけ（応答の Content-Type と署名で確かめる）。拡張子でわかる別の種類は、保存の
+        // ときに止める（保存した後にすべてのタイルが 502 になり、原因がわからないため）。
+        for ng in [
+            "https://tiles.example.org/{z}/{x}/{y}.jpg",
+            "https://tiles.example.org/{z}/{x}/{y}.JPEG?key=abc",
+            "https://tiles.example.org/{z}/{x}/{y}.webp",
+            "https://tiles.example.org/{z}/{x}/{y}.pbf",
+            "https://tiles.example.org/{z}/{x}/{y}.mvt",
+        ] {
+            let e = validate_tile_url_template(ng).unwrap_err();
+            assert!(e.to_string().contains("PNG"), "{ng}: {e}");
+        }
+        for ok in [
+            "https://tiles.example.org/{z}/{x}/{y}.png",
+            "https://tiles.example.org/{z}/{x}/{y}.PNG",
+            "https://tiles.example.org/{z}/{x}/{y}",
+            "https://tiles.example.org/{z}/{x}/{y}@2x.png",
+            "https://tiles.example.org/jpg/{z}/{x}/{y}.png?format=png",
+        ] {
+            assert!(validate_tile_url_template(ok).is_ok(), "{ok}");
+        }
     }
 
     #[test]
