@@ -225,6 +225,10 @@ jobs:
           }
           # 同梱した C / C++ のライブラリのライセンスの文書（scripts/lib/native-notice.mjs）がインストール先にあり、
           # 同梱の一覧の DLL がすべて載っているか。LibRaw のソースのアーカイブ（licenses\LibRaw\source）があるか。
+          # Visual C++ のランタイムの使用条件（インストーラーで同意を求めたもの。scripts/lib/worker.mjs）。
+          if (-not (Test-Path (Join-Path $dir 'licenses\third-party\vcruntime-terms.txt'))) {
+            throw "Visual C++ のランタイムの使用条件 licenses\third-party\vcruntime-terms.txt がインストール先にない"
+          }
           $nativeFile = Join-Path $dir 'licenses\third-party\native.txt'
           if (-not (Test-Path $nativeFile)) { throw "ライセンスの文書 licenses\third-party\native.txt がインストール先にない" }
           $native = Get-Content $nativeFile -Raw -Encoding utf8

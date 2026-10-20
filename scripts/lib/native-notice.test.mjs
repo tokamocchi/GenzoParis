@@ -1,10 +1,17 @@
 // native-notice.mjs のテスト（node --test）。
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
+
+import { APP_DIR, REPO_ROOT } from "./proc.mjs";
 
 import {
   IJG_STATEMENT,
+  VCRUNTIME_TERMS_SOURCE,
+  VCRUNTIME_TERMS_TARGET,
+  installerLicenseText,
   changedVcpkgPortFiles,
   formatNativeNotices,
   githubArchiveUrl,
@@ -221,6 +228,7 @@ test("文書: パッケージごとにまとめ、libjpeg を含むときは IJG
   assert.match(win, /\n  MSVCP140\.dll: Microsoft Visual C\+\+ のランタイム/);
   assert.match(win, /\n3\. Microsoft Visual C\+\+ のランタイム \/ Microsoft Visual C\+\+ Runtime\n/);
   assert.match(win, /VC\\Redist\\MSVC\\14\.51\.36231\\x64\\Microsoft\.VC145\.CRT/);
+  assert.ok(win.includes(`使用条件 / Terms of use: ${VCRUNTIME_TERMS_TARGET}`));
   assert.match(win, /ライセンス \/ License: （入手元に表示なし/);
 });
 
@@ -242,4 +250,35 @@ test("文書: ライセンスの文書が見つからないパッケージがあ
       ]),
     /libomp\.dylib（libomp 23\.1\.3）のライセンスの文書が見つからない/,
   );
+});
+
+
+test("Visual C++ のランタイムの使用条件と、インストーラーの同意の画面の文書", () => {
+  const terms = fs.readFileSync(path.join(APP_DIR, VCRUNTIME_TERMS_SOURCE), "utf8");
+  // Microsoft の Distributable Code の条件に対応する条項（docs/license_compliance.md の 4 章の 1）。
+  for (const phrase of [
+    "GenzoParis を動かすためにだけ使う",
+    "リバースエンジニアリング",
+    "表示を、取り除く",
+    "GenzoParis から切り離して単独で配布",
+    "この条件と同じ以上に Microsoft のファイルを保護する条件",
+    "輸出・制裁に関する法令",
+    "あなたに認める権利を制限するものではありません",
+    "5.00 米ドル",
+    "text prevails",
+  ]) {
+    assert.ok(terms.includes(phrase), phrase);
+  }
+  assert.ok(!terms.includes("\r"), "リポジトリの文書は LF");
+
+  const text = installerLicenseText(terms, "GNU GENERAL PUBLIC LICENSE\nVersion 3\n");
+  assert.ok(text.startsWith("GenzoParis のインストール / Installing GenzoParis\r\n"));
+  assert.ok(!/[^\r]\n/.test(text), "改行はすべて CRLF");
+  assert.ok(text.endsWith("Version 3\r\n"));
+  assert.ok(text.indexOf("Microsoft Visual C++ のランタイムのファイルの使用条件") < text.indexOf("GNU GENERAL PUBLIC LICENSE"));
+  assert.match(text, /「同意する」は、1 の条件への同意です。/);
+  assert.match(text, /GPL-3\.0 の 9 条/);
+  // リポジトリの GPL-3.0 の全文を、そのまま後ろに付けられる。
+  const gpl = fs.readFileSync(path.join(REPO_ROOT, "LICENSE"), "utf8");
+  assert.match(installerLicenseText(terms, gpl), /END OF TERMS AND CONDITIONS/);
 });

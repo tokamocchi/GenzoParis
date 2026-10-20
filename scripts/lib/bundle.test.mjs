@@ -134,6 +134,13 @@ test("同梱するライブラリの Tauri の設定", () => {
   assert.deepEqual(libsTauriConfig("macos", ["libraw_r.24.dylib"], { resources }), {
     bundle: { macOS: { frameworks: ["binaries/libs/libraw_r.24.dylib"] }, resources },
   });
+  // インストーラーの同意の画面の文書を差し替えるとき（Windows だけ）。
+  assert.deepEqual(libsTauriConfig("windows", ["raw_r.dll"], { licenseFile: "binaries/installer-license.txt" }), {
+    bundle: { resources: { "binaries/libs/raw_r.dll": "raw_r.dll" }, licenseFile: "binaries/installer-license.txt" },
+  });
+  assert.deepEqual(libsTauriConfig("macos", ["libraw_r.24.dylib"], { licenseFile: "x" }), {
+    bundle: { macOS: { frameworks: ["binaries/libs/libraw_r.24.dylib"] } },
+  });
   assert.deepEqual(libsTauriConfig("linux", ["x.so"], { resources }), {});
   assert.deepEqual(libsTauriConfig("macos", [], {}), {});
   assert.deepEqual(libsTauriConfig("linux", ["x.so"]), {});

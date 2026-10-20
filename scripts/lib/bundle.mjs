@@ -158,16 +158,23 @@ export function isVcRedistFolder(name) {
  * `resources` は、Windows・macOS で `bundle.resources` に足す対応表（LibRaw のライセンスの文書と案内。
  * scripts/lib/notice.mjs。Windows はインストール先、macOS は .app の Contents/Resources からの場所）。
  *
+ * Windows で `licenseFile` を渡したときは、インストーラー（NSIS）の同意の画面の文書（`bundle.licenseFile`。
+ * tauri.conf.json では GPL-3.0 の全文）を差し替える（Visual C++ のランタイムの使用条件。scripts/lib/worker.mjs）。
+ *
  * @param {"windows" | "macos" | "linux" | "other"} os
  * @param {string[]} fileNames 同梱するファイルの名前（LIBS_DIR の中）
- * @param {{ minimumSystemVersion?: string, resources?: Record<string, string> }} [options]
+ * @param {{ minimumSystemVersion?: string, resources?: Record<string, string>, licenseFile?: string }} [options]
  */
 export function libsTauriConfig(os, fileNames, options = {}) {
   const sorted = [...fileNames].sort();
   const extra = options.resources ?? {};
   if (os === "windows") {
     const resources = { ...Object.fromEntries(sorted.map((n) => [`${LIBS_DIR}/${n}`, n])), ...extra };
-    return Object.keys(resources).length === 0 ? {} : { bundle: { resources } };
+    /** @type {{ resources?: Record<string, string>, licenseFile?: string }} */
+    const bundle = {};
+    if (Object.keys(resources).length > 0) bundle.resources = resources;
+    if (options.licenseFile) bundle.licenseFile = options.licenseFile;
+    return Object.keys(bundle).length === 0 ? {} : { bundle };
   }
   if (os === "macos") {
     /** @type {{ frameworks?: string[], minimumSystemVersion?: string }} */

@@ -1,0 +1,152 @@
+Microsoft Visual C++ のランタイムのファイルの使用条件
+Terms of Use for the Microsoft Visual C++ Runtime Files
+================================================================================
+
+この文書は、GenzoParis の Windows 版と一緒に配布する Microsoft Corporation のファイルを使うための条件です。
+インストールの画面で「同意する」を選ぶ前に、読んでください。
+
+1. 対象
+  この条件の対象は、GenzoParis のインストール先のフォルダに置かれる、Microsoft Visual C++ のランタイムの
+  ファイルです（VCRUNTIME140.dll・VCRUNTIME140_1.dll・MSVCP140.dll など。GenzoParis のビルドに使った
+  Microsoft Visual Studio の再頒布用のファイルを、変更せずに入れたもの。以下「Microsoft のファイル」）。
+  同梱したファイルの一覧は、licenses\third-party\native.txt の「Microsoft Visual C++ のランタイム」の章に
+  あります。
+  Microsoft のファイルの権利は、Microsoft Corporation とその供給者にあります。この条件によって、Microsoft の
+  ファイルの所有権その他の権利が、あなたに移ることはありません。
+
+2. GenzoParis とほかのソフトウェアとの関係
+  この条件は、Microsoft のファイルにだけ適用されます。GenzoParis 自体には GNU General Public License
+  version 3 またはそれ以降の版（GPL-3.0-or-later）が、そのほかの第三者のソフトウェアにはそれぞれの
+  ライセンスが適用されます（インストール先の licenses フォルダ）。この条件は、それらのライセンスが
+  あなたに認める権利を制限するものではありません。
+
+3. 使い方の制限
+  あなたは、Microsoft のファイルを、GenzoParis を動かすためにだけ使うことができます。次のことは
+  できません。
+  (a) Microsoft のファイルを変更すること
+  (b) Microsoft のファイルの技術的な制限を回避すること
+  (c) Microsoft のファイルをリバースエンジニアリング・逆コンパイル・逆アセンブルすること、その他の方法で
+      ソースコードを導こうとすること（適用される法令、または Microsoft のファイルに含まれるオープンソースの
+      部品のライセンスが認める範囲を除きます）
+  (d) Microsoft のファイルにある、Microsoft またはその供給者の表示を、取り除く・目立たなくする・妨げる・
+      変更すること
+  (e) Microsoft のファイルを、GenzoParis から切り離して単独で配布・公開・貸与・リースすること、または
+      GenzoParis 以外のアプリケーションと組み合わせて、他の人に使わせること
+  (f) 法令に反する方法で、Microsoft のファイルを使うこと
+  (g) Microsoft の商標を、GenzoParis が Microsoft から提供されている、または Microsoft が GenzoParis を
+      推奨しているかのように使うこと
+
+4. 再配布
+  Microsoft のファイルを含めて GenzoParis を再配布する（インストーラーや、インストール先のフォルダの写しを
+  配る場合を含みます）ときは、次のことを守ってください。
+  (a) Microsoft のファイルを変更せず、GenzoParis の一部としてだけ配布すること
+  (b) 受け取る人に、この条件、またはこの条件と同じ以上に Microsoft のファイルを保護する条件に、同意して
+      もらうこと
+  Microsoft のファイルを含めずに GenzoParis を配布する場合（ソースコードを配布する場合を含みます）は、
+  この 4 の条件はかかりません。
+
+5. 他の人のためのインストール
+  他の人が使うコンピューターにインストールする場合（画面を表示しない方法でインストールする場合を
+  含みます）は、インストールする人が、使う人にこの条件を示し、同意を得てください。
+
+6. 輸出に関する法令
+  Microsoft のファイルには、米国その他の国や地域の、輸出・制裁に関する法令が適用されることがあります。
+  あなたは、Microsoft のファイルに適用されるそれらの法令を守ってください。
+
+7. 保証の否認
+  Microsoft のファイルは「現状のまま」提供されます。Microsoft とその供給者、および GenzoParis の配布者は、
+  Microsoft のファイルについて、明示・黙示を問わず保証をしません。適用される法令で認められる範囲で、
+  商品性、特定の目的への適合性、権利を侵害しないことの黙示の保証も除きます。
+
+8. 責任の制限
+  適用される法令で認められる範囲で、Microsoft のファイルに関して、あなたが Microsoft とその供給者に
+  請求できるのは、直接の損害について 5.00 米ドルまでです。結果的な損害、逸失利益、特別の損害、間接的な
+  損害、付随的な損害は請求できません。この制限は、Microsoft が損害の可能性を知っていた、または知り得た
+  場合にも適用されます。GenzoParis の配布者も、適用される法令で認められる範囲で、Microsoft のファイルに
+  関する損害について責任を負いません。
+
+9. 条件の終了
+  この条件に違反した場合、Microsoft のファイルを使う権利は終了します。
+
+10. 同意
+  インストールの画面で「同意する」を選んでインストールを続けると、この条件に同意したことになります。
+  同意しない場合は、インストールを中止してください。
+
+11. 言語
+  英語の文は参考の訳です。日本語の文と英語の文に違いがあるときは、日本語の文によります。
+
+--------------------------------------------------------------------------------
+Terms of Use for the Microsoft Visual C++ Runtime Files (English translation for reference)
+
+These terms govern your use of the Microsoft Corporation files distributed with the Windows version of
+GenzoParis. Please read them before selecting "I Agree" in the installer.
+
+1. Scope
+  These terms apply to the Microsoft Visual C++ runtime files placed in the GenzoParis installation folder
+  (such as VCRUNTIME140.dll, VCRUNTIME140_1.dll and MSVCP140.dll, copied unmodified from the redistributable
+  files of the Microsoft Visual Studio used to build GenzoParis; the "Microsoft Files"). The list of bundled
+  files is in the "Microsoft Visual C++ Runtime" section of licenses\third-party\native.txt.
+  The Microsoft Files are owned by Microsoft Corporation and its suppliers. These terms do not transfer
+  ownership of, or any other rights in, the Microsoft Files to you.
+
+2. Relationship to GenzoParis and other software
+  These terms apply only to the Microsoft Files. GenzoParis itself is licensed under the GNU General Public
+  License version 3 or any later version (GPL-3.0-or-later), and other third-party software is licensed under
+  its own license (see the licenses folder in the installation folder). These terms do not restrict any rights
+  granted to you under those licenses.
+
+3. Restrictions
+  You may use the Microsoft Files only to run GenzoParis. You may not:
+  (a) modify the Microsoft Files;
+  (b) work around any technical limitations in the Microsoft Files;
+  (c) reverse engineer, decompile or disassemble the Microsoft Files, or otherwise attempt to derive their
+      source code, except to the extent permitted by applicable law or by the license terms of open source
+      components included in the Microsoft Files;
+  (d) remove, minimize, block or modify any notices of Microsoft or its suppliers in the Microsoft Files;
+  (e) distribute, publish, rent or lease the Microsoft Files on their own, separately from GenzoParis, or
+      combine them with any application other than GenzoParis for others to use;
+  (f) use the Microsoft Files in any way that is against the law; or
+  (g) use Microsoft's trademarks in a way that suggests that GenzoParis comes from or is endorsed by
+      Microsoft.
+
+4. Redistribution
+  If you redistribute GenzoParis together with the Microsoft Files (including copies of the installer or of
+  the installation folder), you must:
+  (a) distribute the Microsoft Files unmodified and only as part of GenzoParis; and
+  (b) require the recipients to agree to these terms, or to terms that protect the Microsoft Files at least
+      as much as these terms.
+  This section 4 does not apply when you distribute GenzoParis without the Microsoft Files (including
+  distribution of its source code).
+
+5. Installation for others
+  If you install GenzoParis on a computer used by another person (including installation without showing
+  the installer's pages), you must present these terms to that person and obtain their agreement.
+
+6. Export laws
+  The Microsoft Files may be subject to export and sanctions laws of the United States and other countries
+  or regions. You must comply with those laws as they apply to the Microsoft Files.
+
+7. Disclaimer of warranty
+  The Microsoft Files are provided "as is". Microsoft and its suppliers, and the distributor of GenzoParis,
+  give no express or implied warranties for the Microsoft Files. To the extent permitted by applicable law,
+  the implied warranties of merchantability, fitness for a particular purpose and non-infringement are
+  excluded.
+
+8. Limitation on damages
+  To the extent permitted by applicable law, you can recover from Microsoft and its suppliers only direct
+  damages up to U.S. $5.00 in connection with the Microsoft Files. You cannot recover any other damages,
+  including consequential, lost profits, special, indirect or incidental damages. This limitation applies
+  even if Microsoft knew or should have known about the possibility of the damages. To the extent permitted
+  by applicable law, the distributor of GenzoParis is not liable for any damages in connection with the
+  Microsoft Files either.
+
+9. Termination
+  If you breach these terms, your right to use the Microsoft Files terminates.
+
+10. Agreement
+  By selecting "I Agree" in the installer and continuing the installation, you agree to these terms. If you
+  do not agree, cancel the installation.
+
+11. Language
+  This English text is a translation for reference. If the Japanese and English texts differ, the Japanese
+  text prevails.
