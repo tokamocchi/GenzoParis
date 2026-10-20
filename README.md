@@ -251,7 +251,7 @@ cargo deny check
 
 ### 配布物に入れる第三者のライセンスの文書（DIST-05）
 
-`Cargo.lock`・`ui/package-lock.json` を変えたら、配布物に入れるライセンスの文書（`crates/genzo-app/licenses/third-party/rust.txt`・`npm.txt`）を作り直してコミットします（作り直していないと、CI と配布物のビルドが止まります）。
+`Cargo.lock`・`ui/package-lock.json`・`about.toml` を変えたら、配布物に入れるライセンスの文書（`crates/genzo-app/licenses/third-party/rust.txt`・`npm.txt`）を作り直してコミットします（作り直していないと、CI と配布物のビルドが止まります）。
 
 ```sh
 cargo install cargo-about --version 0.9.2 --locked --features cli   # 初回だけ

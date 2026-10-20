@@ -1,7 +1,7 @@
 // 配布物（インストーラー）を作る処理（入口は scripts/build-app.mjs）。
 //
 // 1. 第三者のライセンスの文書（crates/genzo-app/licenses/third-party。tauri.conf.json の resources で同梱する）が、
-//    今の Cargo.lock・ui/package-lock.json から作ったものかを確かめる（scripts/lib/third-party-files.mjs。古い文書を
+//    今の Cargo.lock・ui/package-lock.json・about.toml から作ったものかを確かめる（scripts/lib/third-party-files.mjs。古い文書を
 //    同梱しないため。古ければ止める）。
 // 2. ワーカーをビルドし、LibRaw のライブラリを集める（scripts/lib/worker.mjs）。`--skip-worker` なら
 //    省く（前に作った crates/genzo-app/binaries を使う）。

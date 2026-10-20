@@ -12,7 +12,7 @@
 //   すべて一覧にあるかも確かめられる（devDependencies のパッケージを画面から import すると、バンドルに入るのに
 //   一覧から漏れるため）。
 // - 配布物を作るとき（scripts/lib/build.mjs）: Rust は cargo-about がなくても確かめられるよう、文書に書いた
-//   Cargo.lock の SHA-256 と今の Cargo.lock を比べる。npm は作り直して比べる。
+//   Cargo.lock・about.toml の SHA-256 と今のファイルを比べる。npm は作り直して比べる。
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -45,6 +45,21 @@ export const VITE_LICENSE_JSON = path.join(UI_DIR, "dist", ".vite", "license.jso
 
 const CARGO_LOCK = path.join(REPO_ROOT, "Cargo.lock");
 const PACKAGE_LOCK = path.join(UI_DIR, "package-lock.json");
+/** 文書ごとの、元にしたファイル（文書に SHA-256 を書き、変わっていないかを確かめる）。文書に書く名前 → パス。 */
+const SOURCES = {
+  rust: [
+    ["Cargo.lock", CARGO_LOCK],
+    ["about.toml", ABOUT_TOML],
+  ],
+  npm: [
+    ["ui/package-lock.json", PACKAGE_LOCK],
+    ["about.toml", ABOUT_TOML],
+  ],
+};
+
+/** 元にしたファイルの今の SHA-256。 */
+const sourceHashes = (kind) => SOURCES[kind].map(([file, p]) => ({ file, hash: lockHash(fs.readFileSync(p, "utf8")) }));
+
 const REGENERATE = "node scripts/third-party.mjs を実行し、作り直した文書をコミットする（docs/third_party.md の 1.4 節）";
 
 /** ファイルを読む処理（rustModel・npmModel に渡す）。 */
@@ -97,8 +112,7 @@ export function generateRustNotices() {
   const model = rustModel(reports, fileIo);
   return formatNotices(model, {
     kind: "rust",
-    lockFile: "Cargo.lock",
-    lockHash: lockHash(fs.readFileSync(CARGO_LOCK, "utf8")),
+    sources: sourceHashes("rust"),
     facts: [
       `対象の OS / Targets: ${parseTargets(toml).join(", ")}`,
       `対象の実行ファイル / Programs: ${RUST_ROOTS.map((r) => `${r.name}（${r.role}。機能フラグ ${r.features.join(" ")}）`).join("、")}`,
@@ -161,8 +175,7 @@ export function generateNpmNotices() {
   const model = buildNpmModel();
   const text = formatNotices(model, {
     kind: "npm",
-    lockFile: "ui/package-lock.json",
-    lockHash: lockHash(fs.readFileSync(PACKAGE_LOCK, "utf8")),
+    sources: sourceHashes("npm"),
     facts: [
       "対象 / Scope: ui/package.json の dependencies と、その推移的な依存（package-lock.json の dev の印のないもの）",
       "  dependencies of ui/package.json and their transitive dependencies (packages not marked dev in package-lock.json)",
@@ -243,20 +256,23 @@ function describeDifference(current, next) {
 }
 
 /**
- * 配布物を作る前に、文書が今の lock のファイルから作ったものかを確かめる（scripts/lib/build.mjs）。Rust は
- * 文書に書いた Cargo.lock の SHA-256 を比べ（cargo-about を使わない）、npm は作り直して比べる。古ければ例外を投げる。
+ * 配布物を作る前に、文書が今の lock のファイル・about.toml から作ったものかを確かめる（scripts/lib/build.mjs）。
+ * Rust は文書に書いた Cargo.lock・about.toml の SHA-256 を比べ（cargo-about を使わない）、npm は作り直して比べる。
+ * 古ければ例外を投げる。
  */
 export function checkNoticesForBuild() {
   const rustFile = noticesPath(RUST_NOTICES_FILE);
   if (!fs.existsSync(rustFile)) throw new Error(`${path.relative(REPO_ROOT, rustFile)} がない。${REGENERATE}`);
-  const recorded = readLockHash(fs.readFileSync(rustFile, "utf8"), "Cargo.lock");
-  const actual = lockHash(fs.readFileSync(CARGO_LOCK, "utf8"));
-  if (recorded !== actual) {
-    throw new Error(
-      `${path.relative(REPO_ROOT, rustFile)} は今の Cargo.lock から作ったものではない（文書: ${recorded ?? "記録なし"}、` +
-        `Cargo.lock: ${actual}）。${REGENERATE}`,
-    );
+  const notices = fs.readFileSync(rustFile, "utf8");
+  for (const { file, hash } of sourceHashes("rust")) {
+    const recorded = readLockHash(notices, file);
+    if (recorded !== hash) {
+      throw new Error(
+        `${path.relative(REPO_ROOT, rustFile)} は今の ${file} から作ったものではない（文書: ${recorded ?? "記録なし"}、` +
+          `${file}: ${hash}）。${REGENERATE}`,
+      );
+    }
   }
   runThirdParty({ check: true, only: "npm", vite: false });
-  console.log("第三者のライセンスの文書は、今の Cargo.lock・ui/package-lock.json から作ったもの");
+  console.log("第三者のライセンスの文書は、今の Cargo.lock・ui/package-lock.json・about.toml から作ったもの");
 }

@@ -212,7 +212,14 @@ test("Rust: cargo-about の本文の出典を crate ごとに決め、取りこ�
   assert.equal(model.texts.filter((x) => x.notice).length, 0);
   assert.ok(!model.texts.some((x) => x.text === normalizeText(canonical) && x.users.includes("tauri 2.11.6")));
 
-  const text = formatNotices(model, { kind: "rust", lockFile: "Cargo.lock", lockHash: "a".repeat(64), facts: ["対象: test"] });
+  const text = formatNotices(model, {
+    kind: "rust",
+    sources: [
+      { file: "Cargo.lock", hash: "a".repeat(64) },
+      { file: "about.toml", hash: "c".repeat(64) },
+    ],
+    facts: ["対象: test"],
+  });
   assert.match(text, /^GenzoParis が使っている Rust のライブラリ（crate）のライセンス\n/);
   assert.match(text, /\n  tauri 2\.11\.6: Apache-2\.0 OR MIT → MIT \[\d+\]（LICENSE_MIT）\n/);
   assert.match(text, /\n  objc2 0\.6\.5: MIT \[\d+\]\n/);
@@ -221,6 +228,7 @@ test("Rust: cargo-about の本文の出典を crate ごとに決め、取りこ�
   assert.match(text, /（SPDX の標準の文。ライセンスのファイルがないため/);
   assert.match(text, /\n  対象: test\n/);
   assert.equal(readLockHash(text, "Cargo.lock"), "a".repeat(64));
+  assert.equal(readLockHash(text, "about.toml"), "c".repeat(64));
   assert.equal(readLockHash(text, "ui/package-lock.json"), null);
   assert.ok(text.endsWith("\n") && !text.endsWith("\n\n"));
 });
@@ -354,7 +362,7 @@ test("npm: 選んだライセンスの本文をパッケージから取り、な
   // 同じ本文（api の LICENSE_MIT と上流の写し）は 1 つにまとめる。
   assert.equal(model.texts.length, 2);
 
-  const text = formatNotices(model, { kind: "npm", lockFile: "ui/package-lock.json", lockHash: "b".repeat(64), facts: [] });
+  const text = formatNotices(model, { kind: "npm", sources: [{ file: "ui/package-lock.json", hash: "b".repeat(64) }], facts: [] });
   assert.match(text, /\n  @tauri-apps\/api 2\.11\.1: Apache-2\.0 OR MIT → MIT \[1\]（LICENSE_MIT）\n/);
   assert.match(text, /\n3\. 上流のリポジトリから補った本文/);
   assert.equal(readLockHash(text, "ui/package-lock.json"), "b".repeat(64));
@@ -420,17 +428,17 @@ test("上流の写しは、記録した SHA-256 のとおり（改行を変え�
   }
 });
 
-// リポジトリの文書が、今の lock のファイルから作ったものか（cargo-about がなくても確かめられる部分）。中身まで
-// 同じかは、CI の third-party ジョブ（node scripts/third-party.mjs --check）で確かめる。
-test("第三者のライセンスの文書は、今の Cargo.lock・ui/package-lock.json から作ったもの", () => {
+// リポジトリの文書が、今の lock のファイル・about.toml から作ったものか（cargo-about がなくても確かめられる部分）。
+// 中身まで同じかは、CI の third-party ジョブ（node scripts/third-party.mjs --check）で確かめる。
+test("第三者のライセンスの文書は、今の Cargo.lock・ui/package-lock.json・about.toml から作ったもの", () => {
   const dir = path.join(APP_DIR, THIRD_PARTY_SOURCE_DIR);
-  const hint = "Cargo.lock・ui/package-lock.json を変えたら node scripts/third-party.mjs を実行して、作り直した文書をコミットする";
+  const hint =
+    "Cargo.lock・ui/package-lock.json・about.toml を変えたら node scripts/third-party.mjs を実行して、作り直した文書をコミットする";
+  const hashOf = (rel) => lockHash(fs.readFileSync(path.join(REPO_ROOT, rel), "utf8"));
   const rust = fs.readFileSync(path.join(dir, RUST_NOTICES_FILE), "utf8");
-  assert.equal(readLockHash(rust, "Cargo.lock"), lockHash(fs.readFileSync(path.join(REPO_ROOT, "Cargo.lock"), "utf8")), hint);
+  assert.equal(readLockHash(rust, "Cargo.lock"), hashOf("Cargo.lock"), hint);
+  assert.equal(readLockHash(rust, "about.toml"), hashOf("about.toml"), hint);
   const npm = fs.readFileSync(path.join(dir, NPM_NOTICES_FILE), "utf8");
-  assert.equal(
-    readLockHash(npm, "ui/package-lock.json"),
-    lockHash(fs.readFileSync(path.join(REPO_ROOT, "ui", "package-lock.json"), "utf8")),
-    hint,
-  );
+  assert.equal(readLockHash(npm, "ui/package-lock.json"), hashOf("ui/package-lock.json"), hint);
+  assert.equal(readLockHash(npm, "about.toml"), hashOf("about.toml"), hint);
 });
