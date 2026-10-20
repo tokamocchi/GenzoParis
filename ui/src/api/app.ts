@@ -66,9 +66,10 @@ export const openVariantFile = (variantId: VariantId) =>
 export const saveMapPreferences = (preferences: MapPreferences) =>
   call<AppSettings>("save_map_preferences", { preferences });
 /**
- * 地名を検索する（Nominatim）。**Enter か「検索」のボタンのときだけ呼ぶ**（入力の途中で呼ばない。ポリシーの
- * オートコンプリートの禁止）。1 秒に 1 回の間隔と結果のキャッシュは genzo-geo も受け持つ（画面でも 1 秒あける）。
- * オンラインの地図が無効なら、通信せずに invalid_input。
+ * 地名を検索する（設定した検索サービスか、設定で選んだときの OSM の公開の Nominatim）。**Enter か「検索」の
+ * ボタンのときだけ呼ぶ**（入力の途中で呼ばない。Nominatim のポリシーのオートコンプリートの禁止）。1 秒に 1 回の
+ * 間隔と結果のキャッシュは genzo-geo も受け持つ（画面でも 1 秒あける）。オンラインの地図が無効なとき・検索の
+ * サービスがない（既定）ときは、通信せずに invalid_input。
  */
 export const searchPlaces = (query: string) => call<Place[]>("search_places", { query });
 /** 地図のタイルのキャッシュの大きさ（通信しない）。 */

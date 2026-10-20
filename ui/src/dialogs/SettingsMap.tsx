@@ -6,8 +6,12 @@
 //   同じ説明と確認（MapConsent.tsx）を出す。
 // - 保存は専用のコマンド（state/map.ts の saveMapPreferences）で、すぐ効く（この画面の「保存」のボタン・
 //   「再起動すると有効」とは別）。
-// - 提供元の URL（OSM のポリシーの「ソフトウェアの更新なしに切り替えられること」）は空なら OpenStreetMap の標準。
-//   https の URL だけ（形はアプリが確かめ、使えなければ何も保存しない）。PNG のタイルを配る提供元だけ（genzo-geo は
+// - 地名の検索は既定では使わない（geoMapLogic.ts の searchService）。「OSM の公開の地名の検索（Nominatim）を使う」
+//   （public_nominatim。既定は OFF）は、オンラインの地図を有効にする同意とは別の切り替えで、近くに利用ポリシーの制限の
+//   説明（PUBLIC_NOMINATIM_NOTE）と Nominatim の利用ポリシーのボタンを置く。検索サービスの URL を指定したときは、
+//   切り替えによらずその URL を使う（その間は切り替えを押せるが、使わないと書く）。保存はすぐ効く。
+// - 提供元の URL（OSM のポリシーの「ソフトウェアの更新なしに切り替えられること」）は、タイルは空なら OpenStreetMap の
+//   標準、地名の検索は空なら上の切り替えに従う。https の URL だけ（形はアプリが確かめ、使えなければ何も保存しない）。PNG のタイルを配る提供元だけ（genzo-geo は
 //   Content-Type が image/png で PNG の署名で始まる応答だけを受け取る。保存のときにアプリが断るのは、URL の拡張子で
 //   わかる PNG でないもの（.jpg・.webp・.pbf など。genzo-geo の validate_tile_url_template。目安）だけで、拡張子のない
 //   URL は応答で確かめるので、説明に書く）。
@@ -26,7 +30,6 @@ import * as app from "../api/app";
 import { toApiError } from "../api/errors";
 import type { ErrorInfo, MapCacheInfo, MapPreferences } from "../api/types";
 import {
-  DEFAULT_SEARCH_URL,
   DEFAULT_TILE_URL,
   describeDestinations,
   describeMapCache,
@@ -41,6 +44,9 @@ import {
   providerFieldsOf,
   providerPatch,
   providersDirty,
+  PUBLIC_NOMINATIM_LABEL,
+  PUBLIC_NOMINATIM_NOTE,
+  searchService,
 } from "../library/geoMapLogic";
 import { actions, useApp } from "../state/app";
 import { openMapPage, saveMapPreferences } from "../state/map";
@@ -51,8 +57,9 @@ import { Busy, ErrorBox } from "./parts";
 /** 節の説明（文の途中で JSX の行を分けると空白が入るので、文字列で組む）。 */
 function sectionNote(prefs: MapPreferences): string {
   return (
-    "写真に位置を付けるダイアログで、地図で場所を選んだり、地名で検索したりできます。有効にしたときだけ、地図の" +
-    "タイルの要求（地図に出した場所が分かります）と検索した語を外部のサーバー" +
+    "写真に位置を付けるダイアログで、地図で場所を選べます。地名の検索は、検索サービスを設定した場合（下の切り替えか、" +
+    "詳細の検索サービスの URL）だけ使えます。有効にしたときだけ、地図のタイルの要求（地図に出した場所が分かります）と、" +
+    "検索サービスを設定した場合は検索した語を外部のサーバー" +
     `（${describeDestinations(prefs)}）に送ります。無効のときは通信しません` +
     "（座標の貼り付けで位置を付けることはできます）。この節の設定はすぐに効きます。"
   );
@@ -65,8 +72,8 @@ const CACHE_NOTE =
 
 /** 提供元の URL の説明。 */
 const PROVIDER_NOTE =
-  "空なら OpenStreetMap の標準を使います。OpenStreetMap のサーバーが使えないときや、利用の量が多いときは、OSM の" +
-  "データを使う別の提供元に切り替えられます（https の URL で、PNG のタイルを配る提供元だけ。JPEG・WebP・ベクトルの" +
+  "タイルの URL が空なら OpenStreetMap の標準のタイルを使います。OpenStreetMap のサーバーが使えないときや、利用の" +
+  "量が多いときは、OSM のデータを使う別の提供元に切り替えられます（https の URL で、PNG のタイルを配る提供元だけ。JPEG・WebP・ベクトルの" +
   "タイルなどは読み込めません（URL の拡張子が .jpg・.webp などなら、保存のときに断ります）。その提供元の利用条件を" +
   "確かめてください。最大の" +
   `ズームは ${MAP_MAX_ZOOM} とみなします）。地図の右下には「${MAP_ATTRIBUTION}」を常に出し、その提供元の帰属の` +
@@ -74,7 +81,10 @@ const PROVIDER_NOTE =
 
 /** 提供元の欄の下の説明。 */
 const PROVIDER_FIELDS_NOTE =
-  "タイルの URL は {z}・{x}・{y} を 1 つずつ含めてください。地名の検索は Nominatim と同じ形の /search の API です。" +
+  "タイルの URL は {z}・{x}・{y} を 1 つずつ含めてください。検索サービスの URL は Nominatim と同じ形の /search の API" +
+  "で、その提供元の利用条件を確かめてください（1 秒に 1 回まで・入力の途中で検索しない・結果を覚えておく、の規則は" +
+  "どの提供元にも当てます）。空なら、上の「" +
+  `${PUBLIC_NOMINATIM_LABEL}」が ON のときだけ公開のサーバーを使い、OFF なら地名の検索は使えません。` +
   "地図の帰属の表示は、タイルの URL を変えたときだけ使い、地図の右下に文字だけで出します（リンクにはしません。" +
   `${MAX_TILE_ATTRIBUTION_CHARS} 文字まで）。`;
 
@@ -137,6 +147,13 @@ export function SettingsMap() {
     }
   };
 
+  const togglePublicSearch = (on: boolean) => {
+    void save(
+      { public_nominatim: on },
+      on ? "OSM の公開の地名の検索（Nominatim）を使うようにしました" : "OSM の公開の地名の検索（Nominatim）を使わないようにしました",
+    );
+  };
+
   const toggle = (on: boolean) => {
     if (on && !prefs.consented_at) {
       setConfirming(true);
@@ -165,6 +182,8 @@ export function SettingsMap() {
   // 提供元の欄から保存する値と、今の設定と違うか。
   const next = providerPatch(fields);
   const dirty = providersDirty(prefs, fields);
+  // 地名の検索の送り先（検索の URL を指定しているときは、公開の Nominatim の切り替えを使わない）。
+  const search = searchService(prefs);
 
   return (
     <div className="dlg-section">
@@ -197,6 +216,32 @@ export function SettingsMap() {
           onCancel={() => setConfirming(false)}
         />
       )}
+
+      <label className="dlg-check">
+        <input
+          type="checkbox"
+          checked={prefs.public_nominatim}
+          onChange={(e) => togglePublicSearch(e.target.checked)}
+          disabled={busy || confirming}
+        />
+        <span>
+          {PUBLIC_NOMINATIM_LABEL}
+          <span className="desc">
+            {search.kind === "custom"
+              ? `検索サービスの URL（${search.host}）を指定しているので、今はそちらを使います（この切り替えは使いません）`
+              : "既定は OFF です。OFF で検索サービスの URL もないときは、地名の検索は使えません"}
+          </span>
+        </span>
+      </label>
+      <p className="hint">
+        {PUBLIC_NOMINATIM_NOTE}
+      </p>
+      <div className="dlg-row">
+        <button type="button" className="btn small" onClick={() => openMapPage("nominatim_policy")}>
+          {MAP_LINK_LABELS.nominatim_policy}
+        </button>
+        <span className="hint">（英語のページを既定のブラウザで開きます）</span>
+      </div>
 
       <div className="dlg-row" style={{ marginTop: 6 }}>
         <span>地図のキャッシュ: {cache ? describeMapCache(cache) : "—"}</span>
@@ -232,12 +277,12 @@ export function SettingsMap() {
           />
         </div>
         <div className="field">
-          <label htmlFor="map-search-url">地名の検索の URL</label>
+          <label htmlFor="map-search-url">検索サービスの URL</label>
           <input
             id="map-search-url"
             type="text"
             value={fields.searchUrl}
-            placeholder={DEFAULT_SEARCH_URL}
+            placeholder="例: https://geocoder.example.org/search（空なら、上の切り替えに従います）"
             spellCheck={false}
             autoComplete="off"
             onChange={(e) => setField({ searchUrl: e.target.value })}
@@ -288,9 +333,6 @@ export function SettingsMap() {
         <span className="hint">利用ポリシーなど（既定のブラウザで開きます）:</span>
         <button type="button" className="btn small" onClick={() => openMapPage("tile_policy")}>
           {MAP_LINK_LABELS.tile_policy}
-        </button>
-        <button type="button" className="btn small" onClick={() => openMapPage("nominatim_policy")}>
-          {MAP_LINK_LABELS.nominatim_policy}
         </button>
         <button type="button" className="btn small" onClick={() => openMapPage("copyright")}>
           {MAP_LINK_LABELS.copyright}

@@ -1,8 +1,8 @@
 // 位置情報の後付け（LIB-21）の第 2 段階（オンラインの地図と地名の検索）の画面の計算（DOM・Leaflet を使わない
 // 純粋な計算。docs/04 の 3.16 節）。地図の部品は library/GeoMap.tsx（Leaflet を動的に読む。テストからは読まない）。
 //
-// - 設定（MapPreferences）の既定値と重ね方・設定の画面の提供元の欄・送り先の説明・有効にする前の説明（同意の文）・
-//   設定で変えたタイルの提供元の帰属の表示。
+// - 設定（MapPreferences）の既定値と重ね方・設定の画面の提供元の欄・地名の検索の送り先（searchService。既定は
+//   なし）・送り先の説明・有効にする前の説明（同意の文）・設定で変えたタイルの提供元の帰属の表示。
 // - 地名の検索の間隔（画面でも前の要求の開始から 1 秒あける。genzo-geo もプロセス全体で守る）・検索語の検査・
 //   結果の文。
 // - 地図の座標（クリックした位置の経度を -180〜180 に戻す）・初めの表示・検索の結果へ動かすときの範囲・座標の欄と
@@ -11,6 +11,10 @@
 // OSM Foundation の利用ポリシー（タイル: https://operations.osmfoundation.org/policies/tiles/ 、Nominatim:
 // https://operations.osmfoundation.org/policies/nominatim/ ）のうち、画面が受け持つのは次のこと（通信の規則は
 // genzo-geo、有効にするまで通信しないことは genzo-app）:
+// - 地名の検索は既定では使わない。設定に検索サービス（Nominatim と同じ API）の URL を書いたときはその URL、書いて
+//   いなくて「OSM の公開の地名の検索（Nominatim）を使う」を ON にしたときだけ OSM Foundation の公開の Nominatim に
+//   送る（genzo-app の map.rs の geocoder_provider と同じ。公開の Nominatim のポリシーの上限はアプリの全利用者の
+//   合計で、公開で配布するアプリでは数えられないので、既定は OFF。利用者（開発者本人）の決定。2026-10-20）。
 // - 地名の検索は Enter か「検索」のボタンのときだけ（入力の途中で検索しない。オートコンプリートの禁止）。
 // - 帰属の表示「© OpenStreetMap contributors」を地図の右下に常に出す（リンクは WebView ではなく既定のブラウザで開く）。
 //   設定で変えたタイルの提供元の帰属の表示（tile_attribution）があれば並べて出す（文字だけ。リンクにしない。
@@ -46,8 +50,33 @@ export const MAP_CACHE_LIMIT_BYTES = 200 * 1024 * 1024;
 /** 既定のタイルの URL（genzo-geo の OSM_TILE_URL。設定の欄の例に出す）。 */
 export const DEFAULT_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 
-/** 既定の地名の検索の URL（genzo-geo の NOMINATIM_SEARCH_URL。設定の欄の例に出す）。 */
-export const DEFAULT_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
+/**
+ * OSM Foundation の公開の Nominatim の検索の URL（genzo-geo の NOMINATIM_SEARCH_URL）。既定では使わない（設定の
+ * public_nominatim を ON にし、検索の URL が空のときだけ。searchService）。
+ */
+export const PUBLIC_NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
+
+/** 設定の「OSM の公開の地名の検索（Nominatim）を使う」の見出し。 */
+export const PUBLIC_NOMINATIM_LABEL = "OSM の公開の地名の検索（Nominatim）を使う";
+
+/**
+ * 「OSM の公開の地名の検索（Nominatim）を使う」の説明（切り替えの近くに出す。利用ポリシーの制限を示す。AI の仮の案）。
+ * オンラインの地図を有効にする同意とは別の切り替えで、ON にしたときだけ公開の Nominatim に検索語を送る。
+ */
+export const PUBLIC_NOMINATIM_NOTE =
+  "ON にすると、地名の検索で OpenStreetMap Foundation の公開のサーバー（nominatim.openstreetmap.org）に検索語を" +
+  "送ります。利用ポリシーにより、検索はこのアプリの利用者全員の合計で 1 秒に 1 回までで、入力の途中の自動の検索" +
+  "（オートコンプリート）はしません（このアプリが数えられるのは、この PC で動いているアプリの中の間隔だけです）。" +
+  "使えることの保証はなく、予告なく使えなくなることがあります。既定は OFF です。下の「詳細」で検索サービスの URL を" +
+  "指定したときは、そちらを使います。";
+
+/**
+ * 地名の検索のサービスがない（既定）ときに、位置を付けるダイアログの検索の欄の代わりに出す案内（AI の仮の案）。
+ */
+export const SEARCH_UNAVAILABLE_NOTE =
+  "地名の検索は、設定の「一般」のオンラインの地図で、OSM の公開の地名の検索（Nominatim）を使うか、検索サービス" +
+  "（Nominatim と同じ API）の URL を指定すると使えます。座標や Google マップの場所の URL を貼り付けても位置を付け" +
+  "られます。";
 
 /** 位置がないときの初めの表示（日本の中ほど。仮置き）。 */
 export const DEFAULT_MAP_CENTER: GpsCoord = { lat: 36.2, lon: 138.25 };
@@ -83,10 +112,14 @@ export const DEFAULT_MAP_PREFERENCES: MapPreferences = {
   consented_at: null,
   tile_url: null,
   search_url: null,
+  public_nominatim: false,
   tile_attribution: null,
 };
 
-/** アプリの設定の地図の欄（古いアプリでは無いので既定値。欠けた欄（前のアプリの tile_attribution など）も既定値）。 */
+/**
+ * アプリの設定の地図の欄（古いアプリでは無いので既定値。欠けた欄（前のアプリの tile_attribution・public_nominatim
+ * など）も既定値）。
+ */
 export function mapPreferencesOf(settings: Pick<AppSettings, "map"> | null | undefined): MapPreferences {
   return { ...DEFAULT_MAP_PREFERENCES, ...(settings?.map ?? {}) };
 }
@@ -105,7 +138,7 @@ function trimmedOrNull(text: string): string | null {
   return t === "" ? null : t;
 }
 
-/** URL の欄の値（前後の空白を除き、空なら null（既定の提供元））。形はアプリが確かめる。 */
+/** URL の欄の値（前後の空白を除き、空なら null（タイルは既定の提供元、地名の検索は searchService）。形はアプリが確かめる。 */
 export function urlFieldValue(text: string): string | null {
   return trimmedOrNull(text);
 }
@@ -175,27 +208,49 @@ function hostOf(url: string): string {
   }
 }
 
-/** 送り先（ホスト名）。`osm` は、どちらも OpenStreetMap Foundation のサーバー（既定）か。 */
+/**
+ * 地名の検索の送り先（genzo-app の map.rs の geocoder_provider と同じ）: 検索の URL があればそれ（custom）、なければ
+ * public_nominatim が ON のときだけ OSM Foundation の公開の Nominatim（public）、どちらもなければなし（none。既定。
+ * 位置を付けるダイアログは検索の欄を出さない）。
+ */
+export type SearchService =
+  | { kind: "custom"; url: string; host: string }
+  | { kind: "public"; url: string; host: string }
+  | { kind: "none" };
+
+export function searchService(p: MapPreferences): SearchService {
+  if (p.search_url !== null) return { kind: "custom", url: p.search_url, host: hostOf(p.search_url) };
+  if (p.public_nominatim) {
+    return { kind: "public", url: PUBLIC_NOMINATIM_SEARCH_URL, host: hostOf(PUBLIC_NOMINATIM_SEARCH_URL) };
+  }
+  return { kind: "none" };
+}
+
+/** 送り先（ホスト名）。`search` は地名の検索のサービスがなければ null。 */
 export interface MapDestinations {
   tiles: string;
-  search: string;
-  osm: boolean;
+  search: string | null;
 }
 
 export function mapDestinations(p: MapPreferences): MapDestinations {
+  const search = searchService(p);
   return {
     tiles: hostOf(p.tile_url ?? DEFAULT_TILE_URL),
-    search: hostOf(p.search_url ?? DEFAULT_SEARCH_URL),
-    osm: p.tile_url === null && p.search_url === null,
+    search: search.kind === "none" ? null : search.host,
   };
 }
 
 /** 送り先の文。 */
 export function describeDestinations(p: MapPreferences): string {
   const d = mapDestinations(p);
-  if (d.osm) return `OpenStreetMap Foundation のサーバー（地図のタイル: ${d.tiles}、地名の検索: ${d.search}）`;
   const tiles = p.tile_url === null ? `${d.tiles}（OpenStreetMap Foundation）` : `${d.tiles}（設定で変えた提供元）`;
-  const search = p.search_url === null ? `${d.search}（OpenStreetMap Foundation）` : `${d.search}（設定で変えた提供元）`;
+  const service = searchService(p);
+  const search =
+    service.kind === "custom"
+      ? `${service.host}（設定した検索サービス）`
+      : service.kind === "public"
+        ? `${service.host}（OpenStreetMap Foundation の公開の Nominatim。設定で使うと選んだもの）`
+        : "なし（検索サービスを設定していないので、検索語は送りません）";
   return `地図のタイル: ${tiles}、地名の検索: ${search}`;
 }
 
@@ -218,7 +273,9 @@ export function mapConsentText(p: MapPreferences): MapConsentText {
         "ダイアログでは、表示中の写真の位置（カメラの位置か付けた位置）や、座標の欄で確定した位置を中心に地図を" +
         `開くので、その付近のタイルを要求します（ズーム ${PIN_ZOOM} で開くので、タイル 1 枚の大きさ（日本の付近では` +
         "およそ 1 km 四方）ほどの精度で場所が分かります）",
-      "地名の検索に入れた語",
+      searchService(p).kind === "none"
+        ? "地名の検索に入れた語（検索サービスを設定した場合だけ。今は設定していないので送りません）"
+        : "地名の検索に入れた語（設定した検索サービスに送ります）",
       "通信のときに、この PC の IP アドレスと、アプリの名前と版（User-Agent）が送り先に伝わります。写真のファイルや" +
         "カタログそのものは送りません（座標の読み取りは、このパソコンの中で行います。地図に出した位置は、上のとおり" +
         "タイルの要求から分かります）",

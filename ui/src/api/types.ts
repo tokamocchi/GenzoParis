@@ -2427,8 +2427,18 @@ export interface MapPreferences {
   consented_at: string | null;
   /** 地図のタイルの URL のひな形（https。{z}・{x}・{y} を含む。null なら OpenStreetMap の標準）。 */
   tile_url: string | null;
-  /** 地名の検索（Nominatim と同じ API の /search）の URL（https。null なら nominatim.openstreetmap.org）。 */
+  /**
+   * 地名の検索のサービス（Nominatim と同じ API の /search）の URL（https）。あればこの URL に問い合わせる。null なら、
+   * public_nominatim が true のときだけ OSM Foundation の公開の Nominatim を使い、false なら地名の検索は使えない
+   * （geoMapLogic.ts の searchService）。
+   */
   search_url: string | null;
+  /**
+   * search_url がないときに OSM Foundation の公開の Nominatim（nominatim.openstreetmap.org）を使う（設定の「OSM の
+   * 公開の地名の検索（Nominatim）を使う」。既定は false。利用者が ON にしたときだけ）。前のアプリには無い
+   * （mapPreferencesOf が false で埋める）。
+   */
+  public_nominatim: boolean;
   /**
    * 設定で変えたタイルの提供元の帰属の表示（例「Maps © 提供元の名前」。地図の右下に「© OpenStreetMap contributors」と
    * 並べて文字だけで出す。geoMapLogic.ts の providerAttribution）。tile_url が null（OSM の標準）なら使わない（アプリが

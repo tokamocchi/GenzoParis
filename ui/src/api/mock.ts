@@ -891,17 +891,18 @@ export const MOCK_GEOTAGGED_DETAILS: VariantDetails = {
   files: [],
 };
 
-/** オンラインの地図の設定の見本（有効。提供元は OSM の既定）。 */
+/** オンラインの地図の設定の見本（有効。タイルは OSM の既定。地名の検索のサービスはない（既定のまま））。 */
 export const MOCK_MAP_PREFERENCES: MapPreferences = {
   online: true,
   consented_at: "2026-10-20T01:02:03Z",
   tile_url: null,
   search_url: null,
+  public_nominatim: false,
   tile_attribution: null,
 };
 
 /**
- * 地名の検索の結果の見本（Nominatim の jsonv2 を genzo-geo が読んだ形。座標・範囲は見本の値で、実際の検索の結果
+ * 地名の検索の結果の見本（Nominatim と同じ API の jsonv2 を genzo-geo が読んだ形。座標・範囲は見本の値で、実際の検索の結果
  * ではない）。
  */
 export const MOCK_PLACES: Place[] = [

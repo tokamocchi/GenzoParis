@@ -2,11 +2,13 @@
 // 無効で、利用者が明示的に有効にしたときだけ通信する）。位置を付けるダイアログと設定の画面（一般）で同じものを出す。
 //
 // 何をどこへ送るか・アプリが守る OSM の利用ポリシーの規則・気をつけること（文は library/geoMapLogic.ts の
-// mapConsentText）と、利用ポリシーのページ（既定のブラウザで開く）を示す。有効にするボタンは .primary にしない
+// mapConsentText）と、利用ポリシーのページ（既定のブラウザで開く）を示す。Nominatim の利用ポリシーのボタンは、
+// 地名の検索で OSM の公開の Nominatim を使う設定（public_nominatim が ON で検索の URL が空）のときだけ出す（既定では
+// 公開の Nominatim に送らないので）。有効にするボタンは .primary にしない
 // （Dialog が開いたときに最初の入力か .primary のボタンにフォーカスを移すので、Enter で有効にしてしまわないため）。
 
 import type { ErrorInfo, MapPreferences } from "../api/types";
-import { MAP_LINK_LABELS, mapConsentText } from "../library/geoMapLogic";
+import { MAP_LINK_LABELS, mapConsentText, searchService } from "../library/geoMapLogic";
 import { openMapPage } from "../state/map";
 import { ErrorBox } from "./parts";
 import "../library/geo.css";
@@ -19,6 +21,7 @@ export function MapConsentPanel(props: {
   onCancel?: () => void;
 }) {
   const t = mapConsentText(props.preferences);
+  const publicSearch = searchService(props.preferences).kind === "public";
   return (
     <div className="dlg-confirm geo-consent">
       <p>
@@ -46,9 +49,11 @@ export function MapConsentPanel(props: {
         <button type="button" className="btn small" onClick={() => openMapPage("tile_policy")}>
           {MAP_LINK_LABELS.tile_policy}
         </button>
-        <button type="button" className="btn small" onClick={() => openMapPage("nominatim_policy")}>
-          {MAP_LINK_LABELS.nominatim_policy}
-        </button>
+        {publicSearch && (
+          <button type="button" className="btn small" onClick={() => openMapPage("nominatim_policy")}>
+            {MAP_LINK_LABELS.nominatim_policy}
+          </button>
+        )}
         <span className="hint">（英語のページを既定のブラウザで開きます）</span>
       </div>
       <ErrorBox error={props.error} title="有効にできません" />

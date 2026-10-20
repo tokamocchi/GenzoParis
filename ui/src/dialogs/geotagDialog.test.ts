@@ -20,7 +20,13 @@ import {
   mockSummary,
 } from "../api/mock";
 import type { VariantDetails } from "../api/types";
-import { DEFAULT_MAP_PREFERENCES, DEFAULT_TILE_URL } from "../library/geoMapLogic";
+import {
+  DEFAULT_MAP_PREFERENCES,
+  DEFAULT_TILE_URL,
+  PUBLIC_NOMINATIM_LABEL,
+  PUBLIC_NOMINATIM_NOTE,
+  SEARCH_UNAVAILABLE_NOTE,
+} from "../library/geoMapLogic";
 import { GpsValue } from "../library/MetadataPanel";
 import { appStore } from "../state/app";
 import { openGeotagDialog, runPhotoMenu } from "../state/stacks";
@@ -185,6 +191,8 @@ describe("位置情報の後付けのコアの命令（genzo-api の JSON の形
 
 describe("位置を付けるダイアログのオンラインの地図（LIB-21 の第 2 段階）", () => {
   const dialog = () => render(createElement(GeotagDialog, { variantIds: [3, 4], current: 4 }));
+  /** 有効で、地名の検索のサービス（検索サービスの URL）を設定した形。 */
+  const SEARCHABLE = { ...MOCK_MAP_PREFERENCES, search_url: "https://geocoder.example.org/search" };
 
   it("無効（既定）: 地図は出さず、1 行の案内だけ（通信しない。座標の貼り付けは使える）", () => {
     for (const status of [mockAppStatus(DEFAULT_MAP_PREFERENCES), mockAppStatus(), null]) {
@@ -200,9 +208,10 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
   });
 
   it("有効: 地名の検索・地図（読み込みの前）・右下の帰属の表示・地図の誤りの報告・印の説明", () => {
-    appStore.set({ status: mockAppStatus(MOCK_MAP_PREFERENCES) });
+    appStore.set({ status: mockAppStatus(SEARCHABLE) });
     const html = dialog();
     expect(html).toContain('aria-label="地名の検索"');
+    expect(html).not.toContain(SEARCH_UNAVAILABLE_NOTE);
     expect(html).toContain("地名・駅名・施設名で検索");
     expect(html).toContain(">検索</button>");
     expect(html).toContain('class="geo-map"');
@@ -219,6 +228,21 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     expect(html.indexOf('class="geo-map"')).toBeLessThan(html.indexOf("座標（緯度, 経度）"));
     // OSM の標準のタイルでは、提供元の帰属の表示は出さない。
     expect(html).not.toContain("geo-credit");
+  });
+
+  it("有効で地名の検索のサービスがない（既定）: 検索の欄は出さず、案内を出す（地図と座標の欄は使える）", () => {
+    appStore.set({ status: mockAppStatus(MOCK_MAP_PREFERENCES) });
+    const html = dialog();
+    expect(html).not.toContain('aria-label="地名の検索"');
+    expect(html).not.toContain('type="search"');
+    expect(html).toContain(SEARCH_UNAVAILABLE_NOTE);
+    expect(html).toContain('class="geo-map"');
+    expect(html).toContain("座標（緯度, 経度）");
+    // 公開の Nominatim を使うと選ぶと、検索の欄を出す。
+    appStore.set({ status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, public_nominatim: true }) });
+    const pub = dialog();
+    expect(pub).toContain('aria-label="地名の検索"');
+    expect(pub).not.toContain(SEARCH_UNAVAILABLE_NOTE);
   });
 
   it("有効で提供元を変えた: 右下に提供元の帰属の表示を、OSM の帰属の表示と並べて文字だけで出す", () => {
@@ -242,7 +266,7 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
   });
 
   it("開いたときのフォーカスは座標の欄（有効なときは地名の検索の欄が先にあるが、座標を貼って Enter で検索に送らない）", () => {
-    for (const prefs of [MOCK_MAP_PREFERENCES, DEFAULT_MAP_PREFERENCES]) {
+    for (const prefs of [SEARCHABLE, MOCK_MAP_PREFERENCES, DEFAULT_MAP_PREFERENCES]) {
       appStore.set({ status: mockAppStatus(prefs) });
       const html = dialog();
       // Dialog は data-autofocus の付いた欄を先に探す（components/Dialog.tsx の initialFocusTarget）。
@@ -250,7 +274,7 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
       expect(marked).toHaveLength(1);
       expect(marked[0]).toContain('id="geo-coord"');
     }
-    appStore.set({ status: mockAppStatus(MOCK_MAP_PREFERENCES) });
+    appStore.set({ status: mockAppStatus(SEARCHABLE) });
     const html = dialog();
     expect(html.indexOf('type="search"')).toBeGreaterThan(-1);
     expect(html.indexOf('type="search"')).toBeLessThan(html.indexOf('id="geo-coord"'));
@@ -268,12 +292,14 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     );
     expect(html).toContain("オンラインの地図（OpenStreetMap）を有効にしますか");
     expect(html).toContain("tile.openstreetmap.org");
-    expect(html).toContain("nominatim.openstreetmap.org");
+    // 既定では公開の Nominatim に送らないので、送り先にも、利用ポリシーのボタンにも出さない。
+    expect(html).not.toContain("nominatim.openstreetmap.org");
+    expect(html).not.toContain("地名の検索（Nominatim）の利用ポリシー");
+    expect(html).toContain("検索サービスを設定していないので、検索語は送りません");
     expect(html).toContain("1 秒以上あけ");
     expect(html).toContain("入力の途中では送りません");
     expect(html).toContain("個人の情報を検索語にしないでください");
     expect(html).toContain("タイルの利用ポリシー");
-    expect(html).toContain("地名の検索（Nominatim）の利用ポリシー");
     expect(html).toContain("オンラインの地図を有効にする");
     expect(html).toContain("やめる");
     // 有効にするボタンは .primary にしない（Dialog の初めのフォーカスと Enter で有効にしない）。
@@ -288,6 +314,17 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     );
     expect(noCancel).not.toContain("やめる");
     expect(noCancel).toContain("有効にしています…");
+    // 公開の Nominatim を使うと選んでいれば、送り先と利用ポリシーのボタンに出す。
+    const pub = render(
+      createElement(MapConsentPanel, {
+        preferences: { ...DEFAULT_MAP_PREFERENCES, public_nominatim: true },
+        busy: false,
+        error: null,
+        onEnable: () => undefined,
+      }),
+    );
+    expect(pub).toContain("nominatim.openstreetmap.org（OpenStreetMap Foundation の公開の Nominatim");
+    expect(pub).toContain("地名の検索（Nominatim）の利用ポリシー");
   });
 
   it("設定の一般: オンラインの地図の節（有効・無効、キャッシュ、詳細の URL、利用ポリシー）", () => {
@@ -315,6 +352,30 @@ describe("位置を付けるダイアログのオンラインの地図（LIB-21 
     expect(off).toContain("SOCKS のプロキシには対応していません");
     expect(off).toContain("地図のタイルの要求");
     expect(off).toContain("タイルの利用ポリシー");
+    // OSM の公開の地名の検索（Nominatim）の切り替え（既定は OFF）と、近くの説明・利用ポリシーのボタン。
+    const publicToggle = (html: string) =>
+      html.match(/<label class="dlg-check"><input type="checkbox"[^>]*>(?:(?!<\/label>).)*OSM の公開の地名の検索/)?.[0] ?? "";
+    expect(off).toContain(PUBLIC_NOMINATIM_LABEL);
+    expect(publicToggle(off)).not.toBe("");
+    expect(publicToggle(off)).not.toContain("checked");
+    expect(off).toContain("既定は OFF です。OFF で検索サービスの URL もないときは、地名の検索は使えません");
+    expect(off).toContain(PUBLIC_NOMINATIM_NOTE);
+    expect(off).toContain("地名の検索（Nominatim）の利用ポリシー");
+    expect(off.indexOf(PUBLIC_NOMINATIM_LABEL)).toBeLessThan(off.indexOf("地名の検索（Nominatim）の利用ポリシー"));
+    // 検索の URL の欄に、公開の Nominatim を例に出さない。地名の検索は既定でなし。
+    expect(off).toContain('<label for="map-search-url">検索サービスの URL</label>');
+    expect(off).not.toContain('placeholder="https://nominatim.openstreetmap.org/search"');
+    expect(off).toContain("地名の検索: なし（検索サービスを設定していないので、検索語は送りません）");
+    appStore.set({ status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, public_nominatim: true }), catalog: null });
+    const pub = render(createElement(SettingsDialog, { tab: "general" }));
+    expect(publicToggle(pub)).toContain('checked=""');
+    expect(pub).toContain("nominatim.openstreetmap.org（OpenStreetMap Foundation の公開の Nominatim");
+    appStore.set({
+      status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, public_nominatim: true, search_url: "https://geo.example.net/search" }),
+      catalog: null,
+    });
+    const custom = render(createElement(SettingsDialog, { tab: "general" }));
+    expect(custom).toContain("検索サービスの URL（geo.example.net）を指定しているので、今はそちらを使います");
 
     const tile_url = "https://tiles.example.org/{z}/{x}/{y}.png";
     appStore.set({ status: mockAppStatus({ ...MOCK_MAP_PREFERENCES, tile_url }) });

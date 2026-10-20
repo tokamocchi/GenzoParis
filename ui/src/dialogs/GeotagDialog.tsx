@@ -17,7 +17,10 @@
 //   タイルを提供元に要求するため。geoMapLogic.ts の coordFieldReducer）。
 //   - オンラインの地図が無効（既定）なら通信しない。地図の代わりに 1 行の案内を出し、押すと有効にする前の説明と
 //     確認（MapConsent.tsx）を出す。無効のままでも座標の貼り付けで付けられる（docs/02 の SEC-01・SEC-02）。
-//   - 地名の検索（Nominatim）は Enter か「検索」のボタンのときだけ送る（入力の途中では送らない。オートコンプリートの
+//   - 地名の検索は、検索のサービスがあるときだけ出す（設定の検索サービスの URL か、「OSM の公開の地名の検索
+//     （Nominatim）を使う」が ON のとき。geoMapLogic.ts の searchService）。ない（既定）ときは、検索の欄の代わりに
+//     短い案内（SEARCH_UNAVAILABLE_NOTE）を出す（地図のクリックと座標の貼り付けでは付けられる）。
+//   - 地名の検索は Enter か「検索」のボタンのときだけ送る（入力の途中では送らない。オートコンプリートの
 //     禁止。IME の変換を確定する Enter は除く）。前の検索が終わるまでは次の検索を受け付けず、前の要求の開始から
 //     1 秒あけて送る（library/geoMapLogic.ts の searchWaitMs。genzo-geo もプロセス全体で 1 秒に 1 回にし、結果を
 //     キャッシュする）。座標の形の語は送らず、読めれば座標の欄に入れる（geoMapLogic.ts の searchInput）。
@@ -50,7 +53,9 @@ import {
   placeLabel,
   placeView,
   providerAttribution,
+  SEARCH_UNAVAILABLE_NOTE,
   searchInput,
+  searchService,
   searchWaitMs,
 } from "../library/geoMapLogic";
 import {
@@ -265,6 +270,7 @@ export function GeotagDialog(props: { variantIds: VariantId[]; current: VariantI
             target={field.target}
             photo={ref?.gps ?? null}
             credit={providerAttribution(mapPrefs)}
+            searchable={searchService(mapPrefs).kind !== "none"}
             onPick={setCoordinate}
             disabled={busy}
           />
@@ -365,6 +371,8 @@ function MapPicker(props: {
   photo: GpsCoord | null;
   /** 設定で変えたタイルの提供元の帰属の表示（なければ null）。 */
   credit: string | null;
+  /** 地名の検索のサービスがあるか（なければ検索の欄を出さず、案内を出す）。 */
+  searchable: boolean;
   onPick: (g: GpsCoord) => void;
   disabled: boolean;
 }) {
@@ -441,40 +449,43 @@ function MapPicker(props: {
 
   return (
     <div>
-      <div className="dlg-row">
-        <input
-          type="search"
-          className="dlg-grow"
-          value={query}
-          placeholder="地名・駅名・施設名で検索（例: 東京駅）"
-          aria-label="地名の検索"
-          spellCheck={false}
-          autoComplete="off"
-          onChange={(e) => {
-            // 入力の途中では検索しない（オートコンプリートの禁止）。誤りの表示だけ消す。
-            setQuery(e.target.value);
-            setProblem(null);
-            setNotice(null);
-          }}
-          onCompositionStart={() => {
-            composing.current = true;
-          }}
-          onCompositionEnd={() => {
-            composing.current = false;
-          }}
-          onKeyDown={(e) => {
-            // IME の変換を確定する Enter では検索しない。
-            if (composing.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
-            if (e.key === "Enter") {
-              e.preventDefault();
-              search();
-            }
-          }}
-        />
-        <button type="button" className="btn" onClick={search} disabled={searching || props.disabled}>
-          {searching ? "検索しています…" : "検索"}
-        </button>
-      </div>
+      {!props.searchable && <p className="hint">{SEARCH_UNAVAILABLE_NOTE}</p>}
+      {props.searchable && (
+        <div className="dlg-row">
+          <input
+            type="search"
+            className="dlg-grow"
+            value={query}
+            placeholder="地名・駅名・施設名で検索（例: 東京駅）"
+            aria-label="地名の検索"
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(e) => {
+              // 入力の途中では検索しない（オートコンプリートの禁止）。誤りの表示だけ消す。
+              setQuery(e.target.value);
+              setProblem(null);
+              setNotice(null);
+            }}
+            onCompositionStart={() => {
+              composing.current = true;
+            }}
+            onCompositionEnd={() => {
+              composing.current = false;
+            }}
+            onKeyDown={(e) => {
+              // IME の変換を確定する Enter では検索しない。
+              if (composing.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === "Enter") {
+                e.preventDefault();
+                search();
+              }
+            }}
+          />
+          <button type="button" className="btn" onClick={search} disabled={searching || props.disabled}>
+            {searching ? "検索しています…" : "検索"}
+          </button>
+        </div>
+      )}
       {problem && <p className="dlg-field-error">{problem}</p>}
       {notice && <p className="hint">{notice}</p>}
       <ErrorBox error={error} title="検索できません" />

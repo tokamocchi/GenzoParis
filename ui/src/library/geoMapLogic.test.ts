@@ -37,9 +37,14 @@ import {
   providerFieldsOf,
   providerPatch,
   providersDirty,
+  PUBLIC_NOMINATIM_LABEL,
+  PUBLIC_NOMINATIM_NOTE,
+  PUBLIC_NOMINATIM_SEARCH_URL,
   SEARCH_INTERVAL_MS,
+  SEARCH_UNAVAILABLE_NOTE,
   searchInput,
   searchQueryProblem,
+  searchService,
   searchWaitMs,
   urlFieldValue,
   withMapPreferences,
@@ -67,24 +72,34 @@ describe("地図のタイルの URL（genzo-app の protocol.rs の /tile/{z}/{x
 });
 
 describe("オンラインの地図の設定", () => {
-  it("古いアプリ（map が無い）・欠けた欄は既定値（無効・OSM の既定の提供元）", () => {
+  it("古いアプリ（map が無い）・欠けた欄は既定値（無効・OSM の既定のタイル・地名の検索のサービスなし）", () => {
     expect(mapPreferencesOf(undefined)).toEqual(DEFAULT_MAP_PREFERENCES);
     expect(mapPreferencesOf({})).toEqual({
       online: false,
       consented_at: null,
       tile_url: null,
       search_url: null,
+      public_nominatim: false,
       tile_attribution: null,
     });
     // 帰属の表示の欄が無い前のアプリの形も、欄を既定値（null）で埋める。
     const before = { online: true, consented_at: null, tile_url: null, search_url: null } as unknown as MapPreferences;
     expect(mapPreferencesOf({ map: before }).tile_attribution).toBeNull();
+    // 公開の Nominatim の切り替えが無い前のアプリの形は OFF（既定で使わない）。
+    expect(mapPreferencesOf({ map: before }).public_nominatim).toBe(false);
     expect(mapPreferencesOf({ map: { ...DEFAULT_MAP_PREFERENCES, online: true } }).online).toBe(true);
   });
 
   it("変える欄だけを重ねる（有効にしても、設定した提供元の URL を消さない）", () => {
     const tile_url = "https://tiles.example.org/{z}/{x}/{y}.png";
-    const cur = { online: false, consented_at: null, tile_url, search_url: null, tile_attribution: "Maps © 提供元" };
+    const cur: MapPreferences = {
+      online: false,
+      consented_at: null,
+      tile_url,
+      search_url: null,
+      public_nominatim: true,
+      tile_attribution: "Maps © 提供元",
+    };
     expect(withMapPreferences(cur, { online: true })).toEqual({ ...cur, online: true });
     expect(withMapPreferences(cur, { tile_url: null })).toEqual({ ...cur, tile_url: null });
   });
@@ -95,26 +110,56 @@ describe("オンラインの地図の設定", () => {
     expect(urlFieldValue(" https://a.example/{z}/{x}/{y} ")).toBe("https://a.example/{z}/{x}/{y}");
   });
 
-  it("送り先: 既定は OSM Foundation のサーバー、変えた提供元はそのホスト", () => {
-    expect(mapDestinations(DEFAULT_MAP_PREFERENCES)).toEqual({
-      tiles: "tile.openstreetmap.org",
-      search: "nominatim.openstreetmap.org",
-      osm: true,
+  it("地名の検索の送り先: 既定はなし。公開の Nominatim は切り替えが ON で URL が空のときだけ。URL があればそれ", () => {
+    expect(searchService(DEFAULT_MAP_PREFERENCES)).toEqual({ kind: "none" });
+    const pub = { ...DEFAULT_MAP_PREFERENCES, public_nominatim: true };
+    expect(searchService(pub)).toEqual({
+      kind: "public",
+      url: "https://nominatim.openstreetmap.org/search",
+      host: "nominatim.openstreetmap.org",
     });
+    // genzo-geo の NOMINATIM_SEARCH_URL と同じ。
+    expect(PUBLIC_NOMINATIM_SEARCH_URL).toBe("https://nominatim.openstreetmap.org/search");
+    const url = "https://geo.example.net/v1/search?key=abc";
+    for (const public_nominatim of [false, true]) {
+      expect(searchService({ ...DEFAULT_MAP_PREFERENCES, public_nominatim, search_url: url })).toEqual({
+        kind: "custom",
+        url,
+        host: "geo.example.net",
+      });
+    }
+  });
+
+  it("送り先: タイルの既定は OSM Foundation のサーバー。地名の検索は既定でなし（検索語を送らない）", () => {
+    expect(mapDestinations(DEFAULT_MAP_PREFERENCES)).toEqual({ tiles: "tile.openstreetmap.org", search: null });
     expect(describeDestinations(DEFAULT_MAP_PREFERENCES)).toBe(
-      "OpenStreetMap Foundation のサーバー（地図のタイル: tile.openstreetmap.org、地名の検索: nominatim.openstreetmap.org）",
+      "地図のタイル: tile.openstreetmap.org（OpenStreetMap Foundation）、地名の検索: なし（検索サービスを設定していないので、検索語は送りません）",
     );
+    expect(describeDestinations(DEFAULT_MAP_PREFERENCES)).not.toContain("nominatim");
     const custom = { ...DEFAULT_MAP_PREFERENCES, tile_url: "https://tiles.example.org:8443/osm/{z}/{x}/{y}.png" };
-    expect(mapDestinations(custom)).toEqual({
-      tiles: "tiles.example.org:8443",
-      search: "nominatim.openstreetmap.org",
-      osm: false,
-    });
-    expect(describeDestinations(custom)).toBe(
-      "地図のタイル: tiles.example.org:8443（設定で変えた提供元）、地名の検索: nominatim.openstreetmap.org（OpenStreetMap Foundation）",
+    expect(mapDestinations(custom)).toEqual({ tiles: "tiles.example.org:8443", search: null });
+    expect(describeDestinations(custom)).toContain("tiles.example.org:8443（設定で変えた提供元）");
+    // 公開の Nominatim を使うと選んだとき。
+    const pub = { ...DEFAULT_MAP_PREFERENCES, public_nominatim: true };
+    expect(mapDestinations(pub).search).toBe("nominatim.openstreetmap.org");
+    expect(describeDestinations(pub)).toBe(
+      "地図のタイル: tile.openstreetmap.org（OpenStreetMap Foundation）、地名の検索: nominatim.openstreetmap.org（OpenStreetMap Foundation の公開の Nominatim。設定で使うと選んだもの）",
     );
+    // 設定した検索サービス。
+    const geo = { ...DEFAULT_MAP_PREFERENCES, search_url: "https://geo.example.net/search" };
+    expect(describeDestinations(geo)).toContain("地名の検索: geo.example.net（設定した検索サービス）");
     // 読めない URL（アプリが保存を断るので通常はない）はそのまま出す。
     expect(mapDestinations({ ...DEFAULT_MAP_PREFERENCES, search_url: "not a url" }).search).toBe("not a url");
+  });
+
+  it("公開の Nominatim の切り替えの説明と、検索のサービスがないときの案内（利用ポリシーの制限を示す）", () => {
+    expect(PUBLIC_NOMINATIM_LABEL).toBe("OSM の公開の地名の検索（Nominatim）を使う");
+    expect(PUBLIC_NOMINATIM_NOTE).toContain("OpenStreetMap Foundation の公開のサーバー（nominatim.openstreetmap.org）に検索語を送ります");
+    expect(PUBLIC_NOMINATIM_NOTE).toContain("このアプリの利用者全員の合計で 1 秒に 1 回まで");
+    expect(PUBLIC_NOMINATIM_NOTE).toContain("入力の途中の自動の検索");
+    expect(PUBLIC_NOMINATIM_NOTE).toContain("既定は OFF");
+    expect(SEARCH_UNAVAILABLE_NOTE).toContain("検索サービス（Nominatim と同じ API）の URL を指定すると使えます");
+    expect(SEARCH_UNAVAILABLE_NOTE).toContain("座標や Google マップの場所の URL を貼り付けても位置を付けられます");
   });
 
   it("有効にする前の説明: 送るもの・送り先・守ること（1 秒・入力の途中で送らない・キャッシュ・先読みしない）・注意", () => {
@@ -143,8 +188,14 @@ describe("オンラインの地図の設定", () => {
     expect(all).toContain("座標の欄に打つ途中の値では地図を動かしません");
     // 文の終わりの「。」は MapConsent.tsx が付ける。
     for (const item of [...t.sends, ...t.rules, ...t.cautions]) expect(item.endsWith("。")).toBe(false);
+    // 地名の検索のサービスがない（既定）ときは、検索語を送らないと書く。
+    expect(sends).toContain("今は設定していないので送りません");
+    expect(t.destination).not.toContain("nominatim");
     const custom = mapConsentText({ ...DEFAULT_MAP_PREFERENCES, search_url: "https://geo.example.net/search" });
-    expect(custom.destination).toContain("geo.example.net（設定で変えた提供元）");
+    expect(custom.destination).toContain("geo.example.net（設定した検索サービス）");
+    expect(custom.sends.join("\n")).toContain("地名の検索に入れた語（設定した検索サービスに送ります）");
+    const pub = mapConsentText({ ...DEFAULT_MAP_PREFERENCES, public_nominatim: true });
+    expect(pub.destination).toContain("nominatim.openstreetmap.org（OpenStreetMap Foundation の公開の Nominatim");
   });
 });
 
