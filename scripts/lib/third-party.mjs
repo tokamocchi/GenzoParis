@@ -6,8 +6,10 @@
 //   （about.toml の accepted の順）は cargo-about のもの。cargo-about は `LICENSE`・`LICENSE-*`・`LICENSE.*` の形の
 //   ファイルしか見ないため、`LICENSE_MIT`（Tauri）・`license-mit`（windows-rs）などを取りこぼして SPDX の標準の文
 //   （著作権の行のない雛形）にする。そのときは crate の直下のファイルを名前と中身で選んで補う（findLicenseTexts。
-//   rustModel の doc）。補えなければ標準の文のまま載せ、「ライセンスのファイルがない crate」として著作権者の
-//   手がかり（Cargo.toml の authors）を書く。
+//   rustModel の doc）。crate にファイルがなければ、上流のリポジトリのその版のコミットのファイルの写し
+//   （RUST_SUPPLEMENTS。版と SHA-256 を固定）で補う。それもなければ標準の文のまま載せ、「ライセンスのファイルが
+//   ない crate」として著作権者の手がかり（Cargo.toml の authors）を書く。MPL-2.0 の crate は、ソースコードの
+//   入手先（crates.io の同じ版）の節を作る（SOURCE_OFFER_LICENSES）。
 // - npm: ui/package-lock.json の、開発用でない（`dev` の印のない）パッケージ（ui/package.json の dependencies と、
 //   その推移的な依存）。ライセンスは package.json の `license`（SPDX の式）を about.toml の accepted の順で選び、
 //   本文はパッケージのフォルダのファイルから取る。パッケージに本文がなければ、上流のリポジトリの同じ版のファイルの
