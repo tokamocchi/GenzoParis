@@ -5,6 +5,7 @@
 
 mod geocode;
 mod http;
+mod os_verifier;
 mod server;
 mod tiles;
 
