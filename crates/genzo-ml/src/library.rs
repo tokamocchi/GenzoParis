@@ -82,8 +82,29 @@ impl ModelLibrary {
                 })
                 .collect();
             paths.sort();
+            // 同じ ID の台帳は、ファイル名の順で最初のものだけを使う（セッションは ID ごとに使い回すので、同じ ID で
+            // 別のモデルを指すと、別の種類の推論に違うモデルを使ってしまう）。
+            let mut seen: HashMap<String, PathBuf> = HashMap::new();
             for p in paths {
-                entries.push(read_entry(&p));
+                let mut entry = read_entry(&p);
+                if let Some(m) = &entry.manifest {
+                    match seen.get(&m.id) {
+                        Some(first) => {
+                            entry.problem = Some(format!(
+                                "id {} が {} と重複しています（ファイル名の順で先の台帳だけを使います）",
+                                m.id,
+                                first
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                            ));
+                        }
+                        None => {
+                            seen.insert(m.id.clone(), p.clone());
+                        }
+                    }
+                }
+                entries.push(entry);
             }
         }
         tracing::info!(
@@ -304,6 +325,36 @@ mod tests {
         .unwrap();
         assert!(none.entries().is_empty());
         assert_eq!(none.status().problems.len(), 1);
+    }
+
+    /// 同じ ID の台帳が 2 つあれば、後のものは使わない（セッションを ID で使い回すため。Codex のレビューの指摘）。
+    #[test]
+    fn duplicate_ids_use_only_the_first_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.onnx"), b"model-a").unwrap();
+        std::fs::write(dir.path().join("b.onnx"), b"model-b").unwrap();
+        write(
+            dir.path(),
+            "1-sky.genzo-model.json",
+            r#"{"id": "same", "file": "a.onnx", "input": {"width": 4, "height": 4}, "kinds": {"sky": {"channel": 0}}}"#,
+        );
+        write(
+            dir.path(),
+            "2-person.genzo-model.json",
+            r#"{"id": "same", "file": "b.onnx", "input": {"width": 8, "height": 8}, "kinds": {"person": {"channel": 0}}}"#,
+        );
+        let lib = ModelLibrary::scan(dir.path(), Arc::new(ThresholdBackend::default())).unwrap();
+        assert!(lib.entries()[0].usable());
+        let p = lib.entries()[1].problem.as_deref().unwrap();
+        assert!(
+            p.contains("重複") && p.contains("1-sky.genzo-model.json"),
+            "{p}"
+        );
+        assert_eq!(lib.model_for(AiMaskKind::Sky).unwrap().1.id, "same");
+        assert!(lib.model_for(AiMaskKind::Person).is_none());
+        let status = lib.status();
+        assert_eq!(status.kinds, [AiMaskKind::Sky]);
+        assert!(status.problems.iter().any(|x| x.contains("重複")));
     }
 
     #[test]

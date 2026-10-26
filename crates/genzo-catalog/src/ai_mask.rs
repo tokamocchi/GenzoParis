@@ -3,12 +3,13 @@
 //! - 推論で作った重みのラスター（8 ビット、行優先）を、内容の SHA-256 をキーにして保存する
 //!   （[`Catalog::put_ai_mask`]）。現像設定（genzo-model の `MaskShape::Ai`）はこの SHA-256 で参照する。設定の
 //!   JSON にラスターを入れないのは、履歴の 1 件ごとに設定の全体を写すため。
-//! - 同じ内容は 1 行（同じ SHA-256 の行があれば、何もしない）。仮想コピー・スナップショット・履歴・設定の貼り付けは
-//!   同じ参照を写すので、行は asset を消すまで残す（`ON DELETE CASCADE`）。参照のなくなった行の回収は
+//! - 同じ内容は 1 行（同じ SHA-256 の行があれば、何もしない）。仮想コピー・スナップショット・履歴・設定の貼り付け
+//!   （別の asset への貼り付けを含む）は同じ参照を写すので、行は 1 つの asset のものではない: asset を消しても
+//!   消さず、推論した写真の記録（`asset_id`）を NULL にする（`ON DELETE SET NULL`）。参照のなくなった行の回収は
 //!   [`Catalog::delete_unreferenced_ai_masks`]（variant の今の設定・履歴・スナップショットのどれにも SHA-256 が
 //!   現れない行を消す）。
 //! - 符号化（`encoding`）はここでは解釈しない（`raw`: ラスターそのまま、`png`: 8 ビットのグレースケールの PNG。
-//!   符号化と復号は genzo-api）。SHA-256 は符号化する前の値のもの。
+//!   符号化と復号は genzo-api）。SHA-256 は符号化する前の幅・高さと値のもの（genzo-model の `ai_mask_sha256`）。
 
 use chrono::{DateTime, Utc};
 use genzo_model::AssetId;
@@ -24,7 +25,8 @@ pub const AI_MASK_ENCODINGS: [&str; 2] = ["raw", "png"];
 /// 保存する AI マスクのラスター。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiMaskInsert {
-    /// ラスターの内容（符号化する前の値）の SHA-256（小文字の 16 進数 64 文字）。
+    /// ラスターの内容のアドレス（符号化する前の幅・高さと値の SHA-256。genzo-model の `ai_mask_sha256`。小文字の
+    /// 16 進数 64 文字）。
     pub sha256: String,
     /// 推論した写真。
     pub asset_id: AssetId,
@@ -47,8 +49,8 @@ pub struct AiMaskInsert {
 pub struct AiMaskRecord {
     /// 内容の SHA-256。
     pub sha256: String,
-    /// 推論した写真。
-    pub asset_id: AssetId,
+    /// 推論した写真（その asset を消した後は `None`）。
+    pub asset_id: Option<AssetId>,
     /// 種類。
     pub kind: String,
     /// モデルの ID。
@@ -182,7 +184,7 @@ impl Catalog {
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
-                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<i64>>(1)?,
                         r.get::<_, String>(2)?,
                         r.get::<_, String>(3)?,
                         r.get::<_, i64>(4)?,
@@ -198,7 +200,7 @@ impl Catalog {
                 |(sha256, asset_id, kind, model, width, height, encoding, data, created_at)| {
                     Ok(AiMaskRecord {
                         sha256,
-                        asset_id: AssetId::new(asset_id),
+                        asset_id: asset_id.map(AssetId::new),
                         kind,
                         model,
                         width: i64_to_u32(width, "ai_mask.width")?,

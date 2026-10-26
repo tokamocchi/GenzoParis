@@ -17,7 +17,7 @@ AI マスクのボタンは押せず（理由を説明に出す）、CLI は「�
 | モデルの台帳 | `genzo-ml` の `ModelManifest`（`*.genzo-model.json`） | モデルごとの前処理・後処理・種類との対応・出どころとライセンス（2 章）。アプリのコードはモデルの中身を知らない |
 | 推論の入口 | `genzo-ml` の `Segmenter`（`ModelLibrary` が実装） | 画像 → 種類の重みのラスター（8 ビット）。モデルのフォルダの台帳を読み、種類ごとに最初に使える台帳を選び、セッションを使い回す |
 | コア API | `genzo-api` の `Core::compute_ai_mask`（コマンド `compute_ai_mask`）・`ai_mask_status`・`collect_ai_masks` | 切り抜く前の全体（G の外接矩形）を今の設定で sRGB の 8 ビットに描き（長辺 1024 まで）、推論し、ラスターを PNG にしてカタログに保存し、設定に入れる形（`MaskShape::Ai`）を返す。設定への適用は画面・CLI（色域のスポイトと同じ） |
-| 保存 | `genzo-catalog` の `ai_mask`（スキーマの版 14。[catalog_schema.md](catalog_schema.md)） | 内容の SHA-256 をキーにしたラスター。asset を消すと消える。参照のない行は `genzo ai collect` で回収 |
+| 保存 | `genzo-catalog` の `ai_mask`（スキーマの版 14。[catalog_schema.md](catalog_schema.md)） | 内容のアドレス（幅・高さと値の SHA-256）をキーにしたラスター。別の写真に貼り付けた設定からも参照されるので、asset を消しても残す（推論した写真の記録は NULL）。参照のない行は `genzo ai collect` で回収 |
 | 設定 | `genzo-model` の `MaskShape::Ai { kind, model, mask: DataRef, width, height, bounds }` | ラスターの参照（ID `ai-mask:<種類>` と SHA-256）と大きさ、覆う範囲の G 座標。ラスター自体は設定に入れない（履歴の 1 件ごとに設定の全体を写すため） |
 | 描画 | `genzo-pipeline` の `ProfileResolver::ai_mask` → `ProfileResources::ai_masks` → `local::ai`（ブラシと同じ G 座標の格子 `BrushRaster` に写す） | 描画のたびに推論し直さない。GPU 版はブラシと同じ経路（`local.wgsl` の種類 2）で、シェーダーは変えていない。ラスターが見つからなければ重み 0 で描き、警告する（`SensorWarning::AiMaskMissing`） |
 | 画面 | 現像のパネル「マスク」の「＋ AI 被写体 / 空 / 人物」（マスク・部品の両方）と、AI の部品の「作り直す」 | 使える種類だけ押せる。計算の間は「計算しています…」。失敗はトースト |

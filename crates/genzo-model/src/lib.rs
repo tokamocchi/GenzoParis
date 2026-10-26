@@ -46,7 +46,7 @@ pub use develop::{
     MAX_PROFILE_ID_CHARS, MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS, MaskComponent, MaskMode,
     MaskShape, NoiseReduction, ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings,
     RenderDeps, Sharpening, ToneCurve, ToneParams, ValidationError, VignetteCenter, WbPreset,
-    WhiteBalance, is_valid_profile_id, sha256_hex,
+    WhiteBalance, ai_mask_sha256, is_valid_profile_id, sha256_hex,
 };
 pub use export::{
     Align, ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize,

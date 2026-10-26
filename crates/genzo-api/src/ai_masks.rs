@@ -332,7 +332,8 @@ impl Core {
         // 2. 推論。
         let seg = segmenter.segment(&image, kind).map_err(ml_error)?;
         // 3. カタログに保存（内容の SHA-256 がキー。同じなら 1 行）。
-        let sha256 = genzo_model::sha256_hex(&seg.values);
+        // 内容のアドレス（幅・高さも含める。同じ値の並びで大きさの違うラスターを別のものにする）。
+        let sha256 = genzo_model::ai_mask_sha256(seg.width, seg.height, &seg.values);
         let png = encode_gray8_png(seg.width, seg.height, &seg.values)?;
         let asset_id = inner.with_catalog(|c| c.asset_of_variant(variant_id))?;
         let insert = AiMaskInsert {
@@ -410,16 +411,21 @@ mod tests {
 
     #[test]
     fn models_dir_prefers_the_environment_variable() {
-        let dir = models_dir_from(|k| (k == ENV_MODELS_DIR).then(|| OsString::from("/m")));
-        assert_eq!(dir, Some(PathBuf::from("/m")));
+        // どの OS でも絶対パスになる場所（Windows では `/m` はドライブを補った `D:\m` になるため）。
+        let base = std::env::temp_dir().join("genzo-models-test");
+        let m = base.join("m");
+        let dir = models_dir_from(|k| (k == ENV_MODELS_DIR).then(|| m.clone().into_os_string()));
+        assert_eq!(dir, Some(m.clone()));
+        // 環境変数が空なら、OS のアプリのデータのフォルダ（Windows は APPDATA、macOS は HOME、ほかは
+        // XDG_DATA_HOME）の下の models。
         let dir = models_dir_from(|k| match k {
             ENV_MODELS_DIR => Some(OsString::from("")),
-            "HOME" => Some(OsString::from("/home/x")),
+            "APPDATA" | "HOME" | "XDG_DATA_HOME" => Some(base.clone().into_os_string()),
             _ => None,
         });
         let d = dir.unwrap();
         assert!(d.ends_with(MODELS_DIR), "{}", d.display());
-        assert!(d.starts_with("/home/x"), "{}", d.display());
+        assert!(d.starts_with(&base), "{}", d.display());
     }
 
     #[test]

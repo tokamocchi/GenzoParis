@@ -1,4 +1,4 @@
-//! AI マスクのラスター（DEV-20。`ai_mask`）: 保存と読み出し、同じ内容の重複、asset の削除、参照のない行の回収、
+//! AI マスクのラスター（DEV-20。`ai_mask`）: 保存と読み出し、同じ内容の重複、asset の削除（行は残る）、参照のない行の回収、
 //! 版 14 への移行。
 
 use genzo_model::{
@@ -13,7 +13,7 @@ fn raster(asset_id: AssetId, seed: u8, kind: &str) -> AiMaskInsert {
         .map(|i| i.wrapping_mul(7).wrapping_add(seed))
         .collect();
     AiMaskInsert {
-        sha256: genzo_model::sha256_hex(&data),
+        sha256: genzo_model::ai_mask_sha256(6, 4, &data),
         asset_id,
         kind: kind.to_owned(),
         model: "test-model".to_owned(),
@@ -52,7 +52,7 @@ fn ai_masks_are_stored_once_per_content_and_read_back() {
     assert_eq!(f.rows("ai_mask"), 1);
     let r = f.cat.ai_mask(&m.sha256).unwrap().unwrap();
     assert_eq!(r.sha256, m.sha256);
-    assert_eq!(r.asset_id, a.asset_id);
+    assert_eq!(r.asset_id, Some(a.asset_id));
     assert_eq!((r.kind.as_str(), r.model.as_str()), ("sky", "test-model"));
     assert_eq!((r.width, r.height, r.encoding.as_str()), (6, 4, "raw"));
     assert_eq!(r.data, m.data);
@@ -117,7 +117,7 @@ fn invalid_ai_masks_are_rejected() {
 }
 
 #[test]
-fn ai_masks_follow_the_asset_and_unreferenced_ones_are_collected() {
+fn unreferenced_ai_masks_are_collected_and_outlive_their_asset() {
     let mut f = Fixture::new();
     let a = f.photo("A.ARW", 1, None);
     let b = f.photo("B.ARW", 2, None);
@@ -154,9 +154,32 @@ fn ai_masks_follow_the_asset_and_unreferenced_ones_are_collected() {
     assert!(f.cat.ai_mask(&in_history.sha256).unwrap().is_none());
     assert!(f.cat.ai_mask(&unused.sha256).unwrap().is_none());
     assert!(f.cat.ai_mask(&of_b.sha256).unwrap().is_none());
-    // asset を消すと、その asset のラスターも消える。
+    // asset を消しても、ラスターは残る（推論した写真の記録は NULL）。参照がなくなれば回収で消える。
     f.cat.remove_assets(&[a.asset_id]).unwrap();
+    assert_eq!(f.rows("ai_mask"), 2);
+    assert_eq!(f.cat.ai_mask(&used.sha256).unwrap().unwrap().asset_id, None);
+    assert_eq!(f.cat.delete_unreferenced_ai_masks().unwrap(), 2);
     assert_eq!(f.rows("ai_mask"), 0);
+}
+
+/// 別の asset に貼り付けた設定が参照するラスターは、推論した asset を消しても消えない（Codex のレビューの指摘）。
+#[test]
+fn ai_masks_pasted_to_another_asset_survive_deleting_the_source() {
+    let mut f = Fixture::new();
+    let a = f.photo("A.ARW", 1, None);
+    let b = f.photo("B.ARW", 2, None);
+    let m = raster(a.asset_id, 1, "sky");
+    f.cat.put_ai_mask(&m).unwrap();
+    // a で推論したラスターを、b の設定だけが参照する（貼り付け）。
+    f.cat
+        .save_develop(b.master_variant_id, &settings_with(&m.sha256), "貼り付け")
+        .unwrap();
+    f.cat.remove_assets(&[a.asset_id]).unwrap();
+    let r = f.cat.ai_mask(&m.sha256).unwrap().expect("b が参照している");
+    assert_eq!(r.asset_id, None);
+    assert_eq!(r.data, m.data);
+    assert_eq!(f.cat.delete_unreferenced_ai_masks().unwrap(), 0);
+    assert!(f.cat.ai_mask(&m.sha256).unwrap().is_some());
 }
 
 /// 版 13 のカタログを開くと版 14 に移行し、`ai_mask` の表（空）ができる。

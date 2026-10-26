@@ -39,7 +39,7 @@ GenzoParis のカタログ（SQLite のデータベース）の構造と、外�
 | 11 | 撮影日時の一括修正（LIB-16）: カメラの本体のシリアル番号（`asset.camera_serial`）と UTC の計算に使ったオフセット（`asset.tz_basis`）の列、修正の履歴（`capture_time_edit`・`capture_time_edit_item`）、`photos_v1` の列 `camera_serial`。既存の行の 2 つの列は NULL のまま（撮影日時は変わらない） | `catalog_0011_capture_time_edits.sql` |
 | 12 | 外付けドライブの識別（FILE-03）・見つからない写真（FILE-04）: ボリュームのファイルシステムの種類（`volume.fs_type`）と最後につながった日時（`volume.last_seen_at`）、フォルダの状態（`folder.status`・`folder.status_at`）、状態が `ok` でないファイルの部分索引（`file_not_ok`）。版 11 までのパスから作ったボリュームの ID（`path:`）は移行では変えない（アプリが開いたときに、見えるフォルダから OS のボリューム ID へ移す。2.4 節） | `catalog_0012_volumes_and_missing.sql` |
 | 13 | 位置情報の後付け（LIB-21。ジオタグ付け）: 後から付けた位置（`asset_location`。元のファイルには書かない）、位置の変更の履歴（`location_edit`・`location_edit_item`）、`photos_v1` の列 `location_lat`・`location_lon`・`location_source`（使う位置とその出どころ）。`asset` の表は変えない（`gps_lat`・`gps_lon` はカメラの記録の値のまま）。既存の asset には行を作らない | `catalog_0013_asset_locations.sql` |
-| 14 | AI マスク（DEV-20）: 推論で作った重みのラスター（`ai_mask`。現像設定の `MaskShape::Ai` が内容の SHA-256 で参照する。asset を消すと消える）。既存の設定・表は変えない | `catalog_0014_ai_masks.sql` |
+| 14 | AI マスク（DEV-20）: 推論で作った重みのラスター（`ai_mask`。現像設定の `MaskShape::Ai` が内容の SHA-256 で参照する。asset を消しても残り、参照がなくなったら回収する）。既存の設定・表は変えない | `catalog_0014_ai_masks.sql` |
 
 ## 2. 読み方
 
@@ -633,12 +633,12 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 
 ### `ai_mask`
 
-AI マスク（DEV-20。2026-10-26 から使う。決定事項ログ No.202）の推論で作った重みのラスター（8 ビット、行優先）。現像設定の `masks[].components[].shape.ai` が、`mask.sha256`（ラスターの内容の SHA-256）でこの表の行を参照します（設定の JSON にラスターは入れません。履歴の 1 件ごとに設定の全体を写すため）。内容のアドレスなので、同じラスターは 1 行で、仮想コピー・スナップショット・履歴・設定の貼り付けは同じ参照を写します。asset を消すと、その asset で推論した行も消えます。どの設定・履歴・スナップショットにも参照が現れない行は、カタログの保守（`genzo maintenance ai-masks --collect`）で回収します。`data` は `encoding` の形（`raw`: ラスターそのまま、`png`: 8 ビットのグレースケールの PNG）で、`sha256` は符号化する前の値のものです。
+AI マスク（DEV-20。2026-10-26 から使う。決定事項ログ No.202）の推論で作った重みのラスター（8 ビット、行優先）。現像設定の `masks[].components[].shape.ai` が、`mask.sha256`（ラスターの内容の SHA-256）でこの表の行を参照します（設定の JSON にラスターは入れません。履歴の 1 件ごとに設定の全体を写すため）。内容のアドレスなので、同じラスターは 1 行で、仮想コピー・スナップショット・履歴・設定の貼り付け（別の写真への貼り付けを含む）は同じ参照を写します。そのため行は 1 つの asset のものではなく、asset を消しても消えません（`asset_id` が NULL になる）。どの設定・履歴・スナップショットにも参照が現れない行は、カタログの保守（`genzo ai collect`）で回収します。`data` は `encoding` の形（`raw`: ラスターそのまま、`png`: 8 ビットのグレースケールの PNG）で、`sha256` は符号化する前の幅・高さ（それぞれ 4 バイトのリトルエンディアン）と値をつないだものから求めます（genzo-model の `ai_mask_sha256`）。
 
 | 列 | 型 | NULL | 既定値 | 意味 |
 |---|---|---|---|---|
-| `sha256` | TEXT | 不可 | | 主キー。ラスターの内容の SHA-256（小文字の 16 進数 64 文字） |
-| `asset_id` | INTEGER | 不可 | | 推論した写真（→ `asset.id`。asset を消すと消える） |
+| `sha256` | TEXT | 不可 | | 主キー。ラスターの内容のアドレス（幅・高さと値の SHA-256。小文字の 16 進数 64 文字） |
+| `asset_id` | INTEGER | 可 | | 推論した写真（→ `asset.id`。asset を消すと NULL。行は残る） |
 | `kind` | TEXT | 不可 | | 種類（`subject`・`sky`・`person`） |
 | `model` | TEXT | 不可 | | 推論に使ったモデルの ID |
 | `width` | INTEGER | 不可 | | 幅（画素。1 以上） |
@@ -715,7 +715,7 @@ AI マスク（DEV-20。2026-10-26 から使う。決定事項ログ No.202）�
 | `file_op_unfinished` | `file_op(id) WHERE state IN ('planned', 'executing')` | 起動時に終わっていない記録を探す |
 | `capture_time_edit_item_asset` | `capture_time_edit_item(asset_id)` | asset を消すときの参照の確認（版 11） |
 | `location_edit_item_asset` | `location_edit_item(asset_id)` | asset を消すときの参照の確認（版 13） |
-| `ai_mask_asset` | `ai_mask(asset_id)` | asset の AI マスクのラスターと、asset を消すときの参照の確認（版 14） |
+| `ai_mask_asset` | `ai_mask(asset_id)` | asset で推論した AI マスクのラスターと、asset を消すときの参照の更新（版 14） |
 
 `UNIQUE` の制約と主キーには、SQLite が自動で索引（`sqlite_autoindex_*`）を作ります。
 

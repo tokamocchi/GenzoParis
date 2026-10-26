@@ -68,6 +68,18 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(sha256(&[bytes]))
 }
 
+/// AI マスクのラスター（DEV-20）の内容のアドレス（[`DataRef::sha256`] に入れる値）: 幅・高さ（それぞれ 4 バイトの
+/// リトルエンディアン）と値（幅 × 高さの 8 ビット、行優先）をつないだものの SHA-256 の小文字の 16 進数。同じ値の
+/// 並びでも大きさが違えば別のラスターになる（縦長と横長で値がすべて同じ、など）。
+pub fn ai_mask_sha256(width: u32, height: u32, values: &[u8]) -> String {
+    hex::encode(sha256(&[
+        b"genzo.ai_mask\0",
+        &width.to_le_bytes(),
+        &height.to_le_bytes(),
+        values,
+    ]))
+}
+
 /// 構造体を JSON にする（設定の型は必ず JSON にできる）。
 fn to_json_bytes<T: Serialize>(value: &T) -> Vec<u8> {
     serde_json::to_vec(value).expect("現像設定の型は必ず JSON にできる")
@@ -252,6 +264,19 @@ mod tests {
             .into_iter()
             .filter(|&p| a.hash_for_phase(p) != b.hash_for_phase(p))
             .collect()
+    }
+
+    #[test]
+    fn ai_mask_hash_covers_the_dimensions() {
+        let v = vec![7u8; 12];
+        let a = ai_mask_sha256(4, 3, &v);
+        assert_eq!(a.len(), 64);
+        assert_eq!(a, ai_mask_sha256(4, 3, &v));
+        assert_ne!(a, ai_mask_sha256(3, 4, &v));
+        assert_ne!(a, sha256_hex(&v));
+        let mut w = v.clone();
+        w[5] = 8;
+        assert_ne!(a, ai_mask_sha256(4, 3, &w));
     }
 
     #[test]

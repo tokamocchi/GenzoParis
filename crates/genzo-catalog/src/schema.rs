@@ -143,7 +143,7 @@ pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[
 ];
 
 /// AI マスク（DEV-20）を使い始めたカタログのスキーマの版（推論で作った重みのラスター `ai_mask`。現像設定の
-/// `MaskShape::Ai` が内容の SHA-256 で参照する。asset を消すと消える）。既存の設定・表は変えない。
+/// `MaskShape::Ai` が内容の SHA-256 で参照する。asset を消しても残り、asset_id を NULL にする）。既存の設定・表は変えない。
 pub const AI_MASKS_SCHEMA_VERSION: u32 = 14;
 
 /// 位置情報の後付け（LIB-21）を使い始めたカタログのスキーマの版（後から付けた位置 `asset_location`、変更の

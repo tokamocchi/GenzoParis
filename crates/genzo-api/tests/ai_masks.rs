@@ -295,5 +295,23 @@ fn ai_masks_can_be_pasted_to_another_variant() {
         255
     );
     core.close_develop().unwrap();
+    // 推論した写真（a）をカタログから除いても、b が参照するラスターは残る（Codex のレビューの指摘）。メモリの使い回しで
+    // 隠れないよう、コアを開き直してから描く。
+    let plan = core
+        .plan_delete(genzo_api::types::DeleteKind::RemoveFromCatalog, &[a])
+        .unwrap();
+    core.execute_delete(plan.plan_id).unwrap();
+    assert_eq!(core.collect_ai_masks().unwrap().removed, 0);
+    core.close().unwrap();
+    let core = env.open_with_hooks(|h| h.segmenter = Some(Arc::new(FixedSegmenter::right_half())));
+    core.open_develop(b).unwrap();
+    let info = core.render_develop().unwrap();
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let o = core.mask_overlay(b, 0, None).unwrap();
+    assert_eq!(
+        o.weights[(o.info.height / 2 * o.info.width + o.info.width - 3) as usize],
+        255
+    );
+    core.close_develop().unwrap();
     core.close().unwrap();
 }

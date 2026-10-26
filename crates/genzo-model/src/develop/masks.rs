@@ -269,7 +269,7 @@ pub enum MaskShape {
         /// 推論に使ったモデルの ID（genzo-ml のモデルの台帳の `id`。表示と記録用）。
         #[serde(default)]
         model: String,
-        /// ラスターの参照（ID は `ai-mask:<種類>`、SHA-256 はラスターの内容（幅 × 高さの 8 ビットの値、行優先））。
+        /// ラスターの参照（ID は `ai-mask:<種類>`、SHA-256 はラスターの内容のアドレス（幅・高さと値。`ai_mask_sha256`））。
         /// カタログの `ai_mask` の表から引く。見つからなければ重み 0（genzo-pipeline が知らせる）。
         mask: DataRef,
         /// ラスターの幅（画素）。

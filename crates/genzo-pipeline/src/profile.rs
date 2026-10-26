@@ -90,9 +90,10 @@ impl AiMaskRaster {
         )
     }
 
-    /// 内容の SHA-256（小文字の 16 進数。genzo-model の `DataRef::sha256` に入れる値）。
+    /// 内容のアドレス（幅・高さと値の SHA-256 の小文字の 16 進数。genzo-model の `ai_mask_sha256`。`DataRef::sha256` に
+    /// 入れる値）。
     pub fn sha256_hex(&self) -> String {
-        genzo_model::sha256_hex(&self.values)
+        genzo_model::ai_mask_sha256(self.width, self.height, &self.values)
     }
 }
 

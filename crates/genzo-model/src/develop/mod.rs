@@ -29,7 +29,7 @@ pub use params::{
 pub use validate::{FieldIssue, IssueKind, ValidationError};
 
 pub(crate) use hash::sha256;
-pub use hash::sha256_hex;
+pub use hash::{ai_mask_sha256, sha256_hex};
 
 use crate::{CURRENT_PROCESS_VERSION, CURRENT_SCHEMA_VERSION};
 
