@@ -1,0 +1,11 @@
+{
+  "id": "mediapipe-deeplab-v3-person",
+  "name": "DeepLab-v3（MediaPipe。人物）",
+  "file": "deeplab_v3.onnx",
+  "sha256": "d535514b4b80a8d2bae10107a5c2dec333bfedf7f87a9c8f000f999118051785",
+  "license": "Apache-2.0 と判断（モデルのファイル自体に表示はない。licenses/third-party/ai-models.txt）",
+  "source": "https://storage.googleapis.com/mediapipe-models/image_segmenter/deeplab_v3/float32/1/deeplab_v3.tflite を tf2onnx 1.17.0 で ONNX に変換",
+  "input": {"name": "sub_7", "width": 257, "height": 257, "layout": "nhwc", "range": "signed"},
+  "output": {"name": "ResizeBilinear_3", "activation": "softmax", "layout": "nhwc"},
+  "kinds": {"person": {"classes": [15]}}
+}

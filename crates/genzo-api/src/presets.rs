@@ -381,6 +381,15 @@ fn presets_dir_from(get: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     platform_data_dir(&get).map(|d| d.join(APP_IDENTIFIER).join(PRESETS_DIR))
 }
 
+/// OS のアプリのデータのフォルダの中の `name`（`<データのフォルダ>/<APP_IDENTIFIER>/<name>`。プリセット・AI マスクの
+/// モデルで同じ決め方）。分からなければ `None`。
+pub(crate) fn app_data_subdir(
+    get: &impl Fn(&str) -> Option<OsString>,
+    name: &str,
+) -> Option<PathBuf> {
+    platform_data_dir(get).map(|d| d.join(APP_IDENTIFIER).join(name))
+}
+
 /// OS のアプリのデータのフォルダ（Tauri の `data_dir` と同じ場所。識別子の前まで）。
 #[cfg(windows)]
 fn platform_data_dir(get: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
@@ -420,6 +429,12 @@ pub fn develop_preset_settings(
     };
     let mut s = groups.merge(current, &base);
     s.render_deps = RenderDeps::default();
+    // AI マスク（DEV-20）の部品は写さない: ラスターはカタログの中にあり、プリセットはカタログをまたいで使う（別の
+    // カタログでは見つからず、元のカタログでも参照がなくなると回収で消える）。部品が残らなかったマスクも除く。
+    for m in &mut s.masks {
+        m.components.retain(|c| !c.shape.is_ai());
+    }
+    s.masks.retain(|m| !m.components.is_empty());
     s
 }
 
@@ -1479,6 +1494,45 @@ mod tests {
     }
 
     /// 現像プリセット: 選んだ項目だけを保存し、ほかの項目は既定値・外部データは空にする。一覧・名前の規則・重なり。
+    /// AI マスク（DEV-20）の部品はプリセットに写さない（ラスターはカタログの中にあり、回収・別のカタログで失われるため。
+    /// Codex のレビューの指摘）。AI の部品だけのマスクは除き、ほかの部品は残す。
+    #[test]
+    fn develop_presets_drop_ai_mask_parts() {
+        use genzo_model::{AiMaskKind, DataRef, LocalAdjustment, MaskComponent, MaskShape};
+        let ai = MaskShape::Ai {
+            kind: AiMaskKind::Sky,
+            model: "m".into(),
+            mask: DataRef::new(AiMaskKind::Sky.ref_id(), "ab".repeat(32)),
+            width: 4,
+            height: 3,
+            bounds: [0.0, 0.0, 1.0, 0.75],
+        };
+        let linear = MaskShape::Linear {
+            x0: 0.5,
+            y0: 0.0,
+            x1: 0.5,
+            y1: 0.3,
+        };
+        let mut current = DevelopSettings {
+            process_version: 2,
+            ..DevelopSettings::default()
+        };
+        current
+            .masks
+            .push(LocalAdjustment::new(MaskComponent::add(ai.clone())));
+        let mut mixed = LocalAdjustment::new(MaskComponent::add(linear.clone()));
+        mixed.components.push(MaskComponent::add(ai));
+        current.masks.push(mixed);
+        let groups = SettingGroups {
+            masks: true,
+            ..SettingGroups::ALL
+        };
+        let s = develop_preset_settings(groups, &current);
+        assert_eq!(s.masks.len(), 1);
+        assert_eq!(s.masks[0].components.len(), 1);
+        assert_eq!(s.masks[0].components[0].shape, linear);
+    }
+
     #[test]
     fn develop_presets_keep_only_the_chosen_groups() {
         let (_d, s) = store();

@@ -309,10 +309,20 @@ pub fn run() {
                     None
                 }
             };
+            // 配布物に同梱した AI マスクのモデル（資源のフォルダの models。tauri.conf.json の bundle.resources。
+            // docs/ai_masks.md の 2 章）。なければ利用者のフォルダのモデルだけを使う。
+            let bundled_models = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|d| d.join(genzo_api::MODELS_DIR))
+                .filter(|d| d.is_dir());
+            tracing::info!(dir = ?bundled_models, "同梱の AI マスクのモデルのフォルダ");
             app.manage(Arc::new(
                 AppState::new(config_dir, sink)
                     .with_logs(logs::AppLogs::new(log_status))
-                    .with_map(map::MapService::new(map_cache)),
+                    .with_map(map::MapService::new(map_cache))
+                    .with_bundled_models_dir(bundled_models),
             ));
             Ok(())
         })

@@ -620,13 +620,58 @@ export interface LuminanceRangeShape {
   smoothness: number;
 }
 
+/** AI マスクの種類（genzo-model の AiMaskKind。DEV-20）。 */
+export type AiMaskKind = "subject" | "sky" | "person";
+
+/** AI マスク（genzo-model の MaskShape::Ai。推論で作ったラスターの参照と、G 座標の範囲）。 */
+export interface AiShape {
+  kind: AiMaskKind;
+  /** 推論に使ったモデルの ID。 */
+  model: string;
+  /** ラスターの参照（ID は `ai-mask:<種類>`、SHA-256 は内容）。 */
+  mask: { id: string; sha256: string };
+  width: number;
+  height: number;
+  /** ラスターが覆う範囲の G 座標（左・上・右・下）。 */
+  bounds: [number, number, number, number];
+}
+
 /** 部品の形（genzo-model の MaskShape。外部タグの JSON）。 */
 export type MaskShape =
   | { linear: LinearShape }
   | { radial: RadialShape }
   | { brush: { strokes: BrushStroke[] } }
   | { color_range: ColorRangeShape }
-  | { luminance_range: LuminanceRangeShape };
+  | { luminance_range: LuminanceRangeShape }
+  | { ai: AiShape };
+
+/** AI マスクの計算の結果（genzo-api の AiMaskResult。`shape` をそのまま部品の形にする）。 */
+export interface AiMaskResult {
+  variant_id: VariantId;
+  kind: AiMaskKind;
+  shape: MaskShape;
+  model: string;
+  sha256: string;
+  width: number;
+  height: number;
+  render_ms: number;
+  inference_ms: number;
+}
+
+/** AI マスクの推論の仕組みの状態（genzo-api の AiMaskStatusInfo）。 */
+export interface AiMaskStatus {
+  available: boolean;
+  kinds: AiMaskKind[];
+  models: string[];
+  backend: string;
+  problems: string[];
+  models_dir: string | null;
+  /** 配布物に同梱したモデルのフォルダ（なければ null）。利用者のフォルダの後に読む。 */
+  bundled_models_dir: string | null;
+  onnxruntime: string | null;
+  rasters: number;
+  raster_bytes: number;
+}
 
 /** 部品（genzo-model の MaskComponent）。 */
 export interface MaskComponent {
@@ -2093,6 +2138,8 @@ export type Command =
   | { type: "retouch_auto_source"; variant_id: VariantId; spot: RetouchSpot }
   | { type: "auto_tone"; variant_id: VariantId }
   | { type: "mask_overlay"; variant_id: VariantId; index: number; uncropped?: boolean }
+  | { type: "compute_ai_mask"; variant_id: VariantId; kind: AiMaskKind }
+  | { type: "ai_mask_status" }
   | { type: "set_develop_view"; uncropped: boolean }
   | {
       type: "constrain_crop";
@@ -2224,6 +2271,8 @@ export type Response =
   | { type: "retouch_source"; offset: [number, number] | null }
   | ({ type: "auto_tone" } & AutoTone)
   | ({ type: "mask_overlay" } & MaskOverlayInfo)
+  | ({ type: "ai_mask" } & AiMaskResult)
+  | ({ type: "ai_mask_status" } & AiMaskStatus)
   | { type: "crop"; crop: CropRect }
   | ({ type: "display" } & DisplayInfo)
   | { type: "profiles"; profiles: ProfileEntry[] }

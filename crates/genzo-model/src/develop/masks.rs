@@ -1,5 +1,5 @@
-//! ローカル補正（マスク。DEV-18・DEV-19。v1。処理バージョン 2）の型（docs/04_architecture.md の 2.1 節
-//! 「ローカル補正」・2.5 節）。
+//! ローカル補正（マスク。DEV-18・DEV-19・DEV-20。v1。処理バージョン 2）の型（docs/04_architecture.md の 2.1 節
+//! 「ローカル補正」・2.5 節・7.2 節）。
 //!
 //! 1 つのマスク（[`LocalAdjustment`]）は、部品（[`MaskComponent`]）を順に合成した 0〜1 の重みと、調整値の差分
 //! （[`LocalDelta`]）からなる。パイプライン（genzo-pipeline の `local`）は、画素ごとに「マスクの重み × 差分」を
@@ -27,10 +27,16 @@
 //! ], "delta": {"exposure_ev": -0.5, "dehaze": 20}}
 //! ```
 //!
+//! AI マスク（DEV-20。[`MaskShape::Ai`]）は、推論で作ったラスター（8 ビットの重み）をカタログに保存し、設定には
+//! その参照（[`DataRef`]。ID と内容の SHA-256）と大きさ・覆う範囲だけを持つ（履歴の 1 件ごとに設定の全体を保存する
+//! ため、ラスターは設定に入れない。04 の 7.2 節「生成したマスクは画像として保存し、現像のたびに推論し直さない」）。
+//!
 //! finish-detail までの仮の形（`"mask": {...}` に形が 1 つ。円形の反転は形の中）は、読み込みで部品 1 つの形に
 //! 読み替える（[`super::migrate`]）。
 
 use serde::{Deserialize, Serialize};
+
+use super::params::DataRef;
 
 /// ローカル補正（マスク）の数の上限。
 pub const MAX_MASKS: usize = 100;
@@ -46,6 +52,15 @@ pub const MAX_TOTAL_BRUSH_POINTS: usize = 100_000;
 pub const MAX_COLOR_SAMPLES: usize = 5;
 /// マスクの名前の長さの上限（文字）。
 pub const MAX_MASK_NAME_CHARS: usize = 100;
+/// AI マスクのラスターの 1 辺の上限（画素。**仮置き**: 推論の出力を長辺 1024 までに縮めて保存する。genzo-api の
+/// `ai_masks`）。
+pub const MAX_AI_MASK_SIDE: u32 = 4096;
+/// AI マスクのラスターの画素数の上限（**仮置き**: 4096 × 4096 より小さく、1024 × 1024 の 4 倍）。
+pub const MAX_AI_MASK_PIXELS: u64 = 4 * 1024 * 1024;
+/// AI マスクのモデルの ID の長さの上限（文字）。
+pub const MAX_AI_MODEL_ID_CHARS: usize = 100;
+/// AI マスクのラスターの参照の ID の先頭（`ai-mask:<種類>`。[`AiMaskKind::ref_id`]）。
+pub const AI_MASK_REF_PREFIX: &str = "ai-mask:";
 
 /// 部品の合成のしかた（モジュールの doc の「部品の合成」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -139,7 +154,52 @@ pub struct ColorSample {
     pub lab: [f32; 3],
 }
 
-/// マスクの部品の形（DEV-18・DEV-19）。位置・半径は G 座標（モジュールの doc）。
+/// AI マスクの種類（DEV-20。自動で選ぶ対象）。順序は [`AiMaskKind::ALL`] の並び（台帳の BTreeMap のキーに使う）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiMaskKind {
+    /// 被写体（主要な被写体。顕著性）。
+    Subject,
+    /// 空。
+    Sky,
+    /// 人物。
+    Person,
+}
+
+impl AiMaskKind {
+    /// すべての種類（画面・CLI の並びの順）。
+    pub const ALL: [AiMaskKind; 3] = [AiMaskKind::Subject, AiMaskKind::Sky, AiMaskKind::Person];
+
+    /// JSON の名前（`subject`・`sky`・`person`）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AiMaskKind::Subject => "subject",
+            AiMaskKind::Sky => "sky",
+            AiMaskKind::Person => "person",
+        }
+    }
+
+    /// 表示の名前。
+    pub fn display_name(self) -> &'static str {
+        match self {
+            AiMaskKind::Subject => "被写体",
+            AiMaskKind::Sky => "空",
+            AiMaskKind::Person => "人物",
+        }
+    }
+
+    /// ラスターの参照の ID（`ai-mask:<種類>`）。
+    pub fn ref_id(self) -> String {
+        format!("{AI_MASK_REF_PREFIX}{}", self.as_str())
+    }
+
+    /// JSON の名前から。
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+}
+
+/// マスクの部品の形（DEV-18・DEV-19・DEV-20）。位置・半径は G 座標（モジュールの doc）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaskShape {
@@ -198,6 +258,27 @@ pub enum MaskShape {
         #[serde(default = "default_smoothness")]
         smoothness: f32,
     },
+    /// AI マスク（推論で作った重みのラスター。DEV-20。モジュールの doc の「AI マスク」）。
+    ///
+    /// ラスターは G 座標の `bounds` の範囲を `width × height` の格子で覆い、画素の値（0〜255）を 0〜1 の重みとして
+    /// 双線形で引く（範囲の外は 0。genzo-pipeline の `local`）。ブラシと同じく G 座標なので、切り抜きを変えても
+    /// 位置は変わらないが、回転・歪曲補正を変えると画像に対してずれる（作り直す）。
+    Ai {
+        /// 種類（被写体・空・人物）。
+        kind: AiMaskKind,
+        /// 推論に使ったモデルの ID（genzo-ml のモデルの台帳の `id`。表示と記録用）。
+        #[serde(default)]
+        model: String,
+        /// ラスターの参照（ID は `ai-mask:<種類>`、SHA-256 はラスターの内容のアドレス（幅・高さと値。`ai_mask_sha256`））。
+        /// カタログの `ai_mask` の表から引く。見つからなければ重み 0（genzo-pipeline が知らせる）。
+        mask: DataRef,
+        /// ラスターの幅（画素）。
+        width: u32,
+        /// ラスターの高さ（画素）。
+        height: u32,
+        /// ラスターが覆う範囲の G 座標（左・上・右・下）。ふつうは切り抜く前の全体（`[0, 0, gw / long, gh / long]`）。
+        bounds: [f32; 4],
+    },
 }
 
 fn default_feather() -> f32 {
@@ -230,6 +311,19 @@ impl MaskShape {
         match self {
             MaskShape::Brush { strokes } => strokes.iter().map(|s| s.points.len()).sum(),
             _ => 0,
+        }
+    }
+
+    /// AI マスク（DEV-20）か。
+    pub fn is_ai(&self) -> bool {
+        matches!(self, MaskShape::Ai { .. })
+    }
+
+    /// AI マスクのラスターの参照（AI マスク以外は `None`）。
+    pub fn ai_mask_ref(&self) -> Option<&DataRef> {
+        match self {
+            MaskShape::Ai { mask, .. } => Some(mask),
+            _ => None,
         }
     }
 }
@@ -396,6 +490,11 @@ impl LocalAdjustment {
     pub fn brush_points(&self) -> usize {
         self.components.iter().map(|c| c.shape.brush_points()).sum()
     }
+
+    /// AI マスクのラスターの参照（部品の順）。
+    pub fn ai_mask_refs(&self) -> impl Iterator<Item = &DataRef> {
+        self.components.iter().filter_map(|c| c.shape.ai_mask_ref())
+    }
 }
 
 fn default_true() -> bool {
@@ -440,6 +539,47 @@ mod tests {
             serde_json::to_value(MaskMode::Intersect).unwrap(),
             serde_json::json!("intersect")
         );
+    }
+
+    #[test]
+    fn ai_mask_json_form_and_helpers() {
+        let s: MaskShape = serde_json::from_str(
+            r#"{"ai": {"kind": "sky", "mask": {"id": "ai-mask:sky", "sha256": ""}, "width": 64, "height": 48,
+                "bounds": [0, 0, 1, 0.75]}}"#,
+        )
+        .unwrap();
+        let MaskShape::Ai {
+            kind,
+            model,
+            mask,
+            width,
+            height,
+            bounds,
+        } = &s
+        else {
+            panic!("{s:?}")
+        };
+        assert_eq!(*kind, AiMaskKind::Sky);
+        assert_eq!(model, "");
+        assert_eq!(mask.id, "ai-mask:sky");
+        assert_eq!((*width, *height), (64, 48));
+        assert_eq!(*bounds, [0.0, 0.0, 1.0, 0.75]);
+        assert!(s.is_ai() && !s.is_range());
+        assert_eq!(s.ai_mask_ref().unwrap().id, "ai-mask:sky");
+        assert_eq!(s.brush_points(), 0);
+        let adj = LocalAdjustment::new(MaskComponent::add(s.clone()));
+        assert_eq!(adj.ai_mask_refs().count(), 1);
+        assert_eq!(
+            serde_json::to_value(AiMaskKind::Person).unwrap(),
+            serde_json::json!("person")
+        );
+        assert_eq!(AiMaskKind::parse("subject"), Some(AiMaskKind::Subject));
+        assert_eq!(AiMaskKind::parse("Subject"), None);
+        assert_eq!(AiMaskKind::Sky.ref_id(), "ai-mask:sky");
+        assert_eq!(AiMaskKind::Subject.display_name(), "被写体");
+        for k in AiMaskKind::ALL {
+            assert_eq!(AiMaskKind::parse(k.as_str()), Some(k));
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@
 
 import * as core from "../api/core";
 import type {
+  AiMaskKind,
   AspectRatio,
   BeforeSource,
   CropRect,
@@ -53,6 +54,7 @@ import {
   sanitizeCrop,
 } from "./cropMath";
 import {
+  AI_KIND_LABELS,
   type BrushOptions,
   DEFAULT_BRUSH,
   addColorSample,
@@ -64,6 +66,7 @@ import {
   newComponent,
   newMask,
   shapeKind,
+  withComponent,
 } from "./maskLogic";
 import {
   DEFAULT_RETOUCH,
@@ -98,6 +101,23 @@ export type MaskPickTarget =
   | { kind: "new_mask" }
   | { kind: "new_component"; mask: number }
   | { kind: "add_sample"; mask: number; component: number };
+
+/**
+ * AI マスク（DEV-20）の計算の結果の入れ先（new_mask: 新しいマスク、new_component: マスク `mask` に新しい部品、
+ * replace: マスク `mask` の部品 `component` の形を置き換える（作り直し））。
+ */
+export type AiMaskTarget =
+  | { kind: "new_mask" }
+  | { kind: "new_component"; mask: number }
+  | { kind: "replace"; mask: number; component: number };
+
+/** AI マスクの推論の仕組みの状態（画面に出す分。コアの ai_mask_status から）。 */
+export interface AiMaskUiStatus {
+  /** 使える種類（空なら使えない）。 */
+  kinds: AiMaskKind[];
+  /** 使えない理由・問題（表示用）。 */
+  problems: string[];
+}
 
 /** ビフォー / アフターの表示の形（off: アフターだけ、before: ビフォーだけ、side_by_side: 左右、split: 分割）。 */
 export type CompareMode = "off" | "before" | "side_by_side" | "split";
@@ -136,6 +156,10 @@ export interface DevelopViewState {
   brush: BrushOptions;
   /** 色域のスポイトの入れ先（tool が mask_color の間）。 */
   pickTarget: MaskPickTarget | null;
+  /** AI マスクの推論の仕組みの状態（null はまだ聞いていない）。 */
+  aiStatus: AiMaskUiStatus | null;
+  /** AI マスクを計算している間（ボタンを無効にする）。 */
+  aiBusy: boolean;
   /**
    * 周辺光量補正の中心の印をプレビューに出す（効果の区切りを開いている間。ドラッグで中心を動かす）。
    * 量が 0 のとき・マスクを選んでいるとき・ほかの道具の間などは、出す側（DevelopView）で出さない。
@@ -159,6 +183,8 @@ export const viewStore = createStore<DevelopViewState>({
   brushOverlay: true,
   brush: DEFAULT_BRUSH,
   pickTarget: null,
+  aiStatus: null,
+  aiBusy: false,
   vignetteHandle: false,
   spotIndex: null,
   retouch: DEFAULT_RETOUCH,
@@ -819,6 +845,70 @@ export async function pickMaskColor(x: number, y: number): Promise<void> {
       actions.reportError(e, "スポイトで色を求められません");
     }
   });
+}
+
+/**
+ * AI マスクの推論の仕組みの状態をコアに聞く（マスクの節を開いたとき。失敗したら使えないとして知らせない: ボタンの
+ * 説明に理由を出す）。
+ */
+export async function refreshAiStatus(): Promise<void> {
+  try {
+    const st = await core.aiMaskStatus();
+    viewStore.set({ aiStatus: { kinds: st.available ? st.kinds : [], problems: st.problems } });
+  } catch (e) {
+    viewStore.set({ aiStatus: { kinds: [], problems: [e instanceof Error ? e.message : String(e)] } });
+  }
+}
+
+/**
+ * AI マスク（DEV-20）: 現像中の写真の種類 `kind` の選択範囲をコアに計算させ（推論。数秒かかりうる）、入れ先に入れる
+ * （新しいマスク・新しい部品・部品の作り直し）。計算の間は aiBusy。失敗（モデルがないなど）はコアのエラーを知らせる。
+ */
+export async function computeAiMask(kind: AiMaskKind, target: AiMaskTarget): Promise<void> {
+  const d = developStore.get();
+  const id = d.variantId;
+  if (id === null || !d.state || !d.settings || viewStore.get().aiBusy || !maskToolReady()) return;
+  // 入れ先のマスク・部品（の中身）を覚えておく。推論は数秒かかり、その間もほかのマスクの編集（削除・並べ替え）は
+  // できるので、結果を入れるときに番号ではなく中身で探し直す（見つからなければ入れない）。
+  const origMask = target.kind === "new_mask" ? undefined : d.settings.masks[target.mask];
+  const origComp = target.kind === "replace" ? origMask?.components[target.component] : undefined;
+  if (target.kind !== "new_mask" && !origMask) return;
+  if (target.kind === "replace" && !origComp) return;
+  if (viewStore.get().tool === "mask_color" || viewStore.get().tool === "brush") cancelMaskTool();
+  viewStore.set({ aiBusy: true });
+  try {
+    await enqueue(async () => {
+      try {
+        const r = await core.computeAiMask(id, kind);
+        const cur = developStore.get();
+        if (cur.variantId !== id || !cur.settings) return;
+        const s = cur.settings;
+        if (target.kind === "new_mask") {
+          addMaskWith(s, { ...newMask(r.shape), name: AI_KIND_LABELS[kind] }, false);
+          return;
+        }
+        // 名前・調整・有効の変更ではマスクの部品の並び（components）はそのままなので、それで同じマスクを探す。
+        const i = s.masks.findIndex((m) => m === origMask || m.components === origMask?.components);
+        const j = i < 0 || !origComp ? -1 : s.masks[i].components.indexOf(origComp);
+        if (i < 0 || (target.kind === "replace" && j < 0)) {
+          actions.notify("info", "計算の間にマスクが変わったため、AI マスクを入れませんでした（もう一度押してください）");
+          return;
+        }
+        if (target.kind === "new_component") {
+          const next = addComponent(s, i, newComponent(r.shape));
+          if (next === s) return;
+          applyAddedComponent(next, i, false);
+        } else {
+          const next = withComponent(s, i, j, (c) => ({ ...c, shape: r.shape }));
+          if (next !== s) applySettings(next, false);
+        }
+      } catch (e) {
+        actions.reportError(e, `AI マスク（${AI_KIND_LABELS[kind]}）を計算できません`);
+      }
+    });
+  } finally {
+    viewStore.set({ aiBusy: false });
+  }
 }
 
 /**

@@ -130,10 +130,76 @@ pub fn encode_png<T: Sample>(
     Ok(out)
 }
 
+/// 8 ビットのグレースケールの画像（`width × height`。行優先）を PNG のバイト列にする（AI マスクのラスターの保存。
+/// DEV-20。色の情報は付けない）。長さが合わなければエラー。
+pub fn encode_gray8_png(width: u32, height: u32, values: &[u8]) -> Result<Vec<u8>> {
+    if width == 0 || height == 0 || values.len() != width as usize * height as usize {
+        return Err(MediaError::encode(format!(
+            "PNG（グレースケール）: 値の長さ {} が {width} × {height} に合わない",
+            values.len()
+        )));
+    }
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(PNG_COMPRESSION);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| MediaError::encode(format!("PNG: {e}")))?;
+        writer
+            .write_image_data(values)
+            .map_err(|e| MediaError::encode(format!("PNG: {e}")))?;
+        writer
+            .finish()
+            .map_err(|e| MediaError::encode(format!("PNG: {e}")))?;
+    }
+    Ok(out)
+}
+
+/// [`encode_gray8_png`] で作った PNG を読む（幅・高さ・値）。8 ビットのグレースケール以外はエラー。
+pub fn decode_gray8_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| MediaError::decode(format!("PNG: {e}")))?;
+    let info = reader.info();
+    if info.color_type != png::ColorType::Grayscale || info.bit_depth != png::BitDepth::Eight {
+        return Err(MediaError::decode(format!(
+            "PNG: 8 ビットのグレースケールではない（{:?}, {:?}）",
+            info.color_type, info.bit_depth
+        )));
+    }
+    let (width, height) = (info.width, info.height);
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    let frame = reader
+        .next_frame(&mut buf)
+        .map_err(|e| MediaError::decode(format!("PNG: {e}")))?;
+    buf.truncate(frame.buffer_size());
+    if buf.len() != width as usize * height as usize {
+        return Err(MediaError::decode("PNG: 画素の数が合わない".to_owned()));
+    }
+    Ok((width, height, buf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::buffer::{RgbImage8, RgbImage16};
+
+    #[test]
+    fn gray8_png_round_trips() {
+        let values: Vec<u8> = (0..24u8).map(|i| i.wrapping_mul(11)).collect();
+        let png = encode_gray8_png(6, 4, &values).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+        assert_eq!(decode_gray8_png(&png).unwrap(), (6, 4, values.clone()));
+        assert!(encode_gray8_png(5, 4, &values).is_err());
+        assert!(decode_gray8_png(b"not a png").is_err());
+        // RGB の PNG は読まない。
+        let rgb = encode_png(&RgbImage8::new(2, 1).unwrap(), None, None).unwrap();
+        assert!(decode_gray8_png(&rgb).is_err());
+    }
 
     fn chunk_types(png_bytes: &[u8]) -> Vec<[u8; 4]> {
         let mut pos = 8;

@@ -83,6 +83,14 @@ pub struct GlobalArgs {
     /// GENZO_PRESETS_DIR、それもなければアプリと同じ場所（genzo preset dir で表示）
     #[arg(long, global = true, value_name = "DIR")]
     pub presets_dir: Option<PathBuf>,
+    /// AI マスク（DEV-20）のモデルのフォルダ（モデルのファイルと台帳 *.genzo-model.json）。省略時は環境変数
+    /// GENZO_MODELS_DIR、それもなければアプリと同じ場所（genzo ai status で表示）
+    #[arg(long, global = true, value_name = "DIR")]
+    pub models_dir: Option<PathBuf>,
+    /// AI マスクの推論に使う ONNX Runtime の共有ライブラリ（onnxruntime.dll・libonnxruntime.dylib・
+    /// libonnxruntime.so）。省略時は環境変数 GENZO_ONNXRUNTIME、モデルのフォルダ、実行ファイルのフォルダの順に探す
+    #[arg(long, global = true, value_name = "FILE")]
+    pub onnxruntime: Option<PathBuf>,
     /// 結果を JSON で出す（機械が読む用）
     #[arg(long, global = true)]
     pub json: bool,
@@ -201,6 +209,10 @@ pub enum Command {
     /// 1 件 1 ファイルで置く。プリセットは ID（16 桁の 16 進数）か名前で指定する
     #[command(subcommand)]
     Preset(PresetCommand),
+    /// AI マスク（DEV-20。被写体・空・人物の自動の選択）の推論の仕組みの状態と、カタログの中のラスターの保守。
+    /// マスクを足すのは develop mask add <ID> --ai <種類>。モデルと ONNX Runtime の置き方は docs/ai_masks.md
+    #[command(subcommand)]
+    Ai(AiCommand),
     /// 書き出す（P3 のジョブ。進捗は標準エラー）
     Export(ExportArgs),
     /// 比較明・比較暗合成（DEV-34。P3 のジョブ）: 選んだ写真を撮影日時の順に現像して画素ごとに比べ、1 枚にして保存し、
@@ -1748,7 +1760,38 @@ pub struct ExportPresetArgs {
     pub watermark: WatermarkArgs,
 }
 
-/// `develop mask` のサブコマンド（DEV-18・DEV-19）。
+/// `ai` のサブコマンド（DEV-20）。
+#[derive(Debug, Subcommand)]
+pub enum AiCommand {
+    /// 推論の仕組みの状態（使える種類とモデル・ONNX Runtime・モデルのフォルダ・問題・カタログの中のラスターの数）
+    Status,
+    /// どの設定・履歴・スナップショットにも参照されていないラスターをカタログから消す
+    Collect,
+}
+
+/// AI マスクの種類（genzo-model の AiMaskKind）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AiKindArg {
+    /// 被写体（主要な被写体）。
+    Subject,
+    /// 空。
+    Sky,
+    /// 人物。
+    Person,
+}
+
+impl AiKindArg {
+    /// genzo-model の値。
+    pub fn kind(self) -> genzo_model::AiMaskKind {
+        match self {
+            AiKindArg::Subject => genzo_model::AiMaskKind::Subject,
+            AiKindArg::Sky => genzo_model::AiMaskKind::Sky,
+            AiKindArg::Person => genzo_model::AiMaskKind::Person,
+        }
+    }
+}
+
+/// `develop mask` のサブコマンド（DEV-18・DEV-19・DEV-20）。
 #[derive(Debug, Subcommand)]
 pub enum MaskCommand {
     /// マスクの一覧（番号・名前・有効か・部品・調整）
@@ -2034,6 +2077,10 @@ pub struct MaskShapeArgs {
     /// 輝度の範囲（MIN,MAX[,滑らかさ]。0〜100。表示の明るさの %。滑らかさの既定 50）
     #[arg(long, value_name = "MIN,MAX[,S]", value_parser = parse_luminance)]
     pub luminance: Option<[f32; 3]>,
+    /// AI マスク: 種類（subject: 被写体 / sky: 空 / person: 人物）の選択範囲を推論して保存する（写真を開いて
+    /// 計算する。モデルと ONNX Runtime が要る。genzo ai status）
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub ai: Option<AiKindArg>,
 }
 
 /// 部品の合成のしかた（genzo-model の MaskMode）。

@@ -33,6 +33,9 @@ pub enum ApiError {
     /// 現像中の写真がない（[`crate::Core::open_develop`] の前の操作）。
     #[error("現像中の写真がありません")]
     NoDevelopSession,
+    /// AI マスク（DEV-20）の推論の仕組み・モデルが使えない（ONNX Runtime とモデルの置き方は docs/ai_masks.md）。
+    #[error("AI マスクを計算できません: {0}")]
+    AiMask(String),
     /// コアは終了している。
     #[error("コアは終了しています")]
     Closed,
@@ -257,6 +260,8 @@ const HINT_UPDATE_APP: &str = "このカタログは新しい版のアプリで�
 const HINT_MIGRATE: &str =
     "アプリでカタログを開くと、スキーマを移行します（移行の前にバックアップを作ります）";
 const HINT_FILE: &str = "ファイルの場所・ドライブの接続・権限を確かめてください";
+/// AI マスクが使えないときの案内。
+const HINT_AI_MASK: &str = "ONNX Runtime の共有ライブラリと AI マスクのモデル（台帳付き）を、モデルのフォルダに置いてください（docs/ai_masks.md）";
 const HINT_IN_USE: &str =
     "カタログを開いている GenzoParis（アプリ・CLI）を終了してから、やり直してください";
 const HINT_CACHE: &str = "サムネイル・プレビューのキャッシュは作り直せます（カタログの復元は不要です）。開くときに壊れていれば自動で退避して作り直します。直らなければ、アプリを終了し、データのフォルダの thumbs.db の名前を変えてから開き直してください";
@@ -272,6 +277,7 @@ fn classify(e: &ApiError) -> (ErrorKind, Option<&'static str>) {
         ApiError::Stale { .. } => (K::Stale, None),
         ApiError::NotFound(_) => (K::NotFound, None),
         ApiError::InvalidArgument(_) | ApiError::NoDevelopSession => (K::InvalidInput, None),
+        ApiError::AiMask(_) => (K::InvalidInput, Some(HINT_AI_MASK)),
         ApiError::Closed => (K::Closed, None),
         ApiError::CatalogInUse { .. } => (K::Conflict, Some(HINT_IN_USE)),
         ApiError::Cancelled => (K::Cancelled, None),

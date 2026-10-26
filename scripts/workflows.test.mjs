@@ -56,3 +56,21 @@ test("配布物の確認で、同梱した C / C++ のライブラリのライ�
   assert.match(release, /'licenses\\third-party\\vcruntime-terms\.txt'/);
   assert.match(release, /licenses\/LibRaw\/source\/\*\.tar\.gz/);
 });
+
+test("配布物の確認で、AI マスクの同梱のモデル・ONNX Runtime・そのライセンスの文書があるかを見る（Windows・macOS）", async () => {
+  const { ONNXRUNTIME_ARCHIVES } = await import("./lib/onnxruntime.mjs");
+  const release = fs.readFileSync(path.join(WORKFLOWS_DIR, "release.yml"), "utf8");
+  const tauri = JSON.parse(fs.readFileSync(path.join(WORKFLOWS_DIR, "..", "..", "crates", "genzo-app", "tauri.conf.json"), "utf8"));
+  // tauri.conf.json の resources で同梱するモデルと台帳は、両 OS の確認に載っている。
+  const models = Object.values(tauri.bundle.resources)
+    .filter((v) => v.startsWith("models/"))
+    .map((v) => v.slice("models/".length));
+  assert.ok(models.length >= 4, models.join(", "));
+  for (const name of [...models, ONNXRUNTIME_ARCHIVES.windows.fileName]) assert.ok(release.includes(`'${name}'`), name);
+  for (const name of [...models, ONNXRUNTIME_ARCHIVES.macos.fileName]) {
+    assert.match(release, new RegExp(`for name in [^\\n]*\\b${name.replace(/[.]/g, "\\.")}\\b`), name);
+  }
+  assert.match(release, /third-party\/ai-models\.txt/);
+  assert.match(release, /'third-party\\ai-models\.txt'/);
+  assert.equal((release.match(/scripts\/check-onnxruntime\.py/g) ?? []).length >= 2, true);
+});

@@ -14,7 +14,8 @@
 
 use genzo_api::{DevelopSettings, VariantId};
 use genzo_model::{
-    BrushStroke, ColorSample, LocalAdjustment, LocalDelta, MaskComponent, MaskMode, MaskShape,
+    AiMaskKind, BrushStroke, ColorSample, LocalAdjustment, LocalDelta, MaskComponent, MaskMode,
+    MaskShape,
 };
 use serde_json::{Value, json};
 
@@ -152,9 +153,11 @@ fn build_component(s: &Session, v: VariantId, part: &MaskPartArgs) -> CliResult<
             samples: pick_samples(s, v, &a.color_at)?,
             amount: part.color_amount.unwrap_or(50.0),
         }
+    } else if let Some(kind) = a.ai {
+        compute_ai_shape(s, v, kind.kind())?
     } else {
         return Err(CliError::Usage(
-            "形（--linear・--radial・--brush・--color-at・--luminance のどれか）を指定してください"
+            "形（--linear・--radial・--brush・--color-at・--luminance・--ai のどれか）を指定してください"
                 .to_owned(),
         ));
     };
@@ -194,6 +197,25 @@ fn read_strokes(src: &str) -> CliResult<Vec<BrushStroke>> {
         return Err(CliError::input("ブラシのストロークがありません"));
     }
     Ok(strokes)
+}
+
+/// 写真を開いて、AI マスク（DEV-20）の種類 `kind` の選択範囲を推論して保存し、形を返す（閉じてから返す）。
+fn compute_ai_shape(s: &Session, v: VariantId, kind: AiMaskKind) -> CliResult<MaskShape> {
+    ensure_variants(s, &[v])?;
+    s.core.open_develop(v)?;
+    let r = s.core.compute_ai_mask(v, kind);
+    s.core.close_develop()?;
+    let r = r?;
+    s.out.progress(format!(
+        "AI マスク（{}）: モデル {}、{} × {}、描画 {} ms、推論 {} ms",
+        kind.display_name(),
+        r.model,
+        r.width,
+        r.height,
+        r.render_ms,
+        r.inference_ms
+    ));
+    Ok(r.shape)
 }
 
 /// 写真を開いて、プレビューの点の色を見本にする（閉じてから返す）。
@@ -255,6 +277,9 @@ fn components_text(m: &LocalAdjustment) -> String {
                 MaskShape::Brush { strokes } => format!("ブラシ {} 本", strokes.len()),
                 MaskShape::ColorRange { samples, .. } => format!("色域 {} 色", samples.len()),
                 MaskShape::LuminanceRange { min, max, .. } => format!("輝度 {min}〜{max}"),
+                MaskShape::Ai { kind, model, .. } => {
+                    format!("AI {}（{model}）", kind.display_name())
+                }
             };
             let mode = match c.mode {
                 MaskMode::Add => "",

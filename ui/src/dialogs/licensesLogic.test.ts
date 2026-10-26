@@ -36,6 +36,9 @@ describe("ライセンスの文書の並びと見出し", () => {
   it("見出しと大きさ", () => {
     expect(licenseTitle("third-party/npm.txt")).toBe("画面のライブラリ（npm のパッケージ）のライセンス");
     expect(licenseTitle("LibRaw/build-recipe/homebrew-libraw.rb")).toBe("LibRaw/build-recipe/homebrew-libraw.rb");
+    // AI マスク（DEV-20）のモデルと ONNX Runtime の文書。
+    expect(licenseTitle("third-party/ai-models.txt")).toBe("AI マスクのモデルのライセンス（U²-Net・DeepLab-v3）");
+    expect(licenseTitle("third-party/onnxruntime/LICENSE.txt")).toContain("ONNX Runtime");
     expect(licenseOptionLabel({ path: "GenzoParis/LICENSE.txt", size: 2048 })).toBe(
       "GenzoParis のライセンス（GPL-3.0-or-later）（2.00 KB）",
     );

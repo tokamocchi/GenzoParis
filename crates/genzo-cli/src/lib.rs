@@ -137,6 +137,7 @@
 //!   ときだけ退避して置き換える（写真などを取り違えて指定しても、名前を変えない）。
 //! - 取り込みでは、アプリのデータのフォルダ（プレビューのキャッシュなど）を飛ばす（genzo-api）。
 
+mod ai;
 pub mod args;
 mod bench;
 mod catalog;
@@ -375,6 +376,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         Command::Develop(c) => develop::run(&g, out, c),
         Command::Profile(c) => profile::run(&g, out, c),
         Command::Preset(c) => preset::run(&g, out, c),
+        Command::Ai(c) => ai::run(&g, out, c),
         Command::Export(a) => export::run(&g, out, a),
         Command::Composite(a) => composite::run(&g, out, a),
         Command::Render(a) => standalone::render(&g, out, a),

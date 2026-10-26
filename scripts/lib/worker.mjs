@@ -34,6 +34,9 @@
 //    vcruntime-terms.txt）をインストール先の licenses/third-party に入れ、インストーラー（NSIS）の同意の画面の文書を、
 //    使用条件と GPL-3.0 の全文をまとめたもの（binaries/installer-license.txt）に差し替える（bundle.licenseFile。
 //    Microsoft の Distributable Code の条件。決定事項ログ No.199）。
+// 8. Windows・macOS では、AI マスクの推論に使う ONNX Runtime を公式の配布物から取り、SHA-256 を確かめて同梱する
+//    （scripts/lib/onnxruntime.mjs。同梱のモデルのフォルダ models に置き、ライセンスの文書を
+//    licenses/third-party/onnxruntime に入れる。macOS では dylib の最小の版も下の「macOS の最小の版」の確認に含める）。
 //
 // LibRaw の場所:
 // - Windows: VCPKG_ROOT（なければ VCPKG_INSTALLATION_ROOT。GitHub Actions の Windows のランナーにある）の
@@ -114,7 +117,8 @@ import {
   vcpkgDllOwners,
   vcpkgPortInfo,
 } from "./native-notice.mjs";
-import { readPeImports } from "./pe.mjs";
+import { prepareOnnxRuntime } from "./onnxruntime.mjs";
+import { isVcRuntimeDll, readPeImports } from "./pe.mjs";
 import { APP_DIR, BINARIES_DIR, LIBS_CONFIG, REPO_ROOT, capture, run } from "./proc.mjs";
 import { parseHostTriple, sidecarFileName, targetOs } from "./target.mjs";
 
@@ -186,13 +190,23 @@ export function prepareWorker() {
   let vcRuntime = [];
   /** @type {string | undefined} .app の最小の版を上げるとき、その版 */
   let raisedMinimum;
+  // AI マスクの ONNX Runtime（Windows・macOS。scripts/lib/onnxruntime.mjs）。macOS では最小の版の確認に含めるので、
+  // LibRaw を集める前に取る。
+  const onnx = prepareOnnxRuntime(os, {
+    appDir: APP_DIR,
+    run: (cmd, args) => run(cmd, args),
+    readMinos: (file) => parseOtoolLoadCommands(capture("otool", ["-l", file])).minos,
+  });
+  if (onnx) notes.push(...onnx.notes);
   if (os === "windows") {
-    const r = collectWindowsDlls(sidecar, dllDirs, findVcRedistDirs(env, triple), libsDir);
+    // ONNX Runtime の読み込む Visual C++ のランタイムも、ワーカーのものと合わせて同梱する（scripts/lib/onnxruntime.mjs）。
+    const extraVcImports = onnx ? vcRuntimeImports(onnx.libraryPath) : [];
+    const r = collectWindowsDlls(sidecar, dllDirs, findVcRedistDirs(env, triple), libsDir, extraVcImports);
     bundled = r.bundled;
     vcRuntime = r.vcRuntime;
     notes.push(...r.notes);
   } else if (os === "macos") {
-    const r = collectMacosDylibs(built, sidecar, libsDir);
+    const r = collectMacosDylibs(built, sidecar, libsDir, onnx ? [{ name: onnx.fileName, minos: onnx.minos }] : []);
     bundled = r.bundled;
     notes.push(...r.notes);
     raisedMinimum = r.raisedMinimum;
@@ -213,6 +227,7 @@ export function prepareWorker() {
     resources = {
       ...writeLibrawLicenses(os, readLibrawVersion(os, env), bundled.map((b) => b.name), licensesDir, vcpkgRoot, sourceFiles, env),
       ...writeNativeNotices(os, triple, components, vcRuntime, vcpkgRoot, windowsLibraw?.triplet ?? "", env, nativeNotices),
+      ...(onnx?.resources ?? {}),
     };
   }
   // Visual C++ のランタイムを同梱するときは、その使用条件をインストール先に入れ、インストーラーの同意の画面で
@@ -374,11 +389,13 @@ function indexDlls(dirs) {
  * @returns {{ bundled: Array<{ name: string, source: string }>, vcRuntime: Array<{ name: string, source: string }>, notes: string[] }}
  *   `bundled` は Visual C++ のランタイムを含むすべて
  */
-function collectWindowsDlls(worker, dllDirs, vcRedistDirs, libsDir) {
+function collectWindowsDlls(worker, dllDirs, vcRedistDirs, libsDir, extraVcImports = []) {
   const index = indexDlls(dllDirs);
   const vcIndex = indexDlls(vcRedistDirs);
   const readImports = (file) => readPeImports(new Uint8Array(fs.readFileSync(file)));
-  const plan = planWindowsDlls(readImports(worker), {
+  const root = readImports(worker);
+  // ほかの同梱物（ONNX Runtime）の読み込む Visual C++ のランタイムも、ワーカーが読み込むものとして扱う。
+  const plan = planWindowsDlls({ ...root, imports: [...root.imports, ...extraVcImports] }, {
     findDll: (name) => index.get(name.toLowerCase()) ?? null,
     findVcRuntimeDll: (name) => vcIndex.get(name.toLowerCase()) ?? null,
     readImports,
@@ -415,13 +432,24 @@ function collectWindowsDlls(worker, dllDirs, vcRedistDirs, libsDir) {
   return { bundled: all, vcRuntime: plan.vcRuntime, notes };
 }
 
+/** DLL `file` が読み込む Visual C++ のランタイムの DLL の名前（遅延読み込みを含む）。 */
+function vcRuntimeImports(file) {
+  const r = readPeImports(new Uint8Array(fs.readFileSync(file)));
+  return [...r.imports, ...r.delayImports].filter((n) => isVcRuntimeDll(n));
+}
+
 /**
- * macOS: Homebrew の dylib を集め、参照を書き換えて署名し直す。
+ * macOS: Homebrew の dylib を集め、参照を書き換えて署名し直す。`extraMinos` は、最小の版の確認に含めるほかの同梱物
+ * （ONNX Runtime。資源のフォルダに置き、ここでは書き換えない）。
  *
+ * @param {string} built
+ * @param {string} sidecar
+ * @param {string} libsDir
+ * @param {Array<{ name: string, minos: string | null }>} [extraMinos]
  * @returns {{ bundled: Array<{ name: string, source: string }>, notes: string[], raisedMinimum: string | undefined }}
  *   `raisedMinimum` は .app の最小の版を上げるときの版（GENZO_ALLOW_NEWER_MINOS=1 のときだけ）
  */
-function collectMacosDylibs(built, sidecar, libsDir) {
+function collectMacosDylibs(built, sidecar, libsDir, extraMinos = []) {
   const otool = (file) => parseOtoolLoadCommands(capture("otool", ["-l", file]));
   const plan = planMacosBundle(built, {
     loadCommands: otool,
@@ -435,7 +463,11 @@ function collectMacosDylibs(built, sidecar, libsDir) {
   // 最小の版を先に確かめる（書き換え・署名の前に止めるため）。
   const minimum = readMinimumMacosVersion();
   const check = checkMacosMinimum(
-    [{ name: WORKER_NAME, minos: plan.worker.minos }, ...plan.libs.map((l) => ({ name: l.name, minos: l.minos }))],
+    [
+      { name: WORKER_NAME, minos: plan.worker.minos },
+      ...plan.libs.map((l) => ({ name: l.name, minos: l.minos })),
+      ...extraMinos,
+    ],
     minimum,
     process.env[ALLOW_NEWER_MINOS_ENV] === "1",
   );

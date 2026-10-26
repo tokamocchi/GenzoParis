@@ -611,6 +611,19 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         uncropped: Option<bool>,
     },
+    /// AI マスク（DEV-20）: 現像中の写真の種類 `kind`（被写体・空・人物）の選択範囲を推論して保存し、設定に入れる形を
+    /// 返す（適用はしない。[`crate::Core::compute_ai_mask`]）。→ [`Response::AiMask`]
+    ComputeAiMask {
+        /// 現像中の写真。
+        variant_id: VariantId,
+        /// 種類。
+        kind: genzo_model::AiMaskKind,
+    },
+    /// AI マスクの推論の仕組みの状態（[`crate::Core::ai_mask_status`]）。→ [`Response::AiMaskStatus`]
+    AiMaskStatus,
+    /// 参照のない AI マスクのラスターをカタログから消す（[`crate::Core::collect_ai_masks`]）。
+    /// → [`Response::AiMasksCollected`]
+    CollectAiMasks,
     /// スポット修正（DEV-21）のコピー元を自動で選ぶ（適用はしない。[`crate::Core::retouch_auto_source`]）。
     /// → [`Response::RetouchSource`]
     RetouchAutoSource {
@@ -1339,6 +1352,12 @@ pub enum Response {
     AutoTone(AutoTone),
     /// マスクの重ねて表示の画像の情報。
     MaskOverlay(MaskOverlayInfo),
+    /// AI マスクの計算の結果（設定に入れる形）。
+    AiMask(crate::types::AiMaskResult),
+    /// AI マスクの推論の仕組みの状態。
+    AiMaskStatus(crate::types::AiMaskStatusInfo),
+    /// 参照のない AI マスクのラスターの回収の結果。
+    AiMasksCollected(crate::types::AiMaskCollectReport),
     /// スポット修正のコピー元の自動の選択の結果（コピー元のずれ。O 座標。よい候補がなければ `None`）。
     RetouchSource {
         /// コピー元のずれ（`RetouchSpot::offset` にそのまま使える）。
@@ -1805,6 +1824,11 @@ impl Core {
                 index,
                 uncropped,
             } => R::MaskOverlay(self.mask_overlay(variant_id, index, uncropped)?.info),
+            C::ComputeAiMask { variant_id, kind } => {
+                R::AiMask(self.compute_ai_mask(variant_id, kind)?)
+            }
+            C::AiMaskStatus => R::AiMaskStatus(self.ai_mask_status()?),
+            C::CollectAiMasks => R::AiMasksCollected(self.collect_ai_masks()?),
             C::RetouchAutoSource { variant_id, spot } => R::RetouchSource {
                 offset: self.retouch_auto_source(variant_id, &spot)?,
             },

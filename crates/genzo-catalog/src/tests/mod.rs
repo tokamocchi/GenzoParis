@@ -1,5 +1,6 @@
 //! カタログの結合テスト（内部の接続にも触れるため、crate の中に置く）。
 
+mod ai_mask;
 mod backup;
 mod capture;
 mod collections;

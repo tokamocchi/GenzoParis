@@ -9,7 +9,8 @@ use std::fmt;
 
 use super::DevelopSettings;
 use super::masks::{
-    BrushStroke, LocalAdjustment, LocalDelta, MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES,
+    AI_MASK_REF_PREFIX, BrushStroke, LocalAdjustment, LocalDelta, MAX_AI_MASK_PIXELS,
+    MAX_AI_MASK_SIDE, MAX_AI_MODEL_ID_CHARS, MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES,
     MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS,
     MaskShape,
 };
@@ -979,6 +980,57 @@ impl MaskShape {
                     );
                 }
             }
+            MaskShape::Ai {
+                kind,
+                model,
+                mask,
+                width,
+                height,
+                bounds,
+            } => {
+                let p = format!("{p}.ai");
+                if model.chars().count() > MAX_AI_MODEL_ID_CHARS {
+                    c.invalid(
+                        format!("{p}.model"),
+                        format!("モデルの ID が長すぎます（上限 {MAX_AI_MODEL_ID_CHARS} 文字）"),
+                    );
+                }
+                if mask.id != kind.ref_id() {
+                    c.invalid(
+                        format!("{p}.mask.id"),
+                        format!(
+                            "ラスターの参照の ID は {AI_MASK_REF_PREFIX}{} にしてください",
+                            kind.as_str()
+                        ),
+                    );
+                }
+                mask.check(&format!("{p}.mask.sha256"), c);
+                if mask.sha256.is_empty() {
+                    c.invalid(
+                        format!("{p}.mask.sha256"),
+                        "ラスターの SHA-256 がありません",
+                    );
+                }
+                c.range_u32(format!("{p}.width"), *width, 1, MAX_AI_MASK_SIDE);
+                c.range_u32(format!("{p}.height"), *height, 1, MAX_AI_MASK_SIDE);
+                if u64::from(*width) * u64::from(*height) > MAX_AI_MASK_PIXELS {
+                    c.invalid(
+                        format!("{p}.width"),
+                        format!(
+                            "ラスターが大きすぎます（{width} × {height}。上限 {MAX_AI_MASK_PIXELS} 画素）"
+                        ),
+                    );
+                }
+                for (i, name) in ["left", "top", "right", "bottom"].iter().enumerate() {
+                    c.range(format!("{p}.bounds.{name}"), bounds[i], ranges::MASK_COORD);
+                }
+                if !(bounds[2] > bounds[0] && bounds[3] > bounds[1]) {
+                    c.invalid(
+                        format!("{p}.bounds"),
+                        "右は左より、下は上より大きくしてください",
+                    );
+                }
+            }
         }
     }
 
@@ -1047,6 +1099,38 @@ impl MaskShape {
                 *smoothness = ranges::AMOUNT_0_100.clamp_or(*smoothness, 50.0);
                 if *min > *max {
                     std::mem::swap(min, max);
+                }
+            }
+            MaskShape::Ai {
+                kind,
+                model,
+                mask,
+                width,
+                height,
+                bounds,
+            } => {
+                if model.chars().count() > MAX_AI_MODEL_ID_CHARS {
+                    *model = model.chars().take(MAX_AI_MODEL_ID_CHARS).collect();
+                }
+                mask.id = kind.ref_id();
+                mask.normalize();
+                *width = (*width).clamp(1, MAX_AI_MASK_SIDE);
+                *height = (*height).clamp(1, MAX_AI_MASK_SIDE);
+                // 画素数の上限を超えるラスターは、引けないもの（幅・高さ 1）にする（参照は残す）。
+                if u64::from(*width) * u64::from(*height) > MAX_AI_MASK_PIXELS {
+                    *width = 1;
+                    *height = 1;
+                }
+                for v in bounds.iter_mut() {
+                    clamp0(v, ranges::MASK_COORD);
+                }
+                if bounds[2] <= bounds[0] {
+                    bounds[2] = ranges::MASK_COORD.max.min(bounds[0] + 1.0);
+                    bounds[0] = bounds[2] - 1.0;
+                }
+                if bounds[3] <= bounds[1] {
+                    bounds[3] = ranges::MASK_COORD.max.min(bounds[1] + 1.0);
+                    bounds[1] = bounds[3] - 1.0;
                 }
             }
         }
@@ -1453,6 +1537,78 @@ mod tests {
             ]
         );
         s.normalized().validate().unwrap();
+    }
+
+    #[test]
+    fn ai_masks_are_checked_and_normalized() {
+        use crate::develop::masks::AiMaskKind;
+        let mut s = DevelopSettings::default();
+        let good = MaskShape::Ai {
+            kind: AiMaskKind::Sky,
+            model: "m".to_owned(),
+            mask: DataRef::new("ai-mask:sky", "ab".repeat(32)),
+            width: 640,
+            height: 480,
+            bounds: [0.0, 0.0, 1.0, 0.75],
+        };
+        s.masks
+            .push(LocalAdjustment::new(MaskComponent::add(good.clone())));
+        assert!(s.validate().is_ok());
+        let bad = MaskShape::Ai {
+            kind: AiMaskKind::Person,
+            model: "x".repeat(MAX_AI_MODEL_ID_CHARS + 1),
+            mask: DataRef::new("ai-mask:sky", "AB".repeat(32)),
+            width: 0,
+            height: MAX_AI_MASK_SIDE + 1,
+            bounds: [0.5, f32::NAN, 0.5, 9.0],
+        };
+        s.masks.push(LocalAdjustment::new(MaskComponent::add(bad)));
+        s.masks
+            .push(LocalAdjustment::new(MaskComponent::add(MaskShape::Ai {
+                kind: AiMaskKind::Subject,
+                model: String::new(),
+                mask: DataRef::new("ai-mask:subject", ""),
+                width: 4096,
+                height: 4096,
+                bounds: [0.0, 0.0, 1.0, 1.0],
+            })));
+        assert_eq!(
+            issue_fields(&s),
+            [
+                "masks[1].components[0].shape.ai.model",
+                "masks[1].components[0].shape.ai.mask.id",
+                "masks[1].components[0].shape.ai.mask.sha256",
+                "masks[1].components[0].shape.ai.width",
+                "masks[1].components[0].shape.ai.height",
+                "masks[1].components[0].shape.ai.bounds.top",
+                "masks[1].components[0].shape.ai.bounds.bottom",
+                "masks[1].components[0].shape.ai.bounds",
+                "masks[2].components[0].shape.ai.mask.sha256",
+                "masks[2].components[0].shape.ai.width",
+            ]
+        );
+        let n = s.normalized();
+        assert_eq!(n.masks[0].components[0].shape, good);
+        let MaskShape::Ai {
+            model,
+            mask,
+            width,
+            height,
+            bounds,
+            ..
+        } = &n.masks[1].components[0].shape
+        else {
+            panic!()
+        };
+        assert_eq!(model.chars().count(), MAX_AI_MODEL_ID_CHARS);
+        assert_eq!(mask.id, "ai-mask:person");
+        assert_eq!(mask.sha256, "ab".repeat(32));
+        assert_eq!((*width, *height), (1, MAX_AI_MASK_SIDE));
+        assert_eq!(*bounds, [0.5, 0.0, 1.5, 2.0]);
+        let MaskShape::Ai { width, height, .. } = &n.masks[2].components[0].shape else {
+            panic!()
+        };
+        assert_eq!((*width, *height), (1, 1));
     }
 
     #[test]

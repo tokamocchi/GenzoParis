@@ -7,12 +7,15 @@ mod common;
 
 use common::*;
 use genzo_color::RgbColorSpace;
+use std::sync::Arc;
+
 use genzo_model::{
-    BrushStroke, ColorSample, CropRect, DevelopSettings, LocalAdjustment, LocalDelta,
-    MaskComponent, MaskMode, MaskShape, RenderQuality,
+    AiMaskKind, BrushStroke, ColorSample, CropRect, DataRef, DevelopSettings, LocalAdjustment,
+    LocalDelta, MaskComponent, MaskMode, MaskShape, RenderQuality,
 };
 use genzo_pipeline::finish::{UnimplementedSetting, unimplemented_settings};
-use genzo_pipeline::{NeverCancel, PhotoSource, RgbImage};
+use genzo_pipeline::sensor::SensorWarning;
+use genzo_pipeline::{AiMaskRaster, MemoryProfiles, NeverCancel, PhotoSource, RgbImage};
 use genzo_testkit::diff::{LabConversion, delta_e2000_stats};
 
 fn v2() -> DevelopSettings {
@@ -425,4 +428,91 @@ fn overlay_and_color_pick_use_the_preview_grid() {
         e.mask_color_at(&source, &s, (1.5, 0.3), 120, false)
             .is_err()
     );
+}
+
+/// AI マスク（DEV-20）: 引いたラスターの右半分だけに効き、左側はビット単位で同じ。ラスターが引けなければ、重み 0
+/// で描いて知らせる。重ねて表示もラスターを使う。
+#[test]
+fn ai_masks_render_the_stored_raster_and_warn_when_missing() {
+    let source = raw_source(raw_from(&busy_scene(160, 96)));
+    // G の箱は 1 × 0.6。ラスター 16 × 10 の右半分（x ≥ 0.5）だけ 255。
+    let values: Vec<u8> = (0..10)
+        .flat_map(|_| (0..16).map(|x| if x >= 8 { 255 } else { 0 }))
+        .collect();
+    let mut lib = MemoryProfiles::new();
+    let sha = lib.insert_ai_mask(AiMaskRaster::new(16, 10, values).unwrap());
+    let lib = Arc::new(lib);
+    let shape = |sha: &str| MaskShape::Ai {
+        kind: AiMaskKind::Subject,
+        model: "test".into(),
+        mask: DataRef::new(AiMaskKind::Subject.ref_id(), sha),
+        width: 16,
+        height: 10,
+        bounds: [0.0, 0.0, 1.0, 0.6],
+    };
+    let base = global_features();
+    let mut s = base.clone();
+    s.masks.push(mask(shape(&sha), every_delta()));
+    let e = engine(64, 64).with_profile_resolver(lib.clone());
+    let a = e
+        .render_full_resolution(&source, &base, None, &NeverCancel)
+        .unwrap();
+    let b = e
+        .render_full_resolution(&source, &s, None, &NeverCancel)
+        .unwrap();
+    let (w, h) = a.b3.image.dimensions();
+    let mut changed_right = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let (p, q) = (
+                a.b3.image.pixel(x, y).unwrap(),
+                b.b3.image.pixel(x, y).unwrap(),
+            );
+            if x < w / 2 - 8 {
+                assert!(
+                    p.iter().zip(q).all(|(u, v)| u.to_bits() == v.to_bits()),
+                    "({x}, {y}): {p:?} ≠ {q:?}"
+                );
+            } else if p != q {
+                changed_right += 1;
+            }
+        }
+    }
+    assert!(changed_right > 500, "{changed_right}");
+    // プレビューも同じで、警告はない。
+    let pa = e
+        .render_preview(&source, &base, RenderQuality::Final, 64)
+        .unwrap();
+    let pb = e
+        .render_preview(&source, &s, RenderQuality::Final, 64)
+        .unwrap();
+    assert!(pb.warnings.is_empty(), "{:?}", pb.warnings);
+    assert_ne!(pa.b3.image.data(), pb.b3.image.data());
+    // 重ねて表示: 右半分が 1、左が 0。
+    let o = e.mask_overlay(&source, &s, 0, 64, false).unwrap();
+    assert_eq!(o.weights[(o.height / 2 * o.width + 2) as usize], 0.0);
+    assert_eq!(
+        o.weights[(o.height / 2 * o.width + o.width - 3) as usize],
+        1.0
+    );
+    // 引けない参照: マスクのない描画とビット単位で同じで、知らせる。
+    let mut missing = base.clone();
+    missing
+        .masks
+        .push(mask(shape(&"ef".repeat(32)), every_delta()));
+    let pc = e
+        .render_preview(&source, &missing, RenderQuality::Final, 64)
+        .unwrap();
+    assert!(
+        pc.warnings.contains(&SensorWarning::AiMaskMissing),
+        "{:?}",
+        pc.warnings
+    );
+    assert_bitwise_eq(&pa.b3.image, &pc.b3.image, "引けない参照");
+    // 引く仕組みのないエンジンでも同じ。
+    let pd = engine(64, 64)
+        .render_preview(&source, &s, RenderQuality::Final, 64)
+        .unwrap();
+    assert!(pd.warnings.contains(&SensorWarning::AiMaskMissing));
+    assert_bitwise_eq(&pa.b3.image, &pd.b3.image, "引く仕組みなし");
 }

@@ -123,6 +123,7 @@
 //! - 切り抜く前の全体の表示（[`Core::set_develop_view`]）の GPU 版（今は、その間のプレビューを CPU 版で
 //!   描く。genzo-gpu の `render_preview` が [`genzo_pipeline::PreviewRequest::uncropped`] を見ないため）。
 
+mod ai_masks;
 mod before;
 mod capture_time;
 pub mod command;
@@ -165,6 +166,9 @@ mod view;
 mod volumes;
 mod watermark;
 
+pub use ai_masks::{
+    ENV_MODELS_DIR, ENV_ONNXRUNTIME, MODELS_DIR, default_models_dir, onnxruntime_candidates,
+};
 pub use capture_time::{CAPTURE_TIME_EXAMPLES, CAPTURE_ZONE_RANGE_MINUTES};
 pub use command::{Command, Response};
 pub use config::{CoreConfig, GpuMode, IMPORT_BATCH_FILES, WorkerLaunch};
@@ -181,6 +185,10 @@ pub use develop::{
 pub use error::{ApiError, ErrorInfo, ErrorKind};
 pub use events::{CatalogChange, Event, WarningCode};
 pub use export::preview_export_names;
+/// ONNX Runtime のテレメトリーを止める環境変数と、その設定（genzo-ml。アプリ・CLI の `main` の最初で呼ぶ）。
+pub use genzo_ml::{
+    ORT_DISABLE_TELEMETRY_ENV, disable_telemetry_before_threads as disable_onnxruntime_telemetry,
+};
 pub use identity::{DUPLICATE_GROUPS_MAX, HASH_FAILURES_KEPT, INTERACTIVE_MAX_WAIT};
 pub use import::{IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS, media_kind};
 pub use maintenance::{RestorePlan, apply_restore, prepare_restore};

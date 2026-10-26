@@ -530,8 +530,11 @@ impl Engine {
     }
 
     /// キャッシュのキーに使う設定（`render_deps.profile`・`render_deps.look` を、引いたファイルの参照にしたもの）。
+    /// AI マスクのラスターは引かない（[`ProfileResources::resolve_profiles_only`]。genzo-api がカタログのロックの中から
+    /// 呼ぶことがある）。
     pub fn effective_settings(&self, settings: &DevelopSettings) -> DevelopSettings {
-        self.resolve_profiles(settings).apply_render_deps(settings)
+        ProfileResources::resolve_profiles_only(settings, self.profiles.as_deref())
+            .apply_render_deps(settings)
     }
 
     /// 設定。

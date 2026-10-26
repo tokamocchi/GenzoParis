@@ -62,7 +62,12 @@
       "licenses/README.txt": "licenses/README.txt",
       "../../LICENSE": "licenses/GenzoParis/LICENSE.txt",
       "licenses/third-party/rust.txt": "licenses/third-party/rust.txt",
-      "licenses/third-party/npm.txt": "licenses/third-party/npm.txt"
+      "licenses/third-party/npm.txt": "licenses/third-party/npm.txt",
+      "licenses/third-party/ai-models.txt": "licenses/third-party/ai-models.txt",
+      "models/u2netp.onnx": "models/u2netp.onnx",
+      "models/u2netp-subject.genzo-model.json": "models/u2netp-subject.genzo-model.json",
+      "models/deeplab_v3.onnx": "models/deeplab_v3.onnx",
+      "models/deeplab-v3-person.genzo-model.json": "models/deeplab-v3-person.genzo-model.json"
     },
     "icon": [
       "icons/32x32.png",

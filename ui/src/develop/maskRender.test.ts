@@ -16,7 +16,7 @@ import { MaskLayer, MaskOverlayCanvas } from "./MaskLayer";
 import { type Box, DEFAULT_BRUSH, type GBounds, defaultDelta, gToBox, newLuminanceShape, newMask, pixelsPerG } from "./maskLogic";
 import { viewStore } from "./viewState";
 
-/** 5 種類の部品（線形・円形（除く・反転）・ブラシ・色域・輝度範囲）と調整のあるマスクと、使わないマスク。 */
+/** 6 種類の部品（線形・円形（除く・反転）・ブラシ・色域・輝度範囲・AI）と調整のあるマスクと、使わないマスク。 */
 function fixtureMasks(): LocalAdjustment[] {
   return [
     {
@@ -47,6 +47,13 @@ function fixtureMasks(): LocalAdjustment[] {
           shape: { color_range: { samples: [{ x: 0.75, y: 0.3, lab: [0.6, 0.1, -0.05] }], amount: 40 } },
         },
         { mode: "intersect", invert: false, shape: { luminance_range: { min: 20, max: 80, smoothness: 30 } } },
+        {
+          mode: "add",
+          invert: false,
+          shape: {
+            ai: { kind: "sky", model: "mock-model", mask: { id: "ai-mask:sky", sha256: "ab".repeat(32) }, width: 64, height: 48, bounds: [0, 0, 1, 0.75] },
+          },
+        },
       ],
       delta: { ...defaultDelta(), exposure_ev: 0.5, temperature: -20 },
     },
@@ -66,7 +73,7 @@ describe("マスクのパネルを描く", () => {
   afterEach(() => {
     delete (globalThis as { localStorage?: unknown }).localStorage;
     developStore.set({ variantId: null, state: null, settings: null });
-    viewStore.set({ tool: "none", maskIndex: null, componentIndex: null, maskOverlay: false, brushOverlay: true, brush: DEFAULT_BRUSH, pickTarget: null });
+    viewStore.set({ tool: "none", maskIndex: null, componentIndex: null, maskOverlay: false, brushOverlay: true, brush: DEFAULT_BRUSH, pickTarget: null, aiStatus: null, aiBusy: false });
   });
 
   /** マスク `mask`・部品 `component` を選んだ現像のパネル。 */
@@ -102,9 +109,12 @@ describe("マスクのパネルを描く", () => {
     expect(html).toContain("重ねて表示");
     expect(html).toContain("複製");
     expect(html).toContain("部品（上から順に合成）");
-    for (const label of ["1. 線形グラデーション", "2. 円形グラデーション", "3. ブラシ", "4. 色域", "5. 輝度範囲"]) {
+    for (const label of ["1. 線形グラデーション", "2. 円形グラデーション", "3. ブラシ", "4. 色域", "5. 輝度範囲", "6. AI"]) {
       expect(html).toContain(label);
     }
+    // AI マスクのボタン（状態を聞くまでは無効）。
+    expect(html).toContain('aria-label="AI 空"');
+    expect(html).toContain("AI マスクの状態を確かめています");
     expect(html).toContain('aria-label="部品 2 の合成"');
     expect(html).toMatch(/<option value="subtract" title="[^"]*" selected="">除く<\/option>/);
     expect(html).toContain("反転");
@@ -144,6 +154,20 @@ describe("マスクのパネルを描く", () => {
     expect(lum).toContain("上端");
     expect(lum).toContain("滑らかさ");
     expect(lum).toContain("transparent 20%");
+  });
+
+  it("部品ごとの設定: AI は種類・モデル・大きさと「作り直す」（使える種類なら押せる）", () => {
+    const settings = mockDevelopSettings({ masks: fixtureMasks() });
+    const ai = render(settings, 0, 5);
+    expect(ai).toContain("AI が選んだ空の範囲（モデル mock-model、64 × 48）");
+    expect(ai).toMatch(/<button[^>]*disabled[^>]*>作り直す<\/button>/);
+    viewStore.set({ aiStatus: { kinds: ["sky"], problems: [] } });
+    const ready = render(settings, 0, 5);
+    expect(ready).toMatch(/<button[^>]*title="今の写真でもう一度計算して[^"]*"[^>]*>作り直す<\/button>/);
+    expect(ready).not.toMatch(/<button[^>]*disabled[^>]*>作り直す<\/button>/);
+    expect(ready).toMatch(/<button[^>]*aria-label="AI 空"[^>]*>＋ AI 空<\/button>/);
+    expect(ready).toMatch(/<button[^>]*disabled[^>]*aria-label="AI 人物"/);
+    viewStore.set({ aiStatus: null });
   });
 
   it("処理バージョン 1 では更新を案内し、編集できなくする（削除はできる）", () => {

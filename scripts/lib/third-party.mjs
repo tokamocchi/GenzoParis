@@ -40,6 +40,19 @@ export const STATIC_LICENSE_RESOURCES = {
   "../../LICENSE": "licenses/GenzoParis/LICENSE.txt",
   "licenses/third-party/rust.txt": "licenses/third-party/rust.txt",
   "licenses/third-party/npm.txt": "licenses/third-party/npm.txt",
+  "licenses/third-party/ai-models.txt": "licenses/third-party/ai-models.txt",
+};
+/**
+ * 配布物に同梱する AI マスクのモデルと台帳（DEV-20。crates/genzo-app/models → 資源のフォルダの models）。
+ * tauri.conf.json の bundle.resources に、上の文書と合わせて書く（scripts/lib/third-party.test.mjs で確かめる）。
+ * モデルの入手元・ライセンスは licenses/third-party/ai-models.txt。ONNX Runtime は配布のビルドで足す
+ * （scripts/lib/onnxruntime.mjs）。
+ */
+export const BUNDLED_MODEL_RESOURCES = {
+  "models/u2netp.onnx": "models/u2netp.onnx",
+  "models/u2netp-subject.genzo-model.json": "models/u2netp-subject.genzo-model.json",
+  "models/deeplab_v3.onnx": "models/deeplab_v3.onnx",
+  "models/deeplab-v3-person.genzo-model.json": "models/deeplab-v3-person.genzo-model.json",
 };
 /** 配布の対象（about.toml の targets と同じ。scripts/lib/third-party.test.mjs で確かめる）。 */
 export const RUST_TARGETS = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"];

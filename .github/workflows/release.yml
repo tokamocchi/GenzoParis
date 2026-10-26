@@ -239,6 +239,19 @@ jobs:
           if ($sources.Count -eq 0) { throw "LibRaw のソースのアーカイブが licenses\LibRaw\source にない" }
           Write-Output "LibRaw のソース: $($sources.Name -join ', ')"
           Get-Content (Join-Path $dir 'licenses\LibRaw\README.txt') -Encoding utf8 | Select-Object -First 5
+          # AI マスク（DEV-20）: 同梱のモデルと台帳（crates/genzo-app/models。tauri.conf.json の resources）・ONNX Runtime
+          # （scripts/lib/onnxruntime.mjs）・それらのライセンスの文書が、インストール先にあるか。ONNX Runtime を読み込めて、
+          # 版が固定した版か（scripts/check-onnxruntime.py。ランナーの Python で読み込むだけ。推論はしない）。
+          foreach ($name in 'u2netp.onnx', 'u2netp-subject.genzo-model.json', 'deeplab_v3.onnx', 'deeplab-v3-person.genzo-model.json', 'onnxruntime.dll') {
+            if (-not (Test-Path (Join-Path $dir "models\${name}"))) { throw "AI マスクの models\${name} がインストール先にない" }
+          }
+          foreach ($name in 'third-party\ai-models.txt', 'third-party\onnxruntime\LICENSE.txt', 'third-party\onnxruntime\ThirdPartyNotices.txt') {
+            if (-not (Test-Path (Join-Path $dir "licenses\${name}"))) { throw "ライセンスの文書 licenses\${name} がインストール先にない" }
+          }
+          $ortExpected = node --input-type=module -e "import('./scripts/lib/onnxruntime.mjs').then((m) => console.log(m.ONNXRUNTIME_VERSION))"
+          $env:PYTHONUTF8 = '1'
+          python scripts/check-onnxruntime.py (Join-Path $dir 'models\onnxruntime.dll') $ortExpected
+          if ($LASTEXITCODE -ne 0) { throw "同梱の ONNX Runtime を読み込めない、または版が違う（期待 ${ortExpected}）" }
           # DLL をインストール先と OS のフォルダからだけ探すよう、PATH を OS のフォルダだけにして起動する
           # （ランナーの PATH に LibRaw などの DLL があると、同梱の漏れを見逃すため）。
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
@@ -284,6 +297,21 @@ jobs:
             fi
           done
           head -5 "$app/Contents/Resources/licenses/LibRaw/README.txt"
+          # AI マスク（DEV-20）: 同梱のモデルと台帳（crates/genzo-app/models）・ONNX Runtime（scripts/lib/onnxruntime.mjs。
+          # Contents/Frameworks ではなく資源のフォルダの models に置く）・それらのライセンスの文書が .app の中にあるか。
+          # ONNX Runtime を読み込めて、版が固定した版か（scripts/check-onnxruntime.py。読み込むだけで推論はしない）。
+          for name in u2netp.onnx u2netp-subject.genzo-model.json deeplab_v3.onnx deeplab-v3-person.genzo-model.json libonnxruntime.dylib; do
+            if [ ! -f "$app/Contents/Resources/models/${name}" ]; then
+              echo "::error::AI マスクの models/${name} が .app の Contents/Resources にない"; exit 1
+            fi
+          done
+          for name in third-party/ai-models.txt third-party/onnxruntime/LICENSE.txt third-party/onnxruntime/ThirdPartyNotices.txt; do
+            if [ ! -f "$app/Contents/Resources/licenses/${name}" ]; then
+              echo "::error::ライセンスの文書 licenses/${name} が .app の Contents/Resources にない"; exit 1
+            fi
+          done
+          ort_expected=$(node --input-type=module -e "import('./scripts/lib/onnxruntime.mjs').then((m) => console.log(m.ONNXRUNTIME_VERSION))")
+          python3 scripts/check-onnxruntime.py "$app/Contents/Resources/models/libonnxruntime.dylib" "$ort_expected"
           shopt -s nullglob
           # 同梱した C / C++ のライブラリのライセンスの文書（scripts/lib/native-notice.mjs）が .app の中にあり、
           # Contents/Frameworks の dylib がすべて載っているか。LibRaw のソースのアーカイブ（licenses/LibRaw/source）があるか。

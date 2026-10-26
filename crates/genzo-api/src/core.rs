@@ -107,6 +107,9 @@ pub struct CoreHooks {
     /// OS のボリューム ID の問い合わせ（FILE-03。既定は [`crate::OsVolumes`]。テストでは偽物を渡して、ドライブの
     /// 付け外し・マウント先の変化を確かめる）。
     pub volumes: Arc<dyn crate::volumes::VolumeProbe>,
+    /// AI マスク（DEV-20）の推論の仕組みの差し替え（`None` なら、設定のモデルのフォルダと ONNX Runtime から作る。
+    /// テストでは genzo-ml の `FixedSegmenter` などを渡して、モデルなしに流れを確かめる）。
+    pub segmenter: Option<Arc<dyn genzo_ml::Segmenter>>,
     /// テスト専用: アプリの中でのファイル操作（FILE-02）が途中の段階に着いたときに呼ぶ（[`FileOpStage`]）。
     /// `Err` を返すと、その段階の失敗として扱うので、途中で失敗したときの戻し方を確かめられる。
     #[doc(hidden)]
@@ -195,6 +198,7 @@ impl Default for CoreHooks {
             on_copy_import: None,
             volumes: Arc::new(crate::volumes::OsVolumes),
             on_file_op: None,
+            segmenter: None,
         }
     }
 }
@@ -208,7 +212,8 @@ impl std::fmt::Debug for CoreHooks {
 /// コアの状態（[`Core`] と、ジョブ・自動保存のスレッドが共有する）。
 pub(crate) struct Inner {
     pub config: CoreConfig,
-    pub catalog: Mutex<Option<Catalog>>,
+    /// カタログ（AI マスクのラスターを描画のときに引く [`crate::ai_masks::AiMaskStore`] と共有する）。
+    pub catalog: Arc<Mutex<Option<Catalog>>>,
     pub cache: Mutex<Option<CacheDb>>,
     pub events: EventHub,
     pub workers: Mutex<Option<Arc<WorkerPool>>>,
@@ -229,6 +234,12 @@ pub(crate) struct Inner {
     pub engine: Engine,
     /// カメラプロファイル・ルックのライブラリ（DEV-17。`profiles` の doc。`engine` にも渡している）。
     pub profiles: Arc<crate::profiles::ProfileLibrary>,
+    /// AI マスクのラスターをカタログから引く（DEV-20。`ai_masks` の doc。`engine` にも渡している）。
+    pub ai_masks: Arc<crate::ai_masks::AiMaskStore>,
+    /// AI マスクの推論の仕組みの差し替え（[`CoreHooks::segmenter`]）。
+    pub segmenter_hook: Option<Arc<dyn genzo_ml::Segmenter>>,
+    /// AI マスクの推論の仕組み（初めて要るときに 1 度だけ作る。[`Inner::segmenter`]）。
+    pub segmenter: std::sync::OnceLock<Result<Arc<dyn genzo_ml::Segmenter>, String>>,
     /// 現像プリセット・書き出しプリセット（DEV-29・EXP-02。`presets` の doc。アプリのデータのフォルダ）。
     pub presets: crate::presets::PresetStore,
     pub gpu: Mutex<GpuState>,
@@ -291,6 +302,13 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
+    /// AI マスクの推論の仕組み（初めて呼んだときに作る。作れなければ理由）。
+    pub(crate) fn segmenter(&self) -> Result<Arc<dyn genzo_ml::Segmenter>, String> {
+        self.segmenter
+            .get_or_init(|| crate::ai_masks::build_segmenter(self))
+            .clone()
+    }
+
     /// 終了していないか。
     pub(crate) fn check_open(&self) -> Result<(), ApiError> {
         if self.closed.load(Ordering::Acquire) {
@@ -508,10 +526,19 @@ impl Core {
             interactive,
             maintenance,
             video,
-            engine,
             profiles,
             display,
         } = parts;
+        // カメラプロファイル・ルック（DEV-17）と AI マスクのラスター（DEV-20）: 描画のたびに、現像設定の参照から
+        // ライブラリ・カタログを引く。
+        let catalog = Arc::new(Mutex::new(Some(catalog)));
+        let ai_masks = Arc::new(crate::ai_masks::AiMaskStore::new(catalog.clone()));
+        let engine = Engine::new(EngineConfig::default())?.with_profile_resolver(Arc::new(
+            crate::ai_masks::Resolvers {
+                profiles: profiles.clone(),
+                ai_masks: ai_masks.clone(),
+            },
+        ));
         let proxies = crate::playback::ProxyState::open(&config.data_dir, &settings);
         // プリセット（DEV-29・EXP-02）: アプリのデータのフォルダ（読むだけならフォルダを作らない）。
         let presets = crate::presets::PresetStore::new(
@@ -523,7 +550,7 @@ impl Core {
 
         let inner = Arc::new(Inner {
             config,
-            catalog: Mutex::new(Some(catalog)),
+            catalog,
             cache: Mutex::new(Some(CacheDb { thumbs, previews })),
             events,
             workers: Mutex::new(Some(Arc::new(pool))),
@@ -536,6 +563,9 @@ impl Core {
             proxy_support: std::sync::OnceLock::new(),
             engine,
             profiles,
+            ai_masks,
+            segmenter_hook: hooks.segmenter,
+            segmenter: std::sync::OnceLock::new(),
             presets,
             gpu: Mutex::new(GpuState::default()),
             display: Mutex::new(display),
@@ -836,7 +866,6 @@ struct Parts {
     interactive: Scheduler,
     maintenance: Scheduler,
     video: Scheduler,
-    engine: Engine,
     profiles: Arc<crate::profiles::ProfileLibrary>,
     display: DisplayState,
 }
@@ -932,9 +961,9 @@ fn build_parts(
     // 動画の再生用のファイルの作成（VID-04）。変換は ffmpeg の子プロセスが行う（本体のメモリの予算の枠は取らない）。
     let video = Scheduler::with_budget(1, "genzo-video", budget)
         .map_err(|e| ApiError::Job(e.to_string()))?;
-    // カメラプロファイル・ルック（DEV-17）: 描画のたびに、現像設定の ID からデータのフォルダのライブラリを引く。
+    // カメラプロファイル・ルック（DEV-17）: 描画のたびに、現像設定の ID からデータのフォルダのライブラリを引く
+    // （エンジンに渡すのは Core::open_with。AI マスクのラスターの引き方と合わせる）。
     let profiles = Arc::new(crate::profiles::ProfileLibrary::new(&config.data_dir));
-    let engine = Engine::new(EngineConfig::default())?.with_profile_resolver(profiles.clone());
     let display = DisplayState::assumed_srgb()?;
     Ok(Parts {
         recovered,
@@ -950,7 +979,6 @@ fn build_parts(
         interactive,
         maintenance,
         video,
-        engine,
         profiles,
         display,
     })

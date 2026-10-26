@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { installBridge } from "../api/bridge";
 import { fetchMaskOverlay } from "../api/frames";
-import { MOCK_MASK_LAB, MockBridge, mockDevelopSettings, mockMaskCommands, mockSourceInfo } from "../api/mock";
+import { MOCK_AI_MASK_SHA256, MOCK_MASK_LAB, MockBridge, mockDevelopSettings, mockMaskCommands, mockSourceInfo } from "../api/mock";
 import type { DevelopSettings, DevelopState, LocalAdjustment, MaskComponent } from "../api/types";
 import { MASK_LIMITS } from "../api/types";
 import { SHORTCUT_GROUPS } from "../dialogs/shortcutsData";
@@ -36,6 +36,7 @@ import {
   overlayRgba,
   pixelsPerG,
   removeColorSample,
+  removeMask,
   sanitizeMaskName,
   settlePendingStrokes,
   shapeKind,
@@ -47,10 +48,12 @@ import {
 } from "./maskLogic";
 import {
   commitBrushStroke,
+  computeAiMask,
   currentMask,
   endAllTools,
   overlayShown,
   pickMaskColor,
+  refreshAiStatus,
   selectMask,
   startMaskColorPick,
   toggleBrushTool,
@@ -369,6 +372,8 @@ describe("マスクの道具（コアとのやり取り）", () => {
       maskOverlay: false,
       brushOverlay: true,
       pickTarget: null,
+      aiStatus: null,
+      aiBusy: false,
     });
     // 前のテストで開いた写真と違う ID で開く（同じ写真なら開いているものを返すため）。
     await openDevelopFor(Math.floor(Math.random() * 1e9) + 10);
@@ -471,6 +476,83 @@ describe("マスクの道具（コアとのやり取り）", () => {
     selectMask(0);
     toggleBrushTool();
     expect(viewStore.get().tool).toBe("none");
+  });
+
+  it("AI マスク: 状態を聞き、計算の結果を新しいマスク・新しい部品・部品の作り直しに入れる", async () => {
+    expect(viewStore.get().aiStatus).toBeNull();
+    await refreshAiStatus();
+    expect(viewStore.get().aiStatus).toEqual({ kinds: ["subject", "sky", "person"], problems: [] });
+    expect(sent.at(-1)).toMatchObject({ type: "ai_mask_status" });
+    // 新しいマスク（名前は種類）。
+    await computeAiMask("sky", { kind: "new_mask" });
+    expect(sent.at(-1)).toMatchObject({ type: "compute_ai_mask", kind: "sky" });
+    let s = await lastSettings();
+    expect(s?.masks).toHaveLength(1);
+    expect(s?.masks[0].name).toBe("空");
+    const comp = s?.masks[0].components[0] as MaskComponent;
+    expect(comp.mode).toBe("add");
+    expect(comp.shape).toMatchObject({ ai: { kind: "sky", model: "mock-model", mask: { id: "ai-mask:sky", sha256: MOCK_AI_MASK_SHA256 } } });
+    expect(viewStore.get()).toMatchObject({ maskIndex: 0, componentIndex: 0, aiBusy: false });
+    // 新しい部品（マスク 0 に）。
+    await computeAiMask("person", { kind: "new_component", mask: 0 });
+    s = await lastSettings();
+    expect(s?.masks[0].components).toHaveLength(2);
+    expect(shapeKind(s!.masks[0].components[1].shape)).toBe("ai");
+    expect(viewStore.get()).toMatchObject({ maskIndex: 0, componentIndex: 1 });
+    // 作り直し（部品 0 の形を置き換える。部品の数は変わらない）。
+    await computeAiMask("subject", { kind: "replace", mask: 0, component: 0 });
+    s = await lastSettings();
+    expect(s?.masks[0].components).toHaveLength(2);
+    expect(s?.masks[0].components[0].shape).toMatchObject({ ai: { kind: "subject" } });
+    expect(maskSummary(s!.masks[0])).toBe("AI 被写体 ＋ AI 人物");
+    expect(appStore.get().toasts).toHaveLength(0);
+  });
+
+  it("AI マスク: 推論の間にマスクを消しても、番号ではなく中身で入れ先を探す（Codex のレビューの指摘）", async () => {
+    const lum = (min: number) => newMask({ luminance_range: { min, max: 100, smoothness: 50 } });
+    developStore.set({ settings: withMasks([lum(10), lum(20)]) });
+    // 推論の間（コアの応答の前）に、マスク 0 を消す。
+    const wrap = (mutate: () => void) => {
+      const base = mock.responses.get("core_execute") as (a?: Record<string, unknown>) => unknown;
+      mock.responses.set("core_execute", (args?: Record<string, unknown>) => {
+        const c = args?.command as { type: string };
+        if (c.type === "compute_ai_mask") mutate();
+        return base(args);
+      });
+      return () => mock.responses.set("core_execute", base);
+    };
+    let restore = wrap(() => developStore.set({ settings: removeMask(developStore.get().settings!, 0) }));
+    await computeAiMask("sky", { kind: "new_component", mask: 1 });
+    restore();
+    let s = await lastSettings();
+    // 元のマスク 1（min 20）は今は 0 番。そこに足す。
+    expect(s?.masks).toHaveLength(1);
+    expect(s?.masks[0].components).toHaveLength(2);
+    expect(s?.masks[0].components[0].shape).toEqual({ luminance_range: { min: 20, max: 100, smoothness: 50 } });
+    expect(shapeKind(s!.masks[0].components[1].shape)).toBe("ai");
+    // 作り直しの入れ先の部品が消えたら、入れずに知らせる。
+    restore = wrap(() => developStore.set({ settings: withMasks([lum(30)]) }));
+    await computeAiMask("person", { kind: "replace", mask: 0, component: 1 });
+    restore();
+    expect(appStore.get().toasts.at(-1)?.message).toContain("計算の間にマスクが変わった");
+    s = developStore.get().settings ?? undefined;
+    expect(s?.masks).toHaveLength(1);
+    expect(shapeKind(s!.masks[0].components[0].shape)).toBe("luminance_range");
+  });
+
+  it("AI マスク: 使えない種類はコアのエラーを知らせ、設定を変えない", async () => {
+    ({ sent } = mockMaskCommands(mock, { aiKinds: ["sky"] }));
+    await refreshAiStatus();
+    expect(viewStore.get().aiStatus?.kinds).toEqual(["sky"]);
+    await computeAiMask("person", { kind: "new_mask" });
+    expect(appStore.get().toasts.at(-1)?.message).toContain("AI マスク（人物）を計算できません");
+    expect(developStore.get().settings?.masks).toHaveLength(0);
+    expect(viewStore.get().aiBusy).toBe(false);
+    // 処理バージョン 1 の写真では計算しない。
+    ({ sent } = mockMaskCommands(mock));
+    developStore.set({ settings: withMasks([], { process_version: 1 }) });
+    await computeAiMask("sky", { kind: "new_mask" });
+    expect(sent.filter((c) => c.type === "compute_ai_mask")).toHaveLength(0);
   });
 
   it("処理バージョン 1 の写真では、ブラシ・スポイトを使い始めない", () => {

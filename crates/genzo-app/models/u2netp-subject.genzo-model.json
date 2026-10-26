@@ -1,0 +1,12 @@
+{
+  "id": "u2netp-subject",
+  "name": "U²-Net 小型版（被写体）",
+  "file": "u2netp.onnx",
+  "sha256": "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
+  "license": "Apache-2.0（U²-Net の重み。ONNX への変換は rembg。licenses/third-party/ai-models.txt）",
+  "source": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx（元: https://github.com/xuebinqin/U-2-Net）",
+  "input": {"name": "input.1", "width": 320, "height": 320, "layout": "nchw", "range": "unit",
+            "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
+  "output": {"name": "1959", "activation": "none", "layout": "nchw"},
+  "kinds": {"subject": {"channel": 0}}
+}

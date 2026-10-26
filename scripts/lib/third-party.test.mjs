@@ -13,6 +13,7 @@ import {
   RUST_NOTICES_FILE,
   RUST_SUPPLEMENTS,
   RUST_TARGETS,
+  BUNDLED_MODEL_RESOURCES,
   STATIC_LICENSE_RESOURCES,
   THIRD_PARTY_SOURCE_DIR,
   chooseLicenses,
@@ -457,10 +458,13 @@ test("npm: 選んだライセンスの本文をパッケージから取り、な
 
 test("tauri.conf.json の resources に、ライセンスの文書がすべてあり、元のファイルもある", () => {
   const conf = JSON.parse(fs.readFileSync(path.join(APP_DIR, "tauri.conf.json"), "utf8"));
-  assert.deepEqual(conf.bundle.resources, STATIC_LICENSE_RESOURCES);
-  for (const src of Object.keys(STATIC_LICENSE_RESOURCES)) {
+  assert.deepEqual(conf.bundle.resources, { ...STATIC_LICENSE_RESOURCES, ...BUNDLED_MODEL_RESOURCES });
+  for (const src of Object.keys({ ...STATIC_LICENSE_RESOURCES, ...BUNDLED_MODEL_RESOURCES })) {
     assert.ok(fs.existsSync(path.join(APP_DIR, src)), `${src} がない`);
   }
+  // 同梱のモデルのフォルダの中身は、すべて resources に載っている（載せ忘れたモデルを配らないことがないように）。
+  const modelFiles = fs.readdirSync(path.join(APP_DIR, "models")).map((f) => `models/${f}`);
+  assert.deepEqual(modelFiles.sort(), Object.keys(BUNDLED_MODEL_RESOURCES).sort());
   assert.deepEqual(
     [RUST_NOTICES_FILE, NPM_NOTICES_FILE].map((f) => `${THIRD_PARTY_SOURCE_DIR}/${f}`).filter((f) => !(f in STATIC_LICENSE_RESOURCES)),
     [],

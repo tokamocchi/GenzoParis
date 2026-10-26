@@ -52,11 +52,39 @@ fn test_profiles() -> &'static ProfileResources {
         let mut lib = MemoryProfiles::new();
         lib.insert_camera("test", test_dcp(), &"aa".repeat(32));
         lib.insert_look("test", test_cube(), &"bb".repeat(32));
-        let mut s = DevelopSettings::default();
+        lib.insert_ai_mask(test_ai_raster());
+        let mut s = DevelopSettings {
+            process_version: 2,
+            ..Default::default()
+        };
         s.profile.camera = Some("test".into());
         s.profile.look = Some("test".into());
+        s.masks.push(genzo_model::LocalAdjustment::new(
+            genzo_model::MaskComponent::add(test_ai_shape()),
+        ));
         ProfileResources::resolve(&s, Some(&lib as &dyn ProfileResolver))
     })
+}
+
+/// AI マスク（DEV-20）のテスト用のラスター（24 × 16。斜めのグラデーション）。
+fn test_ai_raster() -> genzo_pipeline::AiMaskRaster {
+    let values = (0..16)
+        .flat_map(|y| (0..24).map(move |x| ((x * 9 + y * 11) % 256) as u8))
+        .collect();
+    genzo_pipeline::AiMaskRaster::new(24, 16, values).unwrap()
+}
+
+/// [`test_ai_raster`] を G の [0.1, 0.05, 0.9, 0.6] に置く形（[`test_profiles`] で引ける）。
+fn test_ai_shape() -> genzo_model::MaskShape {
+    use genzo_model::{AiMaskKind, DataRef, MaskShape};
+    MaskShape::Ai {
+        kind: AiMaskKind::Sky,
+        model: "test".into(),
+        mask: DataRef::new(AiMaskKind::Sky.ref_id(), test_ai_raster().sha256_hex()),
+        width: 24,
+        height: 16,
+        bounds: [0.1, 0.05, 0.9, 0.6],
+    }
 }
 
 /// テストの DCP（色相彩度のマップは色相で変わるずれ・彩度で変わる倍率、ルックテーブルは明度でも変わる）。
@@ -1252,9 +1280,31 @@ fn masks_settings() -> DevelopSettings {
             y1: 1.0,
         }))
     };
+    // AI マスク（DEV-20。ラスターはブラシと同じ形で GPU に渡る）。反転して除く部品も付ける。
+    let mut ai = LocalAdjustment {
+        delta: LocalDelta {
+            exposure_ev: 0.4,
+            dehaze: -20.0,
+            highlights: 30.0,
+            ..Default::default()
+        },
+        ..LocalAdjustment::new(MaskComponent::add(test_ai_shape()))
+    };
+    ai.components.push(MaskComponent {
+        mode: MaskMode::Subtract,
+        invert: true,
+        shape: MaskShape::Radial {
+            cx: 0.5,
+            cy: 0.3,
+            rx: 0.2,
+            ry: 0.2,
+            angle_deg: 0.0,
+            feather: 30.0,
+        },
+    });
     // 全体の値が 0 で、マスクだけで有効なステージ（コントラストは全体の値なし）。
     s.contrast = 0.0;
-    s.masks = vec![radial, brush, warm];
+    s.masks = vec![radial, brush, warm, ai];
     s
 }
 

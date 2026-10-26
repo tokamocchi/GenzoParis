@@ -53,6 +53,7 @@
 //!   [`Catalog::undo_location_edit`]、[`Catalog::asset_location`]（付けた位置）。使う位置（付けた位置があれば
 //!   それ、なければカメラの位置）は [`AssetRecord::effective_gps`]
 
+mod ai_mask;
 mod backup;
 mod capture;
 mod catalog;
@@ -86,6 +87,7 @@ mod tests;
 #[doc(hidden)]
 pub mod testing;
 
+pub use ai_mask::{AI_MASK_ENCODINGS, AiMaskInfo, AiMaskInsert, AiMaskRecord};
 pub use backup::{
     BackupInfo, BackupOwner, DEFAULT_BACKUP_GENERATIONS, ForeignKeyViolation, IntegrityReport,
     RestoreReport, backup_catalog_file, create_backup, list_backups, list_backups_by_stem,
@@ -139,10 +141,10 @@ pub use register::{
     pair_class, rel_path_from_path,
 };
 pub use schema::{
-    BUSY_TIMEOUT, CACHE_SIZE_KIB, CAPTURE_TIME_EDITS_SCHEMA_VERSION, CATALOG_APPLICATION_ID,
-    CATALOG_SCHEMA_VERSION, COLLECTIONS_SCHEMA_VERSION, CONTENT_IDENTITY_SCHEMA_VERSION,
-    ColumnInfo, IPTC_SCHEMA_VERSION, LOCATIONS_SCHEMA_VERSION, PUBLIC_VIEWS,
-    PUBLIC_VIEWS_SCHEMA_VERSION, STABLE_IDS_SCHEMA_VERSION, STACKS_SCHEMA_VERSION,
+    AI_MASKS_SCHEMA_VERSION, BUSY_TIMEOUT, CACHE_SIZE_KIB, CAPTURE_TIME_EDITS_SCHEMA_VERSION,
+    CATALOG_APPLICATION_ID, CATALOG_SCHEMA_VERSION, COLLECTIONS_SCHEMA_VERSION,
+    CONTENT_IDENTITY_SCHEMA_VERSION, ColumnInfo, IPTC_SCHEMA_VERSION, LOCATIONS_SCHEMA_VERSION,
+    PUBLIC_VIEWS, PUBLIC_VIEWS_SCHEMA_VERSION, STABLE_IDS_SCHEMA_VERSION, STACKS_SCHEMA_VERSION,
     SchemaDescription, SchemaObject, THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, TableInfo,
     UTC_ONLY_SCHEMA_VERSION, VOLUMES_SCHEMA_VERSION,
 };

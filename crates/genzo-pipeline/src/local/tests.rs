@@ -1,6 +1,6 @@
 use genzo_model::{
-    BrushStroke, ColorSample, DevelopSettings, Geometry, LocalAdjustment, LocalDelta,
-    MaskComponent, MaskMode, MaskShape, Orientation,
+    AiMaskKind, BrushStroke, ColorSample, DataRef, DevelopSettings, Geometry, LocalAdjustment,
+    LocalDelta, MaskComponent, MaskMode, MaskShape, Orientation,
 };
 
 use super::*;
@@ -115,6 +115,7 @@ fn linear_and_radial_shapes() {
         ),
         &g,
         None,
+        None,
     );
     assert_eq!(lin.weight(0.1, 0.2, &none()), 1.0);
     assert_eq!(lin.weight(0.2, 0.3, &none()), 1.0);
@@ -134,14 +135,25 @@ fn linear_and_radial_shapes() {
         ),
         &g,
         None,
+        None,
     );
     assert_eq!(zero.weight(0.3, 0.3, &none()), 0.0);
     // 円形: ぼかし 0 なら縁でちょうど切る。ぼかしで内側から 0 に向かう。
-    let hard = prepare_mask(&mask(radial(0.5, 0.25, 0.1, 0.0), exposure(1.0)), &g, None);
+    let hard = prepare_mask(
+        &mask(radial(0.5, 0.25, 0.1, 0.0), exposure(1.0)),
+        &g,
+        None,
+        None,
+    );
     assert_eq!(hard.weight(0.5, 0.25, &none()), 1.0);
     assert_eq!(hard.weight(0.59, 0.25, &none()), 1.0);
     assert_eq!(hard.weight(0.61, 0.25, &none()), 0.0);
-    let soft = prepare_mask(&mask(radial(0.5, 0.25, 0.1, 50.0), exposure(1.0)), &g, None);
+    let soft = prepare_mask(
+        &mask(radial(0.5, 0.25, 0.1, 50.0), exposure(1.0)),
+        &g,
+        None,
+        None,
+    );
     assert_eq!(soft.weight(0.54, 0.25, &none()), 1.0);
     let mid = soft.weight(0.575, 0.25, &none());
     assert!((mid - 0.5).abs() < 1e-5, "{mid}");
@@ -160,6 +172,7 @@ fn linear_and_radial_shapes() {
         ),
         &g,
         None,
+        None,
     );
     assert_eq!(ellipse.weight(0.5, 0.4, &none()), 1.0);
     assert_eq!(ellipse.weight(0.6, 0.25, &none()), 0.0);
@@ -171,7 +184,7 @@ fn components_combine_and_invert() {
     let mut m = mask(radial(0.3, 0.5, 0.1, 0.0), exposure(1.0));
     m.components
         .push(MaskComponent::add(radial(0.7, 0.5, 0.1, 0.0)));
-    let p = prepare_mask(&m, &g, None);
+    let p = prepare_mask(&m, &g, None, None);
     assert_eq!(p.weight(0.3, 0.5, &none()), 1.0);
     assert_eq!(p.weight(0.7, 0.5, &none()), 1.0);
     assert_eq!(p.weight(0.5, 0.5, &none()), 0.0);
@@ -181,7 +194,7 @@ fn components_combine_and_invert() {
         invert: false,
         shape: radial(0.3, 0.5, 0.03, 0.0),
     });
-    let p = prepare_mask(&m, &g, None);
+    let p = prepare_mask(&m, &g, None, None);
     assert_eq!(p.weight(0.3, 0.5, &none()), 0.0);
     assert_eq!(p.weight(0.36, 0.5, &none()), 1.0);
     // 交差だけのマスクは画像全体 ∩ 部品。反転で外側。
@@ -193,7 +206,7 @@ fn components_combine_and_invert() {
         }],
         ..mask(radial(0.0, 0.0, 0.0, 0.0), exposure(1.0))
     };
-    let p = prepare_mask(&only, &g, None);
+    let p = prepare_mask(&only, &g, None, None);
     assert_eq!(p.initial, 1.0);
     assert_eq!(p.weight(0.5, 0.5, &none()), 0.0);
     assert_eq!(p.weight(0.9, 0.9, &none()), 1.0);
@@ -216,7 +229,7 @@ fn color_and_luminance_ranges() {
         },
         exposure(1.0),
     );
-    let p = prepare_mask(&m, &g, None);
+    let p = prepare_mask(&m, &g, None, None);
     let at = |c: [f32; 3]| p.weight(0.5, 0.5, &range_inputs(c, 1.0, &tone));
     assert_eq!(at(red), 1.0);
     // 露光量を変えても（明るさだけが違う同じ色）選ぶ。
@@ -239,8 +252,11 @@ fn color_and_luminance_ranges() {
         },
         exposure(1.0),
     );
-    let wide =
-        prepare_mask(&wide_mask, &g, None).weight(0.5, 0.5, &range_inputs(orange, 1.0, &tone));
+    let wide = prepare_mask(&wide_mask, &g, None, None).weight(
+        0.5,
+        0.5,
+        &range_inputs(orange, 1.0, &tone),
+    );
     assert!(wide > narrow, "{wide} {narrow}");
     // 輝度の範囲: 表示の明るさ（ステージ 15 のカーブの後の符号化した値）。
     let e = |y: f32| range_inputs([y; 3], 1.0, &tone).luma;
@@ -262,6 +278,7 @@ fn color_and_luminance_ranges() {
                 exposure(1.0),
             ),
             &g,
+            None,
             None,
         )
     };
@@ -295,13 +312,21 @@ fn weights_do_not_depend_on_the_resolution() {
         )
         .unwrap()
     };
-    let a = mask_weights(&m, &full, &reference(&full), 0.0, InputKind::SceneReferred);
+    let a = mask_weights(
+        &m,
+        &full,
+        &reference(&full),
+        0.0,
+        InputKind::SceneReferred,
+        None,
+    );
     let b = mask_weights(
         &m,
         &preview,
         &reference(&preview),
         0.0,
         InputKind::SceneReferred,
+        None,
     );
     // プレビューの画素 (i, j) の中心はフル解像度の (4i + 2, 4j + 2) の左上の角（ここでは近い画素で比べる）。
     let (fw, _) = full.output_size();
@@ -387,7 +412,7 @@ fn brush_masks_use_the_raster() {
         },
         exposure(1.0),
     );
-    let p = prepare_mask(&m, &g, None);
+    let p = prepare_mask(&m, &g, None, None);
     assert_eq!(p.weight(0.4, 0.2, &none()), 1.0);
     assert_eq!(p.weight(0.4, 0.4, &none()), 0.0);
     assert!(matches!(
@@ -432,4 +457,71 @@ fn local_white_balance_sums_are_limited_to_100() {
     one[LocalParam::Tint.index()] = -100.0;
     let c = [0.2, 0.3, 0.4];
     assert_eq!(p.apply_local(c, &two), p.apply_local(c, &one));
+}
+
+#[test]
+fn ai_masks_use_the_resolved_raster_and_are_zero_when_missing() {
+    use crate::profile::{AiMaskRaster, MemoryProfiles, ProfileResolver, ProfileResources};
+    use crate::sensor::SensorWarning;
+    // 400 × 200 の画像（G の箱は 1 × 0.5）。ラスター 8 × 4 の右半分だけ 255。
+    let g = geometry(400, 200, 1.0);
+    let values: Vec<u8> = (0..4)
+        .flat_map(|_| (0..8).map(|x| if x >= 4 { 255 } else { 0 }))
+        .collect();
+    let mut lib = MemoryProfiles::new();
+    let sha = lib.insert_ai_mask(AiMaskRaster::new(8, 4, values).unwrap());
+    let shape = |sha: &str| MaskShape::Ai {
+        kind: AiMaskKind::Sky,
+        model: "test".into(),
+        mask: DataRef::new(AiMaskKind::Sky.ref_id(), sha),
+        width: 8,
+        height: 4,
+        bounds: [0.0, 0.0, 1.0, 0.5],
+    };
+    let mut s = v2_settings();
+    s.masks.push(mask(shape(&sha), exposure(1.0)));
+    let res = ProfileResources::resolve(&s, Some(&lib as &dyn ProfileResolver));
+    assert_eq!(res.ai_masks.len(), 1);
+    assert!(res.ai_masks_missing.is_empty());
+    assert!(res.stage_c_warnings().is_empty());
+    let p = prepare_mask(&s.masks[0], &g, None, Some(&res));
+    assert!(matches!(
+        p.components[0].shape,
+        PreparedShape::Brush(Some(_))
+    ));
+    assert_eq!(p.weight(0.1, 0.2, &none()), 0.0);
+    assert_eq!(p.weight(0.9, 0.2, &none()), 1.0);
+    // 境目（x = 0.5）は中間。範囲の外は 0。
+    assert!((p.weight(0.5, 0.25, &none()) - 0.5).abs() < 1e-6);
+    assert_eq!(p.weight(0.9, 0.7, &none()), 0.0);
+    // 引けない参照: 重み 0 で、知らせる。資源なしでも 0。
+    let mut missing = v2_settings();
+    missing
+        .masks
+        .push(mask(shape(&"cd".repeat(32)), exposure(1.0)));
+    let res = ProfileResources::resolve(&missing, Some(&lib as &dyn ProfileResolver));
+    assert_eq!(res.ai_masks_missing, ["cd".repeat(32)]);
+    assert_eq!(res.stage_c_warnings(), [SensorWarning::AiMaskMissing]);
+    let p = prepare_mask(&missing.masks[0], &g, None, Some(&res));
+    assert!(matches!(p.components[0].shape, PreparedShape::Brush(None)));
+    assert_eq!(p.weight(0.9, 0.2, &none()), 0.0);
+    let p = prepare_mask(&s.masks[0], &g, None, None);
+    assert_eq!(p.weight(0.9, 0.2, &none()), 0.0);
+    // 引けても範囲に写せない（極端に細い範囲。Codex のレビューの指摘）なら、使えないとして知らせる。
+    let mut narrow = v2_settings();
+    narrow.masks.push(mask(
+        MaskShape::Ai {
+            kind: AiMaskKind::Sky,
+            model: "test".into(),
+            mask: DataRef::new(AiMaskKind::Sky.ref_id(), &sha),
+            width: 8,
+            height: 4,
+            bounds: [0.0, 0.0, 0.000_001, 1.0],
+        },
+        exposure(1.0),
+    ));
+    let res = ProfileResources::resolve(&narrow, Some(&lib as &dyn ProfileResolver));
+    assert_eq!(res.ai_masks_missing, std::slice::from_ref(&sha));
+    assert!(res.ai_masks.is_empty());
+    assert_eq!(res.stage_c_warnings(), [SensorWarning::AiMaskMissing]);
 }

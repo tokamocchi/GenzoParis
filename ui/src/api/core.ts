@@ -6,6 +6,9 @@
 import { bridge } from "./bridge";
 import { ApiError, toApiError } from "./errors";
 import type {
+  AiMaskKind,
+  AiMaskResult,
+  AiMaskStatus,
   AutoStackReport,
   AutoTone,
   BackupEntry,
@@ -497,6 +500,14 @@ export const maskColorAt = async (
   );
   return { x: r.x, y: r.y, lab: r.lab };
 };
+/**
+ * AI マスク（DEV-20）: 現像中の写真の種類 `kind`（被写体・空・人物）の選択範囲を推論して保存し、設定に入れる形を返す。
+ * 適用はしない（画面がマスクの部品にして送る）。推論は数秒かかりうる。
+ */
+export const computeAiMask = async (variant_id: VariantId, kind: AiMaskKind): Promise<AiMaskResult> =>
+  strip(await execute({ type: "compute_ai_mask", variant_id, kind }, "ai_mask"));
+/** AI マスクの推論の仕組みの状態（使える種類・モデル・問題）。 */
+export const aiMaskStatus = async (): Promise<AiMaskStatus> => strip(await execute({ type: "ai_mask_status" }, "ai_mask_status"));
 /**
  * スポット修正（DEV-21）のコピー元を自動で選ぶ（適用はしない）。スポットのまわりとよく似たまわりを持つ場所へのずれ
  * （O 座標）。写真の枠に収まる候補がなければ null。
