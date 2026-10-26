@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-api"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-app"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "crossbeam-channel",
@@ -1632,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-catalog"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-color"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "lcms2",
  "proptest",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-geo"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "genzo-model",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-gpu"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "genzo-color",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-jobs"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -1733,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-media"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "genzo-color",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-ml"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "genzo-model",
  "hex",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-model"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "hex",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-pipeline"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "genzo-color",
  "genzo-model",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-raw"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "cc",
  "genzo-model",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-testkit"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "genzo-color",
@@ -1828,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "genzo-worker"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "crossbeam-channel",

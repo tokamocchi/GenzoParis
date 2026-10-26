@@ -1,7 +1,7 @@
 {
   "name": "genzo-ui",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "GenzoParis の画面（Tauri 2 の WebView で動く React / TypeScript）",
   "license": "GPL-3.0-or-later",
   "type": "module",
