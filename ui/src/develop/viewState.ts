@@ -821,9 +821,11 @@ export async function reselectSource(index: number): Promise<void> {
   }
   const cur = developStore.get();
   const now = spotsOf(cur.settings)[index];
-  // 待つ間にスポットが除かれた・動いた（番号が別のスポットを指す）・コピー元を手で動かしたなら入れない。
+  // 待つ間にスポットが除かれた・動いた（番号が別のスポットを指す）・大きさが変わった（候補・重なりは半径による）・
+  // コピー元を手で動かしたなら入れない。
   if (cur.variantId !== id || !cur.state || !cur.settings || !now) return;
-  if (JSON.stringify([now.points, now.offset]) !== JSON.stringify([spot.points, spot.offset])) return;
+  const key = (r: RetouchSpot) => JSON.stringify([r.points, r.size, r.offset]);
+  if (key(now) !== key(spot)) return;
   if (!offset) {
     actions.notify("info", "よいコピー元が見つかりません（画面の上でコピー元の円をドラッグして動かせます）");
     return;

@@ -294,6 +294,19 @@ describe("スポット修正の道具（コアとのやり取り）", () => {
     expect(spotsOf(s)[0].offset).not.toEqual([0, 0.04]);
   });
 
+  it("コピー元を選び直す間に大きさを変えたら、選んだコピー元は入れない", async () => {
+    await commitRetouchSpot([[0.3, 0.2]]);
+    const before = spotsOf(developStore.get().settings)[0].offset;
+    mock.delay = (call) => ((call.args?.command as { type?: string })?.type === "retouch_auto_source" ? 20 : 0);
+    offset = [0, 0.04];
+    const reselecting = reselectSource(0);
+    applySettings(withSpot(developStore.get().settings as DevelopSettings, 0, (r) => ({ ...r, size: r.size * 2 })), false);
+    await reselecting;
+    const s = await lastSettings();
+    expect(spotsOf(s)[0].size).toBe(DEFAULT_RETOUCH.size * 2);
+    expect(spotsOf(s)[0].offset).toEqual(before);
+  });
+
   it("処理バージョン 1 の写真では使い始めずに知らせる", () => {
     developStore.set({ settings: { ...settings, process_version: 1 } });
     toggleRetouchTool();

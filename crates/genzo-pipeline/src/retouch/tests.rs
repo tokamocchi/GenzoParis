@@ -284,6 +284,31 @@ fn source_search_prefers_similar_surroundings() {
     );
 }
 
+#[test]
+fn boundary_samples_of_a_very_long_stroke_are_capped() {
+    // 検証を通る最も長い線: 5000 点で、画像の外の端どうし（−1 と 2）を往復する（最小の大きさ。Codex の指摘）。
+    let long = 6000.0;
+    let points: Vec<[f32; 2]> = (0..5000)
+        .map(|i| if i % 2 == 0 { [-1.0, -1.0] } else { [2.0, 2.0] })
+        .collect();
+    let spot = RetouchSpot {
+        size: genzo_model::develop::ranges::RETOUCH_SIZE.min,
+        ..RetouchSpot::new(points, [0.01, 0.0])
+    };
+    let plan = SpotPlan::new(&spot, long);
+    let n = plan.boundary_points(1.0).len();
+    assert!(n <= 2 * (STROKE_SAMPLES_MAX + 2), "{n}");
+    // 長辺を斜めに横切る線は、間隔を広げない（窓の幅のまま）。
+    let line = SpotPlan::new(
+        &RetouchSpot {
+            size: genzo_model::develop::ranges::RETOUCH_SIZE.min,
+            ..RetouchSpot::new(vec![[0.0, 0.0], [1.0, 2.0 / 3.0]], [0.01, 0.0])
+        },
+        long,
+    );
+    assert_eq!(line.stroke_step(1.0), line.band(1.0));
+}
+
 /// ずれ `d`（O 座標）のコピー元の線の上の点（弧長で細かく）から、消したい線までの最も近い距離（O の画素）。
 fn closest_source_distance(spot: &RetouchSpot, d: [f32; 2], long: f64) -> (f64, f64) {
     let plan = SpotPlan::new(

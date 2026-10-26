@@ -57,6 +57,11 @@ pub const MAX_LOG_RATIO: f32 = 8.0;
 const CIRCLE_SAMPLES_MIN: usize = 16;
 const CIRCLE_SAMPLES_MAX: usize = 256;
 
+/// 線の境界の標本の、線に沿った位置の数の上限（画像の外の端どうしを往復する点の列のような、とても長い線で、
+/// 標本の数とメモリが際限なく増えないようにする。超える線では間隔を広げる。長辺 6000 画素の写真を斜めに横切る
+/// 線は、最小の大きさでも間隔を広げずに収まる。**仮置き**）。
+const STROKE_SAMPLES_MAX: usize = 4096;
+
 /// 境界の標本を 1 回に取り出す数（取り出す範囲を小さく保つため）。
 const SAMPLES_PER_FETCH: usize = 64;
 
@@ -258,6 +263,15 @@ impl SpotPlan {
         }
     }
 
+    /// 線の境界の標本の弧長の間隔（窓の幅。線に沿った位置が [`STROKE_SAMPLES_MAX`] を超える長い線では広げる）。
+    fn stroke_step(&self, px: f64) -> f64 {
+        let step = self.band(px);
+        match &self.path {
+            Path::Stroke { arc, .. } => step.max(arc[arc.len() - 1] / STROKE_SAMPLES_MAX as f64),
+            Path::Circle(_) => step,
+        }
+    }
+
     /// 境界の標本の点（O の画素。円は円周の上、線は両側に交互に `[+, −, +, −, …]`）。
     fn boundary_points(&self, px: f64) -> Vec<[f64; 2]> {
         let rb = self.boundary_radius(px);
@@ -273,7 +287,7 @@ impl SpotPlan {
                     .collect()
             }
             Path::Stroke { points, arc } => {
-                let step = stroke_step(h);
+                let step = self.stroke_step(px);
                 let total = arc[arc.len() - 1];
                 let m = (total / step).ceil() as usize;
                 let mut out = Vec::with_capacity(2 * (m + 1));
@@ -287,11 +301,6 @@ impl SpotPlan {
             }
         }
     }
-}
-
-/// 線の境界の標本の弧長の間隔。
-fn stroke_step(h: f64) -> f64 {
-    2.0 * h
 }
 
 /// スポットの境界の補正（チャンネルごとの比の対数。[`SpotPlan::boundary_points`] と同じ順）。
@@ -614,7 +623,7 @@ impl PreparedRetouch {
         let src = fetch(src_roi)?;
         let px = map.px();
         let rb = spot.boundary_radius(px);
-        let step = stroke_step(spot.band(px) / 2.0);
+        let step = spot.stroke_step(px);
         let mut value = vec![[0.0f32; 3]; n];
         value.par_chunks_mut(w).enumerate().for_each(|(j, row)| {
             for (i, out) in row.iter_mut().enumerate() {
