@@ -257,6 +257,11 @@ function solve2(a: number, b: number, c: number, d: number, e: number, f: number
   return [(e * d - b * f) / det, (a * f - e * c) / det];
 }
 
+/** 位置（CSS の画素）が画像の箱の中か（縁を含む）。 */
+export function insideBox(box: Box, x: number, y: number): boolean {
+  return x >= box.left && x <= box.left + box.width && y >= box.top && y <= box.top + box.height;
+}
+
 /** 箱の中の位置（CSS の画素）を O 座標にする。 */
 export function boxToO(g: OGrid, box: Box, x: number, y: number): [number, number] {
   return fracToO(g, (x - box.left) / box.width, (y - box.top) / box.height);

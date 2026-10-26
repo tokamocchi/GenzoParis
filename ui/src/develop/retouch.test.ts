@@ -16,6 +16,7 @@ import {
   clearSpots,
   fallbackOffset,
   fracToO,
+  insideBox,
   moveSource,
   moveSpot,
   newSpot,
@@ -161,6 +162,15 @@ describe("スポット修正の計算", () => {
     expect(pixelsPerO(g, box, 0.5, 0.3)).toBeCloseTo(400, 6);
     // 壊れた表（点の数が違う・NaN）は使わない。
     expect(orientedGrid([[0, 0]], [0, 0, 1, 1]).points.at(-1)).toEqual([1, 1]);
+  });
+
+  it("画像の箱の中か（まわりの余白では描き始めない）", () => {
+    const box = { left: 10, top: 20, width: 400, height: 300 };
+    expect(insideBox(box, 10, 20)).toBe(true);
+    expect(insideBox(box, 410, 320)).toBe(true);
+    expect(insideBox(box, 200, 150)).toBe(true);
+    expect(insideBox(box, 9, 150)).toBe(false);
+    expect(insideBox(box, 200, 321)).toBe(false);
   });
 
   it("回転した画像の表でも、O 座標と画面の位置を行き来できる（画像の外の点も）", () => {

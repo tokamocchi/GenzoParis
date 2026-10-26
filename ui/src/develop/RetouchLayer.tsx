@@ -13,7 +13,7 @@ import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } f
 import type { RetouchSpot } from "../api/types";
 import { applySettings, developStore, endDrag } from "../state/develop";
 import type { Box } from "./maskLogic";
-import { type OGrid, boxToO, moveSource, moveSpot, oToBox, pixelsPerO, withSpot } from "./retouchLogic";
+import { type OGrid, boxToO, insideBox, moveSource, moveSpot, oToBox, pixelsPerO, withSpot } from "./retouchLogic";
 import { commitRetouchSpot, selectSpot } from "./viewState";
 
 /** クリックとドラッグを分ける動きの量（CSS の画素。仮置き）。 */
@@ -80,10 +80,13 @@ export function RetouchLayer(props: {
 
   const onPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
     if (e.button !== 0 || !editable || !canAdd) return;
+    // 画像のまわりの余白では描き始めない（画像の外の見えないスポットを足さない）。
+    const origin = local(e);
+    if (!insideBox(box, origin[0], origin[1])) return;
     e.stopPropagation();
     e.preventDefault();
     svgRef.current?.setPointerCapture(e.pointerId);
-    setDrawn({ points: [toO(e)], origin: local(e), moved: false, pointer: e.pointerId });
+    setDrawn({ points: [toO(e)], origin, moved: false, pointer: e.pointerId });
   };
   const onPointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
     setCursor(local(e));
@@ -183,7 +186,7 @@ export function RetouchLayer(props: {
     >
       {items}
       {live && live.length > 0 && <g className="dv-retouch drawing">{shape({ points: live, size: props.size }, "dv-retouch-dest", 0, 0)}</g>}
-      {editable && canAdd && cursor && !drawn && <circle className="dv-retouch-cursor" cx={cursor[0]} cy={cursor[1]} r={cursorR} />}
+      {editable && canAdd && cursor && !drawn && insideBox(box, cursor[0], cursor[1]) && <circle className="dv-retouch-cursor" cx={cursor[0]} cy={cursor[1]} r={cursorR} />}
     </svg>
   );
 }
