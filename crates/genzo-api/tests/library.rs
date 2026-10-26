@@ -460,6 +460,10 @@ fn missing_files_are_detected_and_restored() {
     let s = by_name(&all_items(&core), "A.jpg").clone();
     assert_eq!(s.file_status, FileStatus::Ok);
     assert_eq!(s.file_revision, 1);
+    // 戻したときに予約したプレビューの作り直し（after_files_changed）も元ファイルを照合する。書き換えの後に
+    // 動くと、そちらが先に変化を検知して登録し直し、下の check_files は変化なしになるので、終わるまで待つ
+    // （CI の Windows で起きた）。
+    core.wait_idle();
     // 内容が変わったらリビジョンを上げる（キャッシュを無効にする。4.1 節）。
     write_jpeg(&a, (40, 30), 9, None);
     let report = core.check_files(&[va]).unwrap();
