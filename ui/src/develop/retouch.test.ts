@@ -8,7 +8,7 @@ import type { DevelopSettings, DevelopState, RetouchSpot } from "../api/types";
 import { RANGES, RETOUCH_LIMITS } from "../api/types";
 import { SHORTCUT_GROUPS } from "../dialogs/shortcutsData";
 import { appStore } from "../state/app";
-import { developStore, enqueue, openDevelopFor } from "../state/develop";
+import { applySettings, developStore, enqueue, openDevelopFor, undo } from "../state/develop";
 import {
   DEFAULT_RETOUCH,
   addSpot,
@@ -241,6 +241,43 @@ describe("スポット修正の道具（コアとのやり取り）", () => {
     toggleRetouchTool();
     toggleRetouchTool();
     expect(viewStore.get().tool).toBe("none");
+  });
+
+  it("コピー元を待つ間の Undo・スライダーの変更を消さず、その後の設定にスポットを足す", async () => {
+    mock.delay = (call) => ((call.args?.command as { type?: string })?.type === "retouch_auto_source" ? 20 : 0);
+    // Undo はコアの履歴を 1 つ戻し、露光量 -1 の設定を返す（見本）。
+    const undone: DevelopSettings = { ...settings, exposure_ev: -1 };
+    const base = mock.responses.get("core_execute") as (a?: Record<string, unknown>) => unknown;
+    mock.responses.set("core_execute", (args?: Record<string, unknown>) => {
+      const c = args?.command as { type: string };
+      if (c.type === "undo") return { type: "settings_or_none", settings: undone };
+      if (c.type === "develop_state") return { type: "develop_or_none", state: null };
+      return base(args);
+    });
+    const sent = () =>
+      mock.calls
+        .map((c) => c.args?.command as { type: string; settings?: DevelopSettings } | undefined)
+        .filter((c) => c?.type === "set_settings")
+        .map((c) => c?.settings);
+    // 待つ間にスライダーを動かしてから Undo を押す。
+    const adding = commitRetouchSpot([[0.3, 0.2]]);
+    applySettings({ ...(developStore.get().settings as DevelopSettings), exposure_ev: 0.5 }, false);
+    const undoing = undo();
+    await Promise.all([adding, undoing]);
+    // スポットは Undo の後の設定に足す（Undo の前の値（露光量 0.5）を送り直して Undo を消さない）。
+    const s = await lastSettings();
+    expect(spotsOf(s)).toHaveLength(1);
+    expect(s?.exposure_ev).toBe(-1);
+    expect(spotsOf(sent().at(-1))).toHaveLength(1);
+    expect(viewStore.get().spotIndex).toBe(0);
+  });
+
+  it("コピー元を待つ間に写真が変わったら足さない", async () => {
+    mock.delay = (call) => ((call.args?.command as { type?: string })?.type === "retouch_auto_source" ? 20 : 0);
+    const adding = commitRetouchSpot([[0.3, 0.2]]);
+    await openDevelopFor(Math.floor(Math.random() * 1e9) + 10);
+    await adding;
+    expect(spotsOf(developStore.get().settings)).toHaveLength(0);
   });
 
   it("処理バージョン 1 の写真では使い始めずに知らせる", () => {

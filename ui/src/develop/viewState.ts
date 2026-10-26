@@ -772,8 +772,12 @@ export function setRetouchOptions(patch: Partial<RetouchOptions>): void {
 
 /**
  * 描いたスポット（O 座標の点の列。1 点なら円、2 点以上なら線）を足す: コピー元をコアに選ばせて（選べなければ
- * 大きさの 2.5 倍だけ横にずらして）から設定に足し（履歴に 1 件）、足したスポットを選ぶ。`oWidth` は O の幅（長辺を
- * 1 とする。選べなかったときのずらす向きに使う）。
+ * 大きさの 2.5 倍だけ横にずらして）から、そのときの設定に足し（履歴に 1 件）、足したスポットを選ぶ。`oWidth` は O の幅
+ * （長辺を 1 とする。選べなかったときのずらす向きに使う）。
+ *
+ * コピー元を求めるのは送信の列の外で待ち、届いてから applySettings で送る（列の中で送ると、待つ間に押した Undo・
+ * 動かしたスライダーの設定と順序が入れ替わり、どちらかが消える。コピー元は今の設定のどの画像で求めてもよい）。待つ間に
+ * 写真が変わったら足さない。
  */
 export async function commitRetouchSpot(points: [number, number][], oWidth = 1): Promise<void> {
   const d = developStore.get();
@@ -781,48 +785,50 @@ export async function commitRetouchSpot(points: [number, number][], oWidth = 1):
   if (id === null || !d.state || !d.settings) return;
   const spot = newSpot(points, viewStore.get().retouch);
   if (spot.points.length === 0) return;
-  await enqueue(async () => {
-    let offset: [number, number] | null = null;
-    try {
-      offset = await core.retouchAutoSource(id, spot);
-    } catch (e) {
-      console.warn("コピー元を自動で選べません", e);
-    }
-    const cur = developStore.get();
-    if (cur.variantId !== id || !cur.settings) return;
-    const r = addSpot(cur.settings, { ...spot, offset: offset ? retouchOffset(offset) : fallbackOffset(spot, oWidth) });
-    if ("error" in r) {
-      actions.notify("info", r.error);
-      return;
-    }
-    applySettings(r.settings, false);
-    viewStore.set({ spotIndex: spotsOf(r.settings).length - 1 });
-  });
+  let offset: [number, number] | null = null;
+  try {
+    offset = await core.retouchAutoSource(id, spot);
+  } catch (e) {
+    console.warn("コピー元を自動で選べません", e);
+  }
+  const cur = developStore.get();
+  if (cur.variantId !== id || !cur.state || !cur.settings) return;
+  const r = addSpot(cur.settings, { ...spot, offset: offset ? retouchOffset(offset) : fallbackOffset(spot, oWidth) });
+  if ("error" in r) {
+    actions.notify("info", r.error);
+    return;
+  }
+  applySettings(r.settings, false);
+  viewStore.set({ spotIndex: spotsOf(r.settings).length - 1 });
 }
 
-/** スポット `index` のコピー元をコアに選び直させる（パネルのボタン。選べなければ知らせて変えない）。 */
+/**
+ * スポット `index` のコピー元をコアに選び直させる（パネルのボタン。選べなければ知らせて変えない）。commitRetouchSpot と
+ * 同じく、求めるのは列の外で待ち、届いたときの設定のスポットに入れる（待つ間にスポットが除かれた・動いたら何もしない）。
+ */
 export async function reselectSource(index: number): Promise<void> {
   const d = developStore.get();
   const id = d.variantId;
   const spot = spotsOf(d.settings)[index];
   if (id === null || !d.state || !spot) return;
-  await enqueue(async () => {
-    try {
-      // コアはスポットのまわり（半径の外の帯）を比べるので、このスポットを当てた後の画像で探してもよい（ずれは使わない）。
-      const offset = await core.retouchAutoSource(id, { ...spot, offset: [0, 0] });
-      const cur = developStore.get();
-      const now = spotsOf(cur.settings)[index];
-      if (cur.variantId !== id || !cur.settings || !now) return;
-      if (!offset) {
-        actions.notify("info", "よいコピー元が見つかりません（画面の上でコピー元の円をドラッグして動かせます）");
-        return;
-      }
-      const next = retouchOffset(offset);
-      if (next[0] === now.offset[0] && next[1] === now.offset[1]) return;
-      const spots = spotsOf(cur.settings).map((r, k) => (k === index ? { ...r, offset: next } : r));
-      applySettings({ ...cur.settings, retouch: spots }, false);
-    } catch (e) {
-      actions.reportError(e, "コピー元を選び直せません");
-    }
-  });
+  let offset: [number, number] | null;
+  try {
+    // コアはスポットのまわり（半径の外の帯）を比べるので、このスポットを当てた後の画像で探してもよい（ずれは使わない）。
+    offset = await core.retouchAutoSource(id, { ...spot, offset: [0, 0] });
+  } catch (e) {
+    actions.reportError(e, "コピー元を選び直せません");
+    return;
+  }
+  const cur = developStore.get();
+  const now = spotsOf(cur.settings)[index];
+  // 待つ間にスポットが除かれた・動いた（番号が別のスポットを指す）なら入れない。
+  if (cur.variantId !== id || !cur.state || !cur.settings || !now) return;
+  if (JSON.stringify(now.points) !== JSON.stringify(spot.points)) return;
+  if (!offset) {
+    actions.notify("info", "よいコピー元が見つかりません（画面の上でコピー元の円をドラッグして動かせます）");
+    return;
+  }
+  const next = retouchOffset(offset);
+  if (next[0] === now.offset[0] && next[1] === now.offset[1]) return;
+  applySettings({ ...cur.settings, retouch: spotsOf(cur.settings).map((r, k) => (k === index ? { ...r, offset: next } : r)) }, false);
 }
