@@ -38,10 +38,12 @@ export function RetouchLayer(props: {
   spots: RetouchSpot[];
   selected: number | null;
   editable: boolean;
+  /** 新しいスポットを描けるか（数が上限に達していない）。 */
+  canAdd: boolean;
   /** 次に足すスポットの大きさ（半径。O 座標）。 */
   size: number;
 }) {
-  const { box, grid, spots, selected, editable } = props;
+  const { box, grid, spots, selected, editable, canAdd } = props;
   const svgRef = useRef<SVGSVGElement>(null);
   const drag = useRef<Drag | null>(null);
   const [drawn, setDrawn] = useState<Drawn | null>(null);
@@ -77,7 +79,7 @@ export function RetouchLayer(props: {
   };
 
   const onPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
-    if (e.button !== 0 || !editable) return;
+    if (e.button !== 0 || !editable || !canAdd) return;
     e.stopPropagation();
     e.preventDefault();
     svgRef.current?.setPointerCapture(e.pointerId);
@@ -114,7 +116,10 @@ export function RetouchLayer(props: {
       const points = drawn.moved ? [...drawn.points, toO(e)] : [drawn.points[0]];
       setDrawn(null);
       setPending({ points, count: spots.length });
-      void commitRetouchSpot(points, oWidth > 0 ? oWidth : 1);
+      // 足せなかったら、残していた形を消す。
+      void commitRetouchSpot(points, oWidth > 0 ? oWidth : 1).then((added) => {
+        if (!added) setPending(null);
+      });
     }
   };
 
@@ -178,7 +183,7 @@ export function RetouchLayer(props: {
     >
       {items}
       {live && live.length > 0 && <g className="dv-retouch drawing">{shape({ points: live, size: props.size }, "dv-retouch-dest", 0, 0)}</g>}
-      {editable && cursor && !drawn && <circle className="dv-retouch-cursor" cx={cursor[0]} cy={cursor[1]} r={cursorR} />}
+      {editable && canAdd && cursor && !drawn && <circle className="dv-retouch-cursor" cx={cursor[0]} cy={cursor[1]} r={cursorR} />}
     </svg>
   );
 }

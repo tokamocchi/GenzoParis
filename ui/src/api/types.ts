@@ -510,6 +510,8 @@ export const RETOUCH_LIMITS = {
   spots: 1000,
   points: 5000,
   totalPoints: 100_000,
+  /** 線の長さ（O 座標。長辺の何倍か。genzo-model の MAX_RETOUCH_STROKE_LENGTH）。 */
+  strokeLength: 4,
 } as const;
 
 /** FrameInfo.o_grid の一辺の点の数（genzo-pipeline の retouch::ORIENTED_GRID_SIZE）。 */

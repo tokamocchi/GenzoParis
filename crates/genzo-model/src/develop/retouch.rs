@@ -32,6 +32,10 @@ pub const MAX_RETOUCH_SPOTS: usize = 1000;
 pub const MAX_RETOUCH_POINTS: usize = 5000;
 /// 設定の全体のスポットの点の数の上限（**仮置き**。ブラシと同じ。履歴の 1 件ごとに設定の全体を保存するため）。
 pub const MAX_TOTAL_RETOUCH_POINTS: usize = 100_000;
+/// 線のスポットの長さ（点を順に結んだ折れ線の長さ。O 座標で、長辺の何倍か）の上限（**仮置き**）。写真を
+/// 斜めに横切る線（長さ 1.2 ほど）の数倍。画像の外の端どうしを往復する点の列のような極端に長い線で、修復の
+/// 計算の時間とメモリが際限なく増えないようにする。
+pub const MAX_RETOUCH_STROKE_LENGTH: f32 = 4.0;
 
 /// スポットの直し方。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -91,6 +95,14 @@ impl RetouchSpot {
     /// 線（2 点以上）か。
     pub fn is_stroke(&self) -> bool {
         self.points.len() >= 2
+    }
+
+    /// 点を順に結んだ折れ線の長さ（O 座標。円なら 0）。
+    pub fn stroke_length(&self) -> f64 {
+        self.points
+            .windows(2)
+            .map(|w| f64::from(w[1][0] - w[0][0]).hypot(f64::from(w[1][1] - w[0][1])))
+            .sum()
     }
 }
 

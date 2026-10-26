@@ -27,7 +27,8 @@ pub use params::{
     VignetteCenter, WbPreset, WhiteBalance, is_valid_profile_id, ranges,
 };
 pub use retouch::{
-    MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_TOTAL_RETOUCH_POINTS, RetouchMode, RetouchSpot,
+    MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_RETOUCH_STROKE_LENGTH, MAX_TOTAL_RETOUCH_POINTS,
+    RetouchMode, RetouchSpot,
 };
 pub use validate::{FieldIssue, IssueKind, ValidationError};
 
@@ -870,6 +871,36 @@ mod tests {
         // 無限大の点は除き、範囲外の点は端に寄せる。
         assert_eq!(r.points, vec![[0.2, 0.3]]);
         n.validate().unwrap();
+    }
+
+    #[test]
+    fn retouch_stroke_length_is_limited() {
+        // 画像の外の端どうしを往復する線（長さ 4.24 × 4999。Codex のレビューの指摘）。
+        let zigzag: Vec<[f32; 2]> = (0..MAX_RETOUCH_POINTS)
+            .map(|i| if i % 2 == 0 { [-1.0, -1.0] } else { [2.0, 2.0] })
+            .collect();
+        let mut s = DevelopSettings::default();
+        s.retouch.push(RetouchSpot::new(zigzag, [0.01, 0.0]));
+        assert!(s.validate().unwrap_err().has_field("retouch[0].points"));
+        let n = s.normalized();
+        let r = &n.retouch[0];
+        assert!(r.stroke_length() <= f64::from(MAX_RETOUCH_STROKE_LENGTH));
+        assert_eq!(
+            r.points.len(),
+            1 + (f64::from(MAX_RETOUCH_STROKE_LENGTH) / (3.0f64 * 2f64.sqrt())) as usize
+        );
+        n.validate().unwrap();
+        // 上限の長さちょうどの線は通る（写真を斜めに横切る線の数倍）。
+        let ok = RetouchSpot::new(
+            vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]],
+            [0.01, 0.0],
+        );
+        assert_eq!(ok.stroke_length(), 4.0);
+        let s = DevelopSettings {
+            retouch: vec![ok],
+            ..Default::default()
+        };
+        s.validate().unwrap();
     }
 
     #[test]

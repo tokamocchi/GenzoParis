@@ -40,7 +40,7 @@
 //! 境界の補正は、スポットごとに 1 回だけ（[`RetouchPlan::prepare`]）求めて、すべてのタイルで使う。プレビュー
 //! （長辺 2560px）とフル解像度では、同じ O の位置の値を使うので、補間の差の範囲で一致する（IQ-07b）。
 
-use genzo_model::{DevelopSettings, RetouchMode, RetouchSpot};
+use genzo_model::{DevelopSettings, MAX_RETOUCH_STROKE_LENGTH, RetouchMode, RetouchSpot};
 use rayon::prelude::*;
 
 use crate::border::{mirror_cover, mirror_index};
@@ -64,6 +64,15 @@ const STROKE_SAMPLES_MAX: usize = 4096;
 
 /// 境界の標本を 1 回に取り出す数（取り出す範囲を小さく保つため）。
 const SAMPLES_PER_FETCH: usize = 64;
+
+/// 境界の値を 1 回に取り出す範囲の画素の数の上限（格子の画素。RGB の f32 で約 48 MB。**仮置き**）。大きな
+/// スポットの長い線・折り返す線で、離れた標本をまとめて巨大な範囲を取り出さないようにする。
+const FETCH_PIXELS_MAX: f64 = 4_194_304.0;
+
+/// 線の点を間引く距離（半径に対する割合）。画面は大きさの 1/4 で間引いて送る（座標の丸めで少し縮みうる）ので、
+/// その半分にして、画面の線の点は除かない。短い線分がたくさん重なった線で、画素ごとに調べる線分の数が
+/// 際限なく増えないようにする。
+const STROKE_THIN_RATIO: f64 = 0.125;
 
 /// 元の画像（スポットを当てる前の A1）の範囲 `roi`（格子の座標。画像の外にはみ出してよく、はみ出した部分は
 /// 鏡映）を返す関数。
@@ -186,12 +195,28 @@ impl SpotPlan {
             .iter()
             .map(|p| [f64::from(p[0]) * long_side, f64::from(p[1]) * long_side])
             .collect();
-        // 続く同じ点を除く（長さ 0 の線分を作らない）。
+        let radius = f64::from(spot.size) * long_side;
+        // 続く同じ点・近すぎる点（半径の [`STROKE_THIN_RATIO`] 倍より近い点。最後の点は残す）を除き、長さの上限
+        // （[`MAX_RETOUCH_STROKE_LENGTH`]。検証を通った設定では超えない）を超える点から先を除く。
+        let thin = radius * STROKE_THIN_RATIO;
+        let max_length = f64::from(MAX_RETOUCH_STROKE_LENGTH) * long_side;
         let mut points: Vec<[f64; 2]> = Vec::with_capacity(pts.len());
-        for p in pts {
-            if points.last() != Some(&p) {
+        let mut length = 0.0;
+        let last = pts.len().saturating_sub(1);
+        for (k, p) in pts.into_iter().enumerate() {
+            let Some(q) = points.last().copied() else {
                 points.push(p);
+                continue;
+            };
+            let d = (p[0] - q[0]).hypot(p[1] - q[1]);
+            if d == 0.0 || (d < thin && k != last) {
+                continue;
             }
+            if length + d > max_length {
+                break;
+            }
+            length += d;
+            points.push(p);
         }
         let path = if points.len() >= 2 {
             let mut arc = Vec::with_capacity(points.len());
@@ -204,7 +229,6 @@ impl SpotPlan {
         } else {
             Path::Circle(points[0])
         };
-        let radius = f64::from(spot.size) * long_side;
         let feather = f64::from(spot.feather) / 100.0;
         Self {
             mode: spot.mode,
@@ -413,6 +437,42 @@ fn window_mean(tile: &ImageTile, map: &GridMap, q: [f64; 2], h: f64) -> [f32; 3]
     sum.map(|v| v / 9.0)
 }
 
+/// 境界の標本の点を、1 回に取り出す組（添字の範囲）に分ける。続く点を、数が [`SAMPLES_PER_FETCH`] 以下で、
+/// 窓（半幅 `h`）を覆う範囲の画素の数がおよそ [`FETCH_PIXELS_MAX`] 以下になるようにまとめる（1 点だけの組は
+/// 超えてよい）。`px` は格子の 1 画素の O の画素の大きさ。
+fn fetch_groups(points: &[[f64; 2]], h: f64, px: f64) -> Vec<std::ops::Range<usize>> {
+    let area = |b: [f64; 4]| ((b[2] - b[0]) / px + 3.0) * ((b[3] - b[1]) / px + 3.0);
+    let window = |q: [f64; 2]| [q[0] - h, q[1] - h, q[0] + h, q[1] + h];
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut b = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for (i, &q) in points.iter().enumerate() {
+        let w = window(q);
+        let joined = [
+            b[0].min(w[0]),
+            b[1].min(w[1]),
+            b[2].max(w[2]),
+            b[3].max(w[3]),
+        ];
+        if i > start && (i - start >= SAMPLES_PER_FETCH || area(joined) > FETCH_PIXELS_MAX) {
+            out.push(start..i);
+            start = i;
+            b = w;
+        } else {
+            b = joined;
+        }
+    }
+    if start < points.len() {
+        out.push(start..points.len());
+    }
+    out
+}
+
 /// 窓の点（[`window_mean`] が使う点）の列。
 fn window_points(q: [f64; 2], h: f64) -> impl Iterator<Item = [f64; 2]> {
     (-1..=1).flat_map(move |j| {
@@ -478,7 +538,8 @@ impl RetouchPlan {
             let h = spot.band(px) / 2.0;
             let points = spot.boundary_points(px);
             let mut values = Vec::with_capacity(points.len());
-            for chunk in points.chunks(SAMPLES_PER_FETCH) {
+            for group in fetch_groups(&points, h, px) {
+                let chunk = &points[group];
                 let windows = || chunk.iter().flat_map(|&q| window_points(q, h));
                 let off = spot.offset;
                 let (Some(dr), Some(sr)) = (

@@ -604,7 +604,7 @@ function Stage() {
     detailControls(settings, !hasState || opening).vignetteOptions;
   // スポット修正（DEV-21）の表示: 道具を使っている間、アフターだけの表示で、切り抜きの編集中でないとき。
   const showRetouch = tool === "retouch" && !crop && !comparing && hasState && !!settings;
-  const retouchEditable = !!settings && retouchControls(settings, !hasState || opening).editable;
+  const retouchControl = settings ? retouchControls(settings, !hasState || opening) : null;
   const overlay = useMaskOverlay(
     sel && overlayOn && variantId !== null && header
       ? { variantId, index: sel.index, generation: header.generation, uncropped }
@@ -699,7 +699,8 @@ function Stage() {
           grid={orientedGrid(header?.o_grid, gb)}
           spots={spotsOf(settings)}
           selected={spotIndex}
-          editable={retouchEditable}
+          editable={!!retouchControl?.editable}
+          canAdd={!!retouchControl?.canAdd}
           size={retouchOptions.size}
         />
       )}

@@ -120,10 +120,20 @@ export function totalRetouchPoints(s: DevelopSettings): number {
   return spotsOf(s).reduce((n, r) => n + r.points.length, 0);
 }
 
-/** スポットを足す。足せなければ理由を返す（点がない・数や点の数がコアの上限を超える）。 */
+/** 点を順に結んだ折れ線の長さ（O 座標。円なら 0）。 */
+export function strokeLength(points: [number, number][]): number {
+  let n = 0;
+  for (let i = 1; i < points.length; i++) n += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+  return n;
+}
+
+/** スポットを足す。足せなければ理由を返す（点がない・数・点の数・線の長さがコアの上限を超える）。 */
 export function addSpot(s: DevelopSettings, spot: RetouchSpot): { settings: DevelopSettings } | { error: string } {
   const spots = spotsOf(s);
   if (spot.points.length === 0) return { error: "スポットに点がありません" };
+  if (strokeLength(spot.points) > RETOUCH_LIMITS.strokeLength) {
+    return { error: `線が長すぎます（写真の長辺の ${RETOUCH_LIMITS.strokeLength} 倍まで）` };
+  }
   if (spots.length >= RETOUCH_LIMITS.spots) {
     return { error: `スポットが多すぎます（${RETOUCH_LIMITS.spots.toLocaleString("ja-JP")} 個まで）` };
   }

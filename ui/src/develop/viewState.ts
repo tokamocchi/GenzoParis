@@ -779,12 +779,18 @@ export function setRetouchOptions(patch: Partial<RetouchOptions>): void {
  * 動かしたスライダーの設定と順序が入れ替わり、どちらかが消える。コピー元は今の設定のどの画像で求めてもよい）。待つ間に
  * 写真が変わったら足さない。
  */
-export async function commitRetouchSpot(points: [number, number][], oWidth = 1): Promise<void> {
+export async function commitRetouchSpot(points: [number, number][], oWidth = 1): Promise<boolean> {
   const d = developStore.get();
   const id = d.variantId;
-  if (id === null || !d.state || !d.settings) return;
+  if (id === null || !d.state || !d.settings) return false;
   const spot = newSpot(points, viewStore.get().retouch);
-  if (spot.points.length === 0) return;
+  if (spot.points.length === 0) return false;
+  // 足せない（数・点の数・線の長さが上限を超える）なら、コピー元を探す前に知らせる。
+  const check = addSpot(d.settings, spot);
+  if ("error" in check) {
+    actions.notify("info", check.error);
+    return false;
+  }
   let offset: [number, number] | null = null;
   try {
     offset = await core.retouchAutoSource(id, spot);
@@ -792,14 +798,15 @@ export async function commitRetouchSpot(points: [number, number][], oWidth = 1):
     console.warn("コピー元を自動で選べません", e);
   }
   const cur = developStore.get();
-  if (cur.variantId !== id || !cur.state || !cur.settings) return;
+  if (cur.variantId !== id || !cur.state || !cur.settings) return false;
   const r = addSpot(cur.settings, { ...spot, offset: offset ? retouchOffset(offset) : fallbackOffset(spot, oWidth) });
   if ("error" in r) {
     actions.notify("info", r.error);
-    return;
+    return false;
   }
   applySettings(r.settings, false);
   viewStore.set({ spotIndex: spotsOf(r.settings).length - 1 });
+  return true;
 }
 
 /**

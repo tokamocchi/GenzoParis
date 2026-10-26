@@ -28,6 +28,7 @@ import {
   retouchSize,
   spotSummary,
   spotsOf,
+  strokeLength,
   withSpot,
 } from "./retouchLogic";
 import { resetAll } from "./settingsLogic";
@@ -108,6 +109,17 @@ describe("スポット修正の計算", () => {
     expect("error" in addSpot(full, spot([[0.2, 0.2]]))).toBe(true);
     const many = { ...base, retouch: [{ ...spot([[0.5, 0.5]]), points: Array.from({ length: RETOUCH_LIMITS.totalPoints }, () => [0.5, 0.5] as [number, number]) }] };
     expect(addSpot(many, spot([[0.2, 0.2]]))).toMatchObject({ error: expect.stringContaining("点が多すぎます") });
+    // 線の長さの上限（コアと同じ。長辺の 4 倍）。ちょうどなら足せる。
+    const square: [number, number][] = [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+      [0, 1],
+      [0, 0],
+    ];
+    expect(strokeLength(square)).toBe(RETOUCH_LIMITS.strokeLength);
+    expect("settings" in addSpot(base, spot(square))).toBe(true);
+    expect(addSpot(base, spot([...square, [0.1, 0]]))).toMatchObject({ error: expect.stringContaining("線が長すぎます") });
     // 変える（番号の外・同じ値なら同じ設定）。
     const s2 = withSpot(s1, 0, (x) => ({ ...x, opacity: 40 }));
     expect(spotsOf(s2)[0].opacity).toBe(40);
@@ -305,6 +317,16 @@ describe("スポット修正の道具（コアとのやり取り）", () => {
     const s = await lastSettings();
     expect(spotsOf(s)[0].size).toBe(DEFAULT_RETOUCH.size * 2);
     expect(spotsOf(s)[0].offset).toEqual(before);
+  });
+
+  it("スポットが上限の数なら、コピー元を探さずに知らせて足さない", async () => {
+    const full = { ...(developStore.get().settings as DevelopSettings), retouch: Array.from({ length: RETOUCH_LIMITS.spots }, () => spot([[0.5, 0.5]])) };
+    developStore.set({ settings: full });
+    const before = sent.length;
+    expect(await commitRetouchSpot([[0.3, 0.2]])).toBe(false);
+    expect(sent.length).toBe(before);
+    expect(appStore.get().toasts.at(-1)?.message).toContain("スポットが多すぎます");
+    expect(spotsOf(developStore.get().settings)).toHaveLength(RETOUCH_LIMITS.spots);
   });
 
   it("処理バージョン 1 の写真では使い始めずに知らせる", () => {

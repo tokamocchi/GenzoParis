@@ -21,7 +21,8 @@ use super::params::{
     ToneCurve, ToneParams, ValueRange, VignetteCenter, WhiteBalance, is_valid_profile_id, ranges,
 };
 use super::retouch::{
-    MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_TOTAL_RETOUCH_POINTS, RetouchSpot,
+    MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_RETOUCH_STROKE_LENGTH, MAX_TOTAL_RETOUCH_POINTS,
+    RetouchSpot,
 };
 use crate::{CURRENT_PROCESS_VERSION, CURRENT_SCHEMA_VERSION};
 
@@ -1055,10 +1056,19 @@ impl RetouchSpot {
             c.range(format!("{p}.points[{k}][0]"), *x, ranges::RETOUCH_COORD);
             c.range(format!("{p}.points[{k}][1]"), *y, ranges::RETOUCH_COORD);
         }
+        let length = self.stroke_length();
+        if length > f64::from(MAX_RETOUCH_STROKE_LENGTH) {
+            c.invalid(
+                format!("{p}.points"),
+                format!(
+                    "線が長すぎます（長辺の {length:.2} 倍。上限 {MAX_RETOUCH_STROKE_LENGTH} 倍）"
+                ),
+            );
+        }
     }
 
-    /// 丸める。点は、有限でない点を除いて範囲に丸め、上限（1 つのスポットの点の数・全体の点の数 `budget`）を
-    /// 超えた分を除く。
+    /// 丸める。点は、有限でない点を除いて範囲に丸め、上限（線の長さ・1 つのスポットの点の数・全体の点の数
+    /// `budget`）を超えた分を除く。
     fn normalize(&mut self, budget: &mut usize) {
         self.size = ranges::RETOUCH_SIZE.clamp_or(self.size, RetouchSpot::DEFAULT_SIZE);
         self.feather = ranges::AMOUNT_0_100.clamp_or(self.feather, RetouchSpot::DEFAULT_FEATHER);
@@ -1067,13 +1077,26 @@ impl RetouchSpot {
             clamp0(v, ranges::RETOUCH_OFFSET);
         }
         self.points.retain(|[x, y]| x.is_finite() && y.is_finite());
-        let keep = self.points.len().min(MAX_RETOUCH_POINTS).min(*budget);
-        self.points.truncate(keep);
-        *budget -= keep;
         for [x, y] in &mut self.points {
             clamp0(x, ranges::RETOUCH_COORD);
             clamp0(y, ranges::RETOUCH_COORD);
         }
+        // 線の長さの上限を超える点から先を除く。
+        let mut length = 0.0f64;
+        let within = 1 + self
+            .points
+            .windows(2)
+            .take_while(|w| {
+                length += f64::from(w[1][0] - w[0][0]).hypot(f64::from(w[1][1] - w[0][1]));
+                length <= f64::from(MAX_RETOUCH_STROKE_LENGTH)
+            })
+            .count();
+        let keep = within
+            .min(self.points.len())
+            .min(MAX_RETOUCH_POINTS)
+            .min(*budget);
+        self.points.truncate(keep);
+        *budget -= keep;
     }
 }
 

@@ -9,7 +9,7 @@
 import type { ReactNode } from "react";
 
 import type { DevelopSettings, RetouchMode, RetouchSpot } from "../api/types";
-import { RANGES } from "../api/types";
+import { RANGES, RETOUCH_LIMITS } from "../api/types";
 import { Section } from "../components/Section";
 import { Slider } from "../components/Slider";
 import { comboLabel } from "../keyboard";
@@ -155,9 +155,14 @@ export function RetouchSection(props: { settings: DevelopSettings; disabled: boo
           {active ? "スポットを足すのをやめる" : `スポットを足す（${key}）`}
         </button>
       </div>
-      {active && (
+      {active && c.canAdd && (
         <div className="dp-note">
           消したいところをクリック（円）かドラッグ（線）します。コピー元は自動で選びます（点線の形をドラッグすると動かせます）。
+        </div>
+      )}
+      {editable && !c.canAdd && (
+        <div className="dp-note">
+          スポットは {RETOUCH_LIMITS.spots.toLocaleString("ja-JP")} 個までです。これ以上は足せません（いまのスポットは動かす・変える・除くことができます）。
         </div>
       )}
       <div className="dp-sub">次に足すスポット</div>

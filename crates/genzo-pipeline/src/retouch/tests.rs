@@ -286,27 +286,124 @@ fn source_search_prefers_similar_surroundings() {
 
 #[test]
 fn boundary_samples_of_a_very_long_stroke_are_capped() {
-    // 検証を通る最も長い線: 5000 点で、画像の外の端どうし（−1 と 2）を往復する（最小の大きさ。Codex の指摘）。
+    // 長さの上限ちょうど（長辺の 4 倍）の線を、最小の大きさで（Codex の指摘）。
     let long = 6000.0;
-    let points: Vec<[f32; 2]> = (0..5000)
-        .map(|i| if i % 2 == 0 { [-1.0, -1.0] } else { [2.0, 2.0] })
-        .collect();
-    let spot = RetouchSpot {
-        size: genzo_model::develop::ranges::RETOUCH_SIZE.min,
-        ..RetouchSpot::new(points, [0.01, 0.0])
-    };
-    let plan = SpotPlan::new(&spot, long);
+    let min = genzo_model::develop::ranges::RETOUCH_SIZE.min;
+    let square = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]];
+    let plan = SpotPlan::new(
+        &RetouchSpot {
+            size: min,
+            ..RetouchSpot::new(square, [0.01, 0.0])
+        },
+        long,
+    );
+    assert!(plan.stroke_step(1.0) > plan.band(1.0));
     let n = plan.boundary_points(1.0).len();
     assert!(n <= 2 * (STROKE_SAMPLES_MAX + 2), "{n}");
     // 長辺を斜めに横切る線は、間隔を広げない（窓の幅のまま）。
     let line = SpotPlan::new(
         &RetouchSpot {
-            size: genzo_model::develop::ranges::RETOUCH_SIZE.min,
+            size: min,
             ..RetouchSpot::new(vec![[0.0, 0.0], [1.0, 2.0 / 3.0]], [0.01, 0.0])
         },
         long,
     );
     assert_eq!(line.stroke_step(1.0), line.band(1.0));
+}
+
+/// 画像の外の端どうしを往復する、検証を通らない極端な線（Codex の指摘）。
+fn zigzag(n: usize, a: [f32; 2], b: [f32; 2]) -> Vec<[f32; 2]> {
+    (0..n).map(|i| if i % 2 == 0 { a } else { b }).collect()
+}
+
+#[test]
+fn extreme_strokes_are_shortened_and_thinned() {
+    let long = 6000.0;
+    let max_length = f64::from(genzo_model::MAX_RETOUCH_STROKE_LENGTH) * long;
+    // 長すぎる線は、長さの上限で切る（検証を通らない設定が来ても、計算の量を抑える）。
+    let plan = SpotPlan::new(
+        &RetouchSpot::new(zigzag(5000, [-1.0, -1.0], [2.0, 2.0]), [0.01, 0.0]),
+        long,
+    );
+    let length = |plan: &SpotPlan| match &plan.path {
+        Path::Stroke { arc, .. } => arc[arc.len() - 1],
+        Path::Circle(_) => 0.0,
+    };
+    assert!(length(&plan) <= max_length);
+    // 大きなスポットで短い線分がたくさん重なった線は、半径の 1/8 より近い点を間引く。
+    let big = RetouchSpot {
+        size: 0.25,
+        ..RetouchSpot::new(zigzag(5000, [0.5, 0.5], [0.501, 0.5]), [0.3, 0.0])
+    };
+    let Path::Stroke { points, .. } = SpotPlan::new(&big, long).path else {
+        panic!("線")
+    };
+    assert!(points.len() <= 3, "{}", points.len());
+    // 画面が大きさの 1/4 で間引いた線（座標は小数 4 桁に丸める）の点は除かない。
+    let size = 0.002f32;
+    let ui: Vec<[f32; 2]> = (0..200)
+        .map(|k| {
+            let x = 0.1 + k as f32 * size / 4.0;
+            [(x * 1e4).round() / 1e4, 0.3]
+        })
+        .collect();
+    let spot = RetouchSpot {
+        size,
+        ..RetouchSpot::new(ui.clone(), [0.0, 0.01])
+    };
+    let Path::Stroke { points, .. } = SpotPlan::new(&spot, long).path else {
+        panic!("線")
+    };
+    assert_eq!(points.len(), ui.len());
+}
+
+#[test]
+fn boundary_fetches_stay_small_for_large_and_folded_strokes() {
+    let long = 6000.0;
+    for spot in [
+        // 写真を斜めに横切る大きな線。
+        RetouchSpot {
+            size: 0.25,
+            ..RetouchSpot::new(vec![[0.0, 0.0], [1.0, 2.0 / 3.0]], [0.0, 0.3])
+        },
+        // 長さの上限まで折り返す線。
+        RetouchSpot {
+            size: 0.01,
+            ..RetouchSpot::new(zigzag(9, [0.0, 0.0], [1.0, 0.0]), [0.0, 0.1])
+        },
+    ] {
+        let plan = SpotPlan::new(&spot, long);
+        let px = 1.0;
+        let h = plan.band(px) / 2.0;
+        let points = plan.boundary_points(px);
+        let groups = fetch_groups(&points, h, px);
+        let mut next = 0;
+        for g in &groups {
+            assert_eq!(g.start, next);
+            next = g.end;
+            assert!(g.len() <= SAMPLES_PER_FETCH);
+            let chunk = &points[g.clone()];
+            let b = chunk.iter().fold(
+                [
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                ],
+                |b, q| {
+                    [
+                        b[0].min(q[0] - h),
+                        b[1].min(q[1] - h),
+                        b[2].max(q[0] + h),
+                        b[3].max(q[1] + h),
+                    ]
+                },
+            );
+            let area = ((b[2] - b[0]) / px + 3.0) * ((b[3] - b[1]) / px + 3.0);
+            assert!(g.len() == 1 || area <= FETCH_PIXELS_MAX, "{area}");
+        }
+        assert_eq!(next, points.len());
+    }
 }
 
 /// ずれ `d`（O 座標）のコピー元の線の上の点（弧長で細かく）から、消したい線までの最も近い距離（O の画素）。
