@@ -752,14 +752,16 @@ pub fn oriented_grid(geometry: &crate::finish::GeometryPlan) -> Vec<[f32; 2]> {
 const SOURCE_DISTANCES: [f64; 3] = [2.5, 3.5, 5.0];
 /// コピー元の候補の向きの数。
 const SOURCE_DIRECTIONS: usize = 16;
-/// 線の重なりを調べる点の数の上限（多ければ間引く）。
-const OVERLAP_POINTS: usize = 200;
+/// 線の重なりを調べる点（コピー元の線の上に弧長で等間隔にとる）の数の上限（長い線では間隔を広げる）。
+const OVERLAP_POINTS: usize = 400;
 
 /// スポット `spot`（ずれは使わない）の、よいコピー元のずれ（O 座標）を、画像 `image`（格子 `grid`、座標系
 /// `frames`）から探す（DEV-21 の「コピー元の自動の選び方」）。
 ///
 /// 候補は、向き 16 通り × 距離（半径の 2.5・3.5・5 倍）。コピー元が O の枠からはみ出す候補と、線のときに
-/// コピー元が消したい線と重なる（線どうしの距離が直径より近い）候補を除き、境界の帯の上の点（修復の境界の
+/// コピー元が消したい線と重なる（線どうしの距離が直径より近い）候補を除き（重なりは、コピー元の線の上に弧長で
+/// 間隔 `h`（半径の半分。点が [`OVERLAP_POINTS`] を超えるなら広げる）でとった点から消したい線までの距離が
+/// `直径 + h/2` より近いかで調べる。点の間で線が交わっても見逃さない）、境界の帯の上の点（修復の境界の
 /// 標本と同じ点）で、消したい側とコピー元の側の輝度の対数の差の 2 乗の平均が最も小さい候補を選ぶ（同じなら
 /// 先の候補）。候補がなければ `None`。
 pub fn find_source_offset(
@@ -793,11 +795,17 @@ pub fn find_source_offset(
         })
         .collect();
     let bbox = plan.dest_bbox(0.0);
-    let probe: Vec<[f64; 2]> = match &plan.path {
-        Path::Circle(c) => vec![*c],
-        Path::Stroke { points, .. } => {
-            let step = points.len().div_ceil(OVERLAP_POINTS).max(1);
-            points.iter().step_by(step).copied().collect()
+    // 線の重なりを調べる点（弧長で等間隔。両端を含む）と、その間隔の半分だけ広げた距離の上限。
+    let (probe, limit) = match &plan.path {
+        Path::Circle(c) => (vec![*c], 0.0),
+        Path::Stroke { points, arc } => {
+            let total = arc[arc.len() - 1];
+            let h = (plan.radius / 2.0).max(total / OVERLAP_POINTS as f64);
+            let n = (total / h).ceil() as usize;
+            let probe = (0..=n)
+                .map(|j| Path::point_at(points, arc, (j as f64 * h).min(total)).0)
+                .collect();
+            (probe, 2.0 * plan.radius + h / 2.0)
         }
     };
     let mut best: Option<(f64, [f64; 2])> = None;
@@ -815,11 +823,21 @@ pub fn find_source_offset(
             }
             // 線のときは、コピー元の線が消したい線と重ならないこと。
             if let Path::Stroke { points, arc } = &plan.path {
-                let limit = (2.0 * plan.radius).powi(2);
+                let limit2 = limit * limit;
                 let overlaps = probe.iter().any(|p| {
                     let q = [p[0] + d[0], p[1] + d[1]];
-                    (0..points.len() - 1)
-                        .any(|i| Path::nearest_on_segment(points, arc, i, q).d2 < limit)
+                    (0..points.len() - 1).any(|i| {
+                        // 線分の外接矩形から上限より遠い点は、距離を求めない。
+                        let (a, b) = (points[i], points[i + 1]);
+                        if q[0] < a[0].min(b[0]) - limit
+                            || q[0] > a[0].max(b[0]) + limit
+                            || q[1] < a[1].min(b[1]) - limit
+                            || q[1] > a[1].max(b[1]) + limit
+                        {
+                            return false;
+                        }
+                        Path::nearest_on_segment(points, arc, i, q).d2 < limit2
+                    })
                 });
                 if overlaps {
                     continue;

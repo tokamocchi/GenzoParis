@@ -283,3 +283,55 @@ fn source_search_prefers_similar_surroundings() {
         None
     );
 }
+
+/// ずれ `d`（O 座標）のコピー元の線の上の点（弧長で細かく）から、消したい線までの最も近い距離（O の画素）。
+fn closest_source_distance(spot: &RetouchSpot, d: [f32; 2], long: f64) -> (f64, f64) {
+    let plan = SpotPlan::new(
+        &RetouchSpot {
+            offset: [0.0, 0.0],
+            ..spot.clone()
+        },
+        long,
+    );
+    let Path::Stroke { points, arc } = &plan.path else {
+        panic!("線")
+    };
+    let (dx, dy) = (f64::from(d[0]) * long, f64::from(d[1]) * long);
+    let total = arc[arc.len() - 1];
+    let mut min = f64::INFINITY;
+    for j in 0..=2000 {
+        let p = Path::point_at(points, arc, total * j as f64 / 2000.0).0;
+        let q = [p[0] + dx, p[1] + dy];
+        for i in 0..points.len() - 1 {
+            min = min.min(Path::nearest_on_segment(points, arc, i, q).d2.sqrt());
+        }
+    }
+    (min, plan.radius)
+}
+
+#[test]
+fn source_search_checks_the_whole_line_not_just_its_points() {
+    // 点の少ない折れ線では、コピー元の線分が点の間で消したい線と交わることがある（Codex の指摘の例）。
+    let (w, h) = (400u32, 400u32);
+    let img = image(w, h, |_, _| [0.3; 3]);
+    let f = frames(w, h, Orientation::Normal);
+    let grid = SensorGrid::full_resolution(&f);
+    // V 字（の逆）: 半径の 5 倍までのずれは、どれも点の間で交わるので候補はない（前は右へ 2.5 倍のずれを選んでいた）。
+    let v = RetouchSpot {
+        size: 0.01,
+        ..RetouchSpot::new(vec![[0.2, 0.2], [0.5, 0.8], [0.8, 0.2]], [0.0, 0.0])
+    };
+    let (crossing, _) = closest_source_distance(&v, [0.025, 0.0], 400.0);
+    assert!(crossing < 1.0, "例のずれは交わる: {crossing}");
+    assert_eq!(find_source_offset(&img, grid, f, &v).unwrap(), None);
+    // 緩く曲がった線: 候補があり、コピー元の線のどの点も消したい線から直径より離れている。
+    let bent = RetouchSpot {
+        size: 0.01,
+        ..RetouchSpot::new(vec![[0.2, 0.5], [0.5, 0.56], [0.8, 0.5]], [0.0, 0.0])
+    };
+    let d = find_source_offset(&img, grid, f, &bent)
+        .unwrap()
+        .expect("候補");
+    let (closest, r) = closest_source_distance(&bent, d, 400.0);
+    assert!(closest >= 2.0 * r, "{d:?}: {closest}");
+}
