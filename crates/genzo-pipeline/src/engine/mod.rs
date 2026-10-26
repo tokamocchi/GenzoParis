@@ -99,6 +99,7 @@
 //! キャッシュは `Mutex` で守り、計算はロックの外で行う（同時に同じキーを計算した場合は、両方が
 //! ミスとして数えられ、後から入れた方が残る。結果は同じ）。
 
+pub mod auto_tone;
 pub mod cache;
 pub mod control;
 pub mod export;
@@ -115,6 +116,9 @@ use genzo_model::{
     Phase, RenderQuality,
 };
 
+pub use self::auto_tone::{
+    AutoTonePick, AutoToneStats, AutoToneValues, LuminanceHistogram, ToneTargets, solve_auto_tone,
+};
 pub use self::cache::{A0Key, CacheCounters, GuideKey, GuideParamsKey};
 pub use self::control::{NeverCancel, RenderControl};
 pub use self::export::{

@@ -1,8 +1,8 @@
 //! M4（UI）のために足したコマンドの結合テスト: 絞り込みの候補（[`genzo_api::Core::facets`]）、
 //! 切り抜きの編集中の表示（[`genzo_api::Core::set_develop_view`]）とフル解像度の出力の寸法
 //! （[`genzo_api::FrameInfo::output_width`]）、描画が実際に使う切り抜き（[`genzo_api::Core::constrain_crop`]）、
-//! WB のスポイト（DEV-03。[`genzo_api::Core::white_balance_at`]）、カタログの構造（ORG-07。
-//! [`genzo_api::Core::catalog_schema`]）。
+//! WB のスポイト（DEV-03。[`genzo_api::Core::white_balance_at`]）、自動補正（DEV-32。
+//! [`genzo_api::Core::auto_tone`]）、カタログの構造（ORG-07。[`genzo_api::Core::catalog_schema`]）。
 
 mod common;
 
@@ -573,5 +573,82 @@ fn white_balance_picker_neutralizes_the_picked_point() {
             < 20.0,
         "{json} / {as_shot:?}"
     );
+    core.close().unwrap();
+}
+
+/// 自動補正（DEV-32）: 開いている写真の値を返し、設定は変えない。RAW 以外の写真でも使える。同じ写真・設定なら
+/// 同じ値で、露光量などの今の値によらない。JSON のコマンドでも同じ形。値は設定の範囲に収まり、設定に入れて
+/// 保存できる。
+#[test]
+fn auto_tone_returns_values_without_applying_them() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("J.jpg"), (96, 64), 8, None);
+    let has_raw = make_wb_dng(&env.photos.join("R.dng"));
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let jpeg = by_name(&items, "J.jpg").variant_id;
+    assert!(matches!(
+        core.auto_tone(jpeg),
+        Err(ApiError::NoDevelopSession)
+    ));
+    let state = core.open_develop(jpeg).unwrap();
+    assert!(!state.source.is_raw);
+    let a = core.auto_tone(jpeg).unwrap();
+    eprintln!("JPEG の自動補正 {a:?}");
+    assert!(a.stats.samples > 0);
+    assert!(
+        a.stats.black_log2 <= a.stats.median_log2 && a.stats.median_log2 <= a.stats.white_log2,
+        "{a:?}"
+    );
+    assert!((-5.0..=5.0).contains(&a.exposure_ev));
+    for v in [a.contrast, a.highlights, a.shadows, a.whites, a.blacks] {
+        assert!((-100.0..=100.0).contains(&v) && v == v.round(), "{a:?}");
+    }
+    // 設定は変わっていない。
+    assert_eq!(
+        core.develop_state().unwrap().unwrap().settings,
+        state.settings
+    );
+    // 今の露光量などによらない。
+    let mut moved = state.settings.clone();
+    moved.exposure_ev = -1.5;
+    moved.tone.shadows = 80.0;
+    render(&core, &moved);
+    assert_eq!(core.auto_tone(jpeg).unwrap(), a);
+    // JSON のコマンド。
+    let json: serde_json::Value = serde_json::from_str(
+        &core.execute_json(&format!(r#"{{"type":"auto_tone","variant_id":{jpeg}}}"#)),
+    )
+    .unwrap();
+    assert_eq!(json["ok"]["type"], "auto_tone", "{json}");
+    assert_eq!(json["ok"]["stats"]["samples"], a.stats.samples);
+    assert!((json["ok"]["exposure_ev"].as_f64().unwrap() - f64::from(a.exposure_ev)).abs() < 1e-6);
+    // 設定に入れて保存できる（履歴に 1 件）。
+    let mut applied = state.settings.clone();
+    a.apply(&mut applied);
+    assert_eq!(applied.exposure_ev, a.exposure_ev);
+    assert_eq!(applied.tone.blacks, a.blacks);
+    render(&core, &applied);
+    core.flush_develop().unwrap();
+    assert_eq!(core.develop_settings(jpeg).unwrap(), applied);
+    assert!(core.develop_state().unwrap().unwrap().can_undo);
+    // 別の variant ならエラー。
+    assert!(matches!(
+        core.auto_tone(VariantId::new(jpeg.get() + 1000)),
+        Err(ApiError::NoDevelopSession)
+    ));
+    core.close_develop().unwrap();
+    if has_raw {
+        let v = by_name(&items, "R.dng").variant_id;
+        let state = core.open_develop(v).unwrap();
+        assert!(state.source.is_raw);
+        let r = core.auto_tone(v).unwrap();
+        eprintln!("RAW の自動補正 {r:?}");
+        assert!(r.stats.samples > 0);
+        // 灰色の面（0.18）の写真: 露光量は大きくは動かない（目標の中間は 0.18 より 1.3 段暗いので、下げる側）。
+        assert!(r.exposure_ev <= 0.0 && r.exposure_ev > -2.5, "{r:?}");
+        core.close_develop().unwrap();
+    }
     core.close().unwrap();
 }

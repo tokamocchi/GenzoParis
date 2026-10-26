@@ -27,7 +27,7 @@ use crate::maintenance::RestorePlan;
 use crate::naming::RenameRule;
 use crate::presets::{ExportPresetSettings, PresetImportReport, PresetInfo, PresetKind};
 use crate::types::{
-    AutoStackReport, BackupEntry, BeforeInfo, BeforeSource, Capabilities, CaptureDevice,
+    AutoStackReport, AutoTone, BackupEntry, BeforeInfo, BeforeSource, Capabilities, CaptureDevice,
     CaptureDeviceKey, CaptureTarget, CaptureTimeEdit, CaptureTimeEditInfo, CaptureTimePlan,
     CaptureTimeUndo, CatalogSchema, CatalogStats, CollectionInfo, ContentHashStatus, CopySettings,
     CoreSettings, DeleteKind, DeletePlan, DeleteReport, DevelopState, DisplayInfo,
@@ -610,6 +610,12 @@ pub enum Command {
         /// クリックした画像の `FrameInfo::uncropped`（省略可。[`Command::WhiteBalanceAt`] と同じ）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         uncropped: Option<bool>,
+    },
+    /// 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決めた値
+    /// （適用はしない。[`crate::Core::auto_tone`]）。→ [`Response::AutoTone`]
+    AutoTone {
+        /// 現像中の写真。
+        variant_id: VariantId,
     },
     /// マスクの重ねて表示（DEV-18）の画像の情報（[`crate::Core::mask_overlay`]。画素は UI ではアプリのバイナリの
     /// 応答で取る）。→ [`Response::MaskOverlay`]
@@ -1308,6 +1314,8 @@ pub enum Response {
     WhiteBalance(PickedWhiteBalance),
     /// 色域の範囲のスポイトの結果（点の G 座標と OKLab）。
     MaskColor(PickedMaskColor),
+    /// 自動補正の値（DEV-32）。
+    AutoTone(AutoTone),
     /// マスクの重ねて表示の画像の情報。
     MaskOverlay(MaskOverlayInfo),
     /// 切り抜き。
@@ -1765,6 +1773,7 @@ impl Core {
                 y,
                 uncropped,
             } => R::MaskColor(self.mask_color_at(variant_id, x, y, uncropped)?),
+            C::AutoTone { variant_id } => R::AutoTone(self.auto_tone(variant_id)?),
             C::MaskOverlay {
                 variant_id,
                 index,
@@ -2187,6 +2196,15 @@ mod tests {
             .unwrap(),
             json!({"type": "white_balance_at", "variant_id": 1, "x": 0.5, "y": 0.25})
         );
+        // 自動補正（DEV-32）。
+        let c: Command =
+            serde_json::from_value(json!({"type": "auto_tone", "variant_id": 4})).unwrap();
+        assert_eq!(
+            c,
+            Command::AutoTone {
+                variant_id: VariantId::new(4)
+            }
+        );
         let c: Command =
             serde_json::from_value(json!({"type": "set_develop_view", "uncropped": true})).unwrap();
         assert_eq!(c, Command::SetDevelopView { uncropped: true });
@@ -2285,6 +2303,28 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&wb).unwrap(),
             json!({"type": "white_balance", "temperature_k": 5321.0, "tint": 4.5})
+        );
+        let auto = Response::AutoTone(AutoTone {
+            exposure_ev: 0.5,
+            contrast: 0.0,
+            highlights: -40.0,
+            shadows: 25.0,
+            whites: 10.0,
+            blacks: -15.0,
+            stats: crate::AutoToneStats {
+                samples: 1200,
+                black_log2: -8.5,
+                median_log2: -3.75,
+                white_log2: -0.25,
+            },
+        });
+        assert_eq!(
+            serde_json::to_value(&auto).unwrap(),
+            json!({
+                "type": "auto_tone", "exposure_ev": 0.5, "contrast": 0.0, "highlights": -40.0,
+                "shadows": 25.0, "whites": 10.0, "blacks": -15.0,
+                "stats": {"samples": 1200, "black_log2": -8.5, "median_log2": -3.75, "white_log2": -0.25}
+            })
         );
         let crop = Response::Crop {
             crop: CropRect::FULL,

@@ -119,6 +119,7 @@ import {
 } from "./settingsLogic";
 import { ToneCurveEditor } from "./ToneCurveEditor";
 import {
+  applyAutoTone,
   cancelCrop,
   changeAngle,
   chooseAspect,
@@ -400,7 +401,17 @@ function BasicSection(props: { settings: DevelopSettings; disabled: boolean }) {
     <Section id="develop.basic" title="基本補正">
       <TreatmentRow settings={settings} disabled={disabled} />
       <WhiteBalanceRows settings={settings} disabled={disabled} />
-      <div className="dp-sub">トーン</div>
+      <div className="dp-sub dp-sub-row">
+        <span>トーン</span>
+        <button
+          className="btn small"
+          disabled={disabled}
+          onClick={() => void applyAutoTone()}
+          title={`自動補正: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決めます（${comboLabel("mod+u")}）。ほかの項目は変えません。元に戻せます`}
+        >
+          自動
+        </button>
+      </div>
       <Slider
         label="露光量"
         value={settings.exposure_ev}

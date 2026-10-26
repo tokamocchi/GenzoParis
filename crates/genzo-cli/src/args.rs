@@ -1460,6 +1460,9 @@ pub enum DevelopCommand {
     /// ビフォー / アフターの表示（DEV-31）のビフォーのプレビューを PNG に書く（写真を開いて描く。切り抜きは
     /// 今の設定と同じ）
     Before(BeforeArgs),
+    /// 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決め、
+    /// 設定に入れて保存する（履歴に 1 件「自動補正」。ほかの項目は変えない。--dry-run で値を見るだけ）
+    Auto(AutoArgs),
     /// 比較表示（LIB-03）の同期ズームと同じ範囲を、2 枚までの写真について同時に描いて PNG に書く（コア API
     /// `render_view_region` を試す。範囲の中心は写真ごとの割合、大きさは出力の画素で、どの写真も同じ）
     Compare(CompareArgs),
@@ -2635,6 +2638,17 @@ pub struct BeforeArgs {
     /// アフター（今の設定）のプレビューも書き出す PNG のファイル（同じ寸法。省略可）
     #[arg(long, value_name = "FILE")]
     pub after: Option<PathBuf>,
+}
+
+/// `develop auto` の引数（DEV-32）。
+#[derive(Debug, Clone, Args)]
+pub struct AutoArgs {
+    /// variant の ID（写真。動画は現像できない）
+    #[arg(value_parser = parse_variant_id)]
+    pub variant: VariantId,
+    /// 値を表示するだけで、保存しない
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// 表示範囲の座標系（genzo-api の `RegionSpace`）。
@@ -3967,6 +3981,19 @@ mod tests {
             cli.command,
             Command::Develop(DevelopCommand::Source { variant }) if variant == VariantId::new(7)
         ));
+        // 自動補正（DEV-32）。
+        let cli = parse(&["genzo", "develop", "auto", "7"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop(DevelopCommand::Auto(AutoArgs { variant, dry_run: false }))
+                if variant == VariantId::new(7)
+        ));
+        let cli = parse(&["genzo", "develop", "auto", "7", "--dry-run"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop(DevelopCommand::Auto(AutoArgs { dry_run: true, .. }))
+        ));
+        assert!(parse(&["genzo", "develop", "auto"]).is_err());
     }
 
     /// カメラプロファイル・ルック（DEV-17）: `develop set --profile / --look / --look-amount` と `profile` の

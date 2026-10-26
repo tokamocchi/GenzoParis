@@ -7,6 +7,7 @@ import { bridge } from "./bridge";
 import { ApiError, toApiError } from "./errors";
 import type {
   AutoStackReport,
+  AutoTone,
   BackupEntry,
   BeforeInfo,
   BeforeSource,
@@ -491,6 +492,14 @@ export const maskColorAt = async (
     "mask_color",
   );
   return { x: r.x, y: r.y, lab: r.lab };
+};
+/**
+ * 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決めた値（適用は
+ * しない。画面が設定に入れて送る）。今の露光量などの値によらず、同じ写真・WB・切り抜きなら同じ値。
+ */
+export const autoTone = async (variant_id: VariantId): Promise<AutoTone> => {
+  const { type: _type, ...rest } = await execute({ type: "auto_tone", variant_id }, "auto_tone");
+  return rest;
 };
 /** 切り抜きの編集中の表示（`uncropped` なら切り抜く前の全体を描く）。 */
 export const setDevelopView = async (uncropped: boolean) => {
