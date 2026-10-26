@@ -720,6 +720,34 @@ fn blend(tile: &mut ImageTile, layer: &Layer, size: (u32, u32)) {
         });
 }
 
+/// [`oriented_grid`] の格子の一辺の点の数。
+pub const ORIENTED_GRID_SIZE: usize = 9;
+
+/// 出力の画像（C の格子の全体。`geometry` は段階 C の [`GeometryPlan`]）の上の点の O 座標（長辺を 1 とする。
+/// スポットの位置の座標）の表。画面がスポットを出力の画像の上に描き、クリックした位置をスポットの位置にするための
+/// 対応（回転・歪曲補正があると C と O の対応は線形でないので、表を双線形補間する）。
+///
+/// 点 `(i, j)`（`0 ≤ i, j < n`、`n` = [`ORIENTED_GRID_SIZE`]）は出力の画像の幅・高さに対する割合 `(i / (n − 1),
+/// j / (n − 1))` の位置で、`j · n + i` 番目に入る。
+pub fn oriented_grid(geometry: &crate::finish::GeometryPlan) -> Vec<[f32; 2]> {
+    let n = ORIENTED_GRID_SIZE;
+    let frames = geometry.frames();
+    let [l, t, r, b] = crate::local::g_bounds(geometry);
+    let g_long = frames.g_long_side_px();
+    let (ow, oh) = frames.oriented_size();
+    let o_long = f64::from(ow.max(oh));
+    let k = (n - 1) as f64;
+    (0..n * n)
+        .map(|idx| {
+            let (fx, fy) = ((idx % n) as f64 / k, (idx / n) as f64 / k);
+            let gx = (l + fx * (r - l)) * g_long;
+            let gy = (t + fy * (b - t)) * g_long;
+            let (u, v) = frames.g_to_oriented(gx, gy);
+            [(u / o_long) as f32, (v / o_long) as f32]
+        })
+        .collect()
+}
+
 /// コピー元の候補のずれの距離（半径の倍数）。
 const SOURCE_DISTANCES: [f64; 3] = [2.5, 3.5, 5.0];
 /// コピー元の候補の向きの数。

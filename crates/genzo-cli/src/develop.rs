@@ -155,6 +155,7 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
         DevelopCommand::Before(a) => before(g, out, &a),
         DevelopCommand::Compare(a) => compare(g, out, &a),
         DevelopCommand::Mask(c) => crate::masks::run(g, out, c),
+        DevelopCommand::Retouch(c) => crate::retouch::run(g, out, c),
         DevelopCommand::Snapshot(c) => snapshot(g, out, c),
     }
 }

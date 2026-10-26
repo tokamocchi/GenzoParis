@@ -437,6 +437,7 @@ fn check_groups(groups: &SettingGroups) -> Result<(), ApiError> {
         effects: false,
         profile: false,
         masks: false,
+        retouch: false,
     };
     if *groups == none {
         return Err(ApiError::InvalidArgument(
@@ -1393,6 +1394,7 @@ mod tests {
             effects: false,
             profile: false,
             masks: false,
+            retouch: false,
         }
     }
 

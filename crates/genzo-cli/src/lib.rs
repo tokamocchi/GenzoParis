@@ -155,6 +155,7 @@ mod organize;
 pub mod output;
 mod preset;
 mod profile;
+mod retouch;
 mod session;
 mod stacks;
 mod standalone;

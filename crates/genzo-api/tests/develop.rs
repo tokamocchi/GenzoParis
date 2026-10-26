@@ -1129,6 +1129,7 @@ fn color_mixer_grading_and_black_white_are_applied_or_reported() {
         effects: false,
         profile: false,
         masks: false,
+        retouch: false,
     };
     let report = core
         .paste_settings_with(
@@ -1244,6 +1245,7 @@ fn presence_sharpening_and_effects_are_applied_or_reported() {
         effects: true,
         profile: false,
         masks: false,
+        retouch: false,
     };
     let report = core
         .paste_settings_with(&s, &[b], groups, PasteVersion::Keep, HISTORY_LABEL_PASTE)
@@ -1587,5 +1589,72 @@ fn masks_are_applied_overlaid_and_picked() {
         "{:?}",
         info.warnings
     );
+    core.close().unwrap();
+}
+
+/// スポット修正（DEV-21）: 描画に効く・履歴の名前・プレビューの O 座標の表・コピー元の自動の選択。
+#[test]
+fn retouch_is_applied_labelled_and_mapped() {
+    use genzo_model::{RetouchMode, RetouchSpot};
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let a = by_name(&items, "A.jpg").variant_id;
+    let state = core.open_develop(a).unwrap();
+    let base = core.render_develop().unwrap();
+    // 回転なし・向きが通常なら O 座標は G 座標と同じ: 64 × 48 の画像は (0, 0)〜(1, 0.75)。
+    let grid = base.o_grid.clone().expect("O 座標の表");
+    assert_eq!(grid.len(), 81);
+    let near = |p: [f32; 2], q: [f32; 2]| (p[0] - q[0]).abs() < 1e-4 && (p[1] - q[1]).abs() < 1e-4;
+    assert!(near(grid[0], [0.0, 0.0]), "{:?}", grid[0]);
+    assert!(near(grid[80], [1.0, 0.75]), "{:?}", grid[80]);
+    assert!(near(grid[40], [0.5, 0.375]), "{:?}", grid[40]);
+    let before = core.develop_frame().unwrap().b3.image.clone();
+    // コピー元の自動の選択（適用はしない）。
+    let spot = RetouchSpot {
+        mode: RetouchMode::Clone,
+        size: 0.06,
+        ..RetouchSpot::new(vec![[0.3, 0.3]], [0.0, 0.0])
+    };
+    let offset = core
+        .retouch_auto_source(a, &spot)
+        .unwrap()
+        .expect("コピー元の候補");
+    assert!(
+        offset[0].hypot(offset[1]) >= 0.06 * 2.5 - 1e-4,
+        "{offset:?}"
+    );
+    assert!(matches!(
+        core.retouch_auto_source(a, &RetouchSpot::default()),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    let mut s = state.settings.clone();
+    s.retouch.push(RetouchSpot { offset, ..spot });
+    core.set_settings(&s, false).unwrap();
+    core.render_develop().unwrap();
+    let after = core.develop_frame().unwrap().b3.image.clone();
+    assert_ne!(before.pixel(19, 19), after.pixel(19, 19));
+    core.flush_develop().unwrap();
+    assert_eq!(labels(&core, a).last().unwrap(), "スポット修正を追加");
+    s.retouch[0].opacity = 40.0;
+    core.set_settings(&s, false).unwrap();
+    core.flush_develop().unwrap();
+    assert_eq!(labels(&core, a).last().unwrap(), "スポット 1 の不透明度");
+    assert_eq!(core.develop_settings(a).unwrap().retouch, s.retouch);
+    // 角度補正をすると O 座標の表は G 座標とずれる（中心のまわりの回転なので、中心はほぼ同じ。切り抜きの範囲は
+    // プレビューの画素の格子にそろえるので、少しずれる）。
+    s.geometry.angle_deg = 10.0;
+    core.set_settings(&s, false).unwrap();
+    let rotated = core.render_develop().unwrap();
+    let grid = rotated.o_grid.expect("O 座標の表");
+    let c = grid[40];
+    assert!(
+        (c[0] - 0.5).abs() < 0.005 && (c[1] - 0.375).abs() < 0.005,
+        "{c:?}"
+    );
+    assert!(!near(grid[0], [0.0, 0.0]), "{:?}", grid[0]);
+    core.close_develop().unwrap();
     core.close().unwrap();
 }
