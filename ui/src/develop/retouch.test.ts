@@ -280,6 +280,19 @@ describe("スポット修正の道具（コアとのやり取り）", () => {
     expect(spotsOf(developStore.get().settings)).toHaveLength(0);
   });
 
+  it("コピー元を選び直す間に手で動かしたコピー元は上書きしない", async () => {
+    await commitRetouchSpot([[0.3, 0.2]]);
+    mock.delay = (call) => ((call.args?.command as { type?: string })?.type === "retouch_auto_source" ? 20 : 0);
+    offset = [0, 0.04];
+    const reselecting = reselectSource(0);
+    const moved = withSpot(developStore.get().settings as DevelopSettings, 0, (r) => moveSource(r, 0.01, 0));
+    applySettings(moved, false);
+    await reselecting;
+    const s = await lastSettings();
+    expect(spotsOf(s)[0].offset).toEqual(spotsOf(moved)[0].offset);
+    expect(spotsOf(s)[0].offset).not.toEqual([0, 0.04]);
+  });
+
   it("処理バージョン 1 の写真では使い始めずに知らせる", () => {
     developStore.set({ settings: { ...settings, process_version: 1 } });
     toggleRetouchTool();
