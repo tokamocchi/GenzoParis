@@ -125,6 +125,8 @@ pub struct GuideSpec {
     pub rotation_deg: f64,
     /// レンズ補正の設定（丸めた値。歪曲補正（D）で G を決める。処理バージョン 2）。
     pub lens: genzo_model::LensCorrection,
+    /// 変形（遠近補正。丸めた値。P で G を決める。処理バージョン 2。DEV-16）。
+    pub transform: genzo_model::Transform,
     /// アルゴリズムのパラメータ。
     pub params: GuideParams,
     /// かすみの推定（[`crate::haze`]）も作るか（処理バージョン 2 で、全体かローカル補正（マスク）のかすみの除去が 0 でない
@@ -146,6 +148,7 @@ impl GuideSpec {
                 rotation_deg
             },
             lens: s.lens,
+            transform: s.transform,
             params: GuideParams::for_version(process_version),
             haze: match process_version {
                 ProcessVersion::V1 => false,
@@ -182,7 +185,7 @@ pub fn compute_guide(a1: &A1Image, spec: &GuideSpec) -> Result<Guide> {
     compute_guide_from(&a1.image, a1.sensor_grid(), a1.frames(), spec)
 }
 
-/// B2 の画像（S の向き。`grid` は画像が覆う S の範囲）からガイドを作る。`frames` の回転・歪曲補正は
+/// B2 の画像（S の向き。`grid` は画像が覆う S の範囲）からガイドを作る。`frames` の回転・歪曲補正・遠近補正は
 /// 使わず、`spec` から作る（[`crate::finish::stage_c_frames`]。段階 C の文脈と同じ座標系）。
 pub fn compute_guide_from(
     image: &RgbImage,
@@ -207,10 +210,11 @@ pub fn compute_guide_from(
         )));
     }
     let frames = crate::finish::stage_c_frames(
-        frames.with_distortion(None),
+        frames.with_distortion(None).with_perspective(None),
         spec.process_version,
         spec.rotation_deg,
         &spec.lens,
+        &spec.transform,
     )?;
     match spec.process_version {
         ProcessVersion::V1 | ProcessVersion::V2 => {}
@@ -248,13 +252,14 @@ pub fn compute_guide_from(
         ],
     ];
     let mut values = vec![0.0f32; out_w as usize * out_h as usize];
-    let warped = frames.distortion.is_some();
+    // 歪曲補正・遠近補正があれば G → S はアフィン変換でない（coords の is_nonaffine）。
+    let warped = frames.is_nonaffine();
     // ガイドの画素 (p, q) の、縮小した格子の上の位置。
     let coords = |p: usize, q: usize| -> (f32, f32) {
         let v = q as f32 + 0.5;
         let u = p as f32 + 0.5;
         if warped {
-            // 歪曲補正: G → S を f64 で求める（モジュールの doc の 3b）。
+            // 歪曲補正・遠近補正: G → S を f64 で求める（モジュールの doc の 3b）。
             let (gx, gy) = (f64::from(u) * kx, f64::from(v) * ky);
             let (xs, ys) = frames.g_to_sensor(gx, gy);
             ((xs * sx) as f32, (ys * sy) as f32)
@@ -309,7 +314,7 @@ pub fn compute_guide_from(
 
 /// 1 チャンネルの画像を面積平均で縮小する（[`crate::resample::downscale_area`] と同じ定義・同じ
 /// 足し方。横、縦の順）。同じ寸法なら複製する。
-fn downscale_gray(image: &GrayImage, width: u32, height: u32) -> Result<GrayImage> {
+pub(crate) fn downscale_gray(image: &GrayImage, width: u32, height: u32) -> Result<GrayImage> {
     if (width, height) == (image.width(), image.height()) {
         return Ok(image.clone());
     }
@@ -495,6 +500,7 @@ mod tests {
             process_version: ProcessVersion::V1,
             rotation_deg: deg,
             lens: genzo_model::LensCorrection::default(),
+            transform: genzo_model::Transform::default(),
             params: GuideParams::for_version(ProcessVersion::V1),
             haze: false,
         }

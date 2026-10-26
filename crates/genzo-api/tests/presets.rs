@@ -37,6 +37,7 @@ fn tone_only() -> SettingGroups {
         color: false,
         geometry: false,
         lens: false,
+        transform: false,
         detail: false,
         effects: false,
         profile: false,

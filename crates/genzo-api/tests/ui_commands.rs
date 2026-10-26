@@ -295,17 +295,17 @@ fn constrain_crop_returns_the_crop_used_for_rendering() {
     let v = by_name(&items, "A.jpg").variant_id;
     let other = by_name(&items, "B.jpg").variant_id;
     assert!(matches!(
-        core.constrain_crop(v, &CropRect::FULL, 5.0),
+        core.constrain_crop(v, &CropRect::FULL, 5.0, None),
         Err(ApiError::NoDevelopSession)
     ));
     core.open_develop(v).unwrap();
     // 回転なしなら、そのまま。
     assert_eq!(
-        core.constrain_crop(v, &CropRect::FULL, 0.0).unwrap(),
+        core.constrain_crop(v, &CropRect::FULL, 0.0, None).unwrap(),
         CropRect::FULL
     );
     // 回転すると、中心と縦横比を保って画像の内側に縮める。
-    let c = core.constrain_crop(v, &CropRect::FULL, 8.0).unwrap();
+    let c = core.constrain_crop(v, &CropRect::FULL, 8.0, None).unwrap();
     assert!(
         c.left > 0.0 && c.right < 1.0 && c.top > 0.0 && c.bottom < 1.0,
         "{c:?}"
@@ -313,7 +313,7 @@ fn constrain_crop_returns_the_crop_used_for_rendering() {
     assert!(((c.left + c.right) * 0.5 - 0.5).abs() < 1e-4);
     assert!(((c.top + c.bottom) * 0.5 - 0.5).abs() < 1e-4);
     // 返した切り抜きは制限し直しても変わらない。
-    let again = core.constrain_crop(v, &c, 8.0).unwrap();
+    let again = core.constrain_crop(v, &c, 8.0, None).unwrap();
     for (a, b) in [
         (again.left, c.left),
         (again.top, c.top),
@@ -334,8 +334,8 @@ fn constrain_crop_returns_the_crop_used_for_rendering() {
     );
     // 角度は ±45 度に、切り抜きは各軸 0〜1 に丸めて使う。
     assert_eq!(
-        core.constrain_crop(v, &CropRect::FULL, 90.0).unwrap(),
-        core.constrain_crop(v, &CropRect::FULL, 45.0).unwrap()
+        core.constrain_crop(v, &CropRect::FULL, 90.0, None).unwrap(),
+        core.constrain_crop(v, &CropRect::FULL, 45.0, None).unwrap()
     );
     // 数でない値・別の写真。
     let nan = CropRect {
@@ -343,15 +343,15 @@ fn constrain_crop_returns_the_crop_used_for_rendering() {
         ..CropRect::FULL
     };
     assert!(matches!(
-        core.constrain_crop(v, &nan, 5.0),
+        core.constrain_crop(v, &nan, 5.0, None),
         Err(ApiError::InvalidArgument(_))
     ));
     assert!(matches!(
-        core.constrain_crop(v, &CropRect::FULL, f32::INFINITY),
+        core.constrain_crop(v, &CropRect::FULL, f32::INFINITY, None),
         Err(ApiError::InvalidArgument(_))
     ));
     assert!(matches!(
-        core.constrain_crop(other, &CropRect::FULL, 5.0),
+        core.constrain_crop(other, &CropRect::FULL, 5.0, None),
         Err(ApiError::NoDevelopSession)
     ));
     // JSON のコマンド。
@@ -574,4 +574,116 @@ fn white_balance_picker_neutralizes_the_picked_point() {
         "{json} / {as_shot:?}"
     );
     core.close().unwrap();
+}
+
+/// 変形（遠近補正。DEV-16）: 切り抜きの制限は変形を考え、自動の遠近補正は格子の写真から傾きを求め、結果を設定に
+/// 書くと切り抜く前の全体の表示の寸法（G の外接矩形）が変わる。JSON のコマンドでも同じ。
+#[test]
+fn transform_constrains_the_crop_and_upright_finds_the_tilt() {
+    use genzo_api::{Command, Response, UprightMode};
+    use genzo_model::Transform;
+
+    let env = Env::new();
+    common::write_grid_jpeg(&env.photos.join("grid.jpg"), (480, 360), 12.0);
+    write_jpeg(&env.photos.join("plain.jpg"), (300, 200), 6, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let v = by_name(&items, "grid.jpg").variant_id;
+    let plain = by_name(&items, "plain.jpg").variant_id;
+    assert!(matches!(
+        core.analyze_upright(v, UprightMode::Vertical),
+        Err(ApiError::NoDevelopSession)
+    ));
+    core.open_develop(v).unwrap();
+    assert_eq!(core.develop_settings(v).unwrap().process_version, 2);
+
+    // 切り抜きの制限: 変形があると、全体の切り抜きも画像の内側に縮む（回転 0 でも）。
+    let strong = Transform {
+        vertical: -60.0,
+        ..Default::default()
+    };
+    assert_eq!(
+        core.constrain_crop(v, &CropRect::FULL, 0.0, Some(&Transform::default()))
+            .unwrap(),
+        CropRect::FULL
+    );
+    let c = core
+        .constrain_crop(v, &CropRect::FULL, 0.0, Some(&strong))
+        .unwrap();
+    assert!(c.width() < 1.0, "{c:?}");
+    // 省略すると今の設定の変形（既定: なし）。
+    assert_eq!(
+        core.constrain_crop(v, &CropRect::FULL, 0.0, None).unwrap(),
+        CropRect::FULL
+    );
+    let nan = Transform {
+        vertical: f32::NAN,
+        ..Default::default()
+    };
+    assert!(matches!(
+        core.constrain_crop(v, &CropRect::FULL, 0.0, Some(&nan)),
+        Err(ApiError::InvalidArgument(_))
+    ));
+
+    // 自動の遠近補正: 上がすぼまった格子なので、垂直は負（上辺を広げる）。
+    let s = core.analyze_upright(v, UprightMode::Vertical).unwrap();
+    assert_eq!(s.mode, UprightMode::Vertical);
+    assert!(s.transform.vertical < -5.0, "{s:?}");
+    assert_eq!(s.transform.horizontal, 0.0);
+    assert!(s.angle_deg.abs() < 1.0, "{s:?}");
+    assert!(s.vertical_lines >= 2 && s.residual_deg < 2.0, "{s:?}");
+    // 水平（角度だけ）では垂直・水平は今のまま。
+    let level = core.analyze_upright(v, UprightMode::Level).unwrap();
+    assert!(level.transform.is_identity(), "{level:?}");
+    assert!(level.angle_deg.abs() < 1.0);
+    // 完全も求められる（水平の線は水平のまま写っているので、水平の値は小さい）。
+    let full = core.analyze_upright(v, UprightMode::Full).unwrap();
+    assert!(
+        full.transform.vertical < -5.0 && full.transform.horizontal.abs() < 10.0,
+        "{full:?}"
+    );
+
+    // 結果を設定に書くと、切り抜く前の全体（G の外接矩形）の寸法が変わる。
+    let before = render(&core, &DevelopSettings::default());
+    let mut applied = DevelopSettings::default();
+    applied.geometry.angle_deg = s.angle_deg;
+    applied.transform = s.transform;
+    core.set_develop_view(true).unwrap();
+    let after = render(&core, &applied);
+    assert!(after.uncropped);
+    let gs = after.g_size.expect("G の寸法");
+    assert!(gs[0] > 480, "{gs:?}（上辺が広がるので横に広い）");
+    assert_eq!(before.g_size, Some([480, 360]));
+    // 版 1 の写真では垂直・完全は使えず、水平は使える。
+    core.set_develop_view(false).unwrap();
+    let v1 = DevelopSettings {
+        process_version: 1,
+        ..Default::default()
+    };
+    core.set_settings(&v1, false).unwrap();
+    assert!(matches!(
+        core.analyze_upright(v, UprightMode::Vertical),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    assert!(core.analyze_upright(v, UprightMode::Level).is_ok());
+    // JSON のコマンド。
+    let r = core
+        .execute(
+            serde_json::from_str::<Command>(&format!(
+                r#"{{"type":"analyze_upright","variant_id":{v},"mode":"level"}}"#
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(r, Response::Upright(u) if u.mode == UprightMode::Level));
+    core.close_develop().unwrap();
+
+    // 直線のない写真ではエラー。
+    core.open_develop(plain).unwrap();
+    assert!(matches!(
+        core.analyze_upright(plain, UprightMode::Vertical),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    core.close_develop().unwrap();
 }

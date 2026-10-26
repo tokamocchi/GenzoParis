@@ -22,7 +22,16 @@
 //   見本の色として足す。選んでいる番号が設定の外になったら（Undo など）、選んでいないとみなす（currentMask）。
 
 import * as core from "../api/core";
-import type { AspectRatio, BeforeSource, CropRect, DevelopSettings, LocalAdjustment, VariantId } from "../api/types";
+import type {
+  AspectRatio,
+  BeforeSource,
+  CropRect,
+  DevelopSettings,
+  LocalAdjustment,
+  Transform,
+  UprightMode,
+  VariantId,
+} from "../api/types";
 import { actions } from "../state/app";
 import { applySettings, developStore, endDrag, enqueue, refreshFrame, setBeforeSource } from "../state/develop";
 import { cancelRegionRender } from "../state/region";
@@ -50,7 +59,7 @@ import {
   shapeKind,
 } from "./maskLogic";
 import { formatAngle, sameShown } from "./scales";
-import { customWb } from "./settingsLogic";
+import { customWb, describeUpright, fullTransform, sameTransform } from "./settingsLogic";
 import { clamp01 } from "./zoomMath";
 
 export type DevelopTool = "none" | "wb" | "crop" | "brush" | "mask_color";
@@ -314,7 +323,7 @@ export async function commitCrop(): Promise<void> {
     const angle = d.settings.geometry.angle_deg;
     let crop = sanitizeCrop(draft.crop);
     try {
-      crop = sanitizeCrop(await core.constrainCrop(draft.variantId, crop, angle));
+      crop = sanitizeCrop(await core.constrainCrop(draft.variantId, crop, angle, fullTransform(d.settings.transform)));
     } catch (e) {
       // 制限できなくても、そのまま保存する（コアは描画のときに同じ制限をかける。genzo-pipeline の
       // constrain_crop）。
@@ -356,7 +365,12 @@ export async function constrainDraft(): Promise<void> {
   const rev = draftRev;
   try {
     const c = sanitizeCrop(
-      await core.constrainCrop(draft.variantId, sanitizeCrop(draft.crop), d.settings.geometry.angle_deg),
+      await core.constrainCrop(
+        draft.variantId,
+        sanitizeCrop(draft.crop),
+        d.settings.geometry.angle_deg,
+        fullTransform(d.settings.transform),
+      ),
     );
     if (seq === cropSeq && rev === draftRev) setDraftCrop(c);
   } catch (e) {
@@ -416,7 +430,9 @@ export async function chooseAspect(aspect: AspectRatio | null, info: GeometryInf
   if (k !== null) {
     crop = sanitizeCrop(maxAspectCrop(crop, k));
     try {
-      crop = sanitizeCrop(await core.constrainCrop(id, crop, d.settings.geometry.angle_deg));
+      crop = sanitizeCrop(
+        await core.constrainCrop(id, crop, d.settings.geometry.angle_deg, fullTransform(d.settings.transform)),
+      );
     } catch (e) {
       console.warn("切り抜きを画像の内側に制限できません", e);
     }
@@ -475,6 +491,52 @@ export function commitAngle(): void {
   angleBase = null;
   endDrag();
   if (viewStore.get().crop) void constrainDraft();
+}
+
+// ---------------------------------------------------------------------------
+// 変形（遠近補正。DEV-16）
+// ---------------------------------------------------------------------------
+
+/**
+ * 変形の項目を変える（パネルのスライダー）。設定の変形だけを送る（切り抜きは、描画のときにコアが画像の内側に
+ * 制限する。編集中の枠はドラッグを終えたときに制限する）。
+ */
+export function changeTransform(patch: Partial<Transform>, dragging: boolean): void {
+  const d = developStore.get();
+  if (!d.state || !d.settings || d.variantId === null) return;
+  const next = { ...fullTransform(d.settings.transform), ...patch };
+  if (sameTransform(next, fullTransform(d.settings.transform))) return;
+  applySettings({ ...d.settings, transform: next }, dragging);
+}
+
+/** 変形のドラッグを終える（履歴に 1 件。切り抜きの編集中は、枠を画像の内側に制限する）。 */
+export function commitTransform(): void {
+  endDrag();
+  if (viewStore.get().crop) void constrainDraft();
+}
+
+/**
+ * 自動の遠近補正（Upright 相当）: コアに直線を調べてもらい（analyze_upright）、求めた角度補正と垂直・水平を設定に
+ * 入れて送る（履歴に 1 件。元に戻せる）。直線が見つからなければ知らせる。切り抜きの編集中は枠を制限し直す。
+ */
+export async function applyUpright(mode: UprightMode): Promise<void> {
+  const d = developStore.get();
+  if (!d.state || !d.settings || d.variantId === null) return;
+  const id = d.variantId;
+  try {
+    const s = await core.analyzeUpright(id, mode);
+    const latest = developStore.get();
+    if (latest.variantId !== id || !latest.settings || !latest.state) return;
+    const transform = fullTransform(s.transform);
+    applySettings(
+      { ...latest.settings, geometry: { ...latest.settings.geometry, angle_deg: s.angle_deg }, transform },
+      false,
+    );
+    actions.notify("info", describeUpright(mode, s.angle_deg, transform, { vertical: s.vertical_lines, horizontal: s.horizontal_lines }));
+    if (viewStore.get().crop) void constrainDraft();
+  } catch (e) {
+    actions.reportError(e, "自動で補正できません");
+  }
 }
 
 // ---------------------------------------------------------------------------

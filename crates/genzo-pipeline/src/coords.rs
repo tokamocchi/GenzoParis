@@ -6,7 +6,8 @@
 //! | 既定の切り抜き | S の中の矩形（[`CoordinateFrames::default_crop`]。RAW の DefaultCrop。genzo-raw の `RawImage::default_crop`）。カメラの JPEG と同じ範囲で、O・G の基準の枠（「画像全体」）になる。ない場合は S の全体 |
 //! | O：向きを反映した座標 | S の既定の切り抜きの範囲に RAW の向き（[`Orientation`]）を反映した画素の座標（左上は既定の切り抜きの左上の画素）。画素の並べ替えと平行移動だけ（補間なし） |
 //! | D：歪曲補正後の枠（この crate の名前） | O にレンズの歪曲補正（v1。[`crate::lens::RadialDistortion`]）を適用した、回転の前の画像。枠は O と同じ大きさで、O の内側から取れる最大の範囲に自動で拡大・縮小する。歪曲補正がなければ O そのもの |
-//! | G：ジオメトリ補正後の全体 | D（O にレンズの歪曲補正）に回転（ステージ 9）を適用した、切り抜く前の画像全体。G の外接矩形の長辺を 1 とした値 |
+//! | P：遠近補正後の枠（この crate の名前。2026-10-26 追加。DEV-16） | D に変形（遠近補正。[`crate::perspective::Perspective`]。処理バージョン 2）を適用した、回転の前の画像。D と同じ中心・同じ尺度の座標で、D の四隅の像は凸な四角形（その外は画像のない部分）。変形がなければ D そのもの |
+//! | G：ジオメトリ補正後の全体 | P（D に遠近補正）に回転（ステージ 9）を適用した、切り抜く前の画像全体。G の外接矩形の長辺を 1 とした値 |
 //! | C：出力座標 | 切り抜いた後の画像。C → G（切り抜き）→ O → S の順にたどる |
 //!
 //! # 既定の切り抜き（実機の ARW の不具合 A-2）
@@ -43,6 +44,13 @@
 //!   D の枠で判定する（[`CoordinateFrames::g_to_undistorted`]）。プロファイルの歪曲（写真ごとに決まる）は
 //!   [`CoordinateFrames::lens_geometry`] に入れて段階 A1 から段階 B・C へ渡し、適用量・手動の補正と合わせた
 //!   写像は段階 B・C の文脈で作る（[`crate::finish::finish_context`]・[`crate::guide::compute_guide`]）。
+//! - **遠近補正**（2026-10-26 追加。DEV-16。処理バージョン 2）: D → P の射影変換（[`crate::perspective`]）を回転の前に
+//!   入れる。G は P を **D の中心のまわりに** 回転し、P の四角形（D の四隅の像）の外接矩形の左上を原点にしたもの
+//!   （[`CoordinateFrames::with_perspective`]。D → G の対応は 3 × 3 の行列 [`CoordinateFrames::undistorted_to_g_homography`]
+//!   に合成し、回転だけのときの式とは別に持つ）。外接矩形の中心は、ふつう D の中心に対応しない。遠近補正があるときは
+//!   G → S が射影変換になるので、ステージ 9 は画素ごとに「G の格子 → D（射影）→ 半径方向の倍率（表）→ 入力の格子
+//!   （アフィン）」を評価する（[`crate::finish::geometry::ProjectivePlan`]）。遠近補正がなければ、これまでの式を
+//!   そのまま使う（処理バージョン 1 と、変形のない設定の結果は変えない）。
 //! - **切り抜き**: genzo-model の `CropRect`（G の外接矩形の各軸の割合）。C の格子との対応は
 //!   [`crate::finish::geometry::GeometryPlan`] が決める。
 //! - **回転は段階 B の項目**: 回転を変えると G が変わるのでガイドを作り直す（2.7 節の表）。
@@ -66,6 +74,38 @@ use genzo_raw::PixelRect;
 use crate::error::{PipelineError, Result};
 use crate::image::Roi;
 use crate::lens::{ProfileDistortion, RadialDistortion};
+use crate::perspective::{Homography, Perspective};
+
+/// 遠近補正（D → P。[`crate::perspective`]）と、回転・外接矩形を含めて合成した D → G の対応
+/// （[`CoordinateFrames::perspective`]。回転か既定の切り抜きを変えると作り直す）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerspectiveFrame {
+    /// 遠近補正（D → P）。
+    pub perspective: Perspective,
+    /// D（O の画素の座標）→ G（外接矩形の左上が原点。S の画素の単位）。D の中心で分母が正。
+    d_to_g: Homography,
+    /// G → D。D の中心の像で分母が正。
+    g_to_d: Homography,
+    /// G の外接矩形の寸法（幅, 高さ）。
+    g_size: (f64, f64),
+}
+
+impl PerspectiveFrame {
+    /// D → G の射影変換。
+    pub fn d_to_g(&self) -> &Homography {
+        &self.d_to_g
+    }
+
+    /// G → D の射影変換。
+    pub fn g_to_d(&self) -> &Homography {
+        &self.g_to_d
+    }
+
+    /// G の外接矩形の寸法。
+    pub fn g_size(&self) -> (f64, f64) {
+        self.g_size
+    }
+}
 
 /// S（向きを反映する前）と O（向きを反映した後）の対応（連続座標のアフィン変換）。
 ///
@@ -137,6 +177,9 @@ pub struct CoordinateFrames {
     pub lens_geometry: Option<ProfileDistortion>,
     /// ステージ 9 の歪曲補正（D → O。段階 B・C の文脈で設定から作る。版 1・補正なしは `None`）。
     pub distortion: Option<RadialDistortion>,
+    /// 変形（遠近補正。D → P。段階 B・C の文脈で設定から作る。版 1・変形なしは `None`）と、回転を含めた
+    /// D → G の対応（[`with_perspective`](Self::with_perspective) で作り、回転・既定の切り抜きを変えると作り直す）。
+    pub perspective: Option<PerspectiveFrame>,
 }
 
 impl CoordinateFrames {
@@ -156,7 +199,68 @@ impl CoordinateFrames {
             rotation_deg: 0.0,
             lens_geometry: None,
             distortion: None,
+            perspective: None,
         })
+    }
+
+    /// 変形（遠近補正）を設定したもの（D → G の対応を今の回転・既定の切り抜きで合成する）。
+    pub fn with_perspective(mut self, perspective: Option<Perspective>) -> Self {
+        self.perspective = perspective.map(|p| self.perspective_frame(p));
+        self
+    }
+
+    /// 遠近補正があるか（G → D が射影変換か）。
+    pub fn has_perspective(&self) -> bool {
+        self.perspective.is_some()
+    }
+
+    /// G → S がアフィン変換でないか（歪曲補正か遠近補正がある）。真なら、アフィン変換の係数
+    /// （[`g_to_sensor_affine`](Self::g_to_sensor_affine)）は使えず、[`g_to_sensor`](Self::g_to_sensor) か
+    /// ステージ 9 の計画の式を使う。
+    pub fn is_nonaffine(&self) -> bool {
+        self.distortion.is_some() || self.perspective.is_some()
+    }
+
+    /// 遠近補正 `p` と今の回転・O の寸法から、D → G の対応を合成する（モジュールの doc の「遠近補正」）。
+    fn perspective_frame(&self, p: Perspective) -> PerspectiveFrame {
+        let (ow, oh) = self.oriented_size();
+        let (ow, oh) = (f64::from(ow), f64::from(oh));
+        let (cx, cy) = (ow * 0.5, oh * 0.5);
+        let (c, s) = self.rotation_cos_sin();
+        // D → P → D の中心のまわりに回転。
+        let pre = p
+            .d_to_p
+            .then(&Homography::translation(-cx, -cy))
+            .then(&Homography::rotation(c, s));
+        let mut min = (f64::INFINITY, f64::INFINITY);
+        let mut max = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for (x, y) in [(0.0, 0.0), (ow, 0.0), (ow, oh), (0.0, oh)] {
+            // 四隅は消失線の手前にある（Perspective が確かめている）。念のため有限に収めた値を使う。
+            let (qx, qy) = pre.apply(x, y);
+            min = (min.0.min(qx), min.1.min(qy));
+            max = (max.0.max(qx), max.1.max(qy));
+        }
+        let d_to_g = pre
+            .then(&Homography::translation(-min.0, -min.1))
+            .with_positive_w_at(cx, cy);
+        let (gcx, gcy) = d_to_g.apply(cx, cy);
+        let g_to_d = d_to_g
+            .inverse()
+            .unwrap_or(Homography::IDENTITY)
+            .with_positive_w_at(gcx, gcy);
+        PerspectiveFrame {
+            perspective: p,
+            d_to_g,
+            g_to_d,
+            g_size: ((max.0 - min.0).max(1e-9), (max.1 - min.1).max(1e-9)),
+        }
+    }
+
+    /// 回転か既定の切り抜きを変えた後に、D → G の対応を作り直す。
+    fn rebuild_perspective(&mut self) {
+        if let Some(pf) = self.perspective {
+            self.perspective = Some(self.perspective_frame(pf.perspective));
+        }
     }
 
     /// プロファイルの歪曲（[`lens_geometry`](Self::lens_geometry)）を設定したもの。
@@ -182,6 +286,7 @@ impl CoordinateFrames {
             )));
         }
         self.default_crop = crop;
+        self.rebuild_perspective();
         Ok(self)
     }
 
@@ -197,6 +302,7 @@ impl CoordinateFrames {
         } else {
             rotation_deg
         };
+        self.rebuild_perspective();
         Ok(self)
     }
 
@@ -265,14 +371,18 @@ impl CoordinateFrames {
     /// この長さに対する割合で定義する（04 の 1.1 節の 5、2.7 節）。
     ///
     /// 回転した O の外接矩形の長辺（回転が 0 なら O、つまり既定の切り抜きの長辺）。歪曲補正（v1）は
-    /// 含まない。
+    /// 含まない。遠近補正（DEV-16）があれば、P の四角形を回転した外接矩形の長辺。
     pub fn g_long_side_px(&self) -> f64 {
         let (w, h) = self.g_size_px();
         w.max(h)
     }
 
-    /// G の外接矩形の寸法（幅, 高さ。S の画素の単位）。回転が 0 なら O の寸法そのもの。
+    /// G の外接矩形の寸法（幅, 高さ。S の画素の単位）。回転が 0 なら O の寸法そのもの。遠近補正があれば
+    /// P の四角形を回転した外接矩形。
     pub fn g_size_px(&self) -> (f64, f64) {
+        if let Some(pf) = &self.perspective {
+            return pf.g_size;
+        }
         let (ow, oh) = self.oriented_size();
         let (ow, oh) = (f64::from(ow), f64::from(oh));
         if self.rotation_deg == 0.0 {
@@ -302,9 +412,13 @@ impl CoordinateFrames {
         }
     }
 
-    /// 連続座標で D → G（D の中心のまわりに回転し、外接矩形の左上を原点にする）。D は O と同じ大きさの
-    /// 枠（歪曲補正がなければ O）。
+    /// 連続座標で D → G（遠近補正があれば D → P、D の中心のまわりに回転し、外接矩形の左上を原点にする）。D は
+    /// O と同じ大きさの枠（歪曲補正がなければ O）。遠近補正で消失線の向こう側に写る点は有限の値に収める
+    /// （[`Homography::apply`]）。
     pub fn undistorted_to_g(&self, u: f64, v: f64) -> (f64, f64) {
+        if let Some(pf) = &self.perspective {
+            return pf.d_to_g.apply(u, v);
+        }
         if self.rotation_deg == 0.0 {
             return (u, v);
         }
@@ -315,9 +429,13 @@ impl CoordinateFrames {
         (c * dx + s * dy + gw * 0.5, -s * dx + c * dy + gh * 0.5)
     }
 
-    /// 連続座標で G → D（[`undistorted_to_g`](Self::undistorted_to_g) の逆。回転だけ）。D の枠
-    /// `[0, ow] × [0, oh]`（O の寸法）の内側が画像のある部分。
+    /// 連続座標で G → D（[`undistorted_to_g`](Self::undistorted_to_g) の逆。回転と、あれば遠近補正の逆）。D の枠
+    /// `[0, ow] × [0, oh]`（O の寸法）の内側が画像のある部分。遠近補正で消失線の向こう側の点（画像の外）は
+    /// 有限の値に収める（画像の内側かの判定には [`g_to_undistorted_checked`](Self::g_to_undistorted_checked) を使う）。
     pub fn g_to_undistorted(&self, gx: f64, gy: f64) -> (f64, f64) {
+        if let Some(pf) = &self.perspective {
+            return pf.g_to_d.apply(gx, gy);
+        }
         if self.rotation_deg == 0.0 {
             return (gx, gy);
         }
@@ -329,6 +447,73 @@ impl CoordinateFrames {
             c * dx - s * dy + f64::from(ow) * 0.5,
             s * dx + c * dy + f64::from(oh) * 0.5,
         )
+    }
+
+    /// 連続座標で G → D。遠近補正で消失線の上・向こう側に当たる点（画像の外）は `None`。遠近補正がなければ
+    /// [`g_to_undistorted`](Self::g_to_undistorted) と同じで、常に `Some`。
+    pub fn g_to_undistorted_checked(&self, gx: f64, gy: f64) -> Option<(f64, f64)> {
+        match &self.perspective {
+            Some(pf) => pf.g_to_d.apply_checked(gx, gy),
+            None => Some(self.g_to_undistorted(gx, gy)),
+        }
+    }
+
+    /// G の点が画像（D の枠 `[0, ow] × [0, oh]`。許容量 `tolerance` 画素）の内側にあるか。遠近補正で消失線の
+    /// 向こう側の点は外。
+    pub fn g_point_in_image(&self, gx: f64, gy: f64, tolerance: f64) -> bool {
+        let Some((u, v)) = self.g_to_undistorted_checked(gx, gy) else {
+            return false;
+        };
+        let (ow, oh) = self.oriented_size();
+        (-tolerance..=f64::from(ow) + tolerance).contains(&u)
+            && (-tolerance..=f64::from(oh) + tolerance).contains(&v)
+    }
+
+    /// D → G の対応を 3 × 3 の射影変換として返す（遠近補正がなければ回転のアフィン変換
+    /// [`undistorted_to_g_affine`](Self::undistorted_to_g_affine) を 3 行目 `[0, 0, 1]` で表したもの）。
+    pub fn undistorted_to_g_homography(&self) -> Homography {
+        match &self.perspective {
+            Some(pf) => pf.d_to_g,
+            None => Homography::from_affine(self.undistorted_to_g_affine()),
+        }
+    }
+
+    /// G → D の対応を 3 × 3 の射影変換として返す（[`undistorted_to_g_homography`](Self::undistorted_to_g_homography)
+    /// の逆。遠近補正がなければ [`g_to_undistorted_affine`](Self::g_to_undistorted_affine) と同じ）。
+    pub fn g_to_undistorted_homography(&self) -> Homography {
+        match &self.perspective {
+            Some(pf) => pf.g_to_d,
+            None => Homography::from_affine(self.g_to_undistorted_affine()),
+        }
+    }
+
+    /// D → G の変換（回転だけ。**遠近補正は含まない**）をアフィン変換として返す（行ごとに
+    /// `[[m00, m01, t0], [m10, m11, t1]]`）。回転が 0 なら厳密に恒等。
+    pub fn undistorted_to_g_affine(&self) -> [[f64; 3]; 2] {
+        if self.rotation_deg == 0.0 {
+            return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        }
+        let (c, s) = self.rotation_cos_sin();
+        let (ow, oh) = self.oriented_size();
+        let (gw, gh) = self.rotated_box_size();
+        let (gcx, gcy) = (gw * 0.5, gh * 0.5);
+        let (ocx, ocy) = (f64::from(ow) * 0.5, f64::from(oh) * 0.5);
+        [
+            [c, s, gcx - (c * ocx + s * ocy)],
+            [-s, c, gcy - (-s * ocx + c * ocy)],
+        ]
+    }
+
+    /// 回転した O の外接矩形の寸法（遠近補正を含まない。[`g_size_px`](Self::g_size_px) の回転だけの式）。
+    fn rotated_box_size(&self) -> (f64, f64) {
+        let (ow, oh) = self.oriented_size();
+        let (ow, oh) = (f64::from(ow), f64::from(oh));
+        if self.rotation_deg == 0.0 {
+            return (ow, oh);
+        }
+        let (c, s) = self.rotation_cos_sin();
+        let (c, s) = (c.abs(), s.abs());
+        (ow * c + oh * s, ow * s + oh * c)
     }
 
     /// 連続座標で G → S。
@@ -343,15 +528,16 @@ impl CoordinateFrames {
         self.oriented_to_g(u, v)
     }
 
-    /// G → D の変換（回転だけ）をアフィン変換 `[u, v] = m · [gx, gy] + t` として返す（行ごとに
-    /// `[[m00, m01, t0], [m10, m11, t1]]`）。回転が 0 なら厳密に恒等。
+    /// G → D の変換（回転だけ。**遠近補正は含まない**。遠近補正があるときは
+    /// [`g_to_undistorted_homography`](Self::g_to_undistorted_homography)）をアフィン変換 `[u, v] = m · [gx, gy] + t`
+    /// として返す（行ごとに `[[m00, m01, t0], [m10, m11, t1]]`）。回転が 0 なら厳密に恒等。
     pub fn g_to_undistorted_affine(&self) -> [[f64; 3]; 2] {
         if self.rotation_deg == 0.0 {
             return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         }
         let (c, s) = self.rotation_cos_sin();
         let (ow, oh) = self.oriented_size();
-        let (gw, gh) = self.g_size_px();
+        let (gw, gh) = self.rotated_box_size();
         let (gcx, gcy) = (gw * 0.5, gh * 0.5);
         let (ocx, ocy) = (f64::from(ow) * 0.5, f64::from(oh) * 0.5);
         [
@@ -370,15 +556,15 @@ impl CoordinateFrames {
     }
 
     /// G → S の変換をアフィン変換 `[x, y] = m · [gx, gy] + t` として返す（`[m, t]` を行ごとに
-    /// `[[m00, m01, t0], [m10, m11, t1]]`）。**歪曲補正（[`distortion`](Self::distortion)）は含まない**
-    /// （G → D → S。歪曲補正があるときの G → S はアフィン変換ではないので、[`g_to_sensor`](Self::g_to_sensor)
-    /// か、ステージ 9 の計画の式を使う）。
+    /// `[[m00, m01, t0], [m10, m11, t1]]`）。**歪曲補正（[`distortion`](Self::distortion)）と遠近補正
+    /// （[`perspective`](Self::perspective)）は含まない**（G → D → S。どちらかがあるとき（[`is_nonaffine`](Self::is_nonaffine)）
+    /// の G → S はアフィン変換ではないので、[`g_to_sensor`](Self::g_to_sensor) か、ステージ 9 の計画の式を使う）。
     ///
     /// 行列は記号的に合成する（回転が 0 で向きが通常なら、厳密に単位行列と既定の切り抜きの左上）。
     pub fn g_to_sensor_affine(&self) -> [[f64; 3]; 2] {
         let (c, s) = self.rotation_cos_sin();
         let (ow, oh) = self.oriented_size();
-        let (gw, gh) = self.g_size_px();
+        let (gw, gh) = self.rotated_box_size();
         // G → O: o = Rᵀ·(g − gc) + oc = Rᵀ·g + (oc − Rᵀ·gc)。
         let rt = [[c, -s], [s, c]];
         let (gcx, gcy) = (gw * 0.5, gh * 0.5);
@@ -506,6 +692,92 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// 遠近補正（DEV-16）の座標系: D → G → D が元に戻り、G の外接矩形は四角形（D の四隅の像）の外接矩形で、
+    /// 回転・既定の切り抜きを変えると作り直す。消失線の向こう側の点は画像の外。
+    #[test]
+    fn perspective_frames_round_trip_and_follow_rotation() {
+        use crate::perspective::Perspective;
+        let t = genzo_model::Transform {
+            vertical: -40.0,
+            horizontal: 15.0,
+            ..Default::default()
+        };
+        for o in [Orientation::Normal, Orientation::Rotate90Cw] {
+            let base = CoordinateFrames::new(600, 400, o).unwrap();
+            let p = Perspective::for_settings(
+                base.oriented_size(),
+                crate::version::ProcessVersion::V2,
+                &t,
+            )
+            .unwrap();
+            let f = base.with_perspective(Some(p));
+            assert!(f.has_perspective() && f.is_nonaffine());
+            let (ow, oh) = f.oriented_size();
+            let (ow, oh) = (f64::from(ow), f64::from(oh));
+            let (gw, gh) = f.g_size_px();
+            let mut min = (f64::INFINITY, f64::INFINITY);
+            let mut max = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for (u, v) in [
+                (0.0, 0.0),
+                (ow, 0.0),
+                (ow, oh),
+                (0.0, oh),
+                (ow * 0.3, oh * 0.7),
+            ] {
+                let (gx, gy) = f.undistorted_to_g(u, v);
+                let (bu, bv) = f.g_to_undistorted_checked(gx, gy).unwrap();
+                assert!(
+                    (bu - u).abs() < 1e-6 && (bv - v).abs() < 1e-6,
+                    "{o:?} ({u}, {v}) → ({gx}, {gy}) → ({bu}, {bv})"
+                );
+                assert!(f.g_point_in_image(gx, gy, 1e-6));
+                min = (min.0.min(gx), min.1.min(gy));
+                max = (max.0.max(gx), max.1.max(gy));
+            }
+            assert!(min.0.abs() < 1e-9 && min.1.abs() < 1e-9, "{min:?}");
+            assert!(
+                (max.0 - gw).abs() < 1e-9 && (max.1 - gh).abs() < 1e-9,
+                "{max:?} vs {gw} {gh}"
+            );
+            // S との往復。
+            let (sx, sy) = f.g_to_sensor(gw * 0.5, gh * 0.5);
+            let (gx, gy) = f.sensor_to_g(sx, sy);
+            assert!((gx - gw * 0.5).abs() < 1e-6 && (gy - gh * 0.5).abs() < 1e-6);
+            // 回転を加えると外接矩形が変わり、D → G の対応も回転を含む。
+            let r = f.with_rotation(10.0).unwrap();
+            assert_ne!(r.g_size_px(), f.g_size_px());
+            let (u, v) = (ow * 0.25, oh * 0.5);
+            let (gx, gy) = r.undistorted_to_g(u, v);
+            let (bu, bv) = r.g_to_undistorted(gx, gy);
+            assert!((bu - u).abs() < 1e-6 && (bv - v).abs() < 1e-6);
+            // 遠近補正の行列の 3 行目は [0, 0, 1] ではない（射影）。
+            assert!(!r.undistorted_to_g_homography().is_affine());
+            assert!(
+                CoordinateFrames::new(600, 400, o)
+                    .unwrap()
+                    .with_rotation(10.0)
+                    .unwrap()
+                    .undistorted_to_g_homography()
+                    .is_affine()
+            );
+        }
+        // 消失線の向こう側: 大きく外れた G の点は画像の外。
+        let base = CoordinateFrames::new(600, 400, Orientation::Normal).unwrap();
+        let strong = genzo_model::Transform {
+            vertical: -100.0,
+            ..Default::default()
+        };
+        let p = Perspective::for_settings((600, 400), crate::version::ProcessVersion::V2, &strong)
+            .unwrap();
+        let f = base.with_perspective(Some(p));
+        let (gw, gh) = f.g_size_px();
+        assert!(!f.g_point_in_image(gw * 0.5, gh * 50.0, 0.0));
+        assert!(!f.g_point_in_image(-gw * 50.0, gh * 0.5, 0.0));
+        // g_to_undistorted は有限の値を返す。
+        let (u, v) = f.g_to_undistorted(gw * 0.5, gh * 50.0);
+        assert!(u.is_finite() && v.is_finite());
     }
 
     #[test]

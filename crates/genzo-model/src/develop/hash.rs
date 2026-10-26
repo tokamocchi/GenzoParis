@@ -17,13 +17,14 @@
 //! |---|---|
 //! | A0 | process_version、RAW デコーダ（`render_deps.raw_decoder`） |
 //! | A1 | process_version、render_deps のうちルック以外（カメラ行列・カメラプロファイル（DCP）・レンズデータ・デコーダ）、カメラプロファイルの選択（`profile.camera`。ステージ 8）、WB、ハイライト復元（ステージ 4）、ノイズ軽減（ステージ 6。ディテール・コントラストを含む）、レンズ補正のうちステージ 7 の項目（`lens.profile_enabled`・`lens.vignetting_scale`・`lens.remove_chromatic_aberration`・手動の周辺減光（`lens.vignetting_amount`・`lens.vignetting_midpoint`）・手動の色収差（`lens.ca_red_cyan`・`lens.ca_blue_yellow`）） |
-//! | B | A1 の項目 ＋ 角度補正（回転）＋ 歪曲補正の適用量（`lens.distortion_scale`）と手動の歪曲（`lens.distortion`） |
+//! | B | A1 の項目 ＋ 角度補正（回転）＋ 歪曲補正の適用量（`lens.distortion_scale`）と手動の歪曲（`lens.distortion`）＋ 変形（`transform`。遠近補正。DEV-16） |
 //! | C | すべて（= [`DevelopSettings::develop_hash`]） |
 //!
 //! - 段階 A1 はステージ 2〜8（2.2 節）で、歪曲補正はステージ 9（ジオメトリ）に属する（2.1 節）。
 //!   そのため歪曲補正の適用量と手動の歪曲は A1 に含めず、B に含める（2.7 節の表の「回転、歪曲補正」）。
 //!   歪曲補正を有効にするかどうか（`lens.profile_enabled`）は周辺減光と共通なので A1 に含まれ、
 //!   B にも A1 を通じて含まれる。
+//! - 変形（遠近補正。ステージ 9 の座標の変換で G を決める）は回転と同じく B に含める（2026-10-26 追加。DEV-16）。
 //! - 露光量・切り抜き・ハイライトやシャドウなどのスライダーは B に含めない（2.7 節の表）。
 //! - 色（ステージ 13。彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒）は段階 C だけに含まれる
 //!   （A1・B のキャッシュを作り直さない）。
@@ -44,7 +45,7 @@ use sha2::{Digest, Sha256};
 
 use super::DevelopSettings;
 use super::params::{
-    DataRef, HighlightRecovery, LensCorrection, NoiseReduction, RenderDeps, WhiteBalance,
+    DataRef, HighlightRecovery, LensCorrection, NoiseReduction, RenderDeps, Transform, WhiteBalance,
 };
 use crate::Phase;
 
@@ -143,6 +144,8 @@ struct BInput<'a> {
     distortion_scale: f32,
     /// 手動の歪曲（ステージ 9）。
     distortion: f32,
+    /// 変形（遠近補正。ステージ 9。DEV-16）。
+    transform: &'a Transform,
 }
 
 fn a1_input(s: &DevelopSettings) -> A1Input<'_> {
@@ -193,6 +196,7 @@ impl DevelopSettings {
                     angle_deg: s.geometry.angle_deg,
                     distortion_scale: s.lens.distortion_scale,
                     distortion: s.lens.distortion,
+                    transform: &s.transform,
                 };
                 sha256(&[DOMAIN_B, &to_json_bytes(&input)])
             }
@@ -280,6 +284,23 @@ mod tests {
         b.tone_curve.luma = vec![CurvePoint::new(0.0, 0.1), CurvePoint::new(1.0, 1.0)];
         b.detail.sharpening.amount = 40.0;
         assert_eq!(changed_phases(&a, &b), [Phase::C]);
+    }
+
+    /// 変形（遠近補正。DEV-16）はステージ 9 の座標の変換で G を決めるので、回転と同じく段階 B から変わる
+    /// （A1 は変わらない）。
+    #[test]
+    fn transform_changes_the_guide_but_not_a1() {
+        let a = base();
+        let mut b = base();
+        b.transform.vertical = -20.0;
+        assert_eq!(changed_phases(&a, &b), [Phase::B, Phase::C]);
+        let mut c = base();
+        c.transform.scale = 110.0;
+        assert_eq!(changed_phases(&a, &c), [Phase::B, Phase::C]);
+        // 既定値（何もしない）の書き方の違い（-0.0）は丸めで同じになる。
+        let mut d = base();
+        d.transform.offset_x = -0.0;
+        assert_eq!(changed_phases(&a, &d), []);
     }
 
     #[test]
@@ -508,7 +529,7 @@ mod tests {
         assert_eq!(
             json,
             concat!(
-                r#"{"schema_version":2,"process_version":2,"#,
+                r#"{"schema_version":3,"process_version":2,"#,
                 r#""profile":{"camera":null,"look":null,"look_amount":100.0},"white_balance":"as_shot","#,
                 r#""highlight_recovery":{"method":"clip","amount":100.0},"#,
                 r#""exposure_ev":0.0,"contrast":0.0,"#,
@@ -523,6 +544,7 @@ mod tests {
                 r#""geometry":{"crop":{"left":0.0,"top":0.0,"right":1.0,"bottom":1.0},"angle_deg":0.0,"aspect":null},"#,
                 r#""lens":{"profile_enabled":false,"distortion_scale":100.0,"vignetting_scale":100.0,"remove_chromatic_aberration":false,"#,
                 r#""distortion":0.0,"vignetting_amount":0.0,"vignetting_midpoint":50.0,"ca_red_cyan":0.0,"ca_blue_yellow":0.0},"#,
+                r#""transform":{"vertical":0.0,"horizontal":0.0,"aspect":0.0,"scale":100.0,"offset_x":0.0,"offset_y":0.0},"#,
                 r#""detail":{"sharpening":{"amount":0.0,"radius":1.0,"detail":25.0,"masking":0.0},"#,
                 r#""noise_reduction":{"luminance":0.0,"luminance_detail":50.0,"luminance_contrast":0.0,"color":0.0,"color_detail":50.0}},"#,
                 r#""effects":{"vignette":{"amount":0.0,"midpoint":50.0,"roundness":0.0,"feather":50.0,"highlights":0.0},"#,

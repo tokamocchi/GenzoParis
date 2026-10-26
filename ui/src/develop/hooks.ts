@@ -8,6 +8,7 @@ import { appStore } from "../state/app";
 import { searchCache } from "../state/search";
 import { useDevelop } from "../state/develop";
 import { type GeometryInfo, geometryInfo } from "./cropMath";
+import { transformIsIdentity } from "./settingsLogic";
 
 /** variant の詳細から読んだ向き（検索結果のキャッシュにないときに使う）。 */
 const orientationCache = new Map<VariantId, Orientation>();
@@ -105,11 +106,18 @@ export function useOrientation(id: VariantId | null): Orientation | null {
   return fromSearch ?? orientationCache.get(id) ?? null;
 }
 
-/** 開いている写真の、切り抜きの縦横比の計算に使う大きさ（今の設定の角度で）。 */
+/**
+ * 開いている写真の、切り抜きの縦横比の計算に使う大きさ（今の設定の角度で）。変形（遠近補正。DEV-16）があるときは、
+ * G の外接矩形を角度だけからは求められないので、コアが知らせた最新のプレビューの G の寸法（FrameInfo.g_size）を使う
+ * （届くまでは角度だけの近似）。
+ */
 export function useGeometryInfo(): GeometryInfo | null {
   const variantId = useDevelop((s) => s.variantId);
   const source = useDevelop((s) => s.state?.source ?? null);
   const angle = useDevelop((s) => s.settings?.geometry.angle_deg ?? 0);
+  const transformed = useDevelop((s) => !transformIsIdentity(s.settings?.transform));
+  const gSizeW = useDevelop((s) => s.frame?.header.g_size?.[0] ?? 0);
+  const gSizeH = useDevelop((s) => s.frame?.header.g_size?.[1] ?? 0);
   const uncroppedW = useDevelop((s) =>
     s.frame?.header.uncropped ? (s.frame.header.output_width ?? s.frame.width) : 0,
   );
@@ -117,10 +125,12 @@ export function useGeometryInfo(): GeometryInfo | null {
     s.frame?.header.uncropped ? (s.frame.header.output_height ?? s.frame.height) : 0,
   );
   const orientation = useOrientation(variantId);
-  return geometryInfo({
+  const info = geometryInfo({
     source: source ? { width: source.width, height: source.height } : null,
     orientation,
     angleDeg: angle,
     uncropped: uncroppedW > 0 && uncroppedH > 0 ? { width: uncroppedW, height: uncroppedH } : null,
   });
+  if (info && transformed && gSizeW > 0 && gSizeH > 0) return { ...info, gw: gSizeW, gh: gSizeH };
+  return info;
 }

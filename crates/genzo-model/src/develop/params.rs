@@ -64,6 +64,8 @@ pub mod ranges {
     pub const LENS_MANUAL: ValueRange = ValueRange::new(-100.0, 100.0);
     /// 手動の周辺減光の中点（0〜100）。
     pub const LENS_MIDPOINT: ValueRange = ValueRange::new(0.0, 100.0);
+    /// 変形の拡大・縮小（%。DEV-16）。
+    pub const TRANSFORM_SCALE: ValueRange = ValueRange::new(50.0, 150.0);
     /// シャープの適用量。
     pub const SHARPEN_AMOUNT: ValueRange = ValueRange::new(0.0, 150.0);
     /// シャープの半径。
@@ -642,6 +644,59 @@ pub struct Geometry {
     pub angle_deg: f32,
     /// 縦横比の指定。`None` は自由。
     pub aspect: Option<AspectRatio>,
+}
+
+/// 変形（遠近補正。DEV-16。処理バージョン 2 から適用する。Lightroom Classic の「変形」のパネルの手動の項目に
+/// 相当）。既定は何もしない（[`Transform::is_identity`]）。
+///
+/// 遠近補正はステージ 9（ジオメトリ）の座標の変換に、回転（[`Geometry::angle_deg`]）と一緒に入り、リサンプリングは
+/// 1 回のまま（04 の 2.1 節・2.7 節）。式は genzo-pipeline の `perspective`: 歪曲補正の後の画像（D）を、中心を原点・
+/// 対角線の半分を 1 とした座標で、垂直・水平の値に比例した角度でカメラを傾け直す射影変換（回転の行列を
+/// `K · R · K⁻¹` の形で当てる）にかけ、縦横比・拡大・縮小・ずらしのアフィン変換を重ねる。
+///
+/// 自動の補正（Upright 相当。水平・垂直・完全）は、画像の直線を検出してこの項目と角度補正の値を求めて設定に
+/// 書き込む操作（genzo-api の `Core::analyze_upright`）で、描画は値だけを見る（処理バージョンを上げなくても
+/// 結果が再現できる）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Transform {
+    /// 垂直方向の遠近補正（-100〜+100）。負で画像の上辺を広げ（見上げて撮った建物の、上へすぼまる垂直線を
+    /// 平行にする）、正で下辺を広げる。±100 で約 ±40 度の傾き（genzo-pipeline の `perspective::TILT_MAX_DEG`）。
+    pub vertical: f32,
+    /// 水平方向の遠近補正（-100〜+100）。正で右辺を広げ（右へ遠ざかる面の、右へすぼまる水平線を平行にする）、
+    /// 負で左辺を広げる。
+    pub horizontal: f32,
+    /// 縦横比の変更（-100〜+100）。負で横に伸ばし、正で縦に伸ばす（±100 で縦横比が 1.5 倍）。
+    pub aspect: f32,
+    /// 拡大・縮小（%。50〜150。既定 100）。中心を変えずに拡大・縮小する。
+    pub scale: f32,
+    /// 横方向のずらし（-100〜+100。画像の幅の半分に対する割合。正で画像を右へ動かす）。
+    pub offset_x: f32,
+    /// 縦方向のずらし（-100〜+100。画像の高さの半分に対する割合。正で画像を下へ動かす）。
+    pub offset_y: f32,
+}
+
+impl Transform {
+    /// 拡大・縮小の既定値（%）。
+    pub const DEFAULT_SCALE: f32 = 100.0;
+
+    /// 何も変形しない設定か（すべての項目が既定値）。
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            vertical: 0.0,
+            horizontal: 0.0,
+            aspect: 0.0,
+            scale: Self::DEFAULT_SCALE,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        }
+    }
 }
 
 /// レンズ補正（DEV-14。v1。処理バージョン 2 から適用する）。既定は無効。
