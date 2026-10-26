@@ -45,7 +45,7 @@ fn migrate_v1_to_v2(value: Value) -> Result<Value, String> {
 }
 
 /// schema_version 2 → 3: 変形（遠近補正。`transform`: `vertical`・`horizontal`・`aspect`・`scale`・`offset_x`・
-/// `offset_y`。DEV-16。決定事項ログ No.200）を加えた。JSON になければ既定値（何もしない値）で補うので、値は
+/// `offset_y`。DEV-16。決定事項ログ No.202）を加えた。JSON になければ既定値（何もしない値）で補うので、値は
 /// 書き換えない。版 2 の JSON の `transform`（ない）以外の項目はそのまま。
 fn migrate_v2_to_v3(value: Value) -> Result<Value, String> {
     Ok(value)

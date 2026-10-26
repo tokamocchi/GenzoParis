@@ -107,6 +107,9 @@
 //!   中立にする色温度・tint を返す（適用はしない）。点は UI が表示しているプレビューの割合で、その画像の
 //!   表示（[`FrameInfo::uncropped`]。省略可）も送れる（表示を切り替えた直後に、前の表示の画像の上の点を
 //!   取り違えないため）。撮影時の WB の色温度・tint は [`SourceInfo::as_shot_white_balance`] で返す。
+//! - 自動補正（DEV-32。2026-10-26 追加。[`Core::auto_tone`]・[`Command::AutoTone`]）: 露光量・コントラスト・
+//!   ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決めた値を返す（適用はしない。UI・CLI が設定に入れて
+//!   保存する。genzo-pipeline の `engine::auto_tone`）。
 //! - 切り抜きの編集中の表示（[`Core::set_develop_view`]・[`Command::SetDevelopView`]）: 切り抜く前の全体
 //!   （G の外接矩形）を描く（[`FrameInfo::uncropped`]）。描画が実際に使う切り抜き
 //!   （[`Core::constrain_crop`]・[`Command::ConstrainCrop`]）。
@@ -171,8 +174,9 @@ pub use core::{
 };
 pub use delete::{OsTrash, TrashBackend};
 pub use develop::{
-    HISTORY_LABEL_BLACK_WHITE, HISTORY_LABEL_COLOR, HISTORY_LABEL_GENERIC, HISTORY_LABEL_PASTE,
-    HISTORY_LABEL_UPGRADE_PROCESS, describe_change, mask_display_name, upgrade_process_label,
+    HISTORY_LABEL_AUTO_TONE, HISTORY_LABEL_BLACK_WHITE, HISTORY_LABEL_COLOR, HISTORY_LABEL_GENERIC,
+    HISTORY_LABEL_PASTE, HISTORY_LABEL_UPGRADE_PROCESS, describe_change, mask_display_name,
+    upgrade_process_label,
 };
 pub use error::{ApiError, ErrorInfo, ErrorKind};
 pub use events::{CatalogChange, Event, WarningCode};

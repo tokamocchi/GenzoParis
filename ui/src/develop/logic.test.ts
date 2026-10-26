@@ -23,7 +23,9 @@ import {
   effectiveWb,
   resetAll,
   wbFromMode,
+  sameAutoToneValues,
   wbMode,
+  withAutoTone,
 } from "./settingsLogic";
 import { clampCenter, fitBox, zoomOrigin } from "./zoomMath";
 
@@ -247,6 +249,56 @@ describe("WB の選択とリセット", () => {
     expect(r.detail.sharpening).toEqual(defaultSharpening());
     expect(r.presence).toEqual(defaultPresence());
     expect(r.effects).toEqual(defaultEffects());
+  });
+});
+
+describe("自動補正（DEV-32）の値を設定に入れる", () => {
+  const base = {
+    exposure_ev: 0.5,
+    contrast: 10,
+    tone: { highlights: -20, shadows: 30, whites: 5, blacks: -5 },
+    presence: { texture: 0, clarity: 15, dehaze: 0 },
+    white_balance: "as_shot",
+  } as unknown as DevelopSettings;
+  const stats = { samples: 1200, black_log2: -8.5, median_log2: -3.75, white_log2: -0.25 };
+  it("6 つの値だけを置き換え、ほかは変えない", () => {
+    const next = withAutoTone(base, {
+      exposure_ev: -0.35,
+      contrast: 25,
+      highlights: -40,
+      shadows: 60,
+      whites: 12,
+      blacks: -30,
+      stats,
+    });
+    expect(next).not.toBe(base);
+    expect(next.exposure_ev).toBe(-0.35);
+    expect(next.contrast).toBe(25);
+    expect(next.tone).toEqual({ highlights: -40, shadows: 60, whites: 12, blacks: -30 });
+    expect(next.presence).toBe(base.presence);
+    expect(next.white_balance).toBe("as_shot");
+  });
+  it("6 つの値が同じかを比べる（ほかの項目は見ない）", () => {
+    expect(sameAutoToneValues(base, { ...base, presence: { texture: 0, clarity: 99, dehaze: 0 } } as DevelopSettings)).toBe(true);
+    expect(sameAutoToneValues(base, { ...base, exposure_ev: 0.51 })).toBe(false);
+    expect(sameAutoToneValues(base, { ...base, tone: { ...base.tone, blacks: -6 } })).toBe(false);
+  });
+  it("今と同じ値なら同じオブジェクト（送らない）。範囲の外の値は範囲に収め、整数にする", () => {
+    expect(
+      withAutoTone(base, { exposure_ev: 0.5, contrast: 10, highlights: -20, shadows: 30, whites: 5, blacks: -5, stats }),
+    ).toBe(base);
+    const next = withAutoTone(base, {
+      exposure_ev: 9,
+      contrast: 10.4,
+      highlights: -250,
+      shadows: 30,
+      whites: 5,
+      blacks: 101,
+      stats,
+    });
+    expect(next.exposure_ev).toBe(5);
+    expect(next.contrast).toBe(10);
+    expect(next.tone).toEqual({ highlights: -100, shadows: 30, whites: 5, blacks: 100 });
   });
 });
 

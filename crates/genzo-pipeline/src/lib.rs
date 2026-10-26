@@ -290,10 +290,11 @@ pub use composite::{Compositor, compositor_bytes};
 pub use contract::ColorContract;
 pub use coords::{CoordinateFrames, SensorGrid};
 pub use engine::{
-    CacheCounters, DEFAULT_TILE_SIZE, Engine, EngineConfig, EngineStats, ExportOptions,
-    ExportPixels, ExportedImage, FullResolutionJob, MaskColorPick, MaskOverlay, MaskReference,
-    NeverCancel, OutputTarget, PhotoSource, PreviewRender, PreviewRequest, RegionRender,
-    RenderControl, SourceId, WB_PICK_RADIUS, WhiteBalancePick,
+    AutoTonePick, AutoToneStats, AutoToneValues, CacheCounters, DEFAULT_TILE_SIZE, Engine,
+    EngineConfig, EngineStats, ExportOptions, ExportPixels, ExportedImage, FullResolutionJob,
+    MaskColorPick, MaskOverlay, MaskReference, NeverCancel, OutputTarget, PhotoSource,
+    PreviewRender, PreviewRequest, RegionRender, RenderControl, SourceId, WB_PICK_RADIUS,
+    WhiteBalancePick,
 };
 pub use error::{PipelineError, Result};
 pub use finish::{FinishPlan, finish_context};

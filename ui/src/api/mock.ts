@@ -8,6 +8,7 @@ import type {
   AppSettings,
   AppStatus,
   AutoStackReport,
+  AutoTone,
   BeforeInfo,
   CaptureDevice,
   CaptureTimeEditInfo,
@@ -390,6 +391,38 @@ export function mockPasteCommands(
       default:
         return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
     }
+  });
+  return { sent };
+}
+
+/** 自動補正（DEV-32）の値の見本（auto_tone の応答）。 */
+export const MOCK_AUTO_TONE: AutoTone = {
+  exposure_ev: 0.35,
+  contrast: 0,
+  highlights: -40,
+  shadows: 25,
+  whites: 10,
+  blacks: -15,
+  stats: { samples: 1200, black_log2: -8.5, median_log2: -3.75, white_log2: -0.25 },
+};
+
+/**
+ * 自動補正のコマンドの応答を足す: auto_tone（`values`。既定は MOCK_AUTO_TONE）。送ったコマンドは `sent` に残す。
+ * `values` が Error なら、その失敗を返す（コアの invalid_input などの代わり）。
+ */
+export function mockAutoToneCommand(
+  b: MockBridge,
+  values: AutoTone | Error = MOCK_AUTO_TONE,
+): { sent: Record<string, unknown>[] } {
+  const sent: Record<string, unknown>[] = [];
+  const base = b.responses.get("core_execute");
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    if (c.type === "auto_tone") {
+      sent.push(c);
+      return values instanceof Error ? values : { type: "auto_tone", ...values };
+    }
+    return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
   });
   return { sent };
 }

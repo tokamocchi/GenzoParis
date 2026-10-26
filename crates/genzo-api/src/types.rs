@@ -1428,6 +1428,52 @@ pub struct PickedMaskColor {
     pub lab: [f32; 3],
 }
 
+/// 自動補正（DEV-32。[`crate::Core::auto_tone`]）の結果。露光量・コントラスト・ハイライト・シャドウ・白レベル・
+/// 黒レベルの値で、そのまま設定に入れられる（適用はしない。UI・CLI が `set_settings` する。
+/// [`AutoTone::apply`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AutoTone {
+    /// 露光量（EV。0.01 段に丸めた値。±5 の範囲）。
+    pub exposure_ev: f32,
+    /// コントラスト（整数。0 以上）。
+    pub contrast: f32,
+    /// ハイライト（整数。0 以下）。
+    pub highlights: f32,
+    /// シャドウ（整数。0 以上）。
+    pub shadows: f32,
+    /// 白レベル（整数。±100）。
+    pub whites: f32,
+    /// 黒レベル（整数。±100）。
+    pub blacks: f32,
+    /// 決めるのに使った代表の明るさ（確認・CLI の表示用）。
+    pub stats: AutoToneStats,
+}
+
+impl AutoTone {
+    /// 設定に入れる（6 つの値だけを置き換える。ほかの項目は変えない）。
+    pub fn apply(&self, settings: &mut DevelopSettings) {
+        settings.exposure_ev = self.exposure_ev;
+        settings.contrast = self.contrast;
+        settings.tone.highlights = self.highlights;
+        settings.tone.shadows = self.shadows;
+        settings.tone.whites = self.whites;
+        settings.tone.blacks = self.blacks;
+    }
+}
+
+/// 自動補正に使った代表の明るさ（露光量の前のシーンリニアの輝度の log2。genzo-pipeline の `AutoToneStats`）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AutoToneStats {
+    /// 数えた画素の数（プレビューの、画像の上の画素）。
+    pub samples: u64,
+    /// 黒の点（下から 0.5%）。
+    pub black_log2: f32,
+    /// 中央値。
+    pub median_log2: f32,
+    /// 白の点（下から 99.5%）。
+    pub white_log2: f32,
+}
+
 /// マスクの重ねて表示（O キー。DEV-18）の画像の情報（[`crate::Core::mask_overlay`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaskOverlayInfo {
@@ -1942,7 +1988,7 @@ impl SettingGroups {
     };
 
     /// 現像プリセット（DEV-29）を作るときの既定の項目: 切り抜きと角度・変形・マスクを除くすべて（写真ごとに位置・構図が
-    /// 違うことが多いため。画面の貼り付け・プリセットのダイアログの既定の選択と同じ。決定事項ログ No.161・203）。
+    /// 違うことが多いため。画面の貼り付け・プリセットのダイアログの既定の選択と同じ。決定事項ログ No.161・205）。
     pub const PRESET_DEFAULT: Self = Self {
         geometry: false,
         transform: false,

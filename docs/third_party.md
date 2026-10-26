@@ -55,6 +55,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - `genzo-geo` の `tls.rs`（コミット `8cfeb81` で足し、`8ac4eda` で消した）は、ureq 3.4.2 の `src/tls/native_tls.rs`（MIT OR Apache-2.0）を参考に、同じ流れで書いた（ureq の著作権の表示と許諾の文は 3.14 節）。
   - **ライセンスの表記の要否・方法は、ほかの Rust の crate と同じ扱いで、AI の判断で確定しない**（DIST-05）。2026-10-20 から、配布物の `licenses/third-party/rust.txt` に一覧と本文を載せる（1.4 節。この内容で条件を満たすかは人の確認待ち）。
   - 新しく入った 24 個の crate（`created_at` は crates.io の API の値。UTC。「入る対象」は上の 5 つの対象の依存の木）:
+- 2026-10-26（CI の修正。自動補正 DEV-32 の PR #16 で見つかった）: CI の `lint` ジョブの cargo-deny（advisories）が、新しく公開された **`rustls-webpki` 0.103.15 の脆弱性の通知 1 件**（RUSTSEC-2026-0382。信頼しなくなった emSign の中間証明書の公開鍵を含む経路を受け入れうる。直した版は 0.103.16、2026-10-20 公開）で失敗した。0.103.16 は公開から 2 週間たっていない（2026-11-03 まで）ため、2026-10-20 の rustls の 4 件と同じく `deny.toml` の `ignore` で除き、`Cargo.lock` は変えていない。webpki で証明書の経路を検証するのは `rustls-platform-verifier` 0.7.1 の Linux 向けの実装（`src/verification/others.rs`）だけで、配布の対象の Windows（CryptoAPI）・macOS（Security.framework）は OS が検証する（AI がソースで確かめた）。使うのはオンラインの地図（LIB-21。既定で無効）の HTTPS だけ。**除外でよいかは人の確認待ち**。2026-11-03 以降に `cargo update -p rustls-webpki` で 0.103.16 以上へ上げ（`crates.io` の API で確かめた checksum は `4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281`、ライセンスは ISC のまま）、この表の行と `licenses/third-party/rust.txt`（`scripts/third-party.mjs`）を作り直して、除外を消す予定。
 
 | crate | 版 | 公開日 | ライセンス（crates.io） | checksum（`Cargo.lock`） | 入る対象・用途 |
 |---|---|---|---|---|---|
