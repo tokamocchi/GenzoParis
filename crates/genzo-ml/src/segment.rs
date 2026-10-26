@@ -157,10 +157,8 @@ pub fn segment_with(
             for (i, p) in plane.iter_mut().enumerate() {
                 *p = match manifest.output.activation {
                     Activation::None => classes.iter().map(|&c| value(c, i)).sum(),
-                    Activation::Sigmoid => classes
-                        .iter()
-                        .map(|&c| sigmoid(value(c, i)))
-                        .fold(0.0f32, f32::max),
+                    // 台帳の doc のとおりクラスの確率の和（1 を超えた分は最後に 0〜1 に丸める）。
+                    Activation::Sigmoid => classes.iter().map(|&c| sigmoid(value(c, i))).sum(),
                     Activation::Softmax => {
                         let m = (0..channels)
                             .map(|c| value(c, i))
@@ -318,6 +316,21 @@ mod tests {
             segment_with(&m, &mut s, &img, AiMaskKind::Subject),
             Err(MlError::NoModel(_))
         ));
+        // シグモイドのクラスは確率の和（0 → 0.5 ずつで 1 に丸める。−100 → 0 と 0 → 0.5 で 0.5）。
+        let m = manifest(
+            r#"{"id": "m", "file": "m.onnx",
+                "input": {"width": 1, "height": 1},
+                "output": {"activation": "sigmoid"},
+                "kinds": {"sky": {"classes": [0, 1]}, "person": {"classes": [1, 2]}}}"#,
+        );
+        let mut s = Echo {
+            output: Tensor::new(vec![1, 3, 1, 1], vec![0.0, 0.0, -100.0]).unwrap(),
+            seen: Vec::new(),
+        };
+        let r = segment_with(&m, &mut s, &img, AiMaskKind::Sky).unwrap();
+        assert!(r.values.iter().all(|&v| v == 255), "{:?}", r.values);
+        let r = segment_with(&m, &mut s, &img, AiMaskKind::Person).unwrap();
+        assert!(r.values.iter().all(|&v| v == 128), "{:?}", r.values);
         // NHWC の出力、シグモイド、範囲の外のチャンネル。
         let m = manifest(
             r#"{"id": "m", "file": "m.onnx",

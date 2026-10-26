@@ -120,7 +120,8 @@ pub struct OutputSpec {
     pub layout: InputLayout,
 }
 
-/// 種類（被写体・空・人物）ごとの、出力からの読み方。
+/// 種類（被写体・空・人物）ごとの、出力からの読み方（`Classes` はクラスの確率の和。活性化は台帳の `output.activation`。
+/// 和が 1 を超えたら 1 に丸める）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum KindSpec {

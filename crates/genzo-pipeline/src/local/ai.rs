@@ -20,7 +20,8 @@ use crate::profile::AiMaskRaster;
 pub const CACHE_ENTRIES: usize = 8;
 
 /// [`AiMaskRaster`] を、G 座標の `bounds`（左・上・右・下）を覆う [`BrushRaster`] に写す（モジュールの doc）。
-/// 範囲が空（右 ≤ 左・下 ≤ 上・有限でない）なら `None`。
+/// 範囲が空（右 ≤ 左・下 ≤ 上・有限でない）、または写した格子が上限（1 辺 genzo-model の `MAX_AI_MASK_SIDE`・
+/// `MAX_AI_MASK_PIXELS` 画素。範囲の縦横比がラスターと極端に違う設定）を超えるなら `None`（重み 0。確保しない）。
 pub fn to_brush_raster(raster: &AiMaskRaster, bounds: [f32; 4]) -> Option<BrushRaster> {
     let [left, top, right, bottom] = bounds;
     if !bounds.iter().all(|v| v.is_finite()) || right <= left || bottom <= top {
@@ -32,7 +33,15 @@ pub fn to_brush_raster(raster: &AiMaskRaster, bounds: [f32; 4]) -> Option<BrushR
     }
     let cell = f64::from(right - left) / w as f64;
     let inv_cell = (1.0 / cell) as f32;
-    let rows = ((f64::from(bottom - top) / cell).round() as usize).max(1);
+    let rows_f = (f64::from(bottom - top) / cell).round().max(1.0);
+    // 読み込んだ設定の範囲が極端に細い（例: 幅 1e−6・高さ 1）と行の数が膨らむので、確保する前に断る。
+    if !rows_f.is_finite()
+        || rows_f > f64::from(genzo_model::MAX_AI_MASK_SIDE)
+        || (w as u64) * (rows_f as u64) > genzo_model::MAX_AI_MASK_PIXELS
+    {
+        return None;
+    }
+    let rows = rows_f as usize;
     let scale = 1.0 / 255.0;
     let mut values = Vec::with_capacity(w * rows);
     if rows == h {
@@ -142,6 +151,18 @@ mod tests {
         assert_eq!(col[0], 0.0);
         assert!((col[3] - 200.0 / 255.0).abs() < 1e-6);
         assert!(col[1] > col[0] && col[2] > col[1] && col[3] > col[2]);
+    }
+
+    /// 範囲の縦横比がラスターと極端に違う設定（Codex のレビューの指摘）は、巨大な格子を確保せずに断る。
+    #[test]
+    fn rejects_bounds_that_would_need_a_huge_grid() {
+        let r = raster(640, 480, |_, _| 255);
+        assert!(to_brush_raster(&r, [0.0, 0.0, 0.000_001, 1.0]).is_none());
+        // 上限ちょうどまでは写せる（1 辺 4096 行）。
+        let narrow = raster(1, 4, |_, _| 255);
+        let b = to_brush_raster(&narrow, [0.0, 0.0, 1.0 / 1024.0, 4.0]).unwrap();
+        assert_eq!((b.width, b.height), (1, 4096));
+        assert!(to_brush_raster(&narrow, [0.0, 0.0, 1.0 / 1024.0, 4.01]).is_none());
     }
 
     #[test]

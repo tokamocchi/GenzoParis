@@ -741,7 +741,13 @@ export async function refreshAiStatus(): Promise<void> {
 export async function computeAiMask(kind: AiMaskKind, target: AiMaskTarget): Promise<void> {
   const d = developStore.get();
   const id = d.variantId;
-  if (id === null || !d.state || viewStore.get().aiBusy || !maskToolReady()) return;
+  if (id === null || !d.state || !d.settings || viewStore.get().aiBusy || !maskToolReady()) return;
+  // 入れ先のマスク・部品（の中身）を覚えておく。推論は数秒かかり、その間もほかのマスクの編集（削除・並べ替え）は
+  // できるので、結果を入れるときに番号ではなく中身で探し直す（見つからなければ入れない）。
+  const origMask = target.kind === "new_mask" ? undefined : d.settings.masks[target.mask];
+  const origComp = target.kind === "replace" ? origMask?.components[target.component] : undefined;
+  if (target.kind !== "new_mask" && !origMask) return;
+  if (target.kind === "replace" && !origComp) return;
   if (viewStore.get().tool === "mask_color" || viewStore.get().tool === "brush") cancelMaskTool();
   viewStore.set({ aiBusy: true });
   try {
@@ -753,12 +759,21 @@ export async function computeAiMask(kind: AiMaskKind, target: AiMaskTarget): Pro
         const s = cur.settings;
         if (target.kind === "new_mask") {
           addMaskWith(s, { ...newMask(r.shape), name: AI_KIND_LABELS[kind] }, false);
-        } else if (target.kind === "new_component") {
-          const next = addComponent(s, target.mask, newComponent(r.shape));
+          return;
+        }
+        // 名前・調整・有効の変更ではマスクの部品の並び（components）はそのままなので、それで同じマスクを探す。
+        const i = s.masks.findIndex((m) => m === origMask || m.components === origMask?.components);
+        const j = i < 0 || !origComp ? -1 : s.masks[i].components.indexOf(origComp);
+        if (i < 0 || (target.kind === "replace" && j < 0)) {
+          actions.notify("info", "計算の間にマスクが変わったため、AI マスクを入れませんでした（もう一度押してください）");
+          return;
+        }
+        if (target.kind === "new_component") {
+          const next = addComponent(s, i, newComponent(r.shape));
           if (next === s) return;
-          applyAddedComponent(next, target.mask, false);
+          applyAddedComponent(next, i, false);
         } else {
-          const next = withComponent(s, target.mask, target.component, (c) => ({ ...c, shape: r.shape }));
+          const next = withComponent(s, i, j, (c) => ({ ...c, shape: r.shape }));
           if (next !== s) applySettings(next, false);
         }
       } catch (e) {
