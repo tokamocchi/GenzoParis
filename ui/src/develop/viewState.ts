@@ -61,7 +61,15 @@ import {
   shapeKind,
 } from "./maskLogic";
 import { formatAngle, sameShown } from "./scales";
-import { customWb, describeUpright, fullTransform, sameAutoToneValues, sameTransform, withAutoTone } from "./settingsLogic";
+import {
+  customWb,
+  describeUpright,
+  fullTransform,
+  sameAutoToneValues,
+  sameTransform,
+  transformIsIdentity,
+  withAutoTone,
+} from "./settingsLogic";
 import { clamp01 } from "./zoomMath";
 
 export type DevelopTool = "none" | "wb" | "crop" | "brush" | "mask_color";
@@ -336,9 +344,10 @@ export async function startCrop(): Promise<void> {
   }
   // 切り抜く前の全体の描画は preview_updated で届く。念のため今の最新も取りにいく。
   void refreshFrame();
-  // 保存済みの切り抜きが回転した画像の外にかかっていれば（編集の外で角度を変えたとき）、描画で使われる
-  // 枠（コアの constrain_crop。パイプラインと同じ制限）を出す。角度 0 では制限はかからない。
-  if (g.angle_deg !== 0) void constrainDraft();
+  // 保存済みの切り抜きが回転・変形（遠近補正。DEV-16）した画像の外にかかっていれば（編集の外で角度・変形を変えた
+  // とき）、描画で使われる枠（コアの constrain_crop。パイプラインと同じ制限）を出す。角度 0 で変形もなければ、
+  // 制限はかからない。
+  if (g.angle_deg !== 0 || !transformIsIdentity(d.settings.transform)) void constrainDraft();
 }
 
 /** 全体の表示に戻す（失敗しても編集は終える。次に写真を開けば戻る）。 */

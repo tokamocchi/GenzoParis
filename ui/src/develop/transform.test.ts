@@ -22,7 +22,7 @@ import {
   transformControls,
   transformIsIdentity,
 } from "./settingsLogic";
-import { applyUpright, changeTransform } from "./viewState";
+import { applyUpright, cancelCrop, changeTransform, startCrop } from "./viewState";
 
 describe("変形の操作の可否と項目", () => {
   const v2 = mockDevelopSettings();
@@ -106,6 +106,8 @@ describe("自動の遠近補正（Upright）の送信", () => {
           };
         case "set_settings":
           return { type: "develop", ...mockDevelopState({ variant_id: 1, can_undo: true }) };
+        case "constrain_crop":
+          return { type: "crop", crop: { left: 0.1, top: 0, right: 0.9, bottom: 1 } };
         default:
           return { type: "ok" };
       }
@@ -139,6 +141,20 @@ describe("自動の遠近補正（Upright）の送信", () => {
     expect(appStore.get().toasts.some((t) => t.level === "error" && t.message.includes("自動で補正できません"))).toBe(
       true,
     );
+  });
+
+  it("角度 0 でも変形があれば、切り抜きの編集を始めたときに枠を画像の内側に制限する", async () => {
+    await openDevelopFor(4);
+    const s = developStore.get().settings!;
+    developStore.set({ settings: { ...s, transform: { ...defaultTransform(), vertical: -30 } } });
+    await startCrop();
+    await new Promise((r) => setTimeout(r, 0));
+    const sent = mock.calls
+      .filter((c) => c.command === "core_execute")
+      .map((c) => c.args?.command as { type: string; transform?: { vertical: number } });
+    const constrain = sent.find((c) => c.type === "constrain_crop");
+    expect(constrain?.transform?.vertical).toBe(-30);
+    await cancelCrop();
   });
 
   it("スライダーの変更は変形だけを送る（同じ値なら送らない）", async () => {

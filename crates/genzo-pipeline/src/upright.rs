@@ -354,7 +354,9 @@ pub fn detect_lines(luma: &GrayImage) -> Result<Vec<LineSegment>> {
     let rho_off = half_diag.ceil() as i64 + 1;
     let n_rho = (2 * rho_off + 1) as usize;
     let theta_of = |b: usize| (b as f64 + 0.5) * THETA_STEP_DEG.to_radians();
-    // 2. 勾配の向きつきの Hough 変換（θ の隣の区間にも投票。θ が 0 ↔ π をまたぐときは ρ の符号を反転）。
+    // 2. 勾配の向きつきの Hough 変換（θ の隣の区間にも投票する。θ は 0 ↔ π で折り返す。ρ は投票先の区間の θ で
+    //    計算するので、折り返しても符号を変えない（区間の最初と最後の θ は π 近く違い、同じ直線の ρ は符号が逆になる
+    //    が、それは投票先の θ で計算した値にすでに入っている））。
     let mut votes = vec![0u32; n_theta * n_rho];
     let mut by_theta: Vec<Vec<usize>> = vec![Vec::new(); n_theta];
     for (i, e) in edges.iter().enumerate() {
@@ -362,17 +364,9 @@ pub fn detect_lines(luma: &GrayImage) -> Result<Vec<LineSegment>> {
             .rem_euclid(n_theta as i64) as usize;
         by_theta[b].push(i);
         for db in -1i64..=1 {
-            let mut bb = b as i64 + db;
-            let mut flip = 1.0;
-            if bb < 0 {
-                bb += n_theta as i64;
-                flip = -1.0;
-            } else if bb >= n_theta as i64 {
-                bb -= n_theta as i64;
-                flip = -1.0;
-            }
+            let bb = (b as i64 + db).rem_euclid(n_theta as i64);
             let th = theta_of(bb as usize);
-            let rho = flip * ((f64::from(e.x) - cx) * th.cos() + (f64::from(e.y) - cy) * th.sin());
+            let rho = (f64::from(e.x) - cx) * th.cos() + (f64::from(e.y) - cy) * th.sin();
             let r = rho.round() as i64 + rho_off;
             if (0..n_rho as i64).contains(&r) {
                 votes[bb as usize * n_rho + r as usize] += 1;
@@ -436,24 +430,15 @@ pub fn detect_lines(luma: &GrayImage) -> Result<Vec<LineSegment>> {
         let rho_p = rho_bin as f64;
         let mut members: Vec<(f64, usize)> = Vec::new();
         for db in -support_bins..=support_bins {
-            let mut bb = b as i64 + db;
-            let mut flip = 1.0;
-            if bb < 0 {
-                bb += n_theta as i64;
-                flip = -1.0;
-            } else if bb >= n_theta as i64 {
-                bb -= n_theta as i64;
-                flip = -1.0;
-            }
+            // 区間の折り返しをまたいでも、距離は候補の区間の θ（c, s）で測るので符号を変えない。
+            let bb = (b as i64 + db).rem_euclid(n_theta as i64);
             for &i in &by_theta[bb as usize] {
                 if used[i] {
                     continue;
                 }
                 let e = &edges[i];
                 let (dx, dy) = (f64::from(e.x) - cx, f64::from(e.y) - cy);
-                let rho = flip * (dx * c + dy * s);
-                // 反転した側の画素は、向きが π 違う同じ直線（法線が逆向き）。距離は符号をそろえて比べる。
-                let _ = flip;
+                let rho = dx * c + dy * s;
                 if (rho - rho_p).abs() > SUPPORT_RHO_PX {
                     continue;
                 }
@@ -927,6 +912,41 @@ mod tests {
             assert!(a.angle_deg.abs() < 0.5, "{a:?}");
             assert!(a.residual_deg < 1.0, "{a:?}");
             assert!(a.vertical_lines >= 2);
+        }
+    }
+
+    /// 垂直の線の勾配の向きは 0 と π の境目にある。わずかに傾けて、縁の画素の向きが境目の両側（区間の最初と最後）に
+    /// 分かれても、同じ直線として検出する（境目をまたぐ投票と画素の集め方。数学関数の丸めが環境で違っても同じ結果に
+    /// なるように）。
+    #[test]
+    fn vertical_lines_across_the_angle_wrap_are_detected() {
+        let (w, h) = (400u32, 300u32);
+        for deg in [-0.2f64, -0.05, 0.05, 0.2] {
+            let (s, c) = deg.to_radians().sin_cos();
+            let spacing = 50.0;
+            let img = GrayImage::from_fn(w, h, |x, y| {
+                let (dx, dy) = (f64::from(x) + 0.5 - 200.0, f64::from(y) + 0.5 - 150.0);
+                let px = c * dx + s * dy;
+                let on_v = ((px / spacing).round() * spacing - px).abs() < 1.2;
+                if on_v { 0.02 } else { 0.5 }
+            })
+            .unwrap();
+            let lines = detect_lines(&img).unwrap();
+            let vertical: Vec<_> = lines
+                .iter()
+                .filter(|l| deviation_deg(l.angle_deg(), Group::Vertical).abs() < 1.0)
+                .collect();
+            // 線は 7 本（x = 200 ± 50k）。縁は線ごとに 2 本なので、少なくとも線の数だけは長い線分になる。
+            assert!(vertical.len() >= 7, "{deg}: {}", vertical.len());
+            // 画像の端（x = 0 の線）の近くを除けば、線は画像の高さの大部分にわたってつながる。
+            for l in vertical
+                .iter()
+                .filter(|l| l.x0.min(l.x1) > 5.0 && l.x0.max(l.x1) < f64::from(w) - 5.0)
+            {
+                assert!(l.length() > 250.0, "{deg}: {l:?}");
+            }
+            let a = analyze(&lines, (w, h), UprightMode::Vertical).unwrap();
+            assert!((f64::from(a.angle_deg) - deg).abs() < 0.1, "{deg}: {a:?}");
         }
     }
 

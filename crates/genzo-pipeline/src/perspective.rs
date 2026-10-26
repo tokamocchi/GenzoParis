@@ -19,15 +19,21 @@
 //!    画像の中に消失線（`W = 0`）が入らないようにするため）。
 //! 2. **中心をそろえる**: D の中心の像が P の中心に来るように平行移動する（傾け直すだけで画像が上下・左右に
 //!    動かないように）。
-//! 3. **縦横比・拡大縮小・ずらし**（アフィン変換）: 縦横比 `a`（−100〜+100）は幅を `k^−1/2`、高さを `k^1/2` 倍
-//!    （`k = ASPECT_MAX_RATIO^(a / 100)`。正で縦に伸びる）、拡大縮小 `s`（50〜150 %）は両方を `s / 100` 倍、
-//!    ずらし（−100〜+100）は幅・高さの半分に対する割合だけ平行移動する。
-//! 4. 元の画素の単位に戻す: `p = c + R · n''`。
+//! 3. **縦横比**: 縦横比 `a`（−100〜+100）は幅を `k^−1/2`、高さを `k^1/2` 倍にする
+//!    （`k = ASPECT_MAX_RATIO^(a / 100)`。正で縦に伸びる）。
+//! 4. 元の画素の単位に戻す: `p = c + R · n''`。ここまでが [`Perspective::d_to_p`]（形の変換）。
 //!
 //! P の枠は D と同じ中心・同じ尺度の座標で、D の四隅の像は（凸な）四角形になる。回転の後の G の外接矩形は
-//! この四角形の外接矩形（[`crate::coords::CoordinateFrames::g_size_px`]）。四角形の外は画像のない部分で、
-//! 回転と同じく切り抜きを画像の内側に制限し（[`crate::finish::constrain_crop`]）、切り抜く前の全体の表示では
-//! 塗る。
+//! この四角形の外接矩形（[`crate::coords::CoordinateFrames::g_size_px`]）。
+//!
+//! 5. **拡大縮小・ずらし**（枠の中での位置。[`Perspective::scale`]・[`Perspective::offset_px`]）: G の外接矩形を
+//!    決めた **後に**、その中心のまわりに `s / 100` 倍し（50〜150 %）、画面の軸の向きに、D の幅・高さの半分に対する
+//!    割合（−100〜+100）だけ平行移動する（[`crate::coords::CoordinateFrames::with_perspective`]）。外接矩形の大きさと
+//!    位置はこの 2 つを含まない（含めると、ずらしは外接矩形ごと動いて打ち消され、拡大縮小は出力の画素数が変わるだけ
+//!    になる）。そのため、縮小すると枠の中に画像のない部分が出て、拡大・ずらすと画像の一部が枠の外に出る。
+//!
+//! 画像のある部分（D の四隅の像の四角形）の外は画像のない部分で、回転と同じく切り抜きを画像の内側に制限し
+//! （[`crate::finish::constrain_crop`]）、切り抜く前の全体の表示では塗る。
 //!
 //! # 計算（GPU 版も同じ式。2.3 節）
 //!
@@ -218,10 +224,15 @@ pub fn tilt_rotation(phi_deg: f64, psi_deg: f64) -> Homography {
 /// 遠近補正（D → P。モジュールの doc の式）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Perspective {
-    /// D（O の画素の座標）→ P（同じ中心・同じ尺度の座標）。D の中心で分母が正。
+    /// D（O の画素の座標）→ P（同じ中心・同じ尺度の座標）の形の変換（傾け直しと縦横比。拡大縮小・ずらしは含まない）。
+    /// D の中心で分母が正。
     pub d_to_p: Homography,
-    /// P → D。P の中心（= D の中心）で分母が正。
+    /// P → D（[`d_to_p`](Self::d_to_p) の逆）。P の中心（= D の中心）で分母が正。
     pub p_to_d: Homography,
+    /// 拡大縮小の倍率（G の外接矩形の中心のまわり。1 で等倍）。
+    pub scale: f64,
+    /// ずらし（G の画素の単位。画面の軸の向き）。
+    pub offset_px: (f64, f64),
 }
 
 impl Perspective {
@@ -271,12 +282,13 @@ impl Perspective {
         // 2. 中心をそろえる。
         let (c0x, c0y) = rot.apply_checked(0.0, 0.0)?;
         let recenter = Homography::translation(-c0x, -c0y);
-        // 3. 縦横比・拡大縮小・ずらし。
+        // 3. 縦横比（拡大縮小・ずらしは G の外接矩形を決めた後に当てる。モジュールの doc の 5）。
         let k = ASPECT_MAX_RATIO.powf(aspect / 100.0);
         let s = scale_percent / 100.0;
-        let affine = Homography::scaling(s / k.sqrt(), s * k.sqrt()).then(
-            &Homography::translation(offset.0 / 100.0 * (cx / r), offset.1 / 100.0 * (cy / r)),
-        );
+        if !(s.is_finite() && s > 0.0) {
+            return None;
+        }
+        let affine = Homography::scaling(1.0 / k.sqrt(), k.sqrt());
         // 4. 元の単位に戻す。
         let denormalize = Homography::scaling(r, r).then(&Homography::translation(cx, cy));
         let d_to_p = normalize
@@ -290,7 +302,12 @@ impl Perspective {
         for (x, y) in [(0.0, 0.0), (ow, 0.0), (ow, oh), (0.0, oh)] {
             d_to_p.apply_checked(x, y)?;
         }
-        Some(Self { d_to_p, p_to_d })
+        Some(Self {
+            d_to_p,
+            p_to_d,
+            scale: s,
+            offset_px: (offset.0 / 100.0 * cx, offset.1 / 100.0 * cy),
+        })
     }
 }
 
@@ -405,11 +422,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(close(
-            p.d_to_p.apply(600.0, 400.0),
-            (c.0 + 450.0, c.1 + 300.0),
-            1e-9
-        ));
+        // 拡大縮小は形の変換に入れず、枠の中での位置として持つ（coords が G の外接矩形を決めた後に当てる）。
+        assert_eq!(p.scale, 1.5);
+        assert!(close(p.d_to_p.apply(600.0, 400.0), (600.0, 400.0), 1e-9));
         let p = Perspective::from_transform(
             size,
             &Transform {
@@ -430,7 +445,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(close(p.d_to_p.apply(300.0, 200.0), (600.0, 100.0), 1e-9));
+        // ずらしも枠の中での位置（D の幅・高さの半分に対する割合を画素にしたもの）。
+        assert_eq!(p.offset_px, (300.0, -100.0));
+        assert!(close(p.d_to_p.apply(300.0, 200.0), (300.0, 200.0), 1e-9));
         assert!(p.d_to_p.is_affine());
     }
 

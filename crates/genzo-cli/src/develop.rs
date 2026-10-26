@@ -652,6 +652,19 @@ pub fn lens_ignored(settings: &DevelopSettings) -> bool {
         && settings.lens != genzo_model::LensCorrection::default()
 }
 
+/// 自動の遠近補正の結果を設定に入れる（DEV-16）。入れるのは、求めた角度補正と、垂直・完全のときの垂直・水平だけ
+/// （同じ呼び出しの JSON・オプションで決めた縦横比・拡大縮小・ずらしなどは保つ。水平（角度だけ）では変形は変えない）。
+pub fn apply_upright(settings: &mut DevelopSettings, suggestion: &genzo_api::UprightSuggestion) {
+    settings.geometry.angle_deg = suggestion.angle_deg;
+    match suggestion.mode {
+        genzo_api::UprightMode::Level => {}
+        genzo_api::UprightMode::Vertical | genzo_api::UprightMode::Full => {
+            settings.transform.vertical = suggestion.transform.vertical;
+            settings.transform.horizontal = suggestion.transform.horizontal;
+        }
+    }
+}
+
 /// 処理バージョンが古く、変形（遠近補正）が使われない設定か（DEV-16。処理バージョン 2 から使われる）。
 pub fn transform_ignored(settings: &DevelopSettings) -> bool {
     settings.process_version < genzo_pipeline::ProcessVersion::V2.get()
@@ -679,8 +692,7 @@ fn set(
             let closed = s.core.close_develop();
             let suggestion = analyzed?;
             closed?;
-            new.geometry.angle_deg = suggestion.angle_deg;
-            new.transform = suggestion.transform;
+            apply_upright(&mut new, &suggestion);
             new.validate().map_err(genzo_model::DevelopError::from)?;
             Some(suggestion)
         }
@@ -1460,6 +1472,44 @@ mod tests {
             decode_text(&[0xFF, 0xFE, 0x00, 0xD8]).is_err(),
             "対のないサロゲート"
         );
+    }
+
+    /// `--upright` の結果は、角度と（垂直・完全なら）垂直・水平だけを入れ、同じ呼び出しで決めた縦横比・拡大縮小・
+    /// ずらしは保つ。水平（角度だけ）では変形を変えない（Codex のレビューの指摘）。
+    #[test]
+    fn upright_keeps_the_other_transform_options() {
+        let mut new = DevelopSettings::default();
+        new.transform.scale = 110.0;
+        new.transform.offset_x = 12.0;
+        new.transform.vertical = 5.0;
+        let suggestion = |mode| genzo_api::UprightSuggestion {
+            mode,
+            angle_deg: -1.25,
+            // コアは保存している設定の変形に、求めた垂直・水平を入れて返す（拡大縮小などは保存している値）。
+            transform: genzo_model::Transform {
+                vertical: -18.0,
+                horizontal: 4.0,
+                ..Default::default()
+            },
+            vertical_lines: 5,
+            horizontal_lines: 3,
+            residual_deg: 0.2,
+        };
+        let mut vertical = new.clone();
+        apply_upright(&mut vertical, &suggestion(genzo_api::UprightMode::Vertical));
+        assert_eq!(vertical.geometry.angle_deg, -1.25);
+        assert_eq!(
+            (vertical.transform.vertical, vertical.transform.horizontal),
+            (-18.0, 4.0)
+        );
+        assert_eq!(
+            (vertical.transform.scale, vertical.transform.offset_x),
+            (110.0, 12.0)
+        );
+        let mut level = new.clone();
+        apply_upright(&mut level, &suggestion(genzo_api::UprightMode::Level));
+        assert_eq!(level.geometry.angle_deg, -1.25);
+        assert_eq!(level.transform, new.transform);
     }
 
     #[test]

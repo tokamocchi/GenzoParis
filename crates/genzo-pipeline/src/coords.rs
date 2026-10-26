@@ -222,6 +222,9 @@ impl CoordinateFrames {
     }
 
     /// 遠近補正 `p` と今の回転・O の寸法から、D → G の対応を合成する（モジュールの doc の「遠近補正」）。
+    ///
+    /// G の外接矩形は、形の変換（傾け直しと縦横比）を回転した四角形から決め、拡大縮小・ずらし（枠の中での位置）は
+    /// その後に、外接矩形の中心のまわり・画面の軸の向きに当てる（[`crate::perspective`] の doc の 5）。
     fn perspective_frame(&self, p: Perspective) -> PerspectiveFrame {
         let (ow, oh) = self.oriented_size();
         let (ow, oh) = (f64::from(ow), f64::from(oh));
@@ -240,19 +243,28 @@ impl CoordinateFrames {
             min = (min.0.min(qx), min.1.min(qy));
             max = (max.0.max(qx), max.1.max(qy));
         }
+        let g_size = ((max.0 - min.0).max(1e-9), (max.1 - min.1).max(1e-9));
+        let (gcx, gcy) = (g_size.0 * 0.5, g_size.1 * 0.5);
         let d_to_g = pre
             .then(&Homography::translation(-min.0, -min.1))
+            // 枠の中での位置: 外接矩形の中心のまわりに拡大縮小し、ずらす。
+            .then(&Homography::translation(-gcx, -gcy))
+            .then(&Homography::scaling(p.scale, p.scale))
+            .then(&Homography::translation(
+                gcx + p.offset_px.0,
+                gcy + p.offset_px.1,
+            ))
             .with_positive_w_at(cx, cy);
-        let (gcx, gcy) = d_to_g.apply(cx, cy);
+        let (dcx, dcy) = d_to_g.apply(cx, cy);
         let g_to_d = d_to_g
             .inverse()
             .unwrap_or(Homography::IDENTITY)
-            .with_positive_w_at(gcx, gcy);
+            .with_positive_w_at(dcx, dcy);
         PerspectiveFrame {
             perspective: p,
             d_to_g,
             g_to_d,
-            g_size: ((max.0 - min.0).max(1e-9), (max.1 - min.1).max(1e-9)),
+            g_size,
         }
     }
 
@@ -778,6 +790,74 @@ mod tests {
         // g_to_undistorted は有限の値を返す。
         let (u, v) = f.g_to_undistorted(gw * 0.5, gh * 50.0);
         assert!(u.is_finite() && v.is_finite());
+    }
+
+    /// 拡大縮小・ずらし（DEV-16）は G の外接矩形を変えず、枠の中の画像を動かす（外接矩形を拡大縮小・ずらしの後の
+    /// 四隅で決めると、ずらしは打ち消され、拡大縮小は出力の画素数が変わるだけになる。Codex のレビューの指摘）。
+    #[test]
+    fn scale_and_offset_move_the_image_inside_the_same_frame() {
+        use crate::perspective::Perspective;
+        let base = CoordinateFrames::new(600, 400, Orientation::Normal).unwrap();
+        let with = |t: genzo_model::Transform| {
+            let p = Perspective::for_settings((600, 400), crate::version::ProcessVersion::V2, &t)
+                .unwrap();
+            base.with_perspective(Some(p))
+        };
+        // ずらし: 枠は O のまま、D の中心が右・上へ動く（幅の半分の 50 %・高さの半分の 20 %）。
+        let f = with(genzo_model::Transform {
+            offset_x: 50.0,
+            offset_y: -20.0,
+            ..Default::default()
+        });
+        assert_eq!(f.g_size_px(), (600.0, 400.0));
+        let (gx, gy) = f.undistorted_to_g(300.0, 200.0);
+        assert!(
+            (gx - 450.0).abs() < 1e-9 && (gy - 160.0).abs() < 1e-9,
+            "{gx} {gy}"
+        );
+        // 枠の左の端は画像の外になる。
+        assert!(!f.g_point_in_image(10.0, 200.0, 0.0));
+        assert!(f.g_point_in_image(590.0, 200.0, 0.0));
+        // 拡大: 枠は O のまま、中心のまわりに 1.5 倍（D の隅は枠の外へ出る）。
+        let f = with(genzo_model::Transform {
+            scale: 150.0,
+            ..Default::default()
+        });
+        assert_eq!(f.g_size_px(), (600.0, 400.0));
+        let (gx, gy) = f.undistorted_to_g(600.0, 400.0);
+        assert!(
+            (gx - 750.0).abs() < 1e-9 && (gy - 500.0).abs() < 1e-9,
+            "{gx} {gy}"
+        );
+        let (u, v) = f.g_to_undistorted(600.0, 400.0);
+        assert!(
+            (u - 500.0).abs() < 1e-9 && (v - 333.333_333_333).abs() < 1e-6,
+            "{u} {v}"
+        );
+        // 縮小: 枠の隅は画像の外になる。
+        let f = with(genzo_model::Transform {
+            scale: 80.0,
+            ..Default::default()
+        });
+        assert_eq!(f.g_size_px(), (600.0, 400.0));
+        assert!(!f.g_point_in_image(1.0, 1.0, 0.0));
+        assert!(f.g_point_in_image(300.0, 200.0, 0.0));
+        // 傾きと重ねても、外接矩形は傾き（形の変換）だけで決まる。
+        let tilt = genzo_model::Transform {
+            vertical: -40.0,
+            ..Default::default()
+        };
+        let a = with(tilt);
+        let b = with(genzo_model::Transform {
+            scale: 120.0,
+            offset_x: 30.0,
+            ..tilt
+        });
+        assert_eq!(a.g_size_px(), b.g_size_px());
+        assert_ne!(
+            a.undistorted_to_g(300.0, 200.0),
+            b.undistorted_to_g(300.0, 200.0)
+        );
     }
 
     #[test]
