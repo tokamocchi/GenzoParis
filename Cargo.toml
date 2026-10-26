@@ -77,7 +77,7 @@ trash = "5.2.9"
 # ML 推論（DEV-20。04 の 7.2 節）: ONNX Runtime の Rust のバインディング（pyke の ort）。ONNX Runtime の共有ライブラリは
 # ビルド時に取らず（既定の機能 download-binaries を外す）、実行時に指定したファイルから読み込む（load-dynamic。アプリの
 # 配布物に同梱する・利用者が置く。docs/ai_masks.md）。GPU の実行プロバイダー（CUDA・DirectML・Core ML）は機能フラグを
-# 足していない（まず CPU。決定事項ログ No.201）。docs/third_party.md。
+# 足していない（まず CPU。決定事項ログ No.203）。docs/third_party.md。
 ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic"] }
 
 # GPU

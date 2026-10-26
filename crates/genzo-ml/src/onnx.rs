@@ -3,7 +3,7 @@
 //! ONNX Runtime の共有ライブラリ（`onnxruntime.dll`・`libonnxruntime.dylib`・`libonnxruntime.so`）は、ビルド時に取らず
 //! （`ort` の既定の機能 `download-binaries` を外している）、[`OnnxBackend::load_library`] で指定したファイルから実行時に
 //! 読み込む（`ort` の `load-dynamic`）。読み込みはプロセスで 1 度だけ（2 度目以降は最初のライブラリのまま。`ort` の
-//! 制約）。実行プロバイダーは CPU だけ（CUDA・DirectML・Core ML は機能フラグを足していない。決定事項ログ No.201）。
+//! 制約）。実行プロバイダーは CPU だけ（CUDA・DirectML・Core ML は機能フラグを足していない。決定事項ログ No.203）。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};

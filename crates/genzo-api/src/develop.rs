@@ -28,6 +28,7 @@
 //!   [`Core::upgrade_process_versions`]。v1 の機能は処理バージョン 2 から）。
 //! - 切り抜きの編集の支え（DEV-15）: 切り抜く前の全体の表示（[`Core::set_develop_view`]）と、描画が実際に
 //!   使う切り抜き（[`Core::constrain_crop`]）。WB のスポイト（DEV-03。[`Core::white_balance_at`]）。
+//!   自動補正（DEV-32。[`Core::auto_tone`]）。
 //! - ビフォー / アフターの表示のビフォー（DEV-31。[`Core::set_before`]）はセッションに持つ（`before` の doc）。
 
 use std::collections::HashMap;
@@ -50,9 +51,9 @@ use crate::events::{CatalogChange, Event, WarningCode};
 use crate::previews::{load_source, schedule_regenerate, variant_file};
 use crate::render::display_target;
 use crate::types::{
-    DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem, MaskOverlayFrame,
-    MaskOverlayInfo, PasteReport, PasteVersion, PickedMaskColor, PickedWhiteBalance, SettingGroups,
-    SourceInfo,
+    AutoTone, AutoToneStats, DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem,
+    MaskOverlayFrame, MaskOverlayInfo, PasteReport, PasteVersion, PickedMaskColor,
+    PickedWhiteBalance, SettingGroups, SourceInfo,
 };
 
 /// 自動保存に失敗したときに、もう一度試すまでの時間（**仮置き**: 10 秒。ディスクの容量不足などで
@@ -68,6 +69,9 @@ pub const HISTORY_LABEL_PASTE: &str = "設定の貼り付け";
 pub const HISTORY_LABEL_GENERIC: &str = "現像設定の変更";
 /// 白黒にしたときの履歴の名前（DEV-25。画面の V キー）。
 pub const HISTORY_LABEL_BLACK_WHITE: &str = "白黒に変換";
+/// 自動補正を適用したときの履歴の名前（DEV-32。CLI の `develop auto`。画面は `set_settings` の経路なので
+/// 変わった項目の名前になる）。
+pub const HISTORY_LABEL_AUTO_TONE: &str = "自動補正";
 /// 白黒からカラーに戻したときの履歴の名前（DEV-25）。
 pub const HISTORY_LABEL_COLOR: &str = "カラーに変換";
 /// 処理バージョンの更新（[`Core::upgrade_process_version`]）の履歴の名前の前半（後に「2 に更新」が付く。
@@ -1913,6 +1917,48 @@ impl Core {
             x: pick.x as f32,
             y: pick.y as f32,
             lab: pick.lab,
+        })
+    }
+
+    /// 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決める
+    /// （適用はしない。UI・CLI が [`AutoTone::apply`] で設定に入れて `set_settings` する。WB のスポイトと同じ形）。
+    ///
+    /// - 今の設定（保存待ち・ドラッグ中の値を含む）の、プレビューと同じ長辺の段階 A1 からステージ 9 だけを描いた
+    ///   画像（露光量の前。切り抜いた後の範囲）の輝度の分布から決める（genzo-pipeline の `engine::auto_tone` の doc。
+    ///   目標の値・重みは仮置き）。今の露光量・コントラスト・トーンの値によらず、同じ写真・WB・切り抜きなら同じ値。
+    ///   RAW 以外の写真でも使える（目標が RAW と違う）。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。画像の上の画素がない・処理
+    /// バージョンを扱えないなら [`ApiError::InvalidArgument`]。
+    pub fn auto_tone(&self, variant_id: VariantId) -> Result<AutoTone, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let snap = session_snapshot(inner, variant_id)?;
+        let pick = inner
+            .engine
+            .auto_tone(
+                &snap.source,
+                &snap.settings,
+                inner.engine.config().preview_long_edge,
+            )
+            .map_err(|e| match e {
+                genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
+                e => e.into(),
+            })?;
+        let v = pick.values;
+        Ok(AutoTone {
+            exposure_ev: v.exposure_ev,
+            contrast: v.contrast,
+            highlights: v.highlights,
+            shadows: v.shadows,
+            whites: v.whites,
+            blacks: v.blacks,
+            stats: AutoToneStats {
+                samples: pick.stats.samples,
+                black_log2: pick.stats.black_log2,
+                median_log2: pick.stats.median_log2,
+                white_log2: pick.stats.white_log2,
+            },
         })
     }
 

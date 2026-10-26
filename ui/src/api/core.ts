@@ -10,6 +10,7 @@ import type {
   AiMaskResult,
   AiMaskStatus,
   AutoStackReport,
+  AutoTone,
   BackupEntry,
   BeforeInfo,
   BeforeSource,
@@ -503,6 +504,14 @@ export const computeAiMask = async (variant_id: VariantId, kind: AiMaskKind): Pr
   strip(await execute({ type: "compute_ai_mask", variant_id, kind }, "ai_mask"));
 /** AI マスクの推論の仕組みの状態（使える種類・モデル・問題）。 */
 export const aiMaskStatus = async (): Promise<AiMaskStatus> => strip(await execute({ type: "ai_mask_status" }, "ai_mask_status"));
+/**
+ * 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決めた値（適用は
+ * しない。画面が設定に入れて送る）。今の露光量などの値によらず、同じ写真・WB・切り抜きなら同じ値。
+ */
+export const autoTone = async (variant_id: VariantId): Promise<AutoTone> => {
+  const { type: _type, ...rest } = await execute({ type: "auto_tone", variant_id }, "auto_tone");
+  return rest;
+};
 /** 切り抜きの編集中の表示（`uncropped` なら切り抜く前の全体を描く）。 */
 export const setDevelopView = async (uncropped: boolean) => {
   await execute({ type: "set_develop_view", uncropped }, "ok");
