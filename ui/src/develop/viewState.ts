@@ -64,6 +64,7 @@ import { formatAngle, sameShown } from "./scales";
 import {
   customWb,
   describeUpright,
+  fullLens,
   fullTransform,
   sameAutoToneValues,
   sameTransform,
@@ -566,7 +567,8 @@ export function commitTransform(): void {
  * 知らせる。切り抜きの編集中は枠を制限し直す。
  *
  * 送信待ちの設定を送った後に求める（コアが今の設定のレンズ補正で歪曲を補正した画像を調べるため）。求めている間に
- * 利用者が角度や変形を変えたら、後からの操作を優先して適用せず、その旨を知らせる（自動補正（DEV-32）と同じ扱い）。
+ * 利用者が角度・変形・レンズ補正を変えたら、後からの操作を優先して適用せず、その旨を知らせる（自動補正（DEV-32）と
+ * 同じ扱い）。
  */
 export async function applyUpright(mode: UprightMode): Promise<void> {
   const d = developStore.get();
@@ -579,12 +581,14 @@ export async function applyUpright(mode: UprightMode): Promise<void> {
       const s = await core.analyzeUpright(id, mode);
       const latest = developStore.get();
       if (latest.variantId !== id || !latest.settings || !latest.state) return;
+      // 解析は今の設定のレンズ補正で歪曲を補正した画像を調べるので、レンズ補正が変わっても結果は使えない。
       if (
         base &&
         (base.geometry.angle_deg !== latest.settings.geometry.angle_deg ||
-          !sameTransform(fullTransform(base.transform), fullTransform(latest.settings.transform)))
+          !sameTransform(fullTransform(base.transform), fullTransform(latest.settings.transform)) ||
+          JSON.stringify(fullLens(base.lens)) !== JSON.stringify(fullLens(latest.settings.lens)))
       ) {
-        actions.notify("info", "自動の補正: 求めている間に角度・変形が変わったため、適用しませんでした");
+        actions.notify("info", "自動の補正: 求めている間に角度・変形・レンズ補正が変わったため、適用しませんでした");
         return;
       }
       const transform = withUprightTransform(latest.settings.transform, mode, s.transform);

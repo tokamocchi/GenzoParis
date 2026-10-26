@@ -860,6 +860,50 @@ mod tests {
         );
     }
 
+    /// 画面（ui の cropMath の perspectiveFrame）が同じ式で G の外接矩形と D → G を計算しているか、同じ数値で固定する
+    /// （ui の cropMath.test.ts の「変形の外接矩形はコアと同じ値」と同じ値。どちらかの式を変えたら両方を直す）。
+    #[test]
+    fn perspective_frame_matches_the_ui_values() {
+        use crate::perspective::Perspective;
+        let t = genzo_model::Transform {
+            vertical: -40.0,
+            horizontal: 15.0,
+            aspect: 20.0,
+            ..Default::default()
+        };
+        let base = CoordinateFrames::new(600, 400, Orientation::Normal)
+            .unwrap()
+            .with_rotation(7.0)
+            .unwrap();
+        let p =
+            Perspective::for_settings((600, 400), crate::version::ProcessVersion::V2, &t).unwrap();
+        let f = base.with_perspective(Some(p));
+        let (gw, gh) = f.g_size_px();
+        assert!(
+            (gw - 716.487_918_941).abs() < 1e-6 && (gh - 570.003_459_435).abs() < 1e-6,
+            "{gw} {gh}"
+        );
+        let t2 = genzo_model::Transform {
+            scale: 120.0,
+            offset_x: 30.0,
+            offset_y: -10.0,
+            ..t
+        };
+        let p =
+            Perspective::for_settings((600, 400), crate::version::ProcessVersion::V2, &t2).unwrap();
+        let f = base.with_perspective(Some(p));
+        let (x, y) = f.undistorted_to_g(300.0, 200.0);
+        assert!(
+            (x - 437.430_696_754).abs() < 1e-6 && (y - 350.322_573_434).abs() < 1e-6,
+            "{x} {y}"
+        );
+        let (x, y) = f.undistorted_to_g(0.0, 0.0);
+        assert!(
+            (x - 18.351_208_106).abs() < 1e-6 && (y - 113.540_434_291).abs() < 1e-6,
+            "{x} {y}"
+        );
+    }
+
     #[test]
     fn each_orientation_matches_exif() {
         // S:

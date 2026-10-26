@@ -10,7 +10,7 @@ import { MockBridge, mockDevelopSettings, mockDevelopState, mockSourceInfo } fro
 import type { DevelopState } from "../api/types";
 import { DEFAULT_PASTE_SELECTION, PASTE_GROUP_ITEMS, restorePasteSelection, toSettingGroups } from "../dialogs/pasteLogic";
 import { appStore } from "../state/app";
-import { developStore, openDevelopFor } from "../state/develop";
+import { applySettings, developStore, openDevelopFor } from "../state/develop";
 import { DevelopPanel } from "./DevelopPanel";
 import {
   TRANSFORM_PROCESS_VERSION,
@@ -159,7 +159,27 @@ describe("自動の遠近補正（Upright）の送信", () => {
     const s = developStore.get().settings;
     expect(s?.transform?.scale).toBe(120);
     expect(s?.transform?.vertical).toBe(0);
-    expect(appStore.get().toasts.some((t) => t.message.includes("求めている間に角度・変形が変わった"))).toBe(true);
+    expect(appStore.get().toasts.some((t) => t.message.includes("求めている間に角度・変形・レンズ補正が変わった"))).toBe(true);
+  });
+
+  it("求めている間にレンズ補正が変わっても適用しない（解析した歪曲補正の画像が違うため）", async () => {
+    await openDevelopFor(6);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    const base = mock.responses.get("core_execute") as (a?: Record<string, unknown>) => unknown;
+    mock.responses.set("core_execute", async (args?: Record<string, unknown>) => {
+      const c = args?.command as { type: string };
+      if (c.type === "analyze_upright") await gate;
+      return base(args);
+    });
+    const running = applyUpright("full");
+    await new Promise((r) => setTimeout(r, 0));
+    const s = developStore.get().settings!;
+    applySettings({ ...s, lens: { ...s.lens, distortion: 20 } }, false);
+    release();
+    await running;
+    expect(developStore.get().settings?.transform?.vertical).toBe(0);
+    expect(developStore.get().settings?.lens.distortion).toBe(20);
   });
 
   it("直線が見つからなければ知らせ、設定は変えない", async () => {

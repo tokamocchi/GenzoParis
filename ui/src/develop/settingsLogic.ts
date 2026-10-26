@@ -223,6 +223,15 @@ export function fullTransform(t: Partial<Transform> | null | undefined): Transfo
   return { ...defaultTransform(), ...(t ?? {}) };
 }
 
+/**
+ * 描画で使われる変形（その写真の処理バージョンで使われ、何かを変えているときだけ。そうでなければ null）。画面が
+ * G の外接矩形・画像の四隅を計算するのに使う。
+ */
+export function effectiveTransform(settings: DevelopSettings | null | undefined): Transform | null {
+  if (!settings || settings.process_version < TRANSFORM_PROCESS_VERSION) return null;
+  return transformIsIdentity(settings.transform) ? null : fullTransform(settings.transform);
+}
+
 /** 2 つの変形が同じか（すべての項目が一致）。 */
 export function sameTransform(a: Transform, b: Transform): boolean {
   return (Object.keys(defaultTransform()) as (keyof Transform)[]).every((k) => a[k] === b[k]);
