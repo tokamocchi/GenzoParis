@@ -453,10 +453,22 @@ pub struct PreviewRender {
 /// 直前の 2 件だけ持つ（長辺 2560px で 1 件 約 52MB）。
 pub const RETOUCHED_A1_CAPACITY: usize = 2;
 
+/// スポット修正を当てる A1 の出どころ（[`Engine::retouched`] のキャッシュのキーに入れる）。genzo-gpu の簡易処理の
+/// A1 は CPU 版と許容差の範囲で違うので、同じ [`CacheKey`] でも分けて持つ（GPU 版が後の段階で失敗して CPU 版で
+/// 描き直すとき、GPU 版の A1 から作ったものを使わない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum A1Origin {
+    /// エンジン（CPU 版）のセンサー処理（[`Engine::sensor_a1`]）。
+    Cpu,
+    /// genzo-gpu の簡易処理（ドラッグ中の WB など）。
+    GpuDraft,
+}
+
 /// スポット修正を当てた A1 のキャッシュのキー。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RetouchKey {
     a1: CacheKey,
+    origin: A1Origin,
     retouch: [u8; 32],
 }
 
@@ -662,15 +674,16 @@ impl Engine {
             source.effective_quality(quality),
             long_edge,
         );
-        self.retouched(key, &a1, settings)
+        self.retouched(key, A1Origin::Cpu, &a1, settings)
     }
 
-    /// `a1`（キャッシュのキー `key` の、スポット修正を当てる前の A1）にスポット修正を当てたもの（キャッシュする。最新
-    /// [`RETOUCHED_A1_CAPACITY`] 件。キーは `key` と `DevelopSettings::retouch_hash`）。スポットがなければ `a1` を
-    /// そのまま返す。genzo-gpu の簡易処理の A1 も使う。
+    /// `a1`（キャッシュのキー `key`・出どころ `origin` の、スポット修正を当てる前の A1）にスポット修正を当てたもの
+    /// （キャッシュする。最新 [`RETOUCHED_A1_CAPACITY`] 件。キーは `key`・`origin` と `DevelopSettings::retouch_hash`）。
+    /// スポットがなければ `a1` をそのまま返す。genzo-gpu の簡易処理の A1 も使う（`origin` は [`A1Origin::GpuDraft`]）。
     pub fn retouched(
         &self,
         key: CacheKey,
+        origin: A1Origin,
         a1: &Arc<A1Image>,
         settings: &DevelopSettings,
     ) -> Result<Arc<A1Image>> {
@@ -680,7 +693,11 @@ impl Engine {
         let Some(plan) = RetouchPlan::new(settings, a1.frames())? else {
             return Ok(Arc::clone(a1));
         };
-        let key = RetouchKey { a1: key, retouch };
+        let key = RetouchKey {
+            a1: key,
+            origin,
+            retouch,
+        };
         if let Some(r) = self.lock().retouched.lookup(&key) {
             return Ok(r);
         }

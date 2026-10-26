@@ -518,3 +518,35 @@ fn oriented_grid_is_fine_enough_for_the_smallest_spot_with_strong_distortion() {
         assert!(e < min_radius / 4.0, "{amount}: {e}");
     }
 }
+
+#[test]
+fn stroke_correction_reaches_the_last_sample_at_the_end_of_the_line() {
+    // 長さ 2.5・間隔 1 の線: 標本は弧長 0・1・2・2.5（最後は線の終わり。Codex の指摘）。両側とも同じ値にする。
+    let values: Vec<[f32; 3]> = [0.0f32, 1.0, 2.0, 3.0]
+        .iter()
+        .flat_map(|&v| [[v; 3], [v; 3]])
+        .collect();
+    let b = Boundary {
+        points: vec![[0.0, 0.0]; values.len()],
+        values,
+    };
+    let at = |s: f64| {
+        across(
+            &b,
+            1.0,
+            2.5,
+            1.0,
+            Nearest {
+                d2: 0.0,
+                s,
+                sigma: 0.0,
+            },
+        )[0]
+    };
+    assert_eq!(at(0.0), 0.0);
+    assert_eq!(at(1.5), 1.5);
+    // 最後の区間（2〜2.5）は、その長さで補間して、線の終わりで最後の標本の値になる。
+    assert_eq!(at(2.25), 2.5);
+    assert_eq!(at(2.5), 3.0);
+    assert_eq!(at(9.0), 3.0);
+}

@@ -257,6 +257,25 @@ function solve2(a: number, b: number, c: number, d: number, e: number, f: number
   return [(e * d - b * f) / det, (a * f - e * c) / det];
 }
 
+/** 線の点の列を、続く点の間が `maxStep`（O 座標）以下になるように細かくする（1 つの線分は 64 に分けるまで）。
+ * 回転・歪曲補正で O と画面の対応は線形でないので、線分を画面の上の直線で描くと、実際に直す場所からずれる。 */
+export function densify(points: [number, number][], maxStep: number): [number, number][] {
+  if (points.length < 2 || !(maxStep > 0)) return points;
+  const out: [number, number][] = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const [ax, ay] = points[i - 1];
+    const [bx, by] = points[i];
+    const n = Math.min(64, Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / maxStep)));
+    for (let k = 1; k <= n; k++) out.push([ax + ((bx - ax) * k) / n, ay + ((by - ay) * k) / n]);
+  }
+  return out;
+}
+
+/** 線を細かくする間隔（O 座標）: 表の升目の半分。 */
+export function densifyStep(g: OGrid, oWidth: number): number {
+  return (oWidth > 0 ? oWidth : 1) / (2 * (g.n - 1));
+}
+
 /** 位置（CSS の画素）が画像の箱の中か（縁を含む）。 */
 export function insideBox(box: Box, x: number, y: number): boolean {
   return x >= box.left && x <= box.left + box.width && y >= box.top && y <= box.top + box.height;

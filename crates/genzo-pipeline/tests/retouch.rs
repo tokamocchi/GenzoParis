@@ -9,7 +9,7 @@ use common::*;
 use genzo_color::RgbColorSpace;
 use genzo_model::{CropRect, DevelopSettings, RenderQuality, RetouchMode, RetouchSpot};
 use genzo_pipeline::finish::{UnimplementedSetting, unimplemented_settings};
-use genzo_pipeline::{NeverCancel, PhotoSource, RgbImage};
+use genzo_pipeline::{A1Origin, NeverCancel, PhotoSource, RgbImage};
 use genzo_testkit::diff::{LabConversion, delta_e2000_stats};
 
 fn v2() -> DevelopSettings {
@@ -133,6 +133,35 @@ fn spots_stay_on_the_content_when_rotating_or_cropping() {
     assert_bitwise_eq(&a.image, &b.image, "回転・切り抜き");
     let plain = e.sensor_a1(&source, &s, RenderQuality::Final, 160).unwrap();
     assert_ne!(a.image, plain.image);
+}
+
+#[test]
+fn retouched_a1_is_cached_separately_for_each_origin() {
+    // GPU 版の簡易処理の A1 は CPU 版と少し違いうる。同じキーでも、出どころごとに当てた結果を持つ（Codex の指摘）。
+    let source = raw_source(raw_from(&busy_scene(160, 96)));
+    let e = engine(160, 64);
+    let mut s = v2();
+    s.retouch = spots();
+    let cpu = e.sensor_a1(&source, &s, RenderQuality::Draft, 160).unwrap();
+    let key = e.a1_cache_key(&source, &s, RenderQuality::Draft, 160);
+    let mut darker = cpu.image.clone();
+    for px in darker.data_mut() {
+        for c in px.iter_mut() {
+            *c *= 0.5;
+        }
+    }
+    let gpu = std::sync::Arc::new(genzo_pipeline::sensor::A1Image {
+        image: darker,
+        ..(*cpu).clone()
+    });
+    let from_gpu = e.retouched(key, A1Origin::GpuDraft, &gpu, &s).unwrap();
+    let from_cpu = e.retouched(key, A1Origin::Cpu, &cpu, &s).unwrap();
+    assert_ne!(from_gpu.image, from_cpu.image);
+    assert_bitwise_eq(
+        &from_cpu.image,
+        &e.a1(&source, &s, RenderQuality::Draft, 160).unwrap().image,
+        "CPU 版",
+    );
 }
 
 #[test]

@@ -14,6 +14,8 @@ import {
   addSpot,
   boxToO,
   clearSpots,
+  densify,
+  densifyStep,
   fallbackOffset,
   fracToO,
   insideBox,
@@ -162,6 +164,28 @@ describe("スポット修正の計算", () => {
     expect(pixelsPerO(g, box, 0.5, 0.3)).toBeCloseTo(400, 6);
     // 壊れた表（点の数が違う・NaN）は使わない。
     expect(orientedGrid([[0, 0]], [0, 0, 1, 1]).points.at(-1)).toEqual([1, 1]);
+  });
+
+  it("線は表の升目の半分の間隔に細かくして描く（O で直線の線分は、歪曲補正で画面では曲がる）", () => {
+    const g = orientedGrid(undefined, [0, 0, 1, 0.75]);
+    const step = densifyStep(g, 1);
+    expect(step).toBeCloseTo(1 / 64, 12);
+    const out = densify(
+      [
+        [0, 0],
+        [0.1, 0],
+        [0.1, 0.001],
+      ],
+      step,
+    );
+    // 長さ 0.1 は 7 つに、短い線分はそのまま。端の点は変えない。
+    expect(out).toHaveLength(1 + 7 + 1);
+    expect(out[0]).toEqual([0, 0]);
+    expect(out[7]).toEqual([0.1, 0]);
+    expect(out.at(-1)).toEqual([0.1, 0.001]);
+    for (let i = 1; i < out.length; i++) expect(Math.hypot(out[i][0] - out[i - 1][0], out[i][1] - out[i - 1][1])).toBeLessThanOrEqual(step + 1e-12);
+    // 1 つの線分は 64 に分けるまで。
+    expect(densify([[0, 0], [10, 0]], step)).toHaveLength(65);
   });
 
   it("画像の箱の中か（まわりの余白では描き始めない）", () => {

@@ -13,7 +13,18 @@ import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } f
 import type { RetouchSpot } from "../api/types";
 import { applySettings, developStore, endDrag } from "../state/develop";
 import type { Box } from "./maskLogic";
-import { type OGrid, boxToO, insideBox, moveSource, moveSpot, oToBox, pixelsPerO, withSpot } from "./retouchLogic";
+import {
+  type OGrid,
+  boxToO,
+  densify,
+  densifyStep,
+  insideBox,
+  moveSource,
+  moveSpot,
+  oToBox,
+  pixelsPerO,
+  withSpot,
+} from "./retouchLogic";
 import { commitRetouchSpot, selectSpot } from "./viewState";
 
 /** クリックとドラッグを分ける動きの量（CSS の画素。仮置き）。 */
@@ -127,8 +138,9 @@ export function RetouchLayer(props: {
   };
 
   const at = (u: number, v: number) => oToBox(grid, box, u, v);
+  // 線分は O の上で細かくしてから画面の位置にする（回転・歪曲補正で曲がる線を、直す場所に沿って描く）。
   const pts = (points: [number, number][], du = 0, dv = 0) =>
-    points
+    densify(points, densifyStep(grid, oWidth))
       .map(([u, v]) => at(u + du, v + dv))
       .filter((p): p is [number, number] => p !== null)
       .map((p) => p.join(","))

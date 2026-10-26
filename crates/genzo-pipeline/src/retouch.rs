@@ -700,8 +700,8 @@ impl PreparedRetouch {
                     Some(b) => {
                         let c = match &spot.path {
                             Path::Circle(center) => poisson(b, *center, rb, p),
-                            Path::Stroke { .. } => match nearest[idx] {
-                                Some(nr) => across(b, step, rb, nr),
+                            Path::Stroke { arc, .. } => match nearest[idx] {
+                                Some(nr) => across(b, step, arc[arc.len() - 1], rb, nr),
                                 None => [0.0; 3],
                             },
                         };
@@ -738,16 +738,23 @@ fn poisson(b: &Boundary, center: [f64; 2], rb: f64, p: [f64; 2]) -> [f32; 3] {
     acc.map(|v| (v / wsum) as f32)
 }
 
-/// 線の両側の値の補間（モジュールの doc の 3）。標本は `[+, −]` の組が弧長 `step` ごとに並ぶ。
-fn across(b: &Boundary, step: f64, rb: f64, nr: Nearest) -> [f32; 3] {
+/// 線の両側の値の補間（モジュールの doc の 3）。標本は `[+, −]` の組が弧長 `step` ごとに並ぶ（最後の組は線の終わり
+/// `total`）。
+fn across(b: &Boundary, step: f64, total: f64, rb: f64, nr: Nearest) -> [f32; 3] {
     let pairs = b.values.len() / 2;
     if pairs == 0 {
         return [0.0; 3];
     }
-    let t = (nr.s / step).max(0.0);
-    let j0 = (t.floor() as usize).min(pairs - 1);
+    let s = nr.s.clamp(0.0, total);
+    let j0 = ((s / step).floor() as usize).min(pairs - 1);
     let j1 = (j0 + 1).min(pairs - 1);
-    let f = (t - j0 as f64).clamp(0.0, 1.0) as f32;
+    // 標本の位置は j · step（最後だけ線の終わり `total`。[`SpotPlan::boundary_points`]）。
+    let (a, z) = (j0 as f64 * step, (j1 as f64 * step).min(total));
+    let f = if z > a {
+        ((s - a) / (z - a)).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
     let side = |j: usize, k: usize| b.values[2 * j + k];
     let u = ((nr.sigma + rb) / (2.0 * rb)).clamp(0.0, 1.0) as f32;
     std::array::from_fn(|c| {

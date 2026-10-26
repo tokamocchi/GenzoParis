@@ -302,9 +302,10 @@ impl GpuRenderer {
             _ => None,
         };
         let a1 = match draft_raw {
-            // スポット修正（DEV-21）はエンジンと同じ仕組みで当てる（キーもエンジンと同じ）。
+            // スポット修正（DEV-21）はエンジンと同じ仕組みで当てる（キーは CPU 版の A1 と分ける）。
             Some(raw) => engine.retouched(
                 engine.a1_cache_key(source, settings, RenderQuality::Draft, request.long_edge),
+                genzo_pipeline::A1Origin::GpuDraft,
                 &self.draft_a1(engine, source, raw, settings, request.long_edge)?,
                 settings,
             )?,
