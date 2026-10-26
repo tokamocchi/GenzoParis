@@ -138,6 +138,7 @@ use crate::guide::{GUIDE_FORMAT_VERSION, GuideSpec, compute_guide, guide_size};
 use crate::image::{ImageTile, RgbImage, Roi, checked_len};
 use crate::profile::{ProfileResolver, ProfileResources};
 use crate::resample::DEFAULT_PREVIEW_LONG_EDGE;
+use crate::retouch::RetouchPlan;
 use crate::sensor::{A1Image, SensorOptions, SensorWarning, SourceImage, render_a1};
 use crate::stage::{Guide, Stage, StageContext, run_stage_cpu};
 use crate::version::ProcessVersion;
@@ -444,6 +445,17 @@ pub struct PreviewRender {
     pub non_finite_replaced: u64,
 }
 
+/// スポット修正（DEV-21）を当てた A1 を保持する件数。**仮置き**: スポットを足す・動かすたびにキーが変わるので、
+/// 直前の 2 件だけ持つ（長辺 2560px で 1 件 約 52MB）。
+pub const RETOUCHED_A1_CAPACITY: usize = 2;
+
+/// スポット修正を当てた A1 のキャッシュのキー。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetouchKey {
+    a1: CacheKey,
+    retouch: [u8; 32],
+}
+
 /// エンジン（段階 A0〜C の実行とキャッシュ）。スレッド間で共有できる（`&self` のメソッド）。
 #[derive(Debug)]
 pub struct Engine {
@@ -458,6 +470,7 @@ pub struct Engine {
 struct EngineState {
     a0: Lru<A0Key, SourceImage>,
     a1: Lru<CacheKey, A1Image>,
+    retouched: Lru<RetouchKey, A1Image>,
     guide: Lru<GuideKey, Guide>,
     previews_rendered: u64,
 }
@@ -469,6 +482,7 @@ impl Engine {
         let state = EngineState {
             a0: Lru::new(config.a0_capacity),
             a1: Lru::new(config.a1_capacity),
+            retouched: Lru::new(RETOUCHED_A1_CAPACITY),
             guide: Lru::new(config.guide_capacity),
             previews_rendered: 0,
         };
@@ -540,6 +554,7 @@ impl Engine {
         let mut s = self.lock();
         s.a0.clear();
         s.a1.clear();
+        s.retouched.clear();
         s.guide.clear();
     }
 
@@ -626,8 +641,56 @@ impl Engine {
         )
     }
 
-    /// 段階 A1: 長辺 `long_edge` px のプレビュー解像度の作業色空間の画像（B2。キャッシュする）。
+    /// 段階 A1: 長辺 `long_edge` px のプレビュー解像度の作業色空間の画像（B2。キャッシュする）に、スポット修正
+    /// （DEV-21。[`crate::retouch`]）を当てたもの。スポットがなければ [`sensor_a1`](Self::sensor_a1) と同じもの。
+    /// ガイド・プレビュー・スポイトはこの画像を使う。
     pub fn a1(
+        &self,
+        source: &PhotoSource,
+        settings: &DevelopSettings,
+        quality: RenderQuality,
+        long_edge: u32,
+    ) -> Result<Arc<A1Image>> {
+        let a1 = self.sensor_a1(source, settings, quality, long_edge)?;
+        let key = self.a1_cache_key(
+            source,
+            settings,
+            source.effective_quality(quality),
+            long_edge,
+        );
+        self.retouched(key, &a1, settings)
+    }
+
+    /// `a1`（キャッシュのキー `key` の、スポット修正を当てる前の A1）にスポット修正を当てたもの（キャッシュする。最新
+    /// [`RETOUCHED_A1_CAPACITY`] 件。キーは `key` と `DevelopSettings::retouch_hash`）。スポットがなければ `a1` を
+    /// そのまま返す。genzo-gpu の簡易処理の A1 も使う。
+    pub fn retouched(
+        &self,
+        key: CacheKey,
+        a1: &Arc<A1Image>,
+        settings: &DevelopSettings,
+    ) -> Result<Arc<A1Image>> {
+        let Some(retouch) = settings.retouch_hash() else {
+            return Ok(Arc::clone(a1));
+        };
+        let Some(plan) = RetouchPlan::new(settings, a1.frames())? else {
+            return Ok(Arc::clone(a1));
+        };
+        let key = RetouchKey { a1: key, retouch };
+        if let Some(r) = self.lock().retouched.lookup(&key) {
+            return Ok(r);
+        }
+        let image = plan.apply_to_image(&a1.image, a1.sensor_grid())?;
+        let out = Arc::new(A1Image {
+            image,
+            ..(**a1).clone()
+        });
+        self.lock().retouched.insert(key, Arc::clone(&out));
+        Ok(out)
+    }
+
+    /// 段階 A1 のセンサー処理の結果（スポット修正を当てる前。キャッシュする）。
+    pub fn sensor_a1(
         &self,
         source: &PhotoSource,
         settings: &DevelopSettings,

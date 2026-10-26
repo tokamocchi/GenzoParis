@@ -42,9 +42,10 @@ pub use develop::{
     FieldIssue, Geometry, GradingWheel, Grain, HighlightMethod, HighlightRecovery, HslAdjustment,
     HueBand, HueBands, IssueKind, LensCorrection, LocalAdjustment, LocalDelta, MAX_BRUSH_STROKES,
     MAX_COLOR_SAMPLES, MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_PROFILE_ID_CHARS,
-    MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS, MaskComponent, MaskMode, MaskShape, NoiseReduction,
-    ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings, RenderDeps, Sharpening,
-    ToneCurve, ToneParams, ValidationError, VignetteCenter, WbPreset, WhiteBalance,
+    MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS,
+    MAX_TOTAL_RETOUCH_POINTS, MaskComponent, MaskMode, MaskShape, NoiseReduction, ParametricCurve,
+    PostCropVignette, PresenceParams, ProfileSettings, RenderDeps, RetouchMode, RetouchSpot,
+    Sharpening, ToneCurve, ToneParams, ValidationError, VignetteCenter, WbPreset, WhiteBalance,
     is_valid_profile_id,
 };
 pub use export::{
