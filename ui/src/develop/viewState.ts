@@ -52,7 +52,7 @@ import {
   shapeKind,
 } from "./maskLogic";
 import { formatAngle, sameShown } from "./scales";
-import { customWb, withAutoTone } from "./settingsLogic";
+import { customWb, sameAutoToneValues, withAutoTone } from "./settingsLogic";
 import { clamp01 } from "./zoomMath";
 
 export type DevelopTool = "none" | "wb" | "crop" | "brush" | "mask_color";
@@ -246,7 +246,8 @@ export async function pickWhiteBalance(x: number, y: number): Promise<void> {
 
 /**
  * 自動補正（DEV-32）: 今の設定でコアに値を求め、設定に入れて送る（履歴に 1 件）。写真を開いていなければ何もしない。
- * 値がすべて今と同じなら送らず、その旨を知らせる。
+ * 値がすべて今と同じなら送らず、その旨を知らせる。求めている間に利用者が 6 つの値のどれかを変えたら、後からの操作を
+ * 優先して適用せず、その旨を知らせる（自動補正の結果で上書きして消さないため）。
  */
 export async function applyAutoTone(): Promise<void> {
   const d = developStore.get();
@@ -254,10 +255,16 @@ export async function applyAutoTone(): Promise<void> {
   if (id === null || !d.state) return;
   // 送信待ちの設定の後に求める（今の WB・切り抜きで決める）。
   await enqueue(async () => {
+    // コアが値を求める元の設定（列の順で、送信待ちの設定はすべて送った後）。
+    const base = developStore.get().settings;
     try {
       const auto = await core.autoTone(id);
       const cur = developStore.get();
       if (cur.variantId !== id || !cur.settings) return;
+      if (base && !sameAutoToneValues(base, cur.settings)) {
+        actions.notify("info", "自動補正: 求めている間に露光量・トーンが変わったため、適用しませんでした");
+        return;
+      }
       const next = withAutoTone(cur.settings, auto);
       if (next === cur.settings) {
         actions.notify("info", "自動補正: 今の値と同じです");

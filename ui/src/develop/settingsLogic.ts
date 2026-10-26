@@ -64,6 +64,18 @@ export function customWb(temperature_k: number, tint: number): WhiteBalance {
   return { custom: { temperature_k: t, tint: g } };
 }
 
+/** 自動補正（DEV-32）が変える 6 つの値（露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベル）が同じか。 */
+export function sameAutoToneValues(a: DevelopSettings, b: DevelopSettings): boolean {
+  return (
+    a.exposure_ev === b.exposure_ev &&
+    a.contrast === b.contrast &&
+    a.tone.highlights === b.tone.highlights &&
+    a.tone.shadows === b.tone.shadows &&
+    a.tone.whites === b.tone.whites &&
+    a.tone.blacks === b.tone.blacks
+  );
+}
+
 /**
  * 自動補正（DEV-32）の値を設定に入れる（露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルだけを置き換え、
  * ほかは変えない。値は設定の範囲に収める）。6 つがすべて今と同じなら同じオブジェクトを返す（送らないため）。

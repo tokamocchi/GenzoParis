@@ -85,6 +85,43 @@ describe("自動補正（DEV-32）", () => {
     expect(appStore.get().toasts.map((t) => t.message)).toContain("自動補正: 今の値と同じです");
   });
 
+  it("求めている間に変えた露光量・トーンは上書きしない（後からの操作を優先し、知らせる）", async () => {
+    mockAutoToneCommand(mock);
+    await openDevelopFor(1);
+    // auto_tone の応答を遅くして、その間に露光量を変える。
+    mock.delay = (c) => ((c.args?.command as { type: string })?.type === "auto_tone" ? 20 : 0);
+    mock.calls.length = 0;
+    const running = applyAutoTone();
+    await vi.waitFor(() => expect(mock.coreCommands()).toContain("auto_tone"));
+    applySettings({ ...settings, exposure_ev: 1.25 }, false);
+    await running;
+    const sent = () =>
+      mock.calls
+        .filter((c) => c.command === "core_execute")
+        .map((c) => c.args?.command as { type: string; settings?: DevelopSettings })
+        .filter((c) => c.type === "set_settings");
+    await vi.waitFor(() => expect(sent().length).toBe(1));
+    expect(sent()[0].settings?.exposure_ev).toBe(1.25);
+    expect(sent()[0].settings?.tone.shadows).toBe(settings.tone.shadows);
+    expect(developStore.get().settings?.exposure_ev).toBe(1.25);
+    expect(appStore.get().toasts.map((t) => t.message)).toContain(
+      "自動補正: 求めている間に露光量・トーンが変わったため、適用しませんでした",
+    );
+  });
+
+  it("求めている間にほかの項目を変えても、自動補正の値を入れ、その変更も保つ", async () => {
+    mockAutoToneCommand(mock);
+    await openDevelopFor(1);
+    mock.delay = (c) => ((c.args?.command as { type: string })?.type === "auto_tone" ? 20 : 0);
+    mock.calls.length = 0;
+    const running = applyAutoTone();
+    await vi.waitFor(() => expect(mock.coreCommands()).toContain("auto_tone"));
+    applySettings({ ...settings, presence: { ...settings.presence, clarity: 40 } }, false);
+    await running;
+    await vi.waitFor(() => expect(developStore.get().settings?.exposure_ev).toBe(MOCK_AUTO_TONE.exposure_ev));
+    expect(developStore.get().settings?.presence.clarity).toBe(40);
+  });
+
   it("写真を開いていなければ何もしない。コアの失敗は知らせる", async () => {
     const { sent } = mockAutoToneCommand(mock);
     await applyAutoTone();

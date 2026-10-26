@@ -23,6 +23,7 @@ import {
   effectiveWb,
   resetAll,
   wbFromMode,
+  sameAutoToneValues,
   wbMode,
   withAutoTone,
 } from "./settingsLogic";
@@ -276,6 +277,11 @@ describe("自動補正（DEV-32）の値を設定に入れる", () => {
     expect(next.tone).toEqual({ highlights: -40, shadows: 60, whites: 12, blacks: -30 });
     expect(next.presence).toBe(base.presence);
     expect(next.white_balance).toBe("as_shot");
+  });
+  it("6 つの値が同じかを比べる（ほかの項目は見ない）", () => {
+    expect(sameAutoToneValues(base, { ...base, presence: { texture: 0, clarity: 99, dehaze: 0 } } as DevelopSettings)).toBe(true);
+    expect(sameAutoToneValues(base, { ...base, exposure_ev: 0.51 })).toBe(false);
+    expect(sameAutoToneValues(base, { ...base, tone: { ...base.tone, blacks: -6 } })).toBe(false);
   });
   it("今と同じ値なら同じオブジェクト（送らない）。範囲の外の値は範囲に収め、整数にする", () => {
     expect(
