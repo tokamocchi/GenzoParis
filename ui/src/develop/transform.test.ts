@@ -21,6 +21,7 @@ import {
   sameTransform,
   transformControls,
   transformIsIdentity,
+  withUprightTransform,
 } from "./settingsLogic";
 import { applyUpright, cancelCrop, changeTransform, startCrop } from "./viewState";
 
@@ -130,6 +131,35 @@ describe("自動の遠近補正（Upright）の送信", () => {
     expect(s?.transform?.vertical).toBe(-22.5);
     expect(s?.transform?.scale).toBe(100);
     expect(appStore.get().toasts.some((t) => t.message.includes("自動の補正（垂直）"))).toBe(true);
+  });
+
+  it("縦横比・拡大縮小・ずらしは今のまま、水平では変形を変えない", () => {
+    const cur = { ...defaultTransform(), scale: 110, offset_x: 12, vertical: 5 };
+    const suggested = { ...defaultTransform(), vertical: -18, horizontal: 4 };
+    expect(withUprightTransform(cur, "vertical", suggested)).toEqual({ ...cur, vertical: -18, horizontal: 4 });
+    expect(withUprightTransform(cur, "level", suggested)).toEqual(cur);
+    expect(withUprightTransform(undefined, "full", suggested)).toEqual(suggested);
+  });
+
+  it("求めている間に変形が変わったら適用しない（後からの操作を優先する）", async () => {
+    await openDevelopFor(5);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    const base = mock.responses.get("core_execute") as (a?: Record<string, unknown>) => unknown;
+    mock.responses.set("core_execute", async (args?: Record<string, unknown>) => {
+      const c = args?.command as { type: string };
+      if (c.type === "analyze_upright") await gate;
+      return base(args);
+    });
+    const running = applyUpright("vertical");
+    await new Promise((r) => setTimeout(r, 0));
+    changeTransform({ scale: 120 }, false);
+    release();
+    await running;
+    const s = developStore.get().settings;
+    expect(s?.transform?.scale).toBe(120);
+    expect(s?.transform?.vertical).toBe(0);
+    expect(appStore.get().toasts.some((t) => t.message.includes("求めている間に角度・変形が変わった"))).toBe(true);
   });
 
   it("直線が見つからなければ知らせ、設定は変えない", async () => {

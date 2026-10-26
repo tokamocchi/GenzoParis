@@ -263,6 +263,20 @@ export function transformControls(settings: DevelopSettings, source: SourceInfo 
   };
 }
 
+/**
+ * 自動の遠近補正の結果を今の変形に入れる（垂直・完全なら垂直・水平だけを置き換え、縦横比・拡大縮小・ずらしは今のまま。
+ * 水平（角度だけ）では変えない。genzo-cli の `apply_upright` と同じ）。
+ */
+export function withUprightTransform(
+  current: Partial<Transform> | null | undefined,
+  mode: UprightMode,
+  suggested: Transform,
+): Transform {
+  const t = fullTransform(current);
+  if (mode === "level") return t;
+  return { ...t, vertical: suggested.vertical, horizontal: suggested.horizontal };
+}
+
 /** 自動の遠近補正の種類の名前（ボタンと知らせ）。 */
 export const UPRIGHT_LABELS: Record<UprightMode, string> = {
   level: "水平",

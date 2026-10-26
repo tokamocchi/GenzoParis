@@ -69,6 +69,7 @@ import {
   sameTransform,
   transformIsIdentity,
   withAutoTone,
+  withUprightTransform,
 } from "./settingsLogic";
 import { clamp01 } from "./zoomMath";
 
@@ -560,27 +561,46 @@ export function commitTransform(): void {
 }
 
 /**
- * 自動の遠近補正（Upright 相当）: コアに直線を調べてもらい（analyze_upright）、求めた角度補正と垂直・水平を設定に
- * 入れて送る（履歴に 1 件。元に戻せる）。直線が見つからなければ知らせる。切り抜きの編集中は枠を制限し直す。
+ * 自動の遠近補正（Upright 相当）: コアに直線を調べてもらい（analyze_upright）、求めた角度補正と、垂直・完全なら
+ * 垂直・水平を設定に入れて送る（履歴に 1 件。元に戻せる。縦横比・拡大縮小・ずらしは変えない）。直線が見つからなければ
+ * 知らせる。切り抜きの編集中は枠を制限し直す。
+ *
+ * 送信待ちの設定を送った後に求める（コアが今の設定のレンズ補正で歪曲を補正した画像を調べるため）。求めている間に
+ * 利用者が角度や変形を変えたら、後からの操作を優先して適用せず、その旨を知らせる（自動補正（DEV-32）と同じ扱い）。
  */
 export async function applyUpright(mode: UprightMode): Promise<void> {
   const d = developStore.get();
   if (!d.state || !d.settings || d.variantId === null) return;
   const id = d.variantId;
-  try {
-    const s = await core.analyzeUpright(id, mode);
-    const latest = developStore.get();
-    if (latest.variantId !== id || !latest.settings || !latest.state) return;
-    const transform = fullTransform(s.transform);
-    applySettings(
-      { ...latest.settings, geometry: { ...latest.settings.geometry, angle_deg: s.angle_deg }, transform },
-      false,
-    );
-    actions.notify("info", describeUpright(mode, s.angle_deg, transform, { vertical: s.vertical_lines, horizontal: s.horizontal_lines }));
-    if (viewStore.get().crop) void constrainDraft();
-  } catch (e) {
-    actions.reportError(e, "自動で補正できません");
-  }
+  await enqueue(async () => {
+    // コアが調べる元の設定（列の順で、送信待ちの設定はすべて送った後）。
+    const base = developStore.get().settings;
+    try {
+      const s = await core.analyzeUpright(id, mode);
+      const latest = developStore.get();
+      if (latest.variantId !== id || !latest.settings || !latest.state) return;
+      if (
+        base &&
+        (base.geometry.angle_deg !== latest.settings.geometry.angle_deg ||
+          !sameTransform(fullTransform(base.transform), fullTransform(latest.settings.transform)))
+      ) {
+        actions.notify("info", "自動の補正: 求めている間に角度・変形が変わったため、適用しませんでした");
+        return;
+      }
+      const transform = withUprightTransform(latest.settings.transform, mode, s.transform);
+      applySettings(
+        { ...latest.settings, geometry: { ...latest.settings.geometry, angle_deg: s.angle_deg }, transform },
+        false,
+      );
+      actions.notify(
+        "info",
+        describeUpright(mode, s.angle_deg, transform, { vertical: s.vertical_lines, horizontal: s.horizontal_lines }),
+      );
+      if (viewStore.get().crop) void constrainDraft();
+    } catch (e) {
+      actions.reportError(e, "自動で補正できません");
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
