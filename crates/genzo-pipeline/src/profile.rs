@@ -17,6 +17,14 @@
 //! - 見つからない（ライブラリから除いた・別の PC で開いた）ときは、標準の色（ルックなし）で描き、警告する
 //!   （[`SensorWarning::CameraProfileMissing`]・[`SensorWarning::LookMissing`]）。
 //! - 処理バージョン 1 の写真では引かない（値は無視して知らせる。`finish::reserved`）。
+//!
+//! # AI マスクのラスター（DEV-20）
+//!
+//! AI マスク（genzo-model の `MaskShape::Ai`）のラスターも同じ仕組みで引く（[`ProfileResolver::ai_mask`]。genzo-api は
+//! カタログの `ai_mask` の表から引く）。設定が指すラスターの参照（ID と内容の SHA-256）ごとに
+//! [`ProfileResources::ai_masks`] に入れ、段階 C のローカル補正（[`crate::local`]）が G 座標のラスターに写して使う。
+//! 見つからなければ重み 0 として描き、警告する（[`SensorWarning::AiMaskMissing`]）。参照の SHA-256 は設定の JSON
+//! （段階 C のハッシュ）に入るので、`render_deps` には足さない。
 
 use std::collections::HashMap;
 use std::fmt;
@@ -57,7 +65,39 @@ pub fn cube_ref_id(id: &str) -> String {
     format!("cube:{id}")
 }
 
-/// 現像設定の ID からプロファイル・ルックを引く（genzo-api のプロファイルのライブラリなどが実装する）。
+/// AI マスクのラスター（DEV-20。genzo-model の `MaskShape::Ai` が参照する、推論で作った重み）。
+///
+/// 値は 0〜255（0〜1 の重み）、行優先。G 座標のどの範囲を覆うかは設定の側（`bounds`）が持つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiMaskRaster {
+    /// 幅（画素）。
+    pub width: u32,
+    /// 高さ（画素）。
+    pub height: u32,
+    /// 値（`width × height`）。
+    pub values: Vec<u8>,
+}
+
+impl AiMaskRaster {
+    /// 作る（`values` の長さが `width × height` でなければ `None`）。
+    pub fn new(width: u32, height: u32, values: Vec<u8>) -> Option<Self> {
+        (width > 0 && height > 0 && values.len() == width as usize * height as usize).then_some(
+            Self {
+                width,
+                height,
+                values,
+            },
+        )
+    }
+
+    /// 内容の SHA-256（小文字の 16 進数。genzo-model の `DataRef::sha256` に入れる値）。
+    pub fn sha256_hex(&self) -> String {
+        genzo_model::sha256_hex(&self.values)
+    }
+}
+
+/// 現像設定の ID からプロファイル・ルック（と AI マスクのラスター）を引く（genzo-api のプロファイルのライブラリ・
+/// カタログなどが実装する）。
 ///
 /// 呼び出しは描画のたび（キャッシュのキーを求めるたび）なので、解析したものは実装の側で持っておくこと。
 pub trait ProfileResolver: Send + Sync + fmt::Debug {
@@ -65,6 +105,12 @@ pub trait ProfileResolver: Send + Sync + fmt::Debug {
     fn camera_profile(&self, id: &str) -> Option<Resolved<DcpProfile>>;
     /// ID `id` のルック（3D LUT）。ない・読めなければ `None`。
     fn look(&self, id: &str) -> Option<Resolved<CubeLut>>;
+    /// 参照 `data_ref`（ID は `ai-mask:<種類>`、SHA-256 は内容）の AI マスクのラスター（DEV-20。モジュールの doc）。
+    /// ない・読めなければ `None`（既定）。
+    fn ai_mask(&self, data_ref: &DataRef) -> Option<Arc<AiMaskRaster>> {
+        let _ = data_ref;
+        None
+    }
 }
 
 /// メモリの中のプロファイル・ルック（CLI のファイル・テスト用の [`ProfileResolver`]）。
@@ -72,6 +118,7 @@ pub trait ProfileResolver: Send + Sync + fmt::Debug {
 pub struct MemoryProfiles {
     cameras: HashMap<String, Resolved<DcpProfile>>,
     looks: HashMap<String, Resolved<CubeLut>>,
+    ai_masks: HashMap<String, Arc<AiMaskRaster>>,
 }
 
 impl MemoryProfiles {
@@ -103,12 +150,24 @@ impl MemoryProfiles {
     }
 }
 
+impl MemoryProfiles {
+    /// AI マスクのラスターを加える（参照は内容の SHA-256 で引く。ID は見ない）。SHA-256 を返す。
+    pub fn insert_ai_mask(&mut self, raster: AiMaskRaster) -> String {
+        let sha = raster.sha256_hex();
+        self.ai_masks.insert(sha.clone(), Arc::new(raster));
+        sha
+    }
+}
+
 impl ProfileResolver for MemoryProfiles {
     fn camera_profile(&self, id: &str) -> Option<Resolved<DcpProfile>> {
         self.cameras.get(id).cloned()
     }
     fn look(&self, id: &str) -> Option<Resolved<CubeLut>> {
         self.looks.get(id).cloned()
+    }
+    fn ai_mask(&self, data_ref: &DataRef) -> Option<Arc<AiMaskRaster>> {
+        self.ai_masks.get(&data_ref.sha256).cloned()
     }
 }
 
@@ -123,12 +182,34 @@ pub struct ProfileResources {
     pub camera_missing: bool,
     /// 設定がルックを指しているのに、引けなかった。
     pub look_missing: bool,
+    /// AI マスクのラスター（設定のマスクが指す参照の SHA-256 → ラスター。引けたものだけ。DEV-20）。
+    pub ai_masks: HashMap<String, Arc<AiMaskRaster>>,
+    /// 設定のマスクが指しているのに、引けなかった AI マスクのラスターの参照の SHA-256（重複なし。設定の順）。
+    pub ai_masks_missing: Vec<String>,
 }
 
 impl ProfileResources {
     /// 設定の ID から引く（処理バージョン 2 から。版 1・未知の版・解決する仕組みがないときは何も引かない。
-    /// 仕組みがないときに設定が指していれば「見つからない」）。
+    /// 仕組みがないときに設定が指していれば「見つからない」）。AI マスクのラスターも引く（描画のとき）。
     pub fn resolve(settings: &DevelopSettings, resolver: Option<&dyn ProfileResolver>) -> Self {
+        Self::resolve_with(settings, resolver, true)
+    }
+
+    /// カメラプロファイル・ルックだけを引く（AI マスクのラスターは引かない）。キャッシュのキー・記録用の設定
+    /// （[`crate::Engine::effective_settings`]）に使う: ラスターの参照は設定の JSON に入っていて `render_deps` には
+    /// 入れないので、引く必要がなく、引く側（genzo-api のカタログ）のロックの中から呼ばれても困らない。
+    pub fn resolve_profiles_only(
+        settings: &DevelopSettings,
+        resolver: Option<&dyn ProfileResolver>,
+    ) -> Self {
+        Self::resolve_with(settings, resolver, false)
+    }
+
+    fn resolve_with(
+        settings: &DevelopSettings,
+        resolver: Option<&dyn ProfileResolver>,
+        with_ai_masks: bool,
+    ) -> Self {
         let Ok(version) = ProcessVersion::from_u32(settings.process_version) else {
             return Self::default();
         };
@@ -147,7 +228,27 @@ impl ProfileResources {
             out.look = resolver.and_then(|r| r.look(id));
             out.look_missing = out.look.is_none();
         }
+        if !with_ai_masks {
+            return out;
+        }
+        for data_ref in s.masks.iter().flat_map(|m| m.ai_mask_refs()) {
+            let sha = &data_ref.sha256;
+            if out.ai_masks.contains_key(sha) || out.ai_masks_missing.contains(sha) {
+                continue;
+            }
+            match resolver.and_then(|r| r.ai_mask(data_ref)) {
+                Some(raster) => {
+                    out.ai_masks.insert(sha.clone(), raster);
+                }
+                None => out.ai_masks_missing.push(sha.clone()),
+            }
+        }
         out
+    }
+
+    /// 参照 `data_ref` の AI マスクのラスター（引けていれば）。
+    pub fn ai_mask(&self, data_ref: &DataRef) -> Option<&Arc<AiMaskRaster>> {
+        self.ai_masks.get(&data_ref.sha256)
     }
 
     /// 設定の `render_deps.profile`・`render_deps.look` を、引いたものの参照にした設定（引けなかった・使わないなら
@@ -159,13 +260,17 @@ impl ProfileResources {
         s
     }
 
-    /// 段階 C の警告（ルックが見つからない）。カメラプロファイルの警告はステージ 8（[`crate::SensorPlan::new`]）が出す。
+    /// 段階 C の警告（ルック・AI マスクのラスターが見つからない）。カメラプロファイルの警告はステージ 8
+    /// （[`crate::SensorPlan::new`]）が出す。
     pub fn stage_c_warnings(&self) -> Vec<SensorWarning> {
+        let mut out = Vec::new();
         if self.look_missing {
-            vec![SensorWarning::LookMissing]
-        } else {
-            Vec::new()
+            out.push(SensorWarning::LookMissing);
         }
+        if !self.ai_masks_missing.is_empty() {
+            out.push(SensorWarning::AiMaskMissing);
+        }
+        out
     }
 }
 

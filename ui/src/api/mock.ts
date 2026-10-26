@@ -4,6 +4,9 @@ import type { Bridge, Unlisten } from "./bridge";
 import { ApiError } from "./errors";
 import { HUE_BANDS } from "./types";
 import type {
+  AiMaskKind,
+  AiMaskResult,
+  AiMaskStatus,
   ColorParams,
   AppSettings,
   AppStatus,
@@ -1462,6 +1465,8 @@ export function mockProfileCommands(
 
 /** 色域のスポイトで返す色の見本（OKLab。やや赤みの明るい色）。 */
 export const MOCK_MASK_LAB: [number, number, number] = [0.72, 0.08, 0.03];
+/** モックの AI マスクのラスターの SHA-256（内容は持たない）。 */
+export const MOCK_AI_MASK_SHA256 = "ab".repeat(32);
 
 /**
  * ローカル補正のコマンドの応答を足す: mask_color_at（点の割合を G 座標にした位置と MOCK_MASK_LAB。`gBounds` は
@@ -1470,15 +1475,64 @@ export const MOCK_MASK_LAB: [number, number, number] = [0.72, 0.08, 0.03];
  */
 export function mockMaskCommands(
   b: MockBridge,
-  opts: { gBounds?: [number, number, number, number]; width?: number; height?: number; masks?: () => number } = {},
+  opts: {
+    gBounds?: [number, number, number, number];
+    width?: number;
+    height?: number;
+    masks?: () => number;
+    /** AI マスク（DEV-20）の使える種類（省略時は 3 種類とも。空なら使えない）。 */
+    aiKinds?: AiMaskKind[];
+  } = {},
 ): { sent: Record<string, unknown>[] } {
   const sent: Record<string, unknown>[] = [];
   const gb = opts.gBounds ?? [0, 0, 1, 0.75];
   const width = opts.width ?? 4;
   const height = opts.height ?? 3;
+  const aiKinds = opts.aiKinds ?? ["subject", "sky", "person"];
   const base = b.responses.get("core_execute");
   b.responses.set("core_execute", (args?: Record<string, unknown>) => {
     const c = args?.command as Record<string, unknown> & { type: string };
+    if (c.type === "ai_mask_status") {
+      sent.push(c);
+      const status: AiMaskStatus = {
+        available: aiKinds.length > 0,
+        kinds: aiKinds,
+        models: aiKinds.map(() => "mock-model"),
+        backend: aiKinds.length > 0 ? "mock" : "",
+        problems: aiKinds.length > 0 ? [] : ["使えるモデルがありません（モック）"],
+        models_dir: "/mock/models",
+        onnxruntime: null,
+        rasters: 0,
+        raster_bytes: 0,
+      };
+      return { type: "ai_mask_status", ...status };
+    }
+    if (c.type === "compute_ai_mask") {
+      sent.push(c);
+      const kind = c.kind as AiMaskKind;
+      if (!aiKinds.includes(kind)) return new Error(`${kind} の AI マスクに使えるモデルがありません`);
+      const result: AiMaskResult = {
+        variant_id: c.variant_id as number,
+        kind,
+        shape: {
+          ai: {
+            kind,
+            model: "mock-model",
+            mask: { id: `ai-mask:${kind}`, sha256: MOCK_AI_MASK_SHA256 },
+            width: 64,
+            height: 48,
+            bounds: gb,
+          },
+        },
+        model: "mock-model",
+        sha256: MOCK_AI_MASK_SHA256,
+        width: 64,
+        height: 48,
+        render_ms: 1,
+        inference_ms: 2,
+      };
+      return { type: "ai_mask", ...result };
+    }
     if (c.type === "mask_color_at") {
       sent.push(c);
       const x = c.x as number;

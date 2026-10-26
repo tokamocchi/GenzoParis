@@ -110,8 +110,15 @@ impl Engine {
             )));
         };
         let r = self.mask_reference(source, settings, long_edge, uncropped)?;
-        let weights =
-            crate::local::mask_weights(mask, &r.geometry, &r.tile, s.exposure_ev, r.input_kind);
+        let profiles = self.resolve_profiles(settings);
+        let weights = crate::local::mask_weights(
+            mask,
+            &r.geometry,
+            &r.tile,
+            s.exposure_ev,
+            r.input_kind,
+            Some(&profiles),
+        );
         let (width, height) = r.geometry.output_size();
         Ok(MaskOverlay {
             width,

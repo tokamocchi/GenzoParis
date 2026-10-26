@@ -63,6 +63,11 @@ pub(crate) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// バイト列の SHA-256 の小文字の 16 進数（64 文字。[`DataRef::sha256`] に入れる形。AI マスクのラスターなど）。
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(sha256(&[bytes]))
+}
+
 /// 構造体を JSON にする（設定の型は必ず JSON にできる）。
 fn to_json_bytes<T: Serialize>(value: &T) -> Vec<u8> {
     serde_json::to_vec(value).expect("現像設定の型は必ず JSON にできる")

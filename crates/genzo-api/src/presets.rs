@@ -381,6 +381,15 @@ fn presets_dir_from(get: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     platform_data_dir(&get).map(|d| d.join(APP_IDENTIFIER).join(PRESETS_DIR))
 }
 
+/// OS のアプリのデータのフォルダの中の `name`（`<データのフォルダ>/<APP_IDENTIFIER>/<name>`。プリセット・AI マスクの
+/// モデルで同じ決め方）。分からなければ `None`。
+pub(crate) fn app_data_subdir(
+    get: &impl Fn(&str) -> Option<OsString>,
+    name: &str,
+) -> Option<PathBuf> {
+    platform_data_dir(get).map(|d| d.join(APP_IDENTIFIER).join(name))
+}
+
 /// OS のアプリのデータのフォルダ（Tauri の `data_dir` と同じ場所。識別子の前まで）。
 #[cfg(windows)]
 fn platform_data_dir(get: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {

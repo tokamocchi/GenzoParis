@@ -11,7 +11,7 @@
 
 import { type ReactNode, useEffect, useState } from "react";
 
-import type { DevelopSettings, LocalDelta, MaskComponent, MaskMode } from "../api/types";
+import type { AiMaskKind, DevelopSettings, LocalDelta, MaskComponent, MaskMode } from "../api/types";
 import { MASK_LIMITS, RANGES } from "../api/types";
 import { Section } from "../components/Section";
 import { Slider } from "../components/Slider";
@@ -19,6 +19,8 @@ import { comboLabel } from "../keyboard";
 import { applySettings, developStore, endDrag, useDevelop } from "../state/develop";
 import { shallowEqual } from "../state/store";
 import {
+  AI_KIND_LABELS,
+  AI_KINDS,
   DEFAULT_BRUSH,
   MODE_CHOICES,
   SHAPE_LABELS,
@@ -45,6 +47,7 @@ import {
   removeMask,
   sanitizeMaskName,
   shapeKind,
+  shapeLabel,
   undoStroke,
   withComponent,
   withDelta,
@@ -54,10 +57,13 @@ import {
 } from "./maskLogic";
 import { formatEv, formatSigned, parseNumber, sameShown } from "./scales";
 import {
+  type AiMaskTarget,
   addMaskWith,
   applyAddedComponent,
+  computeAiMask,
   currentMask,
   overlayShown,
+  refreshAiStatus,
   selectComponent,
   selectMask,
   setBrushOptions,
@@ -154,9 +160,23 @@ function DeltaSliders(props: { index: number; delta: LocalDelta; disabled: boole
   );
 }
 
-/** 部品の追加のボタン（`onAdd` に種類を渡す）。 */
-function AddButtons(props: { disabled: boolean; onAdd: (kind: ShapeKind) => void; pickActive?: boolean }) {
+/** 部品の追加のボタン（`onAdd` に種類を渡す）。AI マスク（DEV-20）は種類ごとのボタンで `onAddAi`。 */
+function AddButtons(props: {
+  disabled: boolean;
+  onAdd: (kind: ShapeKind) => void;
+  onAddAi: (kind: AiMaskKind) => void;
+  pickActive?: boolean;
+}) {
   const kinds: ShapeKind[] = ["brush", "linear", "radial", "color_range", "luminance_range"];
+  const ai = useDevelopView((s) => s.aiStatus);
+  const aiBusy = useDevelopView((s) => s.aiBusy);
+  const aiKinds = ai?.kinds ?? [];
+  const aiTitle = (k: AiMaskKind) =>
+    aiKinds.includes(k)
+      ? `${AI_KIND_LABELS[k]}を自動で選びます（AI マスク。計算に数秒かかります）`
+      : ai === null
+        ? "AI マスクの状態を確かめています"
+        : `AI マスクは使えません: ${ai.problems.join(" / ") || "モデルがありません"}`;
   return (
     <div className="dp-row dp-wrap">
       {kinds.map((k) => (
@@ -175,6 +195,20 @@ function AddButtons(props: { disabled: boolean; onAdd: (kind: ShapeKind) => void
           ＋ {SHAPE_LABELS[k]}
         </button>
       ))}
+      {AI_KINDS.map((k) => (
+        <button
+          key={`ai-${k}`}
+          type="button"
+          className="btn small"
+          disabled={props.disabled || aiBusy || !aiKinds.includes(k)}
+          title={aiTitle(k)}
+          aria-label={`AI ${AI_KIND_LABELS[k]}`}
+          onClick={() => props.onAddAi(k)}
+        >
+          ＋ AI {AI_KIND_LABELS[k]}
+        </button>
+      ))}
+      {aiBusy && <span className="dp-note">AI マスクを計算しています…</span>}
     </div>
   );
 }
@@ -185,6 +219,8 @@ function ComponentEditor(props: { index: number; j: number; component: MaskCompo
   const tool = useDevelopView((s) => s.tool);
   const brush = useDevelopView((s) => s.brush);
   const pickTarget = useDevelopView((s) => s.pickTarget);
+  const aiBusy = useDevelopView((s) => s.aiBusy);
+  const aiKinds = useDevelopView((s) => s.aiStatus?.kinds ?? [], shallowEqual);
   const shape = component.shape;
   if ("linear" in shape) {
     return (
@@ -394,6 +430,29 @@ function ComponentEditor(props: { index: number; j: number; component: MaskCompo
       </>
     );
   }
+  if ("ai" in shape) {
+    const a = shape.ai;
+    return (
+      <>
+        <div className="dp-note">
+          AI が選んだ{AI_KIND_LABELS[a.kind]}の範囲（モデル {a.model || "（不明）"}、{a.width} × {a.height}）。回転や歪曲補正を
+          変えたら作り直してください。
+        </div>
+        <div className="dp-row">
+          <span className="grow" />
+          <button
+            type="button"
+            className="btn small"
+            disabled={!editable || aiBusy || !aiKinds.includes(a.kind)}
+            title="今の写真でもう一度計算して、この部品の範囲を置き換えます"
+            onClick={() => void computeAiMask(a.kind, { kind: "replace", mask: index, component: j })}
+          >
+            作り直す
+          </button>
+        </div>
+      </>
+    );
+  }
   const l = shape.luminance_range;
   const lum = (key: "min" | "max" | "smoothness", label: string, title: string) => (
     <Slider
@@ -560,8 +619,12 @@ export function MaskSection(props: { settings: DevelopSettings; disabled: boolea
       case "luminance_range":
         addMaskWith(s, newMask(newLuminanceShape()), false);
         return;
+      case "ai":
+        // AI は種類ごとのボタン（addAi）で足す。
+        return;
     }
   };
+  const addAi = (kind: AiMaskKind, target: AiMaskTarget) => void computeAiMask(kind, target);
   const addNewComponent = (kind: ShapeKind) => {
     const s = developStore.get().settings;
     if (!s || !sel) return;
@@ -570,6 +633,7 @@ export function MaskSection(props: { settings: DevelopSettings; disabled: boolea
       startMaskColorPick({ kind: "new_component", mask: sel.index });
       return;
     }
+    if (kind === "ai") return;
     const shape =
       kind === "brush"
         ? { brush: { strokes: [] } }
@@ -582,14 +646,26 @@ export function MaskSection(props: { settings: DevelopSettings; disabled: boolea
     if (next !== s) applyAddedComponent(next, sel.index, kind === "brush");
   };
 
+  // AI マスクの推論の仕組みの状態（写真を開くたびではなく、節を初めて描いたときに 1 度聞く。計算すると ai_mask_status の
+  // 問題が変わりうるが、ボタンの可否は変わらない）。
+  const aiStatus = useDevelopView((s) => s.aiStatus);
+  useEffect(() => {
+    if (aiStatus === null && !disabled) void refreshAiStatus();
+  }, [aiStatus, disabled]);
   return (
     <Section id="develop.masks" title={masks.length > 0 ? `マスク（${masks.length}）` : "マスク"} defaultOpen={false}>
       {c.needsUpgrade && !disabled && props.upgradeNote}
       <div className="dp-sub">マスクを足す</div>
-      <AddButtons disabled={!c.canAdd} onAdd={addNewMask} pickActive={pickingNewMask} />
+      <AddButtons
+        disabled={!c.canAdd}
+        onAdd={addNewMask}
+        onAddAi={(k) => addAi(k, { kind: "new_mask" })}
+        pickActive={pickingNewMask}
+      />
       {masks.length === 0 ? (
         <div className="dp-note">
-          マスクを足すと、写真の一部だけを調整できます（ブラシで塗る・グラデーション・色や明るさの範囲）。
+          マスクを足すと、写真の一部だけを調整できます（ブラシで塗る・グラデーション・色や明るさの範囲・AI による被写体・空・
+          人物の自動の選択）。
         </div>
       ) : (
         <ul className="dp-mask-list" aria-label="マスク">
@@ -663,11 +739,12 @@ export function MaskSection(props: { settings: DevelopSettings; disabled: boolea
           <AddButtons
             disabled={!editable || sel.mask.components.length >= MASK_LIMITS.components}
             onAdd={addNewComponent}
+            onAddAi={(k) => addAi(k, { kind: "new_component", mask: sel.index })}
             pickActive={pickingNewComponent}
           />
           {sel.component !== null && (
             <>
-              <div className="dp-sub">{SHAPE_LABELS[shapeKind(sel.mask.components[sel.component].shape)]}</div>
+              <div className="dp-sub">{shapeLabel(sel.mask.components[sel.component].shape)}</div>
               <ComponentEditor
                 index={sel.index}
                 j={sel.component}

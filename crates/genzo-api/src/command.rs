@@ -611,6 +611,19 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         uncropped: Option<bool>,
     },
+    /// AI マスク（DEV-20）: 現像中の写真の種類 `kind`（被写体・空・人物）の選択範囲を推論して保存し、設定に入れる形を
+    /// 返す（適用はしない。[`crate::Core::compute_ai_mask`]）。→ [`Response::AiMask`]
+    ComputeAiMask {
+        /// 現像中の写真。
+        variant_id: VariantId,
+        /// 種類。
+        kind: genzo_model::AiMaskKind,
+    },
+    /// AI マスクの推論の仕組みの状態（[`crate::Core::ai_mask_status`]）。→ [`Response::AiMaskStatus`]
+    AiMaskStatus,
+    /// 参照のない AI マスクのラスターをカタログから消す（[`crate::Core::collect_ai_masks`]）。
+    /// → [`Response::AiMasksCollected`]
+    CollectAiMasks,
     /// マスクの重ねて表示（DEV-18）の画像の情報（[`crate::Core::mask_overlay`]。画素は UI ではアプリのバイナリの
     /// 応答で取る）。→ [`Response::MaskOverlay`]
     MaskOverlay {
@@ -1310,6 +1323,12 @@ pub enum Response {
     MaskColor(PickedMaskColor),
     /// マスクの重ねて表示の画像の情報。
     MaskOverlay(MaskOverlayInfo),
+    /// AI マスクの計算の結果（設定に入れる形）。
+    AiMask(crate::types::AiMaskResult),
+    /// AI マスクの推論の仕組みの状態。
+    AiMaskStatus(crate::types::AiMaskStatusInfo),
+    /// 参照のない AI マスクのラスターの回収の結果。
+    AiMasksCollected(crate::types::AiMaskCollectReport),
     /// 切り抜き。
     Crop {
         /// 切り抜き（G の外接矩形の各軸の割合）。
@@ -1770,6 +1789,11 @@ impl Core {
                 index,
                 uncropped,
             } => R::MaskOverlay(self.mask_overlay(variant_id, index, uncropped)?.info),
+            C::ComputeAiMask { variant_id, kind } => {
+                R::AiMask(self.compute_ai_mask(variant_id, kind)?)
+            }
+            C::AiMaskStatus => R::AiMaskStatus(self.ai_mask_status()?),
+            C::CollectAiMasks => R::AiMasksCollected(self.collect_ai_masks()?),
             C::SetDevelopView { uncropped } => {
                 self.set_develop_view(uncropped)?;
                 R::Ok

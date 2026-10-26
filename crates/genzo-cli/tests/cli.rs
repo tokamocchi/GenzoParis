@@ -5687,3 +5687,176 @@ fn profile_import_list_develop_and_render_options() {
     assert_eq!(r.code, 2, "{}", r.stderr);
     assert_eq!(hashes(&src), before_src);
 }
+
+/// AI マスク（DEV-20）: 推論の仕組みがないときの状態（終了コード 3）と `--ai` のエラー（終了コード 1）。
+#[test]
+fn ai_masks_report_missing_runtime() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (90, 60), 4, None, false);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.jpg").to_string();
+    let models = env.path("models-empty");
+    let models_s = models.to_string_lossy().into_owned();
+    let no_lib = env.path("no-onnxruntime.so");
+    let no_lib_s = no_lib.to_string_lossy().into_owned();
+    let r = env.run(&[
+        "ai",
+        "status",
+        "--models-dir",
+        &models_s,
+        "--onnxruntime",
+        &no_lib_s,
+        "--json",
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["available"], false);
+    assert_eq!(v["rasters"], 0);
+    assert!(!v["problems"].as_array().unwrap().is_empty());
+    assert_eq!(v["models_dir"], json!(models_s));
+    let r = env.run(&[
+        "develop",
+        "mask",
+        "add",
+        &a,
+        "--ai",
+        "sky",
+        "--models-dir",
+        &models_s,
+        "--onnxruntime",
+        &no_lib_s,
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(r.stderr.contains("AI マスク"), "{}", r.stderr);
+    assert_eq!(
+        env.json(&["develop", "mask", "list", &a])["masks"],
+        json!([])
+    );
+    // 形を 2 つ指定するのは使い方の誤り（終了コード 2）。
+    let r = env.run(&[
+        "develop",
+        "mask",
+        "add",
+        &a,
+        "--ai",
+        "sky",
+        "--luminance",
+        "0,50",
+    ]);
+    assert_eq!(r.code, 2);
+    let r = env.run(&["ai", "collect", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.json()["removed"], 0);
+}
+
+/// AI マスク（DEV-20）を ONNX Runtime で実際に計算する（環境変数 `GENZO_ORT_DYLIB` で共有ライブラリを指定したとき
+/// だけ。モデルは genzo-ml のテスト用の小さなもの: チャンネルの平均のしきい値）。
+#[test]
+fn ai_masks_are_computed_with_onnx_runtime() {
+    let Some(lib) = std::env::var_os("GENZO_ORT_DYLIB").filter(|v| !v.is_empty()) else {
+        eprintln!("GENZO_ORT_DYLIB がないので、ONNX Runtime の CLI のテストをスキップする");
+        return;
+    };
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../genzo-ml/tests/fixtures/mean_threshold.onnx");
+    let env = Env::new();
+    // 左半分が暗く、右半分が明るい写真。
+    let img = image::RgbImage::from_fn(96, 64, |x, _| {
+        let v = if x < 48 { 20 } else { 230 };
+        image::Rgb([v, v, v])
+    });
+    img.save(env.photos.join("A.jpg")).unwrap();
+    let models = env.path("models");
+    std::fs::create_dir_all(&models).unwrap();
+    std::fs::copy(&fixture, models.join("mean_threshold.onnx")).unwrap();
+    std::fs::write(
+        models.join("mean-threshold.genzo-model.json"),
+        r#"{"id": "mean-threshold", "name": "平均のしきい値", "file": "mean_threshold.onnx", "license": "CC0-1.0",
+            "input": {"name": "input", "width": 32, "height": 32}, "output": {"name": "output", "activation": "none"},
+            "kinds": {"subject": {"channel": 0}, "sky": {"channel": 0}}}"#,
+    )
+    .unwrap();
+    let models_s = models.to_string_lossy().into_owned();
+    let lib_s = PathBuf::from(lib).to_string_lossy().into_owned();
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.jpg").to_string();
+    let before = export_png(&env, &a, "out-before");
+    let st = env.json(&[
+        "ai",
+        "status",
+        "--models-dir",
+        &models_s,
+        "--onnxruntime",
+        &lib_s,
+    ]);
+    assert_eq!(st["available"], true, "{st}");
+    assert_eq!(st["kinds"], json!(["subject", "sky"]));
+    let added = env.json(&[
+        "develop",
+        "mask",
+        "add",
+        &a,
+        "--ai",
+        "sky",
+        "--exposure",
+        "-2",
+        "--models-dir",
+        &models_s,
+        "--onnxruntime",
+        &lib_s,
+    ]);
+    let m = &added["masks"][0];
+    assert_eq!(m["components"][0]["shape"]["ai"]["kind"], "sky");
+    assert_eq!(m["components"][0]["shape"]["ai"]["model"], "mean-threshold");
+    assert_eq!(
+        m["components"][0]["shape"]["ai"]["mask"]["id"],
+        "ai-mask:sky"
+    );
+    assert_eq!(
+        env.json(&[
+            "ai",
+            "status",
+            "--models-dir",
+            &models_s,
+            "--onnxruntime",
+            &lib_s
+        ])["rasters"],
+        1
+    );
+    let list = env.run(&["develop", "mask", "list", &a]);
+    assert!(
+        list.stdout.contains("AI 空（mean-threshold）"),
+        "{}",
+        list.stdout
+    );
+    // 重み: 右半分が白。
+    let out = env.path("overlay.png");
+    env.json(&[
+        "develop",
+        "mask",
+        "overlay",
+        &a,
+        "1",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    let overlay = image::open(&out).unwrap().to_luma8();
+    let (w, h) = overlay.dimensions();
+    assert!(overlay.get_pixel(2, h / 2)[0] < 8);
+    assert!(overlay.get_pixel(w - 3, h / 2)[0] > 247);
+    // 書き出し: 右半分は -2 EV で暗くなり、左半分は変わらない。
+    let after = export_png(&env, &a, "out-ai");
+    let (ew, eh) = after.dimensions();
+    let right_before = mean_luma(&before, (ew * 3 / 4, eh / 2), 4);
+    let right_after = mean_luma(&after, (ew * 3 / 4, eh / 2), 4);
+    assert!(
+        right_after < right_before * 0.75,
+        "{right_before} → {right_after}"
+    );
+    assert_eq!(
+        mean_luma(&before, (ew / 8, eh / 2), 4),
+        mean_luma(&after, (ew / 8, eh / 2), 4)
+    );
+}

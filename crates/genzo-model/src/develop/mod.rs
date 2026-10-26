@@ -13,9 +13,10 @@ mod validate;
 use serde::{Deserialize, Serialize};
 
 pub use masks::{
-    BrushStroke, ColorSample, LocalAdjustment, LocalDelta, MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES,
-    MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS,
-    MaskComponent, MaskMode, MaskShape,
+    AI_MASK_REF_PREFIX, AiMaskKind, BrushStroke, ColorSample, LocalAdjustment, LocalDelta,
+    MAX_AI_MASK_PIXELS, MAX_AI_MASK_SIDE, MAX_AI_MODEL_ID_CHARS, MAX_BRUSH_STROKES,
+    MAX_COLOR_SAMPLES, MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_STROKE_POINTS,
+    MAX_TOTAL_BRUSH_POINTS, MaskComponent, MaskMode, MaskShape,
 };
 pub use params::{
     AspectRatio, BlackWhite, ColorGrading, ColorMixer, ColorParams, CropRect, CurvePoint, DataRef,
@@ -28,6 +29,7 @@ pub use params::{
 pub use validate::{FieldIssue, IssueKind, ValidationError};
 
 pub(crate) use hash::sha256;
+pub use hash::sha256_hex;
 
 use crate::{CURRENT_PROCESS_VERSION, CURRENT_SCHEMA_VERSION};
 

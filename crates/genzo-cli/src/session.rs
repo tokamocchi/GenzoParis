@@ -110,6 +110,16 @@ impl Session {
         config.gpu = g.gpu.into();
         // プリセット（DEV-29・EXP-02）のフォルダ（--presets-dir、GENZO_PRESETS_DIR、アプリと同じ場所）。
         config.presets_dir = crate::presets_dir(g);
+        // AI マスク（DEV-20）のモデルのフォルダと ONNX Runtime（--models-dir・--onnxruntime。相対パスは今のフォルダから。
+        // なければ genzo-api の既定: 環境変数、アプリと同じ場所）。
+        config.models_dir = g
+            .models_dir
+            .as_ref()
+            .map(|d| std::path::absolute(d).unwrap_or_else(|_| d.clone()));
+        config.onnxruntime = g
+            .onnxruntime
+            .as_ref()
+            .map(|d| std::path::absolute(d).unwrap_or_else(|_| d.clone()));
         if let Some(r) = opts.render_previews_after_import {
             config.render_previews_after_import = r;
         }

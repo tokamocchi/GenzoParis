@@ -156,6 +156,16 @@ pub struct CoreConfig {
     /// OS のアプリのデータのフォルダの `presets`。アプリと CLI で同じ場所）。
     #[serde(default)]
     pub presets_dir: Option<PathBuf>,
+    /// AI マスク（DEV-20）のモデルのフォルダ（モデルのファイルと台帳 `*.genzo-model.json`）。`None` なら
+    /// [`crate::default_models_dir`]（環境変数 `GENZO_MODELS_DIR`、なければ OS のアプリのデータのフォルダの `models`。
+    /// アプリと CLI で同じ場所）。
+    #[serde(default)]
+    pub models_dir: Option<PathBuf>,
+    /// AI マスクの推論に使う ONNX Runtime の共有ライブラリ（`onnxruntime.dll`・`libonnxruntime.dylib`・
+    /// `libonnxruntime.so`）。`None` なら環境変数 `GENZO_ONNXRUNTIME`、モデルのフォルダ、実行ファイルのフォルダの順に
+    /// 探す（[`crate::onnxruntime_candidates`]）。
+    #[serde(default)]
+    pub onnxruntime: Option<PathBuf>,
     /// 自動バックアップの世代数（DATA-04。既定 5。0 なら自動バックアップをしない）。
     #[serde(default = "default_backup_generations")]
     pub backup_generations: usize,
@@ -237,6 +247,8 @@ impl CoreConfig {
             gpu_allow_software: false,
             backup_dir: None,
             presets_dir: None,
+            models_dir: None,
+            onnxruntime: None,
             backup_generations: default_backup_generations(),
             backup_on_close: false,
             render_previews_after_import: false,

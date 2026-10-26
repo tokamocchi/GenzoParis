@@ -37,15 +37,16 @@ pub use catalog::{
 };
 pub use composite::{CompositeMode, CompositeSettings};
 pub use develop::{
-    AspectRatio, BlackWhite, BrushStroke, ColorGrading, ColorMixer, ColorParams, ColorSample,
-    CropRect, CurvePoint, DataRef, DetailParams, DevelopError, DevelopSettings, EffectsParams,
-    FieldIssue, Geometry, GradingWheel, Grain, HighlightMethod, HighlightRecovery, HslAdjustment,
-    HueBand, HueBands, IssueKind, LensCorrection, LocalAdjustment, LocalDelta, MAX_BRUSH_STROKES,
-    MAX_COLOR_SAMPLES, MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS, MAX_PROFILE_ID_CHARS,
-    MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS, MaskComponent, MaskMode, MaskShape, NoiseReduction,
-    ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings, RenderDeps, Sharpening,
-    ToneCurve, ToneParams, ValidationError, VignetteCenter, WbPreset, WhiteBalance,
-    is_valid_profile_id,
+    AI_MASK_REF_PREFIX, AiMaskKind, AspectRatio, BlackWhite, BrushStroke, ColorGrading, ColorMixer,
+    ColorParams, ColorSample, CropRect, CurvePoint, DataRef, DetailParams, DevelopError,
+    DevelopSettings, EffectsParams, FieldIssue, Geometry, GradingWheel, Grain, HighlightMethod,
+    HighlightRecovery, HslAdjustment, HueBand, HueBands, IssueKind, LensCorrection,
+    LocalAdjustment, LocalDelta, MAX_AI_MASK_PIXELS, MAX_AI_MASK_SIDE, MAX_AI_MODEL_ID_CHARS,
+    MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES, MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS,
+    MAX_PROFILE_ID_CHARS, MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS, MaskComponent, MaskMode,
+    MaskShape, NoiseReduction, ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings,
+    RenderDeps, Sharpening, ToneCurve, ToneParams, ValidationError, VignetteCenter, WbPreset,
+    WhiteBalance, is_valid_profile_id, sha256_hex,
 };
 pub use export::{
     Align, ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize,

@@ -1,4 +1,4 @@
-//! ローカル補正（マスク。DEV-18・DEV-19。処理バージョン 2。docs/04_architecture.md の 2.1 節「ローカル補正」）。
+//! ローカル補正（マスク。DEV-18・DEV-19・DEV-20。処理バージョン 2。docs/04_architecture.md の 2.1 節「ローカル補正」）。
 //!
 //! マスク（genzo-model の `LocalAdjustment`）ごとに、画素の **重み** `m`（0〜1）を部品の合成で求め、調整値の差分
 //! `δ` を掛けてすべてのマスクについて足した **局所の値** `Σ m·δ` を、項目ごとの面（[`LocalField`]）にする。
@@ -8,7 +8,9 @@
 //!
 //! 1. [`crate::finish::FinishPlan::new`] が、丸めた設定から計画（[`LocalPlan`]）を作る。有効なマスク（有効・部品が
 //!    ある・差分が 0 でない）がなければ作らない。面を作る項目（[`LocalSlots`]）は、どれかの有効なマスクで差分が 0 で
-//!    ない項目（決まった順に面の番号を振る）。ブラシの部品は G 座標のラスターにする（[`brush`]）。
+//!    ない項目（決まった順に面の番号を振る）。ブラシの部品は G 座標のラスターにする（[`brush`]）。AI マスクの部品は、
+//!    引いたラスター（[`crate::ProfileResources::ai_masks`]）を同じ形の G 座標のラスターに写す（[`ai`]。引けなければ
+//!    重み 0）。
 //! 2. ステージ 9 の出力（ステージ 9 を飛ばすときは段階 A1 の画像。**露光量の前**の B2）を **基準の画像** として、
 //!    画素ごとに重みと局所の値を求める（[`LocalPlan::field`]）。範囲マスクの色・明るさはこの基準の画像で決める
 //!    （ステージ 10〜14 の結果で選択範囲が変わらない）。
@@ -48,6 +50,7 @@
 //! かすみの除去は ±100、シャープは −100〜+150（負はぼかす）、ほかのスライダーは ±200 に収める（ステージごとの式は
 //! 各モジュールの doc）。
 
+pub mod ai;
 pub mod brush;
 
 use std::sync::Arc;
@@ -62,6 +65,7 @@ use crate::finish::geometry::GeometryPlan;
 use crate::finish::luminance;
 use crate::finish::scene_to_display::SceneToDisplayParams;
 use crate::image::{ImageTile, Roi};
+use crate::profile::ProfileResources;
 use crate::stage::StageContext;
 use crate::version::ProcessVersion;
 
@@ -552,7 +556,7 @@ impl LocalPlan {
             .masks
             .iter()
             .filter(|m| LocalSlots::is_active_mask(m))
-            .map(|m| prepare_mask(m, geometry, Some(&slots)))
+            .map(|m| prepare_mask(m, geometry, Some(&slots), ctx.profiles))
             .collect();
         let uses_range = masks.iter().any(PreparedMask::uses_range);
         let (origin, scale) = g_mapping(geometry);
@@ -687,11 +691,13 @@ pub fn sample_chroma(lab: [f32; 3]) -> [f32; 2] {
     [lab[1] / d, lab[2] / d]
 }
 
-/// マスク `m` を準備する（`slots` があれば、その面の順の差分も。なければ差分は空。重ねて表示するとき）。
+/// マスク `m` を準備する（`slots` があれば、その面の順の差分も。なければ差分は空。重ねて表示するとき）。`resources` は
+/// 引いた AI マスクのラスター（DEV-20。なければ AI マスクの部品は重み 0）。
 pub fn prepare_mask(
     m: &LocalAdjustment,
     geometry: &GeometryPlan,
     slots: Option<&LocalSlots>,
+    resources: Option<&ProfileResources>,
 ) -> PreparedMask {
     let (gw, gh) = geometry.frames().g_size_px();
     let long = gw.max(gh);
@@ -702,7 +708,7 @@ pub fn prepare_mask(
         .map(|c| PreparedComponent {
             mode: c.mode,
             invert: c.invert,
-            shape: prepare_shape(&c.shape, g_box),
+            shape: prepare_shape(&c.shape, g_box, resources),
         })
         .collect();
     let delta = match slots {
@@ -725,7 +731,11 @@ pub fn prepare_mask(
     }
 }
 
-fn prepare_shape(shape: &MaskShape, g_box: (f32, f32)) -> PreparedShape {
+fn prepare_shape(
+    shape: &MaskShape,
+    g_box: (f32, f32),
+    resources: Option<&ProfileResources>,
+) -> PreparedShape {
     match shape {
         MaskShape::Linear { x0, y0, x1, y1 } => {
             let (dx, dy) = (
@@ -782,19 +792,27 @@ fn prepare_shape(shape: &MaskShape, g_box: (f32, f32)) -> PreparedShape {
             hi: max / 100.0,
             smooth: smoothness / 100.0 * LUMA_RANGE_SMOOTH_MAX,
         },
+        // AI マスク: 引いたラスターを G 座標の格子に写す（引けなければ重み 0。警告は ProfileResources）。
+        MaskShape::Ai { mask, bounds, .. } => PreparedShape::Brush(
+            resources
+                .and_then(|r| r.ai_mask(mask))
+                .and_then(|r| ai::raster_for(&mask.sha256, r, *bounds)),
+        ),
     }
 }
 
 /// マスク 1 つの重みの画像（重ねて表示（O キー）・CLI の確かめ用。差分・有効かによらない）。`reference` は基準の画像
-/// （C の格子）、`exposure_ev` は全体の露光量、`input` は入力の種類。値は 0〜1（行優先）。
+/// （C の格子）、`exposure_ev` は全体の露光量、`input` は入力の種類、`resources` は引いた AI マスクのラスター。
+/// 値は 0〜1（行優先）。
 pub fn mask_weights(
     m: &LocalAdjustment,
     geometry: &GeometryPlan,
     reference: &ImageTile,
     exposure_ev: f32,
     input: crate::InputKind,
+    resources: Option<&ProfileResources>,
 ) -> Vec<f32> {
-    let mask = prepare_mask(m, geometry, None);
+    let mask = prepare_mask(m, geometry, None, resources);
     let (origin, scale) = g_mapping(geometry);
     let gain = f64::from(exposure_ev).exp2() as f32;
     let tone = SceneToDisplayParams::for_input(input);

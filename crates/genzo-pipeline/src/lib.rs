@@ -295,7 +295,7 @@ pub use guide::{GuideSpec, compute_guide};
 pub use image::{CfaImage, GrayImage, ImageTile, RgbImage, Roi};
 pub use input::working_image_from_encoded;
 pub use local::{LocalField, LocalParam, LocalPlan, LocalSlots};
-pub use profile::{MemoryProfiles, ProfileResolver, ProfileResources};
+pub use profile::{AiMaskRaster, MemoryProfiles, ProfileResolver, ProfileResources};
 pub use registry::{GpuCoverage, StageRegistry};
 pub use resample::{DEFAULT_PREVIEW_LONG_EDGE, downscale_area, preview_size};
 pub use sensor::demosaic::DemosaicMethod;

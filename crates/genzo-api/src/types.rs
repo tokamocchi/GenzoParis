@@ -1405,6 +1405,64 @@ pub struct MaskOverlayInfo {
     pub uncropped: bool,
 }
 
+/// AI マスク（DEV-20）の計算の結果（[`crate::Core::compute_ai_mask`]）。`shape` をマスクの部品の形として設定に入れる
+/// （適用はしない。UI・CLI が `set_settings` する。色域のスポイトと同じ）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AiMaskResult {
+    /// 写真。
+    pub variant_id: VariantId,
+    /// 種類。
+    pub kind: genzo_model::AiMaskKind,
+    /// 設定に入れる形（`MaskShape::Ai`。ラスターの参照・大きさ・G 座標の範囲）。
+    pub shape: genzo_model::MaskShape,
+    /// 使ったモデルの ID。
+    pub model: String,
+    /// ラスターの内容の SHA-256（カタログの `ai_mask` の行）。
+    pub sha256: String,
+    /// ラスターの幅（画素）。
+    pub width: u32,
+    /// ラスターの高さ（画素）。
+    pub height: u32,
+    /// 推論に渡す画像の描画にかかった時間（ミリ秒）。
+    pub render_ms: u64,
+    /// 推論にかかった時間（ミリ秒。前処理・後処理を含む）。
+    pub inference_ms: u64,
+}
+
+/// AI マスクの推論の仕組みの状態（[`crate::Core::ai_mask_status`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiMaskStatusInfo {
+    /// 使えるか（使える種類が 1 つ以上ある）。
+    pub available: bool,
+    /// 使える種類。
+    pub kinds: Vec<genzo_model::AiMaskKind>,
+    /// 種類ごとに使うモデルの ID（`kinds` の順）。
+    pub models: Vec<String>,
+    /// 推論の backend（例: `onnxruntime ...`。使えなければ空）。
+    pub backend: String,
+    /// 使えない理由・読めなかった台帳（使えるなら空）。
+    pub problems: Vec<String>,
+    /// モデルのフォルダ（分からなければ `None`）。
+    pub models_dir: Option<PathBuf>,
+    /// 見つかった ONNX Runtime の共有ライブラリ（なければ `None`）。
+    pub onnxruntime: Option<PathBuf>,
+    /// カタログの中の AI マスクのラスターの数。
+    pub rasters: u64,
+    /// カタログの中の AI マスクのラスターのバイト数の合計（符号化したもの）。
+    pub raster_bytes: u64,
+}
+
+/// 参照のない AI マスクのラスターの回収の結果（[`crate::Core::collect_ai_masks`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiMaskCollectReport {
+    /// 消した数。
+    pub removed: u64,
+    /// 残った数。
+    pub remaining: u64,
+    /// 残ったラスターのバイト数の合計。
+    pub remaining_bytes: u64,
+}
+
 /// マスクの重ねて表示の画像（重み 0〜1 を 0〜255 にしたもの。行優先）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaskOverlayFrame {

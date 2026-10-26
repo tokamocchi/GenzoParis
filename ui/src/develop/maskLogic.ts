@@ -9,6 +9,7 @@
 // - 処理バージョン 1 の写真では使われない（コアは警告を出して無視する）。パネルは更新を勧める。
 
 import type {
+  AiMaskKind,
   BrushStroke,
   ColorSample,
   DevelopSettings,
@@ -25,7 +26,7 @@ import { MASK_LIMITS, RANGES } from "../api/types";
 /** ローカル補正を使える最初の処理バージョン（genzo-pipeline の ProcessVersion::V2）。 */
 export const MASK_PROCESS_VERSION = 2;
 
-export type ShapeKind = "linear" | "radial" | "brush" | "color_range" | "luminance_range";
+export type ShapeKind = "linear" | "radial" | "brush" | "color_range" | "luminance_range" | "ai";
 
 /** 形の名前。 */
 export const SHAPE_LABELS: Record<ShapeKind, string> = {
@@ -34,7 +35,17 @@ export const SHAPE_LABELS: Record<ShapeKind, string> = {
   radial: "円形グラデーション",
   color_range: "色域",
   luminance_range: "輝度範囲",
+  ai: "AI",
 };
+
+/** AI マスクの種類（genzo-model の AiMaskKind::ALL の順）と名前。 */
+export const AI_KINDS: AiMaskKind[] = ["subject", "sky", "person"];
+export const AI_KIND_LABELS: Record<AiMaskKind, string> = { subject: "被写体", sky: "空", person: "人物" };
+
+/** 部品の形の名前（AI は種類も。「AI 空」）。 */
+export function shapeLabel(shape: MaskShape): string {
+  return "ai" in shape ? `AI ${AI_KIND_LABELS[shape.ai.kind]}` : SHAPE_LABELS[shapeKind(shape)];
+}
 
 /** 合成のしかたの選択肢。 */
 export const MODE_CHOICES: { mode: MaskMode; label: string; title: string }[] = [
@@ -49,6 +60,7 @@ export function shapeKind(shape: MaskShape): ShapeKind {
   if ("radial" in shape) return "radial";
   if ("brush" in shape) return "brush";
   if ("color_range" in shape) return "color_range";
+  if ("ai" in shape) return "ai";
   return "luminance_range";
 }
 
@@ -114,7 +126,7 @@ export function sanitizeMaskName(name: string): string {
 /** 部品の種類の要約（「線形グラデーション ＋ 輝度範囲」など。一覧に出す）。 */
 export function maskSummary(m: LocalAdjustment): string {
   if (m.components.length === 0) return "部品なし";
-  return m.components.map((c) => SHAPE_LABELS[shapeKind(c.shape)]).join(" ＋ ");
+  return m.components.map((c) => shapeLabel(c.shape)).join(" ＋ ");
 }
 
 /** マスクの欄の操作の可否。 */

@@ -103,6 +103,7 @@ flowchart TB
   MEDIA["genzo-media<br/>画像入出力・FFmpeg"]
   MODEL["genzo-model<br/>ドメインの型・現像設定のスキーマ"]
   GEO["genzo-geo<br/>地図のタイル・地名の検索（HTTPS）"]
+  ML["genzo-ml<br/>ML 推論（ONNX Runtime）・AI マスク"]
   TAURI --> API
   NATIVE --> API
   CLI --> API
@@ -123,6 +124,8 @@ flowchart TB
   PIPE --> MODEL
   API --> MODEL
   TAURI --> GEO
+  API --> ML
+  ML --> MODEL
   GEO --> MODEL
 ```
 
@@ -1182,10 +1185,10 @@ pub trait Stage: Send + Sync {
 | 機能 | 差し込む位置 | インターフェース |
 |---|---|---|
 | AI ノイズ除去（DEV-22） | ステージ 5〜6（デモザイク後のカメラ RGB）。デモザイクとノイズ除去を同時に行うモデルの場合は、ステージ 5 を置き換える | `Stage` として実装する。推論は `MlBackend` トレイト経由で行う |
-| AI マスク（DEV-20） | マスクの生成元として追加する。生成したマスクは画像として保存し、現像のたびに推論し直さない | `MaskSource` トレイト（ブラシ・グラデーション・範囲マスクと同じ扱い） |
+| AI マスク（DEV-20） | マスクの生成元として追加する。生成したマスクは画像として保存し、現像のたびに推論し直さない | マスクの部品の形 `MaskShape::Ai`（ブラシ・グラデーション・範囲マスクと同じ扱い。2026-10-26 に実装。**`MaskSource` トレイトは作らず**、推論で作ったラスターをカタログの `ai_mask` の表に保存し、設定からは参照（ID と SHA-256）で指す。描画のときは `ProfileResolver::ai_mask`（カメラプロファイル・ルックと同じ引き方）でカタログから引き、ブラシと同じ G 座標の格子に写す。[ai_masks.md](ai_masks.md)） |
 | 顔認識・自然言語検索（LIB-19、LIB-20） | バックグラウンドのジョブ（P3）で推論し、結果をカタログの別テーブルに保存する | ジョブとして実装する |
 
-`MlBackend` は ONNX Runtime を包む抽象で、Windows では CUDA または DirectML、macOS では Core ML を選べるようにします。
+`MlBackend` は ONNX Runtime を包む抽象で、Windows では CUDA または DirectML、macOS では Core ML を選べるようにします。2026-10-26 に `genzo-ml` として実装しました（`MlBackend`・`MlSession`・`Tensor`、ONNX Runtime の backend は pyke の `ort` を使い、共有ライブラリはビルド時に取らず実行時に指定したファイルから読み込む。実行プロバイダーはまず CPU だけ。モデルは台帳（JSON）で前処理・後処理を書き、リポジトリ・配布物には含めない。決定事項ログ No.200〜203、[ai_masks.md](ai_masks.md)）。
 
 ```rust
 pub trait MlBackend: Send + Sync {

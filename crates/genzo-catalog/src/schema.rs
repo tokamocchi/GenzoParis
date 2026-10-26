@@ -134,7 +134,17 @@ pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[
         sql: include_str!("sql/catalog_0013_asset_locations.sql"),
         post: None,
     },
+    Migration {
+        version: AI_MASKS_SCHEMA_VERSION,
+        description: "AI マスク（DEV-20）: 推論で作った重みのラスター（ai_mask。内容の SHA-256 で現像設定から参照する）",
+        sql: include_str!("sql/catalog_0014_ai_masks.sql"),
+        post: None,
+    },
 ];
+
+/// AI マスク（DEV-20）を使い始めたカタログのスキーマの版（推論で作った重みのラスター `ai_mask`。現像設定の
+/// `MaskShape::Ai` が内容の SHA-256 で参照する。asset を消すと消える）。既存の設定・表は変えない。
+pub const AI_MASKS_SCHEMA_VERSION: u32 = 14;
 
 /// 位置情報の後付け（LIB-21）を使い始めたカタログのスキーマの版（後から付けた位置 `asset_location`、変更の
 /// 履歴 `location_edit`・`location_edit_item`、公開ビュー `photos_v1` の `location_lat`・`location_lon`・
@@ -379,7 +389,7 @@ pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[
 ];
 
 /// このアプリのカタログのスキーマの版。
-pub const CATALOG_SCHEMA_VERSION: u32 = 13;
+pub const CATALOG_SCHEMA_VERSION: u32 = 14;
 
 /// このアプリのサムネイル DB のスキーマの版。
 pub const THUMBS_SCHEMA_VERSION: u32 = 2;
