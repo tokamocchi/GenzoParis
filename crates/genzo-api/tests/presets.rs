@@ -42,6 +42,7 @@ fn tone_only() -> SettingGroups {
         effects: false,
         profile: false,
         masks: false,
+        retouch: false,
     }
 }
 

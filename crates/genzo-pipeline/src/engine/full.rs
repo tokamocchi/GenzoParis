@@ -50,6 +50,7 @@ use crate::finish::{FinishPlan, UnimplementedSetting, finish_context, unimplemen
 use crate::image::{ImageTile, RgbImage, Roi};
 use crate::profile::ProfileResources;
 use crate::resample::{AreaWeights, downscale_column_row};
+use crate::retouch::{PreparedRetouch, RetouchPlan};
 use crate::sensor::{SensorPlan, SensorWarning, SourceImage};
 use crate::stage::{GpuStageLookup, Guide, StageContext};
 use crate::version::ProcessVersion;
@@ -130,6 +131,8 @@ pub struct FullResolutionJob {
     unimplemented: Vec<UnimplementedSetting>,
     tile_size: u32,
     tiles_rendered: Arc<AtomicU64>,
+    /// スポット修正（DEV-21。境界の補正を求めたもの。なければ `None`）。
+    retouch: Option<PreparedRetouch>,
 }
 
 impl std::fmt::Debug for FullResolutionJob {
@@ -319,15 +322,7 @@ impl FullResolutionJob {
         }
         let ctx = self.context();
         let rois = self.plan.stage_rois(&ctx, tile);
-        let (input, mut replaced) = match (&self.source, &self.sensor) {
-            (SourceImage::Raw(raw), Some(plan)) => plan.render_roi(raw, rois[0])?,
-            (SourceImage::Working { image, .. }, None) => {
-                let mut t = gather_mirror_from(image, rois[0])?;
-                let n = t.image.sanitize();
-                (t, n)
-            }
-            _ => unreachable!("RAW のときだけセンサー処理の設定を持つ（作るときに決まる）"),
-        };
+        let (input, mut replaced) = self.render_source(rois[0])?;
         let (mut b3, n) = run_scene_stages(&self.plan, &ctx, &rois, input)?;
         replaced += n;
         // 切り抜く前の全体の表示: 回転で画像の外になった四隅を塗る（設定の切り抜きでは何もしない）。
@@ -335,6 +330,32 @@ impl FullResolutionJob {
             .fill_outside_image(&mut b3, OUTSIDE_IMAGE_FILL);
         self.tiles_rendered.fetch_add(1, Ordering::Relaxed);
         Ok((b3, replaced))
+    }
+
+    /// ステージ 9 の入力の範囲 `roi`（S の格子、フル解像度。画像の外にはみ出してよく、はみ出した部分は鏡映）の、
+    /// 段階 A1 の値（RAW はセンサー処理、RAW 以外は B2 の画像）。スポット修正（DEV-21）を当てる前のもの。置き換えた
+    /// NaN・無限大の数も返す。
+    fn sensor_source(&self, roi: Roi) -> Result<(ImageTile, u64)> {
+        match (&self.source, &self.sensor) {
+            (SourceImage::Raw(raw), Some(plan)) => plan.render_roi(raw, roi),
+            (SourceImage::Working { image, .. }, None) => {
+                let mut t = gather_mirror_from(image, roi)?;
+                let n = t.image.sanitize();
+                Ok((t, n))
+            }
+            _ => unreachable!("RAW のときだけセンサー処理の設定を持つ（作るときに決まる）"),
+        }
+    }
+
+    /// ステージ 9 の入力の範囲 `roi`（S の格子、フル解像度。画像の外にはみ出してよい）の、段階 A1 の値に
+    /// スポット修正（DEV-21）を当てたもの（[`render_tile`](Self::render_tile) の入力。genzo-gpu の書き出しも使う）。
+    /// 置き換えた NaN・無限大の数も返す（コピー元・境界のために取り出した範囲の分は数えない）。
+    pub fn render_source(&self, roi: Roi) -> Result<(ImageTile, u64)> {
+        let (mut tile, replaced) = self.sensor_source(roi)?;
+        if let Some(r) = &self.retouch {
+            r.apply(&mut tile, &|roi| self.sensor_source(roi).map(|(t, _)| t))?;
+        }
+        Ok((tile, replaced))
     }
 
     /// B3 のタイルにステージ 17a / 17b を適用する。
@@ -607,7 +628,8 @@ impl Engine {
                 self.config.preview_long_edge,
             )
         })?;
-        Ok(FullResolutionJob {
+        let retouch = RetouchPlan::new(settings, frames)?;
+        let mut job = FullResolutionJob {
             source: source.image.clone(),
             sensor,
             base,
@@ -619,7 +641,14 @@ impl Engine {
             unimplemented: unimplemented_settings(settings),
             tile_size: self.config.tile_size,
             tiles_rendered: Arc::clone(&self.tiles_rendered),
-        })
+            retouch: None,
+        };
+        // スポット修正の境界の補正は、ジョブ全体で 1 回だけ求める（どのタイルでも同じ値を使う）。
+        if let Some(plan) = retouch {
+            let prepared = plan.prepare(grid, &|roi| job.sensor_source(roi).map(|(t, _)| t))?;
+            job.retouch = Some(prepared);
+        }
+        Ok(job)
     }
 
     /// フル解像度の処理のジオメトリ（C の格子とフル解像度の出力の寸法 [`GeometryPlan::output_size`]）だけを

@@ -1,8 +1,8 @@
 // 現像設定の一括適用（DEV-30）のダイアログで選ぶ項目（DOM を使わない純粋な計算）。
 //
-// 画面で選ぶのは 12（genzo-api の SettingGroups のすべて）。マスク（ローカル補正。DEV-18・DEV-19）と変形（遠近補正。
-// DEV-16）は、位置・傾きが写真ごとに違うことが多いので、切り抜きと角度と同じく既定では写さない（前の版の保存した選択に
-// 無ければ写さない。AI の仮決定）。
+// 画面で選ぶのは 13（genzo-api の SettingGroups のすべて）。マスク（ローカル補正。DEV-18・DEV-19）・スポット修正（DEV-21）・
+// 変形（遠近補正。DEV-16）は、位置・傾きが写真ごとに違うことが多いので、切り抜きと角度と同じく既定では写さない（前の版の
+// 保存した選択に無ければ写さない。AI の仮決定）。
 // カメラプロファイル・ルック（DEV-17）も選べる（既定は写す。前の版の保存した選択に無ければ写す）。
 // レンズ補正（DEV-14）とディテール（シャープ・ノイズ軽減。DEV-12・DEV-13）・外観（テクスチャ・明瞭度・かすみの除去。
 // DEV-11）・効果（切り抜き後の周辺光量補正・粒子。DEV-24）は現像のパネルで扱うので選べる（既定は写す。前の版の
@@ -27,6 +27,7 @@ export type PasteGroupKey =
   | "effects"
   | "profile"
   | "masks"
+  | "retouch"
   | "geometry"
   | "transform";
 
@@ -51,6 +52,11 @@ export const PASTE_GROUP_ITEMS: { key: PasteGroupKey; label: string; detail: str
     label: "マスク",
     detail: "ローカル補正（ブラシ・グラデーション・色域・輝度範囲と調整）。写真ごとに位置が違うことが多いため、既定では写しません",
   },
+  {
+    key: "retouch",
+    label: "スポット修正",
+    detail: "修復・コピースタンプ（ゴミ・電線など）。写真ごとに位置が違うため、既定では写しません",
+  },
   { key: "geometry", label: "切り抜きと角度", detail: "写真ごとに構図が違うことが多いため、既定では写しません" },
   {
     key: "transform",
@@ -59,7 +65,7 @@ export const PASTE_GROUP_ITEMS: { key: PasteGroupKey; label: string; detail: str
   },
 ];
 
-/** 既定の選択（マスクと、切り抜きと角度はオフ）。 */
+/** 既定の選択（マスク・スポット修正と、切り抜きと角度はオフ）。 */
 export const DEFAULT_PASTE_SELECTION: PasteSelection = {
   white_balance: true,
   basic_tone: true,
@@ -71,6 +77,7 @@ export const DEFAULT_PASTE_SELECTION: PasteSelection = {
   effects: true,
   profile: true,
   masks: false,
+  retouch: false,
   geometry: false,
   transform: false,
 };

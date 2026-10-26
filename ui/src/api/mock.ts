@@ -1558,6 +1558,32 @@ export function mockMaskCommands(
 // v1 の presets: スナップショット（DEV-28）・現像プリセット（DEV-29）・書き出しプリセット（EXP-02）の見本
 // ---------------------------------------------------------------------------
 
+/** スポット修正（DEV-21）のコピー元の自動の選択の見本のずれ（O 座標）。 */
+export const MOCK_RETOUCH_OFFSET: [number, number] = [0.05, 0];
+
+/**
+ * スポット修正のコマンドの応答を足す: retouch_auto_source（`offset()` が返すずれ。既定は MOCK_RETOUCH_OFFSET。点のない
+ * スポットはエラー（コアの invalid_input と同じく））。送ったコマンドは `sent` に残す。
+ */
+export function mockRetouchCommands(
+  b: MockBridge,
+  opts: { offset?: () => [number, number] | null } = {},
+): { sent: Record<string, unknown>[] } {
+  const sent: Record<string, unknown>[] = [];
+  const base = b.responses.get("core_execute");
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    if (c.type === "retouch_auto_source") {
+      sent.push(c);
+      const spot = c.spot as { points?: unknown[] } | undefined;
+      if (!spot?.points?.length) return new Error("点がありません");
+      return { type: "retouch_source", offset: opts.offset ? opts.offset() : MOCK_RETOUCH_OFFSET };
+    }
+    return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
+  });
+  return { sent };
+}
+
 /** 含める項目の見本（基本補正・外観だけ）。 */
 export const MOCK_TONE_GROUPS: SettingGroups = {
   white_balance: false,

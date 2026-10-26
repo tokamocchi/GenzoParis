@@ -29,12 +29,11 @@ use genzo_pipeline::finish::output::Dither;
 use genzo_pipeline::resample::{AreaWeights, downscale_column_row};
 use genzo_pipeline::{
     ColorContract, Engine, ExportOptions, ImageTile, PhotoSource, PipelineError, RenderControl,
-    RgbImage, Roi, SourceImage, Stage, StageContext, StageParams,
+    RgbImage, Roi, Stage, StageContext, StageParams,
 };
 use rayon::prelude::*;
 
 use crate::error::{GpuError, Result};
-use crate::preview::gather_mirror;
 use crate::renderer::{Chain, GpuRenderer};
 
 /// 書き出しを処理した側。
@@ -181,7 +180,6 @@ struct Prepared {
 struct ExportRun<'a> {
     r: &'a GpuRenderer,
     job: FullResolutionJob,
-    source: &'a PhotoSource,
     output_stage: &'static ExportStage,
     output_params: StageParams,
 }
@@ -191,24 +189,12 @@ impl ExportRun<'_> {
         self.job.context()
     }
 
-    /// タイルのステージ 9 の入力を CPU で作る（RAW はステージ 2〜8 の CPU 版）。
+    /// タイルのステージ 9 の入力を CPU で作る（RAW はステージ 2〜8 の CPU 版。スポット修正を含む）。
     fn prepare(&self, tile: Roi) -> Result<Prepared> {
         let ctx = self.ctx();
         let rois = self.job.plan().stage_rois(&ctx, tile);
-        let (input, replaced) = match (&self.source.image, self.job.sensor_plan()) {
-            (SourceImage::Raw(raw), Some(plan)) => plan.render_roi(raw, rois[0])?,
-            (SourceImage::Working { image, .. }, None) => {
-                let mut t = gather_mirror(image, rois[0])?;
-                let n = t.image.sanitize();
-                (t, n)
-            }
-            _ => {
-                return Err(PipelineError::InvalidArgument(
-                    "書き出しのジョブと入力が対応していない".to_owned(),
-                )
-                .into());
-            }
-        };
+        // スポット修正（DEV-21）も当てたもの（ジョブの CPU 版）。
+        let (input, replaced) = self.job.render_source(rois[0])?;
         Ok(Prepared {
             tile,
             rois,
@@ -353,7 +339,6 @@ impl GpuRenderer {
         let run = ExportRun {
             r: self,
             job,
-            source,
             output_stage,
             output_params,
         };

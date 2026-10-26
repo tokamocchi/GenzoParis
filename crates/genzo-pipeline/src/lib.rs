@@ -30,6 +30,7 @@
 //! | [`border`] | 画像の端の外の鏡映 | 2.7 節 |
 //! | [`coords`] | 座標系 S / O / D / G / C・RAW の向き・歪曲補正（D）・回転（G）・ステージ 9 の入力の格子（[`SensorGrid`]） | 2.7 節 |
 //! | [`local`] | ローカル補正（マスク。処理バージョン 2。DEV-18・DEV-19）: マスクの重み（線形・円形・ブラシのラスター・色域・輝度の範囲と合成）、局所の値の面（[`LocalField`]）、ステージ 10〜14 の画素ごとの値 | 2.1 節・2.7 節 |
+//! | [`retouch`] | スポット修正（処理バージョン 2。DEV-21）: 修復・コピースタンプ（[`retouch::RetouchPlan`]）、段階 A1 の出力に当てる、コピー元の自動の選び方（[`retouch::find_source_offset`]） | 2.1 節 |
 //! | [`lens`] | レンズ補正（処理バージョン 2。DEV-14）: ステージ 7 の周辺減光・倍率色収差（[`lens::LensStagePlan`]）、ステージ 9 の歪曲補正（[`lens::RadialDistortion`]）、埋め込みの補正の情報の解釈 | 2.1 節・2.7 節 |
 //! | [`sanitize`] | NaN・無限大の置き換え、対数の下限 | 2.3 節・2.6 節 |
 //! | [`guide`] | 段階 B: ガイドの計算（[`compute_guide`]・ガイデッドフィルタ）とキャッシュのキーの項目（[`GuideSpec`]） | 2.2 節・2.7 節 |
@@ -280,6 +281,7 @@ pub mod perspective;
 pub mod profile;
 pub mod registry;
 pub mod resample;
+pub mod retouch;
 pub mod sanitize;
 pub mod sensor;
 pub mod stage;
@@ -290,11 +292,11 @@ pub use composite::{Compositor, compositor_bytes};
 pub use contract::ColorContract;
 pub use coords::{CoordinateFrames, SensorGrid};
 pub use engine::{
-    AutoTonePick, AutoToneStats, AutoToneValues, CacheCounters, DEFAULT_TILE_SIZE, Engine,
-    EngineConfig, EngineStats, ExportOptions, ExportPixels, ExportedImage, FullResolutionJob,
-    MaskColorPick, MaskOverlay, MaskReference, NeverCancel, OutputTarget, PhotoSource,
-    PreviewRender, PreviewRequest, RegionRender, RenderControl, SourceId, WB_PICK_RADIUS,
-    WhiteBalancePick,
+    A1Origin, AutoTonePick, AutoToneStats, AutoToneValues, CacheCounters, DEFAULT_TILE_SIZE,
+    Engine, EngineConfig, EngineStats, ExportOptions, ExportPixels, ExportedImage,
+    FullResolutionJob, MaskColorPick, MaskOverlay, MaskReference, NeverCancel, OutputTarget,
+    PhotoSource, PreviewRender, PreviewRequest, RegionRender, RenderControl, SourceId,
+    WB_PICK_RADIUS, WhiteBalancePick,
 };
 pub use error::{PipelineError, Result};
 pub use finish::{FinishPlan, finish_context};

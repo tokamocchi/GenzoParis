@@ -427,6 +427,9 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     if old.masks != new.masks {
         parts.push(describe_masks(&old.masks, &new.masks));
     }
+    if old.retouch != new.retouch {
+        parts.push(describe_retouch(&old.retouch, &new.retouch));
+    }
     // 外部データのうち、カメラプロファイル・ルックの参照は設定の ID に付いて変わる（上の名前で表す）。
     let raw_deps = |d: &genzo_model::RenderDeps| genzo_model::RenderDeps {
         profile: None,
@@ -516,6 +519,55 @@ fn describe_masks(
         return format!("マスクの名前「{name}」");
     }
     format!("マスク「{name}」の範囲")
+}
+
+/// スポット修正の変更の履歴の名前（DEV-21。「スポット修正を追加」「スポット 2 の不透明度」など）。
+fn describe_retouch(old: &[genzo_model::RetouchSpot], new: &[genzo_model::RetouchSpot]) -> String {
+    if new.len() > old.len() {
+        return "スポット修正を追加".to_owned();
+    }
+    if new.is_empty() && !old.is_empty() {
+        return "スポット修正をすべて削除".to_owned();
+    }
+    if new.len() < old.len() {
+        return "スポット修正を削除".to_owned();
+    }
+    let Some((i, (a, b))) = old.iter().zip(new).enumerate().find(|(_, (a, b))| a != b) else {
+        return "スポット修正".to_owned();
+    };
+    let n = i + 1;
+    if a.enabled != b.enabled {
+        return format!(
+            "スポット {n} を{}",
+            if b.enabled {
+                "有効にする"
+            } else {
+                "無効にする"
+            }
+        );
+    }
+    if a.mode != b.mode {
+        return format!(
+            "スポット {n} を{}",
+            match b.mode {
+                genzo_model::RetouchMode::Heal => "修復にする",
+                genzo_model::RetouchMode::Clone => "コピースタンプにする",
+            }
+        );
+    }
+    if a.offset != b.offset && a.points == b.points {
+        return format!("スポット {n} のコピー元");
+    }
+    if a.points != b.points {
+        return format!("スポット {n} の位置");
+    }
+    if a.size != b.size {
+        return format!("スポット {n} の大きさ");
+    }
+    if a.feather != b.feather {
+        return format!("スポット {n} のぼかし");
+    }
+    format!("スポット {n} の不透明度")
 }
 
 /// 保存待ちの変更を保存する（呼び出し側が state のロックを持つ。写真を開く・一括適用・Undo / Redo・
@@ -767,6 +819,7 @@ pub(crate) fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFram
             output_width,
             output_height,
             g_bounds: Some(r.g_bounds),
+            o_grid: Some(r.o_grid),
             g_size: Some(r.g_size),
         },
         b3: Arc::new(r.b3),
@@ -1933,6 +1986,49 @@ impl Core {
         })
     }
 
+    /// スポット修正（DEV-21）のコピー元を自動で選ぶ（適用はしない。UI がずれを `RetouchSpot::offset` にして
+    /// `set_settings` する）。
+    ///
+    /// 今の設定（保存待ち・ドラッグ中の値を含む。ほかのスポットを当てた後）のプレビュー解像度の A1 で、スポット
+    /// `spot`（位置・大きさ。ずれは使わない）のまわりとよく似たまわりを持つ場所を探す（genzo-pipeline の
+    /// `retouch::find_source_offset`）。写真の枠に収まる候補がなければ `None`。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。点のないスポットは
+    /// [`ApiError::InvalidArgument`]。
+    pub fn retouch_auto_source(
+        &self,
+        variant_id: VariantId,
+        spot: &genzo_model::RetouchSpot,
+    ) -> Result<Option<[f32; 2]>, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let mut checked = DevelopSettings {
+            retouch: vec![genzo_model::RetouchSpot {
+                // ずれ 0 のスポットは結果に影響しないものとして除かれないよう、検証用に仮のずれを入れる。
+                offset: [0.01, 0.0],
+                ..spot.clone()
+            }],
+            ..DevelopSettings::default()
+        };
+        if let Err(e) = checked.validate() {
+            return Err(ApiError::InvalidArgument(e.to_string()));
+        }
+        let spot = checked.retouch.remove(0);
+        let snap = session_snapshot(inner, variant_id)?;
+        let a1 = inner.engine.a1(
+            &snap.source,
+            &snap.settings,
+            RenderQuality::Final,
+            inner.engine.config().preview_long_edge,
+        )?;
+        Ok(genzo_pipeline::retouch::find_source_offset(
+            &a1.image,
+            a1.sensor_grid(),
+            a1.frames(),
+            &spot,
+        )?)
+    }
+
     /// 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決める
     /// （適用はしない。UI・CLI が [`AutoTone::apply`] で設定に入れて `set_settings` する。WB のスポイトと同じ形）。
     ///
@@ -2322,6 +2418,42 @@ mod tests {
         let shared = DevelopShared::default();
         let g: Vec<u64> = (0..5).map(|_| shared.next_generation()).collect();
         assert_eq!(g, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn retouch_change_labels() {
+        use genzo_model::{RetouchMode, RetouchSpot};
+        let a = DevelopSettings::default();
+        let mut b = a.clone();
+        b.retouch
+            .push(RetouchSpot::new(vec![[0.3, 0.3]], [0.05, 0.0]));
+        assert_eq!(describe_change(&a, &b), "スポット修正を追加");
+        let mut c = b.clone();
+        c.retouch
+            .push(RetouchSpot::new(vec![[0.6, 0.3]], [0.05, 0.0]));
+        assert_eq!(describe_change(&c, &b), "スポット修正を削除");
+        assert_eq!(describe_change(&c, &a), "スポット修正をすべて削除");
+        let mut d = c.clone();
+        d.retouch[1].opacity = 50.0;
+        assert_eq!(describe_change(&c, &d), "スポット 2 の不透明度");
+        let mut e = c.clone();
+        e.retouch[0].offset = [0.0, 0.1];
+        assert_eq!(describe_change(&c, &e), "スポット 1 のコピー元");
+        let mut f = c.clone();
+        f.retouch[0].points[0] = [0.31, 0.3];
+        f.retouch[0].offset = [0.04, 0.0];
+        assert_eq!(describe_change(&c, &f), "スポット 1 の位置");
+        let mut g = c.clone();
+        g.retouch[1].mode = RetouchMode::Clone;
+        assert_eq!(describe_change(&c, &g), "スポット 2 をコピースタンプにする");
+        let mut h = c.clone();
+        h.retouch[0].enabled = false;
+        assert_eq!(describe_change(&c, &h), "スポット 1 を無効にする");
+        let mut k = c.clone();
+        k.retouch[0].size = 0.02;
+        assert_eq!(describe_change(&c, &k), "スポット 1 の大きさ");
+        k.exposure_ev = 0.5;
+        assert_eq!(describe_change(&c, &k), "露光量 +0.50・スポット 1 の大きさ");
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::time::Duration;
 use genzo_model::{
     CollectionId, CollectionKind, ColorLabel, CompositeSettings, CropRect, DevelopSettings,
     ExportFormat, ExportSettings, Flag, FolderId, GpsCoord, HistoryEntryId, KeywordId,
-    MetadataField, Rating, SmartRule, SnapshotId, StackId, VariantId, Watermark,
+    MetadataField, Rating, RetouchSpot, SmartRule, SnapshotId, StackId, VariantId, Watermark,
 };
 use serde::{Deserialize, Serialize};
 
@@ -610,6 +610,14 @@ pub enum Command {
         /// クリックした画像の `FrameInfo::uncropped`（省略可。[`Command::WhiteBalanceAt`] と同じ）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         uncropped: Option<bool>,
+    },
+    /// スポット修正（DEV-21）のコピー元を自動で選ぶ（適用はしない。[`crate::Core::retouch_auto_source`]）。
+    /// → [`Response::RetouchSource`]
+    RetouchAutoSource {
+        /// 現像中の写真。
+        variant_id: VariantId,
+        /// スポット（位置・大きさ。ずれは使わない）。
+        spot: RetouchSpot,
     },
     /// 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決めた値
     /// （適用はしない。[`crate::Core::auto_tone`]）。→ [`Response::AutoTone`]
@@ -1331,6 +1339,11 @@ pub enum Response {
     AutoTone(AutoTone),
     /// マスクの重ねて表示の画像の情報。
     MaskOverlay(MaskOverlayInfo),
+    /// スポット修正のコピー元の自動の選択の結果（コピー元のずれ。O 座標。よい候補がなければ `None`）。
+    RetouchSource {
+        /// コピー元のずれ（`RetouchSpot::offset` にそのまま使える）。
+        offset: Option<[f32; 2]>,
+    },
     /// 切り抜き。
     Crop {
         /// 切り抜き（G の外接矩形の各軸の割合）。
@@ -1792,6 +1805,9 @@ impl Core {
                 index,
                 uncropped,
             } => R::MaskOverlay(self.mask_overlay(variant_id, index, uncropped)?.info),
+            C::RetouchAutoSource { variant_id, spot } => R::RetouchSource {
+                offset: self.retouch_auto_source(variant_id, &spot)?,
+            },
             C::SetDevelopView { uncropped } => {
                 self.set_develop_view(uncropped)?;
                 R::Ok

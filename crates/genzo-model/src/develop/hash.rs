@@ -39,6 +39,11 @@
 //!   `render_deps.profile`）。ルック（`profile.look`・`look_amount`・`render_deps.look`）とプロファイルのルックテーブルの
 //!   位置（段階 C）は C だけ。キャッシュキーの外部データのハッシュも、段階 A1・B ではルックを除く
 //!   （[`RenderDeps::hash_for_phase`]）。ルックのない設定の A1 の入力の JSON は、この項目を足す前と同じ。
+//! - スポット修正（DEV-21。処理バージョン 2）は段階 A1 の出力に当てる（genzo-pipeline の `retouch`）ので、ガイド
+//!   （段階 B）に影響する。そのため結果に影響するスポット（[`RetouchSpot::is_active`]）を B に含める（A1 には含めない:
+//!   スポットを足すたびにセンサー処理をやり直さないため。スポットを当てた A1 のキャッシュのキーは A1 のキーと
+//!   [`DevelopSettings::retouch_hash`]）。結果に影響するスポットがなければ B の入力の JSON に書かない（項目を足す
+//!   前と同じハッシュ）。処理バージョン 1 では当てないので含めない。
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -47,6 +52,7 @@ use super::DevelopSettings;
 use super::params::{
     DataRef, HighlightRecovery, LensCorrection, NoiseReduction, RenderDeps, Transform, WhiteBalance,
 };
+use super::retouch::RetouchSpot;
 use crate::Phase;
 
 /// 部分ハッシュの入力の前に付ける、段階ごとの区別のための文字列。
@@ -54,6 +60,7 @@ const DOMAIN_A0: &[u8] = b"genzo.develop.A0\0";
 const DOMAIN_A1: &[u8] = b"genzo.develop.A1\0";
 const DOMAIN_B: &[u8] = b"genzo.develop.B\0";
 const DOMAIN_RENDER_DEPS: &[u8] = b"genzo.render_deps\0";
+const DOMAIN_RETOUCH: &[u8] = b"genzo.develop.retouch\0";
 
 /// バイト列を順につないだものの SHA-256。
 pub(crate) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
@@ -146,6 +153,17 @@ struct BInput<'a> {
     distortion: f32,
     /// 変形（遠近補正。ステージ 9。DEV-16）。
     transform: &'a Transform,
+    /// 結果に影響するスポット修正（DEV-21。なければ書かない）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    retouch: Vec<&'a RetouchSpot>,
+}
+
+/// 丸めた設定 `s` の、結果に影響するスポット修正（処理バージョン 1 では当てないので空）。
+fn active_retouch(s: &DevelopSettings) -> Vec<&RetouchSpot> {
+    if s.process_version < 2 {
+        return Vec::new();
+    }
+    s.retouch.iter().filter(|r| r.is_active()).collect()
 }
 
 fn a1_input(s: &DevelopSettings) -> A1Input<'_> {
@@ -197,11 +215,22 @@ impl DevelopSettings {
                     distortion_scale: s.lens.distortion_scale,
                     distortion: s.lens.distortion,
                     transform: &s.transform,
+                    retouch: active_retouch(&s),
                 };
                 sha256(&[DOMAIN_B, &to_json_bytes(&input)])
             }
             Phase::C => s.develop_hash(),
         }
+    }
+}
+
+impl DevelopSettings {
+    /// 結果に影響するスポット修正（DEV-21）のハッシュ（丸めた設定から求める）。結果に影響するスポットがなければ
+    /// （処理バージョン 1 を含む）`None`。genzo-pipeline が、スポットを当てた A1 のキャッシュのキーに使う。
+    pub fn retouch_hash(&self) -> Option<[u8; 32]> {
+        let s = self.normalized();
+        let spots = active_retouch(&s);
+        (!spots.is_empty()).then(|| sha256(&[DOMAIN_RETOUCH, &to_json_bytes(&spots)]))
     }
 }
 
@@ -358,6 +387,42 @@ mod tests {
         m.delta.dehaze = 25.0;
         b.masks.push(m);
         assert_eq!(changed_phases(&a, &b), [Phase::C]);
+    }
+
+    #[test]
+    fn retouch_changes_b_and_c_but_not_a1() {
+        // スポット修正（DEV-21）は A1 の出力に当てるので、ガイド（段階 B）が変わる。センサー処理は作り直さない。
+        use crate::RetouchSpot;
+        let a = base();
+        let mut b = base();
+        b.retouch
+            .push(RetouchSpot::new(vec![[0.4, 0.3]], [0.05, 0.0]));
+        assert_eq!(changed_phases(&a, &b), [Phase::B, Phase::C]);
+        assert_eq!(a.retouch_hash(), None);
+        let h = b.retouch_hash().expect("スポットのハッシュ");
+        // 結果に影響しないスポット（無効・ずれ 0）は B に含めない（C だけ）。
+        let mut off = b.clone();
+        off.retouch[0].enabled = false;
+        assert_eq!(changed_phases(&a, &off), [Phase::C]);
+        assert_eq!(off.retouch_hash(), None);
+        let mut zero = b.clone();
+        zero.retouch[0].offset = [0.0, 0.0];
+        assert_eq!(changed_phases(&a, &zero), [Phase::C]);
+        // 位置を変えれば B とスポットのハッシュが変わる。丸めると同じになる値は同じハッシュ。
+        let mut moved = b.clone();
+        moved.retouch[0].points[0][0] = 0.41;
+        assert_eq!(changed_phases(&b, &moved), [Phase::B, Phase::C]);
+        assert_ne!(moved.retouch_hash(), Some(h));
+        let mut nan = b.clone();
+        nan.retouch[0].size = f32::NAN;
+        assert_eq!(nan.retouch_hash(), Some(h));
+        // 処理バージョン 1 では当てないので B に含めない。
+        let mut v1a = a.clone();
+        v1a.process_version = 1;
+        let mut v1b = b.clone();
+        v1b.process_version = 1;
+        assert_eq!(changed_phases(&v1a, &v1b), [Phase::C]);
+        assert_eq!(v1b.retouch_hash(), None);
     }
 
     #[test]

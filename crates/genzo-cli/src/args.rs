@@ -1480,6 +1480,11 @@ pub enum DevelopCommand {
     /// 0,0）。処理バージョン 2 から使われる
     #[command(subcommand)]
     Mask(MaskCommand),
+    /// スポット修正（DEV-21。修復・コピースタンプ）: 一覧・追加・変更・削除。スポットは 1 から数えた番号で指定する
+    /// （`develop retouch list` で見られる）。位置・大きさ・コピー元のずれは O 座標（RAW の向きを反映した画像の長辺を
+    /// 1 とする。左上が 0,0。角度補正・切り抜きの前）。処理バージョン 2 から使われる
+    #[command(subcommand)]
+    Retouch(RetouchCommand),
 }
 
 /// スナップショットの ID を解釈する（1 以上の整数）。
@@ -1910,6 +1915,101 @@ fn parse_point(s: &str) -> Result<[f64; 2], String> {
         return Err(format!("X・Y は 0〜1 の割合で指定してください: {s}"));
     }
     Ok([x, y])
+}
+
+/// O 座標の点・ずれを読む（X,Y。範囲は genzo-model の検証で確かめる）。
+fn parse_xy(s: &str) -> Result<[f32; 2], String> {
+    let v = parse_numbers(s, 2, 2, "X,Y")?;
+    Ok([v[0], v[1]])
+}
+
+/// スポット修正の直し方（genzo-model の RetouchMode）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RetouchModeArg {
+    /// 修復（コピー元の模様を写し、明るさと色をまわりになじませる）。
+    Heal,
+    /// コピースタンプ（コピー元をそのまま写す）。
+    Clone,
+}
+
+impl RetouchModeArg {
+    /// genzo-model の値。
+    pub fn mode(self) -> genzo_model::RetouchMode {
+        match self {
+            RetouchModeArg::Heal => genzo_model::RetouchMode::Heal,
+            RetouchModeArg::Clone => genzo_model::RetouchMode::Clone,
+        }
+    }
+}
+
+/// スポットの値（指定しない項目は、追加では既定値、変更では今の値のまま）。
+#[derive(Debug, Clone, Default, Args)]
+pub struct RetouchValueArgs {
+    /// 直し方（既定 heal）
+    #[arg(long, value_enum)]
+    pub mode: Option<RetouchModeArg>,
+    /// 大きさ（半径。O 座標。0.0005〜0.25。既定 0.01）
+    #[arg(long, value_name = "R")]
+    pub size: Option<f32>,
+    /// ぼかし（0〜100。既定 50）
+    #[arg(long, value_name = "N")]
+    pub feather: Option<f32>,
+    /// 不透明度（0〜100。既定 100）
+    #[arg(long, value_name = "N")]
+    pub opacity: Option<f32>,
+    /// コピー元のずれ（DX,DY。O 座標。追加で省略すると、写真を開いてまわりのよく似た場所を自動で選ぶ）
+    #[arg(long, value_name = "DX,DY", value_parser = parse_xy, allow_hyphen_values = true)]
+    pub source: Option<[f32; 2]>,
+}
+
+/// `develop retouch` のサブコマンド（DEV-21）。
+#[derive(Debug, Subcommand)]
+pub enum RetouchCommand {
+    /// スポットの一覧（番号・有効か・直し方・形・大きさ・ぼかし・不透明度・コピー元のずれ）
+    List {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+    },
+    /// スポットを足す（履歴に 1 件記録する）
+    Add {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// 消したい場所の点（X,Y。O 座標）。1 つなら円、繰り返して 2 つ以上なら点を順に結んだ線（電線など）
+        #[arg(long = "at", value_name = "X,Y", value_parser = parse_xy, required = true)]
+        at: Vec<[f32; 2]>,
+        /// 値
+        #[command(flatten)]
+        values: RetouchValueArgs,
+    },
+    /// スポットの値を変える（指定しない項目は今の値のまま。履歴に 1 件記録する）
+    Set {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// スポットの番号（1 から）
+        #[arg(value_parser = parse_mask_number)]
+        spot: usize,
+        /// 使うか
+        #[arg(long, value_enum)]
+        enabled: Option<SwitchArg>,
+        /// 値
+        #[command(flatten)]
+        values: RetouchValueArgs,
+    },
+    /// スポットを除く（履歴に 1 件記録する。Undo で戻せる）
+    Remove {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// スポットの番号（1 から。--all と一緒には指定しない）
+        #[arg(value_parser = parse_mask_number, required_unless_present = "all", conflicts_with = "all")]
+        spot: Option<usize>,
+        /// すべて除く
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 /// マスクの部品の形（1 つだけ指定する）。
@@ -3266,6 +3366,8 @@ pub enum GroupArg {
     Profile,
     /// ローカル補正。
     Masks,
+    /// スポット修正（DEV-21）。
+    Retouch,
 }
 
 /// 写す項目の指定から genzo-api の [`SettingGroups`] を作る（空ならすべて）。
@@ -3287,6 +3389,7 @@ pub fn setting_groups(groups: &[GroupArg]) -> SettingGroups {
         effects: has(GroupArg::Effects),
         profile: has(GroupArg::Profile),
         masks: has(GroupArg::Masks),
+        retouch: has(GroupArg::Retouch),
     }
 }
 
@@ -4148,6 +4251,9 @@ mod tests {
         let g = setting_groups(&[GroupArg::Profile]);
         assert!(g.profile && !g.masks && !g.color && !g.basic_tone);
         assert!(!setting_groups(&[GroupArg::Masks]).profile);
+        assert!(setting_groups(&[GroupArg::Retouch]).retouch);
+        assert!(!setting_groups(&[GroupArg::Masks]).retouch);
+        assert!(setting_groups(&[]).retouch);
     }
 
     #[test]

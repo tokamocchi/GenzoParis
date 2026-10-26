@@ -1733,6 +1733,12 @@ pub struct FrameInfo {
     /// `左 + fx · (右 − 左)`（y も同じ）。古いコアの応答では欠ける。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub g_bounds: Option<[f64; 4]>,
+    /// この画像の上の点の O 座標（RAW の向きを反映した画像の長辺を 1 とする座標。スポット修正（DEV-21）の位置）の表
+    /// （genzo-pipeline の `retouch::oriented_grid`）。一辺 33 点（`ORIENTED_GRID_SIZE`）の格子で、点 `(i, j)` は
+    /// 画像の幅・高さに対する割合 `(i / (n − 1), j / (n − 1))` の位置、`j · n + i` 番目（`n` = 33）。回転・歪曲補正があると線形の対応で
+    /// ないので、画面は表を双線形補間する。古いコアの応答では欠ける。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub o_grid: Option<Vec<[f32; 2]>>,
     /// この描画の設定での、切り抜く前の全体（G の外接矩形）のフル解像度の寸法（幅, 高さ。四捨五入）。角度補正と
     /// 変形（遠近補正。DEV-16）で変わる。画面が切り抜きの縦横比の計算に使う（変形があると、画面の側では角度だけから
     /// 求められないため）。古いコアの応答では欠ける。
@@ -1955,6 +1961,10 @@ pub struct SettingGroups {
     pub profile: bool,
     /// ローカル補正。
     pub masks: bool,
+    /// スポット修正（DEV-21）。この項目のない JSON（スポット修正を足す前の画面・保存したプリセットの選択）では
+    /// 写さない（写すと、貼り付け元のスポット（ないことが多い）で貼り付け先のスポットを消してしまうため）。
+    #[serde(default)]
+    pub retouch: bool,
 }
 
 impl Default for SettingGroups {
@@ -1985,14 +1995,17 @@ impl SettingGroups {
         effects: true,
         profile: true,
         masks: true,
+        retouch: true,
     };
 
-    /// 現像プリセット（DEV-29）を作るときの既定の項目: 切り抜きと角度・変形・マスクを除くすべて（写真ごとに位置・構図が
-    /// 違うことが多いため。画面の貼り付け・プリセットのダイアログの既定の選択と同じ。決定事項ログ No.161・205）。
+    /// 現像プリセット（DEV-29）を作るときの既定の項目: 切り抜きと角度・変形・マスク・スポット修正を除くすべて（写真
+    /// ごとに位置・構図が違うことが多いため。画面の貼り付け・プリセットのダイアログの既定の選択と同じ。決定事項ログ
+    /// No.161・205・210）。
     pub const PRESET_DEFAULT: Self = Self {
         geometry: false,
         transform: false,
         masks: false,
+        retouch: false,
         ..Self::ALL
     };
     /// すべての項目か。
@@ -2050,6 +2063,9 @@ impl SettingGroups {
         }
         if self.masks {
             out.masks = source.masks.clone();
+        }
+        if self.retouch {
+            out.retouch = source.retouch.clone();
         }
         out
     }
@@ -3246,6 +3262,7 @@ mod setting_groups_tests {
             effects: false,
             profile: false,
             masks: false,
+            retouch: false,
         };
         let out = tone_only.merge(&source, &target);
         assert_eq!(out.exposure_ev, 0.5);
@@ -3261,6 +3278,38 @@ mod setting_groups_tests {
         assert_eq!(out.detail.noise_reduction.luminance, 30.0);
         assert_eq!(out.highlight_recovery, target.highlight_recovery);
         assert_eq!(out.exposure_ev, 0.0);
+    }
+
+    #[test]
+    fn retouch_group_is_copied_only_when_chosen() {
+        use genzo_model::RetouchSpot;
+        let mut source = DevelopSettings::default();
+        source
+            .retouch
+            .push(RetouchSpot::new(vec![[0.2, 0.2]], [0.05, 0.0]));
+        source.exposure_ev = 0.5;
+        let mut target = DevelopSettings::default();
+        target
+            .retouch
+            .push(RetouchSpot::new(vec![[0.7, 0.4]], [0.0, 0.05]));
+        // すべての項目なら写す。
+        assert_eq!(
+            SettingGroups::ALL.merge(&source, &target).retouch,
+            source.retouch
+        );
+        // プリセットの既定は写さない（貼り付け先のスポットを残す）。
+        let preset = SettingGroups::PRESET_DEFAULT.merge(&source, &target);
+        assert_eq!(preset.retouch, target.retouch);
+        assert_eq!(preset.exposure_ev, 0.5);
+        // 項目のない JSON（スポット修正を足す前の画面・保存したプリセット）は写さない。ほかの項目は既定（すべて）。
+        let old: SettingGroups = serde_json::from_str(r#"{"geometry": false}"#).unwrap();
+        assert!(!old.retouch && old.masks && !old.geometry);
+        assert!(!old.is_all());
+        assert_eq!(old.merge(&source, &target).retouch, target.retouch);
+        let all_but_new: SettingGroups = serde_json::from_str("{}").unwrap();
+        assert!(!all_but_new.retouch && all_but_new.masks);
+        let json = serde_json::to_value(SettingGroups::ALL).unwrap();
+        assert_eq!(json["retouch"], true);
     }
 
     #[test]
@@ -3283,6 +3332,7 @@ mod setting_groups_tests {
             effects: false,
             profile: false,
             masks: false,
+            retouch: false,
         };
         let presence = SettingGroups {
             presence: true,

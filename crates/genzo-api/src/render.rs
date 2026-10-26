@@ -116,6 +116,8 @@ pub(crate) struct Rendered {
     pub warnings: Vec<String>,
     /// 出力の画像の縁の G 座標（左・上・右・下。genzo-pipeline の `local::g_bounds`。マスクの位置を画面に描くため）。
     pub g_bounds: [f64; 4],
+    /// 出力の画像の上の点の O 座標の表（genzo-pipeline の `retouch::oriented_grid`。スポット修正の位置を画面に描くため）。
+    pub o_grid: Vec<[f32; 2]>,
     /// 切り抜く前の全体（G の外接矩形）のフル解像度の寸法（幅, 高さ。四捨五入。[`crate::FrameInfo::g_size`]）。
     pub g_size: [u32; 2],
 }
@@ -239,6 +241,7 @@ impl Inner {
                             quality: r.quality,
                             warnings: warning_texts(&r.warnings, &r.unimplemented),
                             g_bounds: genzo_pipeline::local::g_bounds(&r.geometry),
+                            o_grid: genzo_pipeline::retouch::oriented_grid(&r.geometry),
                             g_size: g_size_of(&r.geometry),
                         });
                     }
@@ -264,6 +267,7 @@ impl Inner {
             quality: r.quality,
             warnings: warning_texts(&r.warnings, &r.unimplemented),
             g_bounds: genzo_pipeline::local::g_bounds(&r.geometry),
+            o_grid: genzo_pipeline::retouch::oriented_grid(&r.geometry),
             g_size: g_size_of(&r.geometry),
         })
     }

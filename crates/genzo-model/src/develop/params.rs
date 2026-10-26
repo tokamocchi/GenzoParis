@@ -84,6 +84,12 @@ pub mod ranges {
     pub const MASK_LAB_AB: ValueRange = ValueRange::new(-4.0, 4.0);
     /// カラーグレーディングの色相（度。0〜360。0 と 360 は同じ色相）。
     pub const HUE_DEG: ValueRange = ValueRange::new(0.0, 360.0);
+    /// スポット修正の位置（O 座標。向きを反映した画像の長辺を 1 とする。画像の外側も少し許す。DEV-21）。
+    pub const RETOUCH_COORD: ValueRange = ValueRange::new(-1.0, 2.0);
+    /// スポット修正の大きさ（半径。O 座標。DEV-21）。
+    pub const RETOUCH_SIZE: ValueRange = ValueRange::new(0.0005, 0.25);
+    /// スポット修正のコピー元のずれ（O 座標。DEV-21）。
+    pub const RETOUCH_OFFSET: ValueRange = ValueRange::new(-2.0, 2.0);
 }
 
 /// トーンカーブ 1 本あたりの点の数の上限。

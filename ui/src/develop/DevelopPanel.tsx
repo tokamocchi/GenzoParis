@@ -10,7 +10,8 @@
 //   （プロファイル・色収差の除去・手動の歪曲 / 周辺減光 / 色収差。処理バージョン 2 から）・効果（切り抜き後の周辺光量補正・粒子。処理
 //   バージョン 2 から）・プロファイル（カメラプロファイル（DCP。RAW だけ）・ルック（3D LUT）と適用量。取り込み・管理の
 //   ダイアログ。処理バージョン 2 から。DEV-17）・マスク（ローカル補正。ブラシ・線形 / 円形グラデーション・色域・輝度範囲
-//   の部品と調整。処理バージョン 2 から。DEV-18・DEV-19。MaskPanel.tsx）・すべてリセット・警告と元の画像の情報
+//   の部品と調整。処理バージョン 2 から。DEV-18・DEV-19。MaskPanel.tsx）・スポット修正（修復・コピースタンプ。処理
+//   バージョン 2 から。DEV-21。RetouchPanel.tsx）・すべてリセット・警告と元の画像の情報
 //   （処理バージョンの更新）。
 // - 値は developStore.settings（送信前を含む最新の値）から読み、変更は applySettings で送る（ドラッグ中は
 //   dragging: true、離したら endDrag。state/develop.ts の送信の列）。
@@ -80,6 +81,7 @@ import {
 } from "./detailLogic";
 import { Histogram } from "./Histogram";
 import { MaskSection } from "./MaskPanel";
+import { RetouchSection } from "./RetouchPanel";
 import {
   cameraChoices,
   defaultProfile,
@@ -137,6 +139,7 @@ import {
   commitCrop,
   commitTransform,
   selectMask,
+  selectSpot,
   startCrop,
   toggleWbTool,
   useDevelopView,
@@ -2123,6 +2126,11 @@ export function DevelopPanel() {
         disabled={disabled}
         upgradeNote={<UpgradeNote what="ローカル補正（マスク）" processVersion={shown.process_version} />}
       />
+      <RetouchSection
+        settings={shown}
+        disabled={disabled}
+        upgradeNote={<UpgradeNote what="スポット修正" processVersion={shown.process_version} />}
+      />
       <LensSection settings={shown} disabled={disabled} />
       <EffectsSection settings={shown} disabled={disabled} />
       <div className="dp-actions">
@@ -2134,8 +2142,9 @@ export function DevelopPanel() {
             if (viewStore.get().crop) void cancelCrop();
             update((s) => resetAll(s), false);
             selectMask(null);
+            selectSpot(null);
           }}
-          title="切り抜き・レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・カラーミキサー・カラーグレーディング・白黒・カメラプロファイル・ルック・マスクを含むすべての調整を元に戻す（履歴から取り消せます）"
+          title="切り抜き・レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・カラーミキサー・カラーグレーディング・白黒・カメラプロファイル・ルック・マスク・スポット修正を含むすべての調整を元に戻す（履歴から取り消せます）"
         >
           すべてリセット
         </button>

@@ -511,8 +511,48 @@ export interface DevelopSettings {
   profile?: ProfileSettings;
   /** ローカル補正（マスク。DEV-18・DEV-19。処理バージョン 2 から使える）。 */
   masks: LocalAdjustment[];
+  /** スポット修正（DEV-21。処理バージョン 2 から使える。空ならコアは送らない）。 */
+  retouch?: RetouchSpot[];
   render_deps: RenderDeps;
 }
+
+// ---------------------------------------------------------------------------
+// スポット修正（genzo-model の develop::retouch。DEV-21）
+//
+// 位置・大きさ・コピー元のずれは O 座標（RAW の向きを反映した画像の長辺を 1 とする座標。左上が (0, 0)。角度補正・
+// 歪曲補正・切り抜きの前）。画面の画像の上の位置との対応は FrameInfo.o_grid（この画像の上の点の O 座標の表）で求める。
+// ---------------------------------------------------------------------------
+
+/** スポットの直し方（heal: 修復、clone: コピースタンプ）。 */
+export type RetouchMode = "heal" | "clone";
+
+/** スポット修正 1 つ分（genzo-model の RetouchSpot）。 */
+export interface RetouchSpot {
+  enabled: boolean;
+  mode: RetouchMode;
+  /** 消したい場所の点の列（O 座標の [x, y]）。1 点なら円、2 点以上なら線。 */
+  points: [number, number][];
+  /** 大きさ（半径。O 座標。RANGES.retouchSize）。 */
+  size: number;
+  /** ぼかし（0〜100）。 */
+  feather: number;
+  /** 不透明度（0〜100）。 */
+  opacity: number;
+  /** コピー元のずれ（O 座標。コピー元 = 消したい場所 + ずれ）。 */
+  offset: [number, number];
+}
+
+/** スポット修正の数などの上限（genzo-model の develop::retouch の定数）。 */
+export const RETOUCH_LIMITS = {
+  spots: 1000,
+  points: 5000,
+  totalPoints: 100_000,
+  /** 線の長さ（O 座標。長辺の何倍か。genzo-model の MAX_RETOUCH_STROKE_LENGTH）。 */
+  strokeLength: 4,
+} as const;
+
+/** FrameInfo.o_grid の一辺の点の数（genzo-pipeline の retouch::ORIENTED_GRID_SIZE）。 */
+export const ORIENTED_GRID_SIZE = 33;
 
 // ---------------------------------------------------------------------------
 // ローカル補正（マスク。genzo-model の develop::masks。DEV-18・DEV-19）
@@ -694,6 +734,12 @@ export const RANGES = {
   maskAngleDeg: { min: -180, max: 180 },
   /** ブラシの大きさ（半径。G 座標）。 */
   brushSize: { min: 0.0005, max: 0.5 },
+  /** スポット修正の位置（O 座標）。 */
+  retouchCoord: { min: -1, max: 2 },
+  /** スポット修正の大きさ（半径。O 座標）。 */
+  retouchSize: { min: 0.0005, max: 0.25 },
+  /** スポット修正のコピー元のずれ（O 座標）。 */
+  retouchOffset: { min: -2, max: 2 },
 } as const;
 
 /** WB のプリセットの色温度と tint（genzo-model の WbPreset::temperature_tint）。 */
@@ -724,6 +770,8 @@ export interface SettingGroups {
   /** カメラプロファイル・ルック・ルックの適用量（DEV-17。古い形では欠け、コアは写す）。 */
   profile?: boolean;
   masks: boolean;
+  /** スポット修正（DEV-21。欠けていればコアは写さない）。 */
+  retouch?: boolean;
 }
 
 /**
@@ -1622,6 +1670,12 @@ export interface FrameInfo {
    */
   g_bounds?: [number, number, number, number];
   /**
+   * この画像の上の点の O 座標（スポット修正の位置）の表。一辺 ORIENTED_GRID_SIZE 点の格子で、点 (i, j) は画像の幅・
+   * 高さに対する割合 (i / (n − 1), j / (n − 1)) の位置、j · n + i 番目（回転・歪曲補正があると線形でないので双線形補間する）。
+   * 古いコアでは無い。
+   */
+  o_grid?: [number, number][];
+  /**
    * この描画の設定での、切り抜く前の全体（G の外接矩形）のフル解像度の寸法（幅, 高さ）。角度と変形（遠近補正）で
    * 変わる。切り抜きの縦横比の計算に使う。古いコアでは無い。
    */
@@ -2036,6 +2090,7 @@ export type Command =
   | { type: "create_virtual_copy"; variant_id: VariantId; name: string | null }
   | { type: "white_balance_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
   | { type: "mask_color_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
+  | { type: "retouch_auto_source"; variant_id: VariantId; spot: RetouchSpot }
   | { type: "auto_tone"; variant_id: VariantId }
   | { type: "mask_overlay"; variant_id: VariantId; index: number; uncropped?: boolean }
   | { type: "set_develop_view"; uncropped: boolean }
@@ -2166,6 +2221,7 @@ export type Response =
   | { type: "white_balance"; temperature_k: number; tint: number }
   | ({ type: "upright" } & UprightSuggestion)
   | ({ type: "mask_color" } & PickedMaskColor)
+  | { type: "retouch_source"; offset: [number, number] | null }
   | ({ type: "auto_tone" } & AutoTone)
   | ({ type: "mask_overlay" } & MaskOverlayInfo)
   | { type: "crop"; crop: CropRect }

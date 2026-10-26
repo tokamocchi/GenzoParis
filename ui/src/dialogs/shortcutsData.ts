@@ -2,8 +2,8 @@
 // Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + '、現像の画面のスナップショット・プリセットの Ctrl / ⌘ + N・Shift + N を含む）・library/Grid.tsx（グリッドの移動・Enter・タイムラインの T）・
 // viewer/Loupe.tsx（I・Z・等倍表示の Esc）・viewer/CompareView.tsx（比較表示の ←・→・↑・↓・Z・等倍表示の Esc）・
 // viewer/SurveyView.tsx（選別表示の ←・→・/）・viewer/VideoPlayer.tsx（動画のスペース・J・K・L・,・.・M・Home・End）・
-// develop/DevelopView.tsx（W・R・Z・J・I・V・O・[・]・\・Y・
-// Shift ＋ Y と、切り抜き・スポイト・ブラシ・等倍表示の間の Esc・Enter）が持つ。比較表示（C）・選別表示（N）を始めるキーは
+// develop/DevelopView.tsx（W・R・Z・J・I・V・O・Q・[・]・\・Y・
+// Shift ＋ Y と、切り抜き・スポイト・ブラシ・スポット修正・等倍表示の間の Esc・Enter・Delete）が持つ。比較表示（C）・選別表示（N）を始めるキーは
 // App.tsx。ここは表示用の写しなので、キーを変えたらここも直す。
 
 export interface ShortcutItem {
@@ -105,11 +105,13 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["w"], label: "ホワイトバランスのスポイト" },
       { keys: ["r"], label: "切り抜き（もう一度押すと確定）" },
       { keys: ["Enter"], label: "切り抜きを確定" },
-      { keys: ["Escape"], label: "切り抜き・スポイト・マスクのブラシを取り消す・終える" },
+      { keys: ["Escape"], label: "切り抜き・スポイト・マスクのブラシ・スポット修正を取り消す・終える" },
       { keys: ["j"], label: "白飛び・黒つぶれの表示" },
       { keys: ["v"], label: "白黒・カラーの切り替え（処理バージョン 2 の写真。白黒のときはカラーミキサーが白黒ミキサーになる）" },
       { keys: ["o"], label: "マスクの重ねて表示（選んでいるマスクの範囲を赤で表示）" },
-      { keys: ["[", "]"], label: "マスクのブラシの大きさを小さく・大きく（ブラシで描いている間）" },
+      { keys: ["[", "]"], label: "マスクのブラシ・スポット修正の大きさを小さく・大きく（道具を使っている間）" },
+      { keys: ["q"], label: "スポット修正（クリックで円・ドラッグで線のゴミ・電線などを消す。もう一度押すと終わる）" },
+      { keys: ["Delete", "Backspace"], label: "選んでいるスポットを除く（スポット修正の道具を使っている間）" },
       { keys: ["\\"], label: "ビフォー / アフター: ビフォーだけ（もう一度押すとアフター）" },
       { keys: ["y"], label: "ビフォー / アフター: 左右に並べる" },
       { keys: ["shift+y"], label: "ビフォー / アフター: 分割（左半分がビフォー）" },
