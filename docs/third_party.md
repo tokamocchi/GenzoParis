@@ -55,6 +55,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
   - `genzo-geo` の `tls.rs`（コミット `8cfeb81` で足し、`8ac4eda` で消した）は、ureq 3.4.2 の `src/tls/native_tls.rs`（MIT OR Apache-2.0）を参考に、同じ流れで書いた（ureq の著作権の表示と許諾の文は 3.14 節）。
   - **ライセンスの表記の要否・方法は、ほかの Rust の crate と同じ扱いで、AI の判断で確定しない**（DIST-05）。2026-10-20 から、配布物の `licenses/third-party/rust.txt` に一覧と本文を載せる（1.4 節。この内容で条件を満たすかは人の確認待ち）。
   - 新しく入った 24 個の crate（`created_at` は crates.io の API の値。UTC。「入る対象」は上の 5 つの対象の依存の木）:
+- 2026-10-26（CI の修正。スポット修正（DEV-21）の PR #15 で見つかった）: CI の `lint` ジョブの cargo-deny（advisories）が、新しく公開された **脆弱性の勧告 RUSTSEC-2026-0382**（`rustls-webpki` 0.103.15。信頼されなくなった emSign の中間証明書を含む証明書の経路を受け入れうる）で失敗した。依存の木は `genzo-geo`（位置情報の後付けのオンラインの地図の HTTPS）→ `rustls` 0.23.45 / `rustls-platform-verifier` 0.7.1 / `ureq` 3.4.2 → `rustls-webpki`。勧告の修正版は 0.103.16 以上なので、`cargo update -p rustls-webpki --precise 0.103.16` で更新した（crates.io の API で、公開日 2026-10-20、ライセンス ISC、checksum が `Cargo.lock` と一致することを確かめた）。**公開から 6 日で、「公開から 2 週間以上たった版にする」方針の例外**（脆弱性の修正のため。決定事項ログ No.204。**人の確認待ち**）。同じ `cargo update` で、`tempfile` 3.x が使う `getrandom` が 0.4.3 から 0.3.4 に解決し直された（cargo が選び直したもの。3 つの版（0.2.17・0.3.4・0.4.3）はどれも前から `Cargo.lock` にあり、新しい crate・消えた crate はない）。`rust.txt` は `node scripts/third-party.mjs --only rust`（cargo-about 0.9.2）で作り直した（変わったのは rustls-webpki の版と元にした `Cargo.lock` の SHA-256 だけ）。
 
 | crate | 版 | 公開日 | ライセンス（crates.io） | checksum（`Cargo.lock`） | 入る対象・用途 |
 |---|---|---|---|---|---|
@@ -63,7 +64,7 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | `utf8-zero` | 0.8.1 | 2026-02-28 | MIT OR Apache-2.0 | `b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e` | すべて（ureq の依存） |
 | `rustls` | 0.23.45 | 2026-09-14 | Apache-2.0 OR ISC OR MIT | `0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634` | すべて。直接の依存（TLS）。脆弱性の通知 4 件を `deny.toml` で除いた（上） |
 | `rustls-pki-types` | 1.15.1 | 2026-07-23 | MIT OR Apache-2.0 | `2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96` | すべて（証明書などの型） |
-| `rustls-webpki` | 0.103.15 | 2026-08-21 | ISC | `f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2` | すべて（証明書の検証の部品） |
+| `rustls-webpki` | 0.103.16（2026-10-26 に 0.103.15 から更新。RUSTSEC-2026-0382） | 2026-10-20 | ISC | `4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281` | すべて（証明書の検証の部品） |
 | `rustls-platform-verifier` | 0.7.1 | 2026-09-24 | MIT OR Apache-2.0 | `1167586491e2b18b8bfbb293e8180ec17c201c4f076d7cb3070ca964e7598f98` | すべて（証明書の検証を OS に任せる） |
 | `ring` | 0.17.14 | 2025-03-11 | Apache-2.0 AND ISC | `a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7` | すべて（暗号の実装。C とアセンブリを含む。2 章） |
 | `untrusted` | 0.9.0 | 2021-07-13 | ISC | `8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1` | すべて（ring などの依存） |
