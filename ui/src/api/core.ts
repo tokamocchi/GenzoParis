@@ -69,6 +69,9 @@ import type {
   PasteReport,
   PasteVersion,
   PickedMaskColor,
+  Transform,
+  UprightMode,
+  UprightSuggestion,
   ProfileEntry,
   ProfileImportReport,
   ProfileKind,
@@ -76,6 +79,7 @@ import type {
   Rating,
   RegionInfo,
   RegionRequest,
+  RetouchSpot,
   Response,
   RestorePlan,
   SearchFilter,
@@ -505,6 +509,17 @@ export const computeAiMask = async (variant_id: VariantId, kind: AiMaskKind): Pr
 /** AI マスクの推論の仕組みの状態（使える種類・モデル・問題）。 */
 export const aiMaskStatus = async (): Promise<AiMaskStatus> => strip(await execute({ type: "ai_mask_status" }, "ai_mask_status"));
 /**
+ * スポット修正（DEV-21）のコピー元を自動で選ぶ（適用はしない）。スポットのまわりとよく似たまわりを持つ場所へのずれ
+ * （O 座標）。写真の枠に収まる候補がなければ null。
+ */
+export const retouchAutoSource = async (
+  variant_id: VariantId,
+  spot: RetouchSpot,
+): Promise<[number, number] | null> => {
+  const r = await execute({ type: "retouch_auto_source", variant_id, spot }, "retouch_source");
+  return r.offset;
+};
+/**
  * 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決めた値（適用は
  * しない。画面が設定に入れて送る）。今の露光量などの値によらず、同じ写真・WB・切り抜きなら同じ値。
  */
@@ -516,13 +531,28 @@ export const autoTone = async (variant_id: VariantId): Promise<AutoTone> => {
 export const setDevelopView = async (uncropped: boolean) => {
   await execute({ type: "set_develop_view", uncropped }, "ok");
 };
-/** 角度に合わせて、切り抜きを画像の内側に収める（コアが描画で使うのと同じ制限）。 */
+/**
+ * 角度と変形（遠近補正。DEV-16）に合わせて、切り抜きを画像の内側に収める（コアが描画で使うのと同じ制限）。
+ * `transform` を省くと、コアの今の設定の変形。
+ */
 export const constrainCrop = async (
   variant_id: VariantId,
   crop: CropRect,
   angle_deg: number,
+  transform?: Transform,
 ): Promise<CropRect> =>
-  (await execute({ type: "constrain_crop", variant_id, crop, angle_deg }, "crop")).crop;
+  (
+    await execute(
+      { type: "constrain_crop", variant_id, crop, angle_deg, ...(transform === undefined ? {} : { transform }) },
+      "crop",
+    )
+  ).crop;
+/**
+ * 自動の遠近補正（Upright 相当。DEV-16）: 現像中の写真の直線から、角度補正と垂直・水平の値を求める（適用はしない。
+ * 画面が設定に入れて送る）。直線が見つからない・処理バージョン 1 で垂直・完全を使うと invalid_input。
+ */
+export const analyzeUpright = async (variant_id: VariantId, mode: UprightMode): Promise<UprightSuggestion> =>
+  strip(await execute({ type: "analyze_upright", variant_id, mode }, "upright"));
 
 /** 透かしの見本（EXP-03。灰色の濃淡の見本の画像に、書き出しと同じ計算で重ねた PNG）。 */
 export const watermarkPreview = async (watermark: Watermark, width?: number, height?: number): Promise<WatermarkPreview> =>

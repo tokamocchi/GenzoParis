@@ -258,6 +258,32 @@ pub fn gradient(w: u32, h: u32, seed: u8) -> image::RgbImage {
     })
 }
 
+/// 格子（垂直・水平の暗い線）の JPEG を書く（自動の遠近補正（DEV-16）のテスト用。`tilt_deg` が 0 でなければ、
+/// 見上げて撮った建物のように上がすぼまる台形に写った格子にする（上辺が狭い）。線の間隔は短辺の 1/6）。
+pub fn write_grid_jpeg(path: &Path, (w, h): (u32, u32), tilt_deg: f64) {
+    let (cx, cy) = (f64::from(w) * 0.5, f64::from(h) * 0.5);
+    let r = 0.5 * f64::from(w).hypot(f64::from(h));
+    let spacing = f64::from(w.min(h)) / 6.0;
+    let (s, c) = tilt_deg.to_radians().sin_cos();
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        // 画素を、x 軸のまわりに tilt_deg 傾けたカメラの像から元の面に戻す（genzo-pipeline の perspective と同じ式。
+        // 正の傾きで上が広がる補正になるので、ここでは逆に上がすぼまって写る）。
+        let (nx, ny) = ((f64::from(x) + 0.5 - cx) / r, (f64::from(y) + 0.5 - cy) / r);
+        let wv = s * ny + c;
+        let (px, py) = (nx / wv * r + cx, (c * ny - s) / wv * r + cy);
+        let on_v = ((px / spacing).round() * spacing - px).abs() < 1.5;
+        let on_h = ((py / spacing).round() * spacing - py).abs() < 1.5;
+        let v = if on_v || on_h { 30 } else { 200 };
+        image::Rgb([v, v, v])
+    });
+    let rgb = RgbImage8::from_raw(w, h, img.into_raw()).unwrap();
+    let bytes = genzo_media::jpeg::encode_jpeg(&rgb, 95, None, None).unwrap();
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
 /// 合成の JPEG を書く（Exif は任意）。
 pub fn write_jpeg(path: &Path, (w, h): (u32, u32), seed: u8, exif: Option<&ExifData>) {
     let img = gradient(w, h, seed);

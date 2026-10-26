@@ -25,7 +25,7 @@
 //!   ファイルと同じフォルダ → 実行ファイルのフォルダの `lib` → `../Frameworks`（`.app` の Contents/Frameworks に置いた
 //!   とき。今の配布物は使わない）。
 //!
-//! ONNX Runtime のテレメトリーは止める（genzo-ml の `onnx` モジュールの doc。決定事項ログ No.207）。
+//! ONNX Runtime のテレメトリーは止める（genzo-ml の `onnx` モジュールの doc。決定事項ログ No.216）。
 //!
 //! どちらもなければ、状態（[`Core::ai_mask_status`]）で理由を知らせ、計算はエラー（[`ApiError::AiMask`]）になる。
 

@@ -322,6 +322,7 @@ export function mockDevelopSettings(over: Partial<DevelopSettings> = {}): Develo
       ca_red_cyan: 0,
       ca_blue_yellow: 0,
     },
+    transform: { vertical: 0, horizontal: 0, aspect: 0, scale: 100, offset_x: 0, offset_y: 0 },
     detail: {
       sharpening: { amount: 0, radius: 1, detail: 25, masking: 0 },
       noise_reduction: { luminance: 0, luminance_detail: 50, luminance_contrast: 0, color: 0, color_detail: 50 },
@@ -1612,6 +1613,32 @@ export function mockMaskCommands(
 // v1 の presets: スナップショット（DEV-28）・現像プリセット（DEV-29）・書き出しプリセット（EXP-02）の見本
 // ---------------------------------------------------------------------------
 
+/** スポット修正（DEV-21）のコピー元の自動の選択の見本のずれ（O 座標）。 */
+export const MOCK_RETOUCH_OFFSET: [number, number] = [0.05, 0];
+
+/**
+ * スポット修正のコマンドの応答を足す: retouch_auto_source（`offset()` が返すずれ。既定は MOCK_RETOUCH_OFFSET。点のない
+ * スポットはエラー（コアの invalid_input と同じく））。送ったコマンドは `sent` に残す。
+ */
+export function mockRetouchCommands(
+  b: MockBridge,
+  opts: { offset?: () => [number, number] | null } = {},
+): { sent: Record<string, unknown>[] } {
+  const sent: Record<string, unknown>[] = [];
+  const base = b.responses.get("core_execute");
+  b.responses.set("core_execute", (args?: Record<string, unknown>) => {
+    const c = args?.command as Record<string, unknown> & { type: string };
+    if (c.type === "retouch_auto_source") {
+      sent.push(c);
+      const spot = c.spot as { points?: unknown[] } | undefined;
+      if (!spot?.points?.length) return new Error("点がありません");
+      return { type: "retouch_source", offset: opts.offset ? opts.offset() : MOCK_RETOUCH_OFFSET };
+    }
+    return typeof base === "function" ? (base as (a?: Record<string, unknown>) => unknown)(args) : base;
+  });
+  return { sent };
+}
+
 /** 含める項目の見本（基本補正・外観だけ）。 */
 export const MOCK_TONE_GROUPS: SettingGroups = {
   white_balance: false,
@@ -1621,6 +1648,7 @@ export const MOCK_TONE_GROUPS: SettingGroups = {
   color: false,
   geometry: false,
   lens: false,
+  transform: false,
   detail: false,
   effects: false,
   profile: false,

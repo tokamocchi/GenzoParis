@@ -5,6 +5,9 @@
 // 入力の格子の連続座標のアフィン変換（GeometryPlan::lattice_to_input_f32。行ごとに a, b, t）。
 // P_WARP が 1 なら歪曲補正（処理バージョン 2。GeometryPlan::warp の式）: P_PRE（G の格子 → D から中心を
 // 引いたもの）・P_INV_R2・倍率の 1D LUT（aux の LUT 0）・P_POST（中心からの差 → 入力の格子）。
+// P_PERSP が 1 なら遠近補正（処理バージョン 2。DEV-16。GeometryPlan::projective の map_f32 の式）: P_HOM（G の格子 →
+// D から中心を引いたもの。同次座標の 3 × 3。行優先）・P_DLIM（中心からの差の上限）と、P_WARP が 1 なら歪曲補正の
+// 表（P_INV_R2・LUT 0）、P_POST（中心からの差 → 入力の格子）。
 //
 // 同じモジュールの lens_main はステージ 7（genzo-pipeline の sensor::LensCorrectionStage。周辺減光の
 // 利得と R・B の倍率色収差。1D LUT は aux の LUT 0〜2、バイキュービックはこのファイルの関数）。
@@ -122,7 +125,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let yy = f32(pi(P_CROP_Y) + g.y) + 0.5;
     var x = 0.0;
     var y = 0.0;
-    if (pu(P_WARP) != 0u) {
+    if (pu(P_PERSP) != 0u) {
+        // 遠近補正（ProjectivePlan::map_f32 と同じ式。genzo-pipeline の perspective::W_MIN と同じ下限）。
+        let xh = pf(P_HOM) * xx + pf(P_HOM + 1u) * yy + pf(P_HOM + 2u);
+        let yh = pf(P_HOM + 3u) * xx + pf(P_HOM + 4u) * yy + pf(P_HOM + 5u);
+        let w = pf(P_HOM + 6u) * xx + pf(P_HOM + 7u) * yy + pf(P_HOM + 8u);
+        let inv = 1.0 / max(w, 1e-4);
+        let lim = pf(P_DLIM);
+        var dx = clamp(xh * inv, -lim, lim);
+        var dy = clamp(yh * inv, -lim, lim);
+        if (pu(P_WARP) != 0u) {
+            let u = (dx * dx + dy * dy) * pf(P_INV_R2);
+            let k = lut_at(0u, u);
+            dx = k * dx;
+            dy = k * dy;
+        }
+        x = pf(P_POST) * dx + pf(P_POST + 1u) * dy + pf(P_POST + 2u);
+        y = pf(P_POST + 3u) * dx + pf(P_POST + 4u) * dy + pf(P_POST + 5u);
+    } else if (pu(P_WARP) != 0u) {
         // 歪曲補正（GeometryPlan::warp の map_f32 と同じ式）。
         let dx = pf(P_PRE) * xx + pf(P_PRE + 1u) * yy + pf(P_PRE + 2u);
         let dy = pf(P_PRE + 3u) * xx + pf(P_PRE + 4u) * yy + pf(P_PRE + 5u);

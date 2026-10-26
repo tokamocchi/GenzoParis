@@ -53,7 +53,7 @@ use crate::render::display_target;
 use crate::types::{
     AutoTone, AutoToneStats, DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem,
     MaskOverlayFrame, MaskOverlayInfo, PasteReport, PasteVersion, PickedMaskColor,
-    PickedWhiteBalance, SettingGroups, SourceInfo,
+    PickedWhiteBalance, SettingGroups, SourceInfo, UprightMode, UprightSuggestion,
 };
 
 /// 自動保存に失敗したときに、もう一度試すまでの時間（**仮置き**: 10 秒。ディスクの容量不足などで
@@ -370,6 +370,18 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     if old.lens != new.lens {
         parts.push("レンズ補正".to_owned());
     }
+    let (tf_old, tf_new) = (&old.transform, &new.transform);
+    if tf_old != tf_new {
+        parts.push(
+            if tf_old.vertical != tf_new.vertical && tf_old.horizontal == tf_new.horizontal {
+                format!("変形: 垂直 {:+.0}", tf_new.vertical)
+            } else if tf_old.horizontal != tf_new.horizontal && tf_old.vertical == tf_new.vertical {
+                format!("変形: 水平 {:+.0}", tf_new.horizontal)
+            } else {
+                "変形".to_owned()
+            },
+        );
+    }
     let (nr_old, nr_new) = (&old.detail.noise_reduction, &new.detail.noise_reduction);
     if nr_old.luminance != nr_new.luminance {
         parts.push(format!("輝度ノイズの軽減 {:.0}", nr_new.luminance));
@@ -414,6 +426,9 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     }
     if old.masks != new.masks {
         parts.push(describe_masks(&old.masks, &new.masks));
+    }
+    if old.retouch != new.retouch {
+        parts.push(describe_retouch(&old.retouch, &new.retouch));
     }
     // 外部データのうち、カメラプロファイル・ルックの参照は設定の ID に付いて変わる（上の名前で表す）。
     let raw_deps = |d: &genzo_model::RenderDeps| genzo_model::RenderDeps {
@@ -504,6 +519,55 @@ fn describe_masks(
         return format!("マスクの名前「{name}」");
     }
     format!("マスク「{name}」の範囲")
+}
+
+/// スポット修正の変更の履歴の名前（DEV-21。「スポット修正を追加」「スポット 2 の不透明度」など）。
+fn describe_retouch(old: &[genzo_model::RetouchSpot], new: &[genzo_model::RetouchSpot]) -> String {
+    if new.len() > old.len() {
+        return "スポット修正を追加".to_owned();
+    }
+    if new.is_empty() && !old.is_empty() {
+        return "スポット修正をすべて削除".to_owned();
+    }
+    if new.len() < old.len() {
+        return "スポット修正を削除".to_owned();
+    }
+    let Some((i, (a, b))) = old.iter().zip(new).enumerate().find(|(_, (a, b))| a != b) else {
+        return "スポット修正".to_owned();
+    };
+    let n = i + 1;
+    if a.enabled != b.enabled {
+        return format!(
+            "スポット {n} を{}",
+            if b.enabled {
+                "有効にする"
+            } else {
+                "無効にする"
+            }
+        );
+    }
+    if a.mode != b.mode {
+        return format!(
+            "スポット {n} を{}",
+            match b.mode {
+                genzo_model::RetouchMode::Heal => "修復にする",
+                genzo_model::RetouchMode::Clone => "コピースタンプにする",
+            }
+        );
+    }
+    if a.offset != b.offset && a.points == b.points {
+        return format!("スポット {n} のコピー元");
+    }
+    if a.points != b.points {
+        return format!("スポット {n} の位置");
+    }
+    if a.size != b.size {
+        return format!("スポット {n} の大きさ");
+    }
+    if a.feather != b.feather {
+        return format!("スポット {n} のぼかし");
+    }
+    format!("スポット {n} の不透明度")
 }
 
 /// 保存待ちの変更を保存する（呼び出し側が state のロックを持つ。写真を開く・一括適用・Undo / Redo・
@@ -755,6 +819,8 @@ pub(crate) fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFram
             output_width,
             output_height,
             g_bounds: Some(r.g_bounds),
+            o_grid: Some(r.o_grid),
+            g_size: Some(r.g_size),
         },
         b3: Arc::new(r.b3),
         display_rgb8: Arc::new(display_rgb8),
@@ -1920,6 +1986,49 @@ impl Core {
         })
     }
 
+    /// スポット修正（DEV-21）のコピー元を自動で選ぶ（適用はしない。UI がずれを `RetouchSpot::offset` にして
+    /// `set_settings` する）。
+    ///
+    /// 今の設定（保存待ち・ドラッグ中の値を含む。ほかのスポットを当てた後）のプレビュー解像度の A1 で、スポット
+    /// `spot`（位置・大きさ。ずれは使わない）のまわりとよく似たまわりを持つ場所を探す（genzo-pipeline の
+    /// `retouch::find_source_offset`）。写真の枠に収まる候補がなければ `None`。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。点のないスポットは
+    /// [`ApiError::InvalidArgument`]。
+    pub fn retouch_auto_source(
+        &self,
+        variant_id: VariantId,
+        spot: &genzo_model::RetouchSpot,
+    ) -> Result<Option<[f32; 2]>, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let mut checked = DevelopSettings {
+            retouch: vec![genzo_model::RetouchSpot {
+                // ずれ 0 のスポットは結果に影響しないものとして除かれないよう、検証用に仮のずれを入れる。
+                offset: [0.01, 0.0],
+                ..spot.clone()
+            }],
+            ..DevelopSettings::default()
+        };
+        if let Err(e) = checked.validate() {
+            return Err(ApiError::InvalidArgument(e.to_string()));
+        }
+        let spot = checked.retouch.remove(0);
+        let snap = session_snapshot(inner, variant_id)?;
+        let a1 = inner.engine.a1(
+            &snap.source,
+            &snap.settings,
+            RenderQuality::Final,
+            inner.engine.config().preview_long_edge,
+        )?;
+        Ok(genzo_pipeline::retouch::find_source_offset(
+            &a1.image,
+            a1.sensor_grid(),
+            a1.frames(),
+            &spot,
+        )?)
+    }
+
     /// 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決める
     /// （適用はしない。UI・CLI が [`AutoTone::apply`] で設定に入れて `set_settings` する。WB のスポイトと同じ形）。
     ///
@@ -2010,9 +2119,10 @@ impl Core {
         })
     }
 
-    /// 切り抜き `crop` を、現像中の写真の寸法と角度 `angle_deg` で、描画が実際に使う範囲にする（回転で画像の
-    /// 外に出る切り抜きは、中心と縦横比を保って画像の内側に収まる最大の大きさに縮める。genzo-pipeline の
-    /// `finish::geometry::constrain_crop`。描画のステージ 9 と同じ計算）。設定は変えない。
+    /// 切り抜き `crop` を、現像中の写真の寸法と角度 `angle_deg`・変形 `transform`（遠近補正。DEV-16。`None` なら今の
+    /// 設定の値）で、描画が実際に使う範囲にする（回転・遠近補正で画像の外に出る切り抜きは、中心と縦横比を保って
+    /// 画像の内側に収まる最大の大きさに縮める。genzo-pipeline の `finish::geometry::constrain_crop`。描画のステージ 9 と
+    /// 同じ計算）。設定は変えない。変形は、その写真の処理バージョンで使われるときだけ考える（版 1 では無視する）。
     ///
     /// 値は保存するときと同じく丸めてから使う（`DevelopSettings::normalized`: 各軸を 0〜1 に収め、
     /// 左右・上下が逆なら入れ替え、幅・高さが最小値より小さければその軸を全体にする。角度は ±45 度に
@@ -2023,6 +2133,7 @@ impl Core {
         variant_id: VariantId,
         crop: &CropRect,
         angle_deg: f32,
+        transform: Option<&genzo_model::Transform>,
     ) -> Result<CropRect, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
@@ -2032,16 +2143,83 @@ impl Core {
                 "切り抜き・角度に数でない値（NaN・無限大）があります（{crop:?}、{angle_deg}）"
             )));
         }
+        if let Some(t) = transform {
+            let values = [
+                t.vertical,
+                t.horizontal,
+                t.aspect,
+                t.scale,
+                t.offset_x,
+                t.offset_y,
+            ];
+            if !values.iter().all(|v| v.is_finite()) {
+                return Err(ApiError::InvalidArgument(format!(
+                    "変形に数でない値（NaN・無限大）があります（{t:?}）"
+                )));
+            }
+        }
         let snap = session_snapshot(inner, variant_id)?;
         let mut s = DevelopSettings::default();
         s.geometry.crop = *crop;
         s.geometry.angle_deg = angle_deg;
-        let g = s.normalized().geometry;
+        s.transform = transform.copied().unwrap_or(snap.settings.transform);
+        let s = s.normalized();
+        // 変形はその写真の処理バージョンで使われるときだけ（版 1 では描画も使わない）。歪曲補正（D）は O と同じ
+        // 大きさで画像のない部分を持たないので、制限には要らない。
+        let version = known_process_version(snap.settings.process_version, "この写真の")?;
         let frames = snap
             .source
             .frames()?
-            .with_rotation(f64::from(g.angle_deg))?;
-        Ok(genzo_pipeline::finish::constrain_crop(&frames, &g.crop))
+            .with_rotation(f64::from(s.geometry.angle_deg))?;
+        let perspective = genzo_pipeline::perspective::Perspective::for_settings(
+            frames.oriented_size(),
+            version,
+            &s.transform,
+        );
+        let frames = frames.with_perspective(perspective);
+        Ok(genzo_pipeline::finish::constrain_crop(
+            &frames,
+            &s.geometry.crop,
+        ))
+    }
+
+    /// 自動の遠近補正（Upright 相当。DEV-16）: 現像中の写真の直線から、角度補正と垂直・水平の遠近補正の値を求める
+    /// （genzo-pipeline の `Engine::analyze_upright`。今の設定（保存待ち・ドラッグ中の値を含む）のレンズ補正で歪曲を
+    /// 補正した画像を調べる）。設定は変えない（UI・CLI が返した値を `set_settings` で書き込む。履歴に残り、元に戻せる）。
+    ///
+    /// 返す `transform` は、今の設定の変形の垂直・水平を求めた値に置き換えたもの（縦横比・拡大縮小・ずらしは今のまま）。
+    /// 水平（[`UprightMode::Level`]）では垂直・水平は今のまま（角度だけ）。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。垂直・完全を処理バージョン 1 の
+    /// 写真に使う・直線が見つからない・画像が小さすぎるときは [`ApiError::InvalidArgument`]。
+    pub fn analyze_upright(
+        &self,
+        variant_id: VariantId,
+        mode: UprightMode,
+    ) -> Result<UprightSuggestion, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let snap = session_snapshot(inner, variant_id)?;
+        let a = inner
+            .engine
+            .analyze_upright(&snap.source, &snap.settings, mode.into())
+            .map_err(|e| match e {
+                genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
+                e => e.into(),
+            })?;
+        let mut transform = snap.settings.normalized().transform;
+        if mode != UprightMode::Level {
+            transform.vertical = a.vertical;
+            transform.horizontal = a.horizontal;
+        }
+        Ok(UprightSuggestion {
+            mode,
+            angle_deg: a.angle_deg,
+            transform,
+            vertical_lines: a.vertical_lines,
+            horizontal_lines: a.horizontal_lines,
+            residual_deg: a.residual_deg,
+        })
     }
 }
 
@@ -2240,6 +2418,42 @@ mod tests {
         let shared = DevelopShared::default();
         let g: Vec<u64> = (0..5).map(|_| shared.next_generation()).collect();
         assert_eq!(g, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn retouch_change_labels() {
+        use genzo_model::{RetouchMode, RetouchSpot};
+        let a = DevelopSettings::default();
+        let mut b = a.clone();
+        b.retouch
+            .push(RetouchSpot::new(vec![[0.3, 0.3]], [0.05, 0.0]));
+        assert_eq!(describe_change(&a, &b), "スポット修正を追加");
+        let mut c = b.clone();
+        c.retouch
+            .push(RetouchSpot::new(vec![[0.6, 0.3]], [0.05, 0.0]));
+        assert_eq!(describe_change(&c, &b), "スポット修正を削除");
+        assert_eq!(describe_change(&c, &a), "スポット修正をすべて削除");
+        let mut d = c.clone();
+        d.retouch[1].opacity = 50.0;
+        assert_eq!(describe_change(&c, &d), "スポット 2 の不透明度");
+        let mut e = c.clone();
+        e.retouch[0].offset = [0.0, 0.1];
+        assert_eq!(describe_change(&c, &e), "スポット 1 のコピー元");
+        let mut f = c.clone();
+        f.retouch[0].points[0] = [0.31, 0.3];
+        f.retouch[0].offset = [0.04, 0.0];
+        assert_eq!(describe_change(&c, &f), "スポット 1 の位置");
+        let mut g = c.clone();
+        g.retouch[1].mode = RetouchMode::Clone;
+        assert_eq!(describe_change(&c, &g), "スポット 2 をコピースタンプにする");
+        let mut h = c.clone();
+        h.retouch[0].enabled = false;
+        assert_eq!(describe_change(&c, &h), "スポット 1 を無効にする");
+        let mut k = c.clone();
+        k.retouch[0].size = 0.02;
+        assert_eq!(describe_change(&c, &k), "スポット 1 の大きさ");
+        k.exposure_ev = 0.5;
+        assert_eq!(describe_change(&c, &k), "露光量 +0.50・スポット 1 の大きさ");
     }
 
     #[test]

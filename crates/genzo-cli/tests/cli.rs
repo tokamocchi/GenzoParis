@@ -5860,3 +5860,93 @@ fn ai_masks_are_computed_with_onnx_runtime() {
         mean_luma(&after, (ew / 8, eh / 2), 4)
     );
 }
+
+/// `develop retouch`（スポット修正。DEV-21）: 追加（コピー元の指定・自動の選択・線）・一覧・値の変更・削除。
+/// 書き出しで、スポットの中だけが変わる。番号の誤りは終了コードで知らせる。
+#[test]
+fn develop_retouch_spots_are_added_changed_and_removed() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (90, 60), 4, None, false);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let a = id_of(&env.json(&["search"]), "A.jpg").to_string();
+    let label = || {
+        let history = env.json(&["develop", "history", &a]);
+        history.as_array().unwrap().last().unwrap()["label"].clone()
+    };
+    assert_eq!(
+        env.json(&["develop", "retouch", "list", &a])["retouch"],
+        json!([])
+    );
+    let before = export_png(&env, &a, "out-before");
+    // 横に赤が増える画像の左寄り (0.2, 0.3)（O 座標は長辺 90 画素を 1 とするので画素 (18, 27)）に、右に 0.3
+    // ずらしたコピースタンプ（ぼかしなし）。
+    let added = env.json(&[
+        "develop",
+        "retouch",
+        "add",
+        &a,
+        "--at",
+        "0.2,0.3",
+        "--mode",
+        "clone",
+        "--size",
+        "0.08",
+        "--feather",
+        "0",
+        "--source",
+        "0.3,0",
+    ]);
+    assert_eq!(added["changed"], true);
+    let r = &added["retouch"][0];
+    assert_eq!(r["number"], 1);
+    assert_eq!(r["mode"], "clone");
+    assert_eq!(r["offset"], json!([0.3, 0.0]));
+    assert_eq!(label(), "スポット修正を追加");
+    let after = export_png(&env, &a, "out-spot");
+    let red = |img: &image::RgbImage, x: u32, y: u32| f64::from(img.get_pixel(x, y).0[0]);
+    // 中心 (18, 27) は 27 画素右の赤になる。遠くの画素は変わらない。
+    assert!(
+        red(&after, 18, 27) > red(&before, 18, 27) + 40.0,
+        "{} → {}",
+        red(&before, 18, 27),
+        red(&after, 18, 27)
+    );
+    assert_eq!(before.get_pixel(80, 50), after.get_pixel(80, 50));
+    // コピー元を省くと、写真を開いて自動で選ぶ。2 点で線。
+    let line = env.json(&[
+        "develop", "retouch", "add", &a, "--at", "0.3,0.55", "--at", "0.7,0.55", "--size", "0.02",
+    ]);
+    let r = &line["retouch"][1];
+    assert_eq!(r["mode"], "heal");
+    assert_eq!(r["points"].as_array().unwrap().len(), 2);
+    let off = r["offset"].as_array().unwrap();
+    assert!(
+        off[0].as_f64().unwrap() != 0.0 || off[1].as_f64().unwrap() != 0.0,
+        "{off:?}"
+    );
+    // 値の変更・無効にする。
+    env.json(&["develop", "retouch", "set", &a, "2", "--opacity", "40"]);
+    assert_eq!(label(), "スポット 2 の不透明度");
+    let set = env.json(&["develop", "retouch", "set", &a, "1", "--enabled", "off"]);
+    assert_eq!(set["retouch"][0]["enabled"], false);
+    assert_eq!(label(), "スポット 1 を無効にする");
+    // 番号の誤り。
+    let bad = env.run(&["develop", "retouch", "set", &a, "3", "--opacity", "10"]);
+    assert_ne!(bad.code, 0);
+    assert!(
+        bad.stderr.contains("スポット 3 はありません"),
+        "{}",
+        bad.stderr
+    );
+    // 削除。
+    let removed = env.json(&["develop", "retouch", "remove", &a, "1"]);
+    assert_eq!(removed["retouch"].as_array().unwrap().len(), 1);
+    assert_eq!(label(), "スポット修正を削除");
+    env.json(&["develop", "retouch", "remove", &a, "--all"]);
+    assert_eq!(label(), "スポット修正をすべて削除");
+    assert_eq!(
+        env.json(&["develop", "retouch", "list", &a])["retouch"],
+        json!([])
+    );
+}

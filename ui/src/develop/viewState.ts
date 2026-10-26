@@ -22,9 +22,24 @@
 //   持つ（マスクそのものは設定の masks）。ブラシで描く（brush）・色域のスポイト（mask_color）は道具。描いた
 //   ストロークは離したときに 1 本として設定に足す（履歴に 1 件）。スポイトはコアに点の色を求め（mask_color_at）、
 //   見本の色として足す。選んでいる番号が設定の外になったら（Undo など）、選んでいないとみなす（currentMask）。
+// - スポット修正（DEV-21。Q）: 選んでいるスポットと、道具（retouch）の設定（次に足すスポットの直し方・大きさ・ぼかし・
+//   不透明度）をここで持つ（スポットそのものは設定の retouch）。クリック・ドラッグで足したスポットのコピー元は、コアに
+//   選ばせて（retouch_auto_source）から設定に足す（履歴に 1 件）。選んでいる番号が設定の外になったら選んでいないと
+//   みなす（currentSpot）。
 
 import * as core from "../api/core";
-import type { AiMaskKind, AspectRatio, BeforeSource, CropRect, DevelopSettings, LocalAdjustment, VariantId } from "../api/types";
+import type {
+  AiMaskKind,
+  AspectRatio,
+  BeforeSource,
+  CropRect,
+  DevelopSettings,
+  LocalAdjustment,
+  RetouchSpot,
+  Transform,
+  UprightMode,
+  VariantId,
+} from "../api/types";
 import { actions } from "../state/app";
 import { applySettings, developStore, endDrag, enqueue, refreshFrame, setBeforeSource } from "../state/develop";
 import { cancelRegionRender } from "../state/region";
@@ -53,11 +68,30 @@ import {
   shapeKind,
   withComponent,
 } from "./maskLogic";
+import {
+  DEFAULT_RETOUCH,
+  type RetouchOptions,
+  addSpot,
+  fallbackOffset,
+  newSpot,
+  retouchOffset,
+  spotsOf,
+} from "./retouchLogic";
 import { formatAngle, sameShown } from "./scales";
-import { customWb, sameAutoToneValues, withAutoTone } from "./settingsLogic";
+import {
+  customWb,
+  describeUpright,
+  fullLens,
+  fullTransform,
+  sameAutoToneValues,
+  sameTransform,
+  transformIsIdentity,
+  withAutoTone,
+  withUprightTransform,
+} from "./settingsLogic";
 import { clamp01 } from "./zoomMath";
 
-export type DevelopTool = "none" | "wb" | "crop" | "brush" | "mask_color";
+export type DevelopTool = "none" | "wb" | "crop" | "brush" | "mask_color" | "retouch";
 
 /**
  * 色域のスポイトで選んだ色の入れ先（new_mask: 新しいマスク、new_component: マスク `mask` に新しい部品、
@@ -131,6 +165,10 @@ export interface DevelopViewState {
    * 量が 0 のとき・マスクを選んでいるとき・ほかの道具の間などは、出す側（DevelopView）で出さない。
    */
   vignetteHandle: boolean;
+  /** 選んでいるスポット（設定の retouch の番号。DEV-21）。 */
+  spotIndex: number | null;
+  /** スポット修正の道具の設定（次に足すスポットに使う）。 */
+  retouch: RetouchOptions;
 }
 
 export const viewStore = createStore<DevelopViewState>({
@@ -148,6 +186,8 @@ export const viewStore = createStore<DevelopViewState>({
   aiStatus: null,
   aiBusy: false,
   vignetteHandle: false,
+  spotIndex: null,
+  retouch: DEFAULT_RETOUCH,
 });
 
 export function useDevelopView<T>(selector: (s: DevelopViewState) => T, equal?: (a: T, b: T) => boolean): T {
@@ -178,7 +218,9 @@ export function setCompareMode(mode: CompareMode): void {
   const s = viewStore.get();
   if (mode !== "off") {
     if (s.crop) void cancelCrop();
-    if (s.tool === "wb" || s.tool === "brush" || s.tool === "mask_color") viewStore.set({ tool: "none", pickTarget: null });
+    if (s.tool === "wb" || s.tool === "brush" || s.tool === "mask_color" || s.tool === "retouch") {
+      viewStore.set({ tool: "none", pickTarget: null });
+    }
   }
   viewStore.set({ compare: mode });
 }
@@ -231,7 +273,7 @@ export function toggleWbTool(): void {
   if (s.tool === "crop") return;
   const d = developStore.get();
   if (!d.state) return;
-  if (s.tool === "brush" || s.tool === "mask_color") viewStore.set({ tool: "none", pickTarget: null });
+  if (s.tool === "brush" || s.tool === "mask_color" || s.tool === "retouch") viewStore.set({ tool: "none", pickTarget: null });
   if (!d.state.source.is_raw) {
     actions.notify("info", "RAW 以外の写真ではホワイトバランスを変えられません");
     return;
@@ -331,7 +373,7 @@ export async function startCrop(): Promise<void> {
   const d = developStore.get();
   if (!d.state || !d.settings || d.variantId === null) return;
   const seq = ++cropSeq;
-  if (s.tool === "brush" || s.tool === "mask_color") viewStore.set({ pickTarget: null });
+  if (s.tool === "brush" || s.tool === "mask_color" || s.tool === "retouch") viewStore.set({ pickTarget: null });
   if (s.zoom) cancelRegionRender();
   watchSavedGeometry();
   angleBase = null;
@@ -352,9 +394,10 @@ export async function startCrop(): Promise<void> {
   }
   // 切り抜く前の全体の描画は preview_updated で届く。念のため今の最新も取りにいく。
   void refreshFrame();
-  // 保存済みの切り抜きが回転した画像の外にかかっていれば（編集の外で角度を変えたとき）、描画で使われる
-  // 枠（コアの constrain_crop。パイプラインと同じ制限）を出す。角度 0 では制限はかからない。
-  if (g.angle_deg !== 0) void constrainDraft();
+  // 保存済みの切り抜きが回転・変形（遠近補正。DEV-16）した画像の外にかかっていれば（編集の外で角度・変形を変えた
+  // とき）、描画で使われる枠（コアの constrain_crop。パイプラインと同じ制限）を出す。角度 0 で変形もなければ、
+  // 制限はかからない。
+  if (g.angle_deg !== 0 || !transformIsIdentity(d.settings.transform)) void constrainDraft();
 }
 
 /** 全体の表示に戻す（失敗しても編集は終える。次に写真を開けば戻る）。 */
@@ -374,7 +417,7 @@ export async function commitCrop(): Promise<void> {
     const angle = d.settings.geometry.angle_deg;
     let crop = sanitizeCrop(draft.crop);
     try {
-      crop = sanitizeCrop(await core.constrainCrop(draft.variantId, crop, angle));
+      crop = sanitizeCrop(await core.constrainCrop(draft.variantId, crop, angle, fullTransform(d.settings.transform)));
     } catch (e) {
       // 制限できなくても、そのまま保存する（コアは描画のときに同じ制限をかける。genzo-pipeline の
       // constrain_crop）。
@@ -416,7 +459,12 @@ export async function constrainDraft(): Promise<void> {
   const rev = draftRev;
   try {
     const c = sanitizeCrop(
-      await core.constrainCrop(draft.variantId, sanitizeCrop(draft.crop), d.settings.geometry.angle_deg),
+      await core.constrainCrop(
+        draft.variantId,
+        sanitizeCrop(draft.crop),
+        d.settings.geometry.angle_deg,
+        fullTransform(d.settings.transform),
+      ),
     );
     if (seq === cropSeq && rev === draftRev) setDraftCrop(c);
   } catch (e) {
@@ -476,7 +524,9 @@ export async function chooseAspect(aspect: AspectRatio | null, info: GeometryInf
   if (k !== null) {
     crop = sanitizeCrop(maxAspectCrop(crop, k));
     try {
-      crop = sanitizeCrop(await core.constrainCrop(id, crop, d.settings.geometry.angle_deg));
+      crop = sanitizeCrop(
+        await core.constrainCrop(id, crop, d.settings.geometry.angle_deg, fullTransform(d.settings.transform)),
+      );
     } catch (e) {
       console.warn("切り抜きを画像の内側に制限できません", e);
     }
@@ -538,19 +588,94 @@ export function commitAngle(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 変形（遠近補正。DEV-16）
+// ---------------------------------------------------------------------------
+
+/**
+ * 変形の項目を変える（パネルのスライダー）。設定の変形だけを送る（切り抜きは、描画のときにコアが画像の内側に
+ * 制限する。編集中の枠はドラッグを終えたときに制限する）。
+ */
+export function changeTransform(patch: Partial<Transform>, dragging: boolean): void {
+  const d = developStore.get();
+  if (!d.state || !d.settings || d.variantId === null) return;
+  const next = { ...fullTransform(d.settings.transform), ...patch };
+  if (sameTransform(next, fullTransform(d.settings.transform))) return;
+  applySettings({ ...d.settings, transform: next }, dragging);
+}
+
+/** 変形のドラッグを終える（履歴に 1 件。切り抜きの編集中は、枠を画像の内側に制限する）。 */
+export function commitTransform(): void {
+  endDrag();
+  if (viewStore.get().crop) void constrainDraft();
+}
+
+/**
+ * 自動の遠近補正（Upright 相当）: コアに直線を調べてもらい（analyze_upright）、求めた角度補正と、垂直・完全なら
+ * 垂直・水平を設定に入れて送る（履歴に 1 件。元に戻せる。縦横比・拡大縮小・ずらしは変えない）。直線が見つからなければ
+ * 知らせる。切り抜きの編集中は枠を制限し直す。
+ *
+ * 送信待ちの設定を送った後に求める（コアが今の設定のレンズ補正で歪曲を補正した画像を調べるため）。求めている間に
+ * 利用者が角度・変形・レンズ補正を変えたら、後からの操作を優先して適用せず、その旨を知らせる（自動補正（DEV-32）と
+ * 同じ扱い）。
+ */
+export async function applyUpright(mode: UprightMode): Promise<void> {
+  const d = developStore.get();
+  if (!d.state || !d.settings || d.variantId === null) return;
+  const id = d.variantId;
+  await enqueue(async () => {
+    // コアが調べる元の設定（列の順で、送信待ちの設定はすべて送った後）。
+    const base = developStore.get().settings;
+    try {
+      const s = await core.analyzeUpright(id, mode);
+      const latest = developStore.get();
+      if (latest.variantId !== id || !latest.settings || !latest.state) return;
+      // 解析は今の設定のレンズ補正で歪曲を補正した画像を調べるので、レンズ補正が変わっても結果は使えない。
+      if (
+        base &&
+        (base.geometry.angle_deg !== latest.settings.geometry.angle_deg ||
+          !sameTransform(fullTransform(base.transform), fullTransform(latest.settings.transform)) ||
+          JSON.stringify(fullLens(base.lens)) !== JSON.stringify(fullLens(latest.settings.lens)))
+      ) {
+        actions.notify("info", "自動の補正: 求めている間に角度・変形・レンズ補正が変わったため、適用しませんでした");
+        return;
+      }
+      const transform = withUprightTransform(latest.settings.transform, mode, s.transform);
+      applySettings(
+        { ...latest.settings, geometry: { ...latest.settings.geometry, angle_deg: s.angle_deg }, transform },
+        false,
+      );
+      actions.notify(
+        "info",
+        describeUpright(mode, s.angle_deg, transform, { vertical: s.vertical_lines, horizontal: s.horizontal_lines }),
+      );
+      if (viewStore.get().crop) void constrainDraft();
+    } catch (e) {
+      actions.reportError(e, "自動で補正できません");
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 写真が変わったとき・画面を離れたとき
 // ---------------------------------------------------------------------------
 
 /**
- * 道具をすべて終える（切り抜きは保存しない。等倍表示の描画は取り消す。マスクの選択も外す。重ねて表示の切り替えと
- * ブラシの設定は保つ）。
+ * 道具をすべて終える（切り抜きは保存しない。等倍表示の描画は取り消す。マスク・スポットの選択も外す。重ねて表示の
+ * 切り替えとブラシ・スポット修正の道具の設定は保つ）。
  */
 export function endAllTools(): void {
   angleBase = null;
   const s = viewStore.get();
   if (s.crop) void cancelCrop();
   if (s.zoom) cancelRegionRender();
-  viewStore.set({ tool: "none", zoom: null, maskIndex: null, componentIndex: null, pickTarget: null });
+  viewStore.set({
+    tool: "none",
+    zoom: null,
+    maskIndex: null,
+    componentIndex: null,
+    pickTarget: null,
+    spotIndex: null,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -573,10 +698,11 @@ export function currentMask(
 /** マスクを選ぶ（null で外す。部品は最初のもの）。ブラシ・スポイトの道具は終える。 */
 export function selectMask(index: number | null): void {
   const s = viewStore.get();
-  const toolOff = s.tool === "brush" || s.tool === "mask_color";
+  const toolOff = s.tool === "brush" || s.tool === "mask_color" || (index !== null && s.tool === "retouch");
   viewStore.set({
     maskIndex: index,
     componentIndex: index === null ? null : 0,
+    ...(index !== null ? { spotIndex: null } : {}),
     ...(toolOff ? { tool: "none" as const, pickTarget: null } : {}),
   });
 }
@@ -643,7 +769,7 @@ export function toggleBrushTool(): void {
   if (s.crop || !maskToolReady()) return;
   const sel = currentMask(developStore.get().settings, s);
   if (!sel || sel.component === null || shapeKind(sel.mask.components[sel.component].shape) !== "brush") return;
-  viewStore.set({ tool: "brush", compare: "off", pickTarget: null });
+  viewStore.set({ tool: "brush", compare: "off", pickTarget: null, spotIndex: null });
 }
 
 /** マスク・ブラシ・スポイトの道具をやめる（Esc）。 */
@@ -685,7 +811,7 @@ export function startMaskColorPick(target: MaskPickTarget): void {
     return;
   }
   if (s.crop || !maskToolReady()) return;
-  viewStore.set({ tool: "mask_color", compare: "off", pickTarget: target });
+  viewStore.set({ tool: "mask_color", compare: "off", pickTarget: target, spotIndex: null });
 }
 
 /**
@@ -802,4 +928,129 @@ export function commitBrushStroke(points: [number, number][], erase: boolean): n
     return null;
   }
   return applySettings(r.settings, false);
+}
+
+// ---------------------------------------------------------------------------
+// スポット修正（DEV-21）
+// ---------------------------------------------------------------------------
+
+/** 今の設定で有効なスポットの選択（番号が設定の外なら null）。 */
+export function currentSpot(
+  settings: DevelopSettings | null,
+  s: Pick<DevelopViewState, "spotIndex">,
+): { index: number; spot: RetouchSpot } | null {
+  const spots = spotsOf(settings);
+  const i = s.spotIndex;
+  if (i === null || i < 0 || i >= spots.length) return null;
+  return { index: i, spot: spots[i] };
+}
+
+/** スポットを選ぶ（null で外す）。マスクの選択は外す（つまみが重ならないように）。 */
+export function selectSpot(index: number | null): void {
+  viewStore.set(index === null ? { spotIndex: null } : { spotIndex: index, maskIndex: null, componentIndex: null });
+}
+
+/** スポット修正の道具を使い始める・やめる（Q・パネルのボタン）。マスクの道具・選択は終える。 */
+export function toggleRetouchTool(): void {
+  const s = viewStore.get();
+  if (s.tool === "retouch") {
+    viewStore.set({ tool: "none" });
+    return;
+  }
+  if (s.crop) return;
+  const d = developStore.get();
+  if (!d.state || !d.settings) return;
+  if (d.settings.process_version < 2) {
+    actions.notify(
+      "info",
+      `この写真の処理バージョン（${d.settings.process_version}）では、スポット修正は使われません（処理バージョンを更新すると使えます）`,
+    );
+    return;
+  }
+  viewStore.set({ tool: "retouch", compare: "off", pickTarget: null, maskIndex: null, componentIndex: null });
+}
+
+/** スポット修正の道具をやめる（Esc。選んでいるスポットがあれば、先に選択を外す）。 */
+export function cancelRetouchTool(): void {
+  const s = viewStore.get();
+  if (s.tool !== "retouch") return;
+  if (s.spotIndex !== null) viewStore.set({ spotIndex: null });
+  else viewStore.set({ tool: "none" });
+}
+
+/** スポット修正の道具の設定を変える。 */
+export function setRetouchOptions(patch: Partial<RetouchOptions>): void {
+  viewStore.set((s) => ({ retouch: { ...s.retouch, ...patch } }));
+}
+
+/**
+ * 描いたスポット（O 座標の点の列。1 点なら円、2 点以上なら線）を足す: コピー元をコアに選ばせて（選べなければ
+ * 大きさの 2.5 倍だけ横にずらして）から、そのときの設定に足し（履歴に 1 件）、足したスポットを選ぶ。`oWidth` は O の幅
+ * （長辺を 1 とする。選べなかったときのずらす向きに使う）。
+ *
+ * コピー元を求めるのは送信の列の外で待ち、届いてから applySettings で送る（列の中で送ると、待つ間に押した Undo・
+ * 動かしたスライダーの設定と順序が入れ替わり、どちらかが消える。コピー元は今の設定のどの画像で求めてもよい）。待つ間に
+ * 写真が変わったら足さない。
+ */
+export async function commitRetouchSpot(points: [number, number][], oWidth = 1): Promise<boolean> {
+  const d = developStore.get();
+  const id = d.variantId;
+  if (id === null || !d.state || !d.settings) return false;
+  const spot = newSpot(points, viewStore.get().retouch);
+  if (spot.points.length === 0) return false;
+  // 足せない（数・点の数・線の長さが上限を超える）なら、コピー元を探す前に知らせる。
+  const check = addSpot(d.settings, spot);
+  if ("error" in check) {
+    actions.notify("info", check.error);
+    return false;
+  }
+  let offset: [number, number] | null = null;
+  try {
+    offset = await core.retouchAutoSource(id, spot);
+  } catch (e) {
+    console.warn("コピー元を自動で選べません", e);
+  }
+  const cur = developStore.get();
+  if (cur.variantId !== id || !cur.state || !cur.settings) return false;
+  const r = addSpot(cur.settings, { ...spot, offset: offset ? retouchOffset(offset) : fallbackOffset(spot, oWidth) });
+  if ("error" in r) {
+    actions.notify("info", r.error);
+    return false;
+  }
+  applySettings(r.settings, false);
+  viewStore.set({ spotIndex: spotsOf(r.settings).length - 1 });
+  return true;
+}
+
+/**
+ * スポット `index` のコピー元をコアに選び直させる（パネルのボタン。選べなければ知らせて変えない）。commitRetouchSpot と
+ * 同じく、求めるのは列の外で待ち、届いたときの設定のスポットに入れる（待つ間にスポットが除かれた・動いたら何もしない）。
+ */
+export async function reselectSource(index: number): Promise<void> {
+  const d = developStore.get();
+  const id = d.variantId;
+  const spot = spotsOf(d.settings)[index];
+  if (id === null || !d.state || !spot) return;
+  let offset: [number, number] | null;
+  try {
+    // コアはスポットのまわり（半径の外の帯）を比べるので、このスポットを当てた後の画像で探してもよい（ずれは使わない）。
+    offset = await core.retouchAutoSource(id, { ...spot, offset: [0, 0] });
+  } catch (e) {
+    actions.reportError(e, "コピー元を選び直せません");
+    return;
+  }
+  const cur = developStore.get();
+  const now = spotsOf(cur.settings)[index];
+  // 待つ間にスポットが除かれた・動いた（番号が別のスポットを指す）・大きさが変わった（候補・重なりは半径による）・
+  // コピー元を手で動かしたなら入れない。
+  if (cur.variantId !== id || !cur.state || !cur.settings || !now) return;
+  const key = (r: RetouchSpot) => JSON.stringify([r.points, r.size, r.offset]);
+  if (key(now) !== key(spot)) return;
+  if (!offset) {
+    actions.notify("info", "よいコピー元が見つかりません（画面の上でコピー元の円をドラッグして動かせます）");
+    return;
+  }
+  const next = retouchOffset(offset);
+  if (next[0] === now.offset[0] && next[1] === now.offset[1]) return;
+  applySettings({ ...cur.settings, retouch: spotsOf(cur.settings).map((r, k) => (k === index ? { ...r, offset: next } : r)) }, false);
 }

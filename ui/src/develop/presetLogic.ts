@@ -9,7 +9,7 @@
 //   ダイアログは、読み込み済みで動画と分かっているものの数を先に知らせる（presetApplyTargets）。
 
 import type { PasteReport, PresetInfo, SettingGroups, VariantId } from "../api/types";
-import { PASTE_GROUP_ITEMS, type PasteSelection } from "../dialogs/pasteLogic";
+import { PASTE_GROUP_ITEMS, type PasteGroupKey, type PasteSelection } from "../dialogs/pasteLogic";
 
 /** プリセットの名前・フォルダの名前の文字数の上限（genzo-api の MAX_PRESET_NAME_CHARS）。 */
 export const MAX_PRESET_NAME_CHARS = 100;
@@ -65,10 +65,18 @@ export function presetFolders(presets: readonly PresetInfo[]): string[] {
   return [...new Set(presets.map((p) => p.folder).filter((f) => f !== ""))];
 }
 
+/**
+ * 項目 `key` を含めるか（欠けた項目は、コアと同じく含める。ただしスポット修正（DEV-21）は、足す前に作ったプリセットに
+ * 欠けていて、コアは含めないので含めない）。
+ */
+function groupOn(groups: SettingGroups, key: PasteGroupKey): boolean {
+  return groups[key] ?? key !== "retouch";
+}
+
 /** 含める項目の名前の並び（「基本補正・外観」。すべてなら「すべての項目」）。 */
 export function describeGroups(groups: SettingGroups | undefined): string {
   if (!groups) return "";
-  const on = PASTE_GROUP_ITEMS.filter(({ key }) => groups[key] ?? true);
+  const on = PASTE_GROUP_ITEMS.filter(({ key }) => groupOn(groups, key));
   if (on.length === PASTE_GROUP_ITEMS.length) return "すべての項目";
   return on.map((i) => i.label).join("・");
 }
@@ -77,7 +85,7 @@ export function describeGroups(groups: SettingGroups | undefined): string {
 export function selectionOf(groups: SettingGroups | undefined, fallback: PasteSelection): PasteSelection {
   if (!groups) return { ...fallback };
   const out = { ...fallback };
-  for (const { key } of PASTE_GROUP_ITEMS) out[key] = groups[key] ?? true;
+  for (const { key } of PASTE_GROUP_ITEMS) out[key] = groupOn(groups, key);
   return out;
 }
 

@@ -397,6 +397,56 @@ fn full_crop_with_rotation_is_constrained_inside_the_image() {
     }
 }
 
+/// 変形（遠近補正。DEV-16。処理バージョン 2）: 切り抜きは画像（D の四隅の像の四角形）の内側に制限され、出力の
+/// 四隅は画像の内側から取る。変形を元に戻すと、変形のない結果とビット単位で同じ（変形のない設定の経路は変えない）。
+/// ガイドは変形で作り直す（段階 B のキーが変わる）。
+#[test]
+fn perspective_transform_is_constrained_and_identity_is_unchanged() {
+    let img = scene(60, 40);
+    let base = DevelopSettings::default();
+    assert_eq!(base.process_version, 2);
+    let mut s = base.clone();
+    s.transform.vertical = -50.0;
+    s.transform.horizontal = 20.0;
+    let (out, plan) = render(&s, &img, Orientation::Normal);
+    let c = plan.geometry().crop();
+    assert!(c.width() < 1.0 || c.height() < 1.0, "{c:?}");
+    assert_eq!(out.dimensions(), plan.output_size());
+    assert!(plan.geometry().projective().is_some());
+    let (w, h) = plan.output_size();
+    for (i, j) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+        let (x, y) = plan
+            .geometry()
+            .c_to_input(f64::from(i) + 0.5, f64::from(j) + 0.5);
+        assert!(
+            (-0.5..=60.5).contains(&x) && (-0.5..=40.5).contains(&y),
+            "{x} {y}"
+        );
+    }
+    // 変形の値を既定に戻すと、変形のない設定と同じ計画・同じ画素。
+    let mut back = s.clone();
+    back.transform = genzo_model::Transform::default();
+    let (out_back, plan_back) = render(&back, &img, Orientation::Normal);
+    let (out_base, _) = render(&base, &img, Orientation::Normal);
+    assert!(plan_back.geometry().projective().is_none());
+    assert_bitwise_eq(&out_back, &out_base);
+    // 版 1 では変形を無視する（版 1 の結果は変えない）。
+    let mut v1 = s.clone();
+    v1.process_version = 1;
+    let mut v1_plain = base.clone();
+    v1_plain.process_version = 1;
+    let (a, plan_v1) = render(&v1, &img, Orientation::Normal);
+    let (b, _) = render(&v1_plain, &img, Orientation::Normal);
+    assert!(plan_v1.geometry().projective().is_none());
+    assert_bitwise_eq(&a, &b);
+    // ガイド: 変形で段階 B のハッシュが変わり、座標系も遠近補正を持つ。
+    assert_ne!(GuideSpec::develop_hash(&s), GuideSpec::develop_hash(&base));
+    let g = guide_for(&s, &img, Orientation::Normal);
+    assert!(g.frames.has_perspective());
+    let g0 = guide_for(&base, &img, Orientation::Normal);
+    assert!(!g0.frames.has_perspective());
+}
+
 #[test]
 fn guide_is_invariant_to_exposure_crop_and_sliders() {
     let source = SourceImage::Working {

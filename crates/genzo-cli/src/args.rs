@@ -1367,6 +1367,10 @@ pub enum DevelopCommand {
         /// レンズ補正（DEV-14。JSON の後に当てる）
         #[command(flatten)]
         lens: LensArgs,
+        /// 変形（遠近補正。DEV-16。JSON の後に当てる。--upright は写真を開いて直線を調べ、求めた値を角度補正と
+        /// 垂直・水平に入れる）
+        #[command(flatten)]
+        transform: TransformArgs,
         /// ハイライト復元・ノイズ軽減（DEV-06・DEV-13。JSON の後に当てる）
         #[command(flatten)]
         sensor: SensorArgs,
@@ -1488,6 +1492,11 @@ pub enum DevelopCommand {
     /// 0,0）。処理バージョン 2 から使われる
     #[command(subcommand)]
     Mask(MaskCommand),
+    /// スポット修正（DEV-21。修復・コピースタンプ）: 一覧・追加・変更・削除。スポットは 1 から数えた番号で指定する
+    /// （`develop retouch list` で見られる）。位置・大きさ・コピー元のずれは O 座標（RAW の向きを反映した画像の長辺を
+    /// 1 とする。左上が 0,0。角度補正・切り抜きの前）。処理バージョン 2 から使われる
+    #[command(subcommand)]
+    Retouch(RetouchCommand),
 }
 
 /// スナップショットの ID を解釈する（1 以上の整数）。
@@ -1951,6 +1960,101 @@ fn parse_point(s: &str) -> Result<[f64; 2], String> {
     Ok([x, y])
 }
 
+/// O 座標の点・ずれを読む（X,Y。範囲は genzo-model の検証で確かめる）。
+fn parse_xy(s: &str) -> Result<[f32; 2], String> {
+    let v = parse_numbers(s, 2, 2, "X,Y")?;
+    Ok([v[0], v[1]])
+}
+
+/// スポット修正の直し方（genzo-model の RetouchMode）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RetouchModeArg {
+    /// 修復（コピー元の模様を写し、明るさと色をまわりになじませる）。
+    Heal,
+    /// コピースタンプ（コピー元をそのまま写す）。
+    Clone,
+}
+
+impl RetouchModeArg {
+    /// genzo-model の値。
+    pub fn mode(self) -> genzo_model::RetouchMode {
+        match self {
+            RetouchModeArg::Heal => genzo_model::RetouchMode::Heal,
+            RetouchModeArg::Clone => genzo_model::RetouchMode::Clone,
+        }
+    }
+}
+
+/// スポットの値（指定しない項目は、追加では既定値、変更では今の値のまま）。
+#[derive(Debug, Clone, Default, Args)]
+pub struct RetouchValueArgs {
+    /// 直し方（既定 heal）
+    #[arg(long, value_enum)]
+    pub mode: Option<RetouchModeArg>,
+    /// 大きさ（半径。O 座標。0.0005〜0.25。既定 0.01）
+    #[arg(long, value_name = "R")]
+    pub size: Option<f32>,
+    /// ぼかし（0〜100。既定 50）
+    #[arg(long, value_name = "N")]
+    pub feather: Option<f32>,
+    /// 不透明度（0〜100。既定 100）
+    #[arg(long, value_name = "N")]
+    pub opacity: Option<f32>,
+    /// コピー元のずれ（DX,DY。O 座標。追加で省略すると、写真を開いてまわりのよく似た場所を自動で選ぶ）
+    #[arg(long, value_name = "DX,DY", value_parser = parse_xy, allow_hyphen_values = true)]
+    pub source: Option<[f32; 2]>,
+}
+
+/// `develop retouch` のサブコマンド（DEV-21）。
+#[derive(Debug, Subcommand)]
+pub enum RetouchCommand {
+    /// スポットの一覧（番号・有効か・直し方・形・大きさ・ぼかし・不透明度・コピー元のずれ）
+    List {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+    },
+    /// スポットを足す（履歴に 1 件記録する）
+    Add {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// 消したい場所の点（X,Y。O 座標）。1 つなら円、繰り返して 2 つ以上なら点を順に結んだ線（電線など）
+        #[arg(long = "at", value_name = "X,Y", value_parser = parse_xy, required = true)]
+        at: Vec<[f32; 2]>,
+        /// 値
+        #[command(flatten)]
+        values: RetouchValueArgs,
+    },
+    /// スポットの値を変える（指定しない項目は今の値のまま。履歴に 1 件記録する）
+    Set {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// スポットの番号（1 から）
+        #[arg(value_parser = parse_mask_number)]
+        spot: usize,
+        /// 使うか
+        #[arg(long, value_enum)]
+        enabled: Option<SwitchArg>,
+        /// 値
+        #[command(flatten)]
+        values: RetouchValueArgs,
+    },
+    /// スポットを除く（履歴に 1 件記録する。Undo で戻せる）
+    Remove {
+        /// variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// スポットの番号（1 から。--all と一緒には指定しない）
+        #[arg(value_parser = parse_mask_number, required_unless_present = "all", conflicts_with = "all")]
+        spot: Option<usize>,
+        /// すべて除く
+        #[arg(long)]
+        all: bool,
+    },
+}
+
 /// マスクの部品の形（1 つだけ指定する）。
 #[derive(Debug, Clone, Args)]
 #[group(required = true, multiple = false)]
@@ -2218,6 +2322,92 @@ impl LensArgs {
         set(&mut lens.vignetting_midpoint, self.vignetting_midpoint);
         set(&mut lens.ca_red_cyan, self.ca_red_cyan);
         set(&mut lens.ca_blue_yellow, self.ca_blue_yellow);
+    }
+}
+
+/// 自動の遠近補正（Upright 相当）の種類（genzo-api の `UprightMode`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UprightArg {
+    /// 水平: 角度補正だけ（どの処理バージョンでも使える）。
+    Level,
+    /// 垂直: 角度補正と垂直方向の遠近補正（処理バージョン 2 から）。
+    Vertical,
+    /// 完全: 角度補正と垂直・水平の遠近補正（処理バージョン 2 から）。
+    Full,
+}
+
+impl From<UprightArg> for genzo_api::UprightMode {
+    fn from(a: UprightArg) -> Self {
+        match a {
+            UprightArg::Level => Self::Level,
+            UprightArg::Vertical => Self::Vertical,
+            UprightArg::Full => Self::Full,
+        }
+    }
+}
+
+/// `develop set` の変形（遠近補正。DEV-16。設定の JSON の `transform` と同じ項目。処理バージョン 2 から使われる）の
+/// 指定。値の範囲は genzo-model の検証で確かめる。
+#[derive(Debug, Clone, Default, Args)]
+pub struct TransformArgs {
+    /// 自動の遠近補正（Upright 相当）: 写真を開いて直線を調べ、求めた角度補正と垂直・水平の値を入れる
+    /// （level: 水平（角度だけ）・vertical: 垂直・full: 完全。ほかの変形のオプション・JSON より後に当てる。
+    /// 直線が見つからなければエラー）
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub upright: Option<UprightArg>,
+    /// 垂直方向の遠近補正（-100〜100。負で上辺を広げる。transform.vertical）
+    #[arg(long, allow_hyphen_values = true, value_name = "N")]
+    pub vertical: Option<f32>,
+    /// 水平方向の遠近補正（-100〜100。正で右辺を広げる。transform.horizontal）
+    #[arg(long, allow_hyphen_values = true, value_name = "N")]
+    pub horizontal: Option<f32>,
+    /// 縦横比の変更（-100〜100。負で横に伸ばし、正で縦に伸ばす。transform.aspect）
+    #[arg(
+        long = "transform-aspect",
+        allow_hyphen_values = true,
+        value_name = "N"
+    )]
+    pub aspect: Option<f32>,
+    /// 拡大・縮小（%。50〜150。既定 100。transform.scale）
+    #[arg(long = "transform-scale", value_name = "PERCENT")]
+    pub scale: Option<f32>,
+    /// 横方向のずらし（-100〜100。画像の幅の半分に対する割合。transform.offset_x）
+    #[arg(long, allow_hyphen_values = true, value_name = "N")]
+    pub offset_x: Option<f32>,
+    /// 縦方向のずらし（-100〜100。画像の高さの半分に対する割合。transform.offset_y）
+    #[arg(long, allow_hyphen_values = true, value_name = "N")]
+    pub offset_y: Option<f32>,
+}
+
+impl TransformArgs {
+    /// どれかを指定したか（`--upright` を含む）。
+    pub fn any(&self) -> bool {
+        self.upright.is_some() || self.any_value()
+    }
+
+    /// 値の指定（`--upright` 以外）があるか。
+    pub fn any_value(&self) -> bool {
+        self.vertical.is_some()
+            || self.horizontal.is_some()
+            || self.aspect.is_some()
+            || self.scale.is_some()
+            || self.offset_x.is_some()
+            || self.offset_y.is_some()
+    }
+
+    /// 指定した項目を `transform` に当てる（指定しなかった項目は今の値のまま。`--upright` は当てない）。
+    pub fn apply(&self, transform: &mut genzo_model::Transform) {
+        let set = |dst: &mut f32, v: Option<f32>| {
+            if let Some(v) = v {
+                *dst = v;
+            }
+        };
+        set(&mut transform.vertical, self.vertical);
+        set(&mut transform.horizontal, self.horizontal);
+        set(&mut transform.aspect, self.aspect);
+        set(&mut transform.scale, self.scale);
+        set(&mut transform.offset_x, self.offset_x);
+        set(&mut transform.offset_y, self.offset_y);
     }
 }
 
@@ -3213,6 +3403,8 @@ pub enum GroupArg {
     Geometry,
     /// レンズ補正。
     Lens,
+    /// 変形（遠近補正。垂直・水平・縦横比・拡大縮小・ずらし。DEV-16）。
+    Transform,
     /// シャープ・ノイズ軽減。
     Detail,
     /// 効果（切り抜き後の周辺光量補正・粒子）。
@@ -3221,6 +3413,8 @@ pub enum GroupArg {
     Profile,
     /// ローカル補正。
     Masks,
+    /// スポット修正（DEV-21）。
+    Retouch,
 }
 
 /// 写す項目の指定から genzo-api の [`SettingGroups`] を作る（空ならすべて）。
@@ -3237,10 +3431,12 @@ pub fn setting_groups(groups: &[GroupArg]) -> SettingGroups {
         color: has(GroupArg::Color),
         geometry: has(GroupArg::Geometry),
         lens: has(GroupArg::Lens),
+        transform: has(GroupArg::Transform),
         detail: has(GroupArg::Detail),
         effects: has(GroupArg::Effects),
         profile: has(GroupArg::Profile),
         masks: has(GroupArg::Masks),
+        retouch: has(GroupArg::Retouch),
     }
 }
 
@@ -4102,6 +4298,9 @@ mod tests {
         let g = setting_groups(&[GroupArg::Profile]);
         assert!(g.profile && !g.masks && !g.color && !g.basic_tone);
         assert!(!setting_groups(&[GroupArg::Masks]).profile);
+        assert!(setting_groups(&[GroupArg::Retouch]).retouch);
+        assert!(!setting_groups(&[GroupArg::Masks]).retouch);
+        assert!(setting_groups(&[]).retouch);
     }
 
     #[test]

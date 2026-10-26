@@ -448,10 +448,12 @@ fn check_groups(groups: &SettingGroups) -> Result<(), ApiError> {
         color: false,
         geometry: false,
         lens: false,
+        transform: false,
         detail: false,
         effects: false,
         profile: false,
         masks: false,
+        retouch: false,
     };
     if *groups == none {
         return Err(ApiError::InvalidArgument(
@@ -1404,10 +1406,12 @@ mod tests {
             color: false,
             geometry: false,
             lens: false,
+            transform: false,
             detail: false,
             effects: false,
             profile: false,
             masks: false,
+            retouch: false,
         }
     }
 

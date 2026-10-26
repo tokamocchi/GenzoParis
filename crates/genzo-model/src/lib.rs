@@ -43,10 +43,12 @@ pub use develop::{
     HighlightRecovery, HslAdjustment, HueBand, HueBands, IssueKind, LensCorrection,
     LocalAdjustment, LocalDelta, MAX_AI_MASK_PIXELS, MAX_AI_MASK_SIDE, MAX_AI_MODEL_ID_CHARS,
     MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES, MAX_MASK_COMPONENTS, MAX_MASK_NAME_CHARS, MAX_MASKS,
-    MAX_PROFILE_ID_CHARS, MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS, MaskComponent, MaskMode,
+    MAX_PROFILE_ID_CHARS, MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_RETOUCH_STROKE_LENGTH,
+    MAX_STROKE_POINTS, MAX_TOTAL_BRUSH_POINTS, MAX_TOTAL_RETOUCH_POINTS, MaskComponent, MaskMode,
     MaskShape, NoiseReduction, ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings,
-    RenderDeps, Sharpening, ToneCurve, ToneParams, ValidationError, VignetteCenter, WbPreset,
-    WhiteBalance, ai_mask_sha256, is_valid_profile_id, sha256_hex,
+    RenderDeps, RetouchMode, RetouchSpot, Sharpening, ToneCurve, ToneParams, Transform,
+    ValidationError, VignetteCenter, WbPreset, WhiteBalance, ai_mask_sha256, is_valid_profile_id,
+    sha256_hex,
 };
 pub use export::{
     Align, ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize,
@@ -86,7 +88,9 @@ pub use smart::{
 ///   かすみの除去（`presence`。DEV-11）、効果（`effects`。DEV-24）を加え、シャープのディテールの既定を 0 から 25 に
 ///   した（それより前の版が書いた旧既定の 0 は読み込みで読み替える。[`develop::migrate`]。決定事項ログ
 ///   No.135・140・142）。
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+/// - 3（2026-10-26。DEV-16）: 変形（遠近補正。`transform`: 垂直・水平・縦横比・拡大縮小・ずらし）を加えた。
+///   JSON になければ既定値（何もしない値）で補う（決定事項ログ No.202）。
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// 処理アルゴリズムの現在のバージョン（04 の 2.5 節。IQ-08・DATA-09）。
 ///

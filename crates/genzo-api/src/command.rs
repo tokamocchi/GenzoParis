@@ -17,7 +17,7 @@ use std::time::Duration;
 use genzo_model::{
     CollectionId, CollectionKind, ColorLabel, CompositeSettings, CropRect, DevelopSettings,
     ExportFormat, ExportSettings, Flag, FolderId, GpsCoord, HistoryEntryId, KeywordId,
-    MetadataField, Rating, SmartRule, SnapshotId, StackId, VariantId, Watermark,
+    MetadataField, Rating, RetouchSpot, SmartRule, SnapshotId, StackId, VariantId, Watermark,
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,8 +36,8 @@ use crate::types::{
     LocationEditPlan, LocationUndo, MaskOverlayInfo, MetadataSummary, NamePreview, PasteReport,
     PasteVersion, PickedMaskColor, PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest,
     SearchFilter, SearchResult, SearchSort, SettingGroups, SettingsUpdate, ShownVariants,
-    StackInfo, StartupReport, ThumbnailData, Timeline, VariantDetails, VariantKeywords,
-    VideoPlayback, VideoProxyCacheStatus, ViewOutputSize,
+    StackInfo, StartupReport, ThumbnailData, Timeline, UprightMode, UprightSuggestion,
+    VariantDetails, VariantKeywords, VideoPlayback, VideoProxyCacheStatus, ViewOutputSize,
 };
 use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, ProfileEntry, ProfileImportReport, ProfileKind,
@@ -624,6 +624,14 @@ pub enum Command {
     /// 参照のない AI マスクのラスターをカタログから消す（[`crate::Core::collect_ai_masks`]）。
     /// → [`Response::AiMasksCollected`]
     CollectAiMasks,
+    /// スポット修正（DEV-21）のコピー元を自動で選ぶ（適用はしない。[`crate::Core::retouch_auto_source`]）。
+    /// → [`Response::RetouchSource`]
+    RetouchAutoSource {
+        /// 現像中の写真。
+        variant_id: VariantId,
+        /// スポット（位置・大きさ。ずれは使わない）。
+        spot: RetouchSpot,
+    },
     /// 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決めた値
     /// （適用はしない。[`crate::Core::auto_tone`]）。→ [`Response::AutoTone`]
     AutoTone {
@@ -647,7 +655,7 @@ pub enum Command {
         /// 切り抜く前の全体を描くか。
         uncropped: bool,
     },
-    /// 描画が実際に使う切り抜き（回転で画像の外に出ないよう制限したもの。[`crate::Core::constrain_crop`]）。
+    /// 描画が実際に使う切り抜き（回転・遠近補正で画像の外に出ないよう制限したもの。[`crate::Core::constrain_crop`]）。
     /// → [`Response::Crop`]
     ConstrainCrop {
         /// 現像中の写真。
@@ -656,6 +664,17 @@ pub enum Command {
         crop: CropRect,
         /// 角度補正（度）。
         angle_deg: f32,
+        /// 変形（遠近補正。DEV-16。省略時は今の設定の値）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transform: Option<genzo_model::Transform>,
+    },
+    /// 自動の遠近補正（Upright 相当。DEV-16）: 画像の直線から角度補正・垂直・水平の値を求める（適用はしない。
+    /// [`crate::Core::analyze_upright`]）。→ [`Response::Upright`]
+    AnalyzeUpright {
+        /// 現像中の写真。
+        variant_id: VariantId,
+        /// 種類（水平・垂直・完全）。
+        mode: UprightMode,
     },
     /// 画面の ICC プロファイルを設定する。→ [`Response::Display`]
     SetDisplayProfile {
@@ -1325,6 +1344,8 @@ pub enum Response {
     },
     /// WB のスポイトの結果（色温度と tint）。
     WhiteBalance(PickedWhiteBalance),
+    /// 自動の遠近補正の結果（設定に書く値。DEV-16）。
+    Upright(UprightSuggestion),
     /// 色域の範囲のスポイトの結果（点の G 座標と OKLab）。
     MaskColor(PickedMaskColor),
     /// 自動補正の値（DEV-32）。
@@ -1337,6 +1358,11 @@ pub enum Response {
     AiMaskStatus(crate::types::AiMaskStatusInfo),
     /// 参照のない AI マスクのラスターの回収の結果。
     AiMasksCollected(crate::types::AiMaskCollectReport),
+    /// スポット修正のコピー元の自動の選択の結果（コピー元のずれ。O 座標。よい候補がなければ `None`）。
+    RetouchSource {
+        /// コピー元のずれ（`RetouchSpot::offset` にそのまま使える）。
+        offset: Option<[f32; 2]>,
+    },
     /// 切り抜き。
     Crop {
         /// 切り抜き（G の外接矩形の各軸の割合）。
@@ -1803,6 +1829,9 @@ impl Core {
             }
             C::AiMaskStatus => R::AiMaskStatus(self.ai_mask_status()?),
             C::CollectAiMasks => R::AiMasksCollected(self.collect_ai_masks()?),
+            C::RetouchAutoSource { variant_id, spot } => R::RetouchSource {
+                offset: self.retouch_auto_source(variant_id, &spot)?,
+            },
             C::SetDevelopView { uncropped } => {
                 self.set_develop_view(uncropped)?;
                 R::Ok
@@ -1811,9 +1840,13 @@ impl Core {
                 variant_id,
                 crop,
                 angle_deg,
+                transform,
             } => R::Crop {
-                crop: self.constrain_crop(variant_id, &crop, angle_deg)?,
+                crop: self.constrain_crop(variant_id, &crop, angle_deg, transform.as_ref())?,
             },
+            C::AnalyzeUpright { variant_id, mode } => {
+                R::Upright(self.analyze_upright(variant_id, mode)?)
+            }
             C::SetDisplayProfile { icc } => R::Display(self.set_display_profile(icc.as_deref())?),
             C::ListProfiles { camera } => R::Profiles {
                 profiles: self.list_profiles(camera.as_deref())?,
@@ -2299,7 +2332,32 @@ mod tests {
             Command::ConstrainCrop {
                 variant_id: VariantId::new(1),
                 crop: CropRect::FULL,
-                angle_deg: 5.0
+                angle_deg: 5.0,
+                transform: None,
+            }
+        );
+        // 変形（DEV-16）付きの切り抜きの制限と、自動の遠近補正。
+        let with_transform: Command = serde_json::from_str(
+            r#"{"type":"constrain_crop","variant_id":1,"crop":{"left":0,"top":0,"right":1,"bottom":1},"angle_deg":0,"transform":{"vertical":-20}}"#,
+        )
+        .unwrap();
+        match with_transform {
+            Command::ConstrainCrop {
+                transform: Some(t), ..
+            } => {
+                assert_eq!(t.vertical, -20.0);
+                assert_eq!(t.scale, 100.0);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            serde_json::from_str::<Command>(
+                r#"{"type":"analyze_upright","variant_id":3,"mode":"vertical"}"#
+            )
+            .unwrap(),
+            Command::AnalyzeUpright {
+                variant_id: VariantId::new(3),
+                mode: UprightMode::Vertical,
             }
         );
 
@@ -2357,7 +2415,24 @@ mod tests {
             serde_json::to_value(&crop).unwrap(),
             json!({"type": "crop", "crop": {"left": 0.0, "top": 0.0, "right": 1.0, "bottom": 1.0}})
         );
-        for r in [facets, wb, crop, Response::Ok] {
+        let upright = Response::Upright(UprightSuggestion {
+            mode: UprightMode::Full,
+            angle_deg: -0.5,
+            transform: genzo_model::Transform {
+                vertical: -18.0,
+                horizontal: 3.5,
+                ..Default::default()
+            },
+            vertical_lines: 7,
+            horizontal_lines: 4,
+            residual_deg: 0.3,
+        });
+        let v = serde_json::to_value(&upright).unwrap();
+        assert_eq!(v["type"], "upright");
+        assert_eq!(v["mode"], "full");
+        assert_eq!(v["transform"]["vertical"], -18.0);
+        assert_eq!(v["transform"]["scale"], 100.0);
+        for r in [facets, wb, crop, upright, Response::Ok] {
             let back: Response = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
             assert_eq!(back, r);
         }
@@ -2992,6 +3067,11 @@ mod tests {
                     bottom: 0.8,
                 },
                 angle_deg: 5.0,
+                transform: None,
+            },
+            Command::AnalyzeUpright {
+                variant_id: VariantId::new(1),
+                mode: UprightMode::Full,
             },
         ];
         for c in commands {

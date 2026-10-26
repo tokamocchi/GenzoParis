@@ -73,7 +73,7 @@
 8. **GPL-3.0 の対応するソース**: GitHub のリポジトリと版のタグ（Release のソースのアーカイブ）で足りるか。著作権者が利用者自身だけなら、GPL の条件は再頒布する人を縛るもので、著作権者自身は縛らない、という読みでよいか（他の人の GPL のコードを含むかの確認を含む）。
 9. **複数のライセンスから選ぶ順**（MIT を Apache-2.0 より先。決定事項ログ No.195）と、brotli-decompressor を BSD-3-Clause として扱うこと。
 10. **未確認の環境**: `native.txt`・`LibRaw/source/` を作る処理は、Linux で偽の vcpkg・brew を使ったテストでだけ確かめた。Windows・macOS の配布のビルド（`release.yml`）では未実行。実際に同梱されるライブラリ（vcpkg の libraw の依存の jasper が入るかなど）とその文書は、実行したときの `native.txt` で確かめる。
-11. **AI マスクのモデルと ONNX Runtime（2026-10-26 に同梱。判断の表 No.207）**:
+11. **AI マスクのモデルと ONNX Runtime（2026-10-26 に同梱。判断の表 No.213）**:
    - DeepLab-v3（MediaPipe の `deeplab_v3.tflite`）のライセンスの根拠。ファイル自体と、この環境から読めた一次資料には明記がない（MediaPipe のリポジトリが Apache-2.0 で、似たテスト用のファイルを Apache-2.0 と宣言していることからの推定）。Google の MediaPipe の案内のページ・モデルカードで確かめる。確かめられなければ、人物のモデルを同梱から外すか、別のモデルに替える。
    - 学習データ（U²-Net の小型版: DUTS-TR、DeepLab-v3: ImageNet・MS-COCO・PASCAL VOC 2012）の利用条件が、モデルの配布・利用に及ぶか。
    - Apache-2.0 の 4 条 (b) の変更の表示（ONNX への変換）の書き方が足りるか。

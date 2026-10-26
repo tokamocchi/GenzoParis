@@ -5,11 +5,13 @@
 //   かすみの除去。処理バージョン 2 から）・自然な彩度・彩度）・トーンカーブ（パラメトリックとポイント）・カラーミキサー
 //   （色相・彩度・輝度。白黒のときは白黒ミキサー。処理バージョン 2 から）・カラーグレーディング（シャドウ・中間調・
 //   ハイライト・全体の色相環、ブレンド・バランス。処理バージョン 2 から）・ディテール（シャープ（処理バージョン 2 から）・
-//   ノイズ軽減の輝度・カラー（処理バージョン 2 から。RAW だけ））・切り抜きと角度・レンズ補正（プロファイル・色収差の
-//   除去・手動の歪曲 / 周辺減光 / 色収差。処理バージョン 2 から）・効果（切り抜き後の周辺光量補正・粒子。処理
+//   ノイズ軽減の輝度・カラー（処理バージョン 2 から。RAW だけ））・切り抜きと角度・変形（自動の遠近補正（Upright 相当。
+//   水平・垂直・完全）と垂直 / 水平 / 縦横比 / 拡大縮小 / ずらし。処理バージョン 2 から。DEV-16）・レンズ補正
+//   （プロファイル・色収差の除去・手動の歪曲 / 周辺減光 / 色収差。処理バージョン 2 から）・効果（切り抜き後の周辺光量補正・粒子。処理
 //   バージョン 2 から）・プロファイル（カメラプロファイル（DCP。RAW だけ）・ルック（3D LUT）と適用量。取り込み・管理の
 //   ダイアログ。処理バージョン 2 から。DEV-17）・マスク（ローカル補正。ブラシ・線形 / 円形グラデーション・色域・輝度範囲
-//   の部品と調整。処理バージョン 2 から。DEV-18・DEV-19。MaskPanel.tsx）・すべてリセット・警告と元の画像の情報
+//   の部品と調整。処理バージョン 2 から。DEV-18・DEV-19。MaskPanel.tsx）・スポット修正（修復・コピースタンプ。処理
+//   バージョン 2 から。DEV-21。RetouchPanel.tsx）・すべてリセット・警告と元の画像の情報
 //   （処理バージョンの更新）。
 // - 値は developStore.settings（送信前を含む最新の値）から読み、変更は applySettings で送る（ドラッグ中は
 //   dragging: true、離したら endDrag。state/develop.ts の送信の列）。
@@ -27,6 +29,8 @@ import type {
   PostCropVignette,
   PresenceParams,
   Sharpening,
+  Transform,
+  UprightMode,
   WbPreset,
 } from "../api/types";
 import { HUE_BANDS, RANGES, WB_PRESETS } from "../api/types";
@@ -77,6 +81,7 @@ import {
 } from "./detailLogic";
 import { Histogram } from "./Histogram";
 import { MaskSection } from "./MaskPanel";
+import { RetouchSection } from "./RetouchPanel";
 import {
   cameraChoices,
   defaultProfile,
@@ -101,31 +106,40 @@ import {
 } from "./scales";
 import {
   type WbMode,
+  UPRIGHT_LABELS,
   canUpgradeProcess,
   customWb,
   defaultGeometry,
   defaultLens,
   defaultNoiseReduction,
+  defaultTransform,
   effectiveWb,
   fullHighlightRecovery,
   fullLens,
   fullNoiseReduction,
+  fullTransform,
   lensControls,
   lensInfoNote,
   resetAll,
   sensorControls,
+  transformControls,
+  transformIsIdentity,
   wbFromMode,
   wbMode,
 } from "./settingsLogic";
 import { ToneCurveEditor } from "./ToneCurveEditor";
 import {
   applyAutoTone,
+  applyUpright,
   cancelCrop,
   changeAngle,
+  changeTransform,
   chooseAspect,
   commitAngle,
   commitCrop,
+  commitTransform,
   selectMask,
+  selectSpot,
   startCrop,
   toggleWbTool,
   useDevelopView,
@@ -1622,6 +1636,168 @@ function CropSection(props: { settings: DevelopSettings; disabled: boolean }) {
 }
 
 // ---------------------------------------------------------------------------
+// 変形（遠近補正。DEV-16）
+// ---------------------------------------------------------------------------
+
+interface TransformSliderDef {
+  key: keyof Transform;
+  label: string;
+  min: number;
+  max: number;
+  defaultValue: number;
+  format: (v: number) => string;
+  title: string;
+}
+
+const TRANSFORM_SLIDERS: TransformSliderDef[] = [
+  {
+    key: "vertical",
+    label: "垂直",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    defaultValue: 0,
+    format: signed0,
+    title: "垂直方向の遠近補正: 負で上辺を広げます（見上げて撮った建物の、上へすぼまる垂直線を平行にします）",
+  },
+  {
+    key: "horizontal",
+    label: "水平",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    defaultValue: 0,
+    format: signed0,
+    title: "水平方向の遠近補正: 正で右辺を広げます（右へ遠ざかる面の、右へすぼまる水平線を平行にします）",
+  },
+  {
+    key: "aspect",
+    label: "縦横比",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    defaultValue: 0,
+    format: signed0,
+    title: "負で横に、正で縦に伸ばします（遠近補正で縮んだ比を直します）",
+  },
+  {
+    key: "scale",
+    label: "拡大・縮小",
+    min: RANGES.transformScale.min,
+    max: RANGES.transformScale.max,
+    defaultValue: 100,
+    format: formatPercent,
+    title: "中心を変えずに拡大・縮小します",
+  },
+  {
+    key: "offset_x",
+    label: "X オフセット",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    defaultValue: 0,
+    format: signed0,
+    title: "横にずらします（±100 で幅の半分）",
+  },
+  {
+    key: "offset_y",
+    label: "Y オフセット",
+    min: RANGES.slider.min,
+    max: RANGES.slider.max,
+    defaultValue: 0,
+    format: signed0,
+    title: "縦にずらします（±100 で高さの半分）",
+  },
+];
+
+const UPRIGHT_BUTTONS: { mode: UprightMode; title: string }[] = [
+  { mode: "level", title: "写真の水平・垂直の直線から角度補正だけを求めます" },
+  { mode: "vertical", title: "角度補正と、垂直の直線を平行にする垂直の遠近補正を求めます" },
+  { mode: "full", title: "角度補正と、垂直・水平の遠近補正を求めます" },
+];
+
+function TransformSlider(props: { def: TransformSliderDef; transform: Transform; disabled: boolean }) {
+  const { def } = props;
+  return (
+    <Slider
+      label={def.label}
+      value={props.transform[def.key]}
+      min={def.min}
+      max={def.max}
+      step={1}
+      defaultValue={def.defaultValue}
+      format={def.format}
+      parse={parseNumber}
+      disabled={props.disabled}
+      onChange={(v, dragging) => {
+        if (sameShown(def.format, v, props.transform[def.key])) return;
+        changeTransform({ [def.key]: Math.round(v) }, dragging);
+      }}
+      onCommit={commitTransform}
+      title={def.title}
+    />
+  );
+}
+
+function TransformSection(props: { settings: DevelopSettings; disabled: boolean }) {
+  const { settings, disabled } = props;
+  const source = useDevelop((s) => s.state?.source ?? null);
+  const latest = useDevelop((s) => s.state?.latest_process_version);
+  const transform = fullTransform(settings.transform);
+  const c = transformControls(settings, source, disabled);
+  const [busy, setBusy] = useState<UprightMode | null>(null);
+  const run = (mode: UprightMode) => {
+    setBusy(mode);
+    void applyUpright(mode).finally(() => setBusy(null));
+  };
+  return (
+    <Section id="develop.transform" title="変形" defaultOpen={false}>
+      {c.needsUpgrade && !disabled && (
+        <div className="dp-note">
+          {`この写真の処理バージョン（${settings.process_version}）では、変形（遠近補正）は使われません。`}
+          {"処理バージョンを更新すると使えます（変形を使わなければ見え方は変わりません。履歴から取り消せます）。"}
+          {canUpgradeProcess(settings.process_version, latest) && (
+            <div className="dp-row">
+              <button className="btn small" onClick={() => void upgradeProcessVersion()}>
+                処理バージョンを {latest} に更新
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="dp-sub">自動（Upright）</div>
+      <div className="dp-row" role="group" aria-label="自動の遠近補正">
+        {UPRIGHT_BUTTONS.map((b) => (
+          <button
+            key={b.mode}
+            className="btn small"
+            disabled={busy !== null || (b.mode === "level" ? !c.uprightLevel : !c.uprightPerspective)}
+            onClick={() => run(b.mode)}
+            title={b.title}
+          >
+            {busy === b.mode ? "解析中…" : UPRIGHT_LABELS[b.mode]}
+          </button>
+        ))}
+      </div>
+      <div className="dp-sub">手動</div>
+      {TRANSFORM_SLIDERS.map((def) => (
+        <TransformSlider key={def.key} def={def} transform={transform} disabled={!c.sliders} />
+      ))}
+      <div className="dp-row">
+        <span className="grow" />
+        <button
+          className="btn small"
+          disabled={disabled || c.needsUpgrade || transformIsIdentity(settings.transform)}
+          onClick={() => {
+            update((s) => ({ ...s, transform: defaultTransform() }), false);
+            if (viewStore.get().crop) commitTransform();
+          }}
+          title="変形を元に戻す（角度補正は変えません）"
+        >
+          リセット
+        </button>
+      </div>
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // レンズ補正（DEV-14）
 // ---------------------------------------------------------------------------
 
@@ -1944,10 +2120,16 @@ export function DevelopPanel() {
       <GradingSection settings={shown} disabled={disabled} />
       <DetailSection settings={shown} disabled={disabled} />
       <CropSection settings={shown} disabled={disabled} />
+      <TransformSection settings={shown} disabled={disabled} />
       <MaskSection
         settings={shown}
         disabled={disabled}
         upgradeNote={<UpgradeNote what="ローカル補正（マスク）" processVersion={shown.process_version} />}
+      />
+      <RetouchSection
+        settings={shown}
+        disabled={disabled}
+        upgradeNote={<UpgradeNote what="スポット修正" processVersion={shown.process_version} />}
       />
       <LensSection settings={shown} disabled={disabled} />
       <EffectsSection settings={shown} disabled={disabled} />
@@ -1960,8 +2142,9 @@ export function DevelopPanel() {
             if (viewStore.get().crop) void cancelCrop();
             update((s) => resetAll(s), false);
             selectMask(null);
+            selectSpot(null);
           }}
-          title="切り抜き・レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・カラーミキサー・カラーグレーディング・白黒・カメラプロファイル・ルック・マスクを含むすべての調整を元に戻す（履歴から取り消せます）"
+          title="切り抜き・レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・カラーミキサー・カラーグレーディング・白黒・カメラプロファイル・ルック・マスク・スポット修正を含むすべての調整を元に戻す（履歴から取り消せます）"
         >
           すべてリセット
         </button>

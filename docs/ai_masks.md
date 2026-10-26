@@ -2,10 +2,10 @@
 
 被写体・空・人物の自動の選択（AI マスク。[01](01_feature_inventory.md) の DEV-20）の実装（2026-10-26）の説明と、人が
 行うこと（モデルの差し替え、実機での確認）の手順です。設計は [04](04_architecture.md) の 2.1 節「ローカル補正」と 7.2 節
-「AI 機能を差し込む位置」、決定事項は [decision_log.md](decision_log.md) の No.202〜207、人の判断が要る点は
-[implementation_status.md](implementation_status.md) の判断の表 No.203〜207 にあります。
+「AI 機能を差し込む位置」、決定事項は [decision_log.md](decision_log.md) の No.211〜216、人の判断が要る点は
+[implementation_status.md](implementation_status.md) の判断の表 No.209〜213 にあります。
 
-**2026-10-26 から、被写体と人物のモデルと ONNX Runtime を配布物（Windows・macOS）に同梱します**（決定事項ログ No.206。
+**2026-10-26 から、被写体と人物のモデルと ONNX Runtime を配布物（Windows・macOS）に同梱します**（決定事項ログ No.215。
 利用者の指示「ライセンス確認して組み込んで」）。モデルはリポジトリの `crates/genzo-app/models` に置き、ONNX Runtime は配布物を
 作るときに Microsoft の公式の配布物から取ります（2.4 節）。**空のモデルは同梱していません**（信頼できる入手先から取れる軽量な
 ものが見つからなかった。2.3 節）。ONNX Runtime のテレメトリー（Microsoft への利用の情報の送信）は止めて使います（2.5 節）。
@@ -15,7 +15,7 @@
 | 段階 | 場所 | 内容 |
 |---|---|---|
 | 推論の抽象 | `genzo-ml`（`MlBackend`・`MlSession`・`Tensor`） | 04 の 7.2 節のトレイト。モデルのファイルからセッションを作り、f32 のテンソルを入れて出す |
-| ONNX Runtime | `genzo-ml` の `OnnxBackend`（機能 `onnx`。既定で有効） | pyke の `ort` 2.0.0-rc.15。共有ライブラリは**ビルド時に取らず**（既定の機能 `download-binaries` を外した）、実行時に指定したファイルから読み込む（`load-dynamic`）。実行プロバイダーは CPU だけ（CUDA・DirectML・Core ML は未対応。No.201） |
+| ONNX Runtime | `genzo-ml` の `OnnxBackend`（機能 `onnx`。既定で有効） | pyke の `ort` 2.0.0-rc.15。共有ライブラリは**ビルド時に取らず**（既定の機能 `download-binaries` を外した）、実行時に指定したファイルから読み込む（`load-dynamic`）。実行プロバイダーは CPU だけ（CUDA・DirectML・Core ML は未対応。決定事項ログ No.212） |
 | モデルの台帳 | `genzo-ml` の `ModelManifest`（`*.genzo-model.json`） | モデルごとの前処理・後処理・種類との対応・出どころとライセンス（2 章）。アプリのコードはモデルの中身を知らない |
 | 推論の入口 | `genzo-ml` の `Segmenter`（`ModelLibrary` が実装） | 画像 → 種類の重みのラスター（8 ビット）。モデルのフォルダの台帳を読み、種類ごとに最初に使える台帳を選び、セッションを使い回す |
 | コア API | `genzo-api` の `Core::compute_ai_mask`（コマンド `compute_ai_mask`）・`ai_mask_status`・`collect_ai_masks` | 切り抜く前の全体（G の外接矩形）を今の設定で sRGB の 8 ビットに描き（長辺 1024 まで）、推論し、ラスターを PNG にしてカタログに保存し、設定に入れる形（`MaskShape::Ai`）を返す。設定への適用は画面・CLI（色域のスポイトと同じ） |
@@ -118,7 +118,7 @@ ONNX Runtime はプロセスで 1 度しか読み込めません（`ort` の制�
   この環境から読めなかった（検索の結果の要約では、DeepLab-v3 の行にモデルカードのリンクがない）。**同梱した `deeplab_v3.tflite` に
   ライセンスを明記した一次資料は見つけていない。**
 - 学習データ: u2netp は DUTS-TR、DeepLab-v3 は ImageNet・MS-COCO・PASCAL VOC 2012 で学習したとされる。学習データの利用条件が
-  モデルの配布に及ぶかは確かめていない（人・専門家の判断。判断の表 No.207）。
+  モデルの配布に及ぶかは確かめていない（人・専門家の判断。判断の表 No.213）。
 - ONNX への変換（DeepLab-v3）は、同じ版の tf2onnx でも実行のたびにバイト列が変わる（2 回の変換で SHA-256 が違った）。そのため
   配布のビルドで変換せず、変換したファイルをリポジトリに置いた。変換の内容（ラベルの一覧のメタデータが落ちること）は
   `licenses/third-party/ai-models.txt` に変更の表示として書いた（Apache-2.0 の第 4 条）。
@@ -155,7 +155,7 @@ ONNX Runtime を読み込めて版が 1.31.0 であること（`scripts/check-on
 
 Microsoft の公式の配布物の ONNX Runtime は、利用の情報（モデルの生産者・演算子・推論の回数と時間など）を Microsoft に送る
 テレメトリーが既定で有効です（配布物の `Privacy.md`。1.31.0 で確認）。`ort` の既定も有効にする側でした。写真に関する情報を
-外に出さないため、次の 2 つで止めます（決定事項ログ No.207）。
+外に出さないため、次の 2 つで止めます（決定事項ログ No.216）。
 
 - アプリ・CLI の `main` の最初で環境変数 `ORT_DISABLE_TELEMETRY=1` を設定する（ONNX Runtime の初期化の前に設定されていれば、
   送信の仕組みそのものを作らない）。
@@ -205,16 +205,16 @@ GENZO_ORT_DYLIB=/path/to/libonnxruntime.so cargo test -p genzo-cli --test cli ai
 3. 露光量などを動かして、範囲の中だけが変わること。切り抜きを変えても位置が変わらないこと。回転を変えると範囲がずれ、
    「作り直す」で直ること。
 4. 推論の時間（長辺 1024 の入力。CPU）を計測して [implementation_status.md](implementation_status.md) に記録する（PERF-01 の
-   対話の応答の目安に対して長ければ、ジョブ化（進捗の表示）を検討する。判断の表 No.205）。
+   対話の応答の目安に対して長ければ、ジョブ化（進捗の表示）を検討する。判断の表 No.211）。
 5. `genzo ai collect` で参照のないラスターが消え、消したラスターを指す設定（別のカタログから貼り付けたなど）が警告付きで
    描けること。
 
 ## 4. 制限（2026-10-26）
 
-- 推論は CPU だけ。GPU の実行プロバイダー（CUDA・DirectML・Core ML）は機能フラグを足していない（決定事項ログ No.203）。
+- 推論は CPU だけ。GPU の実行プロバイダー（CUDA・DirectML・Core ML）は機能フラグを足していない（決定事項ログ No.212）。
 - 空のモデルは同梱していない（2.3 節）。利用者がモデルと台帳を置けば使える。
 - CLI は同梱のモデルを使わない（`--models-dir` などで指定する）。Linux の .deb はモデルだけを含み、ONNX Runtime は含まない。
-- 推論は同期（コマンドの応答まで待つ。画面は計算中の表示だけ）。長いモデルではジョブ化が要る（判断の表 No.205）。
+- 推論は同期（コマンドの応答まで待つ。画面は計算中の表示だけ）。長いモデルではジョブ化が要る（判断の表 No.211）。
 - ラスターの長辺は 1024 まで（`DEFAULT_INPUT_LONG_EDGE`）。モデルの出力（320〜512 が多い）を双線形で広げるので、細部の
   境界はモデルの解像度で決まる。
 - 設定を別の写真に貼り付けると、元の写真のラスターをそのまま指す（別の写真の選択範囲にはならない。部品の「作り直す」で

@@ -15,6 +15,7 @@ import {
   maxAspectCrop,
   cropFractionAspect,
   orientedSize,
+  perspectiveFrame,
   pixelAspect,
   refitCropForAngle,
   rotatedImageCorners,
@@ -281,5 +282,56 @@ describe("回転した元の画像の四隅", () => {
     expect(Math.max(...ys)).toBeCloseTo(1, 12);
     // 正の角度は画面上の反時計回り: 左上の角（O の (0, 0)）は外接矩形の左の辺に来る。
     expect(c[0][0]).toBeCloseTo(0, 12);
+  });
+});
+
+describe("変形（遠近補正。DEV-16）の外接矩形と四隅", () => {
+  const tilt = { vertical: -40, horizontal: 15, aspect: 20, scale: 100, offset_x: 0, offset_y: 0 };
+
+  it("変形の外接矩形はコアと同じ値（genzo-pipeline の perspective_frame_matches_the_ui_values と同じ数値）", () => {
+    const f = perspectiveFrame(600, 400, 7, tilt)!;
+    expect(f.gw).toBeCloseTo(716.487918941, 6);
+    expect(f.gh).toBeCloseTo(570.003459435, 6);
+    const f2 = perspectiveFrame(600, 400, 7, { ...tilt, scale: 120, offset_x: 30, offset_y: -10 })!;
+    const [cx, cy] = f2.map(300, 200);
+    expect(cx).toBeCloseTo(437.430696754, 6);
+    expect(cy).toBeCloseTo(350.322573434, 6);
+    const [x0, y0] = f2.map(0, 0);
+    expect(x0).toBeCloseTo(18.351208106, 6);
+    expect(y0).toBeCloseTo(113.540434291, 6);
+    // 拡大縮小・ずらしは外接矩形に入らない。
+    expect(f2.gw).toBeCloseTo(f.gw, 9);
+    expect(f2.gh).toBeCloseTo(f.gh, 9);
+  });
+
+  it("変形を渡すと、外接矩形・角度を変えたときの大きさ・四隅が変形を含む（プレビューを待たずに今の値）", () => {
+    expect(gBoxSize(600, 400, 7, null)).toEqual(gBoxSize(600, 400, 7));
+    const g = gBoxSize(600, 400, 7, tilt);
+    expect(g.width).toBeCloseTo(716.487918941, 6);
+    const info = geometryInfo({
+      source: { width: 600, height: 400 },
+      orientation: 1,
+      angleDeg: 0,
+      uncropped: null,
+      transform: tilt,
+    })!;
+    expect(info.transform).toEqual(tilt);
+    const at7 = infoAtAngle(info, 7)!;
+    expect(at7.gw).toBeCloseTo(716.487918941, 6);
+    expect(at7.transform).toEqual(tilt);
+    // 四隅は外接矩形の中（割合が 0〜1）で、少なくとも 1 つは各辺に接する。
+    const corners = rotatedImageCorners(600, 400, 7, tilt);
+    for (const [u, v] of corners) {
+      expect(u).toBeGreaterThanOrEqual(-1e-9);
+      expect(u).toBeLessThanOrEqual(1 + 1e-9);
+      expect(v).toBeGreaterThanOrEqual(-1e-9);
+      expect(v).toBeLessThanOrEqual(1 + 1e-9);
+    }
+    expect(Math.min(...corners.map((c) => c[0]))).toBeCloseTo(0, 9);
+    expect(Math.max(...corners.map((c) => c[1]))).toBeCloseTo(1, 9);
+    // 向きが分からず、変形があるときは求めない（プレビューから逆にたどれない）。
+    expect(
+      geometryInfo({ source: null, orientation: null, angleDeg: 0, uncropped: { width: 700, height: 500 }, transform: tilt }),
+    ).toBeNull();
   });
 });

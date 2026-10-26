@@ -17,13 +17,14 @@
 //! |---|---|
 //! | A0 | process_version、RAW デコーダ（`render_deps.raw_decoder`） |
 //! | A1 | process_version、render_deps のうちルック以外（カメラ行列・カメラプロファイル（DCP）・レンズデータ・デコーダ）、カメラプロファイルの選択（`profile.camera`。ステージ 8）、WB、ハイライト復元（ステージ 4）、ノイズ軽減（ステージ 6。ディテール・コントラストを含む）、レンズ補正のうちステージ 7 の項目（`lens.profile_enabled`・`lens.vignetting_scale`・`lens.remove_chromatic_aberration`・手動の周辺減光（`lens.vignetting_amount`・`lens.vignetting_midpoint`）・手動の色収差（`lens.ca_red_cyan`・`lens.ca_blue_yellow`）） |
-//! | B | A1 の項目 ＋ 角度補正（回転）＋ 歪曲補正の適用量（`lens.distortion_scale`）と手動の歪曲（`lens.distortion`） |
+//! | B | A1 の項目 ＋ 角度補正（回転）＋ 歪曲補正の適用量（`lens.distortion_scale`）と手動の歪曲（`lens.distortion`）＋ 変形（`transform`。遠近補正。DEV-16） |
 //! | C | すべて（= [`DevelopSettings::develop_hash`]） |
 //!
 //! - 段階 A1 はステージ 2〜8（2.2 節）で、歪曲補正はステージ 9（ジオメトリ）に属する（2.1 節）。
 //!   そのため歪曲補正の適用量と手動の歪曲は A1 に含めず、B に含める（2.7 節の表の「回転、歪曲補正」）。
 //!   歪曲補正を有効にするかどうか（`lens.profile_enabled`）は周辺減光と共通なので A1 に含まれ、
 //!   B にも A1 を通じて含まれる。
+//! - 変形（遠近補正。ステージ 9 の座標の変換で G を決める）は回転と同じく B に含める（2026-10-26 追加。DEV-16）。
 //! - 露光量・切り抜き・ハイライトやシャドウなどのスライダーは B に含めない（2.7 節の表）。
 //! - 色（ステージ 13。彩度・自然な彩度・カラーミキサー・カラーグレーディング・白黒）は段階 C だけに含まれる
 //!   （A1・B のキャッシュを作り直さない）。
@@ -38,14 +39,20 @@
 //!   `render_deps.profile`）。ルック（`profile.look`・`look_amount`・`render_deps.look`）とプロファイルのルックテーブルの
 //!   位置（段階 C）は C だけ。キャッシュキーの外部データのハッシュも、段階 A1・B ではルックを除く
 //!   （[`RenderDeps::hash_for_phase`]）。ルックのない設定の A1 の入力の JSON は、この項目を足す前と同じ。
+//! - スポット修正（DEV-21。処理バージョン 2）は段階 A1 の出力に当てる（genzo-pipeline の `retouch`）ので、ガイド
+//!   （段階 B）に影響する。そのため結果に影響するスポット（[`RetouchSpot::is_active`]）を B に含める（A1 には含めない:
+//!   スポットを足すたびにセンサー処理をやり直さないため。スポットを当てた A1 のキャッシュのキーは A1 のキーと
+//!   [`DevelopSettings::retouch_hash`]）。結果に影響するスポットがなければ B の入力の JSON に書かない（項目を足す
+//!   前と同じハッシュ）。処理バージョン 1 では当てないので含めない。
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::DevelopSettings;
 use super::params::{
-    DataRef, HighlightRecovery, LensCorrection, NoiseReduction, RenderDeps, WhiteBalance,
+    DataRef, HighlightRecovery, LensCorrection, NoiseReduction, RenderDeps, Transform, WhiteBalance,
 };
+use super::retouch::RetouchSpot;
 use crate::Phase;
 
 /// 部分ハッシュの入力の前に付ける、段階ごとの区別のための文字列。
@@ -53,6 +60,7 @@ const DOMAIN_A0: &[u8] = b"genzo.develop.A0\0";
 const DOMAIN_A1: &[u8] = b"genzo.develop.A1\0";
 const DOMAIN_B: &[u8] = b"genzo.develop.B\0";
 const DOMAIN_RENDER_DEPS: &[u8] = b"genzo.render_deps\0";
+const DOMAIN_RETOUCH: &[u8] = b"genzo.develop.retouch\0";
 
 /// バイト列を順につないだものの SHA-256。
 pub(crate) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
@@ -160,6 +168,19 @@ struct BInput<'a> {
     distortion_scale: f32,
     /// 手動の歪曲（ステージ 9）。
     distortion: f32,
+    /// 変形（遠近補正。ステージ 9。DEV-16）。
+    transform: &'a Transform,
+    /// 結果に影響するスポット修正（DEV-21。なければ書かない）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    retouch: Vec<&'a RetouchSpot>,
+}
+
+/// 丸めた設定 `s` の、結果に影響するスポット修正（処理バージョン 1 では当てないので空）。
+fn active_retouch(s: &DevelopSettings) -> Vec<&RetouchSpot> {
+    if s.process_version < 2 {
+        return Vec::new();
+    }
+    s.retouch.iter().filter(|r| r.is_active()).collect()
 }
 
 fn a1_input(s: &DevelopSettings) -> A1Input<'_> {
@@ -210,11 +231,23 @@ impl DevelopSettings {
                     angle_deg: s.geometry.angle_deg,
                     distortion_scale: s.lens.distortion_scale,
                     distortion: s.lens.distortion,
+                    transform: &s.transform,
+                    retouch: active_retouch(&s),
                 };
                 sha256(&[DOMAIN_B, &to_json_bytes(&input)])
             }
             Phase::C => s.develop_hash(),
         }
+    }
+}
+
+impl DevelopSettings {
+    /// 結果に影響するスポット修正（DEV-21）のハッシュ（丸めた設定から求める）。結果に影響するスポットがなければ
+    /// （処理バージョン 1 を含む）`None`。genzo-pipeline が、スポットを当てた A1 のキャッシュのキーに使う。
+    pub fn retouch_hash(&self) -> Option<[u8; 32]> {
+        let s = self.normalized();
+        let spots = active_retouch(&s);
+        (!spots.is_empty()).then(|| sha256(&[DOMAIN_RETOUCH, &to_json_bytes(&spots)]))
     }
 }
 
@@ -312,6 +345,23 @@ mod tests {
         assert_eq!(changed_phases(&a, &b), [Phase::C]);
     }
 
+    /// 変形（遠近補正。DEV-16）はステージ 9 の座標の変換で G を決めるので、回転と同じく段階 B から変わる
+    /// （A1 は変わらない）。
+    #[test]
+    fn transform_changes_the_guide_but_not_a1() {
+        let a = base();
+        let mut b = base();
+        b.transform.vertical = -20.0;
+        assert_eq!(changed_phases(&a, &b), [Phase::B, Phase::C]);
+        let mut c = base();
+        c.transform.scale = 110.0;
+        assert_eq!(changed_phases(&a, &c), [Phase::B, Phase::C]);
+        // 既定値（何もしない）の書き方の違い（-0.0）は丸めで同じになる。
+        let mut d = base();
+        d.transform.offset_x = -0.0;
+        assert_eq!(changed_phases(&a, &d), []);
+    }
+
     #[test]
     fn color_items_change_only_phase_c() {
         // カラーミキサー・カラーグレーディング・白黒はステージ 13（段階 C）。A1・ガイドを作り直さない。
@@ -367,6 +417,42 @@ mod tests {
         m.delta.dehaze = 25.0;
         b.masks.push(m);
         assert_eq!(changed_phases(&a, &b), [Phase::C]);
+    }
+
+    #[test]
+    fn retouch_changes_b_and_c_but_not_a1() {
+        // スポット修正（DEV-21）は A1 の出力に当てるので、ガイド（段階 B）が変わる。センサー処理は作り直さない。
+        use crate::RetouchSpot;
+        let a = base();
+        let mut b = base();
+        b.retouch
+            .push(RetouchSpot::new(vec![[0.4, 0.3]], [0.05, 0.0]));
+        assert_eq!(changed_phases(&a, &b), [Phase::B, Phase::C]);
+        assert_eq!(a.retouch_hash(), None);
+        let h = b.retouch_hash().expect("スポットのハッシュ");
+        // 結果に影響しないスポット（無効・ずれ 0）は B に含めない（C だけ）。
+        let mut off = b.clone();
+        off.retouch[0].enabled = false;
+        assert_eq!(changed_phases(&a, &off), [Phase::C]);
+        assert_eq!(off.retouch_hash(), None);
+        let mut zero = b.clone();
+        zero.retouch[0].offset = [0.0, 0.0];
+        assert_eq!(changed_phases(&a, &zero), [Phase::C]);
+        // 位置を変えれば B とスポットのハッシュが変わる。丸めると同じになる値は同じハッシュ。
+        let mut moved = b.clone();
+        moved.retouch[0].points[0][0] = 0.41;
+        assert_eq!(changed_phases(&b, &moved), [Phase::B, Phase::C]);
+        assert_ne!(moved.retouch_hash(), Some(h));
+        let mut nan = b.clone();
+        nan.retouch[0].size = f32::NAN;
+        assert_eq!(nan.retouch_hash(), Some(h));
+        // 処理バージョン 1 では当てないので B に含めない。
+        let mut v1a = a.clone();
+        v1a.process_version = 1;
+        let mut v1b = b.clone();
+        v1b.process_version = 1;
+        assert_eq!(changed_phases(&v1a, &v1b), [Phase::C]);
+        assert_eq!(v1b.retouch_hash(), None);
     }
 
     #[test]
@@ -538,7 +624,7 @@ mod tests {
         assert_eq!(
             json,
             concat!(
-                r#"{"schema_version":2,"process_version":2,"#,
+                r#"{"schema_version":3,"process_version":2,"#,
                 r#""profile":{"camera":null,"look":null,"look_amount":100.0},"white_balance":"as_shot","#,
                 r#""highlight_recovery":{"method":"clip","amount":100.0},"#,
                 r#""exposure_ev":0.0,"contrast":0.0,"#,
@@ -553,6 +639,7 @@ mod tests {
                 r#""geometry":{"crop":{"left":0.0,"top":0.0,"right":1.0,"bottom":1.0},"angle_deg":0.0,"aspect":null},"#,
                 r#""lens":{"profile_enabled":false,"distortion_scale":100.0,"vignetting_scale":100.0,"remove_chromatic_aberration":false,"#,
                 r#""distortion":0.0,"vignetting_amount":0.0,"vignetting_midpoint":50.0,"ca_red_cyan":0.0,"ca_blue_yellow":0.0},"#,
+                r#""transform":{"vertical":0.0,"horizontal":0.0,"aspect":0.0,"scale":100.0,"offset_x":0.0,"offset_y":0.0},"#,
                 r#""detail":{"sharpening":{"amount":0.0,"radius":1.0,"detail":25.0,"masking":0.0},"#,
                 r#""noise_reduction":{"luminance":0.0,"luminance_detail":50.0,"luminance_contrast":0.0,"color":0.0,"color_detail":50.0}},"#,
                 r#""effects":{"vignette":{"amount":0.0,"midpoint":50.0,"roundness":0.0,"feather":50.0,"highlights":0.0},"#,

@@ -68,7 +68,7 @@ use rayon::prelude::*;
 pub use self::color::ColorStage;
 pub use self::effects::EffectsStage;
 pub use self::exposure::{ContrastStage, ExposureStage};
-pub use self::geometry::{GeometryPlan, GeometryStage, constrain_crop};
+pub use self::geometry::{GeometryPlan, GeometryStage, ProjectivePlan, constrain_crop};
 pub use self::look::{LookStage, ProfileLookTableStage};
 pub use self::output::{
     DisplayStage, DisplayTransform, Dither, ExportStage, ExportTransform, Histogram, quantize_u8,
@@ -172,7 +172,8 @@ pub fn scene_stages() -> [&'static dyn Stage; 12] {
 /// - `frames`（S の寸法と向き）に、設定の角度補正（丸めた値）を回転として加える。
 /// - 処理バージョン 2 では、`frames` のプロファイルの歪曲（[`CoordinateFrames::lens_geometry`]）と設定の
 ///   レンズ補正（適用量・手動の歪曲）から歪曲補正（[`CoordinateFrames::distortion`]）を作って加える
-///   （[`crate::lens::RadialDistortion::for_settings`]。版 1 では加えない）。
+///   （[`crate::lens::RadialDistortion::for_settings`]。版 1 では加えない）。設定の変形（遠近補正。DEV-16）も
+///   同じく版 2 だけで加える（[`CoordinateFrames::perspective`]。[`crate::perspective::Perspective::for_settings`]）。
 /// - `grid` はステージ 9 の入力の格子。`resolution_scale` は格子の長辺の倍率
 ///   （[`SensorGrid::resolution_scale`]）。
 /// - ガイドは [`StageContext::with_guide`] で、入力の種類（RAW 以外か）は
@@ -185,7 +186,13 @@ pub fn finish_context<'a>(
 ) -> Result<StageContext<'a>> {
     let version = ProcessVersion::from_u32(settings.process_version)?;
     let s = settings.normalized();
-    let frames = stage_c_frames(frames, version, f64::from(s.geometry.angle_deg), &s.lens)?;
+    let frames = stage_c_frames(
+        frames,
+        version,
+        f64::from(s.geometry.angle_deg),
+        &s.lens,
+        &s.transform,
+    )?;
     let grid = SensorGrid::new(grid.width, grid.height, grid.extent)?;
     Ok(StageContext::new(version, frames)
         .with_sensor_grid(grid)
@@ -193,17 +200,23 @@ pub fn finish_context<'a>(
         .with_quality(quality))
 }
 
-/// 段階 B・C の座標系: `frames`（段階 A1 の座標系。回転なし）に回転と歪曲補正を加えたもの
+/// 段階 B・C の座標系: `frames`（段階 A1 の座標系。回転なし）に回転・歪曲補正・変形（遠近補正）を加えたもの
 /// （[`finish_context`] とガイド（[`crate::guide::compute_guide`]）が同じものを作るための共通の関数）。
+/// `transform` は丸めた設定の値（版 1・何も変形しない設定では加えない）。
 pub fn stage_c_frames(
     frames: CoordinateFrames,
     version: ProcessVersion,
     rotation_deg: f64,
     lens: &genzo_model::LensCorrection,
+    transform: &genzo_model::Transform,
 ) -> Result<CoordinateFrames> {
     let frames = frames.with_rotation(rotation_deg)?;
     let distortion = crate::lens::RadialDistortion::for_settings(&frames, version, lens);
-    Ok(frames.with_distortion(distortion))
+    let perspective =
+        crate::perspective::Perspective::for_settings(frames.oriented_size(), version, transform);
+    Ok(frames
+        .with_distortion(distortion)
+        .with_perspective(perspective))
 }
 
 impl A1Image {

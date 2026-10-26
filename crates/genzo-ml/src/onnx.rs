@@ -3,13 +3,13 @@
 //! ONNX Runtime の共有ライブラリ（`onnxruntime.dll`・`libonnxruntime.dylib`・`libonnxruntime.so`）は、ビルド時に取らず
 //! （`ort` の既定の機能 `download-binaries` を外している）、[`OnnxBackend::load_library`] で指定したファイルから実行時に
 //! 読み込む（`ort` の `load-dynamic`）。読み込みはプロセスで 1 度だけ（2 度目以降は最初のライブラリのまま。`ort` の
-//! 制約）。実行プロバイダーは CPU だけ（CUDA・DirectML・Core ML は機能フラグを足していない。決定事項ログ No.203）。
+//! 制約）。実行プロバイダーは CPU だけ（CUDA・DirectML・Core ML は機能フラグを足していない。決定事項ログ No.212）。
 //!
 //! # テレメトリー
 //!
 //! Microsoft の公式の配布物の ONNX Runtime は、利用の情報（モデルの生産者・演算子・推論の回数と時間など）を
 //! Microsoft に送るテレメトリーが既定で有効（ONNX Runtime の `Privacy.md`。1.31.0 で確認）。写真の情報を外に出さない
-//! ため、次の 2 つで止める（決定事項ログ No.207）。
+//! ため、次の 2 つで止める（決定事項ログ No.216）。
 //!
 //! - 環境変数 [`ORT_DISABLE_TELEMETRY_ENV`]`=1`: ONNX Runtime が初期化される前に設定されていれば、送信の仕組み
 //!   （1DS）そのものを作らない。プロセスの環境変数を変えるのはほかのスレッドが動く前でなければ安全でないので、

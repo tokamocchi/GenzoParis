@@ -5,7 +5,8 @@
 //!
 //! 1. 段階 A1: 最終品質はエンジンのキャッシュ（`Engine::a1`。CPU 版の RCD）。WB のドラッグ中の簡易処理
 //!    （[`RenderQuality::Draft`]）で RAW なら GPU 版（[`GpuRenderer::render_a1_draft`]）で作り、この型の
-//!    キャッシュ（最新 [`DRAFT_CACHE_CAPACITY`] 件。キーはエンジンと同じ `CacheKey`）に入れる。
+//!    キャッシュ（最新 [`DRAFT_CACHE_CAPACITY`] 件。キーはエンジンと同じ `CacheKey`）に入れる。スポット修正
+//!    （DEV-21）は、どちらもエンジンの `Engine::retouched`（CPU 版）で当てる。
 //! 2. 段階 B: トーンのスライダーが 0 でなければガイドを使う。最終品質はエンジンのキャッシュ
 //!    （`Engine::guide`）、GPU 版の簡易処理の A1 からはこの型のキャッシュ（キーはエンジンと同じ
 //!    `GuideKey`）。ガイドの計算は CPU 版（`compute_guide`）。
@@ -301,7 +302,13 @@ impl GpuRenderer {
             _ => None,
         };
         let a1 = match draft_raw {
-            Some(raw) => self.draft_a1(engine, source, raw, settings, request.long_edge)?,
+            // スポット修正（DEV-21）はエンジンと同じ仕組みで当てる（キーは CPU 版の A1 と分ける）。
+            Some(raw) => engine.retouched(
+                engine.a1_cache_key(source, settings, RenderQuality::Draft, request.long_edge),
+                genzo_pipeline::A1Origin::GpuDraft,
+                &self.draft_a1(engine, source, raw, settings, request.long_edge)?,
+                settings,
+            )?,
             None => engine.a1(source, settings, quality, request.long_edge)?,
         };
         let profiles = engine.resolve_profiles(settings);

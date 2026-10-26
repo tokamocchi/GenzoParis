@@ -30,6 +30,7 @@
 //! | [`border`] | 画像の端の外の鏡映 | 2.7 節 |
 //! | [`coords`] | 座標系 S / O / D / G / C・RAW の向き・歪曲補正（D）・回転（G）・ステージ 9 の入力の格子（[`SensorGrid`]） | 2.7 節 |
 //! | [`local`] | ローカル補正（マスク。処理バージョン 2。DEV-18・DEV-19）: マスクの重み（線形・円形・ブラシのラスター・色域・輝度の範囲と合成）、局所の値の面（[`LocalField`]）、ステージ 10〜14 の画素ごとの値 | 2.1 節・2.7 節 |
+//! | [`retouch`] | スポット修正（処理バージョン 2。DEV-21）: 修復・コピースタンプ（[`retouch::RetouchPlan`]）、段階 A1 の出力に当てる、コピー元の自動の選び方（[`retouch::find_source_offset`]） | 2.1 節 |
 //! | [`lens`] | レンズ補正（処理バージョン 2。DEV-14）: ステージ 7 の周辺減光・倍率色収差（[`lens::LensStagePlan`]）、ステージ 9 の歪曲補正（[`lens::RadialDistortion`]）、埋め込みの補正の情報の解釈 | 2.1 節・2.7 節 |
 //! | [`sanitize`] | NaN・無限大の置き換え、対数の下限 | 2.3 節・2.6 節 |
 //! | [`guide`] | 段階 B: ガイドの計算（[`compute_guide`]・ガイデッドフィルタ）とキャッシュのキーの項目（[`GuideSpec`]） | 2.2 節・2.7 節 |
@@ -203,6 +204,10 @@
 //! - **回転**（2 段目）: 段階 B・C の文脈の [`CoordinateFrames::rotation_deg`] に入れる
 //!   （[`finish_context`]）。ステージ 9・11 は設定の角度と一致するか確かめる。回転で生じる外側は
 //!   鏡映で埋めず、切り抜きを画像の内側に制限する（[`finish::constrain_crop`]）。
+//! - **変形（遠近補正）**（2 段目。DEV-16。処理バージョン 2）: 段階 B・C の文脈の
+//!   [`CoordinateFrames::perspective`] に入れる（[`finish_context`]。[`perspective`]）。ステージ 9 は G → D を
+//!   射影変換として画素ごとに評価し、画像のない部分は回転と同じく切り抜きの制限と塗りで扱う。自動の補正
+//!   （Upright 相当）は [`upright`]（直線の検出と当てはめ）と [`Engine::analyze_upright`] で値を求め、設定に書く。
 //! - **ガイド**（2 段目）: 段階 A1 のプレビュー（切り抜く前の全体、露光量の前）から作る。ステージ 11 は
 //!   文脈のガイドの座標系・処理バージョンが文脈と一致するか確かめる（違えば
 //!   [`PipelineError::GuideMismatch`]）。キャッシュのキーの項目は [`guide`] の doc の表。
@@ -272,23 +277,26 @@ pub mod interp;
 pub mod lens;
 pub mod local;
 pub mod output_sharpen;
+pub mod perspective;
 pub mod profile;
 pub mod registry;
 pub mod resample;
+pub mod retouch;
 pub mod sanitize;
 pub mod sensor;
 pub mod stage;
+pub mod upright;
 pub mod version;
 
 pub use composite::{Compositor, compositor_bytes};
 pub use contract::ColorContract;
 pub use coords::{CoordinateFrames, SensorGrid};
 pub use engine::{
-    AutoTonePick, AutoToneStats, AutoToneValues, CacheCounters, DEFAULT_TILE_SIZE, Engine,
-    EngineConfig, EngineStats, ExportOptions, ExportPixels, ExportedImage, FullResolutionJob,
-    MaskColorPick, MaskOverlay, MaskReference, NeverCancel, OutputTarget, PhotoSource,
-    PreviewRender, PreviewRequest, RegionRender, RenderControl, SourceId, WB_PICK_RADIUS,
-    WhiteBalancePick,
+    A1Origin, AutoTonePick, AutoToneStats, AutoToneValues, CacheCounters, DEFAULT_TILE_SIZE,
+    Engine, EngineConfig, EngineStats, ExportOptions, ExportPixels, ExportedImage,
+    FullResolutionJob, MaskColorPick, MaskOverlay, MaskReference, NeverCancel, OutputTarget,
+    PhotoSource, PreviewRender, PreviewRequest, RegionRender, RenderControl, SourceId,
+    WB_PICK_RADIUS, WhiteBalancePick,
 };
 pub use error::{PipelineError, Result};
 pub use finish::{FinishPlan, finish_context};

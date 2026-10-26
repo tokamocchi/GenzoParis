@@ -106,6 +106,7 @@ pub mod export;
 pub mod full;
 pub mod masks;
 pub mod pick;
+pub mod upright;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -127,6 +128,7 @@ pub use self::export::{
 pub use self::full::{FullResolutionJob, RegionRender, StageBackend, TileRois};
 pub use self::masks::{MaskColorPick, MaskOverlay, MaskReference};
 pub use self::pick::{WB_PICK_RADIUS, WhiteBalancePick};
+pub use self::upright::UPRIGHT_ANALYSIS_LONG_EDGE;
 
 use self::cache::Lru;
 use crate::border::mirror_index;
@@ -142,6 +144,7 @@ use crate::guide::{GUIDE_FORMAT_VERSION, GuideSpec, compute_guide, guide_size};
 use crate::image::{ImageTile, RgbImage, Roi, checked_len};
 use crate::profile::{ProfileResolver, ProfileResources};
 use crate::resample::DEFAULT_PREVIEW_LONG_EDGE;
+use crate::retouch::RetouchPlan;
 use crate::sensor::{A1Image, SensorOptions, SensorWarning, SourceImage, render_a1};
 use crate::stage::{Guide, Stage, StageContext, run_stage_cpu};
 use crate::version::ProcessVersion;
@@ -448,6 +451,29 @@ pub struct PreviewRender {
     pub non_finite_replaced: u64,
 }
 
+/// スポット修正（DEV-21）を当てた A1 を保持する件数。**仮置き**: スポットを足す・動かすたびにキーが変わるので、
+/// 直前の 2 件だけ持つ（長辺 2560px で 1 件 約 52MB）。
+pub const RETOUCHED_A1_CAPACITY: usize = 2;
+
+/// スポット修正を当てる A1 の出どころ（[`Engine::retouched`] のキャッシュのキーに入れる）。genzo-gpu の簡易処理の
+/// A1 は CPU 版と許容差の範囲で違うので、同じ [`CacheKey`] でも分けて持つ（GPU 版が後の段階で失敗して CPU 版で
+/// 描き直すとき、GPU 版の A1 から作ったものを使わない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum A1Origin {
+    /// エンジン（CPU 版）のセンサー処理（[`Engine::sensor_a1`]）。
+    Cpu,
+    /// genzo-gpu の簡易処理（ドラッグ中の WB など）。
+    GpuDraft,
+}
+
+/// スポット修正を当てた A1 のキャッシュのキー。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetouchKey {
+    a1: CacheKey,
+    origin: A1Origin,
+    retouch: [u8; 32],
+}
+
 /// エンジン（段階 A0〜C の実行とキャッシュ）。スレッド間で共有できる（`&self` のメソッド）。
 #[derive(Debug)]
 pub struct Engine {
@@ -462,6 +488,7 @@ pub struct Engine {
 struct EngineState {
     a0: Lru<A0Key, SourceImage>,
     a1: Lru<CacheKey, A1Image>,
+    retouched: Lru<RetouchKey, A1Image>,
     guide: Lru<GuideKey, Guide>,
     previews_rendered: u64,
 }
@@ -473,6 +500,7 @@ impl Engine {
         let state = EngineState {
             a0: Lru::new(config.a0_capacity),
             a1: Lru::new(config.a1_capacity),
+            retouched: Lru::new(RETOUCHED_A1_CAPACITY),
             guide: Lru::new(config.guide_capacity),
             previews_rendered: 0,
         };
@@ -547,6 +575,7 @@ impl Engine {
         let mut s = self.lock();
         s.a0.clear();
         s.a1.clear();
+        s.retouched.clear();
         s.guide.clear();
     }
 
@@ -633,8 +662,61 @@ impl Engine {
         )
     }
 
-    /// 段階 A1: 長辺 `long_edge` px のプレビュー解像度の作業色空間の画像（B2。キャッシュする）。
+    /// 段階 A1: 長辺 `long_edge` px のプレビュー解像度の作業色空間の画像（B2。キャッシュする）に、スポット修正
+    /// （DEV-21。[`crate::retouch`]）を当てたもの。スポットがなければ [`sensor_a1`](Self::sensor_a1) と同じもの。
+    /// ガイド・プレビュー・スポイトはこの画像を使う。
     pub fn a1(
+        &self,
+        source: &PhotoSource,
+        settings: &DevelopSettings,
+        quality: RenderQuality,
+        long_edge: u32,
+    ) -> Result<Arc<A1Image>> {
+        let a1 = self.sensor_a1(source, settings, quality, long_edge)?;
+        let key = self.a1_cache_key(
+            source,
+            settings,
+            source.effective_quality(quality),
+            long_edge,
+        );
+        self.retouched(key, A1Origin::Cpu, &a1, settings)
+    }
+
+    /// `a1`（キャッシュのキー `key`・出どころ `origin` の、スポット修正を当てる前の A1）にスポット修正を当てたもの
+    /// （キャッシュする。最新 [`RETOUCHED_A1_CAPACITY`] 件。キーは `key`・`origin` と `DevelopSettings::retouch_hash`）。
+    /// スポットがなければ `a1` をそのまま返す。genzo-gpu の簡易処理の A1 も使う（`origin` は [`A1Origin::GpuDraft`]）。
+    pub fn retouched(
+        &self,
+        key: CacheKey,
+        origin: A1Origin,
+        a1: &Arc<A1Image>,
+        settings: &DevelopSettings,
+    ) -> Result<Arc<A1Image>> {
+        let Some(retouch) = settings.retouch_hash() else {
+            return Ok(Arc::clone(a1));
+        };
+        let Some(plan) = RetouchPlan::new(settings, a1.frames())? else {
+            return Ok(Arc::clone(a1));
+        };
+        let key = RetouchKey {
+            a1: key,
+            origin,
+            retouch,
+        };
+        if let Some(r) = self.lock().retouched.lookup(&key) {
+            return Ok(r);
+        }
+        let image = plan.apply_to_image(&a1.image, a1.sensor_grid())?;
+        let out = Arc::new(A1Image {
+            image,
+            ..(**a1).clone()
+        });
+        self.lock().retouched.insert(key, Arc::clone(&out));
+        Ok(out)
+    }
+
+    /// 段階 A1 のセンサー処理の結果（スポット修正を当てる前。キャッシュする）。
+    pub fn sensor_a1(
         &self,
         source: &PhotoSource,
         settings: &DevelopSettings,
@@ -676,8 +758,14 @@ impl Engine {
         long_edge: u32,
     ) -> Result<GuideKey> {
         let spec = GuideSpec::from_settings(settings)?;
-        // ガイドの寸法は G の外接矩形で決まる（歪曲補正の D は O と同じ大きさなので回転だけで決まる）。
-        let frames = source.frames()?.with_rotation(spec.rotation_deg)?;
+        // ガイドの寸法は G の外接矩形で決まる（歪曲補正の D は O と同じ大きさなので、回転と遠近補正で決まる）。
+        let frames = crate::finish::stage_c_frames(
+            source.frames()?,
+            spec.process_version,
+            spec.rotation_deg,
+            &spec.lens,
+            &spec.transform,
+        )?;
         let size = guide_size(&frames, spec.params.long_edge);
         let effective = self.effective_settings(settings);
         let cache = CacheKey::for_settings(

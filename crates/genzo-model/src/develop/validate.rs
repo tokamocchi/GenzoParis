@@ -19,7 +19,12 @@ use super::params::{
     DetailParams, EffectsParams, Geometry, GradingWheel, Grain, HighlightRecovery, HueBand,
     LensCorrection, MAX_ASPECT_TERM, MAX_CURVE_POINTS, MIN_CROP_SIZE, NoiseReduction,
     ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings, RenderDeps, Sharpening,
-    ToneCurve, ToneParams, ValueRange, VignetteCenter, WhiteBalance, is_valid_profile_id, ranges,
+    ToneCurve, ToneParams, Transform, ValueRange, VignetteCenter, WhiteBalance,
+    is_valid_profile_id, ranges,
+};
+use super::retouch::{
+    MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_RETOUCH_STROKE_LENGTH, MAX_TOTAL_RETOUCH_POINTS,
+    RetouchSpot,
 };
 use crate::{CURRENT_PROCESS_VERSION, CURRENT_SCHEMA_VERSION};
 
@@ -176,6 +181,7 @@ impl DevelopSettings {
         self.color.check(&mut c);
         self.geometry.check(&mut c);
         self.lens.check(&mut c);
+        self.transform.check(&mut c);
         self.detail.check(&mut c);
         self.effects.check(&mut c);
         if self.masks.len() > MAX_MASKS {
@@ -196,6 +202,25 @@ impl DevelopSettings {
         }
         for (i, m) in self.masks.iter().enumerate() {
             m.check(&format!("masks[{i}]"), &mut c);
+        }
+        if self.retouch.len() > MAX_RETOUCH_SPOTS {
+            c.invalid(
+                "retouch",
+                format!(
+                    "スポットが多すぎます（{} 個。上限 {MAX_RETOUCH_SPOTS}）",
+                    self.retouch.len()
+                ),
+            );
+        }
+        let points: usize = self.retouch.iter().map(|r| r.points.len()).sum();
+        if points > MAX_TOTAL_RETOUCH_POINTS {
+            c.invalid(
+                "retouch",
+                format!("スポットの点が多すぎます（{points} 個。上限 {MAX_TOTAL_RETOUCH_POINTS}）"),
+            );
+        }
+        for (i, r) in self.retouch.iter().enumerate() {
+            r.check(&format!("retouch[{i}]"), &mut c);
         }
         self.render_deps.check(&mut c);
         if c.issues.is_empty() {
@@ -218,6 +243,7 @@ impl DevelopSettings {
     ///   その軸を全体に戻す。
     /// - 縦横比の項が 0 や上限を超える場合は、指定なし（自由）にする。
     /// - マスクは上限を超えた分を捨てる。
+    /// - スポット修正は上限（数・点の数）を超えた分を捨て、有限でない点を除き、点のなくなったスポットを除く。
     /// - カメラプロファイル・ルックの ID が不正（空・長すぎる・制御文字・前後の空白）なら、指定なしにする。
     /// - SHA-256 の 16 進数は小文字にする。
     ///
@@ -238,6 +264,7 @@ impl DevelopSettings {
         s.color.normalize();
         s.geometry.normalize();
         s.lens.normalize();
+        s.transform.normalize();
         s.detail.normalize();
         s.effects.normalize();
         s.masks.truncate(MAX_MASKS);
@@ -245,6 +272,12 @@ impl DevelopSettings {
         for m in &mut s.masks {
             m.normalize(&mut budget);
         }
+        s.retouch.truncate(MAX_RETOUCH_SPOTS);
+        let mut budget = MAX_TOTAL_RETOUCH_POINTS;
+        for r in &mut s.retouch {
+            r.normalize(&mut budget);
+        }
+        s.retouch.retain(|r| !r.points.is_empty());
         s.render_deps.normalize();
         s
     }
@@ -574,6 +607,34 @@ fn normalize_crop_axis(start: f32, end: f32) -> (f32, f32) {
         (0.0, 1.0)
     } else {
         (a, b)
+    }
+}
+
+impl Transform {
+    fn check(&self, c: &mut Checker) {
+        for (name, v) in [
+            ("transform.vertical", self.vertical),
+            ("transform.horizontal", self.horizontal),
+            ("transform.aspect", self.aspect),
+            ("transform.offset_x", self.offset_x),
+            ("transform.offset_y", self.offset_y),
+        ] {
+            c.range(name, v, ranges::SLIDER);
+        }
+        c.range("transform.scale", self.scale, ranges::TRANSFORM_SCALE);
+    }
+
+    fn normalize(&mut self) {
+        for v in [
+            &mut self.vertical,
+            &mut self.horizontal,
+            &mut self.aspect,
+            &mut self.offset_x,
+            &mut self.offset_y,
+        ] {
+            *v = ranges::SLIDER.clamp_or(*v, 0.0);
+        }
+        self.scale = ranges::TRANSFORM_SCALE.clamp_or(self.scale, Transform::DEFAULT_SCALE);
     }
 }
 
@@ -1073,6 +1134,84 @@ impl MaskShape {
                 }
             }
         }
+    }
+}
+
+impl RetouchSpot {
+    fn check(&self, p: &str, c: &mut Checker) {
+        c.range(format!("{p}.size"), self.size, ranges::RETOUCH_SIZE);
+        c.range(format!("{p}.feather"), self.feather, ranges::AMOUNT_0_100);
+        c.range(format!("{p}.opacity"), self.opacity, ranges::AMOUNT_0_100);
+        c.range(
+            format!("{p}.offset[0]"),
+            self.offset[0],
+            ranges::RETOUCH_OFFSET,
+        );
+        c.range(
+            format!("{p}.offset[1]"),
+            self.offset[1],
+            ranges::RETOUCH_OFFSET,
+        );
+        if self.points.is_empty() {
+            c.invalid(format!("{p}.points"), "点がありません");
+        }
+        if self.points.len() > MAX_RETOUCH_POINTS {
+            c.invalid(
+                format!("{p}.points"),
+                format!(
+                    "点が多すぎます（{} 個。上限 {MAX_RETOUCH_POINTS}）",
+                    self.points.len()
+                ),
+            );
+        }
+        // 点はたくさんありうるので、問題のある最初の点だけを報告する。
+        if let Some((k, [x, y])) = self.points.iter().enumerate().find(|(_, [x, y])| {
+            !(ranges::RETOUCH_COORD.contains(*x) && ranges::RETOUCH_COORD.contains(*y))
+        }) {
+            c.range(format!("{p}.points[{k}][0]"), *x, ranges::RETOUCH_COORD);
+            c.range(format!("{p}.points[{k}][1]"), *y, ranges::RETOUCH_COORD);
+        }
+        let length = self.stroke_length();
+        if length > f64::from(MAX_RETOUCH_STROKE_LENGTH) {
+            c.invalid(
+                format!("{p}.points"),
+                format!(
+                    "線が長すぎます（長辺の {length:.2} 倍。上限 {MAX_RETOUCH_STROKE_LENGTH} 倍）"
+                ),
+            );
+        }
+    }
+
+    /// 丸める。点は、有限でない点を除いて範囲に丸め、上限（線の長さ・1 つのスポットの点の数・全体の点の数
+    /// `budget`）を超えた分を除く。
+    fn normalize(&mut self, budget: &mut usize) {
+        self.size = ranges::RETOUCH_SIZE.clamp_or(self.size, RetouchSpot::DEFAULT_SIZE);
+        self.feather = ranges::AMOUNT_0_100.clamp_or(self.feather, RetouchSpot::DEFAULT_FEATHER);
+        self.opacity = ranges::AMOUNT_0_100.clamp_or(self.opacity, RetouchSpot::DEFAULT_OPACITY);
+        for v in &mut self.offset {
+            clamp0(v, ranges::RETOUCH_OFFSET);
+        }
+        self.points.retain(|[x, y]| x.is_finite() && y.is_finite());
+        for [x, y] in &mut self.points {
+            clamp0(x, ranges::RETOUCH_COORD);
+            clamp0(y, ranges::RETOUCH_COORD);
+        }
+        // 線の長さの上限を超える点から先を除く。
+        let mut length = 0.0f64;
+        let within = 1 + self
+            .points
+            .windows(2)
+            .take_while(|w| {
+                length += f64::from(w[1][0] - w[0][0]).hypot(f64::from(w[1][1] - w[0][1]));
+                length <= f64::from(MAX_RETOUCH_STROKE_LENGTH)
+            })
+            .count();
+        let keep = within
+            .min(self.points.len())
+            .min(MAX_RETOUCH_POINTS)
+            .min(*budget);
+        self.points.truncate(keep);
+        *budget -= keep;
     }
 }
 

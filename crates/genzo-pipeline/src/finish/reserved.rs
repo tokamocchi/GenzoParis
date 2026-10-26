@@ -14,6 +14,7 @@
 //! | 8. のカメラプロファイル（DCP）と 10 の後のルックテーブル | `sensor.color_matrix`・[`super::ProfileLookTableStage::ID`] | A1・C | `profile.camera` | 適用しない（カメラ行列） | 適用する（[`crate::profile`]・[`super::look`]） |
 //! | 15 の後の独自のルック（3D LUT） | [`super::LookStage::ID`] | C | `profile.look`・`profile.look_amount` | 適用しない | 適用する（[`super::look`]） |
 //! | ローカル補正（マスク） | （ステージ 10〜14 の画素ごとの値） | C | `masks` | 適用しない | 適用する（[`crate::local`]） |
+//! | スポット修正（DEV-21） | [`RETOUCH_ID`]（段階 A1 の出力に当てる） | A1 の後（B にも影響） | `retouch` | 適用しない | 適用する（[`crate::retouch`]） |
 //!
 //! **決めごと**: 処理バージョン 1 は、これらの設定に値があっても **無視して** 処理を続ける
 //! （ステージの `params` は常に `None`）。エラーにしないのは、センサー処理（1 段目）が
@@ -26,7 +27,7 @@
 
 use std::fmt;
 
-use genzo_model::{DevelopSettings, LocalAdjustment};
+use genzo_model::{DevelopSettings, LocalAdjustment, RetouchSpot};
 
 use super::{EffectsStage, SharpenStage, TextureStage};
 use crate::version::ProcessVersion;
@@ -37,6 +38,8 @@ pub const HIGHLIGHT_RECOVERY_ID: &str = "sensor.highlight_recovery";
 pub const NOISE_REDUCTION_ID: &str = "sensor.noise_reduction";
 /// ステージ 7（レンズ補正の周辺減光・倍率色収差。v1。処理バージョン 2 で適用する）の ID。
 pub const LENS_CORRECTION_ID: &str = "sensor.lens_correction";
+/// スポット修正（DEV-21。段階 A1 の出力に当てる。処理バージョン 2 で適用する）の ID。
+pub const RETOUCH_ID: &str = "retouch";
 
 /// 設定の処理バージョンでは適用しない（値があっても無視する）現像設定の項目（処理バージョン 1 だけ）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +54,8 @@ pub enum UnimplementedSetting {
     ChromaticAberration,
     /// レンズ補正の手動の補正（歪曲・周辺減光・色収差。ステージ 7・9）。
     LensManual,
+    /// 変形（遠近補正。ステージ 9。DEV-16）。
+    Transform,
     /// HSL / カラーミキサー（ステージ 13）。
     ColorMixer,
     /// カラーグレーディング（ステージ 13）。
@@ -71,6 +76,8 @@ pub enum UnimplementedSetting {
     Look,
     /// ローカル補正（マスク）。
     Masks,
+    /// スポット修正（DEV-21）。
+    Retouch,
 }
 
 impl UnimplementedSetting {
@@ -80,6 +87,7 @@ impl UnimplementedSetting {
             Self::HighlightRecovery => HIGHLIGHT_RECOVERY_ID,
             Self::NoiseReduction => NOISE_REDUCTION_ID,
             Self::LensProfile | Self::ChromaticAberration | Self::LensManual => LENS_CORRECTION_ID,
+            Self::Transform => super::GeometryStage::ID,
             Self::ColorMixer | Self::ColorGrading | Self::BlackWhite => super::ColorStage::ID,
             Self::Presence => TextureStage::ID,
             Self::Sharpening => SharpenStage::ID,
@@ -87,6 +95,7 @@ impl UnimplementedSetting {
             Self::CameraProfile => "sensor.color_matrix",
             Self::Look => super::LookStage::ID,
             Self::Masks => "finish.masks",
+            Self::Retouch => RETOUCH_ID,
         }
     }
 }
@@ -108,6 +117,9 @@ impl fmt::Display for UnimplementedSetting {
             }
             Self::LensManual => {
                 "レンズ補正の手動の補正はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
+            Self::Transform => {
+                "変形（遠近補正）はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
             }
             Self::ColorMixer => {
                 "カラーミキサー（HSL）はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
@@ -139,6 +151,9 @@ impl fmt::Display for UnimplementedSetting {
             Self::Masks => {
                 "ローカル補正（マスク）はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
             }
+            Self::Retouch => {
+                "スポット修正はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
         })
     }
 }
@@ -164,6 +179,9 @@ pub fn unimplemented_settings(settings: &DevelopSettings) -> Vec<UnimplementedSe
         }
         if s.lens.has_manual() {
             out.push(UnimplementedSetting::LensManual);
+        }
+        if !s.transform.is_identity() {
+            out.push(UnimplementedSetting::Transform);
         }
         if !s.color.mixer.is_neutral() {
             out.push(UnimplementedSetting::ColorMixer);
@@ -194,6 +212,9 @@ pub fn unimplemented_settings(settings: &DevelopSettings) -> Vec<UnimplementedSe
         }
         if !s.masks.iter().all(LocalAdjustment::is_neutral) {
             out.push(UnimplementedSetting::Masks);
+        }
+        if s.retouch.iter().any(RetouchSpot::is_active) {
+            out.push(UnimplementedSetting::Retouch);
         }
     }
     out
@@ -240,6 +261,8 @@ mod tests {
         s.presence.clarity = 10.0;
         s.effects.vignette.amount = -20.0;
         s.effects.grain.amount = 30.0;
+        s.retouch
+            .push(RetouchSpot::new(vec![[0.5, 0.5]], [0.05, 0.0]));
         let u = unimplemented_settings(&s);
         assert_eq!(
             u,
@@ -257,8 +280,11 @@ mod tests {
                 UnimplementedSetting::PostCropVignette,
                 UnimplementedSetting::Grain,
                 UnimplementedSetting::Masks,
+                UnimplementedSetting::Retouch,
             ]
         );
+        assert_eq!(u[13].stage_id(), RETOUCH_ID);
+        assert!(u[13].to_string().contains("スポット修正"));
         assert_eq!(u[8].stage_id(), TextureStage::ID);
         assert_eq!(u[10].stage_id(), EffectsStage::ID);
         assert_eq!(u[11].stage_id(), EffectsStage::ID);

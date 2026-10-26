@@ -84,7 +84,13 @@ describe("名前・まとめ・説明（純粋な計算）", () => {
     expect(describeGroups({ ...MOCK_TONE_GROUPS, profile: undefined })).toBe("基本補正・外観・プロファイル・ルック");
     const all = Object.fromEntries(Object.keys(DEFAULT_PASTE_SELECTION).map((k) => [k, true])) as typeof DEFAULT_PASTE_SELECTION;
     expect(describeGroups(all)).toBe("すべての項目");
-    expect(selectionOf(MOCK_TONE_GROUPS, DEFAULT_PASTE_SELECTION)).toEqual({ ...MOCK_TONE_GROUPS });
+    // スポット修正（DEV-21）を足す前に作ったプリセット（retouch が欠ける）は、コアと同じく含めない。
+    expect(selectionOf(MOCK_TONE_GROUPS, DEFAULT_PASTE_SELECTION)).toEqual({ ...MOCK_TONE_GROUPS, retouch: false });
+    expect(describeGroups({ ...MOCK_TONE_GROUPS, retouch: true })).toBe("基本補正・外観・スポット修正");
+    const { retouch: _, ...allButRetouch } = Object.fromEntries(
+      Object.keys(DEFAULT_PASTE_SELECTION).map((k) => [k, true]),
+    ) as typeof DEFAULT_PASTE_SELECTION;
+    expect(describeGroups(allButRetouch)).not.toBe("すべての項目");
     expect(selectionOf(undefined, DEFAULT_PASTE_SELECTION)).toEqual(DEFAULT_PASTE_SELECTION);
     const [ok, , broken] = mockDevelopPresets();
     expect(presetTooltip(ok)).toContain("含める項目: 基本補正・外観");

@@ -8,6 +8,7 @@ mod hash;
 mod masks;
 pub mod migrate;
 mod params;
+mod retouch;
 mod validate;
 
 use serde::{Deserialize, Serialize};
@@ -23,8 +24,12 @@ pub use params::{
     DetailParams, EffectsParams, Geometry, GradingWheel, Grain, HighlightMethod, HighlightRecovery,
     HslAdjustment, HueBand, HueBands, LensCorrection, MAX_ASPECT_TERM, MAX_CURVE_POINTS,
     MAX_PROFILE_ID_CHARS, MIN_CROP_SIZE, NoiseReduction, ParametricCurve, PostCropVignette,
-    PresenceParams, ProfileSettings, RenderDeps, Sharpening, ToneCurve, ToneParams, ValueRange,
-    VignetteCenter, WbPreset, WhiteBalance, is_valid_profile_id, ranges,
+    PresenceParams, ProfileSettings, RenderDeps, Sharpening, ToneCurve, ToneParams, Transform,
+    ValueRange, VignetteCenter, WbPreset, WhiteBalance, is_valid_profile_id, ranges,
+};
+pub use retouch::{
+    MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_RETOUCH_STROKE_LENGTH, MAX_TOTAL_RETOUCH_POINTS,
+    RetouchMode, RetouchSpot,
 };
 pub use validate::{FieldIssue, IssueKind, ValidationError};
 
@@ -68,12 +73,17 @@ pub struct DevelopSettings {
     pub geometry: Geometry,
     /// レンズ補正（DEV-14。v1。既定は無効）。
     pub lens: LensCorrection,
+    /// 変形（遠近補正。DEV-16。既定は何もしない）。
+    pub transform: Transform,
     /// シャープ・ノイズ軽減（DEV-12・DEV-13。v1。既定は 0）。
     pub detail: DetailParams,
     /// 効果（切り抜き後の周辺光量補正・粒子。DEV-24。v1。既定は 0）。
     pub effects: EffectsParams,
     /// ローカル補正（DEV-18。v1。既定は空）。
     pub masks: Vec<LocalAdjustment>,
+    /// スポット修正（DEV-21。修復・コピースタンプ。既定は空。空なら JSON に書かない）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retouch: Vec<RetouchSpot>,
     /// 現像結果に影響する外部データの識別子と内容のハッシュ（レビュー R-08）。
     pub render_deps: RenderDeps,
 }
@@ -95,9 +105,11 @@ impl Default for DevelopSettings {
             color: ColorParams::default(),
             geometry: Geometry::default(),
             lens: LensCorrection::default(),
+            transform: Transform::default(),
             detail: DetailParams::default(),
             effects: EffectsParams::default(),
             masks: Vec::new(),
+            retouch: Vec::new(),
             render_deps: RenderDeps::default(),
         }
     }
@@ -203,9 +215,11 @@ impl DevelopSettings {
             && s.geometry.crop.is_full()
             && s.geometry.angle_deg == 0.0
             && s.lens.is_disabled()
+            && s.transform.is_identity()
             && s.detail.is_neutral()
             && s.effects.is_neutral()
             && s.masks.iter().all(LocalAdjustment::is_neutral)
+            && !s.retouch.iter().any(RetouchSpot::is_active)
     }
 }
 
@@ -289,13 +303,49 @@ mod tests {
     fn current_versions() {
         // 新しく現像する写真は処理バージョン 2（v1 の機能のステージ。決定事項ログ No.120）。
         let s = DevelopSettings::default();
-        assert_eq!(s.schema_version, 2);
+        assert_eq!(s.schema_version, 3);
         assert_eq!(s.process_version, 2);
         // 版 1 の設定も読める（既存の写真）。
         let v1 =
             DevelopSettings::from_json(r#"{"schema_version": 2, "process_version": 1}"#).unwrap();
         assert_eq!(v1.process_version, 1);
         v1.validate().unwrap();
+    }
+
+    /// 変形（DEV-16）はどの項目でも 0（拡大・縮小は 100）でなければ無調整ではない。範囲の外は丸める。
+    #[test]
+    fn transform_values_are_validated_normalized_and_not_neutral() {
+        assert!(DevelopSettings::default().transform.is_identity());
+        for f in [
+            |t: &mut Transform| t.vertical = -15.0,
+            |t: &mut Transform| t.horizontal = 3.0,
+            |t: &mut Transform| t.aspect = 10.0,
+            |t: &mut Transform| t.scale = 120.0,
+            |t: &mut Transform| t.offset_x = -5.0,
+            |t: &mut Transform| t.offset_y = 1.0,
+        ] {
+            let mut s = DevelopSettings::default();
+            f(&mut s.transform);
+            assert!(!s.transform.is_identity(), "{:?}", s.transform);
+            assert!(!s.is_neutral(), "{:?}", s.transform);
+            s.validate().unwrap();
+        }
+        let mut s = DevelopSettings::default();
+        s.transform.vertical = 150.0;
+        s.transform.scale = 10.0;
+        s.transform.offset_y = f32::NAN;
+        let err = s.validate().unwrap_err();
+        assert!(err.has_field("transform.vertical"));
+        assert!(err.has_field("transform.scale"));
+        assert!(err.has_field("transform.offset_y"));
+        let n = s.normalized();
+        assert_eq!(n.transform.vertical, 100.0);
+        assert_eq!(n.transform.scale, 50.0);
+        assert_eq!(n.transform.offset_y, 0.0);
+        // JSON に変形がなければ既定値で読む（版 2 までの設定）。
+        let s =
+            DevelopSettings::from_json(r#"{"schema_version": 2, "process_version": 2}"#).unwrap();
+        assert!(s.transform.is_identity());
     }
 
     #[test]
@@ -805,16 +855,137 @@ mod tests {
     }
 
     #[test]
+    fn retouch_defaults_json_validation_and_neutral() {
+        // 既定は空で、JSON に書かない（項目を足す前の設定と同じ JSON・ハッシュ）。
+        let s = DevelopSettings::default();
+        assert!(s.retouch.is_empty());
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("retouch").is_none(), "{json}");
+        // 書いて読み直せる。
+        let s = DevelopSettings::from_json(
+            r#"{"schema_version": 2, "retouch": [
+                {"points": [[0.4, 0.2]], "offset": [0.03, 0.0]},
+                {"mode": "clone", "points": [[0.1, 0.5], [0.6, 0.45]], "size": 0.004, "offset": [0.0, 0.01]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(s.retouch.len(), 2);
+        assert_eq!(s.retouch[1].mode, RetouchMode::Clone);
+        assert!(!s.is_neutral());
+        let back = DevelopSettings::from_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!(back, s);
+        // 結果に影響しないスポットだけなら調整なし。
+        let mut n = s.clone();
+        for r in &mut n.retouch {
+            r.enabled = false;
+        }
+        assert!(n.is_neutral());
+        // 範囲外・NaN・点なしは検証で見つけ、丸めると範囲の端・既定値になり、点のないスポットは除く。
+        let mut bad = DevelopSettings::default();
+        bad.retouch.push(RetouchSpot {
+            size: 0.5,
+            feather: f32::NAN,
+            opacity: 120.0,
+            offset: [3.0, f32::NAN],
+            points: vec![[0.2, 0.3], [5.0, f32::INFINITY]],
+            ..Default::default()
+        });
+        bad.retouch.push(RetouchSpot::default());
+        let err = bad.validate().unwrap_err();
+        for f in [
+            "retouch[0].size",
+            "retouch[0].feather",
+            "retouch[0].opacity",
+            "retouch[0].offset[0]",
+            "retouch[0].offset[1]",
+            "retouch[0].points[1][0]",
+            "retouch[0].points[1][1]",
+            "retouch[1].points",
+        ] {
+            assert!(err.has_field(f), "{f}: {err}");
+        }
+        let n = bad.normalized();
+        assert_eq!(n.retouch.len(), 1);
+        let r = &n.retouch[0];
+        assert_eq!(r.size, ranges::RETOUCH_SIZE.max);
+        assert_eq!(r.feather, RetouchSpot::DEFAULT_FEATHER);
+        assert_eq!(r.opacity, 100.0);
+        assert_eq!(r.offset, [2.0, 0.0]);
+        // 無限大の点は除き、範囲外の点は端に寄せる。
+        assert_eq!(r.points, vec![[0.2, 0.3]]);
+        n.validate().unwrap();
+    }
+
+    #[test]
+    fn retouch_stroke_length_is_limited() {
+        // 画像の外の端どうしを往復する線（長さ 4.24 × 4999。Codex のレビューの指摘）。
+        let zigzag: Vec<[f32; 2]> = (0..MAX_RETOUCH_POINTS)
+            .map(|i| if i % 2 == 0 { [-1.0, -1.0] } else { [2.0, 2.0] })
+            .collect();
+        let mut s = DevelopSettings::default();
+        s.retouch.push(RetouchSpot::new(zigzag, [0.01, 0.0]));
+        assert!(s.validate().unwrap_err().has_field("retouch[0].points"));
+        let n = s.normalized();
+        let r = &n.retouch[0];
+        assert!(r.stroke_length() <= f64::from(MAX_RETOUCH_STROKE_LENGTH));
+        assert_eq!(
+            r.points.len(),
+            1 + (f64::from(MAX_RETOUCH_STROKE_LENGTH) / (3.0f64 * 2f64.sqrt())) as usize
+        );
+        n.validate().unwrap();
+        // 上限の長さちょうどの線は通る（写真を斜めに横切る線の数倍）。
+        let ok = RetouchSpot::new(
+            vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]],
+            [0.01, 0.0],
+        );
+        assert_eq!(ok.stroke_length(), 4.0);
+        let s = DevelopSettings {
+            retouch: vec![ok],
+            ..Default::default()
+        };
+        s.validate().unwrap();
+    }
+
+    #[test]
+    fn retouch_point_limits_are_enforced() {
+        let mut s = DevelopSettings::default();
+        for _ in 0..(MAX_TOTAL_RETOUCH_POINTS / MAX_RETOUCH_POINTS + 1) {
+            s.retouch.push(RetouchSpot::new(
+                vec![[0.5, 0.5]; MAX_RETOUCH_POINTS],
+                [0.01, 0.0],
+            ));
+        }
+        let err = s.validate().unwrap_err();
+        assert!(err.has_field("retouch"), "{err}");
+        let n = s.normalized();
+        let total: usize = n.retouch.iter().map(|r| r.points.len()).sum();
+        assert_eq!(total, MAX_TOTAL_RETOUCH_POINTS);
+        n.validate().unwrap();
+        let mut one = DevelopSettings::default();
+        one.retouch.push(RetouchSpot::new(
+            vec![[0.5, 0.5]; MAX_RETOUCH_POINTS + 1],
+            [0.01, 0.0],
+        ));
+        assert!(one.validate().unwrap_err().has_field("retouch[0].points"));
+        assert_eq!(one.normalized().retouch[0].points.len(), MAX_RETOUCH_POINTS);
+        let many = DevelopSettings {
+            retouch: vec![RetouchSpot::new(vec![[0.5, 0.5]], [0.01, 0.0]); MAX_RETOUCH_SPOTS + 1],
+            ..Default::default()
+        };
+        assert!(many.validate().unwrap_err().has_field("retouch"));
+        assert_eq!(many.normalized().retouch.len(), MAX_RETOUCH_SPOTS);
+    }
+
+    #[test]
     fn version_errors() {
         assert!(matches!(
             DevelopSettings::from_json(r#"{"exposure_ev": 1.0}"#),
             Err(DevelopError::MissingSchemaVersion)
         ));
         assert!(matches!(
-            DevelopSettings::from_json(r#"{"schema_version": 3}"#),
+            DevelopSettings::from_json(r#"{"schema_version": 4}"#),
             Err(DevelopError::FutureSchemaVersion {
-                found: 3,
-                supported: 2
+                found: 4,
+                supported: 3
             })
         ));
         assert!(matches!(

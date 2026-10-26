@@ -1,5 +1,5 @@
-// 現像設定の組み立て（WB の選択・レンズ補正・ハイライト復元・ノイズ軽減の操作の可否・リセット。DOM を使わない純粋な
-// 計算）。色（カラーミキサー・カラーグレーディング・白黒）は colorLogic.ts、テクスチャ・明瞭度・かすみの除去・シャープ・
+// 現像設定の組み立て（WB の選択・レンズ補正・変形（遠近補正）・ハイライト復元・ノイズ軽減の操作の可否・リセット。DOM を
+// 使わない純粋な計算）。色（カラーミキサー・カラーグレーディング・白黒）は colorLogic.ts、テクスチャ・明瞭度・かすみの除去・シャープ・
 // 効果は detailLogic.ts、カメラプロファイル・ルックは profileLogic.ts。
 
 import {
@@ -12,6 +12,8 @@ import {
   type NoiseReduction,
   RANGES,
   type SourceInfo,
+  type Transform,
+  type UprightMode,
   type WbPreset,
   type WhiteBalance,
   WB_PRESETS,
@@ -211,6 +213,94 @@ export function lensInfoNote(source: SourceInfo | null): string | null {
   return "この写真には埋め込みの補正の情報がありません（手動で補正できます）。";
 }
 
+/** 既定の変形（何もしない。genzo-model の Transform::default）。 */
+export function defaultTransform(): Transform {
+  return { vertical: 0, horizontal: 0, aspect: 0, scale: 100, offset_x: 0, offset_y: 0 };
+}
+
+/** 古いコアや古い設定で項目が欠けていても、変形のすべての項目をそろえる（欠けた項目は既定値）。 */
+export function fullTransform(t: Partial<Transform> | null | undefined): Transform {
+  return { ...defaultTransform(), ...(t ?? {}) };
+}
+
+/**
+ * 描画で使われる変形（その写真の処理バージョンで使われ、何かを変えているときだけ。そうでなければ null）。画面が
+ * G の外接矩形・画像の四隅を計算するのに使う。
+ */
+export function effectiveTransform(settings: DevelopSettings | null | undefined): Transform | null {
+  if (!settings || settings.process_version < TRANSFORM_PROCESS_VERSION) return null;
+  return transformIsIdentity(settings.transform) ? null : fullTransform(settings.transform);
+}
+
+/** 2 つの変形が同じか（すべての項目が一致）。 */
+export function sameTransform(a: Transform, b: Transform): boolean {
+  return (Object.keys(defaultTransform()) as (keyof Transform)[]).every((k) => a[k] === b[k]);
+}
+
+/** 何も変形しない設定か。 */
+export function transformIsIdentity(t: Partial<Transform> | null | undefined): boolean {
+  return sameTransform(fullTransform(t), defaultTransform());
+}
+
+/** 変形（遠近補正）を使える最初の処理バージョン（genzo-pipeline の ProcessVersion::V2）。 */
+export const TRANSFORM_PROCESS_VERSION = 2;
+
+/** 変形のパネルの各項目を操作できるか（DEV-16）。 */
+export interface TransformControls {
+  /** 処理バージョンが古く、変形を使えない（更新が必要）。 */
+  needsUpgrade: boolean;
+  /** 垂直・水平・縦横比・拡大縮小・ずらしのスライダーとリセット。 */
+  sliders: boolean;
+  /** 自動の「水平」（角度補正だけ。どの処理バージョンでも使える）。 */
+  uprightLevel: boolean;
+  /** 自動の「垂直」「完全」（処理バージョン 2 から）。 */
+  uprightPerspective: boolean;
+}
+
+/**
+ * 変形のパネルの各項目を操作できるか。遠近補正は仕上げの座標変換（ステージ 9）なので、RAW 以外の写真にも使える。
+ * `disabled` は写真を開いていないなど、パネル全体を使えないとき。
+ */
+export function transformControls(settings: DevelopSettings, source: SourceInfo | null, disabled: boolean): TransformControls {
+  const needsUpgrade = settings.process_version < TRANSFORM_PROCESS_VERSION;
+  const open = !disabled && source !== null;
+  return {
+    needsUpgrade,
+    sliders: open && !needsUpgrade,
+    uprightLevel: open,
+    uprightPerspective: open && !needsUpgrade,
+  };
+}
+
+/**
+ * 自動の遠近補正の結果を今の変形に入れる（垂直・完全なら垂直・水平だけを置き換え、縦横比・拡大縮小・ずらしは今のまま。
+ * 水平（角度だけ）では変えない。genzo-cli の `apply_upright` と同じ）。
+ */
+export function withUprightTransform(
+  current: Partial<Transform> | null | undefined,
+  mode: UprightMode,
+  suggested: Transform,
+): Transform {
+  const t = fullTransform(current);
+  if (mode === "level") return t;
+  return { ...t, vertical: suggested.vertical, horizontal: suggested.horizontal };
+}
+
+/** 自動の遠近補正の種類の名前（ボタンと知らせ）。 */
+export const UPRIGHT_LABELS: Record<UprightMode, string> = {
+  level: "水平",
+  vertical: "垂直",
+  full: "完全",
+};
+
+/** 自動の遠近補正の結果の知らせの文（適用した後に出す）。 */
+export function describeUpright(mode: UprightMode, angle_deg: number, t: Transform, lines: { vertical: number; horizontal: number }): string {
+  const parts = [`角度 ${angle_deg >= 0 ? "+" : ""}${angle_deg.toFixed(2)}°`];
+  if (mode !== "level") parts.push(`垂直 ${t.vertical >= 0 ? "+" : ""}${t.vertical.toFixed(1)}`);
+  if (mode === "full") parts.push(`水平 ${t.horizontal >= 0 ? "+" : ""}${t.horizontal.toFixed(1)}`);
+  return `自動の補正（${UPRIGHT_LABELS[mode]}）: ${parts.join("・")}（垂直の線 ${lines.vertical} 本・水平の線 ${lines.horizontal} 本）`;
+}
+
 /** 既定のハイライト復元（復元しない。genzo-model の HighlightRecovery::default）。 */
 export function defaultHighlightRecovery(): HighlightRecovery {
   return { method: "clip", amount: 100 };
@@ -282,15 +372,17 @@ export function sensorControls(
  * すべてリセット（genzo-model の DevelopSettings::default の値にする）。
  *
  * - schema_version・process_version・render_deps は今の値を保つ（コアが管理する値）。
- * - レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・色（カラーミキサー・
- *   カラーグレーディング・白黒）・カメラプロファイルとルック（標準の色・ルックなし）は既定に戻す（画面のパネルで
- *   見える項目）。
- * - マスク（ローカル補正。DEV-18・DEV-19）も除く（現像のパネルの「マスク」で見える項目。履歴から取り消せる）。
+ * - レンズ補正・変形（遠近補正）・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・色
+ *   （カラーミキサー・カラーグレーディング・白黒）・カメラプロファイルとルック（標準の色・ルックなし）は既定に戻す
+ *   （画面のパネルで見える項目）。
+ * - マスク（ローカル補正。DEV-18・DEV-19）とスポット修正（DEV-21）も除く（現像のパネルの「マスク」「スポット修正」で
+ *   見える項目。履歴から取り消せる）。
  */
 export function resetAll(s: DevelopSettings): DevelopSettings {
   return {
     ...s,
     lens: defaultLens(),
+    transform: defaultTransform(),
     highlight_recovery: defaultHighlightRecovery(),
     detail: {
       sharpening: defaultSharpening(),
@@ -313,5 +405,6 @@ export function resetAll(s: DevelopSettings): DevelopSettings {
     color: defaultColor(),
     geometry: defaultGeometry(),
     masks: [],
+    retouch: [],
   };
 }
