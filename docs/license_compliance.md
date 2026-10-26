@@ -16,6 +16,8 @@
 | C / C++ の共有ライブラリ | Windows: LibRaw（`raw_r.dll`）・Little CMS（`lcms2-2.dll`）・zlib（`z.dll`）。macOS: LibRaw（`libraw_r.25.dylib`）・Little CMS（`liblcms2.2.dylib`）・libjpeg-turbo（`libjpeg.8.dylib`）・LLVM の OpenMP（`libomp.dylib`）。2026-10-12 の配布物の記録で、実際に入るものはビルドの環境で決まる | `third-party/native.txt` | 配布のビルド（`scripts/prepare-worker.mjs`。vcpkg・Homebrew がインストールした文書を載せる。**2026-10-20 に追加**） |
 | Visual C++ のランタイム（Windows） | `VCRUNTIME140.dll`・`VCRUNTIME140_1.dll`・`MSVCP140.dll`（2026-10-12 の記録） | `third-party/native.txt` の 3 章（名前・著作権者・入手元だけ）と、使用条件 `third-party/vcruntime-terms.txt`（インストーラーで同意を求める。2026-10-20 に追加） | 同上（使用条件はリポジトリの `crates/genzo-app/licenses/windows/vcruntime-terms.txt`） |
 | LibRaw | LGPL-2.1 の全文・著作権表示・案内・ビルドの手順の写し・**ソースのアーカイブ** | `LibRaw/`（`source/` は **2026-10-20 に追加**） | 配布のビルド |
+| AI マスクのモデル（2026-10-26 に追加） | U²-Net の小型版（`models/u2netp.onnx`。rembg の配布物を変更せずに）・DeepLab-v3（`models/deeplab_v3.onnx`。MediaPipe の tflite を ONNX に変換） | `third-party/ai-models.txt`（入手元・SHA-256・変更の表示・Apache-2.0 と MIT（rembg）の全文） | リポジトリのファイル（`crates/genzo-app/models`・`licenses/third-party/ai-models.txt`） |
+| ONNX Runtime（2026-10-26 に追加。Windows・macOS） | `models/onnxruntime.dll`・`models/libonnxruntime.dylib`（1.31.0。Microsoft の公式の配布物を変更せずに） | `third-party/onnxruntime/LICENSE.txt`（MIT）・`third-party/onnxruntime/ThirdPartyNotices.txt` | 配布のビルド（`scripts/lib/onnxruntime.mjs`。公式の配布物の SHA-256 を固定） |
 
 ## 2. ライセンスごとの条件と対応
 
@@ -35,6 +37,8 @@
 | LGPL-2.1（LibRaw。CDDL-1.0 との選択で LGPL-2.1 を選んだ） | `raw_r.dll`・`libraw_r.25.dylib` | 4 節: ライブラリを実行形式で配るときは、対応するソースを添える（同じ場所からの入手でもよい）。6 節: ライブラリを使っていることとライセンスを目立つように知らせ、写しを渡す。実行中に著作権表示を出すなら、ライブラリの表示とライセンスへの案内も出す。a〜e のどれか（b: 共有ライブラリとして使い、互換のある差し替えで動く）。利用者が改変・リバースエンジニアリングできる条件で配る | 全文（`LICENSE.LGPL`）・著作権表示（`COPYRIGHT`）・案内（使っていること・同梱したファイル・差し替えの方法）を入れる。**ビルドに使ったソースのアーカイブを `LibRaw/source/` に入れる（vcpkg は LibRaw と LibRaw-cmake、Homebrew は LibRaw の配布物。2026-10-20 に追加）**。ビルドの手順の写し（vcpkg の port とパッチ・Homebrew の formula）とコミットを固定した URL も入れる。ワーカーが共有ライブラリとして読み込む（差し替えられる）。**設定の「このアプリについて」に LibRaw の著作権表示と LGPL-2.1 の文書への案内を出す（2026-10-20 に追加）**。GenzoParis は GPL-3.0 で、改変を妨げない | 満たすと考える。ただしソースの範囲（4 章の 3）と、macOS の差し替えで署名し直す必要があること（案内に書いた）は人の確認が要る |
 | IJG（libjpeg-turbo の libjpeg の部分。macOS） | `libjpeg.8.dylib` | 実行形式だけを配るときは、添付の文書に "this software is based in part on the work of the Independent JPEG Group" と書く。名前を宣伝に使わない | **`native.txt` の冒頭にこの一文を書き、`README.ijg`（LEGAL ISSUES を含む）と `LICENSE.md` を載せる（2026-10-20 に追加。README.ijg が見つからなければ配布物を作らずに止める）** | 満たすと考える |
 | Microsoft の Visual C++ のランタイム（Windows） | `VCRUNTIME140.dll`・`VCRUNTIME140_1.dll`・`MSVCP140.dll` | Visual Studio のライセンス条項の Distributable Code の節（下の注）。著作権表示を出す義務はない | `native.txt` に名前・著作権者・入手元を書き、変更せずに同梱する。**2026-10-20 から、インストーラーの同意の画面で使用条件（`licenses/third-party/vcruntime-terms.txt`）への同意を求める**（利用者が方式 A を選んだ。決定事項ログ No.199。文言は AI の案） | 同意を求める条件は、使用条件で対応する形にした（文言が足りるかは専門家の確認待ち）。**補償（indemnify）の義務は文書では満たせず、配布する人が負う**（4 章の 1） |
+| MIT（ONNX Runtime・rembg。2026-10-26 に追加） | `onnxruntime.dll`・`libonnxruntime.dylib`、`u2netp.onnx`（rembg の配布物） | 著作権表示と許諾の文を、すべての複製・重要な部分に含める | ONNX Runtime の配布物の LICENSE と ThirdPartyNotices.txt をそのまま入れる。rembg の LICENSE の全文を `ai-models.txt` に載せる | 満たすと考える。ThirdPartyNotices.txt の中の各ライセンスの条件は個別には照合していない（4 章の 11） |
+| Apache-2.0（AI マスクのモデル。2026-10-26 に追加） | `u2netp.onnx`（U²-Net の重み）・`deeplab_v3.onnx`（MediaPipe の DeepLab-v3） | 4 条（上の行と同じ） | 全文と入手元を `ai-models.txt` に載せる。DeepLab-v3 は ONNX に変換したので、変えたこと（4 条 (b)）を書いた。NOTICE のファイルは、U-2-Net のリポジトリにはない（2026-10-26 の取得で LICENSE だけ） | U²-Net は満たすと考える。**DeepLab-v3 は、配布元のファイルにライセンスの明記がなく、Apache-2.0 という前提そのものが人の確認待ち**（4 章の 11） |
 | GPL-3.0-or-later（GenzoParis 自体） | 本体・ワーカー・画面 | 6 条: 実行形式を配るときは、対応するソースを提供する（同じ場所からの入手でもよい）。ライセンスの写しを渡す | 全文を `GenzoParis/LICENSE.txt` に入れ、ソースの場所（GitHub のリポジトリと版のタグ）を `README.txt` と設定の画面に書く。GitHub の Release にはタグのソースのアーカイブが付く | 4 章の 8 |
 
 注（Microsoft の条項）: 調べた条文は、Visual Studio 2026 Community のライセンス条項（"Last Updated: October 1, 2025"）の 8 節 DISTRIBUTABLE CODE を、第三者のリポジトリにある写しで読んだものです（Microsoft の原本は、この環境から開けなかった）。2026-10-12 の配布物は、GitHub Actions のランナーの Visual Studio 18 Enterprise の `VC\Redist\MSVC\14.51.36231\x64\Microsoft.VC145.CRT` から DLL を取っており、Enterprise 版の条項の本文は確かめていません。要旨: (a) Distributable List（`aka.ms/vs/18/redistribution`。`VC\redist` の下のファイル。デバッグ版を除く）のファイルを、変更せずにアプリとともに配れる。(b) 配るときは、アプリに重要な主たる機能を足す、**配布する人と外部の利用者に、Distributable Code をこの条項と同じ以上に保護する条件に同意させる**、**アプリの配布・使用に関する請求から Microsoft を補償・防御する**。(c) Microsoft の商標をアプリの名前に使わない、Distributable Code のソースを、ソースの開示や改変の権利を求めるライセンス（Excluded License）の対象にしない。
@@ -69,6 +73,13 @@
 8. **GPL-3.0 の対応するソース**: GitHub のリポジトリと版のタグ（Release のソースのアーカイブ）で足りるか。著作権者が利用者自身だけなら、GPL の条件は再頒布する人を縛るもので、著作権者自身は縛らない、という読みでよいか（他の人の GPL のコードを含むかの確認を含む）。
 9. **複数のライセンスから選ぶ順**（MIT を Apache-2.0 より先。決定事項ログ No.195）と、brotli-decompressor を BSD-3-Clause として扱うこと。
 10. **未確認の環境**: `native.txt`・`LibRaw/source/` を作る処理は、Linux で偽の vcpkg・brew を使ったテストでだけ確かめた。Windows・macOS の配布のビルド（`release.yml`）では未実行。実際に同梱されるライブラリ（vcpkg の libraw の依存の jasper が入るかなど）とその文書は、実行したときの `native.txt` で確かめる。
+11. **AI マスクのモデルと ONNX Runtime（2026-10-26 に同梱。判断の表 No.207）**:
+   - DeepLab-v3（MediaPipe の `deeplab_v3.tflite`）のライセンスの根拠。ファイル自体と、この環境から読めた一次資料には明記がない（MediaPipe のリポジトリが Apache-2.0 で、似たテスト用のファイルを Apache-2.0 と宣言していることからの推定）。Google の MediaPipe の案内のページ・モデルカードで確かめる。確かめられなければ、人物のモデルを同梱から外すか、別のモデルに替える。
+   - 学習データ（U²-Net の小型版: DUTS-TR、DeepLab-v3: ImageNet・MS-COCO・PASCAL VOC 2012）の利用条件が、モデルの配布・利用に及ぶか。
+   - Apache-2.0 の 4 条 (b) の変更の表示（ONNX への変換）の書き方が足りるか。
+   - ONNX Runtime の ThirdPartyNotices.txt に載っている第三者のソフトウェアの条件（個別には照合していない）。
+   - ONNX Runtime のテレメトリーを止める処理（環境変数と API）の効果は、実測では確かめていない。社内の情報の扱いの規程に照らして足りるか。
+   - モデルのファイルを公開のリポジトリ（GitHub）に置くこと（再頒布）の可否と範囲。
 
 ## 5. 更新のしかた
 

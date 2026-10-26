@@ -1534,6 +1534,7 @@ export function mockMaskCommands(
         backend: aiKinds.length > 0 ? "mock" : "",
         problems: aiKinds.length > 0 ? [] : ["使えるモデルがありません（モック）"],
         models_dir: "/mock/models",
+        bundled_models_dir: null,
         onnxruntime: null,
         rasters: 0,
         raster_bytes: 0,

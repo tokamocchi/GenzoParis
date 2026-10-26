@@ -204,8 +204,9 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 | 証明書の検証（Windows: CryptoAPI、macOS: Security.framework、Linux: OS の証明書の保管場所） | オンラインの地図の HTTPS のサーバーの証明書の検証（`rustls-platform-verifier` を通して使う。LIB-21。2026-10-20 に、OS の TLS（native-tls。Windows: SChannel、macOS: Security.framework、Linux: OpenSSL）から置き換えた。TLS そのものは rustls と ring） | OS のもの（同梱しない） | Windows・macOS・Linux の OS | OS の構成要素 | 実行時に OS の機能を呼ぶ・OS の証明書の保管場所を読む（同梱しない）。Linux は検証そのものを rustls-webpki が行う | 同梱しない | — | AI 記入（2026-10-20）。Windows・macOS の実機で未確認 |
 | ring（暗号の実装） | オンラインの地図の HTTPS の暗号（`rustls` 0.23.45 の暗号の実装。LIB-21。`genzo-geo`。2026-10-20 追加。それまで Linux の開発環境で動的リンクしていた OpenSSL は、同じ日にやめた（1.1 節）） | 0.17.14（crate。checksum は 1.1 節） | crates.io の `ring`（C とアセンブリを同梱）。上流は https://github.com/briansmith/ring （BoringSSL を元にした部分を含む） | crate の `Cargo.toml` は Apache-2.0 AND ISC。`LICENSE` によると、ring の新しいコードは ISC、BoringSSL から来たコードは Apache-2.0（一部は ISC。ファイルの先頭に書いてある）、`third_party/fiat`（fiat-crypto）は Apache-2.0（1.1 節）。ファイルごとのヘッダは未確認（要確認） | C のファイルとアセンブリを `cc` でビルドして静的にリンクする（C のコンパイラが要る） | アプリの実行ファイル（`genzo-app`）に入る。対応するソースは crates.io の ring 0.17.14 | 要確認。2026-10-20 から、`LICENSE-other-bits`（ISC）・`LICENSE-BoringSSL`（Apache-2.0）と、cargo-about が拾ったファイルごとの表示（ソースのファイルの先頭の注釈 15 個）を配布物の `licenses/third-party/rust.txt` に載せる（1.4 節）。足りるかは人の確認待ち | AI 記入（2026-10-20）。FSF の一覧で Apache-2.0 と ISC は GPLv3 と両立するとされる（AI の理解）。GPL-3.0-or-later との両立の法的な最終の確認と表記の方法は人の確認待ち（3.14 節） |
 
-| ONNX Runtime（共有ライブラリ） | AI マスク（DEV-20）の推論（`genzo-ml` の `OnnxBackend`。pyke の `ort` が実行時に読み込む）。**同梱は未定**（利用者が置く。[ai_masks.md](ai_masks.md) の 2 章） | 未定（`ort` 2.0.0-rc.15 の API の版 31 に対応する 1.31 以上と理解。要確認）。開発環境のテストは PyPI の onnxruntime 1.31.0 の `libonnxruntime.so.1.31.0` | 未定（Microsoft の GitHub のリリース、または PyPI） | MIT（Microsoft。要確認） | 実行時に dlopen（ビルド時にリンクしない） | 同梱するなら、`native.txt` に本文を載せる（3.15 節） | 著作権表示と MIT の本文 | 未同梱 |
-| AI マスクのモデル（ONNX） | AI マスク（DEV-20）の推論のモデル（台帳 `*.genzo-model.json` と一緒に、利用者がモデルのフォルダに置く）。**リポジトリ・配布物に含めない** | 未定（人の選定。判断の表 No.203） | 未定 | モデルごと（候補の U²-Net は Apache-2.0 とされる。ADE20K の学習済みモデルは非商用のものが多い。要確認） | ファイルを読む | 同梱するなら、ライセンスの文書に載せる | モデルごと | 未選定 |
+| ONNX Runtime（共有ライブラリ） | AI マスク（DEV-20）の推論（`genzo-ml` の `OnnxBackend`。pyke の `ort` が実行時に読み込む）。**2026-10-26 から Windows・macOS の配布物に同梱**（決定事項ログ No.206） | 1.31.0（2026-10-09 公開） | Microsoft の GitHub の Releases の公式の配布物（`onnxruntime-win-x64-1.31.0.zip` SHA-256 `3958d8a4…`、`onnxruntime-osx-arm64-1.31.0.tgz` SHA-256 `1031b36d…`。`scripts/lib/onnxruntime.mjs` に全桁を固定） | MIT（Copyright (c) Microsoft Corporation。配布物の LICENSE で確認）。同梱の第三者のソフトウェアは配布物の ThirdPartyNotices.txt | 実行時に dlopen（ビルド時にリンクしない）。テレメトリーは止めて使う（3.15 節） | 資源のフォルダの `models`（Linux は同梱しない） | `licenses/third-party/onnxruntime/` に LICENSE.txt と ThirdPartyNotices.txt | AI 記入（2026-10-26）。条件を満たすかは人の確認待ち |
+| AI マスクのモデル: U²-Net の小型版（`u2netp.onnx`） | 被写体の AI マスク（DEV-20）。**2026-10-26 からリポジトリ（`crates/genzo-app/models`）と配布物に含める** | SHA-256 `309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8` | rembg の配布物（https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx 。変更なし）。元のモデルは https://github.com/xuebinqin/U-2-Net | 重みは Apache-2.0（U-2-Net の LICENSE）。ONNX の配布元の rembg は MIT | ファイルを読む（推論） | 資源のフォルダの `models` | `licenses/third-party/ai-models.txt`（入手元・Apache-2.0 と MIT の本文） | AI 記入（2026-10-26）。学習データ（DUTS-TR）の条件は未確認（判断の表 No.207） |
+| AI マスクのモデル: DeepLab-v3（MediaPipe。`deeplab_v3.onnx`） | 人物の AI マスク（DEV-20）。**2026-10-26 からリポジトリと配布物に含める** | SHA-256 `d535514b4b80a8d2bae10107a5c2dec333bfedf7f87a9c8f000f999118051785`（元の tflite は `ff36e24d…`） | Google の MediaPipe の配布物 `deeplab_v3.tflite` を tf2onnx 1.17.0 で ONNX に変換 | **Apache-2.0 として扱う（ファイル自体と、読めた一次資料に明記がない。3.15 節）** | ファイルを読む（推論） | 資源のフォルダの `models` | `licenses/third-party/ai-models.txt`（入手元・変更の表示・Apache-2.0 の本文） | AI 記入（2026-10-26）。ライセンスの根拠と学習データの条件は人の確認待ち（判断の表 No.207） |
 
 ## 3. 項目ごとの詳細と要確認の点
 
@@ -485,8 +486,9 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 ### 3.15 ONNX Runtime と AI マスクのモデル（DEV-20。2026-10-26）
 
 - Rust の crate（`ort`・`ort-sys`・`libloading`）は cargo-deny と cargo-about（1.4 節の `rust.txt`）で扱う（1.1 節の 2026-10-26 の記録）。
-- ONNX Runtime の共有ライブラリは、`ort` が実行時に読み込む（ビルド時にリンクしない）。**配布物には同梱していない**（判断の表 No.204）。同梱する場合は LibRaw と同じ方式（`bundled-libs.txt` に元の場所と SHA-256、`native.txt` に MIT の本文と著作権表示）にする。
-- モデルは利用者が置く（[ai_masks.md](ai_masks.md) の 2 章）。候補のライセンスは未確認（判断の表 No.203）。学習済みの重みには研究用・非商用のものが多いので、選ぶときは重みのライセンス（コードのライセンスと別）を確かめる。
+- ONNX Runtime の共有ライブラリは、`ort` が実行時に読み込む（ビルド時にリンクしない）。**2026-10-26 から Windows・macOS の配布物に同梱する**（決定事項ログ No.206）。公式の配布物の SHA-256 を `scripts/lib/onnxruntime.mjs` に固定し、`bundled-libs.txt` に置いた共有ライブラリの SHA-256 を記録する。ライセンスの文書は `native.txt` ではなく、配布物の LICENSE と ThirdPartyNotices.txt をそのまま `licenses/third-party/onnxruntime/` に入れる。
+- **テレメトリー**: 公式の配布物は、利用の情報を Microsoft に送るテレメトリーが既定で有効（配布物の `Privacy.md`）。アプリ・CLI は環境変数 `ORT_DISABLE_TELEMETRY=1` と `DisableTelemetryEvents` で止める（決定事項ログ No.207。効果は実測で確かめていない。[ai_masks.md](ai_masks.md) の 2.5 節）。
+- モデル: U²-Net の小型版（被写体）と DeepLab-v3（人物）を同梱する（[ai_masks.md](ai_masks.md) の 2.3 節に確かめたことの記録）。U²-Net の重みは U-2-Net のリポジトリの LICENSE（Apache-2.0）で確認した。**DeepLab-v3 の MediaPipe の tflite には、ライセンスを明記した一次資料を見つけていない**（MediaPipe のリポジトリは Apache-2.0 で、似たテスト用の DeepLab-v3 のファイルを含むパッケージは Apache-2.0 と宣言。元の DeepLab のコードも Apache-2.0）。Apache-2.0 として扱い、変換したことを変更の表示として `ai-models.txt` に書いた。学習データ（DUTS-TR・ImageNet・MS-COCO・PASCAL VOC）の利用条件が配布に及ぶかは確かめていない（判断の表 No.207）。
 - `genzo-ml` のテストの `mean_threshold.onnx` は、このリポジトリの `make_mean_threshold.py` で作った小さなグラフ（学習したモデルではない。第三者のデータを含まない）。
 
 ## 4. 今後記入する対象
@@ -500,6 +502,6 @@ cargo-deny では確認できない **C / C++ のライブラリ、同梱デー�
 - Windows の DirectX のシェーダーコンパイラ（wgpu の Direct3D 12 のバックエンドで、DXC のライブラリを同梱するか。要確認）
 - ~~UI の npm の依存の、配布物のライセンス表記への反映（確認の方法は 1.1a 節。2026-10-12）~~ 2026-10-20 に対応（1.4 節の `npm.txt`）
 - OS のランタイム（Visual C++ のランタイムなど）を同梱する場合
-- ~~ONNX Runtime（将来の ML 推論）~~ 2026-10-26 に 2 章・3.15 節に記入（同梱は未定）
+- ~~ONNX Runtime（将来の ML 推論）~~ 2026-10-26 に 2 章・3.15 節に記入（同じ日に、モデル 2 つとともに同梱することにした）
 - ~~配布物のライセンス表記の自動生成（02 の DIST-05）。Rust のクレートについては、生成するツールを検討する（要検討）~~ 2026-10-20 に対応（1.4 節。cargo-about 0.9.2。条件を満たすかは人の確認待ち）
 - 同梱する C / C++ の共有ライブラリ（LibRaw の依存の lcms2・zlib・libjpeg-turbo・libomp など）と Visual C++ のランタイムの、配布物のライセンスの表示（1.4 節の「含まないもの」）

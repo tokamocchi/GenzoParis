@@ -1,12 +1,14 @@
 # AI マスク（DEV-20）: 仕組み・モデルの置き方・確認の手順
 
 被写体・空・人物の自動の選択（AI マスク。[01](01_feature_inventory.md) の DEV-20）の実装（2026-10-26）の説明と、人が
-行うこと（モデルの選定と置き方、ONNX Runtime の同梱、実機での確認）の手順です。設計は [04](04_architecture.md) の 2.1 節
-「ローカル補正」と 7.2 節「AI 機能を差し込む位置」、決定事項は [decision_log.md](decision_log.md) の No.202〜205、
-人の判断が要る点は [implementation_status.md](implementation_status.md) の判断の表 No.203〜206 にあります。
+行うこと（モデルの差し替え、実機での確認）の手順です。設計は [04](04_architecture.md) の 2.1 節「ローカル補正」と 7.2 節
+「AI 機能を差し込む位置」、決定事項は [decision_log.md](decision_log.md) の No.202〜207、人の判断が要る点は
+[implementation_status.md](implementation_status.md) の判断の表 No.203〜207 にあります。
 
-**このリポジトリと配布物には、モデルのファイルも ONNX Runtime も含めていません。** どちらも人が選んで置くまで、
-AI マスクのボタンは押せず（理由を説明に出す）、CLI は「使えません」と知らせます。
+**2026-10-26 から、被写体と人物のモデルと ONNX Runtime を配布物（Windows・macOS）に同梱します**（決定事項ログ No.206。
+利用者の指示「ライセンス確認して組み込んで」）。モデルはリポジトリの `crates/genzo-app/models` に置き、ONNX Runtime は配布物を
+作るときに Microsoft の公式の配布物から取ります（2.4 節）。**空のモデルは同梱していません**（信頼できる入手先から取れる軽量な
+ものが見つからなかった。2.3 節）。ONNX Runtime のテレメトリー（Microsoft への利用の情報の送信）は止めて使います（2.5 節）。
 
 ## 1. 仕組み
 
@@ -26,7 +28,7 @@ AI マスクのボタンは押せず（理由を説明に出す）、CLI は「�
 座標: ラスターは作ったときの G 座標（回転・歪曲補正の後、切り抜く前）の全体を覆います。ブラシと同じく、切り抜きを変えても
 位置は変わりませんが、回転や歪曲補正を変えると画像に対してずれます（部品の「作り直す」で計算し直す）。
 
-## 2. モデルの置き方（人が行う）
+## 2. モデルの置き場と同梱
 
 ### 2.1 フォルダ
 
@@ -37,17 +39,23 @@ AI マスクのボタンは押せず（理由を説明に出す）、CLI は「�
 3. OS のアプリのデータのフォルダの `models`（プリセットの `presets` と同じ場所。Windows は `%APPDATA%\<識別子>\models`、
    macOS は `~/Library/Application Support/<識別子>/models`。`genzo ai status` で表示）
 
+その後に、配布物に同梱したモデルのフォルダ（`CoreConfig::bundled_models_dir`。アプリが起動時に資源のフォルダの `models` を
+設定する。Windows はインストール先の `models`、macOS は `GenzoParis.app/Contents/Resources/models`）を読みます。種類ごとに、
+先に読んだフォルダ（利用者のフォルダ）の使える台帳を使うので、利用者が置いたモデルが同梱のものより優先されます。同じ ID の
+台帳は、先のものだけを使います。CLI は同梱のフォルダを使いません（配布物に含まれないため）。
+
 ONNX Runtime の共有ライブラリ（Windows `onnxruntime.dll`、macOS `libonnxruntime.dylib`、Linux `libonnxruntime.so`）は、次の順で
 探します（最初に見つかったもの）。
 
 1. `CoreConfig::onnxruntime`（CLI の `--onnxruntime`）
 2. 環境変数 `GENZO_ONNXRUNTIME`
-3. モデルのフォルダ
-4. 実行ファイルと同じフォルダ、その `lib`（配布物に同梱するとき）
+3. モデルのフォルダ、同梱のモデルのフォルダ（配布物は ONNX Runtime をここに置く）
+4. 実行ファイルと同じフォルダ、その `lib`、`../Frameworks`（macOS の `.app`。今の配布物は 3 の同梱のフォルダに置く）
 
 ONNX Runtime はプロセスで 1 度しか読み込めません（`ort` の制約。別の場所を指定しても最初のものを使う）。版は `ort`
 2.0.0-rc.15 が使う API の版（`ORT_API_VERSION` 31 → ONNX Runtime 1.31 以上。**AI の理解。要確認**）に対応したものが要ります。
-この開発環境では、PyPI の `onnxruntime` 1.31.0 に含まれる `libonnxruntime.so.1.31.0` で結合テストを通しました（3 章）。
+この開発環境では、PyPI の `onnxruntime` 1.31.0 の `libonnxruntime.so.1.31.0` と、GitHub の Releases の公式の配布物
+`onnxruntime-linux-x64-1.31.0.tgz` の共有ライブラリで結合テストを通しました（3 章）。
 
 ### 2.2 台帳（`<名前>.genzo-model.json`）
 
@@ -93,37 +101,77 @@ ONNX Runtime はプロセスで 1 度しか読み込めません（`ort` の制�
 台帳が読めない・ファイルがない・SHA-256 が違う台帳は使わず、`genzo ai status` と画面のボタンの説明に理由を出します。
 同じ種類を扱える台帳が複数あれば、ファイル名の順で最初のものを使います。
 
-### 2.3 モデルの候補（**人の判断。AI の理解で、ライセンスと入手先は未確認**）
+### 2.3 同梱したモデル（2026-10-26。**ライセンスは AI が一次資料で確認。法的な判断は人の確認待ち**）
 
-この実装はモデルの中身に依存しないので、台帳で前処理・後処理を書ける ONNX のモデルなら使えます。候補として調べたものを
-挙げますが、**ライセンス（商用・配布の可否）、入手先の信頼性、ONNX への変換の方法と精度、推論の時間は人が確かめて**
-ください（判断の表 No.203）。
+| 種類 | モデル（台帳の ID） | ファイル（`crates/genzo-app/models`） | 入手元 | ライセンス |
+|---|---|---|---|---|
+| 被写体 | U²-Net の小型版（`u2netp-subject`） | `u2netp.onnx`（4,574,861 バイト。SHA-256 `309c8469…`）・`u2netp-subject.genzo-model.json` | rembg の配布物 https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx （変更なし）。元のモデルは https://github.com/xuebinqin/U-2-Net | Apache-2.0（U-2-Net のリポジトリの LICENSE。rembg の README に「モデルの重みは rembg の MIT とは別に、それぞれのライセンスに従う」とあり、u2netp の出典として U-2-Net を挙げている） |
+| 人物 | DeepLab-v3（MediaPipe。`mediapipe-deeplab-v3-person`） | `deeplab_v3.onnx`（2,782,503 バイト。SHA-256 `d535514b…`）・`deeplab-v3-person.genzo-model.json` | Google の MediaPipe の配布物 `deeplab_v3.tflite`（https://storage.googleapis.com/mediapipe-models/image_segmenter/deeplab_v3/float32/1/deeplab_v3.tflite 、SHA-256 `ff36e24d…`）を、tf2onnx 1.17.0（opset 13）で ONNX に変換したもの | **Apache-2.0 として扱う（ファイル自体にライセンスの表示がない。下の注）** |
 
-| 種類 | 候補 | AI の理解（要確認） |
+確かめたこと（2026-10-26）:
+
+- U-2-Net の LICENSE は Apache License 2.0 の全文（著作権者の欄は空のひな形のまま）。rembg の LICENSE は MIT（Copyright (c) 2020
+  Daniel Gatis）。
+- DeepLab-v3: MediaPipe のリポジトリ（Apache-2.0）の中で、似た DeepLab-v3 の TFLite（テスト用のデータ）を含むパッケージは
+  `licenses = ["notice"]  # Apache 2.0` と宣言している（同じファイルではない。SHA-256 が違う）。DeepLab の元のコード
+  （tensorflow/models の research/deeplab）は Apache-2.0。MediaPipe の画像のセグメンテーションの案内のページ（ai.google.dev）は、
+  この環境から読めなかった（検索の結果の要約では、DeepLab-v3 の行にモデルカードのリンクがない）。**同梱した `deeplab_v3.tflite` に
+  ライセンスを明記した一次資料は見つけていない。**
+- 学習データ: u2netp は DUTS-TR、DeepLab-v3 は ImageNet・MS-COCO・PASCAL VOC 2012 で学習したとされる。学習データの利用条件が
+  モデルの配布に及ぶかは確かめていない（人・専門家の判断。判断の表 No.207）。
+- ONNX への変換（DeepLab-v3）は、同じ版の tf2onnx でも実行のたびにバイト列が変わる（2 回の変換で SHA-256 が違った）。そのため
+  配布のビルドで変換せず、変換したファイルをリポジトリに置いた。変換の内容（ラベルの一覧のメタデータが落ちること）は
+  `licenses/third-party/ai-models.txt` に変更の表示として書いた（Apache-2.0 の第 4 条）。
+- 選ばなかったもの: MediaPipe の selfie segmenter（独自の演算 `Convolution2DTransposeBias` を含み、tf2onnx で変換できなかった）、
+  空のモデル（ADE20K などで学習したもの。この環境から届く信頼できる入手先（GitHub の Releases・Google の配布物）に軽量なものが
+  見つからなかった）。
+
+動作の確認: 2026-10-26 にこの開発環境（Linux。CPU）で、MediaPipe のサンプル写真 4 枚に CLI からマスクを作り、被写体・人物とも
+おおむね意図どおりに選ばれた（人の写っていない写真では人物は何も選ばれない）。推論の時間は 1 回 0.3〜0.4 秒（このコンテナの
+CPU。参考値）。DeepLab-v3 の人物の境界は U²-Net より粗い。
+
+モデルを差し替えるときは、2.2 節の台帳を書いて利用者のフォルダに置きます（同梱のものより優先）。同梱のモデルを変えるときは、
+`crates/genzo-app/models` のファイルと台帳、`tauri.conf.json` の `bundle.resources`（`scripts/lib/third-party.mjs` の
+`BUNDLED_MODEL_RESOURCES`）、`licenses/third-party/ai-models.txt`、[third_party.md](third_party.md) を合わせて変えます
+（`genzo-ml` の `tests/bundled_models.rs` と `scripts/lib/third-party.test.mjs` が食い違いを見つける）。
+
+### 2.4 配布物への同梱
+
+| もの | 置き場（配布物の中） | 作り方 |
 |---|---|---|
-| 被写体 | U²-Net（`u2net`・小さい `u2netp`） | 顕著な被写体の検出。Apache-2.0 とされる。入力 320 × 320、ImageNet の平均・標準偏差、出力はシグモイド済みの 1 チャンネル（変換の仕方による） |
-| 人物 | U²-Net の人物用（`u2net_human_seg`） | 同じリポジトリの、人物の切り抜き用の重み |
-| 空・人物 | ADE20K（150 クラス）で学習したセマンティックセグメンテーションのモデル（SegFormer・DeepLab 系など） | 多クラスの出力（`softmax` と `classes`）。ADE20K のクラスの番号は 0 始まりで空が 2、人物が 12 とされる。**学習済みの重みのライセンスは非商用のものが多い**（SegFormer の重みなど）ので、特に確認が要る |
+| モデルと台帳（4 ファイル） | 資源のフォルダの `models` | リポジトリの `crates/genzo-app/models` を `tauri.conf.json` の `bundle.resources` で同梱（Linux の .deb にも入る） |
+| ONNX Runtime 1.31.0（Windows `onnxruntime.dll`、macOS `libonnxruntime.dylib`） | 資源のフォルダの `models`（macOS も `Contents/Frameworks` ではない） | 配布物を作るとき（`scripts/prepare-worker.mjs` → `scripts/lib/onnxruntime.mjs`）に、GitHub の Releases の公式の配布物（`onnxruntime-win-x64-1.31.0.zip`・`onnxruntime-osx-arm64-1.31.0.tgz`）を取り、固定した SHA-256 と比べ（違えば止める）、共有ライブラリを取り出す。Linux には同梱しない |
+| Visual C++ のランタイム（Windows） | インストール先（実行ファイルと同じフォルダ） | `onnxruntime.dll` は `msvcp140.dll`・`msvcp140_1.dll`・`vcruntime140.dll`・`vcruntime140_1.dll` を読み込むので、ワーカーのものと合わせて同梱する（`scripts/lib/worker.mjs`） |
+| ライセンスの文書 | `licenses/third-party/ai-models.txt`（モデル）、`licenses/third-party/onnxruntime/`（ONNX Runtime の LICENSE と ThirdPartyNotices.txt） | モデルの文書はリポジトリに置く。ONNX Runtime の文書は公式の配布物から取り出す |
 
-モデルのファイルは Git に入れません（大きく、ライセンスの表示が要るため）。配布物に同梱する場合は、[third_party.md](third_party.md)
-の 2 章にモデルと ONNX Runtime の行を足し、配布物のライセンスの文書（1.4 節。`native.txt` と同じ扱い）に載せます。
+macOS: ONNX Runtime 1.31.0 の dylib は macOS 14.0 以降向け（minos 14.0）。`.app` の最小の版の確認（`GENZO_ALLOW_NEWER_MINOS`。
+[packaging.md](packaging.md) の 2.3）に含めます。今の配布（macOS 26 以降向け。決定事項ログ No.74）では影響しません。
 
-### 2.4 配布物への同梱（**人の判断**）
+配布物の確認（`release.yml`）で、モデル・台帳・ONNX Runtime・ライセンスの文書がインストール先（`.app` の中）にあることと、
+ONNX Runtime を読み込めて版が 1.31.0 であること（`scripts/check-onnxruntime.py`）を確かめます。**Windows・macOS の配布物は
+まだ作っていません**（2026-10-26。実機での確認も未）。
 
-今の配布のビルド（`release.yml`・`scripts/lib/build.mjs`）は ONNX Runtime とモデルを同梱しません。同梱するなら、
+### 2.5 ONNX Runtime のテレメトリー
 
-- ONNX Runtime（MIT）の共有ライブラリを実行ファイルと同じフォルダ（または `lib`）に置き、`native.txt` にライセンスの本文を
-  足す（LibRaw の同梱と同じ方式。[packaging.md](packaging.md)）。
-- モデルは OS のアプリのデータのフォルダの `models` に入れるインストーラーの処理と、ライセンスの表示が要る。
+Microsoft の公式の配布物の ONNX Runtime は、利用の情報（モデルの生産者・演算子・推論の回数と時間など）を Microsoft に送る
+テレメトリーが既定で有効です（配布物の `Privacy.md`。1.31.0 で確認）。`ort` の既定も有効にする側でした。写真に関する情報を
+外に出さないため、次の 2 つで止めます（決定事項ログ No.207）。
 
-同梱しない間は、利用者が 2.1 節の場所に置きます（判断の表 No.204）。
+- アプリ・CLI の `main` の最初で環境変数 `ORT_DISABLE_TELEMETRY=1` を設定する（ONNX Runtime の初期化の前に設定されていれば、
+  送信の仕組みそのものを作らない）。
+- 推論の環境を作るときに `DisableTelemetryEvents` を呼ぶ（`ort` の `with_telemetry(false)`）。
+
+この開発環境で、推論の間に strace でネットワークの接続（`connect`）が起きないことを見ました。ただし、止めないときに送信が
+起きることもこの環境では再現できなかったので、止める処理の効果を実測では確かめていません（ONNX Runtime の文書の方法に
+従った）。
 
 ## 3. 確認の手順
 
-### 3.1 開発環境（ONNX Runtime とモデルなし）
+### 3.1 開発環境（ONNX Runtime なし）
 
 ```sh
 cargo test -p genzo-model -p genzo-pipeline -p genzo-catalog -p genzo-ml -p genzo-api --test ai_masks
+cargo test -p genzo-ml --test bundled_models          # 同梱のモデルの台帳と SHA-256
 cargo test -p genzo-cli --test cli ai_masks           # 使えないときの状態とエラー
 cd ui && npm test -- mask                              # 画面の流れ（モックの推論）と描画
 ```
@@ -139,17 +187,20 @@ cd ui && npm test -- mask                              # 画面の流れ（モ�
 返すだけの小さなもの。学習したモデルではない）。
 
 ```sh
-GENZO_ORT_DYLIB=/path/to/libonnxruntime.so cargo test -p genzo-ml --test onnx
+GENZO_ORT_DYLIB=/path/to/libonnxruntime.so cargo test -p genzo-ml --test onnx --test bundled_models
 GENZO_ORT_DYLIB=/path/to/libonnxruntime.so cargo test -p genzo-cli --test cli ai_masks_are_computed_with_onnx_runtime
 ```
+
+`bundled_models` は、同梱のモデルで実際に推論します（暗い円の画像で、被写体は円の中心を選び隅を選ばない、人物はほぼ何も
+選ばない）。2026-10-26 に公式の配布物 `onnxruntime-linux-x64-1.31.0.tgz` の共有ライブラリで通りました。
 
 2026-10-26 にこの開発環境（Linux）で、PyPI の `onnxruntime` 1.31.0 の `libonnxruntime.so.1.31.0` を指定して両方通りました
 （CLI は `develop mask add --ai sky` → `list`・`overlay`・書き出しまで）。Windows・macOS では未確認です。
 
 ### 3.3 実機（人が行う）
 
-1. 2 章のとおり ONNX Runtime とモデル（台帳付き）を置き、`genzo ai status` で「使えます」と種類が出ることを確かめる。
-2. アプリで写真を開き、「マスク」の「＋ AI 空」などを押す。数秒で右の一覧にマスクが足され、O キーの重ねて表示で選択範囲が
+1. 配布物を入れたアプリで写真を開き、「マスク」の AI の部品が「被写体」「人物」だけ押せること（空は押せない）を確かめる。
+2. 「＋ AI 被写体」などを押す。数秒で右の一覧にマスクが足され、O キーの重ねて表示で選択範囲が
    見えること。
 3. 露光量などを動かして、範囲の中だけが変わること。切り抜きを変えても位置が変わらないこと。回転を変えると範囲がずれ、
    「作り直す」で直ること。
@@ -161,6 +212,8 @@ GENZO_ORT_DYLIB=/path/to/libonnxruntime.so cargo test -p genzo-cli --test cli ai
 ## 4. 制限（2026-10-26）
 
 - 推論は CPU だけ。GPU の実行プロバイダー（CUDA・DirectML・Core ML）は機能フラグを足していない（決定事項ログ No.203）。
+- 空のモデルは同梱していない（2.3 節）。利用者がモデルと台帳を置けば使える。
+- CLI は同梱のモデルを使わない（`--models-dir` などで指定する）。Linux の .deb はモデルだけを含み、ONNX Runtime は含まない。
 - 推論は同期（コマンドの応答まで待つ。画面は計算中の表示だけ）。長いモデルではジョブ化が要る（判断の表 No.205）。
 - ラスターの長辺は 1024 まで（`DEFAULT_INPUT_LONG_EDGE`）。モデルの出力（320〜512 が多い）を双線形で広げるので、細部の
   境界はモデルの解像度で決まる。

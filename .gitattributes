@@ -4,3 +4,6 @@
 
 # 第三者のライセンスの文書（crates/genzo-app/licenses。上流のファイルをそのまま同梱する）は改行を変えない。
 crates/genzo-app/licenses/** -text
+
+# AI マスクのモデル（crates/genzo-app/models の ONNX）はバイナリ。台帳の SHA-256 と一致させるため、改行の変換をしない。
+*.onnx binary

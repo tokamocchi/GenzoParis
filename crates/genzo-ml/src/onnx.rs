@@ -4,6 +4,19 @@
 //! （`ort` の既定の機能 `download-binaries` を外している）、[`OnnxBackend::load_library`] で指定したファイルから実行時に
 //! 読み込む（`ort` の `load-dynamic`）。読み込みはプロセスで 1 度だけ（2 度目以降は最初のライブラリのまま。`ort` の
 //! 制約）。実行プロバイダーは CPU だけ（CUDA・DirectML・Core ML は機能フラグを足していない。決定事項ログ No.203）。
+//!
+//! # テレメトリー
+//!
+//! Microsoft の公式の配布物の ONNX Runtime は、利用の情報（モデルの生産者・演算子・推論の回数と時間など）を
+//! Microsoft に送るテレメトリーが既定で有効（ONNX Runtime の `Privacy.md`。1.31.0 で確認）。写真の情報を外に出さない
+//! ため、次の 2 つで止める（決定事項ログ No.207）。
+//!
+//! - 環境変数 [`ORT_DISABLE_TELEMETRY_ENV`]`=1`: ONNX Runtime が初期化される前に設定されていれば、送信の仕組み
+//!   （1DS）そのものを作らない。プロセスの環境変数を変えるのはほかのスレッドが動く前でなければ安全でないので、
+//!   アプリ・CLI の `main` の最初で [`disable_telemetry_before_threads`] を呼ぶ。設定されていなければ、読み込みのときに
+//!   警告を記録する。
+//! - 環境（`Environment`）を作るときに `DisableTelemetryEvents` を呼ぶ（`ort` の `with_telemetry(false)`。`ort` の既定は
+//!   有効にする側）。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -28,9 +41,20 @@ impl OnnxBackend {
     /// 最初に読み込んだライブラリをそのまま使う（別のパスを指定しても読み込み直さない）。
     pub fn load_library(library: &Path) -> Result<Self, MlError> {
         let (loaded_path, result) = LOADED.get_or_init(|| {
+            if !crate::telemetry_disabled_by_env() {
+                tracing::warn!(
+                    env = crate::ORT_DISABLE_TELEMETRY_ENV,
+                    "ONNX Runtime のテレメトリーを止める環境変数が設定されていない（API では止める）"
+                );
+            }
             let r = ort::init_from(library)
                 .map_err(|e| e.to_string())
-                .and_then(|b| b.with_name("genzo").build().map_err(|e| e.to_string()));
+                .and_then(|b| {
+                    b.with_name("genzo")
+                        .with_telemetry(false)
+                        .build()
+                        .map_err(|e| e.to_string())
+                });
             (library.to_path_buf(), r)
         });
         match result {

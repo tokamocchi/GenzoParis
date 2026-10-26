@@ -13,6 +13,13 @@ GenzoParis のライセンスの文書
   本文です。
 - third-party/npm.txt
   画面に組み込んだ JavaScript のライブラリ（npm のパッケージ）の一覧と、そのライセンスの本文です。
+- third-party/ai-models.txt
+  AI マスク（被写体・人物の自動の選択）に使う、同梱した学習済みモデル（U²-Net の小型版・DeepLab-v3）の
+  入手元・変更の表示と、そのライセンス（Apache License 2.0・MIT License）の本文です。
+- third-party/onnxruntime/（Windows・macOS の配布物）
+  AI マスクの推論に使う ONNX Runtime（共有ライブラリとして同梱しています）のライセンス（LICENSE.txt。
+  MIT License）と、ONNX Runtime が使っている第三者のソフトウェアのライセンス（ThirdPartyNotices.txt）です。
+  GenzoParis は、ONNX Runtime のテレメトリー（Microsoft への利用の情報の送信）を止めて使います。
 - third-party/native.txt（Windows・macOS の配布物）
   同梱した C / C++ の共有ライブラリ（LibRaw と、LibRaw などが使うライブラリ。Windows では Visual C++ の
   ランタイムを含む）の一覧と、そのライセンスの文書です。
@@ -35,6 +42,11 @@ viewed in the app, in the "About this app" tab of Settings.
   each release is under its version tag, e.g. v0.1.1).
 - third-party/rust.txt: the Rust libraries (crates) compiled into genzo-paris and genzo-worker, with their licenses.
 - third-party/npm.txt: the JavaScript libraries (npm packages) bundled into the user interface, with their licenses.
+- third-party/ai-models.txt: the pre-trained models bundled for AI masks (U²-Net small and DeepLab-v3), with
+  their sources, modification notices and licenses (Apache License 2.0, MIT License).
+- third-party/onnxruntime/ (Windows and macOS packages): the license of ONNX Runtime (LICENSE.txt, MIT License),
+  bundled as a shared library to run the AI mask models, and the notices of the third-party software it uses
+  (ThirdPartyNotices.txt). GenzoParis runs ONNX Runtime with its telemetry turned off.
 - third-party/native.txt (Windows and macOS packages): the C / C++ shared libraries bundled with GenzoParis (LibRaw
   and the libraries it uses; on Windows, also the Visual C++ runtime), with their license documents.
 - third-party/vcruntime-terms.txt (Windows package): the terms of use for the bundled Microsoft Visual C++ runtime

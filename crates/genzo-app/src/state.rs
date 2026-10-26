@@ -177,6 +177,8 @@ pub struct AppState {
     logs: AppLogs,
     /// オンラインの地図のタイルと地名の検索（LIB-21。カタログによらない。[`crate::map`]）。
     map: MapService,
+    /// 配布物に同梱した AI マスクのモデルのフォルダ（資源のフォルダの `models`。DEV-20。なければ `None`）。
+    bundled_models_dir: Option<PathBuf>,
 }
 
 /// エラーの情報を作る。
@@ -228,6 +230,7 @@ impl AppState {
             worker: None,
             logs: AppLogs::new(genzo_api::logging::status().unwrap_or_default()),
             map: MapService::new(None),
+            bundled_models_dir: None,
         }
     }
 
@@ -252,6 +255,13 @@ impl AppState {
     /// 本物の通信でディスクにキャッシュしない [`MapService::new`]`(None)`）。
     pub fn with_map(mut self, map: MapService) -> Self {
         self.map = map;
+        self
+    }
+
+    /// 配布物に同梱した AI マスクのモデルのフォルダを指定する（起動時に資源のフォルダから。カタログを開くたびに
+    /// コアの設定 `CoreConfig::bundled_models_dir` に渡す）。
+    pub fn with_bundled_models_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.bundled_models_dir = dir;
         self
     }
 
@@ -432,6 +442,7 @@ impl AppState {
         }
         config.gpu = settings.gpu;
         config.backup_on_close = settings.backup_on_close;
+        config.bundled_models_dir = self.bundled_models_dir.clone();
         config.worker_env = tools.worker_env();
         // 動画の再生用のファイル（VID-04）は、アプリが探した ffmpeg・ffprobe だけで作る（PATH に頼らない。
         // 決定事項ログ No.67。見つからなければ、作れない理由を画面に出す）。

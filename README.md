@@ -24,7 +24,7 @@ Lightroom Classic 相当の写真現像（RAW 現像・非破壊編集）とカ�
 | [docs/packaging.md](docs/packaging.md) | 配布物（インストーラー）の作り方・入れ方・注意 |
 | [docs/catalog_schema.md](docs/catalog_schema.md) | カタログ（SQLite）のスキーマと、外部のツールから SQL で読む方法（公開ビュー。ORG-07） |
 | [docs/composite_design.md](docs/composite_design.md) | 比較明・比較暗合成（DEV-34）の設計（設計案。未実装） |
-| [docs/ai_masks.md](docs/ai_masks.md) | AI マスク（DEV-20。被写体・空・人物の自動の選択）の仕組み、モデルと ONNX Runtime の置き方（人が行う）、確認の手順と制限 |
+| [docs/ai_masks.md](docs/ai_masks.md) | AI マスク（DEV-20。被写体・空・人物の自動の選択）の仕組み、同梱したモデル（被写体・人物）と ONNX Runtime のライセンスと入手元、モデルの置き場と差し替え、確認の手順と制限 |
 
 ## 開発
 
@@ -142,7 +142,7 @@ cargo run -p genzo-cli -- profile import "$HOME/DCP/ILCE-7M4 標準.dcp" "$HOME/
 cargo run -p genzo-cli -- develop mask add 12 --linear 0.5,0,0.5,0.3 --exposure -0.7 --name 空   # 線形グラデーションのマスクで空を暗く（処理バージョン 2 から。DEV-18）
 cargo run -p genzo-cli -- develop mask add-part 12 1 --luminance 50,100   # マスク 1 を明るい部分だけに絞る（輝度の範囲を交差。DEV-19）
 cargo run -p genzo-cli -- develop mask overlay 12 1 --out mask.png   # マスクの重み（アプリの重ねて表示と同じ）を PNG に書く
-cargo run -p genzo-cli -- develop mask add 12 --ai sky --exposure -0.5   # AI マスク（空を自動で選ぶ。モデルと ONNX Runtime が要る。docs/ai_masks.md。DEV-20）
+cargo run -p genzo-cli -- develop mask add 12 --ai subject --exposure -0.5   # AI マスク（被写体を自動で選ぶ。CLI は --models-dir crates/genzo-app/models と --onnxruntime で指定する。docs/ai_masks.md。DEV-20）
 cargo run -p genzo-cli -- ai status   # AI マスクの推論の仕組みの状態（使える種類・モデルのフォルダ・問題）
 cargo run -p genzo-cli -- profile list --for 12       # 取り込んだものの一覧（12 の機種用か）
 cargo run -p genzo-cli -- develop set 12 --profile "ILCE-7M4 標準" --look film --look-amount 60   # プロファイル・ルックを選ぶ（処理バージョン 2 から）

@@ -45,6 +45,9 @@ fn run_in(s: &Session, out: Output, cmd: AiCommand) -> CliResult<Status> {
                         .map(|d| d.display().to_string())
                         .unwrap_or_else(|| "（不明）".to_owned())
                 ));
+                if let Some(d) = &st.bundled_models_dir {
+                    out.line(format!("  同梱のモデルのフォルダ: {}", d.display()));
+                }
                 out.line(format!(
                     "  ONNX Runtime: {}",
                     st.onnxruntime

@@ -1490,6 +1490,8 @@ pub struct AiMaskStatusInfo {
     pub problems: Vec<String>,
     /// モデルのフォルダ（分からなければ `None`）。
     pub models_dir: Option<PathBuf>,
+    /// 配布物に同梱したモデルのフォルダ（なければ `None`）。利用者のフォルダの後に読む。
+    pub bundled_models_dir: Option<PathBuf>,
     /// 見つかった ONNX Runtime の共有ライブラリ（なければ `None`）。
     pub onnxruntime: Option<PathBuf>,
     /// カタログの中の AI マスクのラスターの数。

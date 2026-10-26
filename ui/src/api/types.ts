@@ -589,6 +589,8 @@ export interface AiMaskStatus {
   backend: string;
   problems: string[];
   models_dir: string | null;
+  /** 配布物に同梱したモデルのフォルダ（なければ null）。利用者のフォルダの後に読む。 */
+  bundled_models_dir: string | null;
   onnxruntime: string | null;
   rasters: number;
   raster_bytes: number;

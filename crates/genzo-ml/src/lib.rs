@@ -21,7 +21,9 @@
 //! 3. genzo-api がラスターをカタログに保存し、現像設定（genzo-model の `MaskShape::Ai`）から参照する。描画のたびに推論
 //!    し直さない。
 //!
-//! モデルのファイル自体はこのリポジトリに含めない（選定・配布は人の判断。docs/ai_masks.md）。
+//! 配布物には、選んだモデル（被写体・人物）と ONNX Runtime を同梱する（crates/genzo-app/models・配布のスクリプト。
+//! docs/ai_masks.md）。モデルのフォルダは複数を順に読み（[`ModelLibrary::scan_dirs`]。利用者のフォルダが先、同梱の
+//! フォルダが後）、種類ごとに先のフォルダのモデルを使う。
 
 mod backend;
 mod fake;
@@ -43,6 +45,25 @@ pub use manifest::{
 };
 #[cfg(feature = "onnx")]
 pub use onnx::OnnxBackend;
+
+/// ONNX Runtime のテレメトリー（Microsoft への利用の情報の送信）を止める環境変数（ONNX Runtime の `Privacy.md`。
+/// 値 `1`。ONNX Runtime が初期化される前に設定されている必要がある）。
+pub const ORT_DISABLE_TELEMETRY_ENV: &str = "ORT_DISABLE_TELEMETRY";
+
+/// ONNX Runtime のテレメトリーを止める環境変数（[`ORT_DISABLE_TELEMETRY_ENV`]）を設定する。
+///
+/// # Safety
+///
+/// プロセスの環境変数を変える（[`std::env::set_var`]）。ほかのスレッドが動き出す前（`main` の最初）に呼ぶこと。
+pub unsafe fn disable_telemetry_before_threads() {
+    // SAFETY: 呼び出し側が、ほかのスレッドが環境変数を読み書きしていないことを保証する（関数の doc）。
+    unsafe { std::env::set_var(ORT_DISABLE_TELEMETRY_ENV, "1") };
+}
+
+/// テレメトリーを止める環境変数が設定されているか（値が `1`）。
+pub fn telemetry_disabled_by_env() -> bool {
+    std::env::var_os(ORT_DISABLE_TELEMETRY_ENV).is_some_and(|v| v == "1")
+}
 
 /// この OS での ONNX Runtime の共有ライブラリのファイル名（機能 `onnx` によらず、置き場の案内に使う）。
 pub fn onnxruntime_file_name() -> &'static str {

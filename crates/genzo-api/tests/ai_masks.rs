@@ -195,8 +195,10 @@ fn ai_masks_without_a_runtime_explain_the_missing_pieces() {
     let env = Env::new();
     write_jpeg(&env.photos.join("A.jpg"), (64, 48), 3, None);
     let models = env.dir.path().join("models-empty");
+    let bundled = env.dir.path().join("bundled-empty");
     let core = env.open_with(|c| {
         c.models_dir = Some(models.clone());
+        c.bundled_models_dir = Some(bundled.clone());
         c.onnxruntime = Some(env.dir.path().join("no-such-onnxruntime.so"));
     });
     let a = open_photo(&env, &core);
@@ -204,6 +206,10 @@ fn ai_masks_without_a_runtime_explain_the_missing_pieces() {
     assert!(!status.available, "{status:?}");
     assert!(!status.problems.is_empty());
     assert_eq!(status.models_dir.as_deref(), Some(models.as_path()));
+    assert_eq!(
+        status.bundled_models_dir.as_deref(),
+        Some(bundled.as_path())
+    );
     assert!(matches!(
         core.compute_ai_mask(a, AiMaskKind::Sky),
         Err(ApiError::AiMask(_))

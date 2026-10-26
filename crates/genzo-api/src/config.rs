@@ -161,9 +161,14 @@ pub struct CoreConfig {
     /// アプリと CLI で同じ場所）。
     #[serde(default)]
     pub models_dir: Option<PathBuf>,
+    /// 配布物に同梱した AI マスクのモデルのフォルダ（アプリの資源のフォルダの `models`。genzo-app が設定する）。
+    /// [`Self::models_dir`] の後に読み、種類ごとに利用者のフォルダのモデルを優先する。`None` なら同梱のものを使わない。
+    #[serde(default)]
+    pub bundled_models_dir: Option<PathBuf>,
     /// AI マスクの推論に使う ONNX Runtime の共有ライブラリ（`onnxruntime.dll`・`libonnxruntime.dylib`・
-    /// `libonnxruntime.so`）。`None` なら環境変数 `GENZO_ONNXRUNTIME`、モデルのフォルダ、実行ファイルのフォルダの順に
-    /// 探す（[`crate::onnxruntime_candidates`]）。
+    /// `libonnxruntime.so`）。`None` なら環境変数 `GENZO_ONNXRUNTIME`、モデルのフォルダ、同梱のモデルのフォルダ、
+    /// 実行ファイルのフォルダ（macOS の `.app` の `Contents/Frameworks` も）の順に探す
+    /// （[`crate::onnxruntime_candidates`]）。
     #[serde(default)]
     pub onnxruntime: Option<PathBuf>,
     /// 自動バックアップの世代数（DATA-04。既定 5。0 なら自動バックアップをしない）。
@@ -248,6 +253,7 @@ impl CoreConfig {
             backup_dir: None,
             presets_dir: None,
             models_dir: None,
+            bundled_models_dir: None,
             onnxruntime: None,
             backup_generations: default_backup_generations(),
             backup_on_close: false,

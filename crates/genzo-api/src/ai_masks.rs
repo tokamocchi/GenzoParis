@@ -17,9 +17,15 @@
 //! # モデルと ONNX Runtime の置き場
 //!
 //! - モデルのフォルダ: [`CoreConfig::models_dir`](crate::CoreConfig::models_dir) → 環境変数 [`ENV_MODELS_DIR`] → OS の
-//!   アプリのデータのフォルダの `models`（プリセットと同じ場所の決め方。アプリと CLI で同じ）。
+//!   アプリのデータのフォルダの `models`（プリセットと同じ場所の決め方。アプリと CLI で同じ）。その後に、配布物に同梱した
+//!   モデルのフォルダ（[`CoreConfig::bundled_models_dir`](crate::CoreConfig::bundled_models_dir)。アプリの資源のフォルダの
+//!   `models`）を読む。種類ごとに、利用者のフォルダのモデルを優先する（genzo-ml の `ModelLibrary::scan_dirs`）。
 //! - ONNX Runtime の共有ライブラリ: [`CoreConfig::onnxruntime`](crate::CoreConfig::onnxruntime) → 環境変数
-//!   [`ENV_ONNXRUNTIME`] → モデルのフォルダ → 実行ファイルと同じフォルダ（配布物に同梱したとき）。
+//!   [`ENV_ONNXRUNTIME`] → モデルのフォルダ → 同梱のモデルのフォルダ（Windows・macOS の配布物はここに置く）→ 実行
+//!   ファイルと同じフォルダ → 実行ファイルのフォルダの `lib` → `../Frameworks`（`.app` の Contents/Frameworks に置いた
+//!   とき。今の配布物は使わない）。
+//!
+//! ONNX Runtime のテレメトリーは止める（genzo-ml の `onnx` モジュールの doc。決定事項ログ No.207）。
 //!
 //! どちらもなければ、状態（[`Core::ai_mask_status`]）で理由を知らせ、計算はエラー（[`ApiError::AiMask`]）になる。
 
@@ -68,10 +74,7 @@ fn models_dir_from(get: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
 }
 
 /// ONNX Runtime の共有ライブラリの場所の候補（モジュールの doc の順。存在するものだけ）。
-pub fn onnxruntime_candidates(
-    configured: Option<&Path>,
-    models_dir: Option<&Path>,
-) -> Vec<PathBuf> {
+pub fn onnxruntime_candidates(configured: Option<&Path>, models_dirs: &[&Path]) -> Vec<PathBuf> {
     let name = genzo_ml::onnxruntime_file_name();
     let mut out = Vec::new();
     if let Some(p) = configured {
@@ -80,7 +83,7 @@ pub fn onnxruntime_candidates(
     if let Some(p) = std::env::var_os(ENV_ONNXRUNTIME).filter(|v| !v.is_empty()) {
         out.push(PathBuf::from(p));
     }
-    if let Some(d) = models_dir {
+    for d in models_dirs {
         out.push(d.join(name));
     }
     if let Ok(exe) = std::env::current_exe()
@@ -88,8 +91,25 @@ pub fn onnxruntime_candidates(
     {
         out.push(dir.join(name));
         out.push(dir.join("lib").join(name));
+        // macOS の .app の Contents/MacOS の隣の Contents/Frameworks（利用者が置いたとき。今の配布物は同梱のモデルの
+        // フォルダに置く。scripts/lib/onnxruntime.mjs）。
+        out.push(dir.join("..").join("Frameworks").join(name));
     }
     out.into_iter().filter(|p| p.is_file()).collect()
+}
+
+/// 読むモデルのフォルダ（利用者のフォルダ、同梱のフォルダの順。モジュールの doc）。
+fn models_dirs(inner: &Inner) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(d) = inner.config.models_dir.clone().or_else(default_models_dir) {
+        dirs.push(d);
+    }
+    if let Some(d) = inner.config.bundled_models_dir.clone()
+        && !dirs.contains(&d)
+    {
+        dirs.push(d);
+    }
+    dirs
 }
 
 /// カタログの AI マスクのラスターを描画のために引く（メモリに使い回す）。
@@ -201,25 +221,24 @@ pub(crate) fn build_segmenter(inner: &Inner) -> Result<Arc<dyn Segmenter>, Strin
     if let Some(s) = &inner.segmenter_hook {
         return Ok(s.clone());
     }
-    let models_dir = inner
-        .config
-        .models_dir
-        .clone()
-        .or_else(default_models_dir)
-        .ok_or_else(|| {
-            "モデルのフォルダが分かりません（GENZO_MODELS_DIR を設定してください）".to_owned()
-        })?;
-    let backend = onnx_backend(inner.config.onnxruntime.as_deref(), Some(&models_dir))?;
-    let library = genzo_ml::ModelLibrary::scan(&models_dir, backend).map_err(|e| e.to_string())?;
+    let dirs = models_dirs(inner);
+    if dirs.is_empty() {
+        return Err(
+            "モデルのフォルダが分かりません（GENZO_MODELS_DIR を設定してください）".to_owned(),
+        );
+    }
+    let dir_refs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+    let backend = onnx_backend(inner.config.onnxruntime.as_deref(), &dir_refs)?;
+    let library = genzo_ml::ModelLibrary::scan_dirs(&dirs, backend).map_err(|e| e.to_string())?;
     Ok(Arc::new(library))
 }
 
 #[cfg(feature = "onnx")]
 fn onnx_backend(
     configured: Option<&Path>,
-    models_dir: Option<&Path>,
+    models_dirs: &[&Path],
 ) -> Result<Arc<dyn genzo_ml::MlBackend>, String> {
-    let candidates = onnxruntime_candidates(configured, models_dir);
+    let candidates = onnxruntime_candidates(configured, models_dirs);
     let Some(path) = candidates.first() else {
         return Err(format!(
             "ONNX Runtime の共有ライブラリ（{}）が見つかりません（{ENV_ONNXRUNTIME} か、モデルのフォルダ・実行ファイルのフォルダに置いてください）",
@@ -234,7 +253,7 @@ fn onnx_backend(
 #[cfg(not(feature = "onnx"))]
 fn onnx_backend(
     _configured: Option<&Path>,
-    _models_dir: Option<&Path>,
+    _models_dirs: &[&Path],
 ) -> Result<Arc<dyn genzo_ml::MlBackend>, String> {
     Err("このビルドには ONNX Runtime の backend がありません（機能 onnx）".to_owned())
 }
@@ -256,6 +275,7 @@ impl Core {
         inner.check_open()?;
         let (rasters, raster_bytes) = inner.with_catalog(|c| c.ai_mask_totals())?;
         let models_dir = inner.config.models_dir.clone().or_else(default_models_dir);
+        let bundled_models_dir = inner.config.bundled_models_dir.clone();
         let mut info = AiMaskStatusInfo {
             available: false,
             kinds: Vec::new(),
@@ -263,6 +283,7 @@ impl Core {
             backend: String::new(),
             problems: Vec::new(),
             models_dir,
+            bundled_models_dir,
             onnxruntime: None,
             rasters,
             raster_bytes,
@@ -280,12 +301,12 @@ impl Core {
         }
         #[cfg(feature = "onnx")]
         {
-            info.onnxruntime = onnxruntime_candidates(
-                inner.config.onnxruntime.as_deref(),
-                info.models_dir.as_deref(),
-            )
-            .into_iter()
-            .next();
+            let dirs = models_dirs(inner);
+            let dir_refs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+            info.onnxruntime =
+                onnxruntime_candidates(inner.config.onnxruntime.as_deref(), &dir_refs)
+                    .into_iter()
+                    .next();
         }
         Ok(info)
     }

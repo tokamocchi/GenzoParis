@@ -1,5 +1,9 @@
 //! モデルのフォルダ（[`ModelLibrary`]）: 台帳（`*.genzo-model.json`）を読み、種類ごとに使うモデルを選び、
 //! セッションを使い回す。
+//!
+//! フォルダは複数を順に読める（[`ModelLibrary::scan_dirs`]。genzo-api は利用者のフォルダ・配布物に同梱したフォルダの
+//! 順）。種類ごとに、先のフォルダの使える台帳を使う（利用者が置いたモデルが同梱のものより優先）。同じ ID の台帳は、
+//! フォルダの順・ファイル名の順で最初のものだけを使う。
 
 use std::collections::HashMap;
 use std::fmt;
@@ -46,7 +50,7 @@ pub struct ModelLoadError {
 
 /// モデルのフォルダ（モジュールの doc）。[`Segmenter`] を実装する。
 pub struct ModelLibrary {
-    dir: PathBuf,
+    dirs: Vec<PathBuf>,
     backend: Arc<dyn MlBackend>,
     entries: Vec<ModelEntry>,
     /// 読み込んだセッション（モデルの ID → セッション）。推論は 1 つずつ（ロックの中で実行する）。
@@ -56,7 +60,7 @@ pub struct ModelLibrary {
 impl fmt::Debug for ModelLibrary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ModelLibrary")
-            .field("dir", &self.dir)
+            .field("dirs", &self.dirs)
             .field("backend", &self.backend)
             .field("entries", &self.entries.len())
             .finish()
@@ -64,11 +68,25 @@ impl fmt::Debug for ModelLibrary {
 }
 
 impl ModelLibrary {
-    /// フォルダ `dir` の台帳を読む（フォルダがなければ空。読めない台帳は `problem` 付きの項目にする）。モデルの
-    /// ファイルの存在と SHA-256（台帳に書いてあれば）をここで確かめる。
+    /// フォルダ `dir` の台帳を読む（[`Self::scan_dirs`] のフォルダが 1 つのとき）。
     pub fn scan(dir: &Path, backend: Arc<dyn MlBackend>) -> Result<Self, ModelLoadError> {
+        Self::scan_dirs(&[dir.to_path_buf()], backend)
+    }
+
+    /// フォルダ `dirs` の台帳をこの順に読む（ないフォルダは空。読めない台帳は `problem` 付きの項目にする）。モデルの
+    /// ファイルの存在と SHA-256（台帳に書いてあれば）をここで確かめる。同じ ID の台帳は、フォルダの順・ファイル名の
+    /// 順で最初のものだけを使う（セッションは ID ごとに使い回すので、同じ ID で別のモデルを指すと、別の種類の推論に
+    /// 違うモデルを使ってしまう）。
+    pub fn scan_dirs(
+        dirs: &[PathBuf],
+        backend: Arc<dyn MlBackend>,
+    ) -> Result<Self, ModelLoadError> {
         let mut entries = Vec::new();
-        if dir.is_dir() {
+        let mut seen: HashMap<String, PathBuf> = HashMap::new();
+        for dir in dirs {
+            if !dir.is_dir() {
+                continue;
+            }
             let read = std::fs::read_dir(dir).map_err(|source| ModelLoadError {
                 dir: dir.to_path_buf(),
                 source,
@@ -82,21 +100,22 @@ impl ModelLibrary {
                 })
                 .collect();
             paths.sort();
-            // 同じ ID の台帳は、ファイル名の順で最初のものだけを使う（セッションは ID ごとに使い回すので、同じ ID で
-            // 別のモデルを指すと、別の種類の推論に違うモデルを使ってしまう）。
-            let mut seen: HashMap<String, PathBuf> = HashMap::new();
             for p in paths {
                 let mut entry = read_entry(&p);
                 if let Some(m) = &entry.manifest {
                     match seen.get(&m.id) {
                         Some(first) => {
                             entry.problem = Some(format!(
-                                "id {} が {} と重複しています（ファイル名の順で先の台帳だけを使います）",
+                                "id {} が {} と重複しています（先の台帳だけを使います）",
                                 m.id,
-                                first
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_default()
+                                if first.parent() == p.parent() {
+                                    first
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_default()
+                                } else {
+                                    first.display().to_string()
+                                }
                             ));
                         }
                         None => {
@@ -108,30 +127,30 @@ impl ModelLibrary {
             }
         }
         tracing::info!(
-            dir = %dir.display(),
+            dirs = ?dirs,
             models = entries.iter().filter(|e| e.usable()).count(),
             problems = entries.iter().filter(|e| !e.usable()).count(),
             "AI マスクのモデルのフォルダを読んだ"
         );
         Ok(Self {
-            dir: dir.to_path_buf(),
+            dirs: dirs.to_vec(),
             backend,
             entries,
             sessions: Mutex::new(HashMap::new()),
         })
     }
 
-    /// フォルダ。
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    /// 読んだフォルダ（読んだ順）。
+    pub fn dirs(&self) -> &[PathBuf] {
+        &self.dirs
     }
 
-    /// 項目（台帳のファイル名の順）。
+    /// 項目（フォルダの順、その中は台帳のファイル名の順）。
     pub fn entries(&self) -> &[ModelEntry] {
         &self.entries
     }
 
-    /// 種類 `kind` に使うモデル（使える台帳のうち、ファイル名の順で最初のもの）。
+    /// 種類 `kind` に使うモデル（使える台帳のうち、フォルダの順・ファイル名の順で最初のもの）。
     pub fn model_for(&self, kind: AiMaskKind) -> Option<(&ModelEntry, &ModelManifest)> {
         self.entries.iter().find_map(|e| {
             let m = e.manifest.as_ref()?;
@@ -210,9 +229,13 @@ impl Segmenter for ModelLibrary {
             }
         }
         if status.kinds.is_empty() {
+            let dir = self
+                .dirs
+                .first()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
             status.problems.push(format!(
-                "使えるモデルがありません（{} に台帳 *{MANIFEST_EXTENSION} とモデルのファイルを置いてください）",
-                self.dir.display()
+                "使えるモデルがありません（{dir} に台帳 *{MANIFEST_EXTENSION} とモデルのファイルを置いてください）"
             ));
         }
         status
@@ -355,6 +378,59 @@ mod tests {
         let status = lib.status();
         assert_eq!(status.kinds, [AiMaskKind::Sky]);
         assert!(status.problems.iter().any(|x| x.contains("重複")));
+    }
+
+    /// 複数のフォルダ（利用者のフォルダ・同梱のフォルダ）: 種類ごとに先のフォルダのモデルを使い、同じ ID の台帳は
+    /// 先のフォルダのものだけを使う。
+    #[test]
+    fn earlier_folders_take_precedence() {
+        let user = tempfile::tempdir().unwrap();
+        let bundled = tempfile::tempdir().unwrap();
+        for d in [user.path(), bundled.path()] {
+            std::fs::write(d.join("m.onnx"), b"model").unwrap();
+        }
+        write(
+            user.path(),
+            "mine.genzo-model.json",
+            r#"{"id": "mine", "file": "m.onnx", "input": {"width": 4, "height": 4}, "kinds": {"subject": {"channel": 0}}}"#,
+        );
+        write(
+            bundled.path(),
+            "a-subject.genzo-model.json",
+            r#"{"id": "bundled-subject", "file": "m.onnx", "input": {"width": 4, "height": 4}, "kinds": {"subject": {"channel": 0}}}"#,
+        );
+        write(
+            bundled.path(),
+            "b-person.genzo-model.json",
+            r#"{"id": "bundled-person", "file": "m.onnx", "input": {"width": 4, "height": 4}, "kinds": {"person": {"channel": 0}}}"#,
+        );
+        write(
+            bundled.path(),
+            "c-dup.genzo-model.json",
+            r#"{"id": "mine", "file": "m.onnx", "input": {"width": 4, "height": 4}, "kinds": {"sky": {"channel": 0}}}"#,
+        );
+        let dirs = [
+            user.path().to_path_buf(),
+            bundled.path().to_path_buf(),
+            user.path().join("missing"),
+        ];
+        let lib = ModelLibrary::scan_dirs(&dirs, Arc::new(ThresholdBackend::default())).unwrap();
+        assert_eq!(lib.dirs(), dirs);
+        assert_eq!(lib.entries().len(), 4);
+        assert_eq!(lib.model_for(AiMaskKind::Subject).unwrap().1.id, "mine");
+        assert_eq!(
+            lib.model_for(AiMaskKind::Person).unwrap().1.id,
+            "bundled-person"
+        );
+        assert!(lib.model_for(AiMaskKind::Sky).is_none());
+        let dup = lib.entries()[3].problem.as_deref().unwrap();
+        assert!(
+            dup.contains("重複") && dup.contains("mine.genzo-model.json"),
+            "{dup}"
+        );
+        let status = lib.status();
+        assert_eq!(status.kinds, [AiMaskKind::Subject, AiMaskKind::Person]);
+        assert_eq!(status.model_ids, ["mine", "bundled-person"]);
     }
 
     #[test]
