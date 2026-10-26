@@ -47,6 +47,13 @@ all-features = true
 # - RUSTSEC-2026-0348: rustls の機能 brotli を入れたときだけ。入れていない（機能は ring・std・tls12・logging）。
 # - RUSTSEC-2026-0349: 耐量子の鍵交換（X25519MLKEM768 など）を先に出すときだけ。ring の暗号の実装の鍵交換は
 #   X25519・P-256・P-384 だけ。
+#
+# 2026-10-26 追加（自動補正 DEV-32 の PR #16 の CI で見つかった。rustls-webpki 0.103.15 の脆弱性の通知。直した版の 0.103.16 は
+# 2026-10-20 の公開で、2 週間以上の方針に合わないため、まだ上げない。配布の対象では当たらない（AI がソースで確かめた。人の
+# 確認待ち）。0.103.16 が 2 週間たつ 2026-11-03 以降に rustls-webpki を上げて、これを消す）:
+# - RUSTSEC-2026-0382: 信頼しなくなった emSign の中間証明書の公開鍵を含む経路を受け入れうる。webpki で経路を検証するのは
+#   rustls-platform-verifier の Linux 向け（src/verification/others.rs）だけで、配布の対象の Windows（CryptoAPI）・macOS
+#   （Security.framework）は OS が検証する。使うのはオンラインの地図（LIB-21。既定で無効）の HTTPS だけ。
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error（Tauri の Linux の GTK の依存。ビルド時のみ）。Tauri の更新時に見直す" },
     { id = "RUSTSEC-2025-0075", reason = "unic-char-range（Tauri の urlpattern）。Tauri の更新時に見直す" },
@@ -61,6 +68,7 @@ ignore = [
     { id = "RUSTSEC-2026-0347", reason = "rustls 0.23.45（ECH を有効にしたときだけが対象）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
     { id = "RUSTSEC-2026-0348", reason = "rustls 0.23.45（機能 brotli を入れたときだけが対象）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
     { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.45（耐量子の鍵交換を使うときだけが対象。ring にはない）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.103.15（webpki で証明書の経路を検証する Linux だけが対象。配布の対象の Windows・macOS は OS が検証する）。2026-11-03 以降に 0.103.16 以上へ上げて消す" },
 ]
 
 [licenses]

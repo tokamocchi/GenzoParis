@@ -4,6 +4,7 @@
 
 import {
   type AsShotWhiteBalance,
+  type AutoTone,
   type DevelopSettings,
   type Geometry,
   type HighlightRecovery,
@@ -61,6 +62,46 @@ export function customWb(temperature_k: number, tint: number): WhiteBalance {
   const t = Math.min(RANGES.temperatureK.max, Math.max(RANGES.temperatureK.min, temperature_k));
   const g = Math.min(RANGES.tint.max, Math.max(RANGES.tint.min, tint));
   return { custom: { temperature_k: t, tint: g } };
+}
+
+/** 自動補正（DEV-32）が変える 6 つの値（露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベル）が同じか。 */
+export function sameAutoToneValues(a: DevelopSettings, b: DevelopSettings): boolean {
+  return (
+    a.exposure_ev === b.exposure_ev &&
+    a.contrast === b.contrast &&
+    a.tone.highlights === b.tone.highlights &&
+    a.tone.shadows === b.tone.shadows &&
+    a.tone.whites === b.tone.whites &&
+    a.tone.blacks === b.tone.blacks
+  );
+}
+
+/**
+ * 自動補正（DEV-32）の値を設定に入れる（露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルだけを置き換え、
+ * ほかは変えない。値は設定の範囲に収める）。6 つがすべて今と同じなら同じオブジェクトを返す（送らないため）。
+ */
+export function withAutoTone(settings: DevelopSettings, auto: AutoTone): DevelopSettings {
+  const ev = Math.min(RANGES.exposureEv.max, Math.max(RANGES.exposureEv.min, auto.exposure_ev));
+  const slider = (v: number) => Math.min(RANGES.slider.max, Math.max(RANGES.slider.min, Math.round(v)));
+  const tone = {
+    highlights: slider(auto.highlights),
+    shadows: slider(auto.shadows),
+    whites: slider(auto.whites),
+    blacks: slider(auto.blacks),
+  };
+  const contrast = slider(auto.contrast);
+  const t = settings.tone;
+  if (
+    settings.exposure_ev === ev &&
+    settings.contrast === contrast &&
+    t.highlights === tone.highlights &&
+    t.shadows === tone.shadows &&
+    t.whites === tone.whites &&
+    t.blacks === tone.blacks
+  ) {
+    return settings;
+  }
+  return { ...settings, exposure_ev: ev, contrast, tone: { ...t, ...tone } };
 }
 
 /** 選択から WB を作る（カスタムは今スライダーに出している値から始める）。 */

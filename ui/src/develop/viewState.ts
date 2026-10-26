@@ -5,6 +5,8 @@
 //
 // - スポイト（DEV-03）: 出力の画像の点を中立にする WB をコアに求め（white_balance_at）、カスタムの WB として
 //   設定する。RAW だけ。
+// - 自動補正（DEV-32。パネルの「自動」と Ctrl / ⌘ ＋ U）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・
+//   黒レベルをコアに求め（auto_tone）、設定に入れて送る（履歴に 1 件）。道具ではないので、使っている道具は変えない。
 // - 切り抜きの編集（DEV-15）: コアに切り抜く前の全体を描かせ（set_develop_view(true)）、その上で枠を
 //   動かす。完了で枠を画像の内側に制限して（constrain_crop）設定に入れ、取り消しでは保存しない。
 //   どちらでも全体の表示を戻す（set_develop_view(false)）。編集中に設定の切り抜きが外から変わったら
@@ -50,7 +52,7 @@ import {
   shapeKind,
 } from "./maskLogic";
 import { formatAngle, sameShown } from "./scales";
-import { customWb } from "./settingsLogic";
+import { customWb, sameAutoToneValues, withAutoTone } from "./settingsLogic";
 import { clamp01 } from "./zoomMath";
 
 export type DevelopTool = "none" | "wb" | "crop" | "brush" | "mask_color";
@@ -238,6 +240,39 @@ export async function pickWhiteBalance(x: number, y: number): Promise<void> {
       applySettings({ ...cur.settings, white_balance: customWb(wb.temperature_k, wb.tint) }, false);
     } catch (e) {
       actions.reportError(e, "スポイトでホワイトバランスを求められません");
+    }
+  });
+}
+
+/**
+ * 自動補正（DEV-32）: 今の設定でコアに値を求め、設定に入れて送る（履歴に 1 件）。写真を開いていなければ何もしない。
+ * 値がすべて今と同じなら送らず、その旨を知らせる。求めている間に利用者が 6 つの値のどれかを変えたら、後からの操作を
+ * 優先して適用せず、その旨を知らせる（自動補正の結果で上書きして消さないため）。
+ */
+export async function applyAutoTone(): Promise<void> {
+  const d = developStore.get();
+  const id = d.variantId;
+  if (id === null || !d.state) return;
+  // 送信待ちの設定の後に求める（今の WB・切り抜きで決める）。
+  await enqueue(async () => {
+    // コアが値を求める元の設定（列の順で、送信待ちの設定はすべて送った後）。
+    const base = developStore.get().settings;
+    try {
+      const auto = await core.autoTone(id);
+      const cur = developStore.get();
+      if (cur.variantId !== id || !cur.settings) return;
+      if (base && !sameAutoToneValues(base, cur.settings)) {
+        actions.notify("info", "自動補正: 求めている間に露光量・トーンが変わったため、適用しませんでした");
+        return;
+      }
+      const next = withAutoTone(cur.settings, auto);
+      if (next === cur.settings) {
+        actions.notify("info", "自動補正: 今の値と同じです");
+        return;
+      }
+      applySettings(next, false);
+    } catch (e) {
+      actions.reportError(e, "自動補正を求められません");
     }
   });
 }

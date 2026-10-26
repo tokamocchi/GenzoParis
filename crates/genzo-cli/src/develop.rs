@@ -60,7 +60,7 @@ use serde_json::{Value, json};
 
 use crate::Status;
 use crate::args::{
-    BeforeArgs, ColorArgs, CompareArgs, DetailArgs, DevelopCommand, GlobalArgs, LensArgs,
+    AutoArgs, BeforeArgs, ColorArgs, CompareArgs, DetailArgs, DevelopCommand, GlobalArgs, LensArgs,
     ProfileArgs, RegionArgs, RegionSpaceArg, SensorArgs, SnapshotCommand, setting_groups,
 };
 use crate::error::{CliError, CliResult};
@@ -153,10 +153,87 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
         DevelopCommand::MakeMaster { variant } => crate::stacks::make_master(g, out, variant),
         DevelopCommand::Region(a) => region(g, out, &a),
         DevelopCommand::Before(a) => before(g, out, &a),
+        DevelopCommand::Auto(a) => auto(g, out, &a),
         DevelopCommand::Compare(a) => compare(g, out, &a),
         DevelopCommand::Mask(c) => crate::masks::run(g, out, c),
         DevelopCommand::Snapshot(c) => snapshot(g, out, c),
     }
+}
+
+/// `develop auto <ID> [--dry-run]`（DEV-32）: 写真を開いて自動補正の値を求め（[`genzo_api::Core::auto_tone`]）、
+/// 設定に入れて保存する（履歴に 1 件「自動補正」。`--dry-run` なら値を表示するだけ）。JSON の出力:
+/// `{"variant_id", "dry_run", "changed", "auto": {露光量などと stats}, "settings": 保存後（dry-run では適用した
+/// 見込み）の設定}`。
+fn auto(g: &GlobalArgs, out: Output, a: &AutoArgs) -> CliResult<Status> {
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    ensure_variants(&s, &[a.variant])?;
+    s.core.open_develop(a.variant)?;
+    let picked = s.core.auto_tone(a.variant);
+    s.core.close_develop()?;
+    let auto = match picked {
+        Ok(v) => v,
+        Err(e) => {
+            s.close()?;
+            return Err(e.into());
+        }
+    };
+    let current = s.core.develop_settings(a.variant)?;
+    let mut new = current.clone();
+    auto.apply(&mut new);
+    let changed = if a.dry_run {
+        false
+    } else {
+        save(
+            &s,
+            a.variant,
+            &new,
+            Some(genzo_api::HISTORY_LABEL_AUTO_TONE),
+        )?
+    };
+    let saved = if a.dry_run {
+        new
+    } else {
+        s.core.develop_settings(a.variant)?
+    };
+    s.close()?;
+    if out.json {
+        out.print_json(&json!({
+            "variant_id": a.variant,
+            "dry_run": a.dry_run,
+            "changed": changed,
+            "auto": auto,
+            "settings": json_value(&saved),
+        }));
+        return Ok(Status::Success);
+    }
+    let signed = |v: f32| format!("{}{}", if v > 0.0 { "+" } else { "" }, v);
+    out.line(format!(
+        "自動補正: 露光量 {}{:.2} EV、コントラスト {}、ハイライト {}、シャドウ {}、白レベル {}、黒レベル {}",
+        if auto.exposure_ev > 0.0 { "+" } else { "" },
+        auto.exposure_ev,
+        signed(auto.contrast),
+        signed(auto.highlights),
+        signed(auto.shadows),
+        signed(auto.whites),
+        signed(auto.blacks),
+    ));
+    out.line(format!(
+        "  代表の明るさ（露光量の前の輝度の log2）: 黒 {:.2}、中間 {:.2}、白 {:.2}（{} 画素）",
+        auto.stats.black_log2, auto.stats.median_log2, auto.stats.white_log2, auto.stats.samples
+    ));
+    if a.dry_run {
+        out.line("--dry-run のため保存していません");
+    } else if changed {
+        out.line(format!(
+            "variant {} に保存しました（履歴「{}」。genzo develop undo {} で戻せます）",
+            a.variant,
+            genzo_api::HISTORY_LABEL_AUTO_TONE,
+            a.variant
+        ));
+    } else {
+        out.progress("設定は変わっていません（今の値と同じ。履歴に記録しませんでした）");
+    }
+    Ok(Status::Success)
 }
 
 /// `develop snapshot`（DEV-28）。JSON の出力: `list` はスナップショットの配列、`create`・`rename` は
