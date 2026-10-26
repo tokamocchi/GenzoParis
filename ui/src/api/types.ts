@@ -513,7 +513,7 @@ export const RETOUCH_LIMITS = {
 } as const;
 
 /** FrameInfo.o_grid の一辺の点の数（genzo-pipeline の retouch::ORIENTED_GRID_SIZE）。 */
-export const ORIENTED_GRID_SIZE = 9;
+export const ORIENTED_GRID_SIZE = 33;
 
 // ---------------------------------------------------------------------------
 // ローカル補正（マスク。genzo-model の develop::masks。DEV-18・DEV-19）

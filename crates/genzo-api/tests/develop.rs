@@ -1606,11 +1606,13 @@ fn retouch_is_applied_labelled_and_mapped() {
     let base = core.render_develop().unwrap();
     // 回転なし・向きが通常なら O 座標は G 座標と同じ: 64 × 48 の画像は (0, 0)〜(1, 0.75)。
     let grid = base.o_grid.clone().expect("O 座標の表");
-    assert_eq!(grid.len(), 81);
+    let n = genzo_pipeline::retouch::ORIENTED_GRID_SIZE;
+    assert_eq!(grid.len(), n * n);
     let near = |p: [f32; 2], q: [f32; 2]| (p[0] - q[0]).abs() < 1e-4 && (p[1] - q[1]).abs() < 1e-4;
     assert!(near(grid[0], [0.0, 0.0]), "{:?}", grid[0]);
-    assert!(near(grid[80], [1.0, 0.75]), "{:?}", grid[80]);
-    assert!(near(grid[40], [0.5, 0.375]), "{:?}", grid[40]);
+    assert!(near(grid[n * n - 1], [1.0, 0.75]), "{:?}", grid[n * n - 1]);
+    let center = (n * n - 1) / 2;
+    assert!(near(grid[center], [0.5, 0.375]), "{:?}", grid[center]);
     let before = core.develop_frame().unwrap().b3.image.clone();
     // コピー元の自動の選択（適用はしない）。
     let spot = RetouchSpot {
@@ -1649,7 +1651,7 @@ fn retouch_is_applied_labelled_and_mapped() {
     core.set_settings(&s, false).unwrap();
     let rotated = core.render_develop().unwrap();
     let grid = rotated.o_grid.expect("O 座標の表");
-    let c = grid[40];
+    let c = grid[center];
     assert!(
         (c[0] - 0.5).abs() < 0.005 && (c[1] - 0.375).abs() < 0.005,
         "{c:?}"

@@ -335,3 +335,64 @@ fn source_search_checks_the_whole_line_not_just_its_points() {
     let (closest, r) = closest_source_distance(&bent, d, 400.0);
     assert!(closest >= 2.0 * r, "{d:?}: {closest}");
 }
+
+/// 一辺 `n` 点の表を双線形補間した O 座標と、正しい O 座標（細かい表の点）との差の最大（長辺 `long` の O の画素）。
+fn grid_error(g: &crate::finish::GeometryPlan, n: usize, long: f64) -> f64 {
+    const M: usize = 257;
+    let exact = oriented_grid_of(g, M);
+    let grid = oriented_grid_of(g, n);
+    let k = (n - 1) as f64;
+    let at = |i: usize, j: usize| grid[j * n + i].map(f64::from);
+    let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
+    let mut worst = 0.0f64;
+    for (idx, e) in exact.iter().enumerate() {
+        let (fx, fy) = (
+            (idx % M) as f64 / (M - 1) as f64,
+            (idx / M) as f64 / (M - 1) as f64,
+        );
+        let (ci, cj) = (
+            ((fx * k) as usize).min(n - 2),
+            ((fy * k) as usize).min(n - 2),
+        );
+        let (tx, ty) = (fx * k - ci as f64, fy * k - cj as f64);
+        let (a, b, c, d) = (
+            at(ci, cj),
+            at(ci + 1, cj),
+            at(ci, cj + 1),
+            at(ci + 1, cj + 1),
+        );
+        let p = [0, 1].map(|q| lerp(lerp(a[q], b[q], tx), lerp(c[q], d[q], tx), ty));
+        worst = worst.max((p[0] - f64::from(e[0])).hypot(p[1] - f64::from(e[1])) * long);
+    }
+    worst
+}
+
+#[test]
+fn oriented_grid_is_fine_enough_for_the_smallest_spot_with_strong_distortion() {
+    use crate::lens::RadialDistortion;
+    use crate::version::ProcessVersion;
+    use genzo_model::{Geometry, LensCorrection};
+    let f0 = frames(6000, 4000, Orientation::Normal);
+    let min_radius = f64::from(genzo_model::develop::ranges::RETOUCH_SIZE.min) * 6000.0;
+    for amount in [100.0f32, -100.0] {
+        let lens = LensCorrection {
+            distortion: amount,
+            ..Default::default()
+        };
+        let f = f0.with_distortion(RadialDistortion::for_settings(
+            &f0,
+            ProcessVersion::V2,
+            &lens,
+        ));
+        let g = crate::finish::GeometryPlan::new(
+            &Geometry::default(),
+            f,
+            SensorGrid::full_resolution(&f),
+        )
+        .unwrap();
+        // 一辺 9 点では最小のスポットの半径（3 画素）より大きくずれる（Codex のレビューの指摘）。
+        assert!(grid_error(&g, 9, 6000.0) > min_radius, "{amount}");
+        let e = grid_error(&g, ORIENTED_GRID_SIZE, 6000.0);
+        assert!(e < min_radius / 4.0, "{amount}: {e}");
+    }
+}

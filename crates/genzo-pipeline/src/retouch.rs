@@ -720,8 +720,10 @@ fn blend(tile: &mut ImageTile, layer: &Layer, size: (u32, u32)) {
         });
 }
 
-/// [`oriented_grid`] の格子の一辺の点の数。
-pub const ORIENTED_GRID_SIZE: usize = 9;
+/// [`oriented_grid`] の格子の一辺の点の数。双線形補間の誤差は升目の大きさの 2 乗に比例し、歪曲補正 ±100（手動の
+/// 最大）の長辺 6000 画素の写真で最大 0.64 画素（一辺 9 点では 9.3 画素で、最小のスポットの半径 3 画素より大きかった。
+/// テストで確かめる）。
+pub const ORIENTED_GRID_SIZE: usize = 33;
 
 /// 出力の画像（C の格子の全体。`geometry` は段階 C の [`GeometryPlan`]）の上の点の O 座標（長辺を 1 とする。
 /// スポットの位置の座標）の表。画面がスポットを出力の画像の上に描き、クリックした位置をスポットの位置にするための
@@ -730,7 +732,11 @@ pub const ORIENTED_GRID_SIZE: usize = 9;
 /// 点 `(i, j)`（`0 ≤ i, j < n`、`n` = [`ORIENTED_GRID_SIZE`]）は出力の画像の幅・高さに対する割合 `(i / (n − 1),
 /// j / (n − 1))` の位置で、`j · n + i` 番目に入る。
 pub fn oriented_grid(geometry: &crate::finish::GeometryPlan) -> Vec<[f32; 2]> {
-    let n = ORIENTED_GRID_SIZE;
+    oriented_grid_of(geometry, ORIENTED_GRID_SIZE)
+}
+
+/// 一辺 `n` 点の [`oriented_grid`]（テストで、表の細かさと誤差を比べる）。
+fn oriented_grid_of(geometry: &crate::finish::GeometryPlan, n: usize) -> Vec<[f32; 2]> {
     let frames = geometry.frames();
     let [l, t, r, b] = crate::local::g_bounds(geometry);
     let g_long = frames.g_long_side_px();

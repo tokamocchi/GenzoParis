@@ -1648,7 +1648,7 @@ pub struct FrameInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub g_bounds: Option<[f64; 4]>,
     /// この画像の上の点の O 座標（RAW の向きを反映した画像の長辺を 1 とする座標。スポット修正（DEV-21）の位置）の表
-    /// （genzo-pipeline の `retouch::oriented_grid`）。一辺 9 点（`ORIENTED_GRID_SIZE`）の格子で、点 `(i, j)` は
+    /// （genzo-pipeline の `retouch::oriented_grid`）。一辺 33 点（`ORIENTED_GRID_SIZE`）の格子で、点 `(i, j)` は
     /// 画像の幅・高さに対する割合 `(i / 8, j / 8)` の位置、`j · 9 + i` 番目。回転・歪曲補正があると線形の対応で
     /// ないので、画面は表を双線形補間する。古いコアの応答では欠ける。
     #[serde(default, skip_serializing_if = "Option::is_none")]

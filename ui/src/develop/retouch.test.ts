@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { installBridge } from "../api/bridge";
 import { MOCK_RETOUCH_OFFSET, MockBridge, mockDevelopSettings, mockRetouchCommands, mockSourceInfo } from "../api/mock";
 import type { DevelopSettings, DevelopState, RetouchSpot } from "../api/types";
-import { RANGES, RETOUCH_LIMITS } from "../api/types";
+import { ORIENTED_GRID_SIZE, RANGES, RETOUCH_LIMITS } from "../api/types";
 import { SHORTCUT_GROUPS } from "../dialogs/shortcutsData";
 import { appStore } from "../state/app";
 import { applySettings, developStore, enqueue, openDevelopFor, undo } from "../state/develop";
@@ -52,11 +52,12 @@ function rotatedGrid(deg: number): [number, number][] {
   const t = (deg * Math.PI) / 180;
   const [cx, cy] = [0.5, 1 / 3];
   const out: [number, number][] = [];
-  for (let j = 0; j < 9; j++) {
-    for (let i = 0; i < 9; i++) {
+  const n = ORIENTED_GRID_SIZE;
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
       // 画面の割合 → G（O と同じ大きさの枠とする）→ O（G = R·(O − 中心) の逆）。
-      const gx = (i / 8) * 1 - cx;
-      const gy = (j / 8) * (2 / 3) - cy;
+      const gx = (i / (n - 1)) * 1 - cx;
+      const gy = (j / (n - 1)) * (2 / 3) - cy;
       out.push([cx + Math.cos(t) * gx - Math.sin(t) * gy, cy + Math.sin(t) * gx + Math.cos(t) * gy]);
     }
   }
@@ -136,7 +137,7 @@ describe("スポット修正の計算", () => {
 
   it("O 座標の表がなければ G 座標と同じとみなし、画面の位置と行き来できる", () => {
     const g = orientedGrid(undefined, [0, 0, 1, 0.75]);
-    expect(g.points).toHaveLength(81);
+    expect(g.points).toHaveLength(ORIENTED_GRID_SIZE ** 2);
     expect(fracToO(g, 0.5, 0.5)).toEqual([0.5, 0.375]);
     const box = { left: 10, top: 20, width: 400, height: 300 };
     const o = boxToO(g, box, 110, 95);
@@ -147,7 +148,7 @@ describe("スポット修正の計算", () => {
     expect(p?.[1]).toBeCloseTo(95, 6);
     expect(pixelsPerO(g, box, 0.5, 0.3)).toBeCloseTo(400, 6);
     // 壊れた表（点の数が違う・NaN）は使わない。
-    expect(orientedGrid([[0, 0]], [0, 0, 1, 1]).points[80]).toEqual([1, 1]);
+    expect(orientedGrid([[0, 0]], [0, 0, 1, 1]).points.at(-1)).toEqual([1, 1]);
   });
 
   it("回転した画像の表でも、O 座標と画面の位置を行き来できる（画像の外の点も）", () => {
