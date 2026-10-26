@@ -75,6 +75,7 @@ import { clippingOverlay } from "./pixels";
 import { RetouchLayer } from "./RetouchLayer";
 import { orientedGrid, removeSpot, retouchControls, retouchSize, spotsOf } from "./retouchLogic";
 import {
+  applyAutoTone,
   cancelCrop,
   cancelMaskTool,
   cancelRetouchTool,
@@ -802,7 +803,7 @@ function brushSize(v: number): number {
   return Math.round(Math.min(RANGES.brushSize.max, Math.max(RANGES.brushSize.min, v)) * 10000) / 10000;
 }
 
-/** 現像の画面のキー（W・R・Z・J・I・V・O・Q・[・]・Delete・\・Y・Shift ＋ Y と、道具を使っている間の Esc・Enter）。 */
+/** 現像の画面のキー（W・R・Z・J・I・V・O・Q・[・]・Delete・\・Y・Shift ＋ Y・Ctrl / ⌘ ＋ U と、道具を使っている間の Esc・Enter）。 */
 function useDevelopKeys(enabled: boolean) {
   const tool = useDevelopView((s) => s.tool);
   const zoomed = useDevelopView((s) => s.zoom !== null);
@@ -851,6 +852,8 @@ function useDevelopKeys(enabled: boolean) {
       "¥": () => toggleCompareMode("before"),
       y: () => toggleCompareMode("side_by_side"),
       "shift+y": () => toggleCompareMode("split"),
+      // 自動補正（DEV-32。Lightroom と同じキー）。
+      "mod+u": () => void applyAutoTone(),
     },
     enabled,
   );

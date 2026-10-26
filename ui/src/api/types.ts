@@ -645,6 +645,18 @@ export interface PickedMaskColor {
   lab: [number, number, number];
 }
 
+/** 自動補正（DEV-32）の結果（genzo-api の AutoTone。そのまま設定に入れられる。適用はしない）。 */
+export interface AutoTone {
+  exposure_ev: number;
+  contrast: number;
+  highlights: number;
+  shadows: number;
+  whites: number;
+  blacks: number;
+  /** 決めるのに使った代表の明るさ（露光量の前の輝度の log2。確認用）。 */
+  stats: { samples: number; black_log2: number; median_log2: number; white_log2: number };
+}
+
 /** マスクの重ねて表示の画像の情報（genzo-api の MaskOverlayInfo。画素は mask_overlay_frame で取る）。 */
 export interface MaskOverlayInfo {
   variant_id: VariantId;
@@ -2033,6 +2045,7 @@ export type Command =
   | { type: "white_balance_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
   | { type: "mask_color_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
   | { type: "retouch_auto_source"; variant_id: VariantId; spot: RetouchSpot }
+  | { type: "auto_tone"; variant_id: VariantId }
   | { type: "mask_overlay"; variant_id: VariantId; index: number; uncropped?: boolean }
   | { type: "set_develop_view"; uncropped: boolean }
   | {
@@ -2159,6 +2172,7 @@ export type Response =
   | { type: "white_balance"; temperature_k: number; tint: number }
   | ({ type: "mask_color" } & PickedMaskColor)
   | { type: "retouch_source"; offset: [number, number] | null }
+  | ({ type: "auto_tone" } & AutoTone)
   | ({ type: "mask_overlay" } & MaskOverlayInfo)
   | { type: "crop"; crop: CropRect }
   | ({ type: "display" } & DisplayInfo)
