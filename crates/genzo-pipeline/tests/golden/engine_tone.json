@@ -170,7 +170,7 @@
           "lens_profile": null,
           "raw_decoder": ""
         },
-        "schema_version": 2,
+        "schema_version": 3,
         "tone": {
           "blacks": -10.0,
           "highlights": -60.0,
@@ -189,9 +189,17 @@
           },
           "red": []
         },
+        "transform": {
+          "aspect": 0.0,
+          "horizontal": 0.0,
+          "offset_x": 0.0,
+          "offset_y": 0.0,
+          "scale": 100.0,
+          "vertical": 0.0
+        },
         "white_balance": "as_shot"
       },
-      "develop_hash": "92c819b422486751fa61d018d01b1cadd90161efcdabd4f9761e070108f577a7",
+      "develop_hash": "fc763a239406f0ee1566e460cab8b54b6205105c3820df044a31dfb14139ab19",
       "process_version": 1
     },
     "process_version": 1,

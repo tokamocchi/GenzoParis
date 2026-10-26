@@ -1316,3 +1316,60 @@ fn local_field_and_local_stages_match_the_cpu_version() {
         assert!(tested.contains(&id), "{id} を比べていない: {tested:?}");
     }
 }
+
+/// ステージ 9 の遠近補正（変形。処理バージョン 2。DEV-16）の CPU 版と GPU 版の一致（歪曲補正・回転・切り抜きと
+/// 重ねた場合と、切り抜く前の全体の表示を含む）。
+#[test]
+fn geometry_with_perspective_matches_the_cpu_version() {
+    let g = gpu_or_skip!();
+    let mut compared = 0;
+    for (vertical, horizontal, scale, deg, distortion) in [
+        (-45.0f32, 0.0f32, 100.0f32, 0.0f32, 0.0f32),
+        (30.0, -25.0, 115.0, 4.0, 0.0),
+        (-70.0, 20.0, 90.0, -8.0, 60.0),
+    ] {
+        let mut settings = settings_for_all_stages();
+        settings.transform.vertical = vertical;
+        settings.transform.horizontal = horizontal;
+        settings.transform.scale = scale;
+        settings.transform.offset_y = -10.0;
+        settings.geometry.angle_deg = deg;
+        settings.lens.distortion = distortion;
+        with_context(&settings, |ctx, a1_image| {
+            assert!(ctx.frames.has_perspective());
+            let registry = StageRegistry::builtin();
+            let stage = registry.find("finish.geometry").unwrap();
+            for uncropped in [false, true] {
+                let ctx = (*ctx).with_uncropped(uncropped);
+                let params = stage.params(&settings, &ctx).unwrap().unwrap();
+                let plan = params
+                    .get::<genzo_pipeline::finish::GeometryPlan>()
+                    .unwrap();
+                let pr = plan.projective().expect("遠近補正の写像");
+                assert!(plan.warp().is_none());
+                assert_eq!(pr.lut.is_some(), distortion != 0.0);
+                let (w, h) = plan.output_size();
+                for out in [Roi::new(2, 3, w - 4, h - 5), Roi::full(w, h)] {
+                    let need = stage.input_roi(out, &params, &ctx);
+                    let input = tile_of(a1_image, need);
+                    let (cpu, gpu, n_cpu, n_gpu) = run_both(g, stage, &ctx, &settings, &input, out);
+                    let report = compare_pixels(
+                        cpu.image.data(),
+                        gpu.image.data(),
+                        stage_tolerance("finish.geometry"),
+                    );
+                    eprintln!(
+                        "変形 {vertical}/{horizontal} 回転 {deg} 歪曲 {distortion} 全体 {uncropped}: {report}"
+                    );
+                    assert!(
+                        report.passed(),
+                        "{vertical} {horizontal} {deg} {distortion} {uncropped}: {report}"
+                    );
+                    assert_eq!(n_cpu, n_gpu);
+                    compared += 1;
+                }
+            }
+        });
+    }
+    assert_eq!(compared, 3 * 2 * 2);
+}

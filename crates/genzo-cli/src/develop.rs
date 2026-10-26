@@ -61,7 +61,8 @@ use serde_json::{Value, json};
 use crate::Status;
 use crate::args::{
     AutoArgs, BeforeArgs, ColorArgs, CompareArgs, DetailArgs, DevelopCommand, GlobalArgs, LensArgs,
-    ProfileArgs, RegionArgs, RegionSpaceArg, SensorArgs, SnapshotCommand, setting_groups,
+    ProfileArgs, RegionArgs, RegionSpaceArg, SensorArgs, SnapshotCommand, TransformArgs,
+    setting_groups,
 };
 use crate::error::{CliError, CliResult};
 use crate::library::{ensure_variants, unique_ids};
@@ -80,6 +81,7 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
             settings,
             replace,
             lens,
+            transform,
             sensor,
             color,
             detail,
@@ -88,6 +90,7 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
             let patch = match settings {
                 Some(source) => read_json_input(&source)?,
                 None if lens.any()
+                    || transform.any()
                     || sensor.any()
                     || color.any()
                     || detail.any()
@@ -98,9 +101,10 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
                 None => {
                     return Err(CliError::Usage(
                         "現像設定の JSON を --json <FILE>（または --settings <FILE>。- で標準入力）か、レンズ補正・\
-                         ハイライト復元・ノイズ軽減・色・ディテール・効果のオプション（--lens-profile・\
-                         --highlight-recovery・--nr-luminance・--black-white・--hsl-hue・--grading-shadows・\
-                         --clarity・--sharpen-amount・--grain-amount・--profile・--look など）で指定してください"
+                         変形・ハイライト復元・ノイズ軽減・色・ディテール・効果のオプション（--lens-profile・\
+                         --upright・--vertical・--highlight-recovery・--nr-luminance・--black-white・--hsl-hue・\
+                         --grading-shadows・--clarity・--sharpen-amount・--grain-amount・--profile・--look など）で\
+                         指定してください"
                             .to_owned(),
                     ));
                 }
@@ -113,6 +117,7 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
                 replace,
                 &OptionArgs {
                     lens: &lens,
+                    transform: &transform,
                     sensor: &sensor,
                     color: &color,
                     detail: &detail,
@@ -521,11 +526,13 @@ pub(crate) fn save(
     Ok(true)
 }
 
-/// `develop set` のオプション（レンズ補正・ハイライト復元とノイズ軽減・色）。
+/// `develop set` のオプション（レンズ補正・変形・ハイライト復元とノイズ軽減・色）。
 #[derive(Debug, Clone, Copy)]
 pub struct OptionArgs<'a> {
     /// レンズ補正（DEV-14）。
     pub lens: &'a LensArgs,
+    /// 変形（遠近補正。DEV-16）。
+    pub transform: &'a TransformArgs,
     /// ハイライト復元・ノイズ軽減（DEV-06・DEV-13）。
     pub sensor: &'a SensorArgs,
     /// 白黒・カラーミキサー・カラーグレーディング（DEV-25・DEV-09・DEV-10）。
@@ -540,6 +547,7 @@ impl OptionArgs<'_> {
     /// どれかを指定したか。
     pub fn any(&self) -> bool {
         self.lens.any()
+            || self.transform.any()
             || self.sensor.any()
             || self.color.any()
             || self.detail.any()
@@ -557,6 +565,7 @@ pub fn settings_with_options(
     let mut new = merged_settings(current, patch, replace)?;
     if options.any() {
         options.lens.apply(&mut new.lens);
+        options.transform.apply(&mut new.transform);
         options.sensor.apply(&mut new);
         options.color.apply(&mut new.color);
         options.detail.apply(&mut new);
@@ -643,6 +652,25 @@ pub fn lens_ignored(settings: &DevelopSettings) -> bool {
         && settings.lens != genzo_model::LensCorrection::default()
 }
 
+/// 自動の遠近補正の結果を設定に入れる（DEV-16）。入れるのは、求めた角度補正と、垂直・完全のときの垂直・水平だけ
+/// （同じ呼び出しの JSON・オプションで決めた縦横比・拡大縮小・ずらしなどは保つ。水平（角度だけ）では変形は変えない）。
+pub fn apply_upright(settings: &mut DevelopSettings, suggestion: &genzo_api::UprightSuggestion) {
+    settings.geometry.angle_deg = suggestion.angle_deg;
+    match suggestion.mode {
+        genzo_api::UprightMode::Level => {}
+        genzo_api::UprightMode::Vertical | genzo_api::UprightMode::Full => {
+            settings.transform.vertical = suggestion.transform.vertical;
+            settings.transform.horizontal = suggestion.transform.horizontal;
+        }
+    }
+}
+
+/// 処理バージョンが古く、変形（遠近補正）が使われない設定か（DEV-16。処理バージョン 2 から使われる）。
+pub fn transform_ignored(settings: &DevelopSettings) -> bool {
+    settings.process_version < genzo_pipeline::ProcessVersion::V2.get()
+        && !settings.transform.is_identity()
+}
+
 fn set(
     g: &GlobalArgs,
     out: Output,
@@ -653,7 +681,23 @@ fn set(
 ) -> CliResult<Status> {
     let s = Session::open(g, out, &OpenOptions::default())?;
     let current = s.core.develop_settings(v)?;
-    let new = settings_with_options(&current, patch, replace, options)?;
+    let mut new = settings_with_options(&current, patch, replace, options)?;
+    // 自動の遠近補正（--upright）: 写真を開いて直線を調べ、角度補正と垂直・水平の値を入れる（保存している設定の
+    // レンズ補正で歪曲を補正した画像を調べる。この呼び出しで同時に変えるほかの項目は、解析には使わない）。
+    let upright = match options.transform.upright {
+        Some(mode) => {
+            ensure_variants(&s, &[v])?;
+            s.core.open_develop(v)?;
+            let analyzed = s.core.analyze_upright(v, mode.into());
+            let closed = s.core.close_develop();
+            let suggestion = analyzed?;
+            closed?;
+            apply_upright(&mut new, &suggestion);
+            new.validate().map_err(genzo_model::DevelopError::from)?;
+            Some(suggestion)
+        }
+        None => None,
+    };
     let changed = save(&s, v, &new, None)?;
     let saved = s.core.develop_settings(v)?;
     let profiles = s.core.list_profiles(None)?;
@@ -661,9 +705,33 @@ fn set(
     if !changed && !out.json {
         out.progress("設定は変わっていません（履歴に記録しませんでした）");
     }
+    if let Some(u) = &upright
+        && !out.json
+    {
+        out.progress(format!(
+                "自動の遠近補正（{}）: 角度 {:+.2}°、垂直 {:+.1}、水平 {:+.1}（垂直の線 {} 本・水平の線 {} 本、残差 {:.2}°）",
+                match u.mode {
+                    genzo_api::UprightMode::Level => "水平",
+                    genzo_api::UprightMode::Vertical => "垂直",
+                    genzo_api::UprightMode::Full => "完全",
+                },
+                u.angle_deg,
+                u.transform.vertical,
+                u.transform.horizontal,
+                u.vertical_lines,
+                u.horizontal_lines,
+                u.residual_deg
+            ));
+    }
     if lens_ignored(&saved) && saved.lens != current.lens {
         out.warn(format!(
             "この写真の処理バージョン（{}）では、レンズ補正は使われません（genzo develop upgrade {v} で更新できます）",
+            saved.process_version
+        ));
+    }
+    if transform_ignored(&saved) && saved.transform != current.transform {
+        out.warn(format!(
+            "この写真の処理バージョン（{}）では、変形（遠近補正）は使われません（genzo develop upgrade {v} で更新できます）",
             saved.process_version
         ));
     }
@@ -1239,6 +1307,7 @@ mod tests {
             replace,
             &OptionArgs {
                 lens,
+                transform: &TransformArgs::default(),
                 sensor,
                 color: &ColorArgs::default(),
                 detail: &DetailArgs::default(),
@@ -1405,6 +1474,44 @@ mod tests {
         );
     }
 
+    /// `--upright` の結果は、角度と（垂直・完全なら）垂直・水平だけを入れ、同じ呼び出しで決めた縦横比・拡大縮小・
+    /// ずらしは保つ。水平（角度だけ）では変形を変えない（Codex のレビューの指摘）。
+    #[test]
+    fn upright_keeps_the_other_transform_options() {
+        let mut new = DevelopSettings::default();
+        new.transform.scale = 110.0;
+        new.transform.offset_x = 12.0;
+        new.transform.vertical = 5.0;
+        let suggestion = |mode| genzo_api::UprightSuggestion {
+            mode,
+            angle_deg: -1.25,
+            // コアは保存している設定の変形に、求めた垂直・水平を入れて返す（拡大縮小などは保存している値）。
+            transform: genzo_model::Transform {
+                vertical: -18.0,
+                horizontal: 4.0,
+                ..Default::default()
+            },
+            vertical_lines: 5,
+            horizontal_lines: 3,
+            residual_deg: 0.2,
+        };
+        let mut vertical = new.clone();
+        apply_upright(&mut vertical, &suggestion(genzo_api::UprightMode::Vertical));
+        assert_eq!(vertical.geometry.angle_deg, -1.25);
+        assert_eq!(
+            (vertical.transform.vertical, vertical.transform.horizontal),
+            (-18.0, 4.0)
+        );
+        assert_eq!(
+            (vertical.transform.scale, vertical.transform.offset_x),
+            (110.0, 12.0)
+        );
+        let mut level = new.clone();
+        apply_upright(&mut level, &suggestion(genzo_api::UprightMode::Level));
+        assert_eq!(level.geometry.angle_deg, -1.25);
+        assert_eq!(level.transform, new.transform);
+    }
+
     #[test]
     fn lens_options_are_applied_after_the_json_and_validated() {
         let current = DevelopSettings::default();
@@ -1506,6 +1613,7 @@ mod tests {
             false,
             &OptionArgs {
                 lens: &LensArgs::default(),
+                transform: &TransformArgs::default(),
                 sensor: &SensorArgs::default(),
                 color: &color,
                 detail: &DetailArgs::default(),
@@ -1540,6 +1648,7 @@ mod tests {
                 false,
                 &OptionArgs {
                     lens: &LensArgs::default(),
+                    transform: &TransformArgs::default(),
                     sensor: &SensorArgs::default(),
                     color: &bad,
                     detail: &DetailArgs::default(),
@@ -1584,6 +1693,7 @@ mod tests {
             false,
             &OptionArgs {
                 lens: &LensArgs::default(),
+                transform: &TransformArgs::default(),
                 sensor: &SensorArgs::default(),
                 color: &ColorArgs::default(),
                 detail: &detail,
@@ -1613,6 +1723,7 @@ mod tests {
                 false,
                 &OptionArgs {
                     lens: &LensArgs::default(),
+                    transform: &TransformArgs::default(),
                     sensor: &SensorArgs::default(),
                     color: &ColorArgs::default(),
                     detail: &bad,

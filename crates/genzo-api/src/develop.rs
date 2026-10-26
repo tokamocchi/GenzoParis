@@ -53,7 +53,7 @@ use crate::render::display_target;
 use crate::types::{
     AutoTone, AutoToneStats, DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem,
     MaskOverlayFrame, MaskOverlayInfo, PasteReport, PasteVersion, PickedMaskColor,
-    PickedWhiteBalance, SettingGroups, SourceInfo,
+    PickedWhiteBalance, SettingGroups, SourceInfo, UprightMode, UprightSuggestion,
 };
 
 /// 自動保存に失敗したときに、もう一度試すまでの時間（**仮置き**: 10 秒。ディスクの容量不足などで
@@ -369,6 +369,18 @@ pub fn describe_change(old: &DevelopSettings, new: &DevelopSettings) -> String {
     }
     if old.lens != new.lens {
         parts.push("レンズ補正".to_owned());
+    }
+    let (tf_old, tf_new) = (&old.transform, &new.transform);
+    if tf_old != tf_new {
+        parts.push(
+            if tf_old.vertical != tf_new.vertical && tf_old.horizontal == tf_new.horizontal {
+                format!("変形: 垂直 {:+.0}", tf_new.vertical)
+            } else if tf_old.horizontal != tf_new.horizontal && tf_old.vertical == tf_new.vertical {
+                format!("変形: 水平 {:+.0}", tf_new.horizontal)
+            } else {
+                "変形".to_owned()
+            },
+        );
     }
     let (nr_old, nr_new) = (&old.detail.noise_reduction, &new.detail.noise_reduction);
     if nr_old.luminance != nr_new.luminance {
@@ -755,6 +767,7 @@ pub(crate) fn render_frame(inner: &Inner, job: &RenderJob) -> Result<DevelopFram
             output_width,
             output_height,
             g_bounds: Some(r.g_bounds),
+            g_size: Some(r.g_size),
         },
         b3: Arc::new(r.b3),
         display_rgb8: Arc::new(display_rgb8),
@@ -2010,9 +2023,10 @@ impl Core {
         })
     }
 
-    /// 切り抜き `crop` を、現像中の写真の寸法と角度 `angle_deg` で、描画が実際に使う範囲にする（回転で画像の
-    /// 外に出る切り抜きは、中心と縦横比を保って画像の内側に収まる最大の大きさに縮める。genzo-pipeline の
-    /// `finish::geometry::constrain_crop`。描画のステージ 9 と同じ計算）。設定は変えない。
+    /// 切り抜き `crop` を、現像中の写真の寸法と角度 `angle_deg`・変形 `transform`（遠近補正。DEV-16。`None` なら今の
+    /// 設定の値）で、描画が実際に使う範囲にする（回転・遠近補正で画像の外に出る切り抜きは、中心と縦横比を保って
+    /// 画像の内側に収まる最大の大きさに縮める。genzo-pipeline の `finish::geometry::constrain_crop`。描画のステージ 9 と
+    /// 同じ計算）。設定は変えない。変形は、その写真の処理バージョンで使われるときだけ考える（版 1 では無視する）。
     ///
     /// 値は保存するときと同じく丸めてから使う（`DevelopSettings::normalized`: 各軸を 0〜1 に収め、
     /// 左右・上下が逆なら入れ替え、幅・高さが最小値より小さければその軸を全体にする。角度は ±45 度に
@@ -2023,6 +2037,7 @@ impl Core {
         variant_id: VariantId,
         crop: &CropRect,
         angle_deg: f32,
+        transform: Option<&genzo_model::Transform>,
     ) -> Result<CropRect, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
@@ -2032,16 +2047,83 @@ impl Core {
                 "切り抜き・角度に数でない値（NaN・無限大）があります（{crop:?}、{angle_deg}）"
             )));
         }
+        if let Some(t) = transform {
+            let values = [
+                t.vertical,
+                t.horizontal,
+                t.aspect,
+                t.scale,
+                t.offset_x,
+                t.offset_y,
+            ];
+            if !values.iter().all(|v| v.is_finite()) {
+                return Err(ApiError::InvalidArgument(format!(
+                    "変形に数でない値（NaN・無限大）があります（{t:?}）"
+                )));
+            }
+        }
         let snap = session_snapshot(inner, variant_id)?;
         let mut s = DevelopSettings::default();
         s.geometry.crop = *crop;
         s.geometry.angle_deg = angle_deg;
-        let g = s.normalized().geometry;
+        s.transform = transform.copied().unwrap_or(snap.settings.transform);
+        let s = s.normalized();
+        // 変形はその写真の処理バージョンで使われるときだけ（版 1 では描画も使わない）。歪曲補正（D）は O と同じ
+        // 大きさで画像のない部分を持たないので、制限には要らない。
+        let version = known_process_version(snap.settings.process_version, "この写真の")?;
         let frames = snap
             .source
             .frames()?
-            .with_rotation(f64::from(g.angle_deg))?;
-        Ok(genzo_pipeline::finish::constrain_crop(&frames, &g.crop))
+            .with_rotation(f64::from(s.geometry.angle_deg))?;
+        let perspective = genzo_pipeline::perspective::Perspective::for_settings(
+            frames.oriented_size(),
+            version,
+            &s.transform,
+        );
+        let frames = frames.with_perspective(perspective);
+        Ok(genzo_pipeline::finish::constrain_crop(
+            &frames,
+            &s.geometry.crop,
+        ))
+    }
+
+    /// 自動の遠近補正（Upright 相当。DEV-16）: 現像中の写真の直線から、角度補正と垂直・水平の遠近補正の値を求める
+    /// （genzo-pipeline の `Engine::analyze_upright`。今の設定（保存待ち・ドラッグ中の値を含む）のレンズ補正で歪曲を
+    /// 補正した画像を調べる）。設定は変えない（UI・CLI が返した値を `set_settings` で書き込む。履歴に残り、元に戻せる）。
+    ///
+    /// 返す `transform` は、今の設定の変形の垂直・水平を求めた値に置き換えたもの（縦横比・拡大縮小・ずらしは今のまま）。
+    /// 水平（[`UprightMode::Level`]）では垂直・水平は今のまま（角度だけ）。
+    ///
+    /// エラー: 写真を開いていない・別の variant なら [`ApiError::NoDevelopSession`]。垂直・完全を処理バージョン 1 の
+    /// 写真に使う・直線が見つからない・画像が小さすぎるときは [`ApiError::InvalidArgument`]。
+    pub fn analyze_upright(
+        &self,
+        variant_id: VariantId,
+        mode: UprightMode,
+    ) -> Result<UprightSuggestion, ApiError> {
+        let inner = &self.inner;
+        inner.check_open()?;
+        let snap = session_snapshot(inner, variant_id)?;
+        let a = inner
+            .engine
+            .analyze_upright(&snap.source, &snap.settings, mode.into())
+            .map_err(|e| match e {
+                genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
+                e => e.into(),
+            })?;
+        let mut transform = snap.settings.normalized().transform;
+        if mode != UprightMode::Level {
+            transform.vertical = a.vertical;
+            transform.horizontal = a.horizontal;
+        }
+        Ok(UprightSuggestion {
+            mode,
+            angle_deg: a.angle_deg,
+            transform,
+            vertical_lines: a.vertical_lines,
+            horizontal_lines: a.horizontal_lines,
+            residual_deg: a.residual_deg,
+        })
     }
 }
 

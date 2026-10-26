@@ -288,6 +288,41 @@ export interface LensCorrection {
   ca_blue_yellow: number;
 }
 
+/**
+ * 変形（遠近補正。DEV-16。genzo-model の Transform。処理バージョン 2 から使える）。自動の補正（Upright 相当）は
+ * analyze_upright で値を求めて書き込む。
+ */
+export interface Transform {
+  /** 垂直方向の遠近補正（-100〜100。負で上辺を広げる）。 */
+  vertical: number;
+  /** 水平方向の遠近補正（-100〜100。正で右辺を広げる）。 */
+  horizontal: number;
+  /** 縦横比の変更（-100〜100。負で横に、正で縦に伸ばす）。 */
+  aspect: number;
+  /** 拡大・縮小（%。50〜150。既定 100）。 */
+  scale: number;
+  /** 横方向のずらし（-100〜100。幅の半分に対する割合）。 */
+  offset_x: number;
+  /** 縦方向のずらし（-100〜100。高さの半分に対する割合）。 */
+  offset_y: number;
+}
+
+/** 自動の遠近補正（Upright 相当）の種類（genzo-api の UprightMode）。 */
+export type UprightMode = "level" | "vertical" | "full";
+
+/** 自動の遠近補正の結果（genzo-api の UprightSuggestion。設定にそのまま書ける値）。 */
+export interface UprightSuggestion {
+  mode: UprightMode;
+  /** 角度補正（度。geometry.angle_deg に書く値）。 */
+  angle_deg: number;
+  /** 変形（今の設定の垂直・水平を求めた値に置き換えたもの）。 */
+  transform: Transform;
+  vertical_lines: number;
+  horizontal_lines: number;
+  /** 当てはめの後の残差（度）。 */
+  residual_deg: number;
+}
+
 /** ノイズ軽減（DEV-13。genzo-model の NoiseReduction。処理バージョン 2 から使える。RAW だけ）。 */
 export interface NoiseReduction {
   /** 輝度ノイズの軽減（0〜100）。 */
@@ -467,6 +502,8 @@ export interface DevelopSettings {
   color: ColorParams;
   geometry: Geometry;
   lens: LensCorrection;
+  /** 変形（遠近補正。DEV-16。古いコアの応答では欠けうる）。 */
+  transform?: Transform;
   detail: DetailParams;
   /** 効果（切り抜き後の周辺光量補正・粒子。DEV-24。古いコアの応答では欠けうる）。 */
   effects: EffectsParams;
@@ -641,6 +678,8 @@ export const RANGES = {
   lensManual: { min: -100, max: 100 },
   /** 手動の周辺減光の中点。 */
   lensMidpoint: { min: 0, max: 100 },
+  /** 変形の拡大・縮小（%）。 */
+  transformScale: { min: 50, max: 150 },
   /** カラーグレーディングの色相（度）。 */
   hueDeg: { min: 0, max: 360 },
   /** シャープの適用量。 */
@@ -677,6 +716,8 @@ export interface SettingGroups {
   color: boolean;
   geometry: boolean;
   lens: boolean;
+  /** 変形（遠近補正。DEV-16。古い形では欠け、コアは写す）。 */
+  transform?: boolean;
   detail: boolean;
   /** 効果（切り抜き後の周辺光量補正・粒子。DEV-24）。 */
   effects: boolean;
@@ -1580,6 +1621,11 @@ export interface FrameInfo {
    * G 座標の x は 左 + fx · (右 − 左)）。古いコアでは無い。
    */
   g_bounds?: [number, number, number, number];
+  /**
+   * この描画の設定での、切り抜く前の全体（G の外接矩形）のフル解像度の寸法（幅, 高さ）。角度と変形（遠近補正）で
+   * 変わる。切り抜きの縦横比の計算に使う。古いコアでは無い。
+   */
+  g_size?: [number, number];
 }
 
 export type RegionSpace = "output" | "geometry";
@@ -1998,7 +2044,10 @@ export type Command =
       variant_id: VariantId;
       crop: CropRect;
       angle_deg: number;
+      /** 変形（遠近補正。DEV-16。省略時はコアの今の設定の値）。 */
+      transform?: Transform;
     }
+  | { type: "analyze_upright"; variant_id: VariantId; mode: UprightMode }
   | {
       type: "export";
       variant_ids: VariantId[];
@@ -2115,6 +2164,7 @@ export type Response =
   | { type: "paths"; paths: string[] }
   | { type: "variant_created"; variant_id: VariantId }
   | { type: "white_balance"; temperature_k: number; tint: number }
+  | ({ type: "upright" } & UprightSuggestion)
   | ({ type: "mask_color" } & PickedMaskColor)
   | ({ type: "auto_tone" } & AutoTone)
   | ({ type: "mask_overlay" } & MaskOverlayInfo)

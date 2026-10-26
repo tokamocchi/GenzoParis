@@ -264,6 +264,9 @@ impl Module {
                 ("WARP", 1),
                 ("PRE", 6),
                 ("POST", 6),
+                ("PERSP", 1),
+                ("HOM", 9),
+                ("DLIM", 1),
                 ("INV_R2", 1),
                 ("LUT_OFF", 3),
                 ("LUT_LEN", 3),
@@ -574,7 +577,7 @@ impl Kernel {
             Kernel::Export => &["MAT", "GC_LUMA", "TRANSFER"],
             Kernel::Geometry => &[
                 "AFF", "CROP_X", "CROP_Y", "GRID_W", "GRID_H", "WARP", "PRE", "POST", "INV_R2",
-                "LUT_OFF", "LUT_LEN", "LUT_INV",
+                "LUT_OFF", "LUT_LEN", "LUT_INV", "PERSP", "HOM", "DLIM",
             ],
             Kernel::LensCorrection => &[
                 "GRID_W", "GRID_H", "INV_R2", "LUT_OFF", "LUT_LEN", "LUT_INV", "CENTER", "SPG",

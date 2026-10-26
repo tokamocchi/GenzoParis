@@ -8,10 +8,12 @@
 // - O（向きを反映した元の画像）の大きさ: SourceInfo の幅・高さ（向きを反映する前。RAW は既定の切り抜きの
 //   大きさ）を、EXIF の向きが 5〜8 なら入れ替えたもの。
 // - G の外接矩形: (ow·|cos θ| + oh·|sin θ|, ow·|sin θ| + oh·|cos θ|)。θ は角度（正で反時計回り）。
+//   変形（遠近補正。DEV-16。処理バージョン 2）があるときは、genzo-pipeline の perspective・coords と同じ式で、傾け直しと
+//   縦横比をかけた四隅を回転した四角形の外接矩形（拡大縮小・ずらしは含まない。perspectiveFrame）。
 // - 切り抜きの幅・高さの下限は genzo-model の MIN_CROP_SIZE（0.001）。画面ではつかみやすさのため
 //   MIN_CROP_FRACTION（仮置き）を下限にする。
 
-import type { AspectRatio, CropRect, Orientation } from "../api/types";
+import type { AspectRatio, CropRect, Orientation, Transform } from "../api/types";
 
 /** 全体（切り抜きなし）。 */
 export const FULL_CROP: CropRect = { left: 0, top: 0, right: 1, bottom: 1 };
@@ -62,12 +64,116 @@ export function orientedSize(
 }
 
 /** G の外接矩形の大きさ（O の大きさと角度から。genzo-pipeline の CoordinateFrames::g_size_px）。 */
-export function gBoxSize(ow: number, oh: number, angleDeg: number): { width: number; height: number } {
+export function gBoxSize(
+  ow: number,
+  oh: number,
+  angleDeg: number,
+  transform?: Transform | null,
+): { width: number; height: number } {
+  if (transform) {
+    const f = perspectiveFrame(ow, oh, angleDeg, transform);
+    if (f) return { width: f.gw, height: f.gh };
+  }
   if (angleDeg === 0) return { width: ow, height: oh };
   const t = (angleDeg * Math.PI) / 180;
   const c = Math.abs(Math.cos(t));
   const s = Math.abs(Math.sin(t));
   return { width: ow * c + oh * s, height: ow * s + oh * c };
+}
+
+/** genzo-pipeline の perspective::TILT_MAX_DEG（垂直・水平の ±100 の傾き。度）。 */
+const TILT_MAX_DEG = 40;
+/** genzo-pipeline の perspective::TILT_TOTAL_MAX_DEG（合成した傾きの上限。度）。 */
+const TILT_TOTAL_MAX_DEG = 44;
+/** genzo-pipeline の perspective::ASPECT_MAX_RATIO。 */
+const ASPECT_MAX_RATIO = 1.5;
+/** genzo-pipeline の perspective::W_MIN。 */
+const W_MIN = 1e-4;
+
+/**
+ * 変形（遠近補正。DEV-16）の D → G の対応（genzo-pipeline の perspective::Perspective と coords の perspective_frame と
+ * 同じ式）。`map` は O（= D。歪曲補正は O と同じ枠なので画面では考えない）の点を G の外接矩形の中の位置（画素）に写す
+ * （拡大縮小・ずらしを含む）。外接矩形の大きさ `gw`・`gh` は拡大縮小・ずらしを含まない。退化していれば null。
+ */
+export function perspectiveFrame(
+  ow: number,
+  oh: number,
+  angleDeg: number,
+  t: Transform,
+): { gw: number; gh: number; map: (x: number, y: number) => [number, number] } | null {
+  if (!(ow > 0 && oh > 0)) return null;
+  const cx = ow / 2;
+  const cy = oh / 2;
+  const r = 0.5 * Math.hypot(ow, oh);
+  // 傾きの角度（度）。合成の上限に縮める。
+  let phi = -(t.vertical / 100) * TILT_MAX_DEG;
+  let psi = (t.horizontal / 100) * TILT_MAX_DEG;
+  const total = Math.hypot(phi, psi);
+  if (total > TILT_TOTAL_MAX_DEG) {
+    phi *= TILT_TOTAL_MAX_DEG / total;
+    psi *= TILT_TOTAL_MAX_DEG / total;
+  }
+  // Rodrigues の式（ω = (φ, ψ, 0)）。
+  const a = (phi * Math.PI) / 180;
+  const b = (psi * Math.PI) / 180;
+  const alpha = Math.hypot(a, b);
+  let m = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ];
+  if (alpha > 0) {
+    const kx = a / alpha;
+    const ky = b / alpha;
+    const s = Math.sin(alpha);
+    const c = Math.cos(alpha);
+    const v = 1 - c;
+    m = [
+      [1 - v * ky * ky, v * kx * ky, s * ky],
+      [v * kx * ky, 1 - v * kx * kx, -s * kx],
+      [-s * ky, s * kx, c],
+    ];
+  }
+  const project = (nx: number, ny: number): [number, number] | null => {
+    const X = m[0][0] * nx + m[0][1] * ny + m[0][2];
+    const Y = m[1][0] * nx + m[1][1] * ny + m[1][2];
+    const W = m[2][0] * nx + m[2][1] * ny + m[2][2];
+    if (!(W > 0)) return null;
+    return [X / W, Y / W];
+  };
+  const c0 = project(0, 0);
+  if (!c0) return null;
+  const k = Math.pow(ASPECT_MAX_RATIO, t.aspect / 100);
+  const sk = Math.sqrt(k);
+  const th = (angleDeg * Math.PI) / 180;
+  const cos = angleDeg === 0 ? 1 : Math.cos(th);
+  const sin = angleDeg === 0 ? 0 : Math.sin(th);
+  // 形の変換（傾け直し・中心をそろえる・縦横比）と回転。D の中心からの差（画素）。
+  const shape = (x: number, y: number): [number, number] => {
+    const p = project((x - cx) / r, (y - cy) / r) ?? [((x - cx) / r) / W_MIN, ((y - cy) / r) / W_MIN];
+    const px = ((p[0] - c0[0]) / sk) * r;
+    const py = (p[1] - c0[1]) * sk * r;
+    return [cos * px + sin * py, -sin * px + cos * py];
+  };
+  const corners = [shape(0, 0), shape(ow, 0), shape(ow, oh), shape(0, oh)];
+  for (const [x, y] of corners) if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const minX = Math.min(...corners.map((p) => p[0]));
+  const maxX = Math.max(...corners.map((p) => p[0]));
+  const minY = Math.min(...corners.map((p) => p[1]));
+  const maxY = Math.max(...corners.map((p) => p[1]));
+  const gw = Math.max(maxX - minX, 1e-9);
+  const gh = Math.max(maxY - minY, 1e-9);
+  const scale = t.scale / 100;
+  const offX = (t.offset_x / 100) * cx;
+  const offY = (t.offset_y / 100) * cy;
+  const map = (x: number, y: number): [number, number] => {
+    const [qx, qy] = shape(x, y);
+    // 外接矩形の左上を原点にし、中心のまわりに拡大縮小してずらす。
+    const ux = qx - minX - gw / 2;
+    const uy = qy - minY - gh / 2;
+    return [gw / 2 + scale * ux + offX, gh / 2 + scale * uy + offY];
+  };
+  return { gw, gh, map };
 }
 
 /** 縦横比の指定の、画素の縦横比（幅 / 高さ）。自由なら null。"original" は O の比。 */
@@ -257,7 +363,27 @@ export function dragCrop(
  * 回転した元の画像（O）の四隅の、G の外接矩形の中の位置（各軸の割合。左上・右上・右下・左下の順）。
  * genzo-pipeline の CoordinateFrames::oriented_to_g と同じ向き（正の角度で画面上の反時計回り）。
  */
-export function rotatedImageCorners(ow: number, oh: number, angleDeg: number): [number, number][] {
+export function rotatedImageCorners(
+  ow: number,
+  oh: number,
+  angleDeg: number,
+  transform?: Transform | null,
+): [number, number][] {
+  if (transform) {
+    const f = perspectiveFrame(ow, oh, angleDeg, transform);
+    if (f) {
+      const pts: [number, number][] = [
+        [0, 0],
+        [ow, 0],
+        [ow, oh],
+        [0, oh],
+      ];
+      return pts.map(([u, v]) => {
+        const [gx, gy] = f.map(u, v);
+        return [gx / f.gw, gy / f.gh];
+      });
+    }
+  }
   const { width: gw, height: gh } = gBoxSize(ow, oh, angleDeg);
   const t = (angleDeg * Math.PI) / 180;
   const c = angleDeg === 0 ? 1 : Math.cos(t);
@@ -293,6 +419,11 @@ export interface GeometryInfo {
   oh: number;
   gw: number;
   gh: number;
+  /**
+   * 変形（遠近補正。DEV-16。その写真の処理バージョンで使われるとき。なければ null・省略）。G の外接矩形を角度から
+   * 求め直すときに使う。
+   */
+  transform?: Transform | null;
 }
 
 /**
@@ -307,13 +438,18 @@ export function geometryInfo(opts: {
   orientation: Orientation | null;
   angleDeg: number;
   uncropped: { width: number; height: number } | null;
+  /** 変形（遠近補正。DEV-16。その写真の処理バージョンで使われるときだけ渡す）。 */
+  transform?: Transform | null;
 }): GeometryInfo | null {
   const { source, orientation, angleDeg, uncropped } = opts;
+  const transform = opts.transform ?? null;
   if (source && orientation !== null && source.width > 0 && source.height > 0) {
     const o = orientedSize(source.width, source.height, orientation);
-    const g = gBoxSize(o.width, o.height, angleDeg);
-    return { ow: o.width, oh: o.height, gw: g.width, gh: g.height };
+    const g = gBoxSize(o.width, o.height, angleDeg, transform);
+    return { ow: o.width, oh: o.height, gw: g.width, gh: g.height, ...(transform ? { transform } : {}) };
   }
+  // 向きが分からないときは、切り抜く前の全体のプレビューから回転を逆にたどる（変形があると逆にたどれない）。
+  if (transform) return null;
   if (uncropped && uncropped.width > 0 && uncropped.height > 0) {
     const gw = uncropped.width;
     const gh = uncropped.height;
@@ -339,8 +475,8 @@ export function cropFractionAspect(aspect: AspectRatio | null | undefined, info:
 /** 角度を変えたときの大きさ（O は同じで、G の外接矩形だけが変わる）。 */
 export function infoAtAngle(info: GeometryInfo | null, angleDeg: number): GeometryInfo | null {
   if (!info) return null;
-  const g = gBoxSize(info.ow, info.oh, angleDeg);
-  return { ow: info.ow, oh: info.oh, gw: g.width, gh: g.height };
+  const g = gBoxSize(info.ow, info.oh, angleDeg, info.transform);
+  return { ow: info.ow, oh: info.oh, gw: g.width, gh: g.height, ...(info.transform ? { transform: info.transform } : {}) };
 }
 
 /** 切り抜きの画素の縦横比（幅 / 高さ。`gw`・`gh` は G の外接矩形の大きさ）。 */
@@ -367,15 +503,15 @@ const EDGE_SNAP = 1e-9;
 export function refitCropForAngle(
   crop: CropRect,
   aspect: AspectRatio | null | undefined,
-  size: { ow: number; oh: number } | null,
+  size: { ow: number; oh: number; transform?: Transform | null } | null,
   fromDeg: number,
   toDeg: number,
 ): CropRect {
   if (!size || !(size.ow > 0) || !(size.oh > 0)) return crop;
   const p = pixelAspect(aspect, size.ow, size.oh);
   if (p === null) return crop;
-  const g0 = gBoxSize(size.ow, size.oh, fromDeg);
-  const g1 = gBoxSize(size.ow, size.oh, toDeg);
+  const g0 = gBoxSize(size.ow, size.oh, fromDeg, size.transform);
+  const g1 = gBoxSize(size.ow, size.oh, toDeg, size.transform);
   // 画素（G の外接矩形の単位）での幅・高さと、外接矩形の中心からの位置。
   const wPx = (crop.right - crop.left) * g0.width;
   const hPx = wPx / p;

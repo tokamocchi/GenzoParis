@@ -1376,6 +1376,46 @@ pub struct PickedWhiteBalance {
     pub tint: f32,
 }
 
+/// 自動の遠近補正（Upright 相当。DEV-16）の種類（[`crate::Core::analyze_upright`]。genzo-pipeline の `upright::UprightMode`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UprightMode {
+    /// 水平: 角度補正だけ（どの処理バージョンでも使える）。
+    Level,
+    /// 垂直: 角度補正と垂直方向の遠近補正（処理バージョン 2 から）。
+    Vertical,
+    /// 完全: 角度補正と垂直・水平の遠近補正（処理バージョン 2 から）。
+    Full,
+}
+
+impl From<UprightMode> for genzo_pipeline::upright::UprightMode {
+    fn from(m: UprightMode) -> Self {
+        match m {
+            UprightMode::Level => Self::Level,
+            UprightMode::Vertical => Self::Vertical,
+            UprightMode::Full => Self::Full,
+        }
+    }
+}
+
+/// 自動の遠近補正の結果（[`crate::Core::analyze_upright`]。DEV-16）。設定にそのまま書ける値（適用はしない。UI・CLI が
+/// `geometry.angle_deg` と `transform` を書き換えて `set_settings` する）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UprightSuggestion {
+    /// 種類。
+    pub mode: UprightMode,
+    /// 角度補正（度。`geometry.angle_deg` に書く値。±45）。
+    pub angle_deg: f32,
+    /// 変形（今の設定の `transform` の垂直・水平を求めた値に置き換えたもの。縦横比・拡大縮小・ずらしは今のまま）。
+    pub transform: genzo_model::Transform,
+    /// 使った垂直の線の数。
+    pub vertical_lines: usize,
+    /// 使った水平の線の数。
+    pub horizontal_lines: usize,
+    /// 当てはめの後の残差（度。長さで重みを付けた 2 乗平均平方根。大きいほど直線がそろわなかった）。
+    pub residual_deg: f32,
+}
+
 /// 色域の範囲（DEV-19）のスポイトの結果（[`crate::Core::mask_color_at`]）。genzo-model の `ColorSample` にそのまま
 /// 使える（適用はしない。UI が `set_settings` する）。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1693,6 +1733,11 @@ pub struct FrameInfo {
     /// `左 + fx · (右 − 左)`（y も同じ）。古いコアの応答では欠ける。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub g_bounds: Option<[f64; 4]>,
+    /// この描画の設定での、切り抜く前の全体（G の外接矩形）のフル解像度の寸法（幅, 高さ。四捨五入）。角度補正と
+    /// 変形（遠近補正。DEV-16）で変わる。画面が切り抜きの縦横比の計算に使う（変形があると、画面の側では角度だけから
+    /// 求められないため）。古いコアの応答では欠ける。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g_size: Option<[u32; 2]>,
 }
 
 /// 現像のプレビュー（ピクセルを含む。[`crate::Core::develop_frame`]）。
@@ -1900,6 +1945,8 @@ pub struct SettingGroups {
     pub geometry: bool,
     /// レンズ補正。
     pub lens: bool,
+    /// 変形（遠近補正。垂直・水平・縦横比・拡大縮小・ずらし。DEV-16。古い形では欠け、写す）。
+    pub transform: bool,
     /// シャープ（DEV-12）・ノイズ軽減（DEV-13）。
     pub detail: bool,
     /// 効果（切り抜き後の周辺光量補正・粒子。DEV-24）。
@@ -1916,6 +1963,13 @@ impl Default for SettingGroups {
     }
 }
 
+// プリセットの既定では切り抜きと角度・変形・マスクを写さない（コンパイル時に確かめる）。
+const _: () = assert!(
+    !SettingGroups::PRESET_DEFAULT.geometry
+        && !SettingGroups::PRESET_DEFAULT.transform
+        && !SettingGroups::PRESET_DEFAULT.masks
+);
+
 impl SettingGroups {
     /// すべての項目。
     pub const ALL: Self = Self {
@@ -1926,20 +1980,21 @@ impl SettingGroups {
         color: true,
         geometry: true,
         lens: true,
+        transform: true,
         detail: true,
         effects: true,
         profile: true,
         masks: true,
     };
 
-    /// 現像プリセット（DEV-29）を作るときの既定の項目: 切り抜きと角度・マスクを除くすべて（写真ごとに位置・構図が
-    /// 違うことが多いため。画面の貼り付け・プリセットのダイアログの既定の選択と同じ。決定事項ログ No.161）。
+    /// 現像プリセット（DEV-29）を作るときの既定の項目: 切り抜きと角度・変形・マスクを除くすべて（写真ごとに位置・構図が
+    /// 違うことが多いため。画面の貼り付け・プリセットのダイアログの既定の選択と同じ。決定事項ログ No.161・205）。
     pub const PRESET_DEFAULT: Self = Self {
         geometry: false,
+        transform: false,
         masks: false,
         ..Self::ALL
     };
-
     /// すべての項目か。
     pub fn is_all(&self) -> bool {
         *self == Self::ALL
@@ -1980,6 +2035,9 @@ impl SettingGroups {
         }
         if self.lens {
             out.lens = source.lens;
+        }
+        if self.transform {
+            out.transform = source.transform;
         }
         if self.detail {
             out.detail = source.detail;
@@ -3183,6 +3241,7 @@ mod setting_groups_tests {
             color: false,
             geometry: false,
             lens: false,
+            transform: false,
             detail: false,
             effects: false,
             profile: false,
@@ -3219,6 +3278,7 @@ mod setting_groups_tests {
             color: false,
             geometry: false,
             lens: false,
+            transform: false,
             detail: false,
             effects: false,
             profile: false,
@@ -3240,7 +3300,25 @@ mod setting_groups_tests {
         assert!(effects.presence.is_neutral());
         // 古い画面（項目のない JSON）からの指定は、足した項目も写す（既定はすべて）。
         let old: SettingGroups = serde_json::from_str(r#"{"white_balance": false}"#).unwrap();
-        assert!(old.presence && old.effects && old.profile && !old.white_balance);
+        assert!(old.presence && old.effects && old.profile && old.transform && !old.white_balance);
+        // 変形（DEV-16）は切り抜きと角度・レンズ補正とは別の項目。
+        let mut source = source.clone();
+        source.transform.vertical = -20.0;
+        source.geometry.angle_deg = 2.0;
+        let transform = SettingGroups {
+            transform: true,
+            ..none
+        }
+        .merge(&source, &target);
+        assert_eq!(transform.transform, source.transform);
+        assert_eq!(transform.geometry, target.geometry);
+        let geometry = SettingGroups {
+            geometry: true,
+            ..none
+        }
+        .merge(&source, &target);
+        assert_eq!(geometry.geometry, source.geometry);
+        assert!(geometry.transform.is_identity());
         // カメラプロファイル・ルック（DEV-17）。
         let mut source = source.clone();
         source.profile.camera = Some("Sony 標準".into());

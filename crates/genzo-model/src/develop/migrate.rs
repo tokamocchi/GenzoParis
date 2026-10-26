@@ -27,7 +27,8 @@ pub type Migration = fn(Value) -> Result<Value, String>;
 ///   luminance_detail`・`luminance_contrast`・`color_detail`。DEV-13）、カラーミキサー・カラーグレーディング・白黒
 ///   （`color.mixer`・`color.grading`・`color.black_white`。DEV-09・DEV-10・DEV-25）、テクスチャ・明瞭度・かすみの除去
 ///   （`presence`。DEV-11）、効果（`effects` の切り抜き後の周辺光量補正・粒子。DEV-24）。
-pub const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2];
+/// - 2 → 3（`migrate_v2_to_v3`）: 変形（遠近補正。`transform`。DEV-16）を加えた。
+pub const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2, migrate_v2_to_v3];
 
 /// schema_version 1 → 2: レンズ補正の手動の項目（`lens.distortion`・`lens.vignetting_amount`・
 /// `lens.vignetting_midpoint`・`lens.ca_red_cyan`・`lens.ca_blue_yellow`）、ハイライト復元
@@ -43,6 +44,13 @@ fn migrate_v1_to_v2(value: Value) -> Result<Value, String> {
     Ok(value)
 }
 
+/// schema_version 2 → 3: 変形（遠近補正。`transform`: `vertical`・`horizontal`・`aspect`・`scale`・`offset_x`・
+/// `offset_y`。DEV-16。決定事項ログ No.202）を加えた。JSON になければ既定値（何もしない値）で補うので、値は
+/// 書き換えない。版 2 の JSON の `transform`（ない）以外の項目はそのまま。
+fn migrate_v2_to_v3(value: Value) -> Result<Value, String> {
+    Ok(value)
+}
+
 // 表の長さとスキーマのバージョンが食い違わないことをコンパイル時に確かめる。
 const _: () = assert!(MIGRATIONS.len() as u32 + 1 == CURRENT_SCHEMA_VERSION);
 
@@ -51,7 +59,7 @@ const _: () = assert!(MIGRATIONS.len() as u32 + 1 == CURRENT_SCHEMA_VERSION);
 /// 欠けている値を「現在の」処理バージョンで補うと、アプリの更新で結果が変わってしまう
 /// （IQ-08・DATA-09）ため、スキーマのバージョンごとに固定の値を使う。
 fn process_version_when_missing(schema_version: u32) -> u32 {
-    // v1 のスキーマは処理バージョン 1 とともに、v2 のスキーマは処理バージョン 2 とともに作られた。
+    // v1 のスキーマは処理バージョン 1 とともに、v2・v3 のスキーマは処理バージョン 2 とともに作られた。
     debug_assert!(schema_version >= 1);
     match schema_version {
         1 => 1,
@@ -262,7 +270,7 @@ mod tests {
             "lens": {"profile_enabled": true, "distortion_scale": 80.0}
         });
         let v2 = migrate_to_current(v1).unwrap();
-        assert_eq!(v2["schema_version"], json!(2));
+        assert_eq!(v2["schema_version"], json!(crate::CURRENT_SCHEMA_VERSION));
         assert_eq!(v2["process_version"], json!(1));
         let s: crate::DevelopSettings = serde_json::from_value(v2).unwrap();
         assert_eq!(s.exposure_ev, 0.5);
@@ -290,6 +298,39 @@ mod tests {
         assert_eq!(v1["process_version"], json!(1));
         let v2 = migrate_to_current(json!({"schema_version": 2})).unwrap();
         assert_eq!(v2["process_version"], json!(2));
+        let v3 = migrate_to_current(json!({"schema_version": 3})).unwrap();
+        assert_eq!(v3["process_version"], json!(2));
+    }
+
+    /// 実際の表: v2（変形を書かない版）の設定を v3 に移行すると、値はそのままで、変形は既定値（何もしない）。
+    #[test]
+    fn v2_settings_migrate_to_v3_with_identity_transform() {
+        let v2 = json!({
+            "schema_version": 2,
+            "process_version": 2,
+            "geometry": {"angle_deg": 1.5},
+            "lens": {"distortion": 10.0}
+        });
+        let v3 = migrate_to_current(v2).unwrap();
+        assert_eq!(v3["schema_version"], json!(3));
+        assert_eq!(v3["process_version"], json!(2));
+        let s: crate::DevelopSettings = serde_json::from_value(v3).unwrap();
+        assert_eq!(s.geometry.angle_deg, 1.5);
+        assert_eq!(s.lens.distortion, 10.0);
+        assert!(s.transform.is_identity());
+        assert_eq!(s.transform.scale, 100.0);
+        // 版 3 が書いた変形の値はそのまま読む。
+        let v3 = json!({
+            "schema_version": 3,
+            "process_version": 2,
+            "transform": {"vertical": -20.0, "scale": 110.0}
+        });
+        let s: crate::DevelopSettings =
+            serde_json::from_value(migrate_to_current(v3).unwrap()).unwrap();
+        assert_eq!(s.transform.vertical, -20.0);
+        assert_eq!(s.transform.horizontal, 0.0);
+        assert_eq!(s.transform.scale, 110.0);
+        assert!(!s.transform.is_identity());
     }
 
     /// finish-detail のパッケージより前の版（`presence` を書かない版）が保存した設定では、シャープの旧既定
