@@ -582,7 +582,7 @@ function Stage() {
 
   const cropReady = !!crop && uncropped && !!fit;
   const k = crop ? cropFractionAspect(crop.aspect, info) : null;
-  const corners = crop && info ? rotatedImageCorners(info.ow, info.oh, angle) : null;
+  const corners = crop && info ? rotatedImageCorners(info.ow, info.oh, angle, info.transform) : null;
 
   // ローカル補正（マスク）の表示: アフターだけの表示（面は 1 つでステージの左上から）で、切り抜きの編集中でないとき。
   // 画像の箱は、全体表示なら配置、等倍表示なら下敷きのプレビューを等倍に引き伸ばした箱。

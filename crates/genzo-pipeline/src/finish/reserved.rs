@@ -54,6 +54,8 @@ pub enum UnimplementedSetting {
     ChromaticAberration,
     /// レンズ補正の手動の補正（歪曲・周辺減光・色収差。ステージ 7・9）。
     LensManual,
+    /// 変形（遠近補正。ステージ 9。DEV-16）。
+    Transform,
     /// HSL / カラーミキサー（ステージ 13）。
     ColorMixer,
     /// カラーグレーディング（ステージ 13）。
@@ -85,6 +87,7 @@ impl UnimplementedSetting {
             Self::HighlightRecovery => HIGHLIGHT_RECOVERY_ID,
             Self::NoiseReduction => NOISE_REDUCTION_ID,
             Self::LensProfile | Self::ChromaticAberration | Self::LensManual => LENS_CORRECTION_ID,
+            Self::Transform => super::GeometryStage::ID,
             Self::ColorMixer | Self::ColorGrading | Self::BlackWhite => super::ColorStage::ID,
             Self::Presence => TextureStage::ID,
             Self::Sharpening => SharpenStage::ID,
@@ -114,6 +117,9 @@ impl fmt::Display for UnimplementedSetting {
             }
             Self::LensManual => {
                 "レンズ補正の手動の補正はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
+            }
+            Self::Transform => {
+                "変形（遠近補正）はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
             }
             Self::ColorMixer => {
                 "カラーミキサー（HSL）はこの処理バージョンでは適用されません（処理バージョンを更新すると使えます）"
@@ -173,6 +179,9 @@ pub fn unimplemented_settings(settings: &DevelopSettings) -> Vec<UnimplementedSe
         }
         if s.lens.has_manual() {
             out.push(UnimplementedSetting::LensManual);
+        }
+        if !s.transform.is_identity() {
+            out.push(UnimplementedSetting::Transform);
         }
         if !s.color.mixer.is_neutral() {
             out.push(UnimplementedSetting::ColorMixer);

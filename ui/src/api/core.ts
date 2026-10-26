@@ -66,6 +66,9 @@ import type {
   PasteReport,
   PasteVersion,
   PickedMaskColor,
+  Transform,
+  UprightMode,
+  UprightSuggestion,
   ProfileEntry,
   ProfileImportReport,
   ProfileKind,
@@ -517,13 +520,28 @@ export const autoTone = async (variant_id: VariantId): Promise<AutoTone> => {
 export const setDevelopView = async (uncropped: boolean) => {
   await execute({ type: "set_develop_view", uncropped }, "ok");
 };
-/** 角度に合わせて、切り抜きを画像の内側に収める（コアが描画で使うのと同じ制限）。 */
+/**
+ * 角度と変形（遠近補正。DEV-16）に合わせて、切り抜きを画像の内側に収める（コアが描画で使うのと同じ制限）。
+ * `transform` を省くと、コアの今の設定の変形。
+ */
 export const constrainCrop = async (
   variant_id: VariantId,
   crop: CropRect,
   angle_deg: number,
+  transform?: Transform,
 ): Promise<CropRect> =>
-  (await execute({ type: "constrain_crop", variant_id, crop, angle_deg }, "crop")).crop;
+  (
+    await execute(
+      { type: "constrain_crop", variant_id, crop, angle_deg, ...(transform === undefined ? {} : { transform }) },
+      "crop",
+    )
+  ).crop;
+/**
+ * 自動の遠近補正（Upright 相当。DEV-16）: 現像中の写真の直線から、角度補正と垂直・水平の値を求める（適用はしない。
+ * 画面が設定に入れて送る）。直線が見つからない・処理バージョン 1 で垂直・完全を使うと invalid_input。
+ */
+export const analyzeUpright = async (variant_id: VariantId, mode: UprightMode): Promise<UprightSuggestion> =>
+  strip(await execute({ type: "analyze_upright", variant_id, mode }, "upright"));
 
 /** 透かしの見本（EXP-03。灰色の濃淡の見本の画像に、書き出しと同じ計算で重ねた PNG）。 */
 export const watermarkPreview = async (watermark: Watermark, width?: number, height?: number): Promise<WatermarkPreview> =>

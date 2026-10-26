@@ -106,6 +106,7 @@ pub mod export;
 pub mod full;
 pub mod masks;
 pub mod pick;
+pub mod upright;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -127,6 +128,7 @@ pub use self::export::{
 pub use self::full::{FullResolutionJob, RegionRender, StageBackend, TileRois};
 pub use self::masks::{MaskColorPick, MaskOverlay, MaskReference};
 pub use self::pick::{WB_PICK_RADIUS, WhiteBalancePick};
+pub use self::upright::UPRIGHT_ANALYSIS_LONG_EDGE;
 
 use self::cache::Lru;
 use crate::border::mirror_index;
@@ -753,8 +755,14 @@ impl Engine {
         long_edge: u32,
     ) -> Result<GuideKey> {
         let spec = GuideSpec::from_settings(settings)?;
-        // ガイドの寸法は G の外接矩形で決まる（歪曲補正の D は O と同じ大きさなので回転だけで決まる）。
-        let frames = source.frames()?.with_rotation(spec.rotation_deg)?;
+        // ガイドの寸法は G の外接矩形で決まる（歪曲補正の D は O と同じ大きさなので、回転と遠近補正で決まる）。
+        let frames = crate::finish::stage_c_frames(
+            source.frames()?,
+            spec.process_version,
+            spec.rotation_deg,
+            &spec.lens,
+            &spec.transform,
+        )?;
         let size = guide_size(&frames, spec.params.long_edge);
         let effective = self.effective_settings(settings);
         let cache = CacheKey::for_settings(

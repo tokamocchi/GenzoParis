@@ -204,6 +204,10 @@
 //! - **回転**（2 段目）: 段階 B・C の文脈の [`CoordinateFrames::rotation_deg`] に入れる
 //!   （[`finish_context`]）。ステージ 9・11 は設定の角度と一致するか確かめる。回転で生じる外側は
 //!   鏡映で埋めず、切り抜きを画像の内側に制限する（[`finish::constrain_crop`]）。
+//! - **変形（遠近補正）**（2 段目。DEV-16。処理バージョン 2）: 段階 B・C の文脈の
+//!   [`CoordinateFrames::perspective`] に入れる（[`finish_context`]。[`perspective`]）。ステージ 9 は G → D を
+//!   射影変換として画素ごとに評価し、画像のない部分は回転と同じく切り抜きの制限と塗りで扱う。自動の補正
+//!   （Upright 相当）は [`upright`]（直線の検出と当てはめ）と [`Engine::analyze_upright`] で値を求め、設定に書く。
 //! - **ガイド**（2 段目）: 段階 A1 のプレビュー（切り抜く前の全体、露光量の前）から作る。ステージ 11 は
 //!   文脈のガイドの座標系・処理バージョンが文脈と一致するか確かめる（違えば
 //!   [`PipelineError::GuideMismatch`]）。キャッシュのキーの項目は [`guide`] の doc の表。
@@ -273,6 +277,7 @@ pub mod interp;
 pub mod lens;
 pub mod local;
 pub mod output_sharpen;
+pub mod perspective;
 pub mod profile;
 pub mod registry;
 pub mod resample;
@@ -280,6 +285,7 @@ pub mod retouch;
 pub mod sanitize;
 pub mod sensor;
 pub mod stage;
+pub mod upright;
 pub mod version;
 
 pub use composite::{Compositor, compositor_bytes};

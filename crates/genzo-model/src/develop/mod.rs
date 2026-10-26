@@ -23,8 +23,8 @@ pub use params::{
     DetailParams, EffectsParams, Geometry, GradingWheel, Grain, HighlightMethod, HighlightRecovery,
     HslAdjustment, HueBand, HueBands, LensCorrection, MAX_ASPECT_TERM, MAX_CURVE_POINTS,
     MAX_PROFILE_ID_CHARS, MIN_CROP_SIZE, NoiseReduction, ParametricCurve, PostCropVignette,
-    PresenceParams, ProfileSettings, RenderDeps, Sharpening, ToneCurve, ToneParams, ValueRange,
-    VignetteCenter, WbPreset, WhiteBalance, is_valid_profile_id, ranges,
+    PresenceParams, ProfileSettings, RenderDeps, Sharpening, ToneCurve, ToneParams, Transform,
+    ValueRange, VignetteCenter, WbPreset, WhiteBalance, is_valid_profile_id, ranges,
 };
 pub use retouch::{
     MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_RETOUCH_STROKE_LENGTH, MAX_TOTAL_RETOUCH_POINTS,
@@ -71,6 +71,8 @@ pub struct DevelopSettings {
     pub geometry: Geometry,
     /// レンズ補正（DEV-14。v1。既定は無効）。
     pub lens: LensCorrection,
+    /// 変形（遠近補正。DEV-16。既定は何もしない）。
+    pub transform: Transform,
     /// シャープ・ノイズ軽減（DEV-12・DEV-13。v1。既定は 0）。
     pub detail: DetailParams,
     /// 効果（切り抜き後の周辺光量補正・粒子。DEV-24。v1。既定は 0）。
@@ -101,6 +103,7 @@ impl Default for DevelopSettings {
             color: ColorParams::default(),
             geometry: Geometry::default(),
             lens: LensCorrection::default(),
+            transform: Transform::default(),
             detail: DetailParams::default(),
             effects: EffectsParams::default(),
             masks: Vec::new(),
@@ -210,6 +213,7 @@ impl DevelopSettings {
             && s.geometry.crop.is_full()
             && s.geometry.angle_deg == 0.0
             && s.lens.is_disabled()
+            && s.transform.is_identity()
             && s.detail.is_neutral()
             && s.effects.is_neutral()
             && s.masks.iter().all(LocalAdjustment::is_neutral)
@@ -297,13 +301,49 @@ mod tests {
     fn current_versions() {
         // 新しく現像する写真は処理バージョン 2（v1 の機能のステージ。決定事項ログ No.120）。
         let s = DevelopSettings::default();
-        assert_eq!(s.schema_version, 2);
+        assert_eq!(s.schema_version, 3);
         assert_eq!(s.process_version, 2);
         // 版 1 の設定も読める（既存の写真）。
         let v1 =
             DevelopSettings::from_json(r#"{"schema_version": 2, "process_version": 1}"#).unwrap();
         assert_eq!(v1.process_version, 1);
         v1.validate().unwrap();
+    }
+
+    /// 変形（DEV-16）はどの項目でも 0（拡大・縮小は 100）でなければ無調整ではない。範囲の外は丸める。
+    #[test]
+    fn transform_values_are_validated_normalized_and_not_neutral() {
+        assert!(DevelopSettings::default().transform.is_identity());
+        for f in [
+            |t: &mut Transform| t.vertical = -15.0,
+            |t: &mut Transform| t.horizontal = 3.0,
+            |t: &mut Transform| t.aspect = 10.0,
+            |t: &mut Transform| t.scale = 120.0,
+            |t: &mut Transform| t.offset_x = -5.0,
+            |t: &mut Transform| t.offset_y = 1.0,
+        ] {
+            let mut s = DevelopSettings::default();
+            f(&mut s.transform);
+            assert!(!s.transform.is_identity(), "{:?}", s.transform);
+            assert!(!s.is_neutral(), "{:?}", s.transform);
+            s.validate().unwrap();
+        }
+        let mut s = DevelopSettings::default();
+        s.transform.vertical = 150.0;
+        s.transform.scale = 10.0;
+        s.transform.offset_y = f32::NAN;
+        let err = s.validate().unwrap_err();
+        assert!(err.has_field("transform.vertical"));
+        assert!(err.has_field("transform.scale"));
+        assert!(err.has_field("transform.offset_y"));
+        let n = s.normalized();
+        assert_eq!(n.transform.vertical, 100.0);
+        assert_eq!(n.transform.scale, 50.0);
+        assert_eq!(n.transform.offset_y, 0.0);
+        // JSON に変形がなければ既定値で読む（版 2 までの設定）。
+        let s =
+            DevelopSettings::from_json(r#"{"schema_version": 2, "process_version": 2}"#).unwrap();
+        assert!(s.transform.is_identity());
     }
 
     #[test]
@@ -940,10 +980,10 @@ mod tests {
             Err(DevelopError::MissingSchemaVersion)
         ));
         assert!(matches!(
-            DevelopSettings::from_json(r#"{"schema_version": 3}"#),
+            DevelopSettings::from_json(r#"{"schema_version": 4}"#),
             Err(DevelopError::FutureSchemaVersion {
-                found: 3,
-                supported: 2
+                found: 4,
+                supported: 3
             })
         ));
         assert!(matches!(

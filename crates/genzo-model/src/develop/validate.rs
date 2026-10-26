@@ -18,7 +18,8 @@ use super::params::{
     DetailParams, EffectsParams, Geometry, GradingWheel, Grain, HighlightRecovery, HueBand,
     LensCorrection, MAX_ASPECT_TERM, MAX_CURVE_POINTS, MIN_CROP_SIZE, NoiseReduction,
     ParametricCurve, PostCropVignette, PresenceParams, ProfileSettings, RenderDeps, Sharpening,
-    ToneCurve, ToneParams, ValueRange, VignetteCenter, WhiteBalance, is_valid_profile_id, ranges,
+    ToneCurve, ToneParams, Transform, ValueRange, VignetteCenter, WhiteBalance,
+    is_valid_profile_id, ranges,
 };
 use super::retouch::{
     MAX_RETOUCH_POINTS, MAX_RETOUCH_SPOTS, MAX_RETOUCH_STROKE_LENGTH, MAX_TOTAL_RETOUCH_POINTS,
@@ -179,6 +180,7 @@ impl DevelopSettings {
         self.color.check(&mut c);
         self.geometry.check(&mut c);
         self.lens.check(&mut c);
+        self.transform.check(&mut c);
         self.detail.check(&mut c);
         self.effects.check(&mut c);
         if self.masks.len() > MAX_MASKS {
@@ -261,6 +263,7 @@ impl DevelopSettings {
         s.color.normalize();
         s.geometry.normalize();
         s.lens.normalize();
+        s.transform.normalize();
         s.detail.normalize();
         s.effects.normalize();
         s.masks.truncate(MAX_MASKS);
@@ -603,6 +606,34 @@ fn normalize_crop_axis(start: f32, end: f32) -> (f32, f32) {
         (0.0, 1.0)
     } else {
         (a, b)
+    }
+}
+
+impl Transform {
+    fn check(&self, c: &mut Checker) {
+        for (name, v) in [
+            ("transform.vertical", self.vertical),
+            ("transform.horizontal", self.horizontal),
+            ("transform.aspect", self.aspect),
+            ("transform.offset_x", self.offset_x),
+            ("transform.offset_y", self.offset_y),
+        ] {
+            c.range(name, v, ranges::SLIDER);
+        }
+        c.range("transform.scale", self.scale, ranges::TRANSFORM_SCALE);
+    }
+
+    fn normalize(&mut self) {
+        for v in [
+            &mut self.vertical,
+            &mut self.horizontal,
+            &mut self.aspect,
+            &mut self.offset_x,
+            &mut self.offset_y,
+        ] {
+            *v = ranges::SLIDER.clamp_or(*v, 0.0);
+        }
+        self.scale = ranges::TRANSFORM_SCALE.clamp_or(self.scale, Transform::DEFAULT_SCALE);
     }
 }
 

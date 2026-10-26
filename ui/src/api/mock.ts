@@ -319,6 +319,7 @@ export function mockDevelopSettings(over: Partial<DevelopSettings> = {}): Develo
       ca_red_cyan: 0,
       ca_blue_yellow: 0,
     },
+    transform: { vertical: 0, horizontal: 0, aspect: 0, scale: 100, offset_x: 0, offset_y: 0 },
     detail: {
       sharpening: { amount: 0, radius: 1, detail: 25, masking: 0 },
       noise_reduction: { luminance: 0, luminance_detail: 50, luminance_contrast: 0, color: 0, color_detail: 50 },
@@ -1592,6 +1593,7 @@ export const MOCK_TONE_GROUPS: SettingGroups = {
   color: false,
   geometry: false,
   lens: false,
+  transform: false,
   detail: false,
   effects: false,
   profile: false,

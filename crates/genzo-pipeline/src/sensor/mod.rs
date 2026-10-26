@@ -1077,8 +1077,9 @@ impl SensorPlan {
             // 段階 A1 は回転を知らない（coords の doc）。
             rotation_deg: 0.0,
             lens_geometry: self.lens_geometry,
-            // 歪曲補正はステージ 9（段階 B・C の文脈で作る）。
+            // 歪曲補正・遠近補正はステージ 9（段階 B・C の文脈で作る）。
             distortion: None,
+            perspective: None,
         }
     }
 
@@ -1341,10 +1342,11 @@ impl A1Image {
                 .filter(|c| c.fits_within(w, h))
                 .unwrap_or(PixelRect::full(w, h)),
             orientation: self.orientation,
-            // 段階 A1 は回転を知らない（coords の doc）。回転は段階 B・C の文脈で加える。
+            // 段階 A1 は回転を知らない（coords の doc）。回転・遠近補正は段階 B・C の文脈で加える。
             rotation_deg: 0.0,
             lens_geometry: self.lens_geometry,
             distortion: None,
+            perspective: None,
         }
     }
 

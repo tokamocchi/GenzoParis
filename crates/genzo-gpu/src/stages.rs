@@ -9,7 +9,7 @@
 //!
 //! | ID | GPU 版 | カーネル（`shaders/`） |
 //! |---|---|---|
-//! | `finish.geometry` | ステージ 9（バイキュービック。歪曲補正（処理バージョン 2）を含む） | `geometry.wgsl` |
+//! | `finish.geometry` | ステージ 9（バイキュービック。歪曲補正・遠近補正（処理バージョン 2）を含む） | `geometry.wgsl` |
 //! | `finish.exposure`・`finish.contrast` | ステージ 10 | `finish.wgsl` |
 //! | `finish.profile_look_table` | ステージ 10 の後のカメラプロファイルのルックテーブル（処理バージョン 2。DEV-17） | `profile.wgsl`（`hsv_table_main`） |
 //! | `finish.tone` | ステージ 11（ガイドの双線形） | `finish.wgsl` |
@@ -526,12 +526,46 @@ pub(crate) fn prepare_rgb(
             .i32("CROP_Y", crop.y)
             .u32("GRID_W", grid.width)
             .u32("GRID_H", grid.height);
-            // 歪曲補正（処理バージョン 2）: 倍率の表を aux の表 0 に入れる。
-            let aux = match plan.warp() {
-                Some(w) => {
-                    let flat =
-                        |m: [[f32; 3]; 2]| [m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2]];
-                    p.u32("WARP", 1)
+            let flat = |m: [[f32; 3]; 2]| [m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2]];
+            // 歪曲補正・遠近補正（処理バージョン 2）: 倍率の表を aux の表 0 に入れる。
+            let aux = match (plan.projective(), plan.warp()) {
+                // 遠近補正（歪曲補正があれば同じ写像に含む。GeometryPlan::projective の map_f32 の式）。
+                (Some(pr), _) => {
+                    let h = pr.pre;
+                    p.u32("PERSP", 1)
+                        .f32s(
+                            "HOM",
+                            &[
+                                h[0][0], h[0][1], h[0][2], h[1][0], h[1][1], h[1][2], h[2][0],
+                                h[2][1], h[2][2],
+                            ],
+                        )
+                        .f32("DLIM", pr.limit)
+                        .f32s("PRE", &[0.0; 6])
+                        .f32s("POST", &flat(pr.post))
+                        .f32("INV_R2", pr.inv_r2);
+                    match &pr.lut {
+                        Some(lut) => {
+                            p.u32("WARP", 1)
+                                .u32s("LUT_OFF", &[0; 3])
+                                .u32s("LUT_LEN", &[lut.values().len() as u32, 2, 2])
+                                .f32s("LUT_INV", &[lut.inv_step(), 1.0, 1.0]);
+                            Some(f32_bytes(lut.values()))
+                        }
+                        None => {
+                            p.u32("WARP", 0)
+                                .u32s("LUT_OFF", &[0; 3])
+                                .u32s("LUT_LEN", &[2; 3])
+                                .f32s("LUT_INV", &[1.0; 3]);
+                            None
+                        }
+                    }
+                }
+                (None, Some(w)) => {
+                    p.u32("PERSP", 0)
+                        .f32s("HOM", &[0.0; 9])
+                        .f32("DLIM", 0.0)
+                        .u32("WARP", 1)
                         .f32s("PRE", &flat(w.pre))
                         .f32s("POST", &flat(w.post))
                         .f32("INV_R2", w.inv_r2)
@@ -540,8 +574,11 @@ pub(crate) fn prepare_rgb(
                         .f32s("LUT_INV", &[w.lut.inv_step(), 1.0, 1.0]);
                     Some(f32_bytes(w.lut.values()))
                 }
-                None => {
-                    p.u32("WARP", 0)
+                (None, None) => {
+                    p.u32("PERSP", 0)
+                        .f32s("HOM", &[0.0; 9])
+                        .f32("DLIM", 0.0)
+                        .u32("WARP", 0)
                         .f32s("PRE", &[0.0; 6])
                         .f32s("POST", &[0.0; 6])
                         .f32("INV_R2", 0.0)

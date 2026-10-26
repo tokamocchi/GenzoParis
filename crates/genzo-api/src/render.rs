@@ -118,6 +118,15 @@ pub(crate) struct Rendered {
     pub g_bounds: [f64; 4],
     /// 出力の画像の上の点の O 座標の表（genzo-pipeline の `retouch::oriented_grid`。スポット修正の位置を画面に描くため）。
     pub o_grid: Vec<[f32; 2]>,
+    /// 切り抜く前の全体（G の外接矩形）のフル解像度の寸法（幅, 高さ。四捨五入。[`crate::FrameInfo::g_size`]）。
+    pub g_size: [u32; 2],
+}
+
+/// G の外接矩形の寸法（S の画素の単位）を四捨五入した整数にする。
+fn g_size_of(geometry: &genzo_pipeline::finish::GeometryPlan) -> [u32; 2] {
+    let (w, h) = geometry.frames().g_size_px();
+    let round = |v: f64| v.round().clamp(0.0, f64::from(u32::MAX)) as u32;
+    [round(w), round(h)]
 }
 
 impl Inner {
@@ -233,6 +242,7 @@ impl Inner {
                             warnings: warning_texts(&r.warnings, &r.unimplemented),
                             g_bounds: genzo_pipeline::local::g_bounds(&r.geometry),
                             o_grid: genzo_pipeline::retouch::oriented_grid(&r.geometry),
+                            g_size: g_size_of(&r.geometry),
                         });
                     }
                     self.gpu_failed("GPU 版が B3 を返さなかった", variant_id);
@@ -258,6 +268,7 @@ impl Inner {
             warnings: warning_texts(&r.warnings, &r.unimplemented),
             g_bounds: genzo_pipeline::local::g_bounds(&r.geometry),
             o_grid: genzo_pipeline::retouch::oriented_grid(&r.geometry),
+            g_size: g_size_of(&r.geometry),
         })
     }
 

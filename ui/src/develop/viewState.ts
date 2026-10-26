@@ -35,6 +35,8 @@ import type {
   DevelopSettings,
   LocalAdjustment,
   RetouchSpot,
+  Transform,
+  UprightMode,
   VariantId,
 } from "../api/types";
 import { actions } from "../state/app";
@@ -73,7 +75,17 @@ import {
   spotsOf,
 } from "./retouchLogic";
 import { formatAngle, sameShown } from "./scales";
-import { customWb, sameAutoToneValues, withAutoTone } from "./settingsLogic";
+import {
+  customWb,
+  describeUpright,
+  fullLens,
+  fullTransform,
+  sameAutoToneValues,
+  sameTransform,
+  transformIsIdentity,
+  withAutoTone,
+  withUprightTransform,
+} from "./settingsLogic";
 import { clamp01 } from "./zoomMath";
 
 export type DevelopTool = "none" | "wb" | "crop" | "brush" | "mask_color" | "retouch";
@@ -356,9 +368,10 @@ export async function startCrop(): Promise<void> {
   }
   // 切り抜く前の全体の描画は preview_updated で届く。念のため今の最新も取りにいく。
   void refreshFrame();
-  // 保存済みの切り抜きが回転した画像の外にかかっていれば（編集の外で角度を変えたとき）、描画で使われる
-  // 枠（コアの constrain_crop。パイプラインと同じ制限）を出す。角度 0 では制限はかからない。
-  if (g.angle_deg !== 0) void constrainDraft();
+  // 保存済みの切り抜きが回転・変形（遠近補正。DEV-16）した画像の外にかかっていれば（編集の外で角度・変形を変えた
+  // とき）、描画で使われる枠（コアの constrain_crop。パイプラインと同じ制限）を出す。角度 0 で変形もなければ、
+  // 制限はかからない。
+  if (g.angle_deg !== 0 || !transformIsIdentity(d.settings.transform)) void constrainDraft();
 }
 
 /** 全体の表示に戻す（失敗しても編集は終える。次に写真を開けば戻る）。 */
@@ -378,7 +391,7 @@ export async function commitCrop(): Promise<void> {
     const angle = d.settings.geometry.angle_deg;
     let crop = sanitizeCrop(draft.crop);
     try {
-      crop = sanitizeCrop(await core.constrainCrop(draft.variantId, crop, angle));
+      crop = sanitizeCrop(await core.constrainCrop(draft.variantId, crop, angle, fullTransform(d.settings.transform)));
     } catch (e) {
       // 制限できなくても、そのまま保存する（コアは描画のときに同じ制限をかける。genzo-pipeline の
       // constrain_crop）。
@@ -420,7 +433,12 @@ export async function constrainDraft(): Promise<void> {
   const rev = draftRev;
   try {
     const c = sanitizeCrop(
-      await core.constrainCrop(draft.variantId, sanitizeCrop(draft.crop), d.settings.geometry.angle_deg),
+      await core.constrainCrop(
+        draft.variantId,
+        sanitizeCrop(draft.crop),
+        d.settings.geometry.angle_deg,
+        fullTransform(d.settings.transform),
+      ),
     );
     if (seq === cropSeq && rev === draftRev) setDraftCrop(c);
   } catch (e) {
@@ -480,7 +498,9 @@ export async function chooseAspect(aspect: AspectRatio | null, info: GeometryInf
   if (k !== null) {
     crop = sanitizeCrop(maxAspectCrop(crop, k));
     try {
-      crop = sanitizeCrop(await core.constrainCrop(id, crop, d.settings.geometry.angle_deg));
+      crop = sanitizeCrop(
+        await core.constrainCrop(id, crop, d.settings.geometry.angle_deg, fullTransform(d.settings.transform)),
+      );
     } catch (e) {
       console.warn("切り抜きを画像の内側に制限できません", e);
     }
@@ -539,6 +559,74 @@ export function commitAngle(): void {
   angleBase = null;
   endDrag();
   if (viewStore.get().crop) void constrainDraft();
+}
+
+// ---------------------------------------------------------------------------
+// 変形（遠近補正。DEV-16）
+// ---------------------------------------------------------------------------
+
+/**
+ * 変形の項目を変える（パネルのスライダー）。設定の変形だけを送る（切り抜きは、描画のときにコアが画像の内側に
+ * 制限する。編集中の枠はドラッグを終えたときに制限する）。
+ */
+export function changeTransform(patch: Partial<Transform>, dragging: boolean): void {
+  const d = developStore.get();
+  if (!d.state || !d.settings || d.variantId === null) return;
+  const next = { ...fullTransform(d.settings.transform), ...patch };
+  if (sameTransform(next, fullTransform(d.settings.transform))) return;
+  applySettings({ ...d.settings, transform: next }, dragging);
+}
+
+/** 変形のドラッグを終える（履歴に 1 件。切り抜きの編集中は、枠を画像の内側に制限する）。 */
+export function commitTransform(): void {
+  endDrag();
+  if (viewStore.get().crop) void constrainDraft();
+}
+
+/**
+ * 自動の遠近補正（Upright 相当）: コアに直線を調べてもらい（analyze_upright）、求めた角度補正と、垂直・完全なら
+ * 垂直・水平を設定に入れて送る（履歴に 1 件。元に戻せる。縦横比・拡大縮小・ずらしは変えない）。直線が見つからなければ
+ * 知らせる。切り抜きの編集中は枠を制限し直す。
+ *
+ * 送信待ちの設定を送った後に求める（コアが今の設定のレンズ補正で歪曲を補正した画像を調べるため）。求めている間に
+ * 利用者が角度・変形・レンズ補正を変えたら、後からの操作を優先して適用せず、その旨を知らせる（自動補正（DEV-32）と
+ * 同じ扱い）。
+ */
+export async function applyUpright(mode: UprightMode): Promise<void> {
+  const d = developStore.get();
+  if (!d.state || !d.settings || d.variantId === null) return;
+  const id = d.variantId;
+  await enqueue(async () => {
+    // コアが調べる元の設定（列の順で、送信待ちの設定はすべて送った後）。
+    const base = developStore.get().settings;
+    try {
+      const s = await core.analyzeUpright(id, mode);
+      const latest = developStore.get();
+      if (latest.variantId !== id || !latest.settings || !latest.state) return;
+      // 解析は今の設定のレンズ補正で歪曲を補正した画像を調べるので、レンズ補正が変わっても結果は使えない。
+      if (
+        base &&
+        (base.geometry.angle_deg !== latest.settings.geometry.angle_deg ||
+          !sameTransform(fullTransform(base.transform), fullTransform(latest.settings.transform)) ||
+          JSON.stringify(fullLens(base.lens)) !== JSON.stringify(fullLens(latest.settings.lens)))
+      ) {
+        actions.notify("info", "自動の補正: 求めている間に角度・変形・レンズ補正が変わったため、適用しませんでした");
+        return;
+      }
+      const transform = withUprightTransform(latest.settings.transform, mode, s.transform);
+      applySettings(
+        { ...latest.settings, geometry: { ...latest.settings.geometry, angle_deg: s.angle_deg }, transform },
+        false,
+      );
+      actions.notify(
+        "info",
+        describeUpright(mode, s.angle_deg, transform, { vertical: s.vertical_lines, horizontal: s.horizontal_lines }),
+      );
+      if (viewStore.get().crop) void constrainDraft();
+    } catch (e) {
+      actions.reportError(e, "自動で補正できません");
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

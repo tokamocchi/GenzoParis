@@ -550,3 +550,54 @@ fn stroke_correction_reaches_the_last_sample_at_the_end_of_the_line() {
     assert_eq!(at(2.5), 3.0);
     assert_eq!(at(9.0), 3.0);
 }
+
+#[test]
+fn oriented_grid_is_fine_enough_with_strong_perspective() {
+    // 遠近補正（DEV-16）は座標系の D → G の射影変換なので、O 座標の表はそれも通る。最も強い垂直・水平の補正と、
+    // 歪曲補正 +100 と合わせたときも、最小のスポットの半径の 1/4 未満に収まる。
+    use crate::lens::RadialDistortion;
+    use crate::version::ProcessVersion;
+    use genzo_model::{Geometry, LensCorrection, Transform};
+    let f0 = frames(6000, 4000, Orientation::Normal);
+    let min_radius = f64::from(genzo_model::develop::ranges::RETOUCH_SIZE.min) * 6000.0;
+    let lens = LensCorrection {
+        distortion: 100.0,
+        ..Default::default()
+    };
+    for (vertical, horizontal, distortion) in [
+        (100.0f32, 0.0f32, false),
+        (0.0, 100.0, false),
+        (-100.0, 0.0, false),
+        (100.0, 0.0, true),
+        (0.0, -100.0, true),
+    ] {
+        let t = Transform {
+            vertical,
+            horizontal,
+            ..Default::default()
+        };
+        let mut f = f0;
+        if distortion {
+            f = f.with_distortion(RadialDistortion::for_settings(
+                &f0,
+                ProcessVersion::V2,
+                &lens,
+            ));
+        }
+        let f = f.with_perspective(crate::perspective::Perspective::from_transform(
+            f0.oriented_size(),
+            &t,
+        ));
+        let g = crate::finish::GeometryPlan::new(
+            &Geometry::default(),
+            f,
+            SensorGrid::full_resolution(&f),
+        )
+        .unwrap();
+        let e = grid_error(&g, ORIENTED_GRID_SIZE, 6000.0);
+        assert!(
+            e < min_radius / 4.0,
+            "{vertical} {horizontal} {distortion}: {e}"
+        );
+    }
+}

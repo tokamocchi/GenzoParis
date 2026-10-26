@@ -80,7 +80,7 @@ describe("取り込み", () => {
 });
 
 describe("一括適用", () => {
-  it("既定はマスク・スポット修正と、切り抜きと角度がオフ（レンズ補正は写す）", () => {
+  it("既定はマスク・スポット修正と、切り抜きと角度・変形がオフ（レンズ補正は写す）", () => {
     expect(toSettingGroups(DEFAULT_PASTE_SELECTION)).toEqual({
       white_balance: true,
       basic_tone: true,
@@ -94,6 +94,7 @@ describe("一括適用", () => {
       profile: true,
       masks: false,
       retouch: false,
+      transform: false,
     });
     // マスク（DEV-18）を選べば写す。
     expect(toSettingGroups({ ...DEFAULT_PASTE_SELECTION, masks: true }).masks).toBe(true);
@@ -142,9 +143,11 @@ describe("一括適用", () => {
       profile: false,
       masks: false,
       retouch: false,
+      transform: false,
     };
     expect(anySelected({ ...none, geometry: false })).toBe(false);
     expect(anySelected({ ...none, retouch: true, geometry: false })).toBe(true);
+    expect(anySelected({ ...none, transform: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, masks: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, profile: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, lens: true, geometry: false })).toBe(true);
