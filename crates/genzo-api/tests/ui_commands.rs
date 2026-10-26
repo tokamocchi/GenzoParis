@@ -646,8 +646,15 @@ fn auto_tone_returns_values_without_applying_them() {
         let r = core.auto_tone(v).unwrap();
         eprintln!("RAW の自動補正 {r:?}");
         assert!(r.stats.samples > 0);
-        // 灰色の面（0.18）の写真: 露光量は大きくは動かない（目標の中間は 0.18 より 1.3 段暗いので、下げる側）。
-        assert!(r.exposure_ev <= 0.0 && r.exposure_ev > -2.5, "{r:?}");
+        // 一様な灰色（0.18）の写真: 黒・中間・白の点がすべて同じ明るさなので、範囲が狭い写真として扱われる
+        // （コントラストは上限の +25、白の点を目標の白の許容の範囲まで上げるので露光量は正、黒レベルは −100）。
+        assert!(
+            (r.stats.white_log2 - r.stats.black_log2).abs() < 0.2
+                && (r.stats.median_log2 - 0.18f32.log2()).abs() < 0.2,
+            "{r:?}"
+        );
+        assert!(r.exposure_ev > 1.0 && r.exposure_ev <= 3.0, "{r:?}");
+        assert_eq!((r.contrast, r.blacks), (25.0, -100.0), "{r:?}");
         core.close_develop().unwrap();
     }
     core.close().unwrap();
