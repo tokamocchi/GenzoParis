@@ -300,6 +300,64 @@
   stroke-dasharray: 3 3;
 }
 
+/* スポット修正（DEV-21）の層。道具を使っている間だけ出し、ポインターを受ける（空いているところで円・線を足す）。 */
+.dv-retouch-layer {
+  overflow: hidden;
+  pointer-events: all;
+  cursor: none;
+}
+.dv-retouch {
+  opacity: 0.6;
+}
+.dv-retouch.selected,
+.dv-retouch.drawing {
+  opacity: 1;
+}
+.dv-retouch.disabled {
+  opacity: 0.3;
+}
+.dv-retouch-dest,
+.dv-retouch-source {
+  fill: transparent;
+  stroke: var(--fg-0);
+  stroke-width: 1.5;
+  pointer-events: all;
+  cursor: move;
+}
+.dv-retouch-source {
+  stroke-dasharray: 5 4;
+}
+.dv-retouch.stroke .dv-retouch-dest,
+.dv-retouch.stroke .dv-retouch-source,
+.dv-retouch.drawing polyline {
+  fill: none;
+  stroke: rgba(232, 232, 232, 0.35);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: stroke;
+}
+.dv-retouch.stroke .dv-retouch-source {
+  stroke: rgba(232, 232, 232, 0.18);
+}
+.dv-retouch.selected:not(.stroke) .dv-retouch-dest,
+.dv-retouch.selected:not(.stroke) .dv-retouch-source {
+  stroke-width: 2.5;
+}
+.dv-retouch.selected.stroke .dv-retouch-dest {
+  stroke: rgba(255, 255, 255, 0.5);
+}
+.dv-retouch-link {
+  stroke: var(--fg-1);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.dv-retouch-cursor {
+  fill: none;
+  stroke: var(--fg-0);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
 /* ---------------------------------------------------------------- 右のパネル */
 
 .dp {

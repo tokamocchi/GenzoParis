@@ -21,6 +21,9 @@
 //   FrameInfo.g_bounds で位置を合わせる。
 // - 切り抜き後の周辺光量補正の中心（DEV-24）: 効果の区切りを開いている間、中心に印を出し、ドラッグで動かす
 //   （VignetteLayer.tsx）。
+// - スポット修正（DEV-21。Q）: 道具を使っている間、スポット（消したい場所とコピー元）を重ね、クリックで円・ドラッグで線の
+//   スポットを足す（RetouchLayer.tsx）。[ ] で次に足すスポットの大きさ、Delete で選んでいるスポットを除く。全体表示でも
+//   等倍表示でも、画像の箱と FrameInfo.o_grid で位置を合わせる。
 // - 画像のまわりは色みのない灰色だけにする（写真の色の判断に影響しないように）。
 
 import {
@@ -69,9 +72,12 @@ import { activatesOnEnter } from "./keyTargets";
 import { MaskLayer, MaskOverlayCanvas, useMaskOverlay } from "./MaskLayer";
 import { type Box, boundsOrDefault, maskControls } from "./maskLogic";
 import { clippingOverlay } from "./pixels";
+import { RetouchLayer } from "./RetouchLayer";
+import { orientedGrid, removeSpot, retouchControls, retouchSize, spotsOf } from "./retouchLogic";
 import {
   cancelCrop,
   cancelMaskTool,
+  cancelRetouchTool,
   cancelWbTool,
   commitCrop,
   constrainDraft,
@@ -80,15 +86,18 @@ import {
   overlayShown,
   pickMaskColor,
   pickWhiteBalance,
+  selectSpot,
   setBrushOptions,
   setCompareMode,
   setDraftCrop,
+  setRetouchOptions,
   setZoom,
   startCrop,
   takeWantedBefore,
   toggleClipping,
   toggleCompareMode,
   toggleMaskOverlay,
+  toggleRetouchTool,
   toggleWbTool,
   useDevelopView,
   viewStore,
@@ -423,6 +432,8 @@ function Stage() {
   const overlayOn = useDevelopView(overlayShown);
   const brush = useDevelopView((s) => s.brush);
   const vignetteHandle = useDevelopView((s) => s.vignetteHandle);
+  const spotIndex = useDevelopView((s) => s.spotIndex);
+  const retouchOptions = useDevelopView((s) => s.retouch);
 
   const header: FrameInfo | null = frame?.header ?? null;
   const outW = header?.output_width ?? 0;
@@ -512,7 +523,7 @@ function Stage() {
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !frame) return;
-    if (tool === "crop" || tool === "brush") return;
+    if (tool === "crop" || tool === "brush" || tool === "retouch") return;
     if (tool === "wb") {
       const p = pointToImage(e.clientX, e.clientY);
       if (p) void pickWhiteBalance(p.fx, p.fy);
@@ -591,6 +602,9 @@ function Stage() {
     tool === "none" &&
     !!info &&
     detailControls(settings, !hasState || opening).vignetteOptions;
+  // スポット修正（DEV-21）の表示: 道具を使っている間、アフターだけの表示で、切り抜きの編集中でないとき。
+  const showRetouch = tool === "retouch" && !crop && !comparing && hasState && !!settings;
+  const retouchEditable = !!settings && retouchControls(settings, !hasState || opening).editable;
   const overlay = useMaskOverlay(
     sel && overlayOn && variantId !== null && header
       ? { variantId, index: sel.index, generation: header.generation, uncropped }
@@ -599,7 +613,7 @@ function Stage() {
 
   const classes = ["dv-stage"];
   if (tool === "wb" || tool === "mask_color") classes.push("tool-wb");
-  else if (tool === "brush") classes.push("tool-brush");
+  else if (tool === "brush" || tool === "retouch") classes.push("tool-brush");
   else if (zoomed) classes.push(panning ? "panning" : "zoomed");
   else if (canZoom && !crop) classes.push("can-zoom");
 
@@ -608,6 +622,8 @@ function Stage() {
   else if (tool === "mask_color") hint = "色域: 選びたい色の点をクリック（Esc で取り消し）";
   else if (tool === "brush")
     hint = `ブラシ${brush.erase ? "（消しゴム）" : ""}: ドラッグで描く。Alt を押しながらで${brush.erase ? "描く" : "消す"}・[ ] で大きさ・O で赤の表示・Esc で終わる`;
+  else if (tool === "retouch")
+    hint = "スポット修正: クリックで円、ドラッグで線を消す。点線（コピー元）・実線をドラッグで動かす。[ ] で大きさ・Delete で削除・Esc で終わる";
   else if (crop && !cropReady) hint = "切り抜く前の全体を描いています…（Esc で取り消し）";
   else if (crop) hint = "切り抜き: 枠の四隅・四辺・中をドラッグ。Enter で完了、Esc で取り消し";
   else if (zoomed) hint = comparing ? "等倍表示（ビフォーとアフターは同じ位置）: ドラッグで移動。クリック・Z・Esc で全体表示" : "等倍表示: ドラッグで移動。クリック・Z・Esc で全体表示";
@@ -673,6 +689,18 @@ function Stage() {
           editable={maskEditable}
           overlayOn={overlayOn}
           overlayGeneration={overlay?.header.generation ?? null}
+        />
+      )}
+      {showRetouch && settings && imageBox && (
+        <RetouchLayer
+          width={size.width}
+          height={size.height}
+          box={imageBox}
+          grid={orientedGrid(header?.o_grid, gb)}
+          spots={spotsOf(settings)}
+          selected={spotIndex}
+          editable={retouchEditable}
+          size={retouchOptions.size}
         />
       )}
       {showVignette && settings && info && imageBox && (
@@ -756,12 +784,24 @@ function toggleBlackWhiteKey(): void {
   applySettings(toggleBlackWhite(d.settings), false);
 }
 
+/** 選んでいるスポットを除く（Delete・Backspace。スポット修正の道具を使っているときだけ）。 */
+function deleteSelectedSpot(): void {
+  const s = viewStore.get();
+  if (s.tool !== "retouch" || s.spotIndex === null) return;
+  const d = developStore.get();
+  if (!d.state || !d.settings || d.opening) return;
+  const next = removeSpot(d.settings, s.spotIndex);
+  if (next === d.settings) return;
+  applySettings(next, false);
+  selectSpot(null);
+}
+
 /** ブラシの大きさを範囲に収める（G 座標の半径。RANGES.brushSize）。 */
 function brushSize(v: number): number {
   return Math.round(Math.min(RANGES.brushSize.max, Math.max(RANGES.brushSize.min, v)) * 10000) / 10000;
 }
 
-/** 現像の画面のキー（W・R・Z・J・I・V・O・[・]・\・Y・Shift ＋ Y と、道具を使っている間の Esc・Enter）。 */
+/** 現像の画面のキー（W・R・Z・J・I・V・O・Q・[・]・Delete・\・Y・Shift ＋ Y と、道具を使っている間の Esc・Enter）。 */
 function useDevelopKeys(enabled: boolean) {
   const tool = useDevelopView((s) => s.tool);
   const zoomed = useDevelopView((s) => s.zoom !== null);
@@ -794,11 +834,16 @@ function useDevelopKeys(enabled: boolean) {
       },
       v: () => toggleBlackWhiteKey(),
       o: () => toggleMaskOverlay(),
+      q: () => toggleRetouchTool(),
       "[": () => {
-        if (viewStore.get().tool === "brush") setBrushOptions({ size: brushSize(viewStore.get().brush.size / BRUSH_SIZE_STEP) });
+        const s = viewStore.get();
+        if (s.tool === "brush") setBrushOptions({ size: brushSize(s.brush.size / BRUSH_SIZE_STEP) });
+        else if (s.tool === "retouch") setRetouchOptions({ size: retouchSize(s.retouch.size / BRUSH_SIZE_STEP) });
       },
       "]": () => {
-        if (viewStore.get().tool === "brush") setBrushOptions({ size: brushSize(viewStore.get().brush.size * BRUSH_SIZE_STEP) });
+        const s = viewStore.get();
+        if (s.tool === "brush") setBrushOptions({ size: brushSize(s.brush.size * BRUSH_SIZE_STEP) });
+        else if (s.tool === "retouch") setRetouchOptions({ size: retouchSize(s.retouch.size * BRUSH_SIZE_STEP) });
       },
       "\\": () => toggleCompareMode("before"),
       // macOS の日本語配列の ¥ のキー（Option なしでは "¥" になる）。
@@ -821,7 +866,20 @@ function useDevelopKeys(enabled: boolean) {
         if (s.crop) void cancelCrop();
         else if (s.tool === "wb") cancelWbTool();
         else if (s.tool === "brush" || s.tool === "mask_color") cancelMaskTool();
+        else if (s.tool === "retouch") cancelRetouchTool();
         else if (s.zoom) setZoom(null);
+      } else if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        s.tool === "retouch" &&
+        s.spotIndex !== null &&
+        !e.altKey &&
+        !e.ctrlKey &&
+        !e.metaKey
+      ) {
+        // 写真の削除（App の Delete）より先に、選んでいるスポットを除く。
+        e.preventDefault();
+        e.stopPropagation();
+        deleteSelectedSpot();
       } else if (e.key === "Enter" && s.crop && !activatesOnEnter(e.target)) {
         // ボタンなどにフォーカスがあるときは、その要素の動作に任せる（横取りして保存しない）。
         e.preventDefault();

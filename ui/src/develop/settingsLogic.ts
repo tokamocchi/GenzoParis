@@ -244,7 +244,8 @@ export function sensorControls(
  * - レンズ補正・ハイライト復元・ノイズ軽減・シャープ・テクスチャ・明瞭度・かすみの除去・効果・色（カラーミキサー・
  *   カラーグレーディング・白黒）・カメラプロファイルとルック（標準の色・ルックなし）は既定に戻す（画面のパネルで
  *   見える項目）。
- * - マスク（ローカル補正。DEV-18・DEV-19）も除く（現像のパネルの「マスク」で見える項目。履歴から取り消せる）。
+ * - マスク（ローカル補正。DEV-18・DEV-19）とスポット修正（DEV-21）も除く（現像のパネルの「マスク」「スポット修正」で
+ *   見える項目。履歴から取り消せる）。
  */
 export function resetAll(s: DevelopSettings): DevelopSettings {
   return {
@@ -272,5 +273,6 @@ export function resetAll(s: DevelopSettings): DevelopSettings {
     color: defaultColor(),
     geometry: defaultGeometry(),
     masks: [],
+    retouch: [],
   };
 }

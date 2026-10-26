@@ -80,7 +80,7 @@ describe("取り込み", () => {
 });
 
 describe("一括適用", () => {
-  it("既定はマスクと、切り抜きと角度がオフ（レンズ補正は写す）", () => {
+  it("既定はマスク・スポット修正と、切り抜きと角度がオフ（レンズ補正は写す）", () => {
     expect(toSettingGroups(DEFAULT_PASTE_SELECTION)).toEqual({
       white_balance: true,
       basic_tone: true,
@@ -93,6 +93,7 @@ describe("一括適用", () => {
       effects: true,
       profile: true,
       masks: false,
+      retouch: false,
     });
     // マスク（DEV-18）を選べば写す。
     expect(toSettingGroups({ ...DEFAULT_PASTE_SELECTION, masks: true }).masks).toBe(true);
@@ -120,6 +121,10 @@ describe("一括適用", () => {
     // マスクを選べるようになる前に保存した選択では写さない（既定）。選んで保存したものは戻す。
     expect(restorePasteSelection({ geometry: true }).masks).toBe(false);
     expect(restorePasteSelection({ masks: true }).masks).toBe(true);
+    // スポット修正（DEV-21）も同じく、選べるようになる前に保存した選択では写さない。
+    expect(restorePasteSelection({ geometry: true }).retouch).toBe(false);
+    expect(restorePasteSelection({ retouch: true }).retouch).toBe(true);
+    expect(toSettingGroups({ ...DEFAULT_PASTE_SELECTION, retouch: true }).retouch).toBe(true);
     expect(restorePasteSelection("x")).toEqual(DEFAULT_PASTE_SELECTION);
     expect(restorePasteSelection({ white_balance: "no" })).toEqual(DEFAULT_PASTE_SELECTION);
   });
@@ -136,8 +141,10 @@ describe("一括適用", () => {
       effects: false,
       profile: false,
       masks: false,
+      retouch: false,
     };
     expect(anySelected({ ...none, geometry: false })).toBe(false);
+    expect(anySelected({ ...none, retouch: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, masks: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, profile: true, geometry: false })).toBe(true);
     expect(anySelected({ ...none, lens: true, geometry: false })).toBe(true);

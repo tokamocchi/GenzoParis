@@ -72,6 +72,7 @@ import type {
   Rating,
   RegionInfo,
   RegionRequest,
+  RetouchSpot,
   Response,
   RestorePlan,
   SearchFilter,
@@ -491,6 +492,17 @@ export const maskColorAt = async (
     "mask_color",
   );
   return { x: r.x, y: r.y, lab: r.lab };
+};
+/**
+ * スポット修正（DEV-21）のコピー元を自動で選ぶ（適用はしない）。スポットのまわりとよく似たまわりを持つ場所へのずれ
+ * （O 座標）。写真の枠に収まる候補がなければ null。
+ */
+export const retouchAutoSource = async (
+  variant_id: VariantId,
+  spot: RetouchSpot,
+): Promise<[number, number] | null> => {
+  const r = await execute({ type: "retouch_auto_source", variant_id, spot }, "retouch_source");
+  return r.offset;
 };
 /** 切り抜きの編集中の表示（`uncropped` なら切り抜く前の全体を描く）。 */
 export const setDevelopView = async (uncropped: boolean) => {
