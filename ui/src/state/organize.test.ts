@@ -22,6 +22,7 @@ import {
   toggleKeywordFilter,
   toggleTargetCollection,
 } from "./organize";
+import { runPhotoMenu } from "./stacks";
 
 let mock: MockBridge;
 /** 送ったコアのコマンド（type ごとの引数）。 */
@@ -130,6 +131,13 @@ describe("Delete キー", () => {
     appStore.set({ filter: {}, dialog: null });
     await deleteKeyAction();
     expect(appStore.get().dialog?.kind).toBe("delete");
+  });
+
+  it("右クリックの「削除…」は、手動のコレクションを表示していても削除のダイアログを開く", async () => {
+    appStore.set({ filter: { collection_id: 13 } });
+    await runPhotoMenu("delete");
+    expect(commands("remove_from_collection")).toHaveLength(0);
+    expect(appStore.get().dialog).toEqual({ kind: "delete", deleteKind: "remove_from_catalog", variantIds: [101, 102] });
   });
 });
 

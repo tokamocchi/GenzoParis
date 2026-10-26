@@ -17,7 +17,7 @@ import type { PhotoMenuAction } from "../library/stackLogic";
 import { actions, appStore } from "./app";
 import { enqueue } from "./develop";
 import { openMoveFiles, openRelink, openRenameFiles } from "./files";
-import { shownManualCollection } from "./organize";
+import { openDeleteDialog, shownManualCollection } from "./organize";
 import { searchCache } from "./search";
 
 /** 写真が入っているスタック（入っていなければ null。読めなければ知らせて null）。 */
@@ -317,6 +317,9 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
       }
       return;
     }
+    case "delete":
+      openDeleteDialog(actions.targets());
+      return;
   }
 }
 

@@ -8,7 +8,8 @@
 //   とみなして外す）。
 // - 手動のコレクションを表示している間の Delete・Backspace は、カタログから除くのではなく、そのコレクションから
 //   外す（写真は消えない。Lightroom と同じ。決定事項ログ No.82）。それ以外では削除のダイアログを開き、対象が
-//   すべて仮想コピーなら「仮想コピーだけを削除」を既定にする（決定事項ログ No.88）。
+//   すべて仮想コピーなら「仮想コピーだけを削除」を既定にする（決定事項ログ No.88）。写真の右クリックの「削除…」は、
+//   手動のコレクションを表示していても削除のダイアログを開く（openDeleteDialog）。
 
 import * as core from "../api/core";
 import type { CollectionId, CollectionInfo, KeywordId, VariantId } from "../api/types";
@@ -119,6 +120,12 @@ export async function deleteKeyAction(): Promise<void> {
     await removeFromCollection(shown.collection_id, ids, shown.name);
     return;
   }
+  openDeleteDialog(ids);
+}
+
+/** 削除のダイアログを開く（写真の右クリックの「削除…」からも。手動のコレクションを表示していても開く）。 */
+export function openDeleteDialog(ids: VariantId[]): void {
+  if (ids.length === 0) return;
   const deleteKind = defaultDeleteKind(ids, (id) => searchCache.getLoadedById(id));
   actions.openDialog({ kind: "delete", deleteKind, variantIds: ids });
 }

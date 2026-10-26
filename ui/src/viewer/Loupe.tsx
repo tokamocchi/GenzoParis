@@ -17,6 +17,8 @@
 //   拡大した L1 を出しておく。
 // - Z・Esc・クリック（ドラッグでない）で全体表示に戻る。写真が変わったら全体表示に戻る（写真ごとに
 //   PhotoView を作り直す）。開いた写真は閉じない（現像の画面に切り替えたときに、そのまま使える）。
+// - ダブルクリックでグリッドに戻る（グリッドのダブルクリックでルーペを開くのと対にする）。1 回目のクリックで
+//   等倍表示を始めるが、グリッドに切り替えると PhotoView が外れて取り消す。
 // - I で撮影情報（LIB-17。情報 1 → 情報 2 → なし。項目は設定の「表示」で選ぶ）の表示を切り替える
 //   （InfoOverlay。現像の画面と同じ表示）。
 //
@@ -25,7 +27,14 @@
 // - アプリの中で再生する（VID-04。VideoPlayer.tsx）。再生する前は、サムネイル（代表フレーム。VID-02）を出す。
 //   長さ・フレームレート・コーデック・解像度（VID-03）と「OS のアプリで再生」も出す。
 
-import { type PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
@@ -568,6 +577,10 @@ function PhotoView(props: {
     if (drag.current?.moved) setDragging(false);
     drag.current = null;
   };
+  const onDoubleClick = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    actions.setMode("grid");
+  };
 
   // --- 表示 ---
   const dpr = view.dpr;
@@ -608,6 +621,7 @@ function PhotoView(props: {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerCancel}
+        onDoubleClick={onDoubleClick}
         onPointerLeave={() => {
           hover.current = null;
         }}

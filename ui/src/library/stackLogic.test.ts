@@ -142,6 +142,16 @@ describe("写真の右クリックのメニュー", () => {
     expect(top.get("unstack")?.keys).toBe("mod+shift+g");
   });
 
+  it("削除…は写真を選んでいれば使え、危険な操作として出す", () => {
+    expect(byAction(photoMenuEntries(1, mockSummary())).get("delete")).toMatchObject({
+      label: "削除…",
+      enabled: true,
+      danger: true,
+    });
+    expect(byAction(photoMenuEntries(2, undefined)).get("delete")?.enabled).toBe(true);
+    expect(byAction(photoMenuEntries(0, undefined)).get("delete")?.enabled).toBe(false);
+  });
+
   it("動画・読み込んでいない写真では仮想コピーを作れない", () => {
     expect(byAction(photoMenuEntries(1, mockSummary({ kind: "video" }))).get("create_copy")?.enabled).toBe(false);
     expect(byAction(photoMenuEntries(1, undefined)).get("create_copy")?.enabled).toBe(false);
