@@ -133,8 +133,8 @@ pub enum SensorWarning {
     CameraProfileUnusable,
     /// 設定のルック（3D LUT。DEV-17）が見つからないため、ルックなしで描いた（[`crate::profile`]）。
     LookMissing,
-    /// 設定の AI マスク（DEV-20）のラスターが見つからないため、そのマスクの部品を重み 0 として描いた
-    /// （[`crate::profile`]）。
+    /// 設定の AI マスク（DEV-20）のラスターが見つからない、または範囲に写せない（読み込んだ設定の範囲が極端など）ため、
+    /// そのマスクの部品を重み 0 として描いた（[`crate::profile`]）。
     AiMaskMissing,
 }
 
@@ -187,7 +187,7 @@ impl fmt::Display for SensorWarning {
                 "選んだルックが見つからないため、ルックなしで表示しています（ルックを取り込み直すか、ほかのルックを選んでください）",
             ),
             SensorWarning::AiMaskMissing => f.write_str(
-                "AI マスクの選択範囲が見つからないため、その部品を空として表示しています（AI マスクを作り直してください）",
+                "AI マスクの選択範囲が見つからないか使えないため、その部品を空として表示しています（AI マスクを作り直してください）",
             ),
         }
     }

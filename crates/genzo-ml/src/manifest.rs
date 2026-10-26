@@ -224,8 +224,8 @@ impl ModelManifest {
                 return Err(format!("input の {what} は有限の数にしてください"));
             }
         }
-        if self.input.std.contains(&0.0) {
-            return Err("input の std に 0 は使えません".into());
+        if self.input.std.iter().any(|v| *v <= 0.0) {
+            return Err("input の std は正の数にしてください".into());
         }
         if self.kinds.is_empty() {
             return Err("kinds（扱える種類）がありません".into());
@@ -329,6 +329,7 @@ mod tests {
         assert!(bad(&|m| m.input.width = 0));
         assert!(bad(&|m| m.input.mean = vec![1.0, 2.0]));
         assert!(bad(&|m| m.input.std = vec![0.0]));
+        assert!(bad(&|m| m.input.std = vec![0.2, -0.2, 0.2]));
         assert!(bad(&|m| m.kinds.clear()));
         assert!(bad(&|m| {
             m.kinds

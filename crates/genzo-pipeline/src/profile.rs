@@ -185,7 +185,8 @@ pub struct ProfileResources {
     pub look_missing: bool,
     /// AI マスクのラスター（設定のマスクが指す参照の SHA-256 → ラスター。引けたものだけ。DEV-20）。
     pub ai_masks: HashMap<String, Arc<AiMaskRaster>>,
-    /// 設定のマスクが指しているのに、引けなかった AI マスクのラスターの参照の SHA-256（重複なし。設定の順）。
+    /// 設定のマスクが指しているのに、引けなかった・範囲に写せなかった AI マスクのラスターの参照の SHA-256（重複なし。
+    /// 設定の順）。
     pub ai_masks_missing: Vec<String>,
 }
 
@@ -232,16 +233,28 @@ impl ProfileResources {
         if !with_ai_masks {
             return out;
         }
-        for data_ref in s.masks.iter().flat_map(|m| m.ai_mask_refs()) {
-            let sha = &data_ref.sha256;
-            if out.ai_masks.contains_key(sha) || out.ai_masks_missing.contains(sha) {
+        for c in s.masks.iter().flat_map(|m| m.components.iter()) {
+            let genzo_model::MaskShape::Ai { mask, bounds, .. } = &c.shape else {
+                continue;
+            };
+            let sha = &mask.sha256;
+            if out.ai_masks_missing.contains(sha) {
                 continue;
             }
-            match resolver.and_then(|r| r.ai_mask(data_ref)) {
-                Some(raster) => {
-                    out.ai_masks.insert(sha.clone(), raster);
+            let raster = match out.ai_masks.get(sha) {
+                Some(r) => Some(r.clone()),
+                None => resolver.and_then(|r| r.ai_mask(mask)),
+            };
+            match raster {
+                // 引けても、範囲に写せない（読み込んだ設定の範囲が極端に細いなど）なら使えないとして知らせる
+                // （重み 0 で黙って効かなくならないように）。
+                Some(r) if crate::local::ai::grid_rows(r.width, *bounds).is_some() => {
+                    out.ai_masks.insert(sha.clone(), r);
                 }
-                None => out.ai_masks_missing.push(sha.clone()),
+                _ => {
+                    out.ai_masks.remove(sha);
+                    out.ai_masks_missing.push(sha.clone());
+                }
             }
         }
         out

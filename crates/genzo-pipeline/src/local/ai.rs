@@ -23,25 +23,14 @@ pub const CACHE_ENTRIES: usize = 8;
 /// 範囲が空（右 ≤ 左・下 ≤ 上・有限でない）、または写した格子が上限（1 辺 genzo-model の `MAX_AI_MASK_SIDE`・
 /// `MAX_AI_MASK_PIXELS` 画素。範囲の縦横比がラスターと極端に違う設定）を超えるなら `None`（重み 0。確保しない）。
 pub fn to_brush_raster(raster: &AiMaskRaster, bounds: [f32; 4]) -> Option<BrushRaster> {
-    let [left, top, right, bottom] = bounds;
-    if !bounds.iter().all(|v| v.is_finite()) || right <= left || bottom <= top {
-        return None;
-    }
     let (w, h) = (raster.width as usize, raster.height as usize);
-    if w == 0 || h == 0 || raster.values.len() != w * h {
+    if raster.values.len() != w * h {
         return None;
     }
+    let rows = grid_rows(raster.width, bounds)?;
+    let [left, top, right, _] = bounds;
     let cell = f64::from(right - left) / w as f64;
     let inv_cell = (1.0 / cell) as f32;
-    let rows_f = (f64::from(bottom - top) / cell).round().max(1.0);
-    // 読み込んだ設定の範囲が極端に細い（例: 幅 1e−6・高さ 1）と行の数が膨らむので、確保する前に断る。
-    if !rows_f.is_finite()
-        || rows_f > f64::from(genzo_model::MAX_AI_MASK_SIDE)
-        || (w as u64) * (rows_f as u64) > genzo_model::MAX_AI_MASK_PIXELS
-    {
-        return None;
-    }
-    let rows = rows_f as usize;
     let scale = 1.0 / 255.0;
     let mut values = Vec::with_capacity(w * rows);
     if rows == h {
@@ -68,6 +57,26 @@ pub fn to_brush_raster(raster: &AiMaskRaster, bounds: [f32; 4]) -> Option<BrushR
         height: rows as u32,
         values,
     })
+}
+
+/// 幅 `width` のラスターを G 座標の `bounds` に写したときの行の数（[`to_brush_raster`]）。範囲が空（右 ≤ 左・下 ≤ 上・
+/// 有限でない）、幅が 0、または格子が上限（1 辺 genzo-model の `MAX_AI_MASK_SIDE`・`MAX_AI_MASK_PIXELS` 画素）を超える
+/// （読み込んだ設定の範囲が極端に細い、例: 幅 1e−6・高さ 1）なら `None`。描画の前に「使えない」を知らせるためにも使う
+/// （[`crate::ProfileResources::resolve`]）。
+pub fn grid_rows(width: u32, bounds: [f32; 4]) -> Option<usize> {
+    let [left, top, right, bottom] = bounds;
+    if width == 0 || !bounds.iter().all(|v| v.is_finite()) || right <= left || bottom <= top {
+        return None;
+    }
+    let cell = f64::from(right - left) / f64::from(width);
+    let rows = (f64::from(bottom - top) / cell).round().max(1.0);
+    if !rows.is_finite()
+        || rows > f64::from(genzo_model::MAX_AI_MASK_SIDE)
+        || u64::from(width) * (rows as u64) > genzo_model::MAX_AI_MASK_PIXELS
+    {
+        return None;
+    }
+    Some(rows as usize)
 }
 
 type Key = (String, [u32; 4]);
@@ -163,6 +172,9 @@ mod tests {
         let b = to_brush_raster(&narrow, [0.0, 0.0, 1.0 / 1024.0, 4.0]).unwrap();
         assert_eq!((b.width, b.height), (1, 4096));
         assert!(to_brush_raster(&narrow, [0.0, 0.0, 1.0 / 1024.0, 4.01]).is_none());
+        assert_eq!(grid_rows(1, [0.0, 0.0, 1.0 / 1024.0, 4.0]), Some(4096));
+        assert_eq!(grid_rows(640, [0.0, 0.0, 0.000_001, 1.0]), None);
+        assert_eq!(grid_rows(0, [0.0, 0.0, 1.0, 1.0]), None);
     }
 
     #[test]

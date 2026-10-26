@@ -507,4 +507,21 @@ fn ai_masks_use_the_resolved_raster_and_are_zero_when_missing() {
     assert_eq!(p.weight(0.9, 0.2, &none()), 0.0);
     let p = prepare_mask(&s.masks[0], &g, None, None);
     assert_eq!(p.weight(0.9, 0.2, &none()), 0.0);
+    // 引けても範囲に写せない（極端に細い範囲。Codex のレビューの指摘）なら、使えないとして知らせる。
+    let mut narrow = v2_settings();
+    narrow.masks.push(mask(
+        MaskShape::Ai {
+            kind: AiMaskKind::Sky,
+            model: "test".into(),
+            mask: DataRef::new(AiMaskKind::Sky.ref_id(), &sha),
+            width: 8,
+            height: 4,
+            bounds: [0.0, 0.0, 0.000_001, 1.0],
+        },
+        exposure(1.0),
+    ));
+    let res = ProfileResources::resolve(&narrow, Some(&lib as &dyn ProfileResolver));
+    assert_eq!(res.ai_masks_missing, std::slice::from_ref(&sha));
+    assert!(res.ai_masks.is_empty());
+    assert_eq!(res.stage_c_warnings(), [SensorWarning::AiMaskMissing]);
 }
