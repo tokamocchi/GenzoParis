@@ -6,6 +6,7 @@
 要るもの: Python 3、numpy、Pillow。乱数の種は固定なので、何度作っても同じ画像になる。
 """
 import json
+import os
 import sys
 
 import numpy as np
@@ -232,6 +233,7 @@ SCENES = [scene_sunset_sea, scene_mountain_lake, scene_night_city, scene_forest,
 
 if __name__ == '__main__':
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+    os.makedirs(OUT, exist_ok=True)
     meta = []
     for i in range(n):
         rng = np.random.default_rng(100 + i)
