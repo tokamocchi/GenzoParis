@@ -26,7 +26,7 @@ import { useEffect, useRef, useState } from "react";
 import { reportUiError } from "../api/app";
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
-import type { ErrorInfo, GpsCoord, MapClusters, MapPreferences } from "../api/types";
+import type { ErrorInfo, GpsCoord, MapClusters, MapPreferences, VariantId } from "../api/types";
 import { thumbUrl, tileUrlTemplate } from "../api/uri";
 import { MapConsentPanel } from "../dialogs/MapConsent";
 import { actions, appStore, useApp } from "../state/app";
@@ -113,6 +113,8 @@ interface MapParts {
   photo: Leaflet.Marker | null;
   /** 地図を、写真の全体か覚えた表示へ動かしたか・利用者が動かしたか（後から届いた全体へ勝手に動かさない）。 */
   located: boolean;
+  /** まとまりの印（代表の写真ごと。表示中の写真の強調を付け替える）。 */
+  markers: Map<VariantId, Leaflet.Marker>;
   /** タイルの層（表示する範囲が決まってから地図に足す。showTiles）。 */
   tiles: Leaflet.TileLayer;
 }
@@ -167,7 +169,15 @@ function PhotoMap(props: { prefs: MapPreferences }) {
         const tiles = L.tileLayer(tileUrlTemplate(), { maxZoom: MAP_MAX_ZOOM })
           .on("tileerror", () => setTileError(true))
           .on("tileload", () => setTileError(false));
-        made = { L, map, clusters: L.layerGroup().addTo(map), photo: null, located: first !== null, tiles };
+        made = {
+          L,
+          map,
+          clusters: L.layerGroup().addTo(map),
+          photo: null,
+          located: first !== null,
+          tiles,
+          markers: new Map(),
+        };
         const m = made;
         if (first) showTiles(m);
         map.on("dragstart zoomstart", () => {
@@ -249,18 +259,23 @@ function PhotoMap(props: { prefs: MapPreferences }) {
     showTiles(p);
   }, [made, data]);
 
-  // 印を描く。
+  // 印を描く（まとまりが変わったときだけ作り直す。表示中の写真が変わっても作り直さない: 1 回目のクリックで写真を
+  // 選んだ後に印を作り直すと、ダブルクリックの 2 回目の相手の要素がなくなり、ルーペで開けないため。表示中の写真の
+  // 強調は下の effect で付け替える）。
+  const currentRef = useRef(current);
+  currentRef.current = current;
   useEffect(() => {
     const p = parts.current;
     if (!p) return;
     p.clusters.clearLayers();
+    p.markers.clear();
     if (!data) return;
     const L = p.L;
     const centerLng = p.map.getCenter().lng;
     for (const c of data.clusters) {
       const size = clusterSizeClass(c.count);
       const px = CLUSTER_PX[size];
-      const isCurrent = c.variant_id === current;
+      const isCurrent = c.variant_id === currentRef.current;
       const marker = L.marker([c.lat, markerLon(c.lon, centerLng)], {
         icon: L.divIcon({
           className: `map-cluster ${size}${isCurrent ? " current" : ""}`,
@@ -295,6 +310,16 @@ function PhotoMap(props: { prefs: MapPreferences }) {
         });
       });
       p.clusters.addLayer(marker);
+      p.markers.set(c.variant_id, marker);
+    }
+  }, [made, data]);
+
+  // 表示中の写真が代表の印を強調する（印の要素の class だけを付け替える）。
+  useEffect(() => {
+    const p = parts.current;
+    if (!p) return;
+    for (const [id, marker] of p.markers) {
+      marker.getElement()?.classList.toggle("current", id === current);
     }
   }, [made, data, current]);
 
