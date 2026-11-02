@@ -914,12 +914,18 @@ async function moveSelection(delta: number): Promise<void> {
 }
 
 /**
- * 操作の対象: グリッド・地図（LIB-18。フィルムストリップで選んだ写真）では選択中のすべて、ルーペ・現像では表示中の
- * 1 枚。
+ * 選択中のすべてを操作の対象にする表示か（グリッドと地図（LIB-18。フィルムストリップで選んだ写真））。操作の対象
+ * （targets）・右のパネルのまとめての編集（MetadataPanel）・「自動で次へ」で同じ判定を使う（食い違うと、右のパネルが
+ * 1 枚の値を出したまま、選んだすべてに書いてしまう）。
  */
+export function selectsMany(mode: Mode): boolean {
+  return mode === "grid" || mode === "map";
+}
+
+/** 操作の対象: グリッド・地図では選択中のすべて（selectsMany）、ルーペ・現像では表示中の 1 枚。 */
 function targets(): VariantId[] {
   const { mode, selection } = appStore.get();
-  if (mode === "grid" || mode === "map") {
+  if (selectsMany(mode)) {
     return selection.ids.length > 0 ? selection.ids : selection.current !== null ? [selection.current] : [];
   }
   return selection.current !== null ? [selection.current] : [];
@@ -937,7 +943,7 @@ function targets(): VariantId[] {
  */
 function pasteTargets(): VariantId[] {
   const { mode, selection } = appStore.get();
-  if (mode === "grid" || mode === "map" || selection.current === null) return targets();
+  if (selectsMany(mode) || selection.current === null) return targets();
   return selection.ids.includes(selection.current) ? selection.ids : [selection.current, ...selection.ids];
 }
 
@@ -970,7 +976,7 @@ async function afterMark(): Promise<void> {
   const s = appStore.get();
   // 比較表示・選別表示では次へ進まない（表示中の写真は作業中の面・枠の写真なので。決定事項ログ No.115・116）。
   if (s.autoAdvance && (s.mode === "loupe" || s.mode === "develop")) await moveSelection(1);
-  else if (s.autoAdvance && s.mode === "grid" && s.selection.ids.length <= 1) await moveSelection(1);
+  else if (s.autoAdvance && selectsMany(s.mode) && s.selection.ids.length <= 1) await moveSelection(1);
 }
 
 /**

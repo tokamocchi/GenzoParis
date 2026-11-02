@@ -11,7 +11,7 @@ import { dispatchCoreEventForTest } from "../api/events";
 import { MOCK_IMPORT_REPORT, MockBridge } from "../api/mock";
 import type { CatalogStatus, ColorLabel, DevelopSettings, ErrorInfo, JobInfo, VariantSummary } from "../api/types";
 import { PasteSettingsDialog } from "../dialogs/PasteSettingsDialog";
-import { actions, appStore, IMPORT_REFRESH_MS, nextColorLabel } from "./app";
+import { actions, appStore, IMPORT_REFRESH_MS, nextColorLabel, selectsMany } from "./app";
 import { searchCache, thumbRevs } from "./search";
 
 /** 検索結果の件数（variant_id は 100 + 位置）。 */
@@ -159,6 +159,15 @@ describe("フィルムストリップの選択（表示中の写真を変えな�
     appStore.set({ mode: "grid" });
     await actions.selectIndex(8, { toggle: true });
     expect(appStore.get().selection).toMatchObject({ ids: [idAt(5), idAt(8)], current: idAt(8) });
+    expect(actions.pasteTargets()).toEqual(actions.targets());
+  });
+
+  it("地図（LIB-18）では、フィルムストリップで選んだすべてが操作の対象（グリッドと同じ）", async () => {
+    appStore.set({ mode: "map" });
+    await actions.selectIndex(9, { toggle: true, keepCurrent: true });
+    expect(selectsMany("map")).toBe(true);
+    expect(selectsMany("loupe")).toBe(false);
+    expect([...actions.targets()].sort((a, b) => a - b)).toEqual([5, 9].map(idAt));
     expect(actions.pasteTargets()).toEqual(actions.targets());
   });
 });
