@@ -73,7 +73,7 @@ for row in con.execute(
 
 DB Browser for SQLite では、「データベースを開く」の代わりに「読み取り専用でデータベースを開く」を使います。
 
-検証用の CLI（`genzo`）でも構造を表示できます（`genzo catalog schema`。README の CLI の節）。アプリでは「設定」→「カタログ」の「カタログの構造」で見られます。
+検証用の CLI（`genzo`）でも構造を表示できます（`genzo catalog schema`。[cli.md](cli.md)）。アプリでは「設定」→「カタログ」の「カタログの構造」で見られます。
 
 ### 2.2 アプリが起動している間の注意（WAL）
 

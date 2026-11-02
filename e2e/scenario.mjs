@@ -1,7 +1,7 @@
 // MVP のユーザーストーリーに沿った E2E（Linux の開発環境。e2e/run.sh から起動する）。
 //
 // 写真のフォルダは環境変数 E2E_PHOTOS（`cargo run -p genzo-testkit --example e2e_fixtures -- <フォルダ>`
-// で作り、動画は ffmpeg で足す。README の「E2E」）。画面の操作の結果を、画面とコアの状態の両方で確かめ、
+// で作り、動画は ffmpeg で足す。docs/development.md の「E2E」）。画面の操作の結果を、画面とコアの状態の両方で確かめ、
 // 各段階の画面を E2E_OUT に保存する。写真・動画の数は取り込んだ後にカタログから数える（動画がなくても
 // 通るが、動画の手順は確かめない）。
 //
@@ -121,7 +121,7 @@ try {
     assert(photoTotal > 0, "写真がある");
     console.log(`  写真 ${photoTotal} 枚、動画 ${videoTotal} 本`);
     if (videoTotal === 0) {
-      console.log("  注意: 写真のフォルダに動画がないので、動画の扱い（書き出さないこと）は確かめません（README の「E2E」）");
+      console.log("  注意: 写真のフォルダに動画がないので、動画の扱い（書き出さないこと）は確かめません（docs/development.md の「E2E」）");
     }
     // サムネイルが読み込まれるまで待つ（写真はすべて。動画は ffmpeg が要るので数えない）。
     await wd.waitFor(
