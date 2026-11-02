@@ -13,6 +13,9 @@ import {
   isDateRangeReversed,
   isNumericRangeReversed,
   localDateToUtc,
+  locationOption,
+  locationPatch,
+  moreConditionCount,
   MULTIPLE,
   normalizeText,
   NUMERIC_RANGES,
@@ -202,5 +205,29 @@ describe("長辺の画素数・動画の長さ・フレームレート（VID-03�
     const f = { long_edge_min: 3840, duration_max_s: 10, fps_min: 50 };
     expect(activeConditionCount(f)).toBe(3);
     expect(clearConditions(f)).toEqual({});
+  });
+});
+
+describe("位置情報（LIB-18）", () => {
+  it("位置の有無の選択肢と条件", () => {
+    expect(locationOption({})).toBe("all");
+    expect(locationOption({ has_location: null })).toBe("all");
+    expect(locationOption({ has_location: true })).toBe("located");
+    expect(locationOption({ has_location: false })).toBe("unlocated");
+    expect(locationPatch("all")).toEqual({ has_location: null });
+    expect(locationPatch("located")).toEqual({ has_location: true });
+    expect(locationPatch("unlocated")).toEqual({ has_location: false });
+  });
+
+  it("位置の有無・地図の範囲を 1 つずつ数え、解除で消える", () => {
+    const f = { has_location: false, location_bounds: { south: 35, west: 139, north: 36, east: 140 } };
+    expect(activeConditionCount(f)).toBe(2);
+    // 「詳しい条件」に入るのは位置の有無だけ（地図の範囲は札で示す）。
+    expect(moreConditionCount(f)).toBe(1);
+    expect(moreConditionCount({ has_location: null })).toBe(0);
+    expect(clearConditions({ ...f, folder_id: 2, include_subfolders: false })).toEqual({
+      folder_id: 2,
+      include_subfolders: false,
+    });
   });
 });

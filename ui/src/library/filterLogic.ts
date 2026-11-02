@@ -47,6 +47,8 @@ export function activeConditionCount(f: SearchFilter): number {
   if (nonEmpty(f.keywords)) n++;
   if (isSet(f.file_statuses)) n++;
   if (f.masters_only) n++;
+  if (isSet(f.has_location)) n++;
+  if (isSet(f.location_bounds)) n++;
   return n;
 }
 
@@ -181,6 +183,34 @@ export const KIND_OPTIONS: { value: AssetKind | ""; label: string }[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// 位置情報（LIB-18）
+// ---------------------------------------------------------------------------
+//
+// 使う位置（付けた位置があればそれ、なければカメラの位置。LIB-21）があるか。地図の範囲（location_bounds）は
+// 地図の表示（library/MapView.tsx）の「地図の範囲で絞り込む」で入れ、絞り込みの帯の札で外す。
+
+export type LocationOption = "all" | "located" | "unlocated";
+
+/** 位置情報の選択肢。 */
+export const LOCATION_OPTIONS: { value: LocationOption; label: string }[] = [
+  { value: "all", label: "すべて" },
+  { value: "located", label: "位置のある写真だけ" },
+  { value: "unlocated", label: "位置のない写真だけ（位置を付ける写真を探す）" },
+];
+
+/** 条件の位置情報の選択肢。 */
+export function locationOption(f: SearchFilter): LocationOption {
+  if (f.has_location === true) return "located";
+  if (f.has_location === false) return "unlocated";
+  return "all";
+}
+
+/** 位置情報の選択肢を条件にする。 */
+export function locationPatch(option: LocationOption): Pick<SearchFilter, "has_location"> {
+  return { has_location: option === "all" ? null : option === "located" };
+}
+
+// ---------------------------------------------------------------------------
 // 長辺の画素数・動画の長さ・フレームレートの範囲（VID-03）
 // ---------------------------------------------------------------------------
 //
@@ -269,14 +299,15 @@ export function numericRangeCount(f: SearchFilter): number {
 
 /**
  * 「詳しい条件」の中で指定しているものの数（数値の範囲・マスターだけ・スタックをすべて展開・ファイルの状態
- * （見つからない写真だけ。FILE-04）。ボタンの数の表示）。
+ * （見つからない写真だけ。FILE-04）・位置情報の有無（LIB-18）。ボタンの数の表示）。
  */
 export function moreConditionCount(f: SearchFilter): number {
   return (
     numericRangeCount(f) +
     (f.masters_only ? 1 : 0) +
     (f.expand_stacks ? 1 : 0) +
-    (Array.isArray(f.file_statuses) && f.file_statuses.length > 0 ? 1 : 0)
+    (Array.isArray(f.file_statuses) && f.file_statuses.length > 0 ? 1 : 0) +
+    (isSet(f.has_location) ? 1 : 0)
   );
 }
 

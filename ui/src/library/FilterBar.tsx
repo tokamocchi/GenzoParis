@@ -9,9 +9,10 @@
 // - 長辺の画素数・動画の長さ・フレームレートの範囲（VID-03）は「詳しい条件」の中に置く（入力は全角の数字も
 //   読む。フォーカスを外したとき・Enter・入力から 600 ms 後に反映する）。マスターだけ（仮想コピーを除く。LIB-13）と
 //   スタックをすべて展開して表示（LIB-12。保存した折りたたみの状態は変えない）・見つからない写真だけ（FILE-04）も
-//   同じ場所に置く。
+//   同じ場所に置く。位置情報の有無（LIB-18。使う位置のある写真・ない写真）も同じ場所に置く。
 // - キーワードでの絞り込み（LIB-09。左のパネルのキーワードの名前で選ぶ）と、表示中のコレクション
-//   （LIB-10・LIB-11）は、名前の札（×で外す）で示す（OrganizeChips）。
+//   （LIB-10・LIB-11）は、名前の札（×で外す）で示す（OrganizeChips）。地図の範囲（LIB-18。地図の表示の
+//   「地図の範囲で絞り込む」で入れる）も札で示す。
 
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -45,7 +46,11 @@ import {
   isNumericRangeReversed,
   KIND_OPTIONS,
   LABEL_CHOICES,
+  LOCATION_OPTIONS,
+  type LocationOption,
   localDateToUtc,
+  locationOption,
+  locationPatch,
   moreConditionCount,
   MULTIPLE,
   normalizeText,
@@ -64,6 +69,7 @@ import {
 import { COLLECTION_KIND_LABEL, collectionPathText } from "./collectionLogic";
 import { isMissingOnly, missingOnlyPatch } from "./fileOpsLogic";
 import { keywordPath, keywordPathText } from "./keywordLogic";
+import { describeBounds } from "./mapViewLogic";
 import "./library.css";
 
 /** テキストの入力から検索までの時間（ms）。 */
@@ -186,6 +192,19 @@ export function FilterBar() {
       <DateRange filter={filter} offset={offset} />
 
       <OrganizeChips filter={filter} />
+
+      {filter.location_bounds && (
+        <span className="lib-chip" title={`地図の範囲: ${describeBounds(filter.location_bounds)}（地図の表示で地図を動かすと変わる）`}>
+          地図の範囲
+          <button
+            type="button"
+            aria-label="地図の範囲での絞り込みをやめる"
+            onClick={() => actions.setFilter({ location_bounds: null })}
+          >
+            ×
+          </button>
+        </span>
+      )}
 
       <span className="spacer" />
 
@@ -436,7 +455,7 @@ function MoreConditions({ filter }: { filter: SearchFilter }) {
         className={`btn small${count > 0 ? " active" : ""}`}
         aria-expanded={open}
         aria-controls={panelId}
-        title="長辺の画素数・動画の長さ・フレームレート・仮想コピー・見つからない写真で絞り込む、スタックをすべて展開して表示する"
+        title="長辺の画素数・動画の長さ・フレームレート・仮想コピー・見つからない写真・位置情報で絞り込む、スタックをすべて展開して表示する"
         onClick={() => setOpen((o) => !o)}
       >
         詳しい条件{count > 0 ? `（${count}）` : ""} ▾
@@ -470,9 +489,24 @@ function MoreConditions({ filter }: { filter: SearchFilter }) {
             />
             見つからない写真だけ（元ファイルが見つからないもの）
           </label>
+          <label className="lib-filter-check" title="カメラが記録した位置か、後から付けた位置（付けた位置を優先）があるか">
+            位置情報:
+            <select
+              value={locationOption(filter)}
+              aria-label="位置情報"
+              onChange={(e) => actions.setFilter(locationPatch(e.target.value as LocationOption))}
+            >
+              {LOCATION_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <p className="hint">
             下限・上限ともその値を含みます。動画の長さ・フレームレートを指定すると、写真と、その値の分からない動画は
-            除きます。長辺の画素数は写真にも動画にも効きます。
+            除きます。長辺の画素数は写真にも動画にも効きます。位置情報は、後から付けた位置があればそれを、なければ
+            カメラが記録した位置を見ます。
           </p>
         </div>
       )}

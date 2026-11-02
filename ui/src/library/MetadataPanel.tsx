@@ -26,7 +26,7 @@ import { FlagMark, LabelDot, Stars } from "../components/Marks";
 import { Section } from "../components/Section";
 import { COLOR_LABEL_NAMES, formatAperture, formatBytes, formatCaptureTime, formatFocal, formatShutter } from "../format";
 import { comboLabel } from "../keyboard";
-import { actions, useApp } from "../state/app";
+import { actions, selectsMany, useApp } from "../state/app";
 import { openCaptureTimeDialog, openGeotagDialog } from "../state/stacks";
 import {
   addTargetsToStack,
@@ -87,7 +87,8 @@ export function MetadataPanel() {
   const detailsVersion = useApp((s) => s.detailsVersion);
   const [reload, setReload] = useState(0);
   const { details, error, notFound } = useDetails(current, detailsVersion, reload);
-  const multi = mode === "grid" && selectedCount > 1;
+  // 複数選択（グリッド・地図）のときは、まとめての編集を出す（操作の対象 targets と同じ判定。state/app.ts の selectsMany）。
+  const multi = selectsMany(mode) && selectedCount > 1;
 
   if (current === null && !multi) {
     return (

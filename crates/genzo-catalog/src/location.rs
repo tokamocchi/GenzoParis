@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use genzo_model::{AssetId, GpsCoord};
+use genzo_model::{AssetId, GpsCoord, VariantId};
 use rusqlite::{OptionalExtension, params};
 
 use crate::catalog::Catalog;
@@ -434,6 +434,96 @@ impl Catalog {
             _ => Ok(None),
         }
     }
+
+    /// 写真の使う位置（LIB-18 の地図）を `ids` と同じ順で返す。使う位置は、付けた位置があればそれ、なければ
+    /// カメラの位置（[`crate::AssetRecord::effective_gps`] と同じ。カメラの位置は緯度・経度の両方があり、範囲内の
+    /// ものだけ）。位置のない id・見つからない id（検索の後に削除されたもの）は `None`。
+    ///
+    /// 読み方はタイムライン（[`Catalog::timeline_keys`]）と同じく、件数が多ければ asset と variant の表を順に
+    /// 読み、少なければ id ごとに引く。
+    pub fn map_locations(&self, ids: &[VariantId]) -> Result<Vec<Option<GpsCoord>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self.scan_limits(ids.len())? {
+            Some((max_variant, max_asset)) => {
+                self.map_locations_by_scan(ids, max_variant, max_asset)
+            }
+            None => self.map_locations_by_id(ids),
+        }
+    }
+
+    /// [`Catalog::map_locations`] の、id ごとに引く方法。
+    pub(crate) fn map_locations_by_id(&self, ids: &[VariantId]) -> Result<Vec<Option<GpsCoord>>> {
+        let mut out = vec![None; ids.len()];
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT j.key, al.lat, al.lon, a.gps_lat, a.gps_lon
+             FROM json_each(?1) j
+             JOIN variant v ON v.id = j.value
+             JOIN asset a ON a.id = v.asset_id
+             LEFT JOIN asset_location al ON al.asset_id = a.id",
+        )?;
+        for (c, chunk) in ids.chunks(CHUNK).enumerate() {
+            let base = c * CHUNK;
+            let mut rows = stmt.query([ids_to_json(chunk)])?;
+            while let Some(row) = rows.next()? {
+                let key: i64 = row.get(0)?;
+                if let Some(slot) = usize::try_from(key)
+                    .ok()
+                    .and_then(|k| out.get_mut(base + k))
+                {
+                    *slot = effective_location_of(row, 1)?;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Catalog::map_locations`] の、表を順に読む方法（id は `max_*` 以下の正の数）。
+    pub(crate) fn map_locations_by_scan(
+        &self,
+        ids: &[VariantId],
+        max_variant: i64,
+        max_asset: i64,
+    ) -> Result<Vec<Option<GpsCoord>>> {
+        let len = usize::try_from(max_asset).unwrap_or(0).saturating_add(1);
+        let mut by_asset: Vec<Option<GpsCoord>> = vec![None; len];
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT a.id, al.lat, al.lon, a.gps_lat, a.gps_lon FROM asset a
+                 LEFT JOIN asset_location al ON al.asset_id = a.id",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let id: i64 = row.get(0)?;
+                if let Some(slot) = usize::try_from(id).ok().and_then(|i| by_asset.get_mut(i)) {
+                    *slot = effective_location_of(row, 1)?;
+                }
+            }
+        }
+        let asset_of = self.variant_assets_by_scan(max_variant)?;
+        Ok(ids
+            .iter()
+            .map(|v| {
+                usize::try_from(v.get())
+                    .ok()
+                    .and_then(|i| asset_of.get(i))
+                    .filter(|&&a| a != 0)
+                    .and_then(|&a| by_asset.get(a as usize))
+                    .copied()
+                    .flatten()
+            })
+            .collect())
+    }
+}
+
+/// 行の `first` 列から順に、付けた位置の緯度・経度とカメラの位置の緯度・経度を読み、使う位置にする。
+fn effective_location_of(row: &rusqlite::Row<'_>, first: usize) -> Result<Option<GpsCoord>> {
+    let assigned: (Option<f64>, Option<f64>) = (row.get(first)?, row.get(first + 1)?);
+    if let (Some(lat), Some(lon)) = assigned {
+        return Ok(Some(coord(lat, lon)?));
+    }
+    Ok(gps_columns(row, first + 2, first + 3)?)
 }
 
 #[cfg(test)]

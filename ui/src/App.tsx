@@ -3,10 +3,10 @@
 // レイアウト:
 //
 // | 上 | TopBar（カタログ・表示モード・取り込み・書き出し・ジョブ・設定） |
-// | 左 | グリッド・ルーペ・比較・選別: LibraryLeftPanel（フォルダ・絞り込み） / 現像: DevelopLeftPanel（履歴） |
-// | 中 | グリッド: FilterBar ＋ Grid / ルーペ: Loupe / 比較: CompareView / 選別: SurveyView / 現像: DevelopView |
-// | 右 | グリッド・ルーペ・比較・選別: MetadataPanel / 現像: DevelopPanel |
-// | 下 | ルーペ・比較・選別・現像: Filmstrip、StatusBar |
+// | 左 | グリッド・ルーペ・比較・選別・地図: LibraryLeftPanel（フォルダ・絞り込み） / 現像: DevelopLeftPanel（履歴） |
+// | 中 | グリッド: FilterBar ＋ Grid / ルーペ: Loupe / 比較: CompareView / 選別: SurveyView / 地図: FilterBar ＋ MapView / 現像: DevelopView |
+// | 右 | グリッド・ルーペ・比較・選別・地図: MetadataPanel / 現像: DevelopPanel |
+// | 下 | ルーペ・比較・選別・地図・現像: Filmstrip、StatusBar |
 
 import { useEffect, useState } from "react";
 
@@ -28,6 +28,7 @@ import { WelcomeScreen } from "./dialogs/WelcomeScreen";
 import { useHotkeys } from "./keyboard";
 import { FilterBar } from "./library/FilterBar";
 import { Grid } from "./library/Grid";
+import { MapView } from "./library/MapView";
 import { LibraryLeftPanel } from "./library/LibraryLeftPanel";
 import { MetadataPanel } from "./library/MetadataPanel";
 import { PhotoDragGhost } from "./library/PhotoDragGhost";
@@ -99,6 +100,8 @@ function useGlobalHotkeys(enabled: boolean) {
       // 比較表示・選別表示（LIB-03。state/compare.ts。← → などは CompareView・SurveyView が受け持つ）。
       c: () => void openCompare(),
       n: () => openSurvey(),
+      // 地図（LIB-18）。M は動画の消音（viewer/VideoPlayer.tsx）なので Shift + M。
+      "shift+m": () => actions.setMode("map"),
       d: () => actions.setMode("develop"),
       Escape: () => {
         if (appStore.get().mode !== "grid") actions.setMode("grid");
@@ -118,7 +121,7 @@ function useGlobalHotkeys(enabled: boolean) {
       "7": () => actions.toggleColorLabel("yellow"),
       "8": () => actions.toggleColorLabel("green"),
       "9": () => actions.toggleColorLabel("blue"),
-      ...(mode === "loupe" || mode === "develop"
+      ...(mode === "loupe" || mode === "map" || mode === "develop"
         ? {
             ArrowLeft: () => actions.moveSelection(-1),
             ArrowRight: () => actions.moveSelection(1),
@@ -230,6 +233,12 @@ function Workspace() {
           {mode === "loupe" && <Loupe />}
           {mode === "compare" && <CompareView />}
           {mode === "survey" && <SurveyView />}
+          {mode === "map" && (
+            <>
+              <FilterBar />
+              <MapView />
+            </>
+          )}
           {mode === "develop" && <DevelopView />}
         </section>
         <aside className="right">{mode === "develop" ? <DevelopPanel /> : <MetadataPanel />}</aside>

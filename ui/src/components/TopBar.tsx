@@ -1,4 +1,4 @@
-// 上の帯（カタログ名・表示モード（グリッド・ルーペ・比較・選別・現像）・取り込み・書き出し・ジョブ・設定）。
+// 上の帯（カタログ名・表示モード（グリッド・ルーペ・比較・選別・地図・現像）・取り込み・書き出し・ジョブ・設定）。
 
 import { JobsIndicator } from "../dialogs/JobsIndicator";
 import { comboLabel } from "../keyboard";
@@ -42,6 +42,13 @@ export function TopBar() {
           title={`選別表示: 選んだ写真を並べる（${comboLabel("n")}）`}
         >
           選別
+        </button>
+        <button
+          className={mode === "map" ? "on" : ""}
+          onClick={() => actions.setMode("map")}
+          title={`地図: 写真を撮影地に並べ、地図から探す（${comboLabel("shift+m")}）`}
+        >
+          地図
         </button>
         <button className={mode === "develop" ? "on" : ""} onClick={() => actions.setMode("develop")} title={`現像（${comboLabel("d")}）`}>
           現像

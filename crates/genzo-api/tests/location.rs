@@ -352,3 +352,181 @@ fn json_commands_for_locations() {
     }
     core.close().unwrap();
 }
+
+/// 地図の表示（LIB-18）: 表示中の検索結果の写真を、使う位置（付けた位置があればそれ、なければカメラの位置）で
+/// ズームに合わせてまとめる。位置を変えたら読み直す。地図の範囲・位置の有無で探せ、位置の条件で表示している間に
+/// 位置を変えたら検索結果を作り直す。範囲・ズームの誤り、古い世代、JSON のコマンドの形。
+#[test]
+fn map_clusters_and_searching_by_location() {
+    use genzo_api::{GeoBounds, SearchFilter, SearchSort};
+
+    let env = Env::new();
+    write_jpeg(
+        &env.photos.join("CAM.jpg"),
+        (64, 48),
+        1,
+        Some(&exif(Some("2024-05-01 10:00:00"), None, Some(CAMERA))),
+    );
+    write_jpeg(
+        &env.photos.join("NOGPS.jpg"),
+        (64, 48),
+        2,
+        Some(&exif(Some("2024-05-01 10:01:00"), None, None)),
+    );
+    write_jpeg(
+        &env.photos.join("T.jpg"),
+        (64, 48),
+        3,
+        Some(&exif(Some("2024-05-01 10:02:00"), None, None)),
+    );
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let cam = by_name(&items, "CAM.jpg").variant_id;
+    let t = by_name(&items, "T.jpg").variant_id;
+    let world = GeoBounds::new(-90.0, -180.0, 90.0, 180.0).unwrap();
+    let r = core
+        .search(&SearchFilter::default(), SearchSort::default())
+        .unwrap();
+
+    let m = core.map_clusters(r.generation, world, 3).unwrap();
+    assert_eq!((m.located, m.unlocated, m.in_bounds), (1, 2, 1));
+    assert_eq!(m.clusters.len(), 1);
+    assert_eq!((m.clusters[0].count, m.clusters[0].variant_id), (1, cam));
+    assert_eq!(m.clusters[0].index, 0);
+    assert!(near(
+        Some(GpsCoord {
+            lat: m.clusters[0].lat,
+            lon: m.clusters[0].lon
+        }),
+        CAMERA
+    ));
+    let ext = m.extent.unwrap();
+    assert!((ext.south - CAMERA.lat).abs() < 1e-6 && (ext.east - CAMERA.lon).abs() < 1e-6);
+    assert!(!m.truncated);
+
+    // 位置を付けると、同じ世代でも読み直す。東京と京都はズーム 3 では 1 つ、ズーム 8 では 2 つ。
+    core.edit_locations(&[t], Some(TOKYO)).unwrap();
+    let m = core.map_clusters(r.generation, world, 3).unwrap();
+    assert_eq!((m.located, m.unlocated), (2, 1));
+    let counts: Vec<u64> = m.clusters.iter().map(|c| c.count).collect();
+    assert_eq!(counts, vec![2]);
+    let b = m.clusters[0].bounds;
+    assert!((b.west - CAMERA.lon).abs() < 1e-6 && (b.east - TOKYO.lon).abs() < 1e-9);
+    let m = core.map_clusters(r.generation, world, 8).unwrap();
+    let reps: Vec<(VariantId, u64)> = m.clusters.iter().map(|c| (c.variant_id, c.count)).collect();
+    assert_eq!(reps, vec![(cam, 1), (t, 1)]);
+    // 範囲の外は数えない（東京の付近だけ）。
+    let tokyo_area = GeoBounds::new(35.0, 139.0, 36.0, 140.5).unwrap();
+    let m = core.map_clusters(r.generation, tokyo_area, 8).unwrap();
+    assert_eq!((m.in_bounds, m.located), (1, 2));
+
+    // 位置の有無・地図の範囲で探す。
+    let count = |f: SearchFilter| core.search(&f, SearchSort::default()).unwrap().count;
+    assert_eq!(
+        count(SearchFilter {
+            has_location: Some(true),
+            ..SearchFilter::default()
+        }),
+        2
+    );
+    assert_eq!(
+        count(SearchFilter {
+            has_location: Some(false),
+            ..SearchFilter::default()
+        }),
+        1
+    );
+    let in_tokyo = SearchFilter {
+        location_bounds: Some(tokyo_area),
+        ..SearchFilter::default()
+    };
+    let r = core.search(&in_tokyo, SearchSort::default()).unwrap();
+    assert_eq!(r.count, 1);
+    assert_eq!(
+        core.range(r.generation, 0, 10).unwrap().items[0].variant_id,
+        t
+    );
+    // 位置の条件で表示している間に位置を消すと、検索結果を作り直す（東京の範囲から外れる）。
+    core.edit_locations(&[t], None).unwrap();
+    let cur = core
+        .wait_search_refreshed(Some(std::time::Duration::from_secs(120)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(cur.count, 0);
+    assert!(cur.generation > r.generation);
+
+    // 範囲の誤り（南北の逆・範囲外）とズームの誤りは invalid_input、古い世代は Stale。
+    let bad = GeoBounds {
+        south: 10.0,
+        west: 0.0,
+        north: 5.0,
+        east: 1.0,
+    };
+    assert_eq!(
+        core.map_clusters(cur.generation, bad, 3)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        core.search(
+            &SearchFilter {
+                location_bounds: Some(bad),
+                ..SearchFilter::default()
+            },
+            SearchSort::default()
+        )
+        .unwrap_err()
+        .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        core.map_clusters(cur.generation, world, 25)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert!(matches!(
+        core.map_clusters(r.generation, world, 3),
+        Err(ApiError::Stale { .. })
+    ));
+
+    // JSON のコマンド（画面の形）。
+    let all = core
+        .search(&SearchFilter::default(), SearchSort::default())
+        .unwrap();
+    let out: serde_json::Value = serde_json::from_str(
+        &core.execute_json(
+            &serde_json::json!({
+                "type": "map_clusters",
+                "generation": all.generation,
+                "bounds": {"south": -90.0, "west": -180.0, "north": 90.0, "east": 180.0},
+                "zoom": 2
+            })
+            .to_string(),
+        ),
+    )
+    .unwrap();
+    let ok = &out["ok"];
+    assert_eq!(ok["type"], "map_clusters", "{out}");
+    assert_eq!(
+        (ok["located"].as_u64(), ok["unlocated"].as_u64()),
+        (Some(1), Some(2))
+    );
+    assert_eq!(ok["clusters"][0]["variant_id"], cam.get());
+    assert!(ok["clusters"][0]["bounds"]["south"].is_f64(), "{out}");
+    let out: serde_json::Value = serde_json::from_str(
+        &core.execute_json(
+            &serde_json::json!({
+                "type": "search",
+                "filter": {"has_location": false},
+                "sort": {}
+            })
+            .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(out["ok"]["count"], 2, "{out}");
+    core.close().unwrap();
+}

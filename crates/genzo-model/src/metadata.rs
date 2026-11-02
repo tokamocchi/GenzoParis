@@ -30,6 +30,59 @@ impl GpsCoord {
     }
 }
 
+/// 地図の範囲（緯度・経度の矩形。LIB-18 の地図から探す・地図の表示）。
+///
+/// - 緯度は `south` 以上 `north` 以下（-90〜90。`south <= north`）。
+/// - 経度は `west`・`east`（-180〜180）。`west <= east` なら `west` 以上 `east` 以下、`west > east` なら経度
+///   180 度の線をまたぐ範囲（`west` 以上 180 以下か、-180 以上 `east` 以下）。両端を含む。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GeoBounds {
+    /// 南の端の緯度。
+    pub south: f64,
+    /// 西の端の経度。
+    pub west: f64,
+    /// 北の端の緯度。
+    pub north: f64,
+    /// 東の端の経度。
+    pub east: f64,
+}
+
+impl GeoBounds {
+    /// 範囲内の有限の値なら範囲を作る。
+    pub fn new(south: f64, west: f64, north: f64, east: f64) -> Option<Self> {
+        let b = Self {
+            south,
+            west,
+            north,
+            east,
+        };
+        b.is_valid().then_some(b)
+    }
+
+    /// 範囲内の有限の値で、`south <= north` か。
+    pub fn is_valid(&self) -> bool {
+        GpsCoord::new(self.south, self.west).is_some()
+            && GpsCoord::new(self.north, self.east).is_some()
+            && self.south <= self.north
+    }
+
+    /// 経度 180 度の線をまたぐか（`west > east`）。
+    pub fn crosses_antimeridian(&self) -> bool {
+        self.west > self.east
+    }
+
+    /// 座標が範囲の中か（端を含む）。
+    pub fn contains(&self, g: GpsCoord) -> bool {
+        let lat = (self.south..=self.north).contains(&g.lat);
+        let lon = if self.crosses_antimeridian() {
+            g.lon >= self.west || g.lon <= self.east
+        } else {
+            (self.west..=self.east).contains(&g.lon)
+        };
+        lat && lon
+    }
+}
+
 /// EXIF の向き（Orientation タグ。1〜8）。
 ///
 /// JSON・DB では EXIF の値（整数）で表す。
@@ -233,6 +286,40 @@ impl VideoMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geo_bounds_check_ranges_and_wrap_at_the_antimeridian() {
+        let tokyo = GpsCoord::new(35.68, 139.77).unwrap();
+        let fiji = GpsCoord::new(-17.7, 178.0).unwrap();
+        let tahiti = GpsCoord::new(-17.5, -149.5).unwrap();
+        let japan = GeoBounds::new(24.0, 122.0, 46.0, 154.0).unwrap();
+        assert!(!japan.crosses_antimeridian());
+        assert!(japan.contains(tokyo));
+        assert!(!japan.contains(fiji));
+        // 端を含む。
+        assert!(japan.contains(GpsCoord::new(24.0, 154.0).unwrap()));
+        // 経度 180 度の線をまたぐ範囲（西の端 170、東の端 -170）。
+        let pacific = GeoBounds::new(-20.0, 170.0, -10.0, -170.0).unwrap();
+        assert!(pacific.crosses_antimeridian());
+        assert!(pacific.contains(fiji));
+        assert!(!pacific.contains(tahiti));
+        assert!(pacific.contains(GpsCoord::new(-15.0, -180.0).unwrap()));
+        assert!(pacific.contains(GpsCoord::new(-15.0, 180.0).unwrap()));
+        // 世界のすべて。
+        let world = GeoBounds::new(-90.0, -180.0, 90.0, 180.0).unwrap();
+        assert!(world.contains(fiji) && world.contains(tahiti));
+        // 範囲外・南北の逆・NaN は作れない。
+        for (s, w, n, e) in [
+            (10.0, 0.0, 5.0, 1.0),
+            (-91.0, 0.0, 0.0, 1.0),
+            (0.0, -181.0, 1.0, 1.0),
+            (0.0, 0.0, 1.0, 180.5),
+            (f64::NAN, 0.0, 1.0, 1.0),
+            (0.0, 0.0, f64::INFINITY, 1.0),
+        ] {
+            assert_eq!(GeoBounds::new(s, w, n, e), None, "{s} {w} {n} {e}");
+        }
+    }
 
     #[test]
     fn serials_are_normalized() {

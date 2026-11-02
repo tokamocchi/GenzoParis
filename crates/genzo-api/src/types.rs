@@ -7,9 +7,9 @@ use std::sync::Arc;
 use chrono::{DateTime, FixedOffset, Utc};
 use genzo_model::{
     AssetId, AssetKind, CaptureTime, CollectionId, CollectionKind, ColorLabel, DevelopSettings,
-    FileId, FileRole, FileStatus, Flag, FolderId, GpsCoord, HistoryEntryId, IptcMetadata,
-    KeywordId, MetadataField, Orientation, OutputColorSpace, Rating, RenderQuality, SmartRule,
-    SnapshotId, StackId, VariantId, VideoMetadata, VolumeId,
+    FileId, FileRole, FileStatus, Flag, FolderId, GeoBounds, GpsCoord, HistoryEntryId,
+    IptcMetadata, KeywordId, MetadataField, Orientation, OutputColorSpace, Rating, RenderQuality,
+    SmartRule, SnapshotId, StackId, VariantId, VideoMetadata, VolumeId,
 };
 use genzo_pipeline::ImageTile;
 use serde::{Deserialize, Serialize, Serializer};
@@ -570,9 +570,25 @@ pub struct SearchFilter {
     /// スタック（LIB-12）を、保存した折りたたみの状態によらず、すべて展開して並べるか（[`crate::Core::search`]
     /// の結果のまとめ方だけに効く。一致する写真・件数（[`crate::Core::count`]）は変わらない）。
     pub expand_stacks: bool,
+    /// 位置の範囲（LIB-18。地図から探す。使う位置（付けた位置があればそれ、なければカメラの位置）が範囲の
+    /// 中のもの。位置のないものは除く）。`west > east` は経度 180 度の線をまたぐ範囲。
+    pub location_bounds: Option<GeoBounds>,
+    /// 位置があるか（LIB-18。`true` は使う位置のあるもの、`false` はないもの）。
+    pub has_location: Option<bool>,
 }
 
 impl SearchFilter {
+    /// 条件の値を確かめる（範囲外の位置の範囲は [`ApiError::InvalidArgument`]。JSON の数は NaN・無限にならない）。
+    pub(crate) fn check(&self) -> Result<(), crate::ApiError> {
+        match self.location_bounds {
+            Some(b) if !b.is_valid() => Err(crate::ApiError::InvalidArgument(
+                "位置の範囲が不正です（緯度は -90〜90 で南の端が北の端以下、経度は -180〜180 の値を指定してください）"
+                    .to_owned(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// genzo-catalog の条件にする。
     pub(crate) fn to_catalog(&self) -> genzo_catalog::Filter {
         genzo_catalog::Filter {
@@ -602,6 +618,8 @@ impl SearchFilter {
             masters_only: self.masters_only,
             collection: self.collection_id,
             smart_rule: self.smart_rule.clone(),
+            location_bounds: self.location_bounds,
+            has_location: self.has_location,
         }
     }
 
@@ -2953,6 +2971,49 @@ pub struct Timeline {
     pub days: u64,
     /// 撮影日時の分からない写真・動画の数。
     pub without_time: u64,
+}
+
+// ---------------------------------------------------------------------------
+// 地図の表示（LIB-18）
+// ---------------------------------------------------------------------------
+
+/// 地図の 1 つのまとまり（[`MapClusters`]。地図の上の近い写真をまとめた 1 つの印）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MapCluster {
+    /// 写真・動画の数（表示する数。仮想コピー・折りたたんだスタックの代表を含む）。
+    pub count: u64,
+    /// 印の位置（まとまりの写真の位置の平均）。
+    pub lat: f64,
+    /// 印の位置の経度。
+    pub lon: f64,
+    /// まとまりの写真の位置を囲む範囲（押したときに地図を寄せる範囲。180 度の線はまたがない）。
+    pub bounds: GeoBounds,
+    /// 代表の写真（検索結果の並びで最初のもの）。
+    pub variant_id: VariantId,
+    /// 代表の写真の、検索結果の中の位置。
+    pub index: u64,
+}
+
+/// 地図のまとまり（LIB-18。[`crate::Core::map_clusters`]）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MapClusters {
+    /// 検索結果の世代。
+    pub generation: u64,
+    /// まとめたズーム。
+    pub zoom: u8,
+    /// まとまり（代表の写真の検索結果の中の位置の順）。
+    pub clusters: Vec<MapCluster>,
+    /// 範囲の中の写真の数（まとまりの数の合計。`truncated` なら返したまとまりの合計より多い）。
+    pub in_bounds: u64,
+    /// 検索結果のうち、使う位置のある写真の数（範囲によらない）。
+    pub located: u64,
+    /// 検索結果のうち、使う位置のない写真の数。
+    pub unlocated: u64,
+    /// 使う位置のある写真をすべて囲む範囲（なければ `null`。地図を開いたときに写真の全体を見せる。180 度の線は
+    /// またがない）。
+    pub extent: Option<GeoBounds>,
+    /// まとまりが多すぎるため、写真の多いものから [`crate::MAX_MAP_CLUSTERS`] 個だけ返したか。
+    pub truncated: bool,
 }
 
 // ---------------------------------------------------------------------------

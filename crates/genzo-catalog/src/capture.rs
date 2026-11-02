@@ -674,9 +674,21 @@ impl Catalog {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
+        match self.scan_limits(ids.len())? {
+            Some((max_variant, max_asset)) => {
+                self.timeline_keys_by_scan(ids, max_variant, max_asset)
+            }
+            None => self.timeline_keys_by_id(ids),
+        }
+    }
+
+    /// 検索結果の全体（`ids_len` 件）を読むとき（タイムライン・地図の位置）に、asset と variant の表を順に読む方が
+    /// よいか（[`Catalog::timeline_keys`] の doc の条件）。よければ variant と asset の id の最大を返す（id ごとに
+    /// 引く方がよければ `None`）。
+    pub(crate) fn scan_limits(&self, ids_len: usize) -> Result<Option<(i64, i64)>> {
         // 少なければ、表の数を数えずに id ごとに引く（数えるだけで 50 万件では数十ミリ秒かかる）。
-        if ids.len() < SCAN_MIN_IDS {
-            return self.timeline_keys_by_id(ids);
+        if ids_len < SCAN_MIN_IDS {
+            return Ok(None);
         }
         let (max_variant, variants): (i64, i64) = self.conn.query_row(
             "SELECT ifnull(max(id), 0), count(*) FROM variant",
@@ -690,14 +702,10 @@ impl Catalog {
                 })?;
         // id が疎ら（削除が多い）なら、id で引く表が大きくなりすぎるので使わない。
         let dense = |max: i64, n: i64| max <= n.saturating_mul(4).saturating_add(1_000_000);
-        if (ids.len() as i64).saturating_mul(4) >= variants
+        Ok(((ids_len as i64).saturating_mul(4) >= variants
             && dense(max_variant, variants)
-            && dense(max_asset, assets)
-        {
-            self.timeline_keys_by_scan(ids, max_variant, max_asset)
-        } else {
-            self.timeline_keys_by_id(ids)
-        }
+            && dense(max_asset, assets))
+        .then_some((max_variant, max_asset)))
     }
 
     /// [`Catalog::timeline_keys`] の、id ごとに引く方法。
@@ -727,6 +735,28 @@ impl Catalog {
         Ok(out)
     }
 
+    /// variant の id → asset の id の表（添字が variant の id。0 は見つからない）。variant の表を順に読む（索引
+    /// variant_asset だけを読む）。id は `max_variant` 以下の正の数。
+    pub(crate) fn variant_assets_by_scan(&self, max_variant: i64) -> Result<Vec<u32>> {
+        let len = usize::try_from(max_variant).unwrap_or(0).saturating_add(1);
+        let mut asset_of = vec![0u32; len];
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, asset_id FROM variant")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let asset: i64 = row.get(1)?;
+            if let (Some(slot), Ok(a)) = (
+                usize::try_from(id).ok().and_then(|i| asset_of.get_mut(i)),
+                u32::try_from(asset),
+            ) {
+                *slot = a;
+            }
+        }
+        Ok(asset_of)
+    }
+
     /// [`Catalog::timeline_keys`] の、表を順に読む方法（id は `max_*` 以下の正の数）。
     pub(crate) fn timeline_keys_by_scan(
         &self,
@@ -749,24 +779,7 @@ impl Catalog {
                 }
             }
         }
-        // variant → asset（0 は見つからない）。索引 variant_asset だけを読む。
-        let mut asset_of = vec![0u32; len(max_variant)];
-        {
-            let mut stmt = self
-                .conn
-                .prepare_cached("SELECT id, asset_id FROM variant")?;
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let id: i64 = row.get(0)?;
-                let asset: i64 = row.get(1)?;
-                if let (Some(slot), Ok(a)) = (
-                    usize::try_from(id).ok().and_then(|i| asset_of.get_mut(i)),
-                    u32::try_from(asset),
-                ) {
-                    *slot = a;
-                }
-            }
-        }
+        let asset_of = self.variant_assets_by_scan(max_variant)?;
         Ok(ids
             .iter()
             .map(|v| {

@@ -78,6 +78,17 @@ export interface GpsCoord {
   lon: number;
 }
 
+/**
+ * 地図の範囲（genzo-model の GeoBounds。LIB-18）。緯度は south 以上 north 以下、経度は west 以上 east 以下
+ * （-180〜180。west > east は経度 180 度の線をまたぐ範囲）。両端を含む。
+ */
+export interface GeoBounds {
+  south: number;
+  west: number;
+  north: number;
+  east: number;
+}
+
 export interface CaptureTime {
   /** 元の日時の文字列。 */
   raw: string | null;
@@ -1312,6 +1323,13 @@ export interface SearchFilter {
    * 一致する写真・件数は変わらない）。
    */
   expand_stacks?: boolean;
+  /**
+   * 地図の範囲（LIB-18。地図から探す。使う位置（付けた位置があればそれ、なければカメラの位置）が範囲の中のもの。
+   * 位置のないものは除く）。
+   */
+  location_bounds?: GeoBounds | null;
+  /** 位置があるか（LIB-18。true は使う位置のあるもの、false はないもの）。 */
+  has_location?: boolean | null;
 }
 
 export type SortKey = "capture_time" | "file_name" | "rating" | "import_order";
@@ -2216,6 +2234,7 @@ export type Command =
   | { type: "location_edits" }
   | { type: "undo_location_edit" }
   | { type: "timeline"; generation: number; gap_seconds: number }
+  | { type: "map_clusters"; generation: number; bounds: GeoBounds; zoom: number }
   | { type: "volumes"; refresh?: boolean }
   | { type: "plan_move_files"; variant_ids: VariantId[]; dest_folder: FolderId }
   | { type: "move_files"; variant_ids: VariantId[]; dest_folder: FolderId }
@@ -2320,6 +2339,7 @@ export type Response =
   | { type: "location_edits"; edits: LocationEditInfo[] }
   | { type: "location_undone"; undone: LocationUndo | null }
   | ({ type: "timeline" } & Timeline)
+  | ({ type: "map_clusters" } & MapClusters)
   | { type: "volumes"; volumes: VolumeInfo[] }
   | ({ type: "move_plan" } & FileMovePlan)
   | ({ type: "rename_plan" } & FileRenamePlan)
@@ -2438,6 +2458,41 @@ export interface Timeline {
   events_merged: boolean;
   days: number;
   without_time: number;
+}
+
+// ---------------------------------------------------------------------------
+// 地図の表示（LIB-18）
+// ---------------------------------------------------------------------------
+
+/** 地図の 1 つのまとまり（genzo-api の MapCluster。近い写真をまとめた 1 つの印）。 */
+export interface MapCluster {
+  /** 写真・動画の数。 */
+  count: number;
+  /** 印の位置（まとまりの写真の位置の平均）。 */
+  lat: number;
+  lon: number;
+  /** まとまりの写真の位置を囲む範囲（押したときに地図を寄せる範囲。180 度の線はまたがない）。 */
+  bounds: GeoBounds;
+  /** 代表の写真（検索結果の並びで最初のもの）と、その検索結果の中の位置。 */
+  variant_id: VariantId;
+  index: number;
+}
+
+/** 地図のまとまり（genzo-api の MapClusters。core.mapClusters）。 */
+export interface MapClusters {
+  generation: number;
+  zoom: number;
+  /** まとまり（代表の写真の検索結果の中の位置の順）。 */
+  clusters: MapCluster[];
+  /** 範囲の中の写真の数。 */
+  in_bounds: number;
+  /** 検索結果のうち、使う位置のある写真・ない写真の数（範囲によらない）。 */
+  located: number;
+  unlocated: number;
+  /** 使う位置のある写真をすべて囲む範囲（なければ null）。 */
+  extent: GeoBounds | null;
+  /** まとまりが多すぎるため、写真の多いものから一部だけ返したか。 */
+  truncated: boolean;
 }
 
 // ---------------------------------------------------------------------------
