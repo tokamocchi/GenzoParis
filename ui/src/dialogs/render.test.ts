@@ -10,6 +10,7 @@ import {
   MOCK_CRASH_REPORT,
   MOCK_IMPORT_PREFERENCES,
   MOCK_LOG_STATUS,
+  mockDevelopPresets,
   mockExportPresets,
 } from "../api/mock";
 import type { AppStatus, CatalogStatus, DevelopSettings, ErrorInfo } from "../api/types";
@@ -169,6 +170,34 @@ describe("ダイアログ", () => {
     const empty = render(createElement(ImportDialog));
     expect(empty).toContain("コピー先のフォルダを選んでください");
     expect(empty).toMatch(/<button class="btn primary" disabled="">コピーして取り込む<\/button>/);
+  });
+
+  it("取り込み（当てる現像プリセット。IMP-07）", () => {
+    presetsStore.set({ develop: mockDevelopPresets(), errors: {} });
+    try {
+      appStore.set({ status: { ...status, settings: { ...status.settings, import: MOCK_IMPORT_PREFERENCES } } });
+      const html = render(createElement(ImportDialog));
+      expect(html).toContain("取り込み時に当てる現像プリセット");
+      expect(html).toContain('<option value="0000000000000001" selected="">明るく</option>');
+      expect(html).toContain('<optgroup label="ルック"><option value="0000000000000002">フィルム風</option></optgroup>');
+      expect(html).not.toContain("新しい形式");
+      expect(html).toContain("含める項目: ");
+      expect(html).toContain(">コピーして取り込む</button>");
+      expect(html).not.toContain("見つかりません（削除");
+      // 選んでいたプリセットが一覧にない（削除された）ときは、理由を出して取り込めない。
+      appStore.set({
+        status: {
+          ...status,
+          settings: { ...status.settings, import: { ...MOCK_IMPORT_PREFERENCES, develop_preset: "0000000000000009" } },
+        },
+      });
+      const missing = render(createElement(ImportDialog));
+      expect(missing).toContain("（見つからないプリセット）");
+      expect(missing).toContain("選んでいた現像プリセットが見つかりません");
+      expect(missing).toContain('<div class="dlg-warn"><div>選んでいた現像プリセットが見つかりません');
+    } finally {
+      presetsStore.set({ develop: null });
+    }
   });
 
   it("取り込み（点を含む名前のフォルダに、名前だけで注意を出さない）", () => {

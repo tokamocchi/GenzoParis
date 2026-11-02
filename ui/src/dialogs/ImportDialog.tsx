@@ -6,6 +6,9 @@
 //   （テンプレート・連番・任意の文字。IMP-03）。名前の例はコアの import_name_preview で作る（見本の写真）。
 // - 取り込み時に付けるもの（IMP-05）: キーワード（「場所 > 京都, 家族」。LIB-09）と説明のメタデータ（作成者・
 //   著作権など。LIB-15）を、新しく登録した写真すべてに付ける。
+// - 取り込み時に当てる現像プリセット（IMP-07）: 現像プリセット（DEV-29。一覧は state/presets.ts）を選ぶと、新しく
+//   登録した写真（動画を除く）に、プリセットの含める項目を当てる（コアの ImportOptions の develop_preset）。選んでいた
+//   プリセットが一覧にない・使えないときは、理由を出して取り込めない（黙って当てずに取り込まない）。
 // - 重複と思われるもの（IMP-04）・RAW と同時記録の JPEG（IMP-06）: 初めの値はカタログの設定で、変えたら
 //   カタログの設定に保存して次の既定にする（importLogic.ts の importChoiceRequest）。
 // - それ以外の設定（方法・コピー先・規則・付けるもの・サブフォルダ）は、取り込みを始めたときにアプリの設定に
@@ -21,8 +24,10 @@ import * as appApi from "../api/app";
 import * as core from "../api/core";
 import type { MetadataField, NamePreview } from "../api/types";
 import { Dialog } from "../components/Dialog";
+import { describeGroups, groupPresets } from "../develop/presetLogic";
 import { COPYRIGHT_STATUS_OPTIONS, MAX_METADATA_CHARS, METADATA_GROUPS } from "../library/metadataEdit";
 import { actions, appStore, useApp } from "../state/app";
+import { reloadPresets, usePresets } from "../state/presets";
 import { baseName } from "./dialogFormat";
 import { onImportFolders, takeImportFolders } from "./importDrop";
 import {
@@ -38,6 +43,7 @@ import {
   importFormFrom,
   importOptionsOf,
   importPreferencesOf,
+  importPresetChoice,
   insertToken,
   metadataCount,
   nonFolderPaths,
@@ -123,12 +129,22 @@ export function ImportDialog() {
   const kinds = usePathKinds(folders, chosen);
   const preview = useNamePreview(form);
   const templateRef = useRef<HTMLInputElement>(null);
-  const errors = useMemo(() => validateImportForm(form), [form]);
+  const developPresets = usePresets((s) => s.develop);
+  const presetsError = usePresets((s) => s.errors.develop ?? null);
+  const presetChoice = importPresetChoice(developPresets, form.developPreset);
+  const errors = useMemo(() => {
+    const list = validateImportForm(form);
+    return presetChoice.problem ? [...list, presetChoice.problem] : list;
+  }, [form, presetChoice.problem]);
   const update = (patch: Partial<ImportForm>) => setForm((f) => ({ ...f, ...patch }));
   const setField = (field: MetadataField, value: string) =>
     setForm((f) => ({ ...f, fields: { ...f.fields, [field]: value } }));
 
   useEffect(() => onImportFolders(setFolders), []);
+  // 現像プリセット（IMP-07）の一覧（まだ読んでいなければ読む）。
+  useEffect(() => {
+    if (developPresets === null) void reloadPresets("develop");
+  }, [developPresets]);
 
   const choose = async () => {
     setChoosing(true);
@@ -418,6 +434,51 @@ export function ImportDialog() {
           </div>
         </div>
       )}
+      <div className="dlg-section">
+        <h3>取り込み時に当てる現像プリセット</h3>
+        <div className="field">
+          <label htmlFor="import-develop-preset">プリセット</label>
+          <select
+            id="import-develop-preset"
+            value={form.developPreset}
+            onChange={(e) => update({ developPreset: e.target.value })}
+          >
+            <option value="">なし（何も当てない）</option>
+            {form.developPreset !== "" && (developPresets === null || presetChoice.preset === null) && (
+              <option value={form.developPreset}>
+                {developPresets === null ? "前回選んだプリセット" : "（見つからないプリセット）"}
+              </option>
+            )}
+            {groupPresets((developPresets ?? []).filter((p) => p.problem === null)).map((g) =>
+              g.folder === "" ? (
+                g.presets.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))
+              ) : (
+                <optgroup key={g.folder} label={g.folder}>
+                  {g.presets.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ),
+            )}
+            {presetChoice.preset?.problem && (
+              <option value={presetChoice.preset.id}>{presetChoice.preset.name}（使えません）</option>
+            )}
+          </select>
+        </div>
+        {presetChoice.preset && presetChoice.problem === null && (
+          <p className="hint">含める項目: {describeGroups(presetChoice.preset.groups)}</p>
+        )}
+        {presetsError && <p className="hint">現像プリセットの一覧を読めません: {presetsError}</p>}
+        <p className="hint">
+          新しく登録した写真に当てます（動画・登録済みの写真には当てません）。当てた写真は、取り込みの後に現像結果からサムネイルを作り直します。元のファイルは変えません。
+        </p>
+      </div>
       <details className="import-tags">
         <summary>
           取り込み時に付けるキーワード・メタデータ{tagCount > 0 ? `（${tagCount} 件）` : ""}

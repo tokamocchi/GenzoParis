@@ -136,9 +136,9 @@ pub use preview_cache::{
     PreviewScan, ReconcileReport, scan_preview_dir,
 };
 pub use register::{
-    Folder, ImportTags, JPEG_EXTENSIONS, MediaMetadata, PairClass, RAW_EXTENSIONS, RegisterFile,
-    RegisterOptions, RegisterOutcome, RegisterStatus, TagOutcome, Volume, normalize_rel_path,
-    pair_class, rel_path_from_path,
+    Folder, ImportApplied, ImportDevelop, ImportTags, JPEG_EXTENSIONS, MediaMetadata, PairClass,
+    RAW_EXTENSIONS, RegisterFile, RegisterOptions, RegisterOutcome, RegisterStatus, TagOutcome,
+    Volume, normalize_rel_path, pair_class, rel_path_from_path,
 };
 pub use schema::{
     AI_MASKS_SCHEMA_VERSION, BUSY_TIMEOUT, CACHE_SIZE_KIB, CAPTURE_TIME_EDITS_SCHEMA_VERSION,
