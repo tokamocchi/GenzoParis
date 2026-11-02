@@ -135,6 +135,6 @@ pub use preview::{
 pub use renderer::{ChainOutput, GpuRenderer, GpuTile, StageStep};
 pub use stages::{GpuStageEntry, GpuStageKind, GpuStageRegistry};
 pub use tolerance::{
-    DEFAULT_STAGE_TOLERANCE, DiffReport, FINAL_OUTPUT_MAX_DIFF_8BIT, StageTolerance, compare,
-    compare_pixels, max_diff_8bit, stage_tolerance,
+    ADOBE_RGB_LINEAR_ROUNDING, DEFAULT_STAGE_TOLERANCE, DiffReport, FINAL_OUTPUT_MAX_DIFF_8BIT,
+    PowerLawTolerance, StageTolerance, compare, compare_pixels, max_diff_8bit, stage_tolerance,
 };
