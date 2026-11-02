@@ -1421,5 +1421,6 @@ fn geometry_with_perspective_matches_the_cpu_version() {
             }
         });
     }
-    assert_eq!(compared, 3 * 2 * 2);
+    // 3 つの設定 × 入力の種類 2 つ（with_context はシーン参照・表示参照で呼ぶ）× 切り抜く前後 × 出力の範囲 2 つ。
+    assert_eq!(compared, 3 * 2 * 2 * 2);
 }

@@ -28,6 +28,7 @@
 //! | `finish.look` | 1e−5 | 1e−4 | `pow`（IEC 61966-2-1）、3D LUT の位置の差。llvmpipe で差の最大 1.639e−7（許容に対する比 0.005。2026-10-14 の計測。DEV-17） |
 //! | `output.display` | 1e−4 | 0 | 符号化（IEC 61966-2-1）の `pow`、色域の圧縮の割り算、3D LUT の位置の差（0〜1 の値） |
 //! | `output.export.*`・`output.cache.*` | 1e−4 | 0 | 同上（0〜1 の値） |
+//! | `output.export.adobe_rgb` | 1e−4 | 0 | 同上。加えて、0 付近では符号化の前の値の丸めの差 2^−21 をガンマで広げた幅まで許容する（下の「べき乗の符号化」） |
 //! | `sensor.highlight_recovery` | 1e−6 | 1e−5 | 近傍の組の積和（融合）と割り算（2.5 ULP） |
 //! | `sensor.noise_reduction` | 1e−5 | 1e−4 | 平方根（WGSL の `sqrt` の精度）・5 タップの積和を段の数だけ重ねる・縮小の割り算 |
 //! | `sensor.normalize`・`sensor.demosaic.half2x2` | 1e−7 | 1e−6 | 引き算と掛け算だけ |
@@ -35,6 +36,19 @@
 //! | `sensor.color_matrix` | 1e−6 | 1e−5 | 行列の積和（カメラプロファイルの色相彩度のマップがあれば HSV の表も。llvmpipe で差 0。DEV-17） |
 //! | `local.field`（ローカル補正の局所の値の面。DEV-18） | 1e−4 | 1e−4 | 立方根（色域の範囲の OKLab）・`pow`（輝度の範囲の IEC 61966-2-1）・`log2`（ステージ 15 の表の位置）・平方根（円形・色の距離）で重みがわずかに違い、差分（−100〜100）を掛ける |
 //! | 上にない ID（新しく登録したステージ） | 1e−5 | 1e−4 | [`DEFAULT_STAGE_TOLERANCE`] |
+//!
+//! # べき乗の符号化（Adobe RGB）
+//!
+//! Adobe RGB (1998) の伝達関数は直線部のない `x^(1/2.2)` なので、0 での傾きが無限大になる。行列・色域の圧縮で
+//! 0 付近になったチャンネル（色域の境界に寄せた色など）は、CPU 版と GPU 版で丸めの残りが違い（f32 の 1 ULP 程度。
+//! WGSL は積和の融合を許す）、符号化でその差が `δ^(1/2.2)` に広がる（δ = 2^−24 ≈ 6e−8 で 5.2e−4。8bit 換算 0.13）。
+//! IEC 61966-2-1（sRGB・Display P3）は 0 付近が傾き 12.92 の直線なので、同じ差は 1e−6 未満に収まる。
+//! そこで `output.export.adobe_rgb` だけ、符号化の前の値の差 [`ADOBE_RGB_LINEAR_ROUNDING`]（2^−21。1.0 の
+//! 4 ULP）を符号化した後の幅（[`PowerLawTolerance`]）を足す。この幅は 0 で最大（1.34e−3。8bit 換算 0.34 で、
+//! 下の IQ-07a の目安の内）で、値が大きくなると急に小さくなる（0.05 で約 8e−6）ので、中間調より明るい値は
+//! これまでどおり abs の 1e−4 で比べる。2026-11-02 に Intel UHD Graphics 770（Vulkan、ドライバー 101.7077）で
+//! 測った差は、符号化の前の値で 2^−24（CPU 2^−24 / GPU 4.2e−10、または 0）。2^−21 は 2026-11-02 に利用者が
+//! 了承した値（docs/implementation_status.md の判断の表 No.219）。
 //!
 //! 最終出力（17b の符号化した値）は **8bit 換算で ±1 以内**（IQ-07a の目安。[`FINAL_OUTPUT_MAX_DIFF_8BIT`]）。
 //! NaN・無限大は出力しない（どのステージも出力で 0 に置き換える）。
@@ -44,24 +58,76 @@
 //! B3 の契約（2.6 節: 輝度は 0〜1）の外の入力（輝度が 1 を大きく超える値）も比べない（ステージ 16 の
 //! 比率の計算 `y2 + r × (c − y)` で桁落ちが起き、`pow` の数 ULP の差が許容誤差を大きく超える）。
 
-/// 1 つのステージの許容誤差（`|GPU − CPU| ≤ abs + rel × |CPU|`）。
+use genzo_color::transfer::ADOBE_RGB_INV_GAMMA_F32;
+
+/// 1 つのステージの許容誤差（`|GPU − CPU| ≤ abs + rel × |CPU|`。べき乗の符号化があれば、その幅を足す）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StageTolerance {
     /// 絶対誤差。
     pub abs: f32,
     /// 相対誤差。
     pub rel: f32,
+    /// べき乗の符号化（`x^exponent`）の前の値の丸めの差を、符号化した後の幅として足すか（モジュールの doc の
+    /// 「べき乗の符号化」）。
+    pub power_law: Option<PowerLawTolerance>,
 }
+
+/// べき乗の符号化（`x^exponent`。0 < exponent < 1）の前の値の差 `linear_abs` を、符号化した後の値の幅に
+/// 直したもの（モジュールの doc の「べき乗の符号化」）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PowerLawTolerance {
+    /// 符号化の指数（Adobe RGB は 256/563）。
+    pub exponent: f32,
+    /// 符号化の前の値の差の上限。
+    pub linear_abs: f32,
+}
+
+impl PowerLawTolerance {
+    /// 符号化した値 `encoded`（CPU 版）の前の値が `linear_abs` だけ動いたときの、符号化した値の差の最大
+    /// （`x^p` は上に凸なので、下に動かす方が大きい。上に動かす方も比べる）。
+    pub fn allowance(&self, encoded: f32) -> f32 {
+        let p = f64::from(self.exponent);
+        let e = f64::from(encoded.abs());
+        let d = f64::from(self.linear_abs);
+        let x = e.powf(1.0 / p);
+        let down = e - (x - d).max(0.0).powf(p);
+        let up = (x + d).powf(p) - e;
+        down.max(up) as f32
+    }
+}
+
+/// Adobe RGB の符号化の前の値の丸めの差の上限（2^−21。1.0 の 4 ULP。モジュールの doc の「べき乗の符号化」）。
+pub const ADOBE_RGB_LINEAR_ROUNDING: f32 = 1.0 / 2_097_152.0;
 
 impl StageTolerance {
     /// 作る。
     pub const fn new(abs: f32, rel: f32) -> Self {
-        Self { abs, rel }
+        Self {
+            abs,
+            rel,
+            power_law: None,
+        }
+    }
+
+    /// べき乗の符号化の幅を足す。
+    pub const fn with_power_law(self, exponent: f32, linear_abs: f32) -> Self {
+        Self {
+            power_law: Some(PowerLawTolerance {
+                exponent,
+                linear_abs,
+            }),
+            ..self
+        }
     }
 
     /// 許容する差の上限。
     pub fn bound(&self, expected: f32) -> f32 {
-        self.abs + self.rel * expected.abs()
+        self.abs + self.rel * expected.abs() + self.power_law_allowance(expected)
+    }
+
+    /// べき乗の符号化の幅（なければ 0）。
+    fn power_law_allowance(&self, expected: f32) -> f32 {
+        self.power_law.map_or(0.0, |p| p.allowance(expected))
     }
 }
 
@@ -87,6 +153,8 @@ pub fn stage_tolerance(stage_id: &str) -> StageTolerance {
         "finish.profile_look_table" | "finish.look" => StageTolerance::new(1e-5, 1e-4),
         "local.field" => StageTolerance::new(1e-4, 1e-4),
         "output.display" => StageTolerance::new(1e-4, 0.0),
+        "output.export.adobe_rgb" => StageTolerance::new(1e-4, 0.0)
+            .with_power_law(ADOBE_RGB_INV_GAMMA_F32, ADOBE_RGB_LINEAR_ROUNDING),
         id if id.starts_with("output.export.") || id.starts_with("output.cache.") => {
             StageTolerance::new(1e-4, 0.0)
         }
@@ -155,7 +223,7 @@ pub fn compare(expected: &[f32], actual: &[f32], tol: StageTolerance) -> DiffRep
 }
 
 /// RGB の画像を許容誤差 `tol` で比べる。値ごとの上限は `abs + rel × m`（`m` は CPU 版のその画素の 3 つの値の
-/// 絶対値の最大。モジュールの doc）。[`DiffReport::worst_index`] は値の番号（画素の番号 × 3 + チャンネル）。
+/// 絶対値の最大。モジュールの doc）。べき乗の符号化の幅は、チャンネルごとの CPU 版の値で決める。[`DiffReport::worst_index`] は値の番号（画素の番号 × 3 + チャンネル）。
 pub fn compare_pixels(
     expected: &[[f32; 3]],
     actual: &[[f32; 3]],
@@ -165,8 +233,8 @@ pub fn compare_pixels(
         .iter()
         .map(|p| p.iter().fold(0.0f32, |m, v| m.max(v.abs())))
         .collect();
-    compare_by(expected.as_flattened(), actual.as_flattened(), |i, _| {
-        tol.bound(scale[i / 3])
+    compare_by(expected.as_flattened(), actual.as_flattened(), |i, e| {
+        tol.abs + tol.rel * scale[i / 3] + tol.power_law_allowance(e)
     })
 }
 
@@ -270,6 +338,33 @@ mod tests {
             1
         );
         assert!(compare_pixels(&[[0.0; 3]], &[[0.0; 3], [0.0; 3]], tol).length_mismatch);
+    }
+
+    #[test]
+    fn adobe_rgb_allows_the_rounding_near_zero_only() {
+        let tol = stage_tolerance("output.export.adobe_rgb");
+        assert_eq!(tol.abs, stage_tolerance("output.export.srgb").abs);
+        assert!(stage_tolerance("output.export.srgb").power_law.is_none());
+        let p = tol.power_law.unwrap();
+        // 0 での幅は (2^−21)^(256/563)（8bit 換算 0.34。IQ-07a の ±1 の内）。
+        let at_zero = p.allowance(0.0);
+        assert!((at_zero - 1.335e-3).abs() < 1e-6, "{at_zero}");
+        assert!(f64::from(at_zero) * 255.0 < FINAL_OUTPUT_MAX_DIFF_8BIT);
+        // 中間調より明るい値では幅はほぼ 0（abs の 1e−4 で比べる）。
+        assert!(p.allowance(0.05) < 1e-5, "{}", p.allowance(0.05));
+        assert!(p.allowance(0.5) < 1e-6, "{}", p.allowance(0.5));
+        // Intel UHD Graphics 770 で測った差（符号化の前の値で CPU 2^−24 / GPU 4.2e−10、または 0）は通る。
+        let cpu = [
+            [0.000_518_644_46f32, 0.3, 0.7],
+            [0.000_518_644_46, 0.2, 0.9],
+        ];
+        let gpu = [[0.000_054_737_528f32, 0.3, 0.7], [0.0, 0.2, 0.9]];
+        assert!(compare_pixels(&cpu, &gpu, tol).passed());
+        assert!(!compare_pixels(&cpu, &gpu, stage_tolerance("output.export.srgb")).passed());
+        // 0 付近でも、符号化の前の値で 2^−21 を大きく超える差は許容しない。
+        assert!(!compare_pixels(&[[0.0; 3]], &[[0.002, 0.0, 0.0]], tol).passed());
+        // 明るい値の差は abs の 1e−4 のまま。
+        assert!(!compare_pixels(&[[0.5; 3]], &[[0.5002, 0.5, 0.5]], tol).passed());
     }
 
     #[test]
