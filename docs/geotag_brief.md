@@ -109,7 +109,7 @@
 - コード・コメント・資料・PR は日本語。周りのコードの書き方（コメントの密度・命名）に合わせる。
 - 資料の更新の習慣: `docs/01_feature_inventory.md`（機能の一覧）、`docs/decision_log.md`（決定事項ログ）、`docs/implementation_status.md`（人の判断の表・進捗）、`docs/04_architecture.md`、`docs/catalog_schema.md`、`docs/third_party.md`（第三者の台帳）。AI が決めたことは「AI の仮決定（人の確認待ち）」と書く習慣がある。
 - 新しく入れるパッケージは信頼と実績のあるものだけ。版は正確に固定し、公開から 2 週間以上たったものにする。`cargo deny` の検査を通す。
-- 確認のコマンド（README の「開発」）: `cargo test --workspace`、`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、UI は `npm ci`・`npm test`・`npm run build`（`ui/` で）。
+- 確認のコマンド（[development.md](development.md)。当時は README の「開発」）: `cargo test --workspace`、`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、UI は `npm ci`・`npm test`・`npm run build`（`ui/` で）。
 
 ## 6. ブランチについて
 
