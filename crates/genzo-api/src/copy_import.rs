@@ -1364,7 +1364,11 @@ pub(crate) fn run_copy_import(
         rollback_pending(&mut pending);
     }
     state.remove_empty_created_dirs();
-    result?;
+    if let Err(e) = result {
+        // 先のバッチで現像プリセットを当てた写真（登録はコミット済み）は、失敗しても作り直す（IMP-07）。
+        crate::import::regenerate_developed(inner, developed);
+        return Err(e);
+    }
     if let Some(copy) = report.copy.as_mut() {
         copy.next_sequence = next_seq;
     }

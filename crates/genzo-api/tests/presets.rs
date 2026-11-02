@@ -655,3 +655,63 @@ fn import_with_an_unusable_develop_preset_does_not_start() {
     assert!(json["develop_preset"].is_null());
     core.close().unwrap();
 }
+
+/// 取り込み時の現像プリセット（IMP-07）: 当てたバッチを登録した後で取り込みが失敗しても、当てた写真は（アプリを
+/// 起動し直すのを待たずに）現像結果から作り直す（PR #22 の Codex の指摘。直す前は失敗の経路で `after_import`
+/// を通らず、埋め込みのサムネイルのままだった）。
+#[test]
+fn import_regenerates_preset_photos_even_when_a_later_step_fails() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use genzo_api::{CopyImportStage, JobState};
+
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (96, 64), 1, None);
+    let fail = Arc::new(AtomicBool::new(false));
+    let fail_in_hook = Arc::clone(&fail);
+    let core = env.open_with_hooks(move |h| {
+        h.on_copy_import = Some(Arc::new(move |stage: &CopyImportStage| match stage {
+            CopyImportStage::Registered(_) if fail_in_hook.swap(false, Ordering::SeqCst) => {
+                Err("登録の後の失敗（テスト）".to_owned())
+            }
+            _ => Ok(()),
+        }));
+    });
+    import(&core, &env.photos);
+    let a = all_items(&core)[0].variant_id;
+    core.paste_settings(&exposure(0.8), &[a], SettingGroups::ALL)
+        .unwrap();
+    let preset = core
+        .create_develop_preset("明るく", "", tone_only(), a)
+        .unwrap();
+    core.wait_idle();
+
+    let card = env.dir.path().join("card");
+    let dest = env.dir.path().join("copied");
+    std::fs::create_dir_all(&card).unwrap();
+    std::fs::create_dir_all(&dest).unwrap();
+    write_jpeg(&card.join("B.jpg"), (96, 64), 2, None);
+    fail.store(true, Ordering::SeqCst);
+    let options = genzo_api::ImportOptions {
+        develop_preset: Some(preset.id.clone()),
+        copy: Some(genzo_api::CopySettings {
+            destination: dest.clone(),
+            folder_rule: genzo_api::FolderRule::Single,
+            rename: None,
+        }),
+        ..Default::default()
+    };
+    let job = core.import_folder_with(&card, true, &options).unwrap();
+    let info = common::wait_done(&core, job);
+    assert_eq!(info.state, JobState::Failed, "{info:?}");
+    core.wait_idle();
+    // 登録とプリセットの保存はコミット済み。
+    let b = by_name(&all_items(&core), "B.jpg").variant_id;
+    assert_eq!(core.develop_settings(b).unwrap().exposure_ev, 0.8);
+    assert!(
+        core.preview_path(b).unwrap().is_some(),
+        "失敗しても、当てた写真は作り直す"
+    );
+    core.close().unwrap();
+}

@@ -810,164 +810,189 @@ fn run_import(
     // 取り込み時の現像プリセットを当てた写真（IMP-07。設定によらず現像結果から作り直す）。
     let mut developed: Vec<VariantId> = Vec::new();
     ctx.progress(0, total);
-    for chunk in files.chunks(IMPORT_BATCH_FILES) {
-        if ctx.is_cancelled() {
-            report.cancelled = true;
-            break;
-        }
-        let prepared = parallel_map(chunk, threads, |c| {
-            prepare(ctx, c, folders[&c.dir_rel], options)
-        });
-        if prepared.iter().any(|p| matches!(p, Prepared::Cancelled)) {
-            report.cancelled = true;
-            break;
-        }
-        // 登録（1 つのトランザクション）。
-        let mut requests: Vec<RegisterFile> = Vec::new();
-        let mut request_index: Vec<usize> = Vec::new();
-        // 登録する新しいファイルの全体のハッシュ（重複の確認で求めたもの。登録の後に記録する）。
-        let mut full_hashes: Vec<Option<String>> = Vec::new();
-        let mut thumbs: Vec<ThumbTask> = Vec::new();
-        let batch_duplicates = report.duplicates.len();
-        for (i, p) in prepared.into_iter().enumerate() {
-            match p {
-                Prepared::Register {
-                    request: r,
-                    new,
-                    check,
-                } => {
-                    let path = &chunk[i].path;
-                    let mut own_hash = check.full_hash;
-                    if new {
-                        // 登録済みのファイルと同じ内容（取り込む設定）か、同じ取り込みで先に登録したファイルと
-                        // 同じ内容か。
-                        let duplicate = match check.duplicate_of {
-                            Some(existing) => Some((existing.path, Some(existing.variant_id))),
-                            None => match seen.find(path, &r.facts, &mut own_hash, ctx.token()) {
-                                Ok(found) => found.map(|p| {
-                                    let v = seen.variant_of(&p);
-                                    (Some(p), v)
-                                }),
-                                Err(e) if e.is_cancelled() => {
-                                    report.cancelled = true;
-                                    break;
+    // バッチの登録（`?` で返る失敗は、先のバッチを登録した後のこともある。下で当てた写真を作り直す）。
+    let batches = (|| -> Result<(), ApiError> {
+        for chunk in files.chunks(IMPORT_BATCH_FILES) {
+            if ctx.is_cancelled() {
+                report.cancelled = true;
+                break;
+            }
+            let prepared = parallel_map(chunk, threads, |c| {
+                prepare(ctx, c, folders[&c.dir_rel], options)
+            });
+            if prepared.iter().any(|p| matches!(p, Prepared::Cancelled)) {
+                report.cancelled = true;
+                break;
+            }
+            // 登録（1 つのトランザクション）。
+            let mut requests: Vec<RegisterFile> = Vec::new();
+            let mut request_index: Vec<usize> = Vec::new();
+            // 登録する新しいファイルの全体のハッシュ（重複の確認で求めたもの。登録の後に記録する）。
+            let mut full_hashes: Vec<Option<String>> = Vec::new();
+            let mut thumbs: Vec<ThumbTask> = Vec::new();
+            let batch_duplicates = report.duplicates.len();
+            for (i, p) in prepared.into_iter().enumerate() {
+                match p {
+                    Prepared::Register {
+                        request: r,
+                        new,
+                        check,
+                    } => {
+                        let path = &chunk[i].path;
+                        let mut own_hash = check.full_hash;
+                        if new {
+                            // 登録済みのファイルと同じ内容（取り込む設定）か、同じ取り込みで先に登録したファイルと
+                            // 同じ内容か。
+                            let duplicate = match check.duplicate_of {
+                                Some(existing) => Some((existing.path, Some(existing.variant_id))),
+                                None => match seen.find(path, &r.facts, &mut own_hash, ctx.token())
+                                {
+                                    Ok(found) => found.map(|p| {
+                                        let v = seen.variant_of(&p);
+                                        (Some(p), v)
+                                    }),
+                                    Err(e) if e.is_cancelled() => {
+                                        report.cancelled = true;
+                                        break;
+                                    }
+                                    Err(e) => return Err(e),
+                                },
+                            };
+                            if let Some((existing_path, existing_variant_id)) = duplicate {
+                                report.duplicates.push(DuplicateFile {
+                                    path: path.clone(),
+                                    existing_path,
+                                    existing_variant_id,
+                                    skipped: options.skip_duplicates,
+                                });
+                                if options.skip_duplicates {
+                                    continue;
                                 }
-                                Err(e) => return Err(e),
-                            },
-                        };
-                        if let Some((existing_path, existing_variant_id)) = duplicate {
-                            report.duplicates.push(DuplicateFile {
-                                path: path.clone(),
-                                existing_path,
-                                existing_variant_id,
-                                skipped: options.skip_duplicates,
-                            });
-                            if options.skip_duplicates {
-                                continue;
                             }
+                            seen.add(path.clone(), r.facts.clone(), own_hash.clone());
                         }
-                        seen.add(path.clone(), r.facts.clone(), own_hash.clone());
+                        if let Some(reason) = &r.error {
+                            report.errors.push(FileIssue {
+                                path: path.clone(),
+                                reason: reason.clone(),
+                            });
+                        }
+                        requests.push(*r);
+                        request_index.push(i);
+                        full_hashes.push(own_hash);
                     }
-                    if let Some(reason) = &r.error {
-                        report.errors.push(FileIssue {
-                            path: path.clone(),
-                            reason: reason.clone(),
-                        });
+                    Prepared::Duplicate(existing) => report.duplicates.push(DuplicateFile {
+                        path: chunk[i].path.clone(),
+                        existing_path: existing.path,
+                        existing_variant_id: Some(existing.variant_id),
+                        skipped: true,
+                    }),
+                    Prepared::Unchanged {
+                        master,
+                        file_id,
+                        revision,
+                        needs_thumbnail,
+                    } => {
+                        report.unchanged += 1;
+                        if needs_thumbnail {
+                            thumbs.push(ThumbTask {
+                                variant: master,
+                                file_id,
+                                revision,
+                                path: chunk[i].path.clone(),
+                                kind: chunk[i].kind,
+                            });
+                        }
                     }
-                    requests.push(*r);
-                    request_index.push(i);
-                    full_hashes.push(own_hash);
+                    Prepared::NotRegistered(reason) => report.not_registered.push(FileIssue {
+                        path: chunk[i].path.clone(),
+                        reason,
+                    }),
+                    Prepared::Cancelled => unreachable!("上で確かめた"),
                 }
-                Prepared::Duplicate(existing) => report.duplicates.push(DuplicateFile {
-                    path: chunk[i].path.clone(),
-                    existing_path: existing.path,
-                    existing_variant_id: Some(existing.variant_id),
-                    skipped: true,
-                }),
-                Prepared::Unchanged {
-                    master,
-                    file_id,
-                    revision,
-                    needs_thumbnail,
-                } => {
-                    report.unchanged += 1;
-                    if needs_thumbnail {
-                        thumbs.push(ThumbTask {
-                            variant: master,
-                            file_id,
-                            revision,
-                            path: chunk[i].path.clone(),
-                            kind: chunk[i].kind,
-                        });
-                    }
+            }
+            if report.cancelled {
+                break;
+            }
+            let outcomes = register_requests(
+                inner,
+                &mut requests,
+                &register_options,
+                apply,
+                &full_hashes,
+                &mut report,
+                &mut developed,
+            )?;
+            let paths: Vec<&Path> = request_index
+                .iter()
+                .map(|&i| chunk[i].path.as_path())
+                .collect();
+            for (out, &i) in outcomes.iter().zip(&request_index) {
+                seen.set_registered(
+                    chunk[i].path.clone(),
+                    out.master_variant_id,
+                    out.file_id,
+                    out.revision,
+                );
+            }
+            let changed = tally_outcomes(
+                inner,
+                &requests,
+                &outcomes,
+                &paths,
+                &mut report,
+                &mut thumbs,
+                &mut regenerate,
+            )?;
+            // 同じバッチで先に登録したファイルの重複は、登録の後に写真が分かる。
+            for d in &mut report.duplicates[batch_duplicates..] {
+                if d.existing_variant_id.is_none() {
+                    d.existing_variant_id =
+                        d.existing_path.as_deref().and_then(|p| seen.variant_of(p));
                 }
-                Prepared::NotRegistered(reason) => report.not_registered.push(FileIssue {
-                    path: chunk[i].path.clone(),
-                    reason,
-                }),
-                Prepared::Cancelled => unreachable!("上で確かめた"),
+            }
+            // 同じ取り込みの中の比較で求めた、先に登録したファイルの全体のハッシュを記録する。
+            let computed = seen.take_computed();
+            if !computed.is_empty() {
+                inner.with_catalog(|c| {
+                    for (file_id, revision, facts, hash) in &computed {
+                        c.set_full_hash_if_current(*file_id, *revision, facts, hash)?;
+                    }
+                    Ok(())
+                })?;
+            }
+            announce_changes(inner, changed);
+            // サムネイル（L0。PRV-01）。
+            make_thumbnails(ctx, threads, &thumbs, &mut report, &mut no_embedded);
+            done += chunk.len() as u64;
+            ctx.progress(done, total);
+            if report.cancelled {
+                break;
             }
         }
-        if report.cancelled {
-            break;
-        }
-        let outcomes = register_requests(
-            inner,
-            &mut requests,
-            &register_options,
-            apply,
-            &full_hashes,
-            &mut report,
-            &mut developed,
-        )?;
-        let paths: Vec<&Path> = request_index
-            .iter()
-            .map(|&i| chunk[i].path.as_path())
-            .collect();
-        for (out, &i) in outcomes.iter().zip(&request_index) {
-            seen.set_registered(
-                chunk[i].path.clone(),
-                out.master_variant_id,
-                out.file_id,
-                out.revision,
-            );
-        }
-        let changed = tally_outcomes(
-            inner,
-            &requests,
-            &outcomes,
-            &paths,
-            &mut report,
-            &mut thumbs,
-            &mut regenerate,
-        )?;
-        // 同じバッチで先に登録したファイルの重複は、登録の後に写真が分かる。
-        for d in &mut report.duplicates[batch_duplicates..] {
-            if d.existing_variant_id.is_none() {
-                d.existing_variant_id = d.existing_path.as_deref().and_then(|p| seen.variant_of(p));
-            }
-        }
-        // 同じ取り込みの中の比較で求めた、先に登録したファイルの全体のハッシュを記録する。
-        let computed = seen.take_computed();
-        if !computed.is_empty() {
-            inner.with_catalog(|c| {
-                for (file_id, revision, facts, hash) in &computed {
-                    c.set_full_hash_if_current(*file_id, *revision, facts, hash)?;
-                }
-                Ok(())
-            })?;
-        }
-        announce_changes(inner, changed);
-        // サムネイル（L0。PRV-01）。
-        make_thumbnails(ctx, threads, &thumbs, &mut report, &mut no_embedded);
-        done += chunk.len() as u64;
-        ctx.progress(done, total);
-        if report.cancelled {
-            break;
-        }
+        Ok(())
+    })();
+    if let Err(e) = batches {
+        regenerate_developed(inner, developed);
+        return Err(e);
     }
     after_import(inner, &report, regenerate, no_embedded, developed);
     Ok(report)
+}
+
+/// 取り込みが途中で失敗したとき（`after_import` を通らない）に、それまでのバッチで現像プリセットを当てた写真
+/// （IMP-07。登録はコミット済み）を現像結果から作り直す。作り直し待ちの印は登録の直後に付けてあるが、それだけ
+/// では次の起動まで埋め込みのサムネイルのままになるため（PR #22 の Codex の指摘）。
+pub(crate) fn regenerate_developed(
+    inner: &std::sync::Arc<crate::core::Inner>,
+    mut developed: Vec<VariantId>,
+) {
+    if developed.is_empty() {
+        return;
+    }
+    developed.sort();
+    developed.dedup();
+    spawn_regenerate(inner, developed);
 }
 
 /// 取り込みの終わりの処理: 現像結果からの L0 / L1 の作り直し（設定で止められる。埋め込みのサムネイルが
