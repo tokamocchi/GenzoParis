@@ -468,3 +468,190 @@ fn export_presets_and_file_naming() {
     assert_eq!(report.imported[0].export.as_ref(), Some(&settings));
     core.close().unwrap();
 }
+
+/// 取り込みで、指定した現像プリセットを取り込み・コピー取り込みのジョブに渡して結果を返す（IMP-07）。
+fn import_with_preset(
+    core: &genzo_api::Core,
+    path: &std::path::Path,
+    preset: &str,
+    copy_to: Option<&std::path::Path>,
+) -> genzo_api::ImportReport {
+    let options = genzo_api::ImportOptions {
+        develop_preset: Some(preset.to_owned()),
+        copy: copy_to.map(|d| genzo_api::CopySettings {
+            destination: d.to_path_buf(),
+            folder_rule: genzo_api::FolderRule::Single,
+            rename: None,
+        }),
+        ..Default::default()
+    };
+    let job = core.import_folder_with(path, true, &options).unwrap();
+    match wait_ok(core, job) {
+        JobResult::Import(r) => r,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// 取り込み時の現像プリセットの適用（IMP-07）: 新しく登録した写真にだけ、プリセットの含める項目を当て（処理
+/// バージョンは最新）、履歴の「読み込み」の後に 1 件残す。取り込み直した写真は変えない。取り込みの後に現像結果から
+/// プレビューを作り直す設定でなくても、当てた写真は作り直す。コピー取り込みでも当てる。
+#[test]
+fn import_applies_a_develop_preset_to_new_photos_only() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (96, 64), 1, None);
+    let core = env.open();
+    import(&core, &env.photos);
+    let a = all_items(&core)[0].variant_id;
+    let mut source = exposure(0.8);
+    source.presence.clarity = 30.0;
+    source.geometry.crop = CropRect {
+        left: 0.1,
+        top: 0.1,
+        right: 0.9,
+        bottom: 0.9,
+    };
+    core.paste_settings(&source, &[a], SettingGroups::ALL)
+        .unwrap();
+    let preset = core
+        .create_develop_preset("明るく", "基本", tone_only(), a)
+        .unwrap();
+    // A を元に戻す（取り込み直しで変えないことを確かめるため、何も当てていない状態にする）。
+    core.paste_settings(&DevelopSettings::default(), &[a], SettingGroups::ALL)
+        .unwrap();
+    core.wait_idle();
+
+    write_jpeg(&env.photos.join("B.jpg"), (96, 64), 2, None);
+    write_jpeg(&env.photos.join("C.jpg"), (96, 64), 3, None);
+    let report = import_with_preset(&core, &env.photos, &preset.id, None);
+    assert_eq!((report.added, report.unchanged), (2, 1), "{report:?}");
+    assert_eq!(
+        report.develop_preset,
+        Some(genzo_api::ImportPresetReport {
+            id: preset.id.clone(),
+            name: "明るく".into(),
+            applied: 2,
+        })
+    );
+    core.wait_idle();
+    let items = all_items(&core);
+    for name in ["B.jpg", "C.jpg"] {
+        let v = by_name(&items, name).variant_id;
+        let s = core.develop_settings(v).unwrap();
+        assert_eq!(s.exposure_ev, 0.8, "{name}");
+        assert_eq!(s.presence.clarity, 30.0, "{name}");
+        assert_eq!(
+            s.geometry,
+            DevelopSettings::default().geometry,
+            "含めない項目は当てない"
+        );
+        assert_eq!(s.process_version, genzo_model::CURRENT_PROCESS_VERSION);
+        assert_eq!(
+            labels(&core, v),
+            vec!["読み込み", "プリセット「明るく」を適用"],
+            "{name}"
+        );
+        // 取り込みの後に作り直さない設定（テストの既定）でも、当てた写真は現像結果から作り直す。
+        assert!(core.preview_path(v).unwrap().is_some(), "{name}");
+        // Undo で何も当てていない状態に戻る。
+        core.undo(v).unwrap();
+        assert_eq!(core.develop_settings(v).unwrap().exposure_ev, 0.0);
+    }
+    // 取り込み直した写真（A）は変えない。
+    assert_eq!(core.develop_settings(a).unwrap().exposure_ev, 0.0);
+    assert!(
+        !labels(&core, a)
+            .iter()
+            .any(|l| l == "プリセット「明るく」を適用")
+    );
+
+    // コピー取り込みでも当てる。名前を決めるだけの確認（dry_run）では何も登録しない（当てた数は 0）。
+    let card = env.dir.path().join("card");
+    let dest = env.dir.path().join("copied");
+    std::fs::create_dir_all(&card).unwrap();
+    std::fs::create_dir_all(&dest).unwrap();
+    write_jpeg(&card.join("D.jpg"), (96, 64), 4, None);
+    let dry = {
+        let options = genzo_api::ImportOptions {
+            develop_preset: Some(preset.id.clone()),
+            copy: Some(genzo_api::CopySettings {
+                destination: dest.clone(),
+                folder_rule: genzo_api::FolderRule::Single,
+                rename: None,
+            }),
+            dry_run: true,
+            ..Default::default()
+        };
+        let job = core.import_folder_with(&card, true, &options).unwrap();
+        match wait_ok(&core, job) {
+            JobResult::Import(r) => r,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(dry.develop_preset.as_ref().map(|p| p.applied), Some(0));
+    let copied = import_with_preset(&core, &card, &preset.id, Some(&dest));
+    assert_eq!(copied.added, 1);
+    assert_eq!(copied.develop_preset.as_ref().map(|p| p.applied), Some(1));
+    core.wait_idle();
+    let d = by_name(&all_items(&core), "D.jpg").variant_id;
+    assert_eq!(core.develop_settings(d).unwrap().exposure_ev, 0.8);
+    core.close().unwrap();
+}
+
+/// 取り込み時の現像プリセットが見つからない・使えないときは、取り込みのジョブを始めずにエラーを返す（何も登録
+/// しない）。JSON のコマンドでも指定でき、省けば当てない。
+#[test]
+fn import_with_an_unusable_develop_preset_does_not_start() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (96, 64), 1, None);
+    let core = env.open();
+    let options = |id: &str| genzo_api::ImportOptions {
+        develop_preset: Some(id.to_owned()),
+        ..Default::default()
+    };
+    assert!(
+        core.import_folder_with(&env.photos, true, &options("0123456789abcdef"))
+            .is_err()
+    );
+    assert!(
+        core.import_folder_with(&env.photos, true, &options("../x"))
+            .is_err()
+    );
+    // 新しい版のアプリで作ったプリセット（形式の版が新しい）は使えない。
+    let dir = env.dir.path().join("presets").join("develop");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("00000000000000aa.json"),
+        r#"{"format":"genzoparis-preset","format_version":99,"kind":"develop","id":"00000000000000aa","name":"未来","folder":"","groups":{},"settings":{}}"#,
+    )
+    .unwrap();
+    let e = core
+        .import_folder_with(&env.photos, true, &options("00000000000000aa"))
+        .unwrap_err();
+    assert!(matches!(e, ApiError::InvalidArgument(_)), "{e:?}");
+    core.wait_idle();
+    assert!(all_items(&core).is_empty(), "何も登録しない");
+
+    // JSON のコマンド（develop_preset を省いた形は、これまでどおり当てない）。
+    let r = core
+        .execute(
+            serde_json::from_value(serde_json::json!({
+                "type": "import_folder",
+                "path": env.photos,
+                "recursive": true,
+                "options": {},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let Response::JobStarted { job_id } = r else {
+        panic!("{r:?}")
+    };
+    let JobResult::Import(report) = wait_ok(&core, job_id) else {
+        panic!()
+    };
+    assert_eq!(report.added, 1);
+    assert_eq!(report.develop_preset, None);
+    let json = serde_json::to_value(&report).unwrap();
+    assert!(json["develop_preset"].is_null());
+    core.close().unwrap();
+}

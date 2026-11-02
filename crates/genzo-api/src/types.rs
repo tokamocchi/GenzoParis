@@ -233,6 +233,12 @@ pub struct ImportOptions {
     /// コピー取り込みで、コピー先の名前を決めるだけで、コピー・登録をしない（確認用。結果の
     /// [`CopyReport::copied`] に予定を入れる）。コピーしない取り込みでは使えない。
     pub dry_run: bool,
+    /// 新しく登録した写真に当てる現像プリセットの ID（IMP-07。DEV-29 の現像プリセット。`None` なら当てない）。
+    /// 取り込みを始めるときにプリセットを読み、その時点の中身を当てる（取り込みの途中でプリセットを変えても
+    /// 響かない）。当て方は [`crate::Core::apply_develop_preset`] の [`PasteVersion::Keep`] と同じ（含める項目
+    /// だけを写す。新しい写真の処理バージョンは最新）。動画・取り込み直した写真・登録済みの写真に組として足した
+    /// ファイルの写真には当てない。
+    pub develop_preset: Option<String>,
 }
 
 /// コピー取り込みの設定（IMP-02・IMP-03。04 の 3.12 節）。
@@ -388,6 +394,20 @@ pub struct ImportReport {
     /// キーワード・説明のメタデータをまとめて付けた写真の数（IMP-05。RAW と JPEG のペアは 1 枚）。
     #[serde(default)]
     pub tagged: u64,
+    /// 取り込み時に当てた現像プリセット（IMP-07。[`ImportOptions::develop_preset`] を指定しなければ `None`）。
+    #[serde(default)]
+    pub develop_preset: Option<ImportPresetReport>,
+}
+
+/// 取り込み時に当てた現像プリセットの結果（IMP-07）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ImportPresetReport {
+    /// プリセットの ID。
+    pub id: String,
+    /// プリセットの名前（取り込みを始めたときの名前）。
+    pub name: String,
+    /// 当てた写真の数（RAW と JPEG のペアは 1 枚。動画は数えない）。
+    pub applied: u64,
 }
 
 impl ImportReport {

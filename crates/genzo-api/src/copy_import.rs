@@ -52,7 +52,7 @@ use std::time::{Duration, SystemTime};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use genzo_catalog::text::path_key;
 use genzo_catalog::{
-    FileFacts, ImportTags, JPEG_EXTENSIONS, MediaMetadata, PairClass, RAW_EXTENSIONS, RegisterFile,
+    FileFacts, JPEG_EXTENSIONS, MediaMetadata, PairClass, RAW_EXTENSIONS, RegisterFile,
     RegisterOptions, pair_class,
 };
 use genzo_jobs::CancellationToken;
@@ -64,9 +64,9 @@ use crate::core::{CopyImportHook, CopyImportStage, Inner};
 use crate::error::ApiError;
 use crate::identity::{ExistingCopy, HashFailure, ImportSeen, check_catalog_duplicate};
 use crate::import::{
-    Candidate, ProbeTarget, ResolvedOptions, ThumbTask, after_import, announce_changes,
-    excluded_dirs, make_thumbnails, parallel_map, probe_request, register_requests, scan,
-    tally_outcomes,
+    Candidate, ImportApply, ProbeTarget, ResolvedOptions, ThumbTask, after_import,
+    announce_changes, excluded_dirs, make_thumbnails, parallel_map, probe_request,
+    register_requests, scan, tally_outcomes,
 };
 use crate::jobs::JobCtx;
 use crate::naming::{
@@ -1058,7 +1058,7 @@ pub(crate) fn run_copy_import(
     root: &Path,
     recursive: bool,
     options: ResolvedOptions,
-    tags: &ImportTags,
+    apply: &ImportApply,
     plan: &CopyPlan,
 ) -> Result<ImportReport, ApiError> {
     let inner = ctx.inner;
@@ -1091,6 +1091,7 @@ pub(crate) fn run_copy_import(
         root: root.clone(),
         skip_duplicates: options.skip_duplicates,
         separate_raw_jpeg: options.separate_raw_jpeg,
+        develop_preset: apply.preset_report(),
         copy: Some(Box::new(CopyReport {
             destination: plan.destination.clone(),
             dry_run: plan.dry_run,
@@ -1177,6 +1178,8 @@ pub(crate) fn run_copy_import(
     let mut pending = Pending::default();
     let mut regenerate: Vec<VariantId> = Vec::new();
     let mut no_embedded: Vec<VariantId> = Vec::new();
+    // 取り込み時の現像プリセットを当てた写真（IMP-07）。
+    let mut developed: Vec<VariantId> = Vec::new();
     let mut stop: Option<String> = None;
     let mut next_seq: u64 = plan
         .settings
@@ -1329,11 +1332,12 @@ pub(crate) fn run_copy_import(
                 &mut state,
                 &mut pending,
                 &register_options,
-                tags,
+                apply,
                 &mut report,
                 &mut seen,
                 &mut regenerate,
                 &mut no_embedded,
+                &mut developed,
                 threads,
             )
         {
@@ -1348,11 +1352,12 @@ pub(crate) fn run_copy_import(
             &mut state,
             &mut pending,
             &register_options,
-            tags,
+            apply,
             &mut report,
             &mut seen,
             &mut regenerate,
             &mut no_embedded,
+            &mut developed,
             threads,
         );
     } else {
@@ -1371,7 +1376,7 @@ pub(crate) fn run_copy_import(
         }
     }
     if !plan.dry_run {
-        after_import(inner, &report, regenerate, no_embedded);
+        after_import(inner, &report, regenerate, no_embedded, developed);
     }
     Ok(report)
 }
@@ -1396,11 +1401,12 @@ fn flush(
     state: &mut CopyState<'_>,
     pending: &mut Pending,
     register_options: &RegisterOptions,
-    tags: &ImportTags,
+    apply: &ImportApply,
     report: &mut ImportReport,
     seen: &mut ImportSeen,
     regenerate: &mut Vec<VariantId>,
     no_embedded: &mut Vec<VariantId>,
+    developed: &mut Vec<VariantId>,
     threads: usize,
 ) -> Result<(), ApiError> {
     if pending.placed.is_empty() {
@@ -1470,9 +1476,10 @@ fn flush(
             inner,
             &mut requests,
             register_options,
-            tags,
+            apply,
             &hashes,
             report,
+            developed,
         )?;
         Ok((requests, outcomes))
     })();

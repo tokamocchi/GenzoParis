@@ -28,7 +28,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use genzo_catalog::{Catalog, FileFacts, ImportTags, RegisterOptions, VariantSummary};
+use genzo_catalog::{Catalog, FileFacts, RegisterOptions, VariantSummary};
 use genzo_media::{DynRgbImage, ExifData, ProtectedFiles, RgbImage8, RgbImage16, WriteOutcome};
 use genzo_model::{
     AssetKind, CompositeSettings, ConflictPolicy, DevelopSettings, ExportFormat, ExportSettings,
@@ -42,8 +42,8 @@ use crate::core::{Core, Inner};
 use crate::error::ApiError;
 use crate::events::CatalogChange;
 use crate::import::{
-    ProbeTarget, ThumbTask, after_import, announce_changes, excluded_dirs, make_thumbnails,
-    probe_request, register_requests, tally_outcomes,
+    ImportApply, ProbeTarget, ThumbTask, after_import, announce_changes, excluded_dirs,
+    make_thumbnails, probe_request, register_requests, tally_outcomes,
 };
 use crate::jobs::{JobCtx, spawn_job};
 use crate::paths::absolute_lexical;
@@ -371,9 +371,10 @@ fn register_written(
         inner,
         &mut requests,
         &options,
-        &ImportTags::default(),
+        &ImportApply::default(),
         &[None],
         &mut import,
+        &mut Vec::new(),
     )?;
     let variant = outcomes
         .first()
@@ -393,7 +394,7 @@ fn register_written(
     announce_changes(inner, changed);
     let mut no_embedded = Vec::new();
     make_thumbnails(ctx, 1, &thumbs, &mut import, &mut no_embedded);
-    after_import(inner, &import, regenerate, no_embedded);
+    after_import(inner, &import, regenerate, no_embedded, Vec::new());
     let problem = requests[0]
         .error
         .as_ref()

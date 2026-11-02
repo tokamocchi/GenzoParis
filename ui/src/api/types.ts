@@ -965,6 +965,11 @@ export interface ImportOptions {
   metadata?: ImportMetadata;
   /** コピー先の名前を決めるだけで、コピー・登録をしない（確認用）。 */
   dry_run?: boolean;
+  /**
+   * 新しく登録した写真に当てる現像プリセットの ID（IMP-07。null・省略なら当てない）。動画・取り込み直した写真には
+   * 当てない。見つからない・使えないプリセットなら、取り込みを始めずにエラー。
+   */
+  develop_preset?: string | null;
 }
 
 /** コピー先のフォルダの規則（genzo-api の FolderRule）。 */
@@ -1071,6 +1076,17 @@ export interface ImportReport {
   copy?: CopyReport | null;
   /** キーワード・説明のメタデータを付けた写真の数（IMP-05）。 */
   tagged?: number;
+  /** 取り込み時に当てた現像プリセット（IMP-07。指定しなかった・古いコアでは null か無い）。 */
+  develop_preset?: ImportPresetReport | null;
+}
+
+/** 取り込み時に当てた現像プリセットの結果（IMP-07。genzo-api の ImportPresetReport）。 */
+export interface ImportPresetReport {
+  id: string;
+  /** 取り込みを始めたときの名前。 */
+  name: string;
+  /** 当てた写真の数（RAW と JPEG の組は 1 枚。動画は数えない）。 */
+  applied: number;
 }
 
 /** ファイルの内容のハッシュの計算の結果（ORG-03。genzo-api の HashReport）。 */
@@ -2583,6 +2599,8 @@ export interface ImportPreferences {
   rename: boolean;
   rename_rule: RenameRule;
   metadata: ImportMetadata;
+  /** 取り込んだ写真に当てる現像プリセットの ID（IMP-07。null なら当てない。古いアプリでは無い）。 */
+  develop_preset?: string | null;
 }
 
 /**

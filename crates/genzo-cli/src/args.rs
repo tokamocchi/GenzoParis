@@ -1180,6 +1180,13 @@ pub struct ImportArgs {
     /// genzo metadata --help）
     #[arg(long = "meta", value_name = "FIELD=VALUE", value_parser = parse_metadata_assignment)]
     pub meta: Vec<(MetadataField, String)>,
+    /// 新しく登録した写真に当てる現像プリセット（IMP-07。ID か名前。genzo preset list で一覧を見られる。含める項目
+    /// だけを当てる。動画・取り込み直した写真には当てない）
+    #[arg(long, value_name = "PRESET")]
+    pub develop_preset: Option<String>,
+    /// --develop-preset の名前を探すフォルダ（同じ名前のプリセットが別のフォルダにあるとき）
+    #[arg(long, value_name = "FOLDER", requires = "develop_preset")]
+    pub develop_preset_folder: Option<String>,
 }
 
 impl ImportArgs {
@@ -1212,6 +1219,8 @@ impl ImportArgs {
                 fields: self.meta.iter().cloned().collect(),
             },
             dry_run: self.dry_run,
+            // ID・名前からの解決は、プリセットのフォルダを読んでから行う（library の import）。
+            develop_preset: None,
         }
     }
 }
@@ -3865,7 +3874,27 @@ mod tests {
             panic!();
         };
         assert_eq!(plain.options().copy, None);
+        assert_eq!(plain.develop_preset, None);
+        // 取り込み時の現像プリセット（IMP-07。ID・名前はプリセットのフォルダを読んでから解決する）。
+        let Command::Import(with_preset) = parse(&[
+            "genzo",
+            "import",
+            "/sd",
+            "--develop-preset",
+            "明るく",
+            "--develop-preset-folder",
+            "基本",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!();
+        };
+        assert_eq!(with_preset.develop_preset.as_deref(), Some("明るく"));
+        assert_eq!(with_preset.develop_preset_folder.as_deref(), Some("基本"));
+        assert_eq!(with_preset.options().develop_preset, None);
         for bad in [
+            vec!["genzo", "import", "/sd", "--develop-preset-folder", "基本"],
             vec!["genzo", "import", "/sd", "--rename", "{seq}"],
             vec!["genzo", "import", "/sd", "--dry-run"],
             vec![

@@ -3,7 +3,13 @@
 
 import { describe, expect, it } from "vitest";
 
-import { MOCK_COPY_IMPORT_REPORT, MOCK_IMPORT_PREFERENCES, MOCK_IMPORT_REPORT } from "../api/mock";
+import {
+  MOCK_COPY_IMPORT_REPORT,
+  MOCK_IMPORT_PREFERENCES,
+  MOCK_IMPORT_REPORT,
+  mockDevelopPresets,
+  mockExportPresets,
+} from "../api/mock";
 import type { ImportReport, JobInfo } from "../api/types";
 import { continueSequence } from "../state/app";
 import {
@@ -16,6 +22,7 @@ import {
   importMetadataOf,
   importOptionsOf,
   importPreferencesOf,
+  importPresetChoice,
   insertToken,
   metadataCount,
   validateImportForm,
@@ -88,6 +95,35 @@ describe("取り込みの指定", () => {
   });
 });
 
+describe("取り込み時の現像プリセット（IMP-07）", () => {
+  it("選んだプリセットの ID を送り、設定に保存する（選ばなければ送らない）", () => {
+    const form = importFormFrom(MOCK_IMPORT_PREFERENCES);
+    expect(form.developPreset).toBe("0000000000000001");
+    expect(importOptionsOf(form, {}).develop_preset).toBe("0000000000000001");
+    expect(importPreferencesOf(form).develop_preset).toBe("0000000000000001");
+    const none = { ...form, developPreset: "" };
+    expect("develop_preset" in importOptionsOf(none, {})).toBe(false);
+    expect(importPreferencesOf(none).develop_preset).toBeNull();
+    // 古いアプリの設定（項目がない）は当てない。
+    const { develop_preset: _omit, ...old } = MOCK_IMPORT_PREFERENCES;
+    expect(importFormFrom(old).developPreset).toBe("");
+  });
+
+  it("一覧にない・使えない・書き出しのプリセットは取り込めない理由を返す。一覧を読む前は確かめない", () => {
+    const list = [...mockDevelopPresets(), ...mockExportPresets()];
+    expect(importPresetChoice(list, "")).toEqual({ preset: null, problem: null });
+    expect(importPresetChoice(null, "0000000000000009")).toEqual({ preset: null, problem: null });
+    const ok = importPresetChoice(list, "0000000000000002");
+    expect(ok.preset?.name).toBe("フィルム風");
+    expect(ok.problem).toBeNull();
+    expect(importPresetChoice(list, "0000000000000009").problem).toContain("見つかりません");
+    expect(importPresetChoice(list, "00000000000000e1").problem).toContain("見つかりません");
+    const unusable = importPresetChoice(list, "0000000000000003");
+    expect(unusable.preset?.name).toBe("新しい形式");
+    expect(unusable.problem).toContain("「新しい形式」は使えません");
+  });
+});
+
 describe("入力の確かめ", () => {
   const base = importFormFrom(MOCK_IMPORT_PREFERENCES);
 
@@ -135,6 +171,26 @@ describe("コピー取り込みの結果の知らせ", () => {
     expect(n.detail).toContain("コピーせずに登録したファイル: 1 件");
     expect(n.detail).toContain("・DSC01234.ARW → /home/u/写真/2026/2026-10-13/20261013_京都-0001.ARW");
     expect(n.detail).toContain("2 枚の写真に、取り込み時のキーワード・メタデータを付けました");
+    expect(n.detail).toContain("2 枚の写真に、現像プリセット「明るく」を当てました");
+  });
+
+  it("現像プリセット（IMP-07）: 当てた写真がなければそう書き、確認だけのときは書かない", () => {
+    const none = describeImportReport({
+      ...MOCK_IMPORT_REPORT,
+      develop_preset: { id: "0000000000000001", name: "明るく", applied: 0 },
+    });
+    expect(none.detail).toContain("現像プリセット「明るく」を当てた写真はありません");
+    const dry = describeImportReport({
+      ...MOCK_COPY_IMPORT_REPORT,
+      copy: { ...MOCK_COPY_IMPORT_REPORT.copy!, dry_run: true },
+      develop_preset: { id: "0000000000000001", name: "明るく", applied: 0 },
+    });
+    expect(dry.detail).not.toContain("現像プリセット");
+    // 古いコア（項目がない）・指定しなかった（null）ときは何も書かない。
+    expect(describeImportReport(MOCK_IMPORT_REPORT).detail ?? "").not.toContain("現像プリセット");
+    expect(describeImportReport({ ...MOCK_IMPORT_REPORT, develop_preset: null }).detail ?? "").not.toContain(
+      "現像プリセット",
+    );
   });
 
   it("確認だけ・取り消し・登録できなかったもの・更新日時で日付を決めたもの", () => {
