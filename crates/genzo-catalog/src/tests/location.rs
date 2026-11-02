@@ -574,3 +574,150 @@ fn version_12_catalog_migrates_to_asset_locations() {
     );
     cat.close().unwrap();
 }
+
+/// フィジーのあたり（経度 180 度の線の西）。
+fn fiji() -> GpsCoord {
+    GpsCoord::new(-17.7134, 178.065).unwrap()
+}
+
+#[test]
+fn photos_are_found_by_their_effective_location_and_read_for_the_map() {
+    use genzo_model::{GeoBounds, VariantId};
+
+    use crate::{Filter, Sort};
+
+    let mut f = Fixture::new();
+    // A: カメラの位置（東京）。B: 位置なし。C: カメラの位置（京都）に、付けた位置（シドニー）。
+    // D: 位置なしに、付けた位置（フィジー）。E: カメラの位置が範囲外（緯度 95）。
+    let a = gps_photo(&mut f, "A.ARW", 1, Some(tokyo()));
+    let b = gps_photo(&mut f, "B.ARW", 2, None);
+    let c = gps_photo(&mut f, "C.ARW", 3, Some(kyoto()));
+    let d = gps_photo(&mut f, "D.ARW", 4, None);
+    let e = gps_photo(&mut f, "E.ARW", 5, Some(tokyo()));
+    f.cat.edit_locations(&[c.asset_id], Some(sydney())).unwrap();
+    f.cat.edit_locations(&[d.asset_id], Some(fiji())).unwrap();
+    f.cat
+        .conn
+        .execute(
+            "UPDATE asset SET gps_lat = 95.0 WHERE id = ?1",
+            [e.asset_id.get()],
+        )
+        .unwrap();
+    let name = |v: VariantId| -> &str {
+        [(&a, "A"), (&b, "B"), (&c, "C"), (&d, "D"), (&e, "E")]
+            .iter()
+            .find(|(o, _)| o.master_variant_id == v)
+            .map_or("?", |(_, n)| n)
+    };
+    let found = |filter: Filter| -> Vec<&str> {
+        let mut names: Vec<&str> = f
+            .cat
+            .search(&filter, &Sort::default())
+            .unwrap()
+            .into_iter()
+            .map(name)
+            .collect();
+        names.sort_unstable();
+        names
+    };
+    let bounds = |s, w, n, e| Some(GeoBounds::new(s, w, n, e).unwrap());
+
+    assert_eq!(
+        found(Filter {
+            has_location: Some(true),
+            ..Filter::default()
+        }),
+        ["A", "C", "D"]
+    );
+    assert_eq!(
+        found(Filter {
+            has_location: Some(false),
+            ..Filter::default()
+        }),
+        ["B", "E"]
+    );
+    // 日本の範囲: 付けた位置（シドニー）のある C は、カメラの位置（京都）では一致しない。
+    assert_eq!(
+        found(Filter {
+            location_bounds: bounds(24.0, 122.0, 46.0, 154.0),
+            ..Filter::default()
+        }),
+        ["A"]
+    );
+    assert_eq!(
+        found(Filter {
+            location_bounds: bounds(-40.0, 140.0, -30.0, 160.0),
+            ..Filter::default()
+        }),
+        ["C"]
+    );
+    // 経度 180 度の線をまたぐ範囲。
+    assert_eq!(
+        found(Filter {
+            location_bounds: bounds(-30.0, 170.0, -10.0, -170.0),
+            ..Filter::default()
+        }),
+        ["D"]
+    );
+    // 世界のすべては「位置がある」と同じ。位置のない条件と組み合わせると、何も一致しない。
+    assert_eq!(
+        found(Filter {
+            location_bounds: bounds(-90.0, -180.0, 90.0, 180.0),
+            ..Filter::default()
+        }),
+        ["A", "C", "D"]
+    );
+    assert!(
+        found(Filter {
+            location_bounds: bounds(-90.0, -180.0, 90.0, 180.0),
+            has_location: Some(false),
+            ..Filter::default()
+        })
+        .is_empty()
+    );
+    assert_eq!(
+        f.cat
+            .count(&Filter {
+                has_location: Some(true),
+                ..Filter::default()
+            })
+            .unwrap(),
+        3
+    );
+
+    // 地図の位置（ids と同じ順。見つからない id は None）。2 つの読み方で同じ結果。
+    let ids = [
+        e.master_variant_id,
+        a.master_variant_id,
+        VariantId::new(9_999),
+        c.master_variant_id,
+        b.master_variant_id,
+        d.master_variant_id,
+    ];
+    let expected = vec![
+        None,
+        Some(tokyo()),
+        None,
+        Some(sydney()),
+        None,
+        Some(fiji()),
+    ];
+    assert_eq!(f.cat.map_locations(&ids).unwrap(), expected);
+    assert_eq!(f.cat.map_locations_by_id(&ids).unwrap(), expected);
+    let (max_variant, max_asset): (i64, i64) = f
+        .cat
+        .conn
+        .query_row(
+            "SELECT (SELECT max(id) FROM variant), (SELECT max(id) FROM asset)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        f.cat
+            .map_locations_by_scan(&ids, max_variant, max_asset)
+            .unwrap(),
+        expected
+    );
+    assert!(f.cat.map_locations(&[]).unwrap().is_empty());
+}

@@ -16,7 +16,7 @@ export function StatusBar() {
           ほかに折りたたんだスタックの中に {search.hidden.toLocaleString()} 枚
         </span>
       )}
-      {(mode === "grid" || mode === "survey") && selected > 1 && <span>{selected.toLocaleString()} 件を選択</span>}
+      {(mode === "grid" || mode === "survey" || mode === "map") && selected > 1 && <span>{selected.toLocaleString()} 件を選択</span>}
       {mode !== "grid" && index !== null && search && (
         <span>
           {(index + 1).toLocaleString()} / {search.count.toLocaleString()}

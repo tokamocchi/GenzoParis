@@ -249,6 +249,14 @@ pub(crate) fn filter_of(s: &Session, a: &FilterArgs) -> CliResult<SearchFilter> 
         keywords,
         collection_id: a.collection,
         smart_rule,
+        location_bounds: a.bounds,
+        has_location: if a.located {
+            Some(true)
+        } else if a.no_location {
+            Some(false)
+        } else {
+            None
+        },
         ..Default::default()
     })
 }

@@ -1,13 +1,15 @@
-/* Leaflet の部品の暗い配色への上書き（位置情報の後付け LIB-21 の地図。library/GeoMap.tsx）。
- * library/leafletLoader.ts で leaflet.css の後に読む（同じ詳細度の規則は後のものが効く）。色は base.css の変数だけ。
- * 地図の入れ物・ピン・帰属の表示など Leaflet を読む前から要るものは geo.css。 */
+/* Leaflet の部品の暗い配色への上書き（位置情報の後付け LIB-21 の地図（library/GeoMap.tsx。.geo-map）と、地図の表示
+ * LIB-18（library/MapView.tsx。.map-view-map））。library/leafletLoader.ts で leaflet.css の後に読む（同じ詳細度の
+ * 規則は後のものが効く）。色は base.css の変数だけ。地図の入れ物・ピン・印・帰属の表示など Leaflet を読む前から
+ * 要るものは geo.css。 */
 
-.geo-map .leaflet-container {
+.geo-map .leaflet-container,
+.map-view-map .leaflet-container {
   background: var(--bg-2);
   font-family: var(--font);
 }
 
-/* クリックで位置を選ぶので、十字にする（ドラッグの間は掴む形）。 */
+/* 位置を付けるダイアログはクリックで位置を選ぶので、十字にする（ドラッグの間は掴む形）。 */
 .geo-map .leaflet-grab {
   cursor: crosshair;
 }
@@ -17,22 +19,48 @@
 
 /* ズームのボタン（.leaflet-touch は今のブラウザでは常に付く）。 */
 .geo-map .leaflet-bar,
-.geo-map .leaflet-touch .leaflet-bar {
+.geo-map .leaflet-touch .leaflet-bar,
+.map-view-map .leaflet-bar,
+.map-view-map .leaflet-touch .leaflet-bar {
   border: 1px solid var(--line-strong);
   box-shadow: none;
 }
 .geo-map .leaflet-bar a,
-.geo-map .leaflet-touch .leaflet-bar a {
+.geo-map .leaflet-touch .leaflet-bar a,
+.map-view-map .leaflet-bar a,
+.map-view-map .leaflet-touch .leaflet-bar a {
   background-color: var(--bg-2);
   color: var(--fg-0);
   border-bottom-color: var(--line-strong);
 }
 .geo-map .leaflet-bar a:hover,
-.geo-map .leaflet-bar a:focus {
+.geo-map .leaflet-bar a:focus,
+.map-view-map .leaflet-bar a:hover,
+.map-view-map .leaflet-bar a:focus {
   background-color: var(--bg-3);
   color: var(--fg-0);
 }
-.geo-map .leaflet-bar a.leaflet-disabled {
+.geo-map .leaflet-bar a.leaflet-disabled,
+.map-view-map .leaflet-bar a.leaflet-disabled {
   background-color: var(--bg-1);
   color: var(--fg-3);
+}
+
+/* 地図の表示の印に重ねたときの説明（代表の写真のサムネイルと数。MapView.tsx）。 */
+.leaflet-tooltip.map-tip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  color: var(--fg-0);
+  box-shadow: none;
+  font-family: var(--font);
+  font-size: 11px;
+}
+.leaflet-tooltip-top.map-tip::before {
+  border-top-color: var(--line-strong);
 }

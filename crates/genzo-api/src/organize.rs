@@ -356,6 +356,7 @@ impl Core {
     /// 読み取り専用の接続で数える。
     pub fn count(&self, filter: &SearchFilter) -> Result<u64, ApiError> {
         self.inner.check_open()?;
+        filter.check()?;
         let filter = filter.to_catalog();
         with_reader(&self.inner, |c| c.count(&filter))
     }

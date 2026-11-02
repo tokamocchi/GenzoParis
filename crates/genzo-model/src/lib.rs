@@ -65,8 +65,8 @@ pub use iptc::{
 };
 pub use location::{CoordParseError, format_coordinates, parse_coordinates};
 pub use metadata::{
-    CaptureInfo, GpsCoord, Orientation, PhotoMetadata, VideoMetadata, camera_display_name,
-    normalize_serial,
+    CaptureInfo, GeoBounds, GpsCoord, Orientation, PhotoMetadata, VideoMetadata,
+    camera_display_name, normalize_serial,
 };
 pub use phase::Phase;
 pub use smart::{

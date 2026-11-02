@@ -8,6 +8,7 @@
 //! （起動の処理は購読より前に終わるため）。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam_channel::{Receiver, Sender};
 use genzo_model::{RenderQuality, VariantId};
@@ -214,9 +215,19 @@ pub(crate) struct EventHub {
     subscribers: Mutex<Vec<Sender<Event>>>,
     /// 後から購読した受け取り側にも送る、起動時の警告。
     sticky: Mutex<Vec<Event>>,
+    /// 写真の位置が変わりうるカタログの変更（[`Event::CatalogChanged`] の [`CatalogChange::Location`]（付けた
+    /// 位置）と [`CatalogChange::Imported`]（ファイルの読み直しでカメラの位置が変わる））を送った回数。地図の位置を
+    /// 覚えておく処理（`map` の doc）が、読んだ後に変わったかを知るのに使う（変更を書いてから送るので、数を見て
+    /// から読めば、読んだ内容はその数の時点より新しい）。写真の増減は検索結果の世代で分かるので数えない。
+    location_changes: AtomicU64,
 }
 
 impl EventHub {
+    /// 写真の位置が変わりうる変更を送った回数（`location_changes` の doc）。
+    pub(crate) fn location_changes(&self) -> u64 {
+        self.location_changes.load(Ordering::Acquire)
+    }
+
     /// 新しい受け取り側を作る（起動時の警告を先に入れる）。
     pub(crate) fn subscribe(&self) -> Receiver<Event> {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -229,6 +240,15 @@ impl EventHub {
 
     /// すべての受け取り側に送る（受け取り側が drop されたものは外す）。
     pub(crate) fn emit(&self, event: Event) {
+        if matches!(
+            event,
+            Event::CatalogChanged {
+                change: CatalogChange::Location | CatalogChange::Imported,
+                ..
+            }
+        ) {
+            self.location_changes.fetch_add(1, Ordering::AcqRel);
+        }
         let mut subs = self.subscribers.lock();
         subs.retain(|tx| tx.send(event.clone()).is_ok());
     }

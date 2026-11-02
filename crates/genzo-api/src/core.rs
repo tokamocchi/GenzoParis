@@ -247,6 +247,8 @@ pub(crate) struct Inner {
     /// 検索の状態と、作り直しのスレッドとの受け渡し（`search` の doc）。
     pub search: Arc<SearchShared>,
     pub develop: Arc<DevelopShared>,
+    /// 地図の表示（LIB-18）のために読んだ、表示中の検索結果の写真の位置（`map` の doc）。
+    pub map: Mutex<Option<crate::map::MapCache>>,
     /// 比較表示（LIB-03）の表示範囲の描画と、展開した入力（`view` の doc）。
     pub view: crate::view::ViewShared,
     pub jobs: JobRegistry,
@@ -571,6 +573,7 @@ impl Core {
             display: Mutex::new(display),
             search: Arc::new(SearchShared::default()),
             develop: Arc::new(DevelopShared::default()),
+            map: Mutex::new(None),
             view: crate::view::ViewShared::default(),
             jobs: JobRegistry::default(),
             plans: Mutex::new(PlanStore::default()),

@@ -163,6 +163,17 @@ pub(crate) fn current_ids(
     }
 }
 
+/// 表示中の検索結果の条件に位置（LIB-18。[`SearchFilter::location_bounds`]・[`SearchFilter::has_location`]）の
+/// 条件があるか（位置を変えた後に、作り直すかを決める。`location` の doc）。
+pub(crate) fn current_uses_location(inner: &Inner) -> bool {
+    inner
+        .search
+        .lock()
+        .current
+        .as_ref()
+        .is_some_and(|c| c.filter.location_bounds.is_some() || c.filter.has_location.is_some())
+}
+
 /// 作り直しの 1 回分の材料（要求を受け取った時点の条件）。
 struct Snapshot {
     target: u64,
@@ -354,6 +365,7 @@ impl Core {
     ) -> Result<SearchResult, ApiError> {
         let inner = &self.inner;
         inner.check_open()?;
+        filter.check()?;
         let mut state = inner.search.lock();
         let grouped = inner.with_catalog(|c| {
             c.search_stacked(

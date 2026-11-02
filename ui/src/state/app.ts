@@ -44,10 +44,10 @@ import { type CatalogChangeSet, searchCache, thumbRevs } from "./search";
 import { createStore, useStore } from "./store";
 
 /**
- * 表示モード（G: グリッド、E: ルーペ、C: 比較表示、N: 選別表示、D: 現像）。比較表示・選別表示（LIB-03）は
- * state/compare.ts の openCompare・openSurvey で始める。
+ * 表示モード（G: グリッド、E: ルーペ、C: 比較表示、N: 選別表示、Shift + M: 地図、D: 現像）。比較表示・選別表示（LIB-03）は
+ * state/compare.ts の openCompare・openSurvey で始める。地図（LIB-18）は library/MapView.tsx。
  */
-export type Mode = "grid" | "loupe" | "compare" | "survey" | "develop";
+export type Mode = "grid" | "loupe" | "compare" | "survey" | "map" | "develop";
 
 /** ダイアログ（同時に 1 つ）。 */
 export type DialogState =
@@ -192,6 +192,8 @@ export interface AppState {
   organizeVersion: number;
   /** 撮影日時の変化の通し番号（catalog_changed の capture_time で増える。タイムラインの読み直し。ORG-01・LIB-16）。 */
   captureTimeVersion: number;
+  /** 写真の位置の変化の通し番号（catalog_changed の location・imported で増える。地図のまとまりの読み直し。LIB-18）。 */
+  locationVersion: number;
   /**
    * ターゲットコレクション（B キーで選んだ写真を入れる・外す手動のコレクション。LIB-10）。カタログごとに
    * ブラウザに保存する（state/organize.ts）。
@@ -264,6 +266,7 @@ export const appStore = createStore<AppState>({
   detailsVersion: 0,
   organizeVersion: 0,
   captureTimeVersion: 0,
+  locationVersion: 0,
   targetCollection: null,
 });
 
@@ -910,10 +913,15 @@ async function moveSelection(delta: number): Promise<void> {
   if (next !== currentIndex) await selectIndex(next);
 }
 
-/** 操作の対象: グリッドでは選択中のすべて、ルーペ・現像では表示中の 1 枚。 */
+/**
+ * 操作の対象: グリッド・地図（LIB-18。フィルムストリップで選んだ写真）では選択中のすべて、ルーペ・現像では表示中の
+ * 1 枚。
+ */
 function targets(): VariantId[] {
   const { mode, selection } = appStore.get();
-  if (mode === "grid") return selection.ids.length > 0 ? selection.ids : selection.current !== null ? [selection.current] : [];
+  if (mode === "grid" || mode === "map") {
+    return selection.ids.length > 0 ? selection.ids : selection.current !== null ? [selection.current] : [];
+  }
   return selection.current !== null ? [selection.current] : [];
 }
 
@@ -929,7 +937,7 @@ function targets(): VariantId[] {
  */
 function pasteTargets(): VariantId[] {
   const { mode, selection } = appStore.get();
-  if (mode === "grid" || selection.current === null) return targets();
+  if (mode === "grid" || mode === "map" || selection.current === null) return targets();
   return selection.ids.includes(selection.current) ? selection.ids : [selection.current, ...selection.ids];
 }
 
@@ -1088,6 +1096,7 @@ function handleEvent(e: CoreEvent): void {
             ? s.organizeVersion + 1
             : s.organizeVersion,
         captureTimeVersion: e.change === "capture_time" ? s.captureTimeVersion + 1 : s.captureTimeVersion,
+        locationVersion: e.change === "location" || e.change === "imported" ? s.locationVersion + 1 : s.locationVersion,
       }));
       break;
     case "thumbnail_updated":

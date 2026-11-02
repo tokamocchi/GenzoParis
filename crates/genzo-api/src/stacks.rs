@@ -196,6 +196,7 @@ impl Core {
         dry_run: bool,
     ) -> Result<AutoStackReport, ApiError> {
         self.inner.check_open()?;
+        filter.check()?;
         if !gap_seconds.is_finite() || !(0.0..=MAX_AUTO_STACK_GAP_SECONDS).contains(&gap_seconds) {
             return Err(ApiError::InvalidArgument(format!(
                 "間隔は 0〜{MAX_AUTO_STACK_GAP_SECONDS} 秒で指定してください（{gap_seconds}）"
