@@ -215,8 +215,10 @@ pub(crate) struct EventHub {
     subscribers: Mutex<Vec<Sender<Event>>>,
     /// 後から購読した受け取り側にも送る、起動時の警告。
     sticky: Mutex<Vec<Event>>,
-    /// 写真の位置が変わりうるカタログの変更（[`Event::CatalogChanged`] の [`CatalogChange::Location`]（付けた
-    /// 位置）と [`CatalogChange::Imported`]（ファイルの読み直しでカメラの位置が変わる））を送った回数。地図の位置を
+    /// 写真の位置が変わりうるカタログの変更を送った回数。[`Event::CatalogChanged`] の
+    /// [`CatalogChange::Location`]（付けた位置）、[`CatalogChange::Imported`]（取り込みでのファイルの読み直し）、
+    /// [`CatalogChange::FileStatus`]（内容の確認・再リンクでのファイルの読み直し。`library` の `reread`）を数える
+    /// （読み直しでカメラの位置が変わる）。地図の位置を
     /// 覚えておく処理（`map` の doc）が、読んだ後に変わったかを知るのに使う（変更を書いてから送るので、数を見て
     /// から読めば、読んだ内容はその数の時点より新しい）。写真の増減は検索結果の世代で分かるので数えない。
     location_changes: AtomicU64,
@@ -243,7 +245,9 @@ impl EventHub {
         if matches!(
             event,
             Event::CatalogChanged {
-                change: CatalogChange::Location | CatalogChange::Imported,
+                change: CatalogChange::Location
+                    | CatalogChange::Imported
+                    | CatalogChange::FileStatus,
                 ..
             }
         ) {
@@ -286,6 +290,34 @@ impl EventHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 地図の位置を読み直す合図（LIB-18）: 付けた位置・取り込み・ファイルの状態（内容の確認・再リンクでの読み直し）
+    /// の変更だけを数える。
+    #[test]
+    fn location_changes_count_only_changes_that_can_move_photos() {
+        let hub = EventHub::default();
+        let changed = |change| Event::CatalogChanged {
+            change,
+            variant_ids: Vec::new(),
+            all: true,
+        };
+        for c in [
+            CatalogChange::Marks,
+            CatalogChange::Develop,
+            CatalogChange::Removed,
+        ] {
+            hub.emit(changed(c));
+        }
+        assert_eq!(hub.location_changes(), 0);
+        for c in [
+            CatalogChange::Location,
+            CatalogChange::Imported,
+            CatalogChange::FileStatus,
+        ] {
+            hub.emit(changed(c));
+        }
+        assert_eq!(hub.location_changes(), 3);
+    }
 
     #[test]
     fn sticky_events_are_replayed_to_late_subscribers() {

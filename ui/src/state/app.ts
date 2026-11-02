@@ -192,7 +192,7 @@ export interface AppState {
   organizeVersion: number;
   /** 撮影日時の変化の通し番号（catalog_changed の capture_time で増える。タイムラインの読み直し。ORG-01・LIB-16）。 */
   captureTimeVersion: number;
-  /** 写真の位置の変化の通し番号（catalog_changed の location・imported で増える。地図のまとまりの読み直し。LIB-18）。 */
+  /** 写真の位置の変化の通し番号（catalog_changed の location・imported・file_status で増える。地図のまとまりの読み直し。LIB-18）。 */
   locationVersion: number;
   /**
    * ターゲットコレクション（B キーで選んだ写真を入れる・外す手動のコレクション。LIB-10）。カタログごとに
@@ -1059,6 +1059,8 @@ const importVersionsThrottle = new Throttle(IMPORT_REFRESH_MS, () =>
 
 /** フォルダの一覧を読み直す変更。 */
 const FOLDER_CHANGES = new Set<string>(["imported", "removed", "files", "folders", "file_status"]);
+/** 写真の位置が変わりうる変更（付けた位置・取り込みと、内容の確認・再リンクでのファイルの読み直し。地図の表示 LIB-18）。 */
+const LOCATION_CHANGES = new Set<string>(["location", "imported", "file_status"]);
 
 /**
  * 画面が待っていないジョブ（コアが自動で始めたもの）の結果。見つからない写真の確認（FILE-04）は、変わりが
@@ -1096,7 +1098,7 @@ function handleEvent(e: CoreEvent): void {
             ? s.organizeVersion + 1
             : s.organizeVersion,
         captureTimeVersion: e.change === "capture_time" ? s.captureTimeVersion + 1 : s.captureTimeVersion,
-        locationVersion: e.change === "location" || e.change === "imported" ? s.locationVersion + 1 : s.locationVersion,
+        locationVersion: LOCATION_CHANGES.has(e.change) ? s.locationVersion + 1 : s.locationVersion,
       }));
       break;
     case "thumbnail_updated":
