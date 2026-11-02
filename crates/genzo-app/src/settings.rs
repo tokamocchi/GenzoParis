@@ -2,7 +2,7 @@
 //!
 //! カタログに保存する設定（キャッシュの場所と上限・既定の色空間・既定のタイムゾーン。genzo-api の
 //! `CoreSettings`）とは別に、カタログを開く前に要るものと、カタログによらない取り込みのダイアログの設定
-//! （コピー先・名前の規則・まとめて付けるメタデータ。[`ImportPreferences`]）を、OS のアプリの設定のフォルダの
+//! （コピー先・名前の規則・まとめて付けるメタデータ・当てる現像プリセット。[`ImportPreferences`]）を、OS のアプリの設定のフォルダの
 //! `settings.json` に保存する。
 //!
 //! オンラインの地図（位置情報の後付け LIB-21 の第 2 段階。[`MapPreferences`]）の有効・無効と提供元も、
@@ -71,6 +71,9 @@ pub struct ImportPreferences {
     pub rename_rule: RenameRule,
     /// 取り込んだ写真にまとめて付けるキーワード・説明のメタデータ。
     pub metadata: ImportMetadata,
+    /// 取り込んだ写真に当てる現像プリセットの ID（IMP-07。`None` なら当てない。プリセットはカタログによらず
+    /// アプリのデータのフォルダにある。消されていれば画面は「なし」にする）。
+    pub develop_preset: Option<String>,
 }
 
 impl Default for ImportPreferences {
@@ -83,6 +86,7 @@ impl Default for ImportPreferences {
             rename: false,
             rename_rule: RenameRule::default(),
             metadata: ImportMetadata::default(),
+            develop_preset: None,
         }
     }
 }
@@ -319,6 +323,7 @@ mod tests {
         assert_eq!(l.import.folder_rule, FolderRule::Single);
         assert!(l.import.recursive);
         assert_eq!(l.import.rename_rule, RenameRule::default());
+        assert_eq!(l.import.develop_preset, None);
         fs::write(d.path().join(SETTINGS_FILE), r#"{"version": 1}"#).unwrap();
         assert_eq!(load(d.path()).settings.import, ImportPreferences::default());
     }

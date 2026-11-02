@@ -715,6 +715,7 @@ export const MOCK_IMPORT_PREFERENCES: ImportPreferences = {
   rename: true,
   rename_rule: { template: "{date}_{text}-{seq}", custom_text: "京都", sequence_start: 1, sequence_digits: 4 },
   metadata: { keywords: [["場所", "京都"], ["家族"]], fields: { creator: "岡本", copyright: "© 2026 岡本" } },
+  develop_preset: "0000000000000001",
 };
 
 /** 名前の例の見本（genzo-api の preview_names と同じ見本の写真。上の設定のとき）。 */
@@ -746,6 +747,7 @@ export const MOCK_COPY_IMPORT_REPORT: ImportReport = {
   skip_duplicates: true,
   separate_raw_jpeg: false,
   tagged: 2,
+  develop_preset: { id: "0000000000000001", name: "明るく", applied: 2 },
   copy: {
     destination: "/home/u/写真",
     copied: [

@@ -1749,6 +1749,51 @@ fn snapshots_presets_and_export_naming() {
     assert_eq!(dup.code, 1, "{}", dup.stdout);
     assert_eq!(dup.json()["error"]["kind"], "conflict");
 
+    // --- 取り込み時の現像プリセット（IMP-07） ---
+    let more = env.path("more");
+    std::fs::create_dir_all(&more).unwrap();
+    write_jpeg(
+        &more.join("C.jpg"),
+        (40, 30),
+        3,
+        Some("2024-05-03 12:00:00"),
+        false,
+    );
+    // 見つからないプリセットは、取り込みを始めない（終了コード 1。何も登録しない）。
+    let missing = env.run(&[
+        "import",
+        more.to_str().unwrap(),
+        "--develop-preset",
+        "ない",
+        "--json",
+    ]);
+    assert_eq!(missing.code, 1, "{}", missing.stdout);
+    assert_eq!(env.json(&["search"])["count"], 2);
+    let imported = env.json(&[
+        "import",
+        more.to_str().unwrap(),
+        "--develop-preset",
+        "明るく 2",
+    ]);
+    assert_eq!(imported["added"], 1);
+    assert_eq!(imported["develop_preset"]["id"], id.as_str());
+    assert_eq!(imported["develop_preset"]["name"], "明るく 2");
+    assert_eq!(imported["develop_preset"]["applied"], 1);
+    let c = id_of(&env.json(&["search"]), "C.jpg").to_string();
+    assert_eq!(env.json(&["develop", "get", &c])["exposure_ev"], 0.5);
+    let history = env.json(&["develop", "history", &c]);
+    assert_eq!(history[0]["label"], "読み込み");
+    assert_eq!(history[1]["label"], "プリセット「明るく 2」を適用");
+    // 文字の出力にも当てた数が出る（取り込み直しでは当てない: 0 枚）。
+    let text = env.run(&["import", more.to_str().unwrap(), "--develop-preset", &id]);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(
+        text.stdout
+            .contains("現像プリセット「明るく 2」を当てた写真: 0 枚"),
+        "{}",
+        text.stdout
+    );
+
     // --- 書き出しプリセットとファイル名 ---
     let out = env.path("out");
     let created = env.json(&[

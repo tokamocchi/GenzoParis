@@ -957,3 +957,105 @@ fn tagged_registration_with_invalid_tags_registers_nothing() {
         .is_empty()
     );
 }
+
+/// 取り込み時の現像設定の適用（IMP-07）: 新しく作った写真（動画・取り込み直し・組として足しただけの写真を除く）に、
+/// 登録と同じトランザクションで設定を保存し、「読み込み」の後に履歴を 1 件足す（Undo で何もない状態に戻せる）。
+#[test]
+fn imported_registration_applies_develop_settings_to_new_photos_only() {
+    use genzo_model::{CURRENT_PROCESS_VERSION, DevelopSettings};
+
+    use crate::{HISTORY_LABEL_IMPORT, ImportDevelop, ImportTags, RegisterOptions};
+
+    let mut f = Fixture::new();
+    // 登録済みの写真（取り込み直し）と、登録済みの RAW（隣に JPEG が現れる）。
+    let old = f.photo("OLD.ARW", 9, Some("2024:05:01 10:00:00"));
+    let raw = f.photo("DSC00009.ARW", 8, Some("2024:05:01 09:00:00"));
+    let develop = ImportDevelop {
+        settings: DevelopSettings {
+            exposure_ev: 0.5,
+            ..DevelopSettings::default()
+        },
+        label: "プリセット「明るく」を適用".to_owned(),
+    };
+    assert_eq!(develop.settings.process_version, CURRENT_PROCESS_VERSION);
+    let requests = vec![
+        photo_req(f.folder, "DSC00001.ARW", 1, Some("2024:05:01 12:00:00")),
+        photo_req(f.folder, "DSC00001.JPG", 2, Some("2024:05:01 12:00:00")),
+        photo_req(f.folder, "DSC00002.JPG", 3, Some("2024:05:01 12:00:01")),
+        video_req(f.folder, "C0001.MP4", 4, None),
+        photo_req(f.folder, "OLD.ARW", 9, Some("2024:05:01 10:00:00")),
+        photo_req(f.folder, "DSC00009.JPG", 5, Some("2024:05:01 09:00:00")),
+    ];
+    let (out, applied) = f
+        .cat
+        .register_batch_imported(
+            &requests,
+            &RegisterOptions::default(),
+            &ImportTags::default(),
+            Some(&develop),
+        )
+        .unwrap();
+    assert_eq!(out[4].status, RegisterStatus::Unchanged);
+    assert!(out[5].paired && out[5].asset_id == raw.asset_id);
+    assert_eq!(out[0].asset_id, out[1].asset_id, "ペアは 1 枚");
+    // 写真 2 枚（RAW と JPEG の組・JPEG だけ）。動画は除く。
+    assert_eq!(
+        applied.developed,
+        vec![out[0].master_variant_id, out[2].master_variant_id]
+    );
+    assert_eq!(applied.tagged, crate::TagOutcome::default());
+    for v in &applied.developed {
+        assert_eq!(f.cat.develop_settings(*v).unwrap(), develop.settings);
+        let labels: Vec<String> = f
+            .cat
+            .history(*v)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.label)
+            .collect();
+        assert_eq!(labels, [HISTORY_LABEL_IMPORT, develop.label.as_str()]);
+    }
+    // 対象でない写真・動画は何も当てていない（履歴は「読み込み」だけ）。
+    for v in [
+        out[3].master_variant_id,
+        old.master_variant_id,
+        raw.master_variant_id,
+    ] {
+        assert!(f.cat.develop_settings(v).unwrap().is_neutral(), "{v}");
+        assert_eq!(f.cat.history(v).unwrap().len(), 1, "{v}");
+    }
+    // Undo で何も当てていない状態に戻る。
+    let v = applied.developed[0];
+    let back = f.cat.undo_develop(v).unwrap().unwrap();
+    assert!(back.is_neutral());
+}
+
+/// 当てる設定が不正なら、何も登録しない（登録だけが進まない）。
+#[test]
+fn imported_registration_with_invalid_develop_settings_registers_nothing() {
+    use genzo_model::DevelopSettings;
+
+    use crate::{ImportDevelop, ImportTags, RegisterOptions};
+
+    let mut f = Fixture::new();
+    let requests = vec![photo_req(f.folder, "DSC00001.ARW", 1, None)];
+    let develop = ImportDevelop {
+        settings: DevelopSettings {
+            exposure_ev: f32::NAN,
+            ..DevelopSettings::default()
+        },
+        label: "プリセット「壊れた」を適用".to_owned(),
+    };
+    let e = f
+        .cat
+        .register_batch_imported(
+            &requests,
+            &RegisterOptions::default(),
+            &ImportTags::default(),
+            Some(&develop),
+        )
+        .unwrap_err();
+    assert!(matches!(e, CatalogError::Develop(_)), "{e:?}");
+    assert_eq!(f.rows("file"), 0);
+    assert_eq!(f.rows("variant"), 0);
+}
