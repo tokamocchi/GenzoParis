@@ -13,12 +13,14 @@
 //!   まだない（動画の件数が少ないうちは不要とみる。PoC-6 の実行計画で判断する）。
 //! - 絞り込みの候補（カメラ・レンズ・動画のコーデックと件数。[`Catalog::facets`]）は、[`Filter`] の
 //!   `cameras`・`lenses`・`codecs` にそのまま渡して一致する値を返す。件数は asset の数（[`Facets`]）。
+//! - 位置（LIB-18）で絞り込める（[`Filter::location_bounds`]・[`Filter::has_location`]。使う位置（付けた位置が
+//!   あればそれ、なければカメラの位置）で比べる）。索引はない（asset ごとに付けた位置を主キーで引く）。
 //! - 利用者の入力はすべてバインドする値として渡し、SQL の文字列に埋め込まない。
 
 use chrono::{DateTime, Utc};
 use genzo_model::{
     AssetId, AssetKind, CaptureTime, CollectionId, ColorLabel, FileId, FileStatus, Flag, FolderId,
-    KeywordId, Orientation, Rating, SmartRule, StackId, VariantId,
+    GeoBounds, KeywordId, Orientation, Rating, SmartRule, StackId, VariantId,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, params_from_iter};
@@ -93,6 +95,11 @@ pub struct Filter {
     pub collection: Option<CollectionId>,
     /// スマートコレクションの条件（保存していないもの。条件の編集中の件数など。LIB-11）。
     pub smart_rule: Option<SmartRule>,
+    /// 位置の範囲（LIB-18。使う位置（後から付けた位置があればそれ、なければカメラの位置。
+    /// [`crate::AssetRecord::effective_gps`]）が範囲の中のもの）。指定すると位置のないものは除く。
+    pub location_bounds: Option<GeoBounds>,
+    /// 位置があるか（LIB-18。`Some(true)` は使う位置のあるもの、`Some(false)` はないもの）。
+    pub has_location: Option<bool>,
 }
 
 /// 並べ替えの項目（LIB-08）。
@@ -292,6 +299,34 @@ impl SearchSql {
     }
 }
 
+/// 使う位置（LIB-18）が範囲の中（`bounds` が `None` なら、使う位置がある）という条件。asset を結合する。
+/// 範囲の値はバインドする（[`GeoBounds`] は範囲内の有限の値）。
+fn location_cond(q: &mut SearchSql, bounds: Option<GeoBounds>) -> String {
+    q.needs_asset = true;
+    let mut within = |lat: &str, lon: &str| -> String {
+        let Some(b) = bounds else {
+            return String::new();
+        };
+        let (s, n) = (q.bind(b.south), q.bind(b.north));
+        let (w, e) = (q.bind(b.west), q.bind(b.east));
+        let lon_cond = if b.crosses_antimeridian() {
+            format!("({lon} >= {w} OR {lon} <= {e})")
+        } else {
+            format!("{lon} BETWEEN {w} AND {e}")
+        };
+        format!(" AND {lat} BETWEEN {s} AND {n} AND {lon_cond}")
+    };
+    let assigned = within("al.lat", "al.lon");
+    let camera = within("a.gps_lat", "a.gps_lon");
+    // カメラの位置は IS NOT NULL を先に確かめ、式の値を NULL にしない（「位置がない」の NOT で除かれないように）。
+    format!(
+        "(EXISTS (SELECT 1 FROM asset_location al WHERE al.asset_id = v.asset_id{assigned}) \
+         OR (NOT EXISTS (SELECT 1 FROM asset_location al WHERE al.asset_id = v.asset_id) \
+         AND a.gps_lat IS NOT NULL AND a.gps_lon IS NOT NULL \
+         AND a.gps_lat BETWEEN -90.0 AND 90.0 AND a.gps_lon BETWEEN -180.0 AND 180.0{camera}))"
+    )
+}
+
 /// フィルターと並べ替えから SQL を組み立てる。コレクション（[`Filter::collection`]）は、スマート
 /// コレクションの条件・セットの中身を `conn` で読んで SQL にする（`smart_sql.rs`）。
 pub(crate) fn build_search_sql(
@@ -412,6 +447,16 @@ pub(crate) fn build_search_sql(
     }
     if filter.masters_only {
         conds.push("v.is_master = 1".to_owned());
+    }
+    // 位置（LIB-18）。使う位置は、付けた位置（asset_location）があればそれ、なければカメラの位置（緯度・経度の
+    // 両方があり、範囲内のものだけ。AssetRecord::effective_gps と同じ）。
+    if let Some(has) = filter.has_location {
+        let c = location_cond(&mut q, None);
+        conds.push(if has { c } else { format!("NOT {c}") });
+    }
+    if let Some(bounds) = filter.location_bounds {
+        let c = location_cond(&mut q, Some(bounds));
+        conds.push(c);
     }
     // コレクション（LIB-10・LIB-11）と、保存していない条件（スマートコレクションの編集中の件数など）。
     if let Some(id) = filter.collection {

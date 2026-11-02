@@ -1,5 +1,5 @@
 // ショートカットの一覧（UX-02）の内容。登録は App.tsx（全体。キーワード・コレクションの B・Ctrl / ⌘ + K・N、スタック・仮想コピーの
-// Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + '、現像の画面のスナップショット・プリセットの Ctrl / ⌘ + N・Shift + N を含む）・library/Grid.tsx（グリッドの移動・Enter・タイムラインの T）・
+// Ctrl / ⌘ + G・S・Shift + S・Ctrl / ⌘ + '、現像の画面のスナップショット・プリセットの Ctrl / ⌘ + N・Shift + N、地図の Shift + M を含む）・library/Grid.tsx（グリッドの移動・Enter・タイムラインの T）・
 // viewer/Loupe.tsx（I・Z・等倍表示の Esc）・viewer/CompareView.tsx（比較表示の ←・→・↑・↓・Z・等倍表示の Esc）・
 // viewer/SurveyView.tsx（選別表示の ←・→・/）・viewer/VideoPlayer.tsx（動画のスペース・J・K・L・,・.・M・Home・End）・
 // develop/DevelopView.tsx（W・R・Z・J・I・V・O・Q・[・]・\・Y・
@@ -26,9 +26,10 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: ["e"], label: "ルーペ" },
       { keys: ["c"], label: "比較表示（選択と候補の 2 枚を並べる）" },
       { keys: ["n"], label: "選別表示（選んだ写真を並べる）" },
+      { keys: ["shift+m"], label: "地図（写真を撮影地に並べ、地図から探す。オンラインの地図を有効にしたときだけ地図を出す）" },
       { keys: ["d"], label: "現像" },
       { keys: ["Escape"], label: "グリッドに戻る（等倍表示・切り抜き・スポイトの間は、それを終える）" },
-      { keys: ["ArrowLeft", "ArrowRight"], label: "前・次の写真（ルーペ・現像）" },
+      { keys: ["ArrowLeft", "ArrowRight"], label: "前・次の写真（ルーペ・地図・現像）" },
       { keys: ["z"], label: "等倍表示（ルーペ・現像）" },
       { keys: ["i"], label: "撮影情報の表示の切り替え（情報 1 → 情報 2 → なし。ルーペ・現像。項目は設定の「表示」）" },
     ],

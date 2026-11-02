@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use genzo_model::{
     CollectionId, CollectionKind, ColorLabel, CompositeSettings, CropRect, DevelopSettings,
-    ExportFormat, ExportSettings, Flag, FolderId, GpsCoord, HistoryEntryId, KeywordId,
+    ExportFormat, ExportSettings, Flag, FolderId, GeoBounds, GpsCoord, HistoryEntryId, KeywordId,
     MetadataField, Rating, RetouchSpot, SmartRule, SnapshotId, StackId, VariantId, Watermark,
 };
 use serde::{Deserialize, Serialize};
@@ -33,11 +33,12 @@ use crate::types::{
     CoreSettings, DeleteKind, DeletePlan, DeleteReport, DevelopState, DisplayInfo,
     DuplicateGroupList, Facets, FileCheckReport, FileIdentity, FolderInfo, FrameInfo, HistoryItem,
     ImportOptions, IndexOf, JobInfo, KeywordHit, KeywordInfo, KeywordUsage, LocationEditInfo,
-    LocationEditPlan, LocationUndo, MaskOverlayInfo, MetadataSummary, NamePreview, PasteReport,
-    PasteVersion, PickedMaskColor, PickedWhiteBalance, RangeResult, RegionInfo, RegionRequest,
-    SearchFilter, SearchResult, SearchSort, SettingGroups, SettingsUpdate, ShownVariants,
-    StackInfo, StartupReport, ThumbnailData, Timeline, UprightMode, UprightSuggestion,
-    VariantDetails, VariantKeywords, VideoPlayback, VideoProxyCacheStatus, ViewOutputSize,
+    LocationEditPlan, LocationUndo, MapClusters, MaskOverlayInfo, MetadataSummary, NamePreview,
+    PasteReport, PasteVersion, PickedMaskColor, PickedWhiteBalance, RangeResult, RegionInfo,
+    RegionRequest, SearchFilter, SearchResult, SearchSort, SettingGroups, SettingsUpdate,
+    ShownVariants, StackInfo, StartupReport, ThumbnailData, Timeline, UprightMode,
+    UprightSuggestion, VariantDetails, VariantKeywords, VideoPlayback, VideoProxyCacheStatus,
+    ViewOutputSize,
 };
 use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, ProfileEntry, ProfileImportReport, ProfileKind,
@@ -1007,6 +1008,15 @@ pub enum Command {
         #[serde(default)]
         gap_seconds: u32,
     },
+    /// 表示中の検索結果の地図のまとまり（LIB-18。[`crate::Core::map_clusters`]）。→ [`Response::MapClusters`]
+    MapClusters {
+        /// 世代。
+        generation: u64,
+        /// 地図の範囲。
+        bounds: GeoBounds,
+        /// 地図のズーム。
+        zoom: u8,
+    },
 
     // --- 位置情報の後付け（LIB-21） ---
     /// 位置の変更の見込み（何も変えない。[`crate::Core::plan_location_edit`]）。
@@ -1437,6 +1447,8 @@ pub enum Response {
     },
     /// タイムライン（ORG-01）。
     Timeline(Timeline),
+    /// 地図のまとまり（LIB-18）。
+    MapClusters(MapClusters),
     /// 位置の変更の見込み・結果（LIB-21）。
     LocationEditPlan(LocationEditPlan),
     /// 位置の変更の履歴（新しい順）。
@@ -2036,6 +2048,11 @@ impl Core {
                 generation,
                 gap_seconds,
             } => R::Timeline(self.timeline(generation, gap_seconds)?),
+            C::MapClusters {
+                generation,
+                bounds,
+                zoom,
+            } => R::MapClusters(self.map_clusters(generation, bounds, zoom)?),
             C::PlanLocationEdit {
                 variant_ids,
                 location,

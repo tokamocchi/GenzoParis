@@ -50,6 +50,7 @@ import type {
   FolderId,
   FolderInfo,
   FrameInfo,
+  GeoBounds,
   GpsCoord,
   HistoryEntryId,
   HistoryItem,
@@ -64,6 +65,7 @@ import type {
   LocationEditInfo,
   LocationEditPlan,
   LocationUndo,
+  MapClusters,
   MetadataSummary,
   NamePreview,
   PasteReport,
@@ -666,6 +668,9 @@ export const undoCaptureTimeEdit = async (): Promise<CaptureTimeUndo | null> =>
 /** 表示中の検索結果のタイムライン（撮影日時の順のときだけ。古い世代なら stale）。 */
 export const timeline = async (generation: number, gap_seconds: number): Promise<Timeline> =>
   strip(await execute({ type: "timeline", generation, gap_seconds }, "timeline"));
+/** 表示中の検索結果の地図のまとまり（LIB-18。地図の範囲・ズームに合わせる。古い世代なら stale）。 */
+export const mapClusters = async (generation: number, bounds: GeoBounds, zoom: number): Promise<MapClusters> =>
+  strip(await execute({ type: "map_clusters", generation, bounds, zoom }, "map_clusters"));
 
 // ---------------------------------------------------------------------------
 // 位置情報の後付け（LIB-21。ジオタグ付け）

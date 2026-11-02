@@ -44,10 +44,10 @@ import { type CatalogChangeSet, searchCache, thumbRevs } from "./search";
 import { createStore, useStore } from "./store";
 
 /**
- * 表示モード（G: グリッド、E: ルーペ、C: 比較表示、N: 選別表示、D: 現像）。比較表示・選別表示（LIB-03）は
- * state/compare.ts の openCompare・openSurvey で始める。
+ * 表示モード（G: グリッド、E: ルーペ、C: 比較表示、N: 選別表示、Shift + M: 地図、D: 現像）。比較表示・選別表示（LIB-03）は
+ * state/compare.ts の openCompare・openSurvey で始める。地図（LIB-18）は library/MapView.tsx。
  */
-export type Mode = "grid" | "loupe" | "compare" | "survey" | "develop";
+export type Mode = "grid" | "loupe" | "compare" | "survey" | "map" | "develop";
 
 /** ダイアログ（同時に 1 つ）。 */
 export type DialogState =
@@ -192,6 +192,8 @@ export interface AppState {
   organizeVersion: number;
   /** 撮影日時の変化の通し番号（catalog_changed の capture_time で増える。タイムラインの読み直し。ORG-01・LIB-16）。 */
   captureTimeVersion: number;
+  /** 写真の位置の変化の通し番号（catalog_changed の location・imported・file_status で増える。地図のまとまりの読み直し。LIB-18）。 */
+  locationVersion: number;
   /**
    * ターゲットコレクション（B キーで選んだ写真を入れる・外す手動のコレクション。LIB-10）。カタログごとに
    * ブラウザに保存する（state/organize.ts）。
@@ -264,6 +266,7 @@ export const appStore = createStore<AppState>({
   detailsVersion: 0,
   organizeVersion: 0,
   captureTimeVersion: 0,
+  locationVersion: 0,
   targetCollection: null,
 });
 
@@ -910,10 +913,21 @@ async function moveSelection(delta: number): Promise<void> {
   if (next !== currentIndex) await selectIndex(next);
 }
 
-/** 操作の対象: グリッドでは選択中のすべて、ルーペ・現像では表示中の 1 枚。 */
+/**
+ * 選択中のすべてを操作の対象にする表示か（グリッドと地図（LIB-18。フィルムストリップで選んだ写真））。操作の対象
+ * （targets）・右のパネルのまとめての編集（MetadataPanel）・「自動で次へ」で同じ判定を使う（食い違うと、右のパネルが
+ * 1 枚の値を出したまま、選んだすべてに書いてしまう）。
+ */
+export function selectsMany(mode: Mode): boolean {
+  return mode === "grid" || mode === "map";
+}
+
+/** 操作の対象: グリッド・地図では選択中のすべて（selectsMany）、ルーペ・現像では表示中の 1 枚。 */
 function targets(): VariantId[] {
   const { mode, selection } = appStore.get();
-  if (mode === "grid") return selection.ids.length > 0 ? selection.ids : selection.current !== null ? [selection.current] : [];
+  if (selectsMany(mode)) {
+    return selection.ids.length > 0 ? selection.ids : selection.current !== null ? [selection.current] : [];
+  }
   return selection.current !== null ? [selection.current] : [];
 }
 
@@ -929,7 +943,7 @@ function targets(): VariantId[] {
  */
 function pasteTargets(): VariantId[] {
   const { mode, selection } = appStore.get();
-  if (mode === "grid" || selection.current === null) return targets();
+  if (selectsMany(mode) || selection.current === null) return targets();
   return selection.ids.includes(selection.current) ? selection.ids : [selection.current, ...selection.ids];
 }
 
@@ -962,7 +976,7 @@ async function afterMark(): Promise<void> {
   const s = appStore.get();
   // 比較表示・選別表示では次へ進まない（表示中の写真は作業中の面・枠の写真なので。決定事項ログ No.115・116）。
   if (s.autoAdvance && (s.mode === "loupe" || s.mode === "develop")) await moveSelection(1);
-  else if (s.autoAdvance && s.mode === "grid" && s.selection.ids.length <= 1) await moveSelection(1);
+  else if (s.autoAdvance && selectsMany(s.mode) && s.selection.ids.length <= 1) await moveSelection(1);
 }
 
 /**
@@ -1051,6 +1065,8 @@ const importVersionsThrottle = new Throttle(IMPORT_REFRESH_MS, () =>
 
 /** フォルダの一覧を読み直す変更。 */
 const FOLDER_CHANGES = new Set<string>(["imported", "removed", "files", "folders", "file_status"]);
+/** 写真の位置が変わりうる変更（付けた位置・取り込みと、内容の確認・再リンクでのファイルの読み直し。地図の表示 LIB-18）。 */
+const LOCATION_CHANGES = new Set<string>(["location", "imported", "file_status"]);
 
 /**
  * 画面が待っていないジョブ（コアが自動で始めたもの）の結果。見つからない写真の確認（FILE-04）は、変わりが
@@ -1088,6 +1104,7 @@ function handleEvent(e: CoreEvent): void {
             ? s.organizeVersion + 1
             : s.organizeVersion,
         captureTimeVersion: e.change === "capture_time" ? s.captureTimeVersion + 1 : s.captureTimeVersion,
+        locationVersion: LOCATION_CHANGES.has(e.change) ? s.locationVersion + 1 : s.locationVersion,
       }));
       break;
     case "thumbnail_updated":

@@ -277,39 +277,50 @@ export function GeoMap(props: {
           </div>
         )}
         {failed && <div className="geo-map-status error-text">地図を読み込めません（画面を開き直してください）</div>}
-        <div className="geo-attribution">
-          {props.credit && (
-            <>
-              <span className="geo-credit" title="設定したタイルの提供元の帰属の表示">
-                {props.credit}
-              </span>
-              <span className="geo-sep" aria-hidden="true">
-                |
-              </span>
-            </>
-          )}
-          <button
-            type="button"
-            className="geo-link"
-            onClick={() => openMapPage("copyright")}
-            title="OpenStreetMap の著作権とライセンスのページを既定のブラウザで開きます"
-          >
-            {MAP_LINK_LABELS.copyright}
-          </button>
-          <span className="geo-sep" aria-hidden="true">
-            |
-          </span>
-          <button
-            type="button"
-            className="geo-link"
-            onClick={() => openMapPage("fix_the_map")}
-            title="OpenStreetMap の地図の誤りを報告するページを既定のブラウザで開きます"
-          >
-            {MAP_LINK_LABELS.fix_the_map}
-          </button>
-        </div>
+        <MapAttribution credit={props.credit ?? null} />
       </div>
       {tileError && <p className="warn-text hint">{MAP_TILE_ERROR}</p>}
     </>
+  );
+}
+
+/**
+ * 地図の右下の帰属の表示（「© OpenStreetMap contributors」・「地図の誤りを報告」。設定したタイルの提供元の帰属の
+ * 表示 `credit` があれば、その前に文字だけで並べる）。位置を付けるダイアログの地図と、地図の表示（LIB-18。
+ * MapView.tsx）で使う。親は position を持つこと（.geo-attribution は親の右下に置く）。
+ */
+export function MapAttribution(props: { credit: string | null }) {
+  return (
+    <div className="geo-attribution">
+      {props.credit && (
+        <>
+          <span className="geo-credit" title="設定したタイルの提供元の帰属の表示">
+            {props.credit}
+          </span>
+          <span className="geo-sep" aria-hidden="true">
+            |
+          </span>
+        </>
+      )}
+      <button
+        type="button"
+        className="geo-link"
+        onClick={() => openMapPage("copyright")}
+        title="OpenStreetMap の著作権とライセンスのページを既定のブラウザで開きます"
+      >
+        {MAP_LINK_LABELS.copyright}
+      </button>
+      <span className="geo-sep" aria-hidden="true">
+        |
+      </span>
+      <button
+        type="button"
+        className="geo-link"
+        onClick={() => openMapPage("fix_the_map")}
+        title="OpenStreetMap の地図の誤りを報告するページを既定のブラウザで開きます"
+      >
+        {MAP_LINK_LABELS.fix_the_map}
+      </button>
+    </div>
   );
 }

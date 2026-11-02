@@ -14,8 +14,9 @@
 //!   [`ApiError::InvalidArgument`]）。座標の文字列の解釈は genzo-model の `parse_coordinates`（CLI・画面）。
 //! - 変えたら [`Event::CatalogChanged`]（[`CatalogChange::Location`]）で知らせる。付ける・消すでは対象の写真の
 //!   すべての variant（仮想コピーを含む）、取り消しでは戻した写真が分からないので、すべてとして知らせる。
-//!   位置は検索結果の並び・絞り込み・グリッドの要約（[`crate::VariantSummary`]）に使わないので、検索結果は
-//!   作り直さない。
+//!   位置は検索結果の並び・グリッドの要約（[`crate::VariantSummary`]）に使わないので、検索結果は、表示中の
+//!   条件に位置の条件（LIB-18 の地図の範囲・位置の有無）があるときだけ作り直す。地図のまとまり（`map`）は、
+//!   この知らせで位置を読み直す。
 //! - ログには座標を書かない（数だけ。決定事項ログ No.75 の方針）。
 
 use std::collections::HashSet;
@@ -100,13 +101,16 @@ fn variants_of(c: &Catalog, assets: &[AssetId]) -> Result<Vec<VariantId>, ApiErr
     Ok(out)
 }
 
-/// 位置を変えた後: 知らせる（検索結果は作り直さない。モジュールの doc）。
+/// 位置を変えた後: 知らせる（検索結果は、位置の条件があるときだけ作り直す。モジュールの doc）。
 fn after_change(inner: &Inner, variant_ids: Vec<VariantId>, all: bool) {
     inner.events.emit(Event::CatalogChanged {
         change: CatalogChange::Location,
         variant_ids,
         all,
     });
+    if crate::search::current_uses_location(inner) {
+        crate::search::refresh(inner, &[]);
+    }
 }
 
 impl Core {

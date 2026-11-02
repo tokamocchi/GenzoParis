@@ -13,8 +13,8 @@ use genzo_api::{
     StackId, VariantId,
 };
 use genzo_model::{
-    ConflictPolicy, ExportFormat, GpsCoord, HistoryEntryId, MetadataField, OutputColorSpace,
-    SnapshotId,
+    ConflictPolicy, ExportFormat, GeoBounds, GpsCoord, HistoryEntryId, MetadataField,
+    OutputColorSpace, SnapshotId,
 };
 
 /// GenzoParis の検証用 CLI（ORG-05。04 の 1.4 節）。
@@ -1310,6 +1310,33 @@ pub struct FilterArgs {
     /// スマートコレクションの条件の JSON のファイル（- で標準入力。保存していない条件で探す）
     #[arg(long, value_name = "FILE")]
     pub rule: Option<String>,
+    /// 地図の範囲（LIB-18。南,西,北,東 の 10 進の度。例: 35.5,139.5,35.9,140.0。西が東より大きければ経度 180 度の
+    /// 線をまたぐ範囲）。使う位置（付けた位置があればそれ、なければカメラの位置）が範囲の中のもの
+    #[arg(long, value_name = "S,W,N,E", value_parser = parse_bounds, allow_hyphen_values = true)]
+    pub bounds: Option<GeoBounds>,
+    /// 使う位置のあるものだけ（LIB-18）
+    #[arg(long, conflicts_with = "no_location")]
+    pub located: bool,
+    /// 使う位置のないものだけ（LIB-18。位置を付ける写真を探すときなど）
+    #[arg(long)]
+    pub no_location: bool,
+}
+
+/// 地図の範囲（`南,西,北,東`。10 進の度。前後の空白は無視する）。
+pub fn parse_bounds(s: &str) -> Result<GeoBounds, String> {
+    let nums: Vec<f64> = s
+        .split(',')
+        .map(|p| p.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("範囲は 南,西,北,東 の 4 つの数で指定してください: {s}"))?;
+    match nums[..] {
+        [south, west, north, east] => GeoBounds::new(south, west, north, east).ok_or_else(|| {
+            format!("範囲が不正です（緯度は -90〜90 で南が北以下、経度は -180〜180）: {s}")
+        }),
+        _ => Err(format!(
+            "範囲は 南,西,北,東 の 4 つの数で指定してください: {s}"
+        )),
+    }
 }
 
 /// `search` の引数。
@@ -3728,6 +3755,32 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         parse_from(os(args))
+    }
+
+    /// 地図の範囲（LIB-18）: 南,西,北,東。負の数で始まってもよい。--located と --no-location は一緒に使えない。
+    #[test]
+    fn location_filter_arguments() {
+        assert_eq!(
+            parse_bounds("35.5, 139.5,35.9,140"),
+            Ok(GeoBounds::new(35.5, 139.5, 35.9, 140.0).unwrap())
+        );
+        let pacific = parse_bounds("-20,170,-10,-170").unwrap();
+        assert!(pacific.crosses_antimeridian());
+        for bad in [
+            "1,2,3",
+            "1,2,3,4,5",
+            "a,b,c,d",
+            "10,0,5,1",
+            "0,0,91,1",
+            "0,-181,1,1",
+            "",
+        ] {
+            assert!(parse_bounds(bad).is_err(), "{bad}");
+        }
+        assert!(parse(&["genzo", "search", "--bounds", "-20,170,-10,-170"]).is_ok());
+        assert!(parse(&["genzo", "search", "--located"]).is_ok());
+        assert!(parse(&["genzo", "search", "--no-location"]).is_ok());
+        assert!(parse(&["genzo", "search", "--located", "--no-location"]).is_err());
     }
 
     /// フォルダの指定（FILE-02）: 数字だけなら ID、それ以外はパス。`file rename` は --name か --template。
