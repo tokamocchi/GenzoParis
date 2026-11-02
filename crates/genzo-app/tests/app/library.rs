@@ -611,6 +611,7 @@ pub fn copy_import_through_the_app() {
         destination: Some(dest.clone()),
         folder_rule: genzo_api::FolderRule::Single,
         rename: true,
+        develop_preset: Some("0123456789abcdef".to_owned()),
         ..Default::default()
     };
     prefs.rename_rule.template = "旅行-{seq}".to_owned();

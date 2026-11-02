@@ -48,6 +48,18 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
             a.dir.display()
         ))));
     }
+    // 取り込み時の現像プリセット（IMP-07。ID か名前。カタログを開く前に探す）。
+    let mut options = a.options();
+    if let Some(r) = &a.develop_preset {
+        let store = crate::preset::store(g);
+        let p = crate::preset::resolve(
+            &store,
+            Some(genzo_api::PresetKind::Develop),
+            r,
+            a.develop_preset_folder.as_deref(),
+        )?;
+        options.develop_preset = Some(p.id);
+    }
     let s = Session::open(
         g,
         out,
@@ -59,7 +71,7 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
     )?;
     let job = s
         .core
-        .import_folder_with(&a.dir, !a.no_recursive, &a.options())?;
+        .import_folder_with(&a.dir, !a.no_recursive, &options)?;
     let info = s.wait_job_ok(job, "取り込み")?;
     let Some(JobResult::Import(report)) = info.result else {
         return Err(CliError::other("取り込みの結果がありません"));
@@ -142,6 +154,12 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
             out.line(format!(
                 "  キーワード・メタデータを付けた写真: {} 枚",
                 report.tagged
+            ));
+        }
+        if let Some(p) = &report.develop_preset {
+            out.line(format!(
+                "  現像プリセット「{}」を当てた写真: {} 枚",
+                p.name, p.applied
             ));
         }
         if report.paired > 0 {

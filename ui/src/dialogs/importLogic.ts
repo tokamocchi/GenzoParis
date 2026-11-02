@@ -1,6 +1,6 @@
 // 取り込み（IMP-01・VID-01）のダイアログとドラッグ＆ドロップの判定、重複と思われるもの（IMP-04）・RAW と
 // JPEG の扱い（IMP-06）の設定、コピー取り込み（IMP-02）・リネーム規則（IMP-03）・まとめて付けるキーワードと
-// 説明のメタデータ（IMP-05）の入力と、結果の知らせ（DOM を使わない純粋な計算）。
+// 説明のメタデータ（IMP-05）・当てる現像プリセット（IMP-07）の入力と、結果の知らせ（DOM を使わない純粋な計算）。
 
 import type {
   CopySettings,
@@ -13,6 +13,7 @@ import type {
   ImportPreferences,
   ImportReport,
   MetadataField,
+  PresetInfo,
   RenameRule,
   SettingsUpdate,
 } from "../api/types";
@@ -273,6 +274,14 @@ export function describeImportReport(r: ImportReport): Notice {
   }
   if (r.paired) detail.push(`RAW と同時記録の JPEG ${formatCount(r.paired)} 件を、RAW と 1 枚の写真にまとめました`);
   if (r.tagged) detail.push(`${formatCount(r.tagged)} 枚の写真に、取り込み時のキーワード・メタデータを付けました`);
+  if (r.develop_preset && !copy?.dry_run) {
+    const p = r.develop_preset;
+    detail.push(
+      p.applied > 0
+        ? `${formatCount(p.applied)} 枚の写真に、現像プリセット「${p.name}」を当てました`
+        : `現像プリセット「${p.name}」を当てた写真はありません（新しく登録した写真がありませんでした）`,
+    );
+  }
   return {
     level: problems > 0 ? "warning" : "success",
     message,
@@ -339,6 +348,7 @@ export const DEFAULT_IMPORT_PREFERENCES: ImportPreferences = {
   rename: false,
   rename_rule: { template: "{date}-{seq}", custom_text: "", sequence_start: 1, sequence_digits: 4 },
   metadata: { keywords: [], fields: {} },
+  develop_preset: null,
 };
 
 /** 取り込みのダイアログの入力（文字列のまま持ち、取り込むときに確かめる）。 */
@@ -357,6 +367,8 @@ export interface ImportForm {
   keywords: string;
   /** 説明のメタデータ（空は付けない）。 */
   fields: Partial<Record<MetadataField, string>>;
+  /** 当てる現像プリセットの ID（IMP-07。"" なら当てない）。 */
+  developPreset: string;
 }
 
 /** アプリに保存した設定から、ダイアログの入力の初めの値を作る（古いアプリで無ければ既定）。 */
@@ -375,6 +387,7 @@ export function importFormFrom(prefs: ImportPreferences | null | undefined): Imp
     sequenceDigits: rule.sequence_digits,
     keywords: (p.metadata?.keywords ?? []).map((k) => k.join(" > ")).join(", "),
     fields: { ...(p.metadata?.fields ?? {}) },
+    developPreset: p.develop_preset ?? "",
   };
 }
 
@@ -420,6 +433,7 @@ export function importPreferencesOf(form: ImportForm): ImportPreferences {
     rename: form.rename,
     rename_rule: renameRuleOf(form),
     metadata: importMetadataOf(form),
+    develop_preset: form.developPreset === "" ? null : form.developPreset,
   };
 }
 
@@ -485,7 +499,35 @@ export function importOptionsOf(form: ImportForm, choice: ImportOptions): Import
   const copy = copySettingsOf(form);
   if (copy) options.copy = copy;
   if (metadata.keywords.length > 0 || Object.keys(metadata.fields).length > 0) options.metadata = metadata;
+  if (form.developPreset !== "") options.develop_preset = form.developPreset;
   return options;
+}
+
+// ---------------------------------------------------------------------------
+// 取り込み時の現像プリセット（IMP-07）
+// ---------------------------------------------------------------------------
+
+/**
+ * 選んだ現像プリセット（`id` が "" なら当てない）。`presets` はコアの一覧（まだ読んでいない・読めなければ null。
+ * そのときは確かめず、コアが取り込みを始める前に確かめる）。一覧にない・使えないものは、取り込めない理由
+ * （`problem`）を返す（何も当てずに取り込むと、利用者が気付かないため）。
+ */
+export function importPresetChoice(
+  presets: readonly PresetInfo[] | null,
+  id: string,
+): { preset: PresetInfo | null; problem: string | null } {
+  if (id === "" || presets === null) return { preset: null, problem: null };
+  const preset = presets.find((p) => p.id === id && p.kind === "develop") ?? null;
+  if (!preset) {
+    return {
+      preset: null,
+      problem: "選んでいた現像プリセットが見つかりません（削除されたか、別の PC で選んだものです）。選び直してください",
+    };
+  }
+  if (preset.problem !== null) {
+    return { preset, problem: `現像プリセット「${preset.name}」は使えません: ${preset.problem}` };
+  }
+  return { preset, problem: null };
 }
 
 /** まとめて付けるものの数（節の見出しに出す。キーワードと値のある項目）。 */

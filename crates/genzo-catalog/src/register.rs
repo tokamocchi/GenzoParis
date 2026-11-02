@@ -20,8 +20,8 @@
 use std::path::{Component, Path};
 
 use genzo_model::{
-    AssetId, AssetKind, CaptureTime, FileId, FileRole, FileStatus, FolderId, MetadataField,
-    PhotoMetadata, VariantId, VideoMetadata, VolumeId,
+    AssetId, AssetKind, CaptureTime, DevelopSettings, FileId, FileRole, FileStatus, FolderId,
+    MetadataField, PhotoMetadata, VariantId, VideoMetadata, VolumeId,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -315,6 +315,24 @@ pub struct TagOutcome {
     pub keyword_links: u64,
 }
 
+/// 取り込みで新しく作った写真に当てる現像設定（IMP-07。[`Catalog::register_batch_imported`]）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDevelop {
+    /// 保存する設定（処理バージョンを含む。新しい variant は処理バージョンが最新）。
+    pub settings: DevelopSettings,
+    /// 履歴の名前（「プリセット「フィルム風」を適用」など）。
+    pub label: String,
+}
+
+/// 取り込みで新しく作った写真に付けた・当てたものの結果（[`Catalog::register_batch_imported`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImportApplied {
+    /// キーワード・説明のメタデータ（IMP-05）。
+    pub tagged: TagOutcome,
+    /// 現像設定を保存した写真のマスターの variant（IMP-07。要求の順。RAW と JPEG のペアは 1 つ）。
+    pub developed: Vec<VariantId>,
+}
+
 /// 登録の結果の種類。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterStatus {
@@ -477,10 +495,36 @@ impl Catalog {
         options: &RegisterOptions,
         tags: &ImportTags,
     ) -> Result<(Vec<RegisterOutcome>, TagOutcome)> {
+        let (out, applied) = self.register_batch_imported(requests, options, tags, None)?;
+        Ok((out, applied.tagged))
+    }
+
+    /// [`Catalog::register_batch_tagged`] と同じ（キーワード・説明のメタデータ。IMP-05）に加えて、`develop` があれば、
+    /// このバッチで新しく作った**写真**（動画を除く）のマスターの variant に、その現像設定を保存する（IMP-07。
+    /// 取り込み時の現像プリセットの適用）。すべて 1 つのトランザクションで、どれかが失敗したら登録も残さない。
+    ///
+    /// - 対象は `tags` と同じ（[`RegisterStatus::Added`] で `paired` でないファイルの asset）。取り込み直した
+    ///   写真・登録済みの写真に組として足したファイルの写真の設定は変えない。
+    /// - 履歴は、登録の「読み込み」（[`crate::HISTORY_LABEL_IMPORT`]）の後に `develop.label` を 1 件足す（Undo で
+    ///   何も当てていない状態に戻せる）。
+    /// - 新しい variant は処理バージョンが最新（[`genzo_model::CURRENT_PROCESS_VERSION`]）で作られる。
+    ///   `develop.settings` はその版の写真に当てる設定として渡す（処理バージョンを含めてそのまま保存する。
+    ///   版の合わせ方は呼び出し側の責任）。設定は保存の前に確かめ（genzo-model の検証）、不正なら何も登録しない。
+    pub fn register_batch_imported(
+        &mut self,
+        requests: &[RegisterFile],
+        options: &RegisterOptions,
+        tags: &ImportTags,
+        develop: Option<&ImportDevelop>,
+    ) -> Result<(Vec<RegisterOutcome>, ImportApplied)> {
         let metadata = tags.normalized_metadata()?;
         for p in &tags.keyword_paths {
             check_keyword_path(p)?;
         }
+        // 設定は登録の前に確かめる（不正な設定で登録だけが進まないように）。
+        let encoded = develop
+            .map(|d| crate::develop::encode(&d.settings))
+            .transpose()?;
         let tx = self.conn.transaction()?;
         let out = register_batch_tx(&tx, requests, options)?;
         // このバッチで作った写真（組にせずに登録したファイルの asset）だけ。組として既存の写真に入れた
@@ -488,16 +532,21 @@ impl Catalog {
         // 同じバッチで作った写真に入れた JPEG は、その写真が既に含まれる。
         let mut assets: Vec<AssetId> = Vec::new();
         let mut variants: Vec<VariantId> = Vec::new();
-        for o in out
+        let mut photos: Vec<VariantId> = Vec::new();
+        for (o, req) in out
             .iter()
-            .filter(|o| o.status == RegisterStatus::Added && !o.paired)
+            .zip(requests)
+            .filter(|(o, _)| o.status == RegisterStatus::Added && !o.paired)
         {
             if !assets.contains(&o.asset_id) {
                 assets.push(o.asset_id);
                 variants.push(o.master_variant_id);
+                if req.kind == AssetKind::Photo {
+                    photos.push(o.master_variant_id);
+                }
             }
         }
-        let mut tagged = TagOutcome::default();
+        let mut applied = ImportApplied::default();
         if !assets.is_empty() && (!tags.keyword_paths.is_empty() || !metadata.is_empty()) {
             let mut keyword_ids = Vec::new();
             for path in &tags.keyword_paths {
@@ -510,12 +559,21 @@ impl Catalog {
                     keyword_ids.push(id);
                 }
             }
-            tagged.keyword_links = add_keywords_tx(&tx, &variants, &keyword_ids)? as u64;
+            applied.tagged.keyword_links = add_keywords_tx(&tx, &variants, &keyword_ids)? as u64;
             set_asset_metadata_tx(&tx, &assets, &metadata)?;
-            tagged.assets = assets.len() as u64;
+            applied.tagged.assets = assets.len() as u64;
+        }
+        if let (Some(d), Some(encoded)) = (develop, &encoded)
+            && !photos.is_empty()
+        {
+            let now = now_utc_string();
+            for &v in &photos {
+                crate::develop::save_develop_tx(&tx, v, encoded, &d.label, &now)?;
+            }
+            applied.developed = photos;
         }
         tx.commit()?;
-        Ok((out, tagged))
+        Ok((out, applied))
     }
 }
 

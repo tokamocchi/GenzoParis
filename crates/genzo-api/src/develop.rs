@@ -965,6 +965,35 @@ fn known_process_version(
     })
 }
 
+/// 新しく登録する写真（処理バージョンが最新で、何も調整していない設定）に、`source` の `groups` の項目を貼り付けた
+/// 設定（IMP-07。取り込み時の現像プリセットの適用）。[`Core::paste_settings_with`] の [`PasteVersion::Keep`] と同じ
+/// 当て方で、処理バージョンは最新のまま。`source` の処理バージョンをこのアプリが知らない・項目の意味が最新の版と
+/// 違うときは [`ApiError::InvalidArgument`]。外部データ（`render_deps`）は空（保存するときに描画に使う値にする）。
+pub(crate) fn pasted_onto_new_photo(
+    source: &DevelopSettings,
+    groups: SettingGroups,
+) -> Result<DevelopSettings, ApiError> {
+    source.validate().map_err(genzo_model::DevelopError::from)?;
+    let source_version = known_process_version(source.process_version, "プリセットの設定の")?;
+    let latest = genzo_model::CURRENT_PROCESS_VERSION;
+    let target_version = known_process_version(latest, "新しい写真の")?;
+    if !target_version.shares_settings_with(source_version) {
+        return Err(ApiError::InvalidArgument(format!(
+            "処理バージョン {} の設定は、処理バージョン {latest} の新しい写真には当てられません（項目の意味が違います）",
+            source.process_version
+        )));
+    }
+    let base = DevelopSettings {
+        process_version: latest,
+        ..DevelopSettings::default()
+    };
+    let mut merged = groups.merge(source, &base);
+    merged.process_version = latest;
+    merged.render_deps = genzo_model::RenderDeps::default();
+    merged.validate().map_err(genzo_model::DevelopError::from)?;
+    Ok(merged)
+}
+
 /// 設定に、その処理バージョンでは使われず、最新の版に更新すると使われる項目の値があるか（版 1 の写真の
 /// レンズ補正など。genzo-pipeline の `finish::unimplemented_settings` で比べる）。
 pub(crate) fn unused_until_upgrade(settings: &DevelopSettings) -> bool {
