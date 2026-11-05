@@ -91,4 +91,7 @@ test("配布: Release を作るのは release ジョブだけで、タグのと�
   assert.match(release, /release_draft:[\s\S]*?default: true/);
   assert.match(job[1], /gh release view "\$TAG"/);
   assert.match(job[1], /--verify-tag/);
+  // 再実行で前の試行の artifact が残っても、配る用の名前だけを取る（「-unverified」は取らない）。
+  assert.match(job[1], /--pattern 'genzoparis-windows-x64' --pattern 'genzoparis-macos-arm64' --pattern 'genzoparis-macos-arm64-macos\*-or-later'/);
+  assert.doesNotMatch(job[1], /\*-unverified/);
 });

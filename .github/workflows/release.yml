@@ -436,11 +436,20 @@ jobs:
             exit 1
           fi
           mkdir dl
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir dl
+          # 配る用の artifact だけを取る（名前で選ぶ。「-unverified」は一致しない）。ジョブの再実行では、run の ID が同じまま
+          # 前の試行の artifact が残る（失敗した試行の「-unverified」など）ため、全部を取って「ない」ことを求めない。
+          # 名前が同じものや、同じ OS の artifact が 2 つ以上あるときは、下で止まる（古いものを載せないため）。
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir dl \
+            --pattern 'genzoparis-windows-x64' --pattern 'genzoparis-macos-arm64' --pattern 'genzoparis-macos-arm64-macos*-or-later'
           ls -R dl
           mkdir out
           shopt -s nullglob
-          for d in dl/*-unverified; do echo "::error::${d} がある（確認に通らなかった配布物は載せない）"; exit 1; done
+          for os in windows-x64 macos-arm64; do
+            dirs=(dl/genzoparis-${os}*)
+            if [ ${#dirs[@]} -ne 1 ]; then
+              echo "::error::${os} の artifact が 1 つではない（${#dirs[@]} 個: ${dirs[*]}）。再実行で古いものが残っていないか確かめる"; exit 1
+            fi
+          done
           # artifact の中のフォルダ構成（upload-artifact は共通の親から残す）に頼らず、find で探す。
           mapfile -t win < <(find dl/genzoparis-windows-x64* -name '*-setup.exe')
           mapfile -t dmg < <(find dl/genzoparis-macos-arm64* -name '*.dmg')
