@@ -74,3 +74,24 @@ test("配布物の確認で、AI マスクの同梱のモデル・ONNX Runtime�
   assert.match(release, /'third-party\\ai-models\.txt'/);
   assert.equal((release.match(/scripts\/check-onnxruntime\.py/g) ?? []).length >= 2, true);
 });
+
+test("配布: Release を作るのは release ジョブだけで、タグのときだけ・bundle の後・下書きが既定で動く", () => {
+  const release = fs.readFileSync(path.join(WORKFLOWS_DIR, "release.yml"), "utf8");
+  // 既定の権限は読み取りだけ。書き込み（contents: write）は release ジョブだけ。
+  assert.match(release, /^permissions:\n  contents: read\n/m);
+  assert.equal((release.match(/^\s*contents: write$/gm) ?? []).length, 1);
+  const job = /^  release:\n([\s\S]*)$/m.exec(release);
+  assert.ok(job, "release ジョブがない");
+  assert.match(job[1], /needs: bundle\n/);
+  assert.match(job[1], /if: github\.ref_type == 'tag'\n/);
+  assert.match(job[1], /contents: write/);
+  // 外部のアクションは使わない（SHA で固定していないものを増やさない）。
+  assert.doesNotMatch(job[1], /^\s*(- )?uses:/m);
+  // 下書きが既定。同じタグの Release があれば上書きしない。
+  assert.match(release, /release_draft:[\s\S]*?default: true/);
+  assert.match(job[1], /gh release view "\$TAG"/);
+  assert.match(job[1], /--verify-tag/);
+  // 再実行で前の試行の artifact が残っても、配る用の名前だけを取る（「-unverified」は取らない）。
+  assert.match(job[1], /--pattern 'genzoparis-windows-x64' --pattern 'genzoparis-macos-arm64' --pattern 'genzoparis-macos-arm64-macos\*-or-later'/);
+  assert.doesNotMatch(job[1], /\*-unverified/);
+});

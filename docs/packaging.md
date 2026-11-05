@@ -138,7 +138,12 @@ Intel の Mac 向け（x86_64）は作りません（要るかは人の判断。
   - 両 OS: `licenses/` の文書があるか、`third-party/native.txt` に同梱したファイル（Windows は `bundled-libs.txt` の DLL、macOS は `Contents/Frameworks` の dylib）がすべて載っているか、`LibRaw/source/` にソースのアーカイブがあるか（2026-10-20 から）。
   - macOS: `codesign --verify`、Info.plist の最小の版、`hdiutil verify`（.dmg）を見た後、`DYLD_PRINT_LIBRARIES=1` でワーカーを起動し、終了コード・「genzo-worker <版>」の出力・dyld のエラー（`Library not loaded`）がないこと・`Contents/Frameworks` のすべての dylib を `.app` の中から読み込んだこと・Homebrew の場所から読み込んでいないことを確かめる。
 - 外部のアクション（actions/checkout など）は、コミットの SHA で固定しています（ci.yml も同じ。タグの付け替えで、配布物を作る処理が変わらないように）。SHA は 2026-10-12 に `git ls-remote` で、その時点の各タグ（コメントに書いた版）が指すコミットを調べたものです。更新するときは、新しい版のタグが指す SHA を同じ方法で調べ、差分を確かめてから書き換えてください。
-- 成果物は Actions の artifact（`genzoparis-windows-x64`・`genzoparis-macos-arm64`。30 日で消える。仮置き）に置きます。GitHub の Releases には出しません。**artifact は、リポジトリを読める人なら誰でも取得できます。リポジトリの公開の範囲を確かめてから実行してください。**
+- 成果物は Actions の artifact（`genzoparis-windows-x64`・`genzoparis-macos-arm64`。30 日で消える。仮置き）に置きます。**artifact は、リポジトリを読める人なら誰でも取得できます。リポジトリの公開の範囲を確かめてから実行してください。**
+- **GitHub の Releases（2026-11-05 から）**: 実行の画面で `v` で始まるタグを選んだときだけ、両 OS の `bundle` が成功した後に `release` ジョブが、そのタグの Release を作ります（プレリリース）。載せるのはインストーラー・.dmg・`bundled-libs-windows-x64.txt`・`bundled-libs-macos-arm64.txt`・`SHA256SUMS.txt` です。.app の tar.gz と `licenses/` のフォルダは載せません（インストーラー・.dmg の中に入っています）。
+  - 入力の「release_draft」は既定で印が付いており、Release は**下書き（draft）**になります。本文は事実（コミット・実行の URL・未署名・LibRaw のライセンスなど）だけで、「変更点」は空です。**変更点・数値・固有名詞を人が確かめて書いてから、画面で公開してください**（印を外すと、すぐ公開のプレリリースになります）。公開すると、リポジトリが公開なら誰でもダウンロードできます（上の公開の範囲の確認）。
+  - 同じタグの Release がすでにあるときは、上書きせずに止まります（公開済みの配布物と SHA-256 を変えないため）。
+  - `release` ジョブだけが `contents: write` の権限を持ちます（ほかのジョブは `contents: read`）。外部のアクションは使わず、ランナーの `gh` を、その実行の `GITHUB_TOKEN` で使います。
+  - **ワークフローの内容は、実行したタグが指すコミットのものが動きます。** `release` ジョブより前のタグ（v0.2.1 を、このジョブを足す前のコミットに付けた場合など）では動かないので、Release は手で作るか、タグを付け直して実行してください。
 - 途中で失敗したときは、調べるために `<名前>-unverified` の artifact（7 日で消える。仮置き）に、できたところまでの配布物と確認の記録を置きます。**`-unverified` の配布物は配らないでください。**
 - 2026-10-12 に main で 2 回実行しました。2 回目（「allow_newer_macos_libs」にも印）で、両 OS の配布物ができ、確認が通りました（6.2）。**GitHub の macos-latest・windows-latest のランナーの版は変わります**。次に実行したときも、artifact の名前の `-macos<版>-or-later` が 26.0 のままか、ジョブの記録に警告・エラーがないかを確かめてください。
 
