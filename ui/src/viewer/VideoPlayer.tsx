@@ -14,6 +14,7 @@
 //   「,」「.」で 1 コマ戻る・進む、M で消音、Home・End で先頭・最後へ。← → は写真送りのまま。
 // - 音量と消音は、この PC のブラウザの保存領域に覚える（読めなければ既定の 1・消音なし）。
 
+import { Icon } from "../components/Icon";
 import { type SyntheticEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import * as appApi from "../api/app";
@@ -379,7 +380,7 @@ export function VideoPlayer(props: {
         )}
         {src && paused && speed === 0 && !playError && (
           <span className="loupe-video-mark" aria-hidden="true">
-            ▶
+            <Icon name="play" />
           </span>
         )}
         {waiting && !paused && (
@@ -411,7 +412,7 @@ export function VideoPlayer(props: {
           title="1 コマ戻る（,）"
           aria-label="1 コマ戻る"
         >
-          ◀|
+          <Icon name="stepBack" />
         </button>
         <button
           className="btn icon video-play"
@@ -420,7 +421,7 @@ export function VideoPlayer(props: {
           title="再生 / 一時停止（スペース。J・K・L で速さを変える）"
           aria-label={paused ? "再生" : "一時停止"}
         >
-          {paused ? "▶" : "❚❚"}
+          <Icon name={paused ? "play" : "pause"} />
         </button>
         <button
           className="btn ghost icon"
@@ -429,7 +430,7 @@ export function VideoPlayer(props: {
           title="1 コマ進む（.）"
           aria-label="1 コマ進む"
         >
-          |▶
+          <Icon name="stepForward" />
         </button>
         <span className="video-speed" aria-live="polite">
           {shuttleLabel(speed)}

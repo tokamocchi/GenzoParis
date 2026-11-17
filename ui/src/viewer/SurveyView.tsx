@@ -9,6 +9,7 @@
 //   なったら外さない）。フィルムストリップの Ctrl / ⌘ + クリックで足す・外す（普通のクリックは、その 1 枚だけに
 //   する）。評価などのキーは作業中の写真に付く（「自動で次へ」は働かない）。枠の下の ★ のクリックでも評価できる。
 
+import { Icon } from "../components/Icon";
 import { useRef } from "react";
 
 import * as core from "../api/core";
@@ -168,7 +169,7 @@ function SurveyPhoto(props: { summary: VariantSummary; width: number; height: nu
         <SlotImages slot={l1} onError={onL1Error} />
         {summary.kind === "video" && (
           <span className="loupe-video-mark small" aria-hidden="true">
-            ▶
+            <Icon name="play" />
           </span>
         )}
       </div>

@@ -9,6 +9,7 @@
 // - スナップショット: 作った順に並べる。クリックで適用する（履歴に 1 件残る）。右クリック・「…」で、ビフォーに設定
 //   （ビフォー / アフターの表示。DEV-31）・名前の変更・削除。見出しの「＋」で今の状態から作る（Ctrl / ⌘ + N）。
 
+import { Icon } from "../components/Icon";
 import { useEffect, useState } from "react";
 
 import * as core from "../api/core";
@@ -199,7 +200,10 @@ export function DevelopPresetsSection(props: { variantId: VariantId | null }) {
                       });
                     }}
                   >
-                    <span className="chev">{open ? "▾" : "▸"}</span> {g.folder}
+                    <span className="chev">
+                      <Icon name={open ? "chevronDown" : "chevronRight"} size={12} />
+                    </span>
+                    {g.folder}
                     <span className="time">{g.presets.length}</span>
                   </div>
                 )}

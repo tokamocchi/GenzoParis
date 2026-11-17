@@ -298,11 +298,13 @@ export function numericRangeCount(f: SearchFilter): number {
 }
 
 /**
- * 「詳しい条件」の中で指定しているものの数（数値の範囲・マスターだけ・スタックをすべて展開・ファイルの状態
+ * 「詳しい条件」の中で指定しているものの数（種類・撮影日・数値の範囲・マスターだけ・スタックをすべて展開・ファイルの状態
  * （見つからない写真だけ。FILE-04）・位置情報の有無（LIB-18）。ボタンの数の表示）。
  */
 export function moreConditionCount(f: SearchFilter): number {
   return (
+    (isSet(f.kind) ? 1 : 0) +
+    (isSet(f.captured_from) || isSet(f.captured_until) ? 1 : 0) +
     numericRangeCount(f) +
     (f.masters_only ? 1 : 0) +
     (f.expand_stacks ? 1 : 0) +

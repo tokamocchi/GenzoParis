@@ -7,6 +7,7 @@
 //   変換中の Enter は確定だけで、付けない（UX-01）。Ctrl / ⌘ + K でこの欄に移る。
 // - 一覧は対象・キーワードの変更（organizeVersion）で読み直す。
 
+import { Icon } from "../components/Icon";
 import { useEffect, useRef, useState } from "react";
 
 import * as core from "../api/core";
@@ -80,7 +81,7 @@ export function KeywordEditor(props: { targets: VariantId[]; disabled?: boolean 
                   disabled={props.disabled}
                   onClick={() => void setKeyword(targets, k.keyword_id, false)}
                 >
-                  ×
+                  <Icon name="close" size={12} />
                 </button>
               </li>
             );
@@ -244,7 +245,7 @@ export function PhotoCollections(props: { variantId: VariantId }) {
                 title="このコレクションから外す（写真は削除しない）"
                 onClick={() => void removeFromCollection(id, [props.variantId], c.name)}
               >
-                ×
+                <Icon name="close" size={12} />
               </button>
             </li>
           );

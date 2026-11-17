@@ -10,7 +10,7 @@
 //   全体に通す）。
 // - 数値の入力欄は IME の全角の数字・記号（"１２"・"－０．５"）も読む。IME の変換中の Enter・Esc では何もしない。
 
-import { useEffect, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 
 import { isRangeKey } from "../keyboard";
 
@@ -141,6 +141,12 @@ export function Slider(p: SliderProps) {
   );
 
   const changed = p.modified ?? (p.defaultValue !== undefined && Math.abs(p.value - p.defaultValue) > 1e-9);
+  // 既定の位置から今の位置までの線（base.css の .slider.has-origin）。位置は 0〜1 の割合で渡す。
+  const posMin = usePos ? 0 : p.min;
+  const posMax = usePos ? 1000 : p.max;
+  const frac = (pos: number) => (posMax > posMin ? Math.min(1, Math.max(0, (pos - posMin) / (posMax - posMin))) : 0);
+  const origin =
+    p.defaultValue !== undefined ? frac(usePos ? p.toPosition!(p.defaultValue) : p.defaultValue) : null;
   /**
    * 既定に戻す（ダブルクリック）。バーのダブルクリックでは 1 回目のクリックの変更がドラッグとして送られて
    * いるので、戻す変更も同じドラッグの中で送ってから終了を送る（履歴は「前の値 → 既定」の 1 件）。
@@ -154,7 +160,7 @@ export function Slider(p: SliderProps) {
   };
 
   return (
-    <div className={`slider${changed ? " changed" : ""}`} title={p.title}>
+    <div className={`slider${changed ? " changed" : ""}${origin !== null ? " has-origin" : ""}`} title={p.title}>
       <span className="slider-label" onDoubleClick={reset}>
         {p.swatch && <span className="slider-swatch" style={{ background: p.swatch }} aria-hidden="true" />}
         {p.label}
@@ -203,6 +209,7 @@ export function Slider(p: SliderProps) {
         value={posValue}
         disabled={p.disabled}
         aria-label={p.label}
+        style={origin !== null ? ({ "--p": frac(posValue), "--z": origin } as CSSProperties) : undefined}
         onPointerDown={() => {
           // 待っている終了は送らずに、同じドラッグの続きにする（ダブルクリックの 2 回目のクリック）。
           cancelCommitTimer();

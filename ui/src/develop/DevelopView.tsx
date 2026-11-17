@@ -26,6 +26,7 @@
 //   等倍表示でも、画像の箱と FrameInfo.o_grid で位置を合わせる。
 // - 画像のまわりは色みのない灰色だけにする（写真の色の判断に影響しないように）。
 
+import { Icon } from "../components/Icon";
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -762,8 +763,8 @@ function OperationError() {
         <div>{error.message}</div>
         {error.hint && <div className="hint">{error.hint}</div>}
       </div>
-      <button className="btn ghost small" onClick={() => developStore.set({ error: null })} aria-label="閉じる">
-        ✕
+      <button className="btn ghost small icon-only" onClick={() => developStore.set({ error: null })} aria-label="閉じる">
+        <Icon name="close" />
       </button>
     </div>
   );
@@ -996,7 +997,7 @@ function CompareBar() {
   return (
     <div className="dv-bar" role="toolbar" aria-label="ビフォー / アフター">
       <span className="dv-bar-label">表示</span>
-      <span className="dv-seg">
+      <span className="dv-seg seg">
         {COMPARE_MODES.map((m) => (
           <button
             key={m.mode}

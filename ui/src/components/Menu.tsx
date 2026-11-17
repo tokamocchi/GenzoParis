@@ -5,6 +5,8 @@
 
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { Icon } from "./Icon";
+
 export interface MenuItem {
   label: string;
   onSelect: () => void;
@@ -90,7 +92,7 @@ export function PopupMenu(props: { at: MenuAt | null; items: MenuEntry[]; onClos
               it.onSelect();
             }}
           >
-            <span className="menu-check">{it.checked ? "✓" : ""}</span>
+            <span className="menu-check">{it.checked && <Icon name="check" />}</span>
             {it.label}
             {it.hint && <span className="menu-hint">{it.hint}</span>}
           </button>
@@ -100,14 +102,19 @@ export function PopupMenu(props: { at: MenuAt | null; items: MenuEntry[]; onClos
   );
 }
 
-/** 「…」などのボタンと、押すと出るメニュー。 */
+/**
+ * 「…」などのボタンと、押すと出るメニュー。label が "…"・"+"・"＋" のときは、文字の代わりに線のアイコンを出す
+ * （children を渡したときは children）。
+ */
 export function MenuButton(props: { label: string; title: string; items: () => MenuEntry[]; children?: ReactNode }) {
+  const iconName = props.label === "…" ? "more" : props.label === "+" || props.label === "＋" ? "plus" : null;
+  const iconOnly = !props.children && iconName !== null;
   const [at, setAt] = useState<MenuAt | null>(null);
   return (
     <>
       <button
         type="button"
-        className="btn ghost small menu-button"
+        className={`btn ghost small menu-button${iconOnly ? " icon-only" : ""}`}
         aria-label={props.title}
         title={props.title}
         aria-haspopup="menu"
@@ -118,7 +125,7 @@ export function MenuButton(props: { label: string; title: string; items: () => M
           setAt(at ? null : { x: r.left, y: r.bottom + 2 });
         }}
       >
-        {props.children ?? props.label}
+        {props.children ?? (iconName ? <Icon name={iconName} /> : props.label)}
       </button>
       {at && <PopupMenu at={at} items={props.items()} onClose={() => setAt(null)} label={props.title} />}
     </>

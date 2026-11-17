@@ -38,32 +38,30 @@
   right: 0;
   display: flex;
 }
+/* セルの面はごく薄くする（枠線は付けない）。選んだ写真は少し明るい面、操作の対象（selection.current）は白い輪郭で示す。 */
 .lib-cell {
   position: relative;
   flex: none;
   display: flex;
   flex-direction: column;
-  background: var(--bg-1);
+  background: rgba(255, 255, 255, 0.025);
   border: 1px solid transparent;
-  border-radius: var(--radius);
+  border-radius: 8px;
   overflow: hidden;
   cursor: default;
 }
 .lib-cell:hover {
-  background: var(--bg-2);
+  background: rgba(255, 255, 255, 0.05);
 }
 .lib-cell.selected {
-  background: var(--bg-3);
-  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.09);
 }
-/* 操作の対象（selection.current）は明るい灰色の太い枠。 */
 .lib-cell.current {
-  background: var(--bg-4);
-  border-color: var(--fg-1);
-  box-shadow: inset 0 0 0 1px var(--fg-1);
+  background: rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 0 0 1.5px #ffffff;
 }
 .lib-cell.loading {
-  background: var(--bg-1);
+  background: rgba(255, 255, 255, 0.015);
 }
 .lib-cell-thumb {
   position: relative;
@@ -119,13 +117,15 @@
   flex: 1;
 }
 .lib-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   font-size: 10px;
-  line-height: 15px;
-  padding: 0 4px;
-  border-radius: 3px;
-  background: var(--bg-0);
-  border: 1px solid var(--line-strong);
-  color: var(--fg-1);
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #e6e6e6;
   white-space: nowrap;
   pointer-events: auto;
 }
@@ -146,6 +146,14 @@
 .lib-cell-foot .stars {
   font-size: 10px;
 }
+/* セルでは、付いている数の星だけを出す（付いていない分の薄い星は出さない）。 */
+.lib-cell-foot .stars > span:not(.on) {
+  display: none;
+}
+.lib-cell.current .lib-cell-foot .name,
+.lib-cell.selected .lib-cell-foot .name {
+  color: var(--fg-1);
+}
 .lib-cell-foot .name {
   flex: 1;
   min-width: 0;
@@ -160,10 +168,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 30px;
-  padding: 0 10px;
-  background: var(--bg-1);
-  border-top: 1px solid var(--line);
+  height: 36px;
+  padding: 0 12px 0 8px;
+  background: var(--bg-0);
   font-size: 12px;
   color: var(--fg-1);
 }
@@ -172,6 +179,9 @@
 }
 .lib-grid-toolbar select {
   max-width: 200px;
+  min-height: var(--ctl-h-small);
+  padding-top: 0;
+  padding-bottom: 0;
   font-size: 12px;
 }
 .lib-grid-toolbar .hint {
@@ -180,7 +190,7 @@
 .lib-tl-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   cursor: pointer;
 }
 /* タイムライン（ORG-01）の日付・イベントの見出しの行。 */
@@ -225,19 +235,16 @@
   position: absolute;
   top: 6px;
   left: 12px;
-  padding: 2px 10px;
-  border-radius: var(--radius);
-  background: var(--bg-1);
-  border: 1px solid var(--line-strong);
+  padding: 3px 11px;
+  border-radius: 12px;
+  background: rgba(22, 22, 22, 0.86);
   color: var(--fg-0);
   font-size: 12px;
   font-weight: 600;
   pointer-events: none;
-  opacity: 0.92;
 }
 .lib-grid-toolbar input[type="range"] {
   width: 140px;
-  accent-color: var(--fg-1);
 }
 .lib-grid-empty {
   position: absolute;
@@ -262,29 +269,71 @@
 
 /* ------------------------------------------------------------------ 絞り込み */
 
+/* 左によく使う条件（幅が足りなければここだけ折り返す）、右端に並べ替え。 */
 .lib-filterbar {
   flex: none;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  padding: 6px 10px;
-  background: var(--bg-1);
-  border-bottom: 1px solid var(--line);
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px 6px;
+  background: var(--bg-0);
   font-size: 12px;
 }
+.lib-filter-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.lib-filter-side {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
 .lib-filterbar select,
-.lib-filterbar input {
+.lib-filterbar input[type="text"],
+.lib-filterbar input[type="search"],
+.lib-filterbar input[type="date"] {
   font-size: 12px;
-  height: 24px;
+  height: var(--ctl-h);
   padding-top: 0;
   padding-bottom: 0;
 }
-.lib-filterbar select {
-  max-width: 180px;
+.lib-filterbar .btn.small {
+  min-height: var(--ctl-h);
 }
-.lib-filter-search {
-  width: 170px;
+/* 選択の欄は、選んだ項目の文字の幅に合わせる（対応していない WebView では、いちばん長い項目の幅になる）。 */
+.lib-filter-main > select,
+.lib-filter-side select {
+  field-sizing: content;
+  max-width: 180px;
+  background-color: transparent;
+  color: var(--fg-1);
+}
+.lib-filter-main > select:hover:not(:disabled),
+.lib-filter-side select:hover:not(:disabled) {
+  background-color: var(--bg-2);
+  color: var(--fg-0);
+}
+.lib-filterbar input.lib-filter-search {
+  flex: 1 1 130px;
+  max-width: 220px;
+  min-width: 110px;
+  padding-left: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23777' stroke-width='1.5' stroke-linecap='round'%3E%3Ccircle cx='7' cy='7' r='4.2'/%3E%3Cpath d='M10.2 10.2l3.3 3.3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 8px center;
+  background-size: 14px 14px;
+}
+.lib-filter-clear {
+  color: var(--fg-1);
+}
+.lib-filter-sep {
+  height: 1px;
+  margin: 2px 0;
+  background: rgba(255, 255, 255, 0.08);
 }
 .lib-filter-group {
   display: inline-flex;
@@ -306,42 +355,48 @@
 .lib-labels {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 1px;
+  padding: 0 2px;
 }
+/* カラーラベルの丸（枠は付けない。選んだものは白い輪で囲む）。 */
 .lib-label-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
+  width: 18px;
   height: 18px;
-  padding: 0 3px;
-  border: 1px solid var(--line-strong);
-  border-radius: 3px;
-  background: var(--bg-2);
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
   cursor: pointer;
-  color: var(--fg-2);
-  font-size: 10px;
+}
+.lib-label-btn:hover:not(:disabled) {
+  background: var(--bg-3);
 }
 .lib-label-btn .label-dot {
   width: 10px;
   height: 10px;
 }
+.label-dot.none {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--fg-3);
+}
 .lib-label-btn:disabled {
   cursor: default;
+  opacity: 0.5;
 }
 .lib-label-btn.on {
-  border-color: var(--fg-0);
-  box-shadow: inset 0 0 0 1px var(--fg-0);
-  color: var(--fg-0);
+  box-shadow: inset 0 0 0 1.5px var(--fg-0);
 }
 .lib-filter-count {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  height: 18px;
+  min-width: 16px;
+  height: 16px;
   padding: 0 5px;
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--bg-4);
   color: var(--fg-0);
   font-size: 11px;
@@ -357,19 +412,24 @@
 }
 .lib-filter-pop {
   position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
+  top: calc(100% + 6px);
+  /* ボタンは行の右寄りにあるので、右端をそろえて左へ広げる（右のパネルに重ねない）。 */
+  right: 0;
   z-index: 50;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   width: max-content;
-  max-width: min(420px, 90vw);
-  padding: 8px 10px;
-  background: var(--bg-1);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  max-width: min(440px, 90vw);
+  padding: 12px 14px;
+  background: var(--pop);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-pop);
+}
+.lib-filter-pop select,
+.lib-filter-pop input[type="date"] {
+  background-color: var(--bg-3);
 }
 .lib-filter-pop .hint {
   margin: 2px 0 0;
@@ -379,7 +439,7 @@
 .lib-filter-range {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 .lib-filter-range > .label:first-child {
   width: 96px;
@@ -391,6 +451,7 @@
 .lib-filterbar input.lib-filter-number {
   width: 84px;
   text-align: right;
+  background-color: var(--bg-3);
 }
 .lib-filterbar input.lib-filter-number.invalid,
 .lib-filter-range.reversed input.lib-filter-number {
@@ -408,14 +469,15 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 0 -6px;
-  padding: 3px 6px;
+  min-height: 26px;
+  margin: 0 -8px;
+  padding: 0 8px;
   border-radius: var(--radius);
   cursor: pointer;
   color: var(--fg-1);
 }
 .lib-nav-row:hover {
-  background: var(--bg-3);
+  background: var(--bg-2);
 }
 .lib-nav-row.on {
   background: var(--bg-4);
@@ -423,32 +485,37 @@
 }
 .lib-nav-row .count {
   margin-left: auto;
+  color: var(--fg-3);
+  font-size: 11.5px;
+}
+.lib-nav-row.on .count {
   color: var(--fg-2);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
 }
 .lib-tree {
-  margin: 0 -10px;
+  margin: 0 -8px;
 }
 .lib-tree-row {
   display: flex;
   align-items: center;
-  height: 24px;
-  padding-right: 8px;
+  height: 26px;
+  padding-right: 4px;
+  border-radius: var(--radius);
 }
 .lib-tree-row:hover {
   background: var(--bg-2);
 }
 .lib-tree-chev {
   flex: none;
-  width: 16px;
-  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 22px;
   padding: 0;
   border: none;
   background: transparent;
   color: var(--fg-2);
   cursor: pointer;
-  font-size: 11px;
 }
 .lib-tree-chev:disabled {
   cursor: default;
@@ -463,8 +530,8 @@
 .lib-tree-seg {
   flex: 0 4 auto;
   min-width: 1.6em;
-  padding: 1px 4px;
-  border-radius: 3px;
+  padding: 2px 5px;
+  border-radius: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -510,10 +577,11 @@
 .lib-left .check {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 6px 0 2px;
+  gap: 7px;
+  margin: 8px 0 2px;
   color: var(--fg-1);
   font-size: 12px;
+  cursor: pointer;
 }
 .lib-left .actions {
   display: flex;
@@ -527,11 +595,10 @@
   font-size: 12px;
 }
 .lib-meta-head {
-  padding: 10px 10px 8px;
-  border-bottom: 1px solid var(--line);
+  padding: 14px 14px 6px;
 }
 .lib-meta-head .title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--fg-0);
   overflow-wrap: anywhere;
@@ -546,7 +613,7 @@
 .lib-kv {
   display: grid;
   grid-template-columns: minmax(72px, max-content) 1fr;
-  gap: 3px 8px;
+  gap: 5px 10px;
   margin: 0;
 }
 .lib-kv dt {
@@ -568,7 +635,11 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  margin: 4px 0 8px;
+  min-height: 26px;
+  margin: 2px 0 6px;
+}
+.lib-mark-row .stars {
+  gap: 3px;
 }
 .lib-mark-row .label {
   width: 72px;
@@ -591,9 +662,9 @@
 }
 .lib-iptc-row {
   display: grid;
-  grid-template-columns: 96px 1fr;
+  grid-template-columns: 84px 1fr;
   align-items: center;
-  gap: 2px 8px;
+  gap: 2px 10px;
   font-size: 12px;
 }
 .lib-iptc-row.multiline {
@@ -622,7 +693,7 @@
   font-size: 11px;
 }
 .lib-meta-note {
-  margin: 6px 10px;
+  margin: 6px 14px;
   font-size: 11px;
 }
 .lib-files {
@@ -671,7 +742,7 @@
 }
 .lib-organize-row.drop-over {
   background: var(--bg-4);
-  outline: 1px solid var(--accent);
+  outline: 1px solid var(--fg-1);
 }
 .lib-organize-row.drop-no {
   outline: 1px dashed var(--warn);
@@ -684,26 +755,40 @@
 }
 .lib-organize-icon {
   flex: none;
-  width: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
   color: var(--fg-2);
-  font-size: 11px;
-  text-align: center;
 }
 .lib-organize-count {
   flex: none;
   min-width: 2em;
-  color: var(--fg-2);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
+  padding-right: 4px;
+  color: var(--fg-3);
+  font-size: 11.5px;
   text-align: right;
+}
+/* 行の「…」は、ホバーしたときに件数と入れ替えて出す（行の幅を取らない）。 */
+.lib-organize-row:hover .lib-organize-count:not(.warn) {
+  display: none;
+}
+.lib-organize-row .menu-button {
+  display: none;
+}
+.lib-organize-row:hover .menu-button,
+.lib-organize-row .menu-button:focus-visible,
+.lib-organize-row .menu-button[aria-expanded="true"] {
+  display: inline-flex;
 }
 .lib-organize-count.warn {
   color: var(--warn);
 }
 .lib-organize-target {
   flex: none;
-  color: var(--accent);
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--fg-0);
 }
 .lib-organize-row .menu-button {
   flex: none;
@@ -717,24 +802,29 @@
 }
 .lib-tag-box {
   flex: none;
-  width: 16px;
-  height: 16px;
-  margin: 0 4px 0 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin: 0 5px 0 1px;
   padding: 0;
-  border: 1px solid var(--line-strong);
-  border-radius: 3px;
-  background: var(--bg-2);
-  color: var(--fg-0);
-  font-size: 11px;
-  line-height: 14px;
+  border: 1px solid var(--fg-3);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent-fg);
   cursor: pointer;
 }
-.lib-tag-box.all {
+.lib-tag-box .icon {
+  stroke-width: 2.4;
+}
+.lib-tag-box.all,
+.lib-tag-box.some {
   border-color: var(--accent);
-  color: var(--accent);
+  background: var(--accent);
 }
 .lib-tag-box.some {
-  color: var(--fg-2);
+  opacity: 0.6;
 }
 .lib-tag-box:disabled {
   opacity: 0.4;
@@ -754,16 +844,18 @@
   display: inline-flex;
   align-items: center;
   max-width: 100%;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
+  min-height: 22px;
+  border: 1px solid transparent;
+  border-radius: 11px;
   background: var(--bg-2);
 }
 .lib-keyword-chips li.partial {
-  border-style: dashed;
+  border: 1px dashed var(--fg-3);
+  background: transparent;
   color: var(--fg-2);
 }
 .lib-keyword-chips .name {
-  padding: 1px 4px 1px 8px;
+  padding: 1px 2px 1px 9px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -779,6 +871,8 @@
   font-size: 11px;
 }
 .lib-keyword-chips .remove {
+  display: inline-flex;
+  align-items: center;
   padding: 0 6px 0 2px;
   border: none;
   background: transparent;
@@ -800,16 +894,17 @@
   left: 0;
   right: 0;
   top: 100%;
-  margin: 2px 0 0;
-  padding: 2px 0;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--bg-1);
+  margin: 4px 0 0;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--radius-lg);
+  background: var(--pop);
   list-style: none;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-pop);
 }
 .lib-keyword-hits li {
-  padding: 3px 8px;
+  padding: 4px 8px;
+  border-radius: 5px;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -817,7 +912,7 @@
 }
 .lib-keyword-hits li:hover,
 .lib-keyword-hits li.active {
-  background: var(--bg-3);
+  background: var(--bg-4);
 }
 
 /* 絞り込みの札（FilterBar の OrganizeChips） */
@@ -831,9 +926,10 @@
   align-items: center;
   gap: 2px;
   max-width: 240px;
-  padding: 1px 2px 1px 8px;
-  border: 1px solid var(--accent);
-  border-radius: 10px;
+  min-height: 22px;
+  padding: 0 3px 0 10px;
+  border-radius: 11px;
+  background: var(--bg-4);
   color: var(--fg-0);
   font-size: 12px;
   white-space: nowrap;
@@ -841,6 +937,9 @@
   text-overflow: ellipsis;
 }
 .lib-chip button {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
   border: none;
   background: transparent;
   color: var(--fg-2);
@@ -853,20 +952,24 @@
 /* スタックの印（LIB-12。StackBadge.tsx）。押せる印なので、セルの印の並び（pointer-events: none）の中でも
    押せるようにする。展開したスタックの写真は、セルの下端に色の帯を付けて、まとまりを示す。 */
 .stack-badge {
+  display: inline-flex;
+  align-items: center;
   font: inherit;
   font-size: 10px;
-  line-height: 15px;
-  padding: 0 4px;
-  border-radius: 3px;
-  background: var(--bg-0);
-  border: 1px solid var(--accent);
-  color: var(--fg-0);
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.62);
+  border: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+  color: #f0f0f0;
   white-space: nowrap;
   cursor: pointer;
   pointer-events: auto;
 }
 .stack-badge.collapsed {
   background: var(--accent);
+  box-shadow: none;
   color: var(--accent-fg);
   font-weight: 700;
 }
@@ -875,7 +978,8 @@
   outline: 1px solid var(--fg-1);
 }
 .stack-icon {
-  margin-right: 2px;
+  display: inline-flex;
+  margin-right: 3px;
 }
 .lib-cell.stack-member::after {
   content: "";
@@ -905,9 +1009,9 @@
 .lib-version {
   display: block;
   width: 100%;
-  padding: 2px 6px;
+  padding: 3px 8px;
   border: none;
-  border-radius: 3px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--fg-1);
   font: inherit;
@@ -956,7 +1060,7 @@
 }
 .lib-tree-seg.drop-over {
   background: var(--bg-4);
-  outline: 1px solid var(--accent);
+  outline: 1px solid var(--fg-1);
 }
 .lib-tree-seg.drop-no {
   outline: 1px dashed var(--warn);

@@ -3,6 +3,7 @@
 // セルのクリック（選択）・ドラッグ・ダブルクリック（ルーペ）には渡さない。
 
 import type { StackBadge, VariantId } from "../api/types";
+import { Icon } from "../components/Icon";
 import { toggleStack } from "../state/stacks";
 import "./library.css";
 import { stackBadgeLabel, stackBadgeTitle } from "./stackLogic";
@@ -26,7 +27,7 @@ export function StackBadgeButton(props: { id: VariantId; badge: StackBadge; wide
     >
       {badge.collapsed && (
         <span className="stack-icon" aria-hidden="true">
-          ❐
+          <Icon name="layers" size={10} />
         </span>
       )}
       {stackBadgeLabel(badge, props.wide)}

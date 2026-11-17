@@ -2,6 +2,7 @@
 
 import type { ColorLabel, Flag, Rating } from "../api/types";
 import { COLOR_LABEL_NAMES } from "../format";
+import { Icon } from "./Icon";
 
 export function Stars(props: { rating: Rating; onSet?: (r: Rating) => void; size?: number }) {
   return (
@@ -20,7 +21,7 @@ export function Stars(props: { rating: Rating; onSet?: (r: Rating) => void; size
               : undefined
           }
         >
-          ★
+          <Icon name="star" />
         </span>
       ))}
     </span>
@@ -28,8 +29,20 @@ export function Stars(props: { rating: Rating; onSet?: (r: Rating) => void; size
 }
 
 export function FlagMark(props: { flag: Flag }) {
-  if (props.flag === 1) return <span className="flag-picked" title="採用">⚑</span>;
-  if (props.flag === -1) return <span className="flag-rejected" title="不採用">✕</span>;
+  if (props.flag === 1) {
+    return (
+      <span className="flag-picked" title="採用">
+        <Icon name="flag" />
+      </span>
+    );
+  }
+  if (props.flag === -1) {
+    return (
+      <span className="flag-rejected" title="不採用">
+        <Icon name="close" />
+      </span>
+    );
+  }
   return null;
 }
 

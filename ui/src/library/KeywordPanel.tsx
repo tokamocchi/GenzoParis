@@ -9,6 +9,7 @@
 // - 「…」・右クリックで、下にキーワードを作る・名前の変更・移動・書き出しに含める・削除。
 // - グリッドの写真をキーワードの行に落とすと、そのキーワードを付ける（library/photoDrag.ts）。
 
+import { Icon } from "../components/Icon";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import * as core from "../api/core";
@@ -142,12 +143,12 @@ export function KeywordPanel() {
       right={
         <button
           type="button"
-          className="btn ghost small"
+          className="btn ghost small icon-only"
           title="キーワードを作る"
           aria-label="キーワードを作る"
           onClick={() => actions.openDialog({ kind: "keyword", mode: "create", parentId: null })}
         >
-          ＋
+          <Icon name="plus" />
         </button>
       }
     >
@@ -203,7 +204,7 @@ export function KeywordPanel() {
                   aria-label={r.hasChildren ? (r.open ? "閉じる" : "開く") : undefined}
                   onClick={() => toggle(r.node)}
                 >
-                  {r.hasChildren ? (r.open ? "▾" : "▸") : ""}
+                  {r.hasChildren && <Icon name={r.open ? "chevronDown" : "chevronRight"} size={12} />}
                 </button>
                 <button
                   type="button"
@@ -221,7 +222,7 @@ export function KeywordPanel() {
                   }
                   onClick={() => void setKeyword(actions.targets(), k.keyword_id, state !== "all")}
                 >
-                  {state === "all" ? "✓" : state === "some" ? "−" : ""}
+                  {state === "all" ? <Icon name="check" size={10} /> : state === "some" ? <Icon name="minus" size={10} /> : null}
                 </button>
                 <span
                   className={`lib-tree-seg lib-organize-name${filtered ? " on" : ""}`}

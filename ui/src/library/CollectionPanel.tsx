@@ -9,6 +9,7 @@
 // - 「…」・右クリックで、ターゲットにする・選んだ写真を入れる・条件の編集・中に作る・名前の変更・移動・削除。
 // - グリッドの写真を手動のコレクションの行に落とすと、そのコレクションに入れる（library/photoDrag.ts）。
 
+import { Icon, type IconName } from "../components/Icon";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import * as core from "../api/core";
@@ -39,7 +40,7 @@ function isOpenMap(v: unknown): v is OpenMap {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-const KIND_ICON: Record<CollectionInfo["kind"], string> = { set: "▤", manual: "▣", smart: "⚙" };
+const KIND_ICON: Record<CollectionInfo["kind"], IconName> = { set: "layers", manual: "album", smart: "sparkle" };
 
 export function CollectionPanel() {
   const organizeVersion = useApp((s) => s.organizeVersion);
@@ -225,10 +226,10 @@ export function CollectionPanel() {
                   aria-label={r.hasChildren ? (r.open ? "閉じる" : "開く") : undefined}
                   onClick={() => toggle(r.node)}
                 >
-                  {r.hasChildren ? (r.open ? "▾" : "▸") : ""}
+                  {r.hasChildren && <Icon name={r.open ? "chevronDown" : "chevronRight"} size={12} />}
                 </button>
                 <span className="lib-organize-icon" aria-hidden="true">
-                  {KIND_ICON[c.kind]}
+                  <Icon name={KIND_ICON[c.kind]} />
                 </span>
                 <span
                   className={`lib-tree-seg lib-organize-name${on ? " on" : ""}`}
@@ -239,7 +240,7 @@ export function CollectionPanel() {
                 </span>
                 {target === c.collection_id && (
                   <span className="lib-organize-target" title="ターゲットコレクション（B で入れる・外す）">
-                    ＋
+                    <Icon name="plus" size={12} />
                   </span>
                 )}
                 <span className={`lib-organize-count${c.rule_error ? " warn" : ""}`} title={c.rule_error ?? undefined}>

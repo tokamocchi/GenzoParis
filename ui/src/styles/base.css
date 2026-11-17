@@ -1,40 +1,59 @@
 /* GenzoParis の画面の基本のスタイル。
- * 写真の色の判断に影響しないよう、背景と枠は色みのない灰色だけにする（色は強調と状態の表示に限る）。
- * 暗い配色だけ（現像のアプリの慣例）。 */
+ * 写真の色の判断に影響しないよう、背景と枠は色みのない灰色だけにする（色は状態の表示に限る）。
+ * 暗い配色だけ（現像のアプリの慣例）。
+ *
+ * 見た目の決まり（「暗室」）:
+ * - 部品は枠線で囲まず、ごく薄い面で示す（ボタン・入力欄・選択の行）。区切りは線より余白で付ける。
+ * - 強調は色ではなく白（主ボタン・チェック・選択の輪郭）。色は、評価・フラグ・カラーラベル・警告・エラーの
+ *   小さな印にだけ使う。
+ * - 記号は線のアイコン（components/Icon.tsx）。数値は等幅フォントではなく、同じ書体の等幅の数字（tabular-nums）。 */
 
 :root {
   color-scheme: dark;
-  --bg-0: #141414; /* いちばん奥（画像の背景） */
-  --bg-1: #1c1c1c; /* パネル */
-  --bg-2: #252525; /* 入力欄・ボタン */
-  --bg-3: #303030; /* ホバー */
-  --bg-4: #3c3c3c; /* 押下・選択 */
-  --line: #2e2e2e;
-  --line-strong: #444444;
-  --fg-0: #e8e8e8;
-  --fg-1: #b8b8b8;
-  --fg-2: #8a8a8a;
-  --fg-3: #626262;
-  --accent: #d8a24a;
-  --accent-fg: #1a1a1a;
-  --select: #6d8fbf; /* 選択の枠 */
-  --ok: #4fae6a;
+  --bg-0: #0d0d0d; /* いちばん奥（画像の背景） */
+  --bg-1: #151515; /* パネル */
+  --bg-2: #212121; /* 入力欄・ボタン */
+  --bg-3: #2a2a2a; /* ホバー */
+  --bg-4: #333333; /* 押下・選択 */
+  --pop: #1e1e1e; /* 浮かぶ面（ダイアログ・メニュー・通知） */
+  --line: #212121; /* 細い区切り */
+  --line-strong: #303030; /* 浮かぶ面の縁など */
+  --fg-0: #ededed;
+  --fg-1: #a9a9a9;
+  --fg-2: #777777;
+  --fg-3: #4f4f4f;
+  --accent: #ededed; /* 強調（白） */
+  --accent-fg: #111111;
+  --select: #dcdcdc; /* フォーカス・選択の枠 */
+  --ok: #57b872;
   --warn: #d9a63a;
-  --danger: #d9534f;
+  --danger: #e5645f;
+  --danger-bg: #c9453f;
   --label-red: #d9534f;
   --label-yellow: #d9b53a;
   --label-green: #4fae6a;
   --label-blue: #4a8fd9;
   --label-purple: #9a6fd9;
-  --radius: 4px;
-  --font: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo UI", "Noto Sans JP",
-    system-ui, sans-serif;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --track: rgba(255, 255, 255, 0.15); /* スライダーの線 */
+  --track-fill: #c2c2c2; /* スライダーの、既定の位置からの線 */
+  --surface: var(--bg-0); /* 今いる面の色（スライダーのつまみの縁取りに使う） */
+  /* 地図の上の印は、地図の色に埋もれないように色を付ける（写真のまわりではないので、無彩色の決まりの外）。 */
+  --map-pin: #d8a24a;
+  --map-pin-fg: #1a1a1a;
+  --map-photo: #6d8fbf;
+  --shadow-pop: 0 14px 44px rgba(0, 0, 0, 0.6);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Hiragino Sans",
+    "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo UI", "Noto Sans JP", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --panel-w: 300px;
   --left-w: 240px;
-  --topbar-h: 40px;
-  --statusbar-h: 26px;
+  --topbar-h: 42px;
+  --statusbar-h: 24px;
   --filmstrip-h: 96px;
+  --ctl-h: 26px; /* ボタン・入力欄の高さ */
+  --ctl-h-small: 22px;
 }
 
 * {
@@ -54,6 +73,8 @@ body {
   font-family: var(--font);
   font-size: 13px;
   line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
@@ -64,8 +85,11 @@ textarea,
 select,
 button {
   font: inherit;
+  font-variant-numeric: inherit;
   color: inherit;
 }
+
+/* ------------------------------------------------------------------ 入力欄 */
 
 input[type="text"],
 input[type="number"],
@@ -73,20 +97,150 @@ input[type="search"],
 input[type="date"],
 textarea,
 select {
-  background: var(--bg-2);
-  border: 1px solid var(--line-strong);
+  background-color: var(--bg-2);
+  border: 1px solid transparent;
   border-radius: var(--radius);
-  padding: 3px 6px;
+  padding: 3px 8px;
   user-select: text;
   -webkit-user-select: text;
+}
+input[type="text"],
+input[type="number"],
+input[type="search"],
+input[type="date"],
+select {
+  min-height: var(--ctl-h);
+}
+input[type="text"]:hover:not(:disabled),
+input[type="number"]:hover:not(:disabled),
+input[type="search"]:hover:not(:disabled),
+input[type="date"]:hover:not(:disabled),
+textarea:hover:not(:disabled),
+select:hover:not(:disabled) {
+  background-color: var(--bg-3);
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--fg-3);
+}
+input:disabled,
+textarea:disabled,
+select:disabled {
+  opacity: 0.45;
+}
+/* 検索の欄の、標準の「×」は出さない（Esc で消せる）。 */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+/* 選択の欄: 標準の矢印の代わりに、線の矢印を右に置く（開いた一覧は標準のまま）。 */
+select:not([multiple]):not([size]) {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 24px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23858585' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 12px 12px;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+select:disabled {
+  cursor: default;
+}
+
+/* チェックボックス・ラジオボタン */
+input[type="checkbox"],
+input[type="radio"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  border: 1px solid var(--fg-3);
+  border-radius: 4px;
+  background: transparent center / 10px 10px no-repeat;
+  vertical-align: -2px;
+  cursor: pointer;
+}
+input[type="radio"] {
+  border-radius: 50%;
+}
+input[type="checkbox"]:hover:not(:disabled),
+input[type="radio"]:hover:not(:disabled) {
+  border-color: var(--fg-1);
+}
+input[type="checkbox"]:checked,
+input[type="checkbox"]:indeterminate {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23111' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.2 8.6l3 3 6.4-7.2'/%3E%3C/svg%3E");
+}
+input[type="checkbox"]:indeterminate {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23111' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M3.5 8h9'/%3E%3C/svg%3E");
+}
+input[type="radio"]:checked {
+  border-color: var(--accent);
+  background-image: radial-gradient(circle, var(--accent) 0 3px, transparent 3.5px);
+  background-size: 100% 100%;
+}
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* スライダー（細い線と丸いつまみ。既定の位置からの線は components/Slider.tsx が --p・--z で渡す）。 */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 1px;
+  background: var(--track);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  margin-top: -4px;
+  border: none;
+  border-radius: 50%;
+  background: #f3f3f3;
+  box-shadow: 0 0 0 3px var(--surface);
+}
+input[type="range"]:hover:not(:disabled)::-webkit-slider-thumb {
+  background: #ffffff;
+}
+input[type="range"]:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible,
-button:focus-visible {
-  outline: 2px solid var(--select);
+button:focus-visible,
+[role="button"]:focus-visible {
+  outline: 1.5px solid var(--select);
   outline-offset: 1px;
+}
+input[type="range"]:focus-visible {
+  outline: none;
+}
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 3px var(--surface),
+    0 0 0 4.5px var(--select);
 }
 
 ::-webkit-scrollbar {
@@ -94,11 +248,16 @@ button:focus-visible {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--bg-4);
+  background: rgba(255, 255, 255, 0.14);
   border-radius: 5px;
-  border: 2px solid var(--bg-1);
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
-::-webkit-scrollbar-track {
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.26);
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
@@ -115,15 +274,34 @@ button:focus-visible {
   font-family: var(--mono);
 }
 
-/* ボタン */
+/* ------------------------------------------------------------------ アイコン（components/Icon.tsx） */
+
+.icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -2px;
+}
+.icon.solid {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* ------------------------------------------------------------------ ボタン */
+
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-height: 26px;
-  padding: 0 10px;
-  border: 1px solid var(--line-strong);
+  min-height: var(--ctl-h);
+  padding: 0 11px;
+  border: 1px solid transparent;
   border-radius: var(--radius);
   background: var(--bg-2);
   cursor: pointer;
@@ -136,106 +314,185 @@ button:focus-visible {
   background: var(--bg-4);
 }
 .btn:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: default;
 }
 .btn.primary {
   background: var(--accent);
-  border-color: var(--accent);
   color: var(--accent-fg);
   font-weight: 600;
 }
 .btn.primary:hover:not(:disabled) {
-  filter: brightness(1.08);
-  background: var(--accent);
+  background: #ffffff;
 }
 .btn.danger {
-  background: var(--danger);
-  border-color: var(--danger);
+  background: var(--danger-bg);
   color: #fff;
 }
 .btn.danger:hover:not(:disabled) {
-  background: var(--danger);
+  background: var(--danger-bg);
   filter: brightness(1.1);
 }
 .btn.ghost {
   background: transparent;
-  border-color: transparent;
+  color: var(--fg-1);
 }
 .btn.ghost:hover:not(:disabled) {
   background: var(--bg-3);
+  color: var(--fg-0);
 }
 .btn.small {
-  min-height: 22px;
-  padding: 0 6px;
+  min-height: var(--ctl-h-small);
+  padding: 0 8px;
   font-size: 12px;
 }
+.btn.icon-only,
 .btn.icon {
-  padding: 0 5px;
+  min-width: var(--ctl-h);
+  padding: 0;
+}
+.btn.small.icon-only,
+.btn.small.icon {
+  min-width: var(--ctl-h-small);
 }
 .btn.active {
   background: var(--bg-4);
-  border-color: var(--fg-2);
+  color: var(--fg-0);
+}
+.btn .icon {
+  vertical-align: 0;
 }
 
-/* 区切りのあるパネルの見出し */
+/* 切り替え（並んだボタンのうち 1 つを選ぶ。選んだものだけ面を付ける）。 */
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+.seg.full {
+  display: flex;
+}
+.seg.full > .btn {
+  flex: 1;
+}
+.seg > .btn {
+  min-height: calc(var(--ctl-h) - 4px);
+  padding: 0 10px;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--fg-1);
+  font-size: 12px;
+}
+.seg > .btn:hover:not(:disabled) {
+  background: var(--bg-3);
+  color: var(--fg-0);
+}
+.seg > .btn.active {
+  background: var(--bg-4);
+  color: var(--fg-0);
+}
+
+/* ------------------------------------------------------------------ パネルの節（components/Section.tsx） */
+
 .section {
-  border-bottom: 1px solid var(--line);
+  padding-top: 4px;
 }
 .section-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
-  font-size: 12px;
+  min-height: 30px;
+  padding: 0 8px 0 14px;
+  font-size: 11px;
   font-weight: 600;
-  color: var(--fg-1);
+  letter-spacing: 0.06em;
+  color: var(--fg-2);
   cursor: pointer;
 }
+.section-head:hover {
+  color: var(--fg-1);
+}
+.section-head .title {
+  flex: 1;
+  min-width: 0;
+}
+.section-head .side {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  letter-spacing: 0;
+}
 .section-head .chev {
-  width: 10px;
-  color: var(--fg-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  color: var(--fg-3);
+}
+.section-head:hover .chev {
+  color: var(--fg-1);
+}
+.section-head .chev .icon {
+  width: 12px;
+  height: 12px;
 }
 .section-body {
-  padding: 4px 10px 10px;
+  padding: 2px 14px 12px;
 }
 
-/* ダイアログ */
+/* ------------------------------------------------------------------ ダイアログ */
+
 .dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
 }
+/* 浮かぶ面の上では、部品の面を 1 段明るくする（面の色との差がなくならないように）。 */
+.dialog,
+.menu,
+.popover {
+  --bg-2: #2a2a2a;
+  --bg-3: #343434;
+  --bg-4: #3d3d3d;
+  --line: #2c2c2c;
+  --line-strong: #3a3a3a;
+  --surface: var(--pop);
+}
 .dialog {
-  background: var(--bg-1);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  background: var(--pop);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 12px;
   min-width: 420px;
   max-width: min(760px, 92vw);
   max-height: 88vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-pop);
 }
 .dialog-title {
-  padding: 12px 16px 8px;
+  padding: 18px 20px 8px;
   font-size: 15px;
   font-weight: 600;
 }
 .dialog-body {
-  padding: 4px 16px 12px;
+  padding: 4px 20px 16px;
   overflow: auto;
 }
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  padding: 10px 16px 14px;
-  border-top: 1px solid var(--line);
+  padding: 12px 20px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.dialog-actions .btn {
+  min-width: 84px;
 }
 
 /* フォームの行 */
@@ -244,7 +501,7 @@ button:focus-visible {
   grid-template-columns: 140px 1fr;
   align-items: center;
   gap: 8px;
-  margin: 6px 0;
+  margin: 8px 0;
 }
 .field > label:first-child {
   color: var(--fg-1);
@@ -262,50 +519,77 @@ button:focus-visible {
   white-space: pre-wrap;
 }
 
-/* スライダー */
+/* ------------------------------------------------------------------ スライダー（components/Slider.tsx） */
+
 .slider {
   display: grid;
-  grid-template-columns: 1fr 56px;
-  grid-template-rows: auto auto;
-  column-gap: 8px;
-  margin: 2px 0 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  margin: 0 0 4px;
 }
 .slider-label {
   grid-column: 1;
   color: var(--fg-1);
   font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .slider-swatch {
   display: inline-block;
   width: 8px;
   height: 8px;
-  margin-right: 5px;
+  margin-right: 6px;
   border-radius: 50%;
   vertical-align: 0;
 }
-.slider-value {
+/* 数値は枠なし（押すと書き換えられる。ホバー・フォーカスで欄と分かる面を出す）。 */
+.slider input.slider-value {
   grid-column: 2;
-  grid-row: 1 / span 2;
-  align-self: center;
-  width: 56px;
-  text-align: right;
-  padding: 1px 4px;
-  font-family: var(--mono);
+  grid-row: 1;
+  width: 64px;
+  min-height: 20px;
+  margin-right: -6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-2);
   font-size: 12px;
+  text-align: right;
+}
+.slider input.slider-value:hover:not(:disabled),
+.slider input.slider-value:focus {
+  background: var(--bg-2);
+  color: var(--fg-0);
 }
 .slider input[type="range"] {
-  grid-column: 1;
+  grid-column: 1 / -1;
   width: 100%;
-  margin: 0;
-  height: 16px;
-  accent-color: var(--fg-1);
-  cursor: pointer;
+  height: 18px;
 }
-.slider.changed .slider-label {
+/* 既定の位置（--z）から今の位置（--p）までを明るい線にする。つまみの幅（10px）の分だけ内側に寄せる。 */
+.slider.has-origin input[type="range"] {
+  --a: calc(5px + (100% - 10px) * min(var(--p), var(--z)));
+  --b: calc(5px + (100% - 10px) * max(var(--p), var(--z)));
+}
+.slider.has-origin input[type="range"]::-webkit-slider-runnable-track {
+  background: linear-gradient(
+    to right,
+    var(--track) 0,
+    var(--track) var(--a),
+    var(--track-fill) var(--a),
+    var(--track-fill) var(--b),
+    var(--track) var(--b),
+    var(--track) 100%
+  );
+}
+.slider.changed .slider-label,
+.slider.changed input.slider-value {
   color: var(--fg-0);
 }
 
-/* 通知 */
+/* ------------------------------------------------------------------ 通知 */
+
 .toasts {
   position: fixed;
   right: 16px;
@@ -317,40 +601,57 @@ button:focus-visible {
   max-width: 420px;
 }
 .toast {
-  background: var(--bg-2);
-  border: 1px solid var(--line-strong);
-  border-left: 4px solid var(--fg-2);
-  border-radius: var(--radius);
-  padding: 8px 10px;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 10px;
+  background: var(--pop);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--radius-lg);
+  padding: 10px 14px 10px 12px;
+  box-shadow: var(--shadow-pop);
   white-space: pre-wrap;
   cursor: pointer;
 }
-.toast.success {
-  border-left-color: var(--ok);
+/* 種類は、左の小さな丸の色で示す。 */
+.toast::before {
+  content: "";
+  grid-row: 1 / span 2;
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--fg-2);
 }
-.toast.warning {
-  border-left-color: var(--warn);
+.toast > div {
+  grid-column: 2;
 }
-.toast.error {
-  border-left-color: var(--danger);
+.toast.success::before {
+  background: var(--ok);
+}
+.toast.warning::before {
+  background: var(--warn);
+}
+.toast.error::before {
+  background: var(--danger);
 }
 .toast .detail {
-  color: var(--fg-1);
+  color: var(--fg-2);
   font-size: 12px;
   margin-top: 2px;
 }
 
-/* 進捗 */
+/* ------------------------------------------------------------------ 進捗 */
+
 .progress {
-  height: 4px;
-  background: var(--bg-3);
+  height: 3px;
+  background: var(--track);
   border-radius: 2px;
   overflow: hidden;
 }
 .progress > div {
   height: 100%;
   background: var(--accent);
+  border-radius: 2px;
   transition: width 0.2s;
 }
 .progress.indeterminate > div {
@@ -380,21 +681,30 @@ button:focus-visible {
   }
 }
 
-/* 評価・フラグ・ラベル */
+/* ------------------------------------------------------------------ 評価・フラグ・ラベル（components/Marks.tsx） */
+
 .stars {
   display: inline-flex;
+  align-items: center;
   gap: 1px;
   color: var(--fg-3);
-  letter-spacing: 0;
+}
+.stars > span {
+  display: inline-flex;
+}
+.stars .icon {
+  width: 1em;
+  height: 1em;
 }
 .stars .on {
   color: var(--fg-0);
 }
 .label-dot {
   display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
 }
 .label-dot.red {
   background: var(--label-red);
@@ -411,14 +721,25 @@ button:focus-visible {
 .label-dot.purple {
   background: var(--label-purple);
 }
+.flag-picked,
+.flag-rejected {
+  display: inline-flex;
+  align-items: center;
+}
 .flag-picked {
   color: var(--fg-0);
 }
 .flag-rejected {
   color: var(--danger);
 }
+.flag-picked .icon,
+.flag-rejected .icon {
+  width: 11px;
+  height: 11px;
+}
 
-/* レイアウト */
+/* ------------------------------------------------------------------ レイアウト */
+
 .app {
   display: grid;
   grid-template-rows: var(--topbar-h) 1fr auto var(--statusbar-h);
@@ -428,18 +749,19 @@ button:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
+  padding: 0 10px 0 14px;
   background: var(--bg-1);
   border-bottom: 1px solid var(--line);
 }
 .topbar .brand {
   font-weight: 700;
-  letter-spacing: 0.02em;
-  margin-right: 6px;
+  letter-spacing: 0.01em;
 }
 .topbar .catalog-name {
+  margin-right: 10px;
   color: var(--fg-2);
-  max-width: 280px;
+  font-size: 12px;
+  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -447,20 +769,29 @@ button:focus-visible {
 .topbar .spacer {
   flex: 1;
 }
+/* 右端の操作のまとまり（取り込み・書き出し）と設定の間の区切り。 */
+.topbar .sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--line-strong);
+}
 .mode-tabs {
   display: flex;
   gap: 2px;
-  background: var(--bg-2);
-  border-radius: var(--radius);
-  padding: 2px;
 }
 .mode-tabs button {
+  min-height: var(--ctl-h);
   border: none;
   background: transparent;
-  padding: 3px 12px;
-  border-radius: 3px;
+  padding: 0 12px;
+  border-radius: var(--radius);
   cursor: pointer;
   color: var(--fg-1);
+}
+.mode-tabs button:hover {
+  background: var(--bg-2);
+  color: var(--fg-0);
 }
 .mode-tabs button.on {
   background: var(--bg-4);
@@ -476,6 +807,7 @@ button:focus-visible {
 }
 .left,
 .right {
+  --surface: var(--bg-1);
   background: var(--bg-1);
   overflow: auto;
   min-height: 0;
@@ -498,11 +830,11 @@ button:focus-visible {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 0 10px;
+  padding: 0 14px;
   background: var(--bg-1);
   border-top: 1px solid var(--line);
-  font-size: 12px;
-  color: var(--fg-1);
+  font-size: 11.5px;
+  color: var(--fg-2);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -514,29 +846,32 @@ button:focus-visible {
   max-width: 520px;
 }
 .empty-state h2 {
-  color: var(--fg-1);
+  color: var(--fg-0);
   font-size: 16px;
   font-weight: 600;
 }
 
-/* メニュー（components/Menu.tsx。キーワード・コレクションの行の操作） */
+/* ------------------------------------------------------------------ メニュー（components/Menu.tsx） */
+
 .menu {
   position: fixed;
   z-index: 1100;
   min-width: 200px;
   max-width: 360px;
-  padding: 4px 0;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--bg-1);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--radius-lg);
+  background: var(--pop);
+  box-shadow: var(--shadow-pop);
 }
 .menu-item {
   display: flex;
   align-items: center;
   width: 100%;
-  padding: 4px 12px 4px 6px;
+  min-height: 26px;
+  padding: 0 12px 0 6px;
   border: none;
+  border-radius: 5px;
   background: transparent;
   color: var(--fg-0);
   text-align: left;
@@ -544,7 +879,7 @@ button:focus-visible {
 }
 .menu-item:hover:not(:disabled),
 .menu-item:focus-visible {
-  background: var(--bg-3);
+  background: var(--bg-4);
   outline: none;
 }
 .menu-item:disabled {
@@ -555,9 +890,11 @@ button:focus-visible {
   color: var(--danger);
 }
 .menu-check {
+  display: inline-flex;
+  align-items: center;
   flex: none;
-  width: 18px;
-  color: var(--accent);
+  width: 20px;
+  color: var(--fg-0);
 }
 .menu-hint {
   margin-left: auto;
@@ -567,8 +904,8 @@ button:focus-visible {
 }
 .menu-sep {
   height: 1px;
-  margin: 4px 0;
-  background: var(--line);
+  margin: 5px 0;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 /* 写真のドラッグの案内（library/PhotoDragGhost.tsx） */
@@ -576,16 +913,16 @@ button:focus-visible {
   position: fixed;
   z-index: 1200;
   max-width: 360px;
-  padding: 3px 8px;
-  border: 1px solid var(--line-strong);
+  padding: 3px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius);
-  background: var(--bg-2);
+  background: var(--pop);
   color: var(--fg-1);
   font-size: 12px;
   pointer-events: none;
 }
 .photo-drag-ghost.ok {
-  border-color: var(--accent);
+  border-color: var(--fg-1);
   color: var(--fg-0);
 }
 .photo-drag-ghost.no {
