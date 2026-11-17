@@ -8,7 +8,8 @@
 //   候補なしで動く（コーデックの欄は候補があるときだけ出す）。
 // - 並びは 1 行に収める: 左によく使う条件（テキスト・評価・フラグ・ラベル・カメラ・レンズ）と「詳しい条件」、
 //   右端に並べ替え。種類（写真・動画）と撮影日は「詳しい条件」の中に置く（既定のウィンドウの幅で折り返さない
-//   ように）。条件があるときだけ「条件を解除」を出す。
+//   ように）。条件があるときだけ「条件を解除」を出す。「詳しい条件」は閉じると中の欄が外れるので、撮影日・
+//   数値の欄は、反映を待っている入力を外されるときに反映する（閉じても入力を捨てない）。
 // - 長辺の画素数・動画の長さ・フレームレートの範囲（VID-03）は「詳しい条件」の中に置く（入力は全角の数字も
 //   読む。フォーカスを外したとき・Enter・入力から 600 ms 後に反映する）。マスターだけ（仮想コピーを除く。LIB-13）と
 //   スタックをすべて展開して表示（LIB-12。保存した折りたたみの状態は変えない）・見つからない写真だけ（FILE-04）も
@@ -687,9 +688,16 @@ function DateInput(props: { value: string; label: string; onCommit: (date: strin
     if (document.activeElement === el && el.validity.badInput) return;
     el.value = props.value;
   }, [props.value]);
+  // 入力してから反映するまでの間の値（外されるときは入力欄をもう読めないので、ここに持つ）。
+  const pending = useRef<string | null>(null);
+  // 外されるとき（「詳しい条件」を閉じたなど）は、待っている値をすぐに反映する（NumberInput と同じ。捨てない）。
   useEffect(
     () => () => {
-      if (timer.current !== null) clearTimeout(timer.current);
+      if (timer.current === null) return;
+      clearTimeout(timer.current);
+      timer.current = null;
+      if (pending.current !== null) commitRef.current(pending.current);
+      pending.current = null;
     },
     [],
   );
@@ -697,6 +705,7 @@ function DateInput(props: { value: string; label: string; onCommit: (date: strin
   const flush = () => {
     if (timer.current !== null) clearTimeout(timer.current);
     timer.current = null;
+    pending.current = null;
     const el = ref.current;
     if (el && !el.validity.badInput) commitRef.current(el.value);
   };
@@ -714,6 +723,7 @@ function DateInput(props: { value: string; label: string; onCommit: (date: strin
       onChange={(e) => {
         if (e.target.validity.badInput) return;
         if (timer.current !== null) clearTimeout(timer.current);
+        pending.current = e.target.value;
         timer.current = setTimeout(flush, DATE_DELAY_MS);
       }}
       onBlur={() => {
