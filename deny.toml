@@ -54,6 +54,15 @@ all-features = true
 # - RUSTSEC-2026-0382: 信頼しなくなった emSign の中間証明書の公開鍵を含む経路を受け入れうる。webpki で経路を検証するのは
 #   rustls-platform-verifier の Linux 向け（src/verification/others.rs）だけで、配布の対象の Windows（CryptoAPI）・macOS
 #   （Security.framework）は OS が検証する。使うのはオンラインの地図（LIB-21。既定で無効）の HTTPS だけ。
+#
+# 2026-11-18 追加（画面の見た目の変更の PR #28 の CI で見つかった。chrono 0.4.45 の「メンテナンス終了」の通知で、脆弱性では
+# ない。2026-11-17 に勧告のデータベースに入った。更新先がない（No safe upgrade is available）。告知は
+# https://github.com/chronotope/chrono/issues/1768 で、代わりに jiff・time を挙げている）:
+# - RUSTSEC-2026-0543: chrono は workspace の 8 つの crate の直接の依存で、crates/ の 59 ファイルが使う（Linux では trash も
+#   使う）。日時の型は保存の形式（serde・カタログ）にも関わるので、置き換えは別の作業にする。利用者が 2026-11-18 に
+#   「当面は除外する」と決めた。置き換え（jiff か time）をするかどうかと時期は決まっていない。chrono の脆弱性の通知が
+#   出たときは、この除外とは別のエラーになるので、そのときに見直す。遅くとも 2027-01 に見直す（ほかの「メンテナンス
+#   終了」の除外と同じ時期。AI の案で、人の確認待ち）。
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error（Tauri の Linux の GTK の依存。ビルド時のみ）。Tauri の更新時に見直す" },
     { id = "RUSTSEC-2025-0075", reason = "unic-char-range（Tauri の urlpattern）。Tauri の更新時に見直す" },
@@ -69,6 +78,7 @@ ignore = [
     { id = "RUSTSEC-2026-0348", reason = "rustls 0.23.45（機能 brotli を入れたときだけが対象）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
     { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.45（耐量子の鍵交換を使うときだけが対象。ring にはない）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
     { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.103.15（webpki で証明書の経路を検証する Linux だけが対象。配布の対象の Windows・macOS は OS が検証する）。2026-11-03 以降に 0.103.16 以上へ上げて消す" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45（メンテナンス終了の通知。脆弱性ではない。更新先なし。workspace の直接の依存）。利用者が 2026-11-18 に当面の除外を決めた。遅くとも 2027-01 に見直す" },
 ]
 
 [licenses]

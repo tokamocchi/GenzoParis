@@ -2,7 +2,7 @@
 
 GenzoParis を手元でビルド・テスト・起動するための手順です。機能の概要は [README](../README.md)、CLI（`genzo`）の使い方は [cli.md](cli.md)、配布物の作り方は [packaging.md](packaging.md) にあります。
 
-Rust の Cargo workspace です（crate の構成は [docs/04_architecture.md](04_architecture.md) の 1.4 節）。Rust の版は `rust-toolchain.toml` で 1.97.0 に固定しています（手元と CI で clippy の警告をそろえるため。`Cargo.toml` の最小の版は 1.88）。
+Rust の Cargo workspace です（crate の構成は [docs/04_architecture.md](04_architecture.md) の 1.4 節）。Rust の版は `rust-toolchain.toml` で 1.97.0 に固定しています（手元と CI で clippy の警告をそろえるため。`Cargo.toml` の最小の版は 1.89。2026-11-18 に 1.88 から上げた。`rusqlite` 0.41 が 1.89 を要求するため）。
 
 ## ビルドとテスト
 
