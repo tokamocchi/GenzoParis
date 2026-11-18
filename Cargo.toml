@@ -9,7 +9,7 @@ members = ["crates/*"]
 version = "0.2.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
-rust-version = "1.88"
+rust-version = "1.89"
 repository = "https://github.com/tokamocchi/GenzoParis"
 publish = false
 
@@ -61,7 +61,9 @@ kamadak-exif = "0.6.1"
 skrifa = { version = "0.47.0", default-features = false, features = ["std"] }
 
 # カタログ（SQLite を同梱してビルドする。backup はオンラインバックアップ API 用。04 の 3.4 節）
-rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+# 0.41 系は、同梱の SQLite の脆弱性の通知（RUSTSEC-2026-0459）のため（Rust 1.89 以上が要る）。0.42.0・0.43.0 は公開から
+# 2 週間たっていないため 0.41.1（2026-11-18）。docs/third_party.md。
+rusqlite = { version = "0.41.1", features = ["bundled", "backup"] }
 
 # 並行処理・プロセス間の受け渡し
 rayon = "1.12.0"
