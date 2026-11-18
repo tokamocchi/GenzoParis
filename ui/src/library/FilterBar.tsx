@@ -6,6 +6,10 @@
 //   UTC の境界にする（開始日はその日の 0 時を含む、終了日は翌日の 0 時を含まない。filterLogic.ts の冒頭）。
 // - カメラ・レンズ・動画のコーデックの候補は core.facets()。カタログが変わったら読み直す。読めなければ
 //   候補なしで動く（コーデックの欄は候補があるときだけ出す）。
+// - 並びは 1 行に収める: 左によく使う条件（テキスト・評価・フラグ・ラベル・カメラ・レンズ）と「詳しい条件」、
+//   右端に並べ替え。種類（写真・動画）と撮影日は「詳しい条件」の中に置く（既定のウィンドウの幅で折り返さない
+//   ように）。条件があるときだけ「条件を解除」を出す。「詳しい条件」は閉じると中の欄が外れるので、撮影日・
+//   数値の欄は、反映を待っている入力を外されるときに反映する（閉じても入力を捨てない）。
 // - 長辺の画素数・動画の長さ・フレームレートの範囲（VID-03）は「詳しい条件」の中に置く（入力は全角の数字も
 //   読む。フォーカスを外したとき・Enter・入力から 600 ms 後に反映する）。マスターだけ（仮想コピーを除く。LIB-13）と
 //   スタックをすべて展開して表示（LIB-12。保存した折りたたみの状態は変えない）・見つからない写真だけ（FILE-04）も
@@ -27,6 +31,7 @@ import type {
   SearchSort,
   SortKey,
 } from "../api/types";
+import { Icon } from "../components/Icon";
 import { COLOR_LABEL_NAMES } from "../format";
 import { actions, appStore, useApp } from "../state/app";
 import {
@@ -93,137 +98,123 @@ export function FilterBar() {
 
   return (
     <div className="lib-filterbar" role="search" aria-label="絞り込みと並べ替え">
-      <TextSearch value={filter.text ?? null} />
+      <div className="lib-filter-main">
+        <TextSearch value={filter.text ?? null} />
 
-      <select
-        value={rating}
-        aria-label="評価"
-        onChange={(e) => actions.setFilter(ratingPatch(Number(e.target.value)))}
-      >
-        {rating === -1 && (
-          <option value={-1} disabled>
-            評価: その他の条件
-          </option>
-        )}
-        {RATING_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
+        <select
+          value={rating}
+          aria-label="評価"
+          onChange={(e) => actions.setFilter(ratingPatch(Number(e.target.value)))}
+        >
+          {rating === -1 && (
+            <option value={-1} disabled>
+              評価: その他の条件
+            </option>
+          )}
+          {RATING_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
 
-      <select
-        value={flag}
-        aria-label="フラグ"
-        onChange={(e) => actions.setFilter({ flags: flagsFor(e.target.value as FlagOption) })}
-      >
-        {flag === "other" && (
-          <option value="other" disabled>
-            フラグ: その他の条件
-          </option>
-        )}
-        {FLAG_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
+        <select
+          value={flag}
+          aria-label="フラグ"
+          onChange={(e) => actions.setFilter({ flags: flagsFor(e.target.value as FlagOption) })}
+        >
+          {flag === "other" && (
+            <option value="other" disabled>
+              フラグ: その他の条件
+            </option>
+          )}
+          {FLAG_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
 
-      <span className="lib-labels" role="group" aria-label="カラーラベル（複数選べる）">
-        {LABEL_CHOICES.map((l) => {
-          const on = filter.color_labels?.includes(l) ?? false;
-          const name = l ? `ラベル: ${COLOR_LABEL_NAMES[l]}` : "ラベルなし";
-          return (
-            <button
-              key={l ?? "none"}
-              type="button"
-              className={`lib-label-btn${on ? " on" : ""}`}
-              aria-pressed={on}
-              aria-label={name}
-              title={name}
-              onClick={() => actions.setFilter({ color_labels: toggleLabel(filter.color_labels, l) })}
-            >
-              {l ? <span className={`label-dot ${l}`} /> : "なし"}
-            </button>
-          );
-        })}
-      </span>
+        <span className="lib-labels" role="group" aria-label="カラーラベル（複数選べる）">
+          {LABEL_CHOICES.map((l) => {
+            const on = filter.color_labels?.includes(l) ?? false;
+            const name = l ? `ラベル: ${COLOR_LABEL_NAMES[l]}` : "ラベルなし";
+            return (
+              <button
+                key={l ?? "none"}
+                type="button"
+                className={`lib-label-btn${on ? " on" : ""}`}
+                aria-pressed={on}
+                aria-label={name}
+                title={name}
+                onClick={() => actions.setFilter({ color_labels: toggleLabel(filter.color_labels, l) })}
+              >
+                <span className={`label-dot ${l ?? "none"}`} />
+              </button>
+            );
+          })}
+        </span>
 
-      <select
-        value={filter.kind ?? ""}
-        aria-label="種類"
-        onChange={(e) => actions.setFilter({ kind: e.target.value === "" ? null : (e.target.value as AssetKind) })}
-      >
-        {KIND_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-
-      <FacetSelect
-        label="カメラ"
-        values={facets.cameras}
-        selected={filter.cameras}
-        failed={failed}
-        onChange={(v) => actions.setFilter({ cameras: v })}
-      />
-      <FacetSelect
-        label="レンズ"
-        values={facets.lenses}
-        selected={filter.lenses}
-        failed={failed}
-        onChange={(v) => actions.setFilter({ lenses: v })}
-      />
-
-      {(facets.codecs.length > 0 || (filter.codecs?.length ?? 0) > 0) && (
         <FacetSelect
-          label="コーデック"
-          title="動画のコーデック（指定すると写真は除く。VID-03）"
-          values={facets.codecs}
-          selected={filter.codecs}
+          label="カメラ"
+          values={facets.cameras}
+          selected={filter.cameras}
           failed={failed}
-          onChange={(v) => actions.setFilter({ codecs: v })}
+          onChange={(v) => actions.setFilter({ cameras: v })}
         />
-      )}
+        <FacetSelect
+          label="レンズ"
+          values={facets.lenses}
+          selected={filter.lenses}
+          failed={failed}
+          onChange={(v) => actions.setFilter({ lenses: v })}
+        />
 
-      <MoreConditions filter={filter} />
+        {(facets.codecs.length > 0 || (filter.codecs?.length ?? 0) > 0) && (
+          <FacetSelect
+            label="コーデック"
+            title="動画のコーデック（指定すると写真は除く。VID-03）"
+            values={facets.codecs}
+            selected={filter.codecs}
+            failed={failed}
+            onChange={(v) => actions.setFilter({ codecs: v })}
+          />
+        )}
 
-      <DateRange filter={filter} offset={offset} />
+        <MoreConditions filter={filter} offset={offset} />
 
-      <OrganizeChips filter={filter} />
+        <OrganizeChips filter={filter} />
 
-      {filter.location_bounds && (
-        <span className="lib-chip" title={`地図の範囲: ${describeBounds(filter.location_bounds)}（地図の表示で地図を動かすと変わる）`}>
-          地図の範囲
+        {filter.location_bounds && (
+          <span className="lib-chip" title={`地図の範囲: ${describeBounds(filter.location_bounds)}（地図の表示で地図を動かすと変わる）`}>
+            地図の範囲
+            <button
+              type="button"
+              aria-label="地図の範囲での絞り込みをやめる"
+              onClick={() => actions.setFilter({ location_bounds: null })}
+            >
+              <Icon name="close" size={12} />
+            </button>
+          </span>
+        )}
+
+        {active > 0 && (
           <button
             type="button"
-            aria-label="地図の範囲での絞り込みをやめる"
-            onClick={() => actions.setFilter({ location_bounds: null })}
+            className="btn ghost small lib-filter-clear"
+            onClick={() => actions.replaceFilter(clearConditions(filter))}
+            title={`絞り込みの条件をすべて解除する（有効な条件: ${active} 個。フォルダ・コレクションの選択は残す）`}
           >
-            ×
+            <Icon name="close" size={12} />
+            条件を解除
+            <span className="lib-filter-count">{active}</span>
           </button>
-        </span>
-      )}
+        )}
+      </div>
 
-      <span className="spacer" />
-
-      <SortControl sort={sort} />
-
-      {active > 0 && (
-        <span className="lib-filter-count" title={`有効な条件: ${active} 個`}>
-          {active}
-        </span>
-      )}
-      <button
-        type="button"
-        className="btn small"
-        disabled={active === 0}
-        onClick={() => actions.replaceFilter(clearConditions(filter))}
-        title="絞り込みの条件をすべて解除する（フォルダ・コレクションの選択は残す）"
-      >
-        条件を解除
-      </button>
+      <div className="lib-filter-side">
+        <SortControl sort={sort} />
+      </div>
     </div>
   );
 }
@@ -257,7 +248,7 @@ function OrganizeChips({ filter }: { filter: SearchFilter }) {
         <span className="lib-chip" title={c ? `${COLLECTION_KIND_LABEL[c.kind]}: ${collectionPathText(names?.collections ?? [], col)}` : undefined}>
           {c ? c.name : `コレクション ${col}`}
           <button type="button" aria-label="コレクションの表示をやめる" title="すべての写真を表示" onClick={() => actions.showAll()}>
-            ×
+            <Icon name="close" size={12} />
           </button>
         </span>
       )}
@@ -271,7 +262,7 @@ function OrganizeChips({ filter }: { filter: SearchFilter }) {
               aria-label="このキーワードでの絞り込みをやめる"
               onClick={() => actions.setFilter({ keywords: kws.filter((x) => x !== k) })}
             >
-              ×
+              <Icon name="close" size={12} />
             </button>
           </span>
         );
@@ -422,7 +413,7 @@ function FacetSelect(props: {
 // 詳しい条件（長辺の画素数・動画の長さ・フレームレート。VID-03）
 // ---------------------------------------------------------------------------
 
-function MoreConditions({ filter }: { filter: SearchFilter }) {
+function MoreConditions({ filter, offset }: { filter: SearchFilter; offset: number }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
   const panelId = useId();
@@ -455,13 +446,30 @@ function MoreConditions({ filter }: { filter: SearchFilter }) {
         className={`btn small${count > 0 ? " active" : ""}`}
         aria-expanded={open}
         aria-controls={panelId}
-        title="長辺の画素数・動画の長さ・フレームレート・仮想コピー・見つからない写真・位置情報で絞り込む、スタックをすべて展開して表示する"
+        title="種類・撮影日・長辺の画素数・動画の長さ・フレームレート・仮想コピー・見つからない写真・位置情報で絞り込む、スタックをすべて展開して表示する"
         onClick={() => setOpen((o) => !o)}
       >
-        詳しい条件{count > 0 ? `（${count}）` : ""} ▾
+        <Icon name="filter" />
+        詳しい条件{count > 0 ? `（${count}）` : ""}
       </button>
       {open && (
-        <div id={panelId} className="lib-filter-pop" role="group" aria-label="詳しい条件">
+        <div id={panelId} className="lib-filter-pop popover" role="group" aria-label="詳しい条件">
+          <label className="lib-filter-range">
+            <span className="label">種類</span>
+            <select
+              value={filter.kind ?? ""}
+              aria-label="種類"
+              onChange={(e) => actions.setFilter({ kind: e.target.value === "" ? null : (e.target.value as AssetKind) })}
+            >
+              {KIND_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <DateRange filter={filter} offset={offset} />
+          <div className="lib-filter-sep" role="separator" />
           {NUMERIC_RANGES.map((r) => (
             <NumericRangeRow key={r.id} range={r} filter={filter} />
           ))}
@@ -651,7 +659,7 @@ function DateRange({ filter, offset }: { filter: SearchFilter; offset: number })
   };
   return (
     <span
-      className={`lib-filter-group lib-filter-dates${reversed ? " reversed" : ""}`}
+      className={`lib-filter-range lib-filter-dates${reversed ? " reversed" : ""}`}
       title={`撮影日（既定のタイムゾーン ${tz} の日付。終了日はその日の終わりまでを含む）${
         reversed ? "\n開始日が終了日より後のため、該当する写真はありません" : ""
       }`}
@@ -680,9 +688,16 @@ function DateInput(props: { value: string; label: string; onCommit: (date: strin
     if (document.activeElement === el && el.validity.badInput) return;
     el.value = props.value;
   }, [props.value]);
+  // 入力してから反映するまでの間の値（外されるときは入力欄をもう読めないので、ここに持つ）。
+  const pending = useRef<string | null>(null);
+  // 外されるとき（「詳しい条件」を閉じたなど）は、待っている値をすぐに反映する（NumberInput と同じ。捨てない）。
   useEffect(
     () => () => {
-      if (timer.current !== null) clearTimeout(timer.current);
+      if (timer.current === null) return;
+      clearTimeout(timer.current);
+      timer.current = null;
+      if (pending.current !== null) commitRef.current(pending.current);
+      pending.current = null;
     },
     [],
   );
@@ -690,6 +705,7 @@ function DateInput(props: { value: string; label: string; onCommit: (date: strin
   const flush = () => {
     if (timer.current !== null) clearTimeout(timer.current);
     timer.current = null;
+    pending.current = null;
     const el = ref.current;
     if (el && !el.validity.badInput) commitRef.current(el.value);
   };
@@ -707,6 +723,7 @@ function DateInput(props: { value: string; label: string; onCommit: (date: strin
       onChange={(e) => {
         if (e.target.validity.badInput) return;
         if (timer.current !== null) clearTimeout(timer.current);
+        pending.current = e.target.value;
         timer.current = setTimeout(flush, DATE_DELAY_MS);
       }}
       onBlur={() => {
@@ -727,11 +744,10 @@ function SortControl({ sort }: { sort: SearchSort }) {
   const dir = sortDirectionLabel(sort.direction);
   return (
     <span className="lib-filter-group">
-      <span className="label">並べ替え</span>
       <select
         value={sort.key}
         aria-label="並べ替えの項目"
-        title={sort.key === "capture_time" ? "撮影日時のない写真は、どちらの向きでも最後に並びます" : undefined}
+        title={sort.key === "capture_time" ? "並べ替え（撮影日時のない写真は、どちらの向きでも最後に並びます）" : "並べ替え"}
         onChange={(e) => actions.setSort({ ...sort, key: e.target.value as SortKey })}
       >
         {SORT_OPTIONS.map((o) => (
@@ -742,12 +758,12 @@ function SortControl({ sort }: { sort: SearchSort }) {
       </select>
       <button
         type="button"
-        className="btn small"
+        className="btn ghost small icon-only"
         aria-label={`並べ替えの向き: ${dir}（押すと逆にする）`}
         title={`${dir}（押すと逆にする）`}
         onClick={() => actions.setSort(flipDirection(sort))}
       >
-        {sort.direction === "ascending" ? "↑ 昇順" : "↓ 降順"}
+        <Icon name={sort.direction === "ascending" ? "arrowUp" : "arrowDown"} />
       </button>
     </span>
   );

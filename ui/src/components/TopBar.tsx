@@ -1,6 +1,7 @@
 // 上の帯（カタログ名・表示モード（グリッド・ルーペ・比較・選別・地図・現像）・取り込み・書き出し・ジョブ・設定）。
 
 import { JobsIndicator } from "../dialogs/JobsIndicator";
+import { Icon } from "./Icon";
 import { comboLabel } from "../keyboard";
 import { actions, useApp } from "../state/app";
 import { openCompare, openSurvey } from "../state/compare";
@@ -71,8 +72,9 @@ export function TopBar() {
       >
         書き出し
       </button>
-      <button className="btn ghost icon" onClick={() => actions.openDialog({ kind: "settings" })} title={`設定（${comboLabel("mod+,")}）`} aria-label="設定">
-        ⚙
+      <span className="sep" aria-hidden="true" />
+      <button className="btn ghost icon-only" onClick={() => actions.openDialog({ kind: "settings" })} title={`設定（${comboLabel("mod+,")}）`} aria-label="設定">
+        <Icon name="settings" />
       </button>
     </header>
   );

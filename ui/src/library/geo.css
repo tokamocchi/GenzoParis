@@ -85,7 +85,7 @@
   height: 18px;
   border: 2px solid var(--bg-0);
   border-radius: 50% 50% 50% 0;
-  background: var(--accent);
+  background: var(--map-pin);
   transform: rotate(-45deg);
 }
 .geo-pin::after {
@@ -103,7 +103,7 @@
 .geo-photo-mark {
   border: 2px solid var(--fg-0);
   border-radius: 50%;
-  background: var(--select);
+  background: var(--map-photo);
 }
 
 /* 印の説明 */
@@ -127,13 +127,13 @@
 }
 .geo-legend-pin {
   border-radius: 50% 50% 50% 0;
-  background: var(--accent);
+  background: var(--map-pin);
   transform: rotate(-45deg);
 }
 .geo-legend-photo {
   border: 2px solid var(--fg-0);
   border-radius: 50%;
-  background: var(--select);
+  background: var(--map-photo);
 }
 
 /* 地名の検索の結果 */
@@ -230,8 +230,8 @@
   justify-content: center;
   border: 2px solid var(--bg-0);
   border-radius: 50%;
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--map-pin);
+  color: var(--map-pin-fg);
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
@@ -243,7 +243,7 @@
   font-size: 12px;
 }
 .map-cluster.current {
-  border-color: var(--select);
+  border-color: var(--map-photo);
   box-shadow: 0 0 0 2px var(--fg-0);
 }
 .map-tip-thumb {

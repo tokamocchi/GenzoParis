@@ -16,6 +16,7 @@
 // - 次の候補（→ で送る先）の L1 を先読みする（prefetch.ts。PERF-04）。
 // - 比較表示をやめたら、コアが展開した写真と結果を捨てる（releaseView）。
 
+import { Icon } from "../components/Icon";
 import { type PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { type Frame, drawFrame } from "../api/frames";
@@ -658,7 +659,7 @@ function PanePhoto(props: PaneProps & { summary: VariantSummary }) {
         <SlotImages slot={l1} onError={onL1Error} />
         {video && (
           <span className="loupe-video-mark" aria-hidden="true">
-            ▶
+            <Icon name="play" />
           </span>
         )}
       </div>

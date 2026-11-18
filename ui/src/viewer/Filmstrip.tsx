@@ -19,6 +19,7 @@
 // - スタック（LIB-12）の印（library/StackBadge.tsx。クリックで展開・折りたたみ）を出す。並びはグリッドと同じ
 //   （コアがスタックでまとめた検索結果）。
 
+import { Icon } from "../components/Icon";
 import { elementScroll, observeElementOffset, useVirtualizer } from "@tanstack/react-virtual";
 import { type MouseEvent, type WheelEvent, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
@@ -289,14 +290,20 @@ export const FilmstripCell = memo(function FilmstripCell(props: {
         )}
         {v && (
           <div className="filmstrip-marks">
-            {v.rating > 0 && <span className="filmstrip-rating">{"★".repeat(v.rating)}</span>}
+            {v.rating > 0 && (
+              <span className="filmstrip-rating" aria-label={`評価 ${v.rating}`}>
+                {Array.from({ length: v.rating }, (_, i) => (
+                  <Icon key={i} name="star" />
+                ))}
+              </span>
+            )}
             <FlagMark flag={v.flag} />
             <LabelDot label={v.color_label} />
           </div>
         )}
         {v?.kind === "video" && (
           <span className="filmstrip-kind" title="動画">
-            ▶
+            <Icon name="play" size={9} />
           </span>
         )}
         {v?.stack && (

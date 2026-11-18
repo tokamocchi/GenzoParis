@@ -15,6 +15,7 @@
 // - フォルダの右クリック（FILE-02・FILE-04）: 写真をここへ移す・フォルダを作る・名前の変更・移動・見つからない
 //   写真の確認と表示・場所の指定し直し。写真をフォルダに落とすと、移動のダイアログを開く（library/photoDrag.ts）。
 
+import { Icon } from "../components/Icon";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import * as core from "../api/core";
@@ -379,7 +380,24 @@ export function LibraryLeftPanel() {
         </div>
       </Section>
 
-      <Section id="lib.folders" title="フォルダ" right={<MenuButton label="…" title="フォルダの操作" items={allFoldersMenu} />}>
+      <Section
+        id="lib.folders"
+        title="フォルダ"
+        right={
+          <>
+            <button
+              type="button"
+              className="btn ghost small icon-only"
+              title="フォルダを取り込む"
+              aria-label="フォルダを取り込む"
+              onClick={() => actions.openDialog({ kind: "import" })}
+            >
+              <Icon name="plus" />
+            </button>
+            <MenuButton label="…" title="フォルダの操作" items={allFoldersMenu} />
+          </>
+        }
+      >
         {folderError && (
           <div>
             <p className="error-text">フォルダの一覧を読めません: {folderError}</p>
@@ -406,7 +424,7 @@ export function LibraryLeftPanel() {
                   aria-label={r.hasChildren ? (r.open ? "閉じる" : "開く") : undefined}
                   onClick={() => toggle(r.node.key, r.depth)}
                 >
-                  {r.hasChildren ? (r.open ? "▾" : "▸") : ""}
+                  {r.hasChildren && <Icon name={r.open ? "chevronDown" : "chevronRight"} size={12} />}
                 </button>
                 <span className="lib-tree-segs">{renderSegments(r.node)}</span>
                 {byId.get(r.node.key)?.online === false && <span className="lib-tree-mark muted">未接続</span>}
@@ -423,11 +441,6 @@ export function LibraryLeftPanel() {
           <input type="checkbox" checked={subChecked} onChange={(e) => changeSub(e.target.checked)} />
           サブフォルダを含める
         </label>
-        <div className="actions">
-          <button type="button" className="btn small" onClick={() => actions.openDialog({ kind: "import" })}>
-            フォルダを取り込む
-          </button>
-        </div>
       </Section>
 
       {menu && <PopupMenu at={menu.at} items={folderMenu(menu.folder)} onClose={() => setMenu(null)} label="フォルダの操作" />}

@@ -197,20 +197,22 @@ function MarkControls(props: { summary: VariantSummary | null; disabled?: boolea
       </div>
       <div className="lib-mark-row">
         <span className="label">フラグ</span>
-        {FLAG_BUTTONS.map((f) => (
-          <button
-            key={f.flag}
-            type="button"
-            className={`btn small${s?.flag === f.flag ? " active" : ""}`}
-            aria-pressed={s ? s.flag === f.flag : undefined}
-            disabled={disabled}
-            title={`${f.label}（${comboLabel(f.key)}）`}
-            onClick={() => void actions.setFlag(f.flag)}
-          >
-            {f.flag !== 0 && <FlagMark flag={f.flag} />}
-            {f.label}
-          </button>
-        ))}
+        <span className="seg">
+          {FLAG_BUTTONS.map((f) => (
+            <button
+              key={f.flag}
+              type="button"
+              className={`btn small${s?.flag === f.flag ? " active" : ""}`}
+              aria-pressed={s ? s.flag === f.flag : undefined}
+              disabled={disabled}
+              title={`${f.label}（${comboLabel(f.key)}）`}
+              onClick={() => void actions.setFlag(f.flag)}
+            >
+              {f.flag !== 0 && <FlagMark flag={f.flag} />}
+              {f.label}
+            </button>
+          ))}
+        </span>
       </div>
       <div className="lib-mark-row">
         <span className="label">ラベル</span>
@@ -229,7 +231,7 @@ function MarkControls(props: { summary: VariantSummary | null; disabled?: boolea
                 disabled={disabled}
                 onClick={() => void actions.setColorLabel(b.label)}
               >
-                {b.label ? <LabelDot label={b.label} /> : "なし"}
+                {b.label ? <LabelDot label={b.label} /> : <span className="label-dot none" />}
               </button>
             );
           })}

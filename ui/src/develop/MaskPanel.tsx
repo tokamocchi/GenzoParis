@@ -9,6 +9,7 @@
 //   明瞭度・かすみの除去・彩度・シャープ。
 // - 処理バージョン 1 の写真では使われないので、更新を勧めて編集はできなくする（削除はできる）。
 
+import { Icon } from "../components/Icon";
 import { type ReactNode, useEffect, useState } from "react";
 
 import type { AiMaskKind, DevelopSettings, LocalDelta, MaskComponent, MaskMode } from "../api/types";
@@ -388,13 +389,13 @@ function ComponentEditor(props: { index: number; j: number; component: MaskCompo
               <span className="dp-swatch" style={{ background: labToCss(sm.lab) }} />
               <button
                 type="button"
-                className="btn ghost small"
+                className="btn ghost small icon-only"
                 disabled={!editable || r.samples.length <= 1}
                 aria-label={`見本 ${k + 1} を除く`}
                 title={r.samples.length <= 1 ? "見本は 1 つ以上要ります" : "この見本を除く"}
                 onClick={() => update((s) => removeColorSample(s, index, j, k), false)}
               >
-                ✕
+                <Icon name="close" size={12} />
               </button>
             </span>
           ))}
@@ -533,7 +534,7 @@ function ComponentRows(props: { index: number; components: MaskComponent[]; sele
                 selectComponent(components.length > 1 ? Math.max(0, j - 1) : null);
               }}
             >
-              ✕
+              <Icon name="close" size={12} />
             </button>
           </li>
         );

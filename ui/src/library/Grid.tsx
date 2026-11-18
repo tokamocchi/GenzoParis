@@ -24,6 +24,7 @@
 //   見出しのクリックで、その日・イベントの写真を選ぶ。下の帯で区切りの間隔と、年・月への移動を選べる。
 //   スクロールして日付の見出しが隠れたら、上端に今の日付を出す。
 
+import { Icon } from "../components/Icon";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   memo,
@@ -614,7 +615,8 @@ export function Grid() {
             { label: "撮影時刻でスタック…", onSelect: () => actions.openDialog({ kind: "auto_stack" }) },
           ]}
         >
-          スタック ▾
+          スタック
+          <Icon name="chevronDown" size={12} />
         </MenuButton>
         <label className="lib-tl-toggle" title={sort.key === "capture_time" ? "撮影日・イベントの見出しを入れて並べる（T）" : "撮影日時の順に並べ替えて、撮影日・イベントの見出しを入れる（T）"}>
           <input type="checkbox" checked={tlActive} onChange={(e) => setTimelineEnabled(e.target.checked)} />
@@ -782,7 +784,8 @@ function Badges({ item, wide }: { item: VariantSummary; wide: boolean }) {
       {stack && <StackBadgeButton id={item.variant_id} badge={stack} wide={wide} />}
       {item.kind === "video" && (
         <span className="lib-badge" title="動画">
-          {wide ? "▶ 動画" : "▶"}
+          <Icon name="play" size={9} />
+          {wide && " 動画"}
         </span>
       )}
       {vc && (
@@ -798,7 +801,7 @@ function Badges({ item, wide }: { item: VariantSummary; wide: boolean }) {
       <span className="spacer" />
       {status && (
         <span className="lib-badge danger" title={status}>
-          {item.file_status === "missing" ? "!" : "×"}
+          {item.file_status === "missing" ? "!" : <Icon name="close" size={10} />}
         </span>
       )}
     </div>

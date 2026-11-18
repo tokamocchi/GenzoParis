@@ -144,7 +144,7 @@ export function JobsIndicator() {
         {running.length > 1 && <span className="muted">ほか {running.length - 1} 件</span>}
       </button>
       {open && (
-        <div className="jobs-popover" role="dialog" aria-label="バックグラウンドの処理と結果">
+        <div className="jobs-popover popover" role="dialog" aria-label="バックグラウンドの処理と結果">
           {list.map((j) => (
             <JobRow key={j.jobId} job={j} />
           ))}

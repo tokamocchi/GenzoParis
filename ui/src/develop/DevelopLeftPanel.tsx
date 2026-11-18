@@ -9,6 +9,7 @@
 // - 履歴の項目の右クリック: その段階からスナップショットを作る・ビフォーに設定（DEV-28・DEV-31）。
 // - プリセット（DEV-29）・スナップショット（DEV-28）の欄は PresetPanels.tsx。
 
+import { Icon } from "../components/Icon";
 import { useEffect, useRef, useState } from "react";
 
 import * as core from "../api/core";
@@ -234,6 +235,7 @@ export function DevelopLeftPanel() {
           onClick={() => void undo()}
           title={`元に戻す（${comboLabel("mod+z")}）`}
         >
+          <Icon name="undo" />
           元に戻す
         </button>
         <button
@@ -242,6 +244,7 @@ export function DevelopLeftPanel() {
           onClick={() => void redo()}
           title={`やり直す（${comboLabel("mod+shift+z")}）`}
         >
+          <Icon name="redo" />
           やり直す
         </button>
         <button

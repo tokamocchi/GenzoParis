@@ -2,6 +2,8 @@
 
 import { type ReactNode, useState } from "react";
 
+import { Icon } from "./Icon";
+
 function load(key: string, fallback: boolean): boolean {
   try {
     const v = localStorage.getItem(`genzo.section.${key}`);
@@ -31,9 +33,15 @@ export function Section(props: {
   return (
     <div className="section">
       <div className="section-head" onClick={toggle}>
-        <span className="chev">{open ? "▾" : "▸"}</span>
-        <span style={{ flex: 1 }}>{props.title}</span>
-        {props.right && <span onClick={(e) => e.stopPropagation()}>{props.right}</span>}
+        <span className="title">{props.title}</span>
+        {props.right && (
+          <span className="side" onClick={(e) => e.stopPropagation()}>
+            {props.right}
+          </span>
+        )}
+        <span className="chev">
+          <Icon name={open ? "chevronDown" : "chevronRight"} />
+        </span>
       </div>
       {open && <div className="section-body">{props.children}</div>}
     </div>

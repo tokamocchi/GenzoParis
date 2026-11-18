@@ -219,6 +219,15 @@ describe("位置情報（LIB-18）", () => {
     expect(locationPatch("unlocated")).toEqual({ has_location: false });
   });
 
+  it("種類と撮影日は「詳しい条件」の中の条件として数える（撮影日は開始・終了を合わせて 1 つ）", () => {
+    expect(moreConditionCount({})).toBe(0);
+    expect(moreConditionCount({ kind: "video" })).toBe(1);
+    expect(moreConditionCount({ kind: null })).toBe(0);
+    expect(moreConditionCount({ captured_from: "2026-05-01T00:00:00Z" })).toBe(1);
+    expect(moreConditionCount({ captured_from: "2026-05-01T00:00:00Z", captured_until: "2026-05-03T00:00:00Z" })).toBe(1);
+    expect(moreConditionCount({ kind: "photo", captured_until: "2026-05-03T00:00:00Z" })).toBe(2);
+  });
+
   it("位置の有無・地図の範囲を 1 つずつ数え、解除で消える", () => {
     const f = { has_location: false, location_bounds: { south: 35, west: 139, north: 36, east: 140 } };
     expect(activeConditionCount(f)).toBe(2);
