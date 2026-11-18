@@ -95,6 +95,9 @@ input[type="text"],
 input[type="number"],
 input[type="search"],
 input[type="date"],
+input[type="tel"],
+input[type="email"],
+input[type="url"],
 textarea,
 select {
   background-color: var(--bg-2);
@@ -108,6 +111,9 @@ input[type="text"],
 input[type="number"],
 input[type="search"],
 input[type="date"],
+input[type="tel"],
+input[type="email"],
+input[type="url"],
 select {
   min-height: var(--ctl-h);
 }
@@ -115,6 +121,9 @@ input[type="text"]:hover:not(:disabled),
 input[type="number"]:hover:not(:disabled),
 input[type="search"]:hover:not(:disabled),
 input[type="date"]:hover:not(:disabled),
+input[type="tel"]:hover:not(:disabled),
+input[type="email"]:hover:not(:disabled),
+input[type="url"]:hover:not(:disabled),
 textarea:hover:not(:disabled),
 select:hover:not(:disabled) {
   background-color: var(--bg-3);
