@@ -63,6 +63,19 @@ all-features = true
 #   「当面は除外する」と決めた。置き換え（jiff か time）をするかどうかと時期は決まっていない。chrono の脆弱性の通知が
 #   出たときは、この除外とは別のエラーになるので、そのときに見直す。遅くとも 2027-01 に見直す（ほかの「メンテナンス
 #   終了」の除外と同じ時期。AI の案で、人の確認待ち）。
+#
+# 2026-11-26 追加（ONNX Runtime の取得元の変更の PR #32 の CI で見つかった。genzo-app の Tauri 2.11 の依存の木の脆弱性の通知が
+# 2 件。直した版はどちらも公開から 2 週間たっておらず、依存の版を公開から 2 週間以上のものにする方針に合わないため、まだ
+# 上げない。どちらもこのアプリの使い方では当たらない（AI がソースと依存の木で確かめた。人の確認待ち）。2 週間たったら
+# 版を上げて、この 2 つを消す）:
+# - RUSTSEC-2026-0594（cookie 0.18.2。直した版 0.18.3 は 2026-11-23 の公開）: fork() したプロセスで、暗号化した cookie
+#   （機能 private の PrivateJar）の nonce が重なりうる。このアプリの cookie は機能 private・secure を入れていない
+#   （cargo tree -e features で既定の機能だけ。Cargo.lock の依存は time・version_check だけで、暗号の crate がない）。
+#   勧告も、fork() しないアプリと Windows のアプリは対象でないとしている。
+# - RUSTSEC-2026-0592（url 2.5.8。直した版 2.5.9 は 2026-11-20 の公開）: 入れ子の blob: の URL で Url::origin() を呼ぶと
+#   スタックがあふれる。url を直接使う crate（tauri・tauri-utils・tauri-runtime・tauri-runtime-wry・wry・tao・
+#   tauri-plugin-dialog・tauri-plugin-fs・tauri-plugin-opener・urlpattern・reqwest・tower-http・tauri-codegen・schemars）の
+#   ソースと、このリポジトリの crates/ に、Url::origin()・url::quirks::origin() の呼び出しがない（検索で該当なし）。
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error（Tauri の Linux の GTK の依存。ビルド時のみ）。Tauri の更新時に見直す" },
     { id = "RUSTSEC-2025-0075", reason = "unic-char-range（Tauri の urlpattern）。Tauri の更新時に見直す" },
@@ -79,6 +92,8 @@ ignore = [
     { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.45（耐量子の鍵交換を使うときだけが対象。ring にはない）。2026-10-28 以降に 0.23.46 以上へ上げて消す" },
     { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.103.15（webpki で証明書の経路を検証する Linux だけが対象。配布の対象の Windows・macOS は OS が検証する）。2026-11-03 以降に 0.103.16 以上へ上げて消す" },
     { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45（メンテナンス終了の通知。脆弱性ではない。更新先なし。workspace の直接の依存）。利用者が 2026-11-18 に当面の除外を決めた。遅くとも 2027-01 に見直す" },
+    { id = "RUSTSEC-2026-0594", reason = "cookie 0.18.2（fork() したプロセスの暗号化した cookie だけが対象。機能 private を入れていない）。2026-12-07 以降に 0.18.3 以上へ上げて消す" },
+    { id = "RUSTSEC-2026-0592", reason = "url 2.5.8（Url::origin() を呼ぶときだけが対象。依存とこのリポジトリに呼び出しがない）。2026-12-04 以降に 2.5.9 以上へ上げて消す" },
 ]
 
 [licenses]
