@@ -140,9 +140,24 @@ CPU。参考値）。DeepLab-v3 の人物の境界は U²-Net より粗い。
 | もの | 置き場（配布物の中） | 作り方 |
 |---|---|---|
 | モデルと台帳（4 ファイル） | 資源のフォルダの `models` | リポジトリの `crates/genzo-app/models` を `tauri.conf.json` の `bundle.resources` で同梱（Linux の .deb にも入る） |
-| ONNX Runtime 1.31.0（Windows `onnxruntime.dll`、macOS `libonnxruntime.dylib`） | 資源のフォルダの `models`（macOS も `Contents/Frameworks` ではない） | 配布物を作るとき（`scripts/prepare-worker.mjs` → `scripts/lib/onnxruntime.mjs`）に、GitHub の Releases の公式の配布物（`onnxruntime-win-x64-1.31.0.zip`・`onnxruntime-osx-arm64-1.31.0.tgz`）を取り、固定した SHA-256 と比べ（違えば止める）、共有ライブラリを取り出す。Linux には同梱しない |
+| ONNX Runtime 1.31.0（Windows `onnxruntime.dll`、macOS `libonnxruntime.dylib`） | 資源のフォルダの `models`（macOS も `Contents/Frameworks` ではない） | 配布物を作るとき（`scripts/prepare-worker.mjs` → `scripts/lib/onnxruntime.mjs`）に、NuGet の公式のパッケージ（`Microsoft.ML.OnnxRuntime` 1.31.0 の `microsoft.ml.onnxruntime.1.31.0.nupkg`）を取り、固定した SHA-256 と比べ（違えば止める）、共有ライブラリを取り出して、その SHA-256 も固定した値と比べる（違えば止める）。Linux には同梱しない |
 | Visual C++ のランタイム（Windows） | インストール先（実行ファイルと同じフォルダ） | `onnxruntime.dll` は `msvcp140.dll`・`msvcp140_1.dll`・`vcruntime140.dll`・`vcruntime140_1.dll` を読み込むので、ワーカーのものと合わせて同梱する（`scripts/lib/worker.mjs`） |
-| ライセンスの文書 | `licenses/third-party/ai-models.txt`（モデル）、`licenses/third-party/onnxruntime/`（ONNX Runtime の LICENSE と ThirdPartyNotices.txt） | モデルの文書はリポジトリに置く。ONNX Runtime の文書は公式の配布物から取り出す |
+| ライセンスの文書 | `licenses/third-party/ai-models.txt`（モデル）、`licenses/third-party/onnxruntime/`（ONNX Runtime の LICENSE と ThirdPartyNotices.txt） | モデルの文書はリポジトリに置く。ONNX Runtime の文書は公式のパッケージから取り出す |
+
+**取得元（2026-11-26 に変更。決定事項ログ No.224）**: それまでは GitHub の Releases の配布物
+（`onnxruntime-win-x64-1.31.0.zip`・`onnxruntime-osx-arm64-1.31.0.tgz`）から取っていました。2026-11-17 ごろから
+`github.com/microsoft/onnxruntime` が 404 を返し、取れなくなったので（理由の公式の説明は、2026-11-26 の時点で
+見つけていません）、同じ版の NuGet のパッケージに替えました。替えるときに確かめたことは次のとおりです。
+
+- パッケージ（159,626,085 バイト。SHA-256 `7e35fdb4…`）の SHA-512 が、nuget.org の記録（`packageHash`。2026-10-09 公開）と
+  同じ。パッケージの署名（作成者 Microsoft Corporation・リポジトリ NuGet.org）が `dotnet nuget verify --all` で通る。
+- Windows の `onnxruntime.dll`（17,253,176 バイト。SHA-256 `0c42dc4e…`）は、0.2.2 までに同梱したものと同じ。
+- macOS の `libonnxruntime.dylib`（44,830,288 バイト。SHA-256 `83973572…`）は、0.2.2 までに同梱したもの（SHA-256
+  `2a50a63e…`）と大きさが同じで、違うバイトはすべてコード署名の領域（`LC_CODE_SIGNATURE`）の中にある。それ以外のバイト列・
+  `LC_UUID`・最小の版（minos 14.0）は同じ。**署名が有効かと、読み込めるかは、この開発環境（Windows）では確かめていない**
+  （配布物の確認の `scripts/check-onnxruntime.py` が macOS のランナーで読み込む）。
+- LICENSE と ThirdPartyNotices.txt は、改行コード（NuGet のものは CRLF）を除いて、0.2.2 までに同梱したものと同じ。
+- Windows の `onnxruntime.dll` で、3.2 節の結合テスト（`genzo-ml` の `onnx`・`bundled_models`）が通った（2026-11-26）。
 
 macOS: ONNX Runtime 1.31.0 の dylib は macOS 14.0 以降向け（minos 14.0）。`.app` の最小の版の確認（`GENZO_ALLOW_NEWER_MINOS`。
 [packaging.md](packaging.md) の 2.3）に含めます。今の配布（macOS 26 以降向け。決定事項ログ No.74）では影響しません。
