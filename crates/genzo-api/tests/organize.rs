@@ -480,3 +480,79 @@ fn organize_commands_have_the_ui_json_forms() {
     let _: Response = core.execute(Command::KeywordTree).unwrap();
     core.close().unwrap();
 }
+
+/// クイックコレクション（LIB-10 の残り）: 初めての出し入れで作り、すべて入っていれば外し、そうでなければ入れる。
+/// 手動のコレクションの中の並び（入れた順・並べ替えた順）で検索できる。JSON のコマンドでも同じ形。
+#[test]
+fn quick_collection_toggles_and_collections_keep_a_custom_order() {
+    let env = Env::new();
+    for (name, seed) in [("A.jpg", 1), ("B.jpg", 2), ("C.jpg", 3)] {
+        write_jpeg(&env.photos.join(name), (32, 24), seed, None);
+    }
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let id = |n: &str| by_name(&items, n).variant_id;
+    let (a, b, c) = (id("A.jpg"), id("B.jpg"), id("C.jpg"));
+
+    assert_eq!(core.quick_collection().unwrap(), None);
+    let r = core.toggle_quick_collection(&[b, a]).unwrap();
+    assert_eq!((r.added, r.removed), (2, 0));
+    let quick = r.collection_id;
+    assert_eq!(core.quick_collection().unwrap(), Some(quick));
+    let list = core.collections(false).unwrap();
+    let info = list.iter().find(|x| x.collection_id == quick).unwrap();
+    assert!(info.quick && info.count == Some(2), "{info:?}");
+    assert!(list.iter().filter(|x| x.quick).count() == 1);
+    // 一部だけ入っているときは、そろえて入れる。すべて入っていれば外す。
+    let r = core.toggle_quick_collection(&[a, c]).unwrap();
+    assert_eq!((r.collection_id, r.added, r.removed), (quick, 1, 0));
+    let r = core.toggle_quick_collection(&[a]).unwrap();
+    assert_eq!((r.added, r.removed), (0, 1));
+    assert!(matches!(
+        core.toggle_quick_collection(&[]),
+        Err(ApiError::InvalidArgument(_))
+    ));
+
+    // コレクションの中の並び: 入れた順（b, c）。
+    let order = |core: &Core| {
+        let r = core
+            .search(
+                &SearchFilter {
+                    collection_id: Some(quick),
+                    ..Default::default()
+                },
+                SearchSort {
+                    key: genzo_api::SortKey::CollectionOrder,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        common::items_of(core, r.generation, r.count)
+            .iter()
+            .map(|i| i.variant_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&core), vec![b, c]);
+    core.toggle_quick_collection(&[a]).unwrap();
+    assert_eq!(core.reorder_collection(quick, &[a], Some(b)).unwrap(), 1);
+    assert_eq!(order(&core), vec![a, b, c]);
+    // JSON のコマンド。
+    let json: serde_json::Value = serde_json::from_str(&core.execute_json(
+        &serde_json::json!({"type": "reorder_collection", "collection_id": quick, "variant_ids": [a]})
+            .to_string(),
+    ))
+    .unwrap();
+    assert_eq!(json["ok"]["count"], 1, "{json}");
+    assert_eq!(order(&core), vec![b, c, a]);
+    let json: serde_json::Value = serde_json::from_str(
+        &core.execute_json(
+            &serde_json::json!({"type": "toggle_quick_collection", "variant_ids": [a, b, c]})
+                .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(json["ok"]["type"], "quick_collection", "{json}");
+    assert_eq!(json["ok"]["removed"], 3, "{json}");
+    core.close().unwrap();
+}

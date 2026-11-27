@@ -63,6 +63,8 @@ beforeEach(() => {
         return { type: "collections", collections: MOCK_COLLECTIONS };
       case "add_to_collection":
         return { type: "updated", count: addResult };
+      case "toggle_quick_collection":
+        return { type: "quick_collection", collection_id: 20, added: 2, removed: 0 };
       case "remove_from_collection":
       case "add_keywords":
       case "remove_keywords":
@@ -84,9 +86,10 @@ beforeEach(() => {
 });
 
 describe("ターゲットコレクション（B）", () => {
-  it("なければ入れる先を選ぶダイアログを開く", async () => {
+  it("ターゲットを決めていなければ、クイックコレクションに出し入れする（ダイアログは開かない）", async () => {
     await toggleTargetCollection();
-    expect(appStore.get().dialog).toEqual({ kind: "add_to_collection", variantIds: [101, 102] });
+    expect(appStore.get().dialog).toBeNull();
+    expect(commands("toggle_quick_collection")).toEqual([{ type: "toggle_quick_collection", variant_ids: [101, 102] }]);
     expect(commands("add_to_collection")).toHaveLength(0);
   });
 
@@ -105,11 +108,12 @@ describe("ターゲットコレクション（B）", () => {
     expect(localStorage.getItem(targetCollectionKey("/tmp/c.db"))).toBeNull();
   });
 
-  it("ターゲットが手動のコレクションでなくなっていたら外して、選ぶダイアログを開く", async () => {
+  it("ターゲットが手動のコレクションでなくなっていたら外して、クイックコレクションを使う", async () => {
     setTargetCollection(12);
     await toggleTargetCollection();
     expect(appStore.get().targetCollection).toBeNull();
-    expect(appStore.get().dialog?.kind).toBe("add_to_collection");
+    expect(appStore.get().dialog).toBeNull();
+    expect(commands("toggle_quick_collection")).toHaveLength(1);
   });
 });
 

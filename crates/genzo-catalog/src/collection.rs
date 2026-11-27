@@ -33,6 +33,15 @@ pub const MAX_COLLECTION_DEPTH: usize = 64;
 /// コレクションの名前の文字数の上限（Unicode のスカラー値の数。**仮置き**: 200。画面の入力欄と同じ）。
 pub const MAX_COLLECTION_NAME_CHARS: usize = 200;
 
+/// クイックコレクションの ID を覚える設定のキー（`setting` の表。値は 10 進数の ID）。
+pub const QUICK_COLLECTION_SETTING: &str = "quick_collection_id";
+
+/// クイックコレクションを初めて作るときの名前。
+pub const QUICK_COLLECTION_NAME: &str = "クイックコレクション";
+
+/// クイックコレクションの名前が重なるときに試す数（「 (2)」〜）。
+const MAX_QUICK_NAME_TRIES: usize = 100;
+
 /// コレクション（[`Catalog::collections`]）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Collection {
@@ -496,5 +505,129 @@ impl Catalog {
             out.push(VariantId::new(r?));
         }
         Ok(out)
+    }
+
+    // -----------------------------------------------------------------------
+    // クイックコレクションと、手動のコレクションの中の並び（LIB-10 の残り）
+    // -----------------------------------------------------------------------
+
+    /// クイックコレクション（キー 1 つで写真を出し入れする、最上位の手動のコレクション）。まだ作っていない・
+    /// 削除された・手動のコレクションでなくなったなら `None`。どのコレクションかは設定
+    /// （[`QUICK_COLLECTION_SETTING`]）に ID で覚える（名前を変えても、セットの中へ移しても同じもの）。
+    pub fn quick_collection(&self) -> Result<Option<CollectionId>> {
+        let Some(id) = self
+            .setting(QUICK_COLLECTION_SETTING)?
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .map(CollectionId::new)
+        else {
+            return Ok(None);
+        };
+        match kind_and_parent(&self.conn, id) {
+            Ok((CollectionKind::Manual, _)) => Ok(Some(id)),
+            Ok(_) | Err(CatalogError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// クイックコレクションを返す。なければ最上位に作る（名前は [`QUICK_COLLECTION_NAME`]。同じ名前の
+    /// コレクションがすでにあれば「 (2)」などを足す）。
+    pub fn ensure_quick_collection(&mut self) -> Result<CollectionId> {
+        if let Some(id) = self.quick_collection()? {
+            return Ok(id);
+        }
+        let mut created = None;
+        for n in 1..=MAX_QUICK_NAME_TRIES {
+            let name = if n == 1 {
+                QUICK_COLLECTION_NAME.to_owned()
+            } else {
+                format!("{QUICK_COLLECTION_NAME} ({n})")
+            };
+            match self.create_collection(None, &name, CollectionKind::Manual, None) {
+                Ok(id) => {
+                    created = Some(id);
+                    break;
+                }
+                Err(CatalogError::NameConflict(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let id = created.ok_or_else(|| {
+            CatalogError::InvalidInput(format!(
+                "「{QUICK_COLLECTION_NAME}」という名前のコレクションが多すぎて、作れません"
+            ))
+        })?;
+        self.set_setting(QUICK_COLLECTION_SETTING, &id.get().to_string())?;
+        Ok(id)
+    }
+
+    /// 手動のコレクションの中で、`variant_ids`（渡した順）を `before` の前へ移す（`None` なら最後へ）。
+    /// コレクションに入っていない variant は飛ばす。`before` が `variant_ids` に含まれる・コレクションに
+    /// 入っていないなら [`CatalogError::InvalidInput`]。移した数を返す。並びの番号（`sort_order`）は 1 から
+    /// 振り直す（1 つのトランザクション）。
+    pub fn reorder_collection_members(
+        &mut self,
+        id: CollectionId,
+        variant_ids: &[VariantId],
+        before: Option<VariantId>,
+    ) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let (kind, _) = kind_and_parent(&tx, id)?;
+        if kind != CollectionKind::Manual {
+            return Err(CatalogError::InvalidInput(
+                "並べ替えられるのは手動のコレクションだけです".to_owned(),
+            ));
+        }
+        let current: Vec<i64> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT variant_id FROM collection_member WHERE collection_id = ?1
+                 ORDER BY sort_order, variant_id",
+            )?;
+            let rows = stmt.query_map([id.get()], |r| r.get::<_, i64>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let members: HashSet<i64> = current.iter().copied().collect();
+        let mut seen = HashSet::new();
+        let moving: Vec<i64> = variant_ids
+            .iter()
+            .map(|v| v.get())
+            .filter(|v| members.contains(v) && seen.insert(*v))
+            .collect();
+        if let Some(b) = before {
+            if seen.contains(&b.get()) {
+                return Err(CatalogError::InvalidInput(
+                    "移す写真そのものの前へは移せません".to_owned(),
+                ));
+            }
+            if !members.contains(&b.get()) {
+                return Err(CatalogError::InvalidInput(format!(
+                    "variant {b} はこのコレクションに入っていません"
+                )));
+            }
+        }
+        if moving.is_empty() {
+            return Ok(0);
+        }
+        let mut order: Vec<i64> = Vec::with_capacity(current.len());
+        for v in current.iter().copied().filter(|v| !seen.contains(v)) {
+            if before.is_some_and(|b| b.get() == v) {
+                order.extend(&moving);
+            }
+            order.push(v);
+        }
+        if before.is_none() {
+            order.extend(&moving);
+        }
+        // 渡した順に 1 から振り直す（json_each の key は配列の位置）。
+        let json =
+            serde_json::to_string(&order).map_err(|e| CatalogError::InvalidInput(e.to_string()))?;
+        tx.execute(
+            "UPDATE collection_member
+             SET sort_order = (SELECT j.key + 1 FROM json_each(?2) AS j WHERE j.value = variant_id)
+             WHERE collection_id = ?1",
+            params![id.get(), json],
+        )?;
+        tx.commit()?;
+        Ok(moving.len())
     }
 }

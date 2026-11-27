@@ -82,6 +82,7 @@ import type {
   RegionInfo,
   RegionRequest,
   RetouchSpot,
+  QuickCollectionToggle,
   Response,
   RestorePlan,
   SearchFilter,
@@ -257,6 +258,17 @@ export const addToCollection = async (collection_id: CollectionId, variant_ids: 
   (await execute({ type: "add_to_collection", collection_id, variant_ids }, "updated")).count;
 export const removeFromCollection = async (collection_id: CollectionId, variant_ids: VariantId[]) =>
   (await execute({ type: "remove_from_collection", collection_id, variant_ids }, "updated")).count;
+/**
+ * 写真をクイックコレクションに出し入れする（すべて入っていれば外し、そうでなければ入れる。なければコアが最上位に
+ * 作る）。
+ */
+export const toggleQuickCollection = async (variant_ids: VariantId[]): Promise<QuickCollectionToggle> => {
+  const { type: _type, ...rest } = await execute({ type: "toggle_quick_collection", variant_ids }, "quick_collection");
+  return rest;
+};
+/** 手動のコレクションの中で、写真（この順）を `before` の前へ移す（null なら最後へ）。移した数を返す。 */
+export const reorderCollection = async (collection_id: CollectionId, variant_ids: VariantId[], before: VariantId | null) =>
+  (await execute({ type: "reorder_collection", collection_id, variant_ids, before }, "updated")).count;
 export const variantCollections = async (variant_id: VariantId): Promise<CollectionId[]> =>
   (await execute({ type: "variant_collections", variant_id }, "variant_collections")).collection_ids;
 

@@ -18,6 +18,7 @@ use genzo_model::{CollectionId, CollectionKind, KeywordId, SmartRule, VariantId}
 use crate::core::{Core, Inner};
 use crate::error::ApiError;
 use crate::events::{CatalogChange, Event};
+use crate::types::QuickCollectionToggle;
 use crate::types::{
     CollectionInfo, KeywordHit, KeywordInfo, KeywordUsage, SearchFilter, VariantKeyword,
     VariantKeywords,
@@ -205,7 +206,9 @@ impl Core {
     /// 検索で数える（手動のコレクションの数は常に入れる）。
     pub fn collections(&self, with_counts: bool) -> Result<Vec<CollectionInfo>, ApiError> {
         self.inner.check_open()?;
-        let list = self.inner.with_catalog(|c| c.collections())?;
+        let (list, quick) = self
+            .inner
+            .with_catalog(|c| Ok((c.collections()?, c.quick_collection()?)))?;
         let counted: Vec<Option<u64>> = if with_counts {
             let ids: Vec<Option<CollectionId>> = list
                 .iter()
@@ -237,6 +240,7 @@ impl Core {
                 } else {
                     counted
                 },
+                quick: quick == Some(col.id),
                 collection_id: col.id,
                 parent_id: col.parent_id,
                 name: col.name,
@@ -339,6 +343,66 @@ impl Core {
             .inner
             .with_catalog(|c| c.remove_from_collection(id, variant_ids))?;
         after_change(&self.inner, CatalogChange::Collections, variant_ids);
+        Ok(n)
+    }
+
+    /// クイックコレクション（まだ作っていない・削除されたなら `None`。genzo-catalog の
+    /// `Catalog::quick_collection`）。
+    pub fn quick_collection(&self) -> Result<Option<CollectionId>, ApiError> {
+        self.inner.check_open()?;
+        self.inner.with_catalog(|c| c.quick_collection())
+    }
+
+    /// 写真をクイックコレクションに出し入れする（LIB-10 の残り。画面の B キー）。クイックコレクションが
+    /// なければ最上位に作る。**渡した写真がすべて入っていれば外し、そうでなければ、入っていないものを入れる**
+    /// （一部だけ入っているときは、そろえて入れる）。存在しない variant は飛ばす。
+    pub fn toggle_quick_collection(
+        &self,
+        variant_ids: &[VariantId],
+    ) -> Result<QuickCollectionToggle, ApiError> {
+        self.inner.check_open()?;
+        if variant_ids.is_empty() {
+            return Err(ApiError::InvalidArgument(
+                "クイックコレクションに入れる写真を選んでください".to_owned(),
+            ));
+        }
+        let r = self.inner.with_catalog(|c| {
+            let id = c.ensure_quick_collection()?;
+            let members: std::collections::HashSet<VariantId> =
+                c.collection_members(id)?.into_iter().collect();
+            let all_in = variant_ids.iter().all(|v| members.contains(v));
+            let (added, removed) = if all_in {
+                (0, c.remove_from_collection(id, variant_ids)?)
+            } else {
+                (c.add_to_collection(id, variant_ids)?, 0)
+            };
+            Ok(QuickCollectionToggle {
+                collection_id: id,
+                added: added as u64,
+                removed: removed as u64,
+            })
+        });
+        // 作っただけで出し入れに失敗しても、一覧は変わっている。
+        after_change(&self.inner, CatalogChange::Collections, variant_ids);
+        r
+    }
+
+    /// 手動のコレクションの中で、写真（渡した順）を `before` の前へ移す（`None` なら最後へ。LIB-10 の残り。
+    /// genzo-catalog の `Catalog::reorder_collection_members`）。移した数を返す。並びは、並べ替えの項目
+    /// [`crate::SortKey::CollectionOrder`] で検索したときの順。
+    pub fn reorder_collection(
+        &self,
+        id: CollectionId,
+        variant_ids: &[VariantId],
+        before: Option<VariantId>,
+    ) -> Result<usize, ApiError> {
+        self.inner.check_open()?;
+        let n = self
+            .inner
+            .with_catalog(|c| c.reorder_collection_members(id, variant_ids, before))?;
+        if n > 0 {
+            after_change(&self.inner, CatalogChange::Collections, variant_ids);
+        }
         Ok(n)
     }
 

@@ -114,6 +114,10 @@ pub enum SortKey {
     Rating,
     /// 登録順（asset の登録の順）。
     ImportOrder,
+    /// 手動のコレクションの中の並び（[`Filter::collection`] が手動のコレクションのとき。入れた順、または
+    /// 利用者が並べ替えた順。`collection_member.sort_order`）。コレクションで絞り込んでいない・手動の
+    /// コレクションでないなら、どの写真にも順がないので `variant.id` の順になる。
+    CollectionOrder,
 }
 
 /// 並べ替えの向き。
@@ -477,6 +481,15 @@ pub(crate) fn build_search_sql(
         SortKey::FileName => format!("pf.name_key {dir} NULLS LAST, v.id ASC"),
         SortKey::Rating => format!("v.rating {dir}, v.id ASC"),
         SortKey::ImportOrder => format!("v.asset_id {dir}, v.id ASC"),
+        SortKey::CollectionOrder => match filter.collection {
+            Some(id) => {
+                let p = q.bind(id.get());
+                format!(
+                    "(SELECT cm.sort_order FROM collection_member cm                      WHERE cm.collection_id = {p} AND cm.variant_id = v.id) {dir} NULLS LAST, v.id ASC"
+                )
+            }
+            None => "v.id ASC".to_owned(),
+        },
     };
     q.needs_asset |= sort.key == SortKey::CaptureTime;
     let needs_primary_file = sort.key == SortKey::FileName || filter.file_statuses.is_some();

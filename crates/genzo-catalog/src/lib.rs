@@ -102,7 +102,10 @@ pub use catalog::{
     Catalog, ConnectionSettings, OpenOptions, OpenReport, PreviousShutdown,
     STATE_CAPTURE_TIME_RERESOLVE,
 };
-pub use collection::{Collection, MAX_COLLECTION_DEPTH, MAX_COLLECTION_NAME_CHARS};
+pub use collection::{
+    Collection, MAX_COLLECTION_DEPTH, MAX_COLLECTION_NAME_CHARS, QUICK_COLLECTION_NAME,
+    QUICK_COLLECTION_SETTING,
+};
 pub use develop::{
     DevelopState, HISTORY_LABEL_IMPORT, HISTORY_LABEL_VIRTUAL_COPY, HistoryEntry,
     MAX_SNAPSHOT_NAME_CHARS, MAX_VARIANT_NAME_CHARS, Snapshot, VariantInfo,

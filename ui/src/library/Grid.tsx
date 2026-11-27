@@ -452,7 +452,9 @@ export function Grid() {
   const menuItems = (): MenuEntry[] => {
     const cur = appStore.get().selection.current;
     const item = cur === null ? undefined : searchCache.getLoadedById(cur);
-    return photoMenuEntries(actions.targets().length, item).map((m) =>
+    const { filter, sort } = appStore.get();
+    const collectionOrder = (filter.collection_id ?? null) !== null && sort.key === "collection_order";
+    return photoMenuEntries(actions.targets().length, item, collectionOrder).map((m) =>
       m === PHOTO_MENU_SEPARATOR
         ? MENU_SEPARATOR
         : {

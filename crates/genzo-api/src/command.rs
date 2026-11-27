@@ -26,6 +26,7 @@ use crate::error::ApiError;
 use crate::maintenance::RestorePlan;
 use crate::naming::RenameRule;
 use crate::presets::{ExportPresetSettings, PresetImportReport, PresetInfo, PresetKind};
+use crate::types::QuickCollectionToggle;
 use crate::types::{
     AutoStackReport, AutoTone, BackupEntry, BeforeInfo, BeforeSource, Capabilities, CaptureDevice,
     CaptureDeviceKey, CaptureTarget, CaptureTimeEdit, CaptureTimeEditInfo, CaptureTimePlan,
@@ -313,6 +314,23 @@ pub enum Command {
         collection_id: CollectionId,
         /// 写真。
         variant_ids: Vec<VariantId>,
+    },
+    /// 写真をクイックコレクションに出し入れする（すべて入っていれば外し、そうでなければ入れる。なければ作る。
+    /// [`crate::Core::toggle_quick_collection`]）。→ [`Response::QuickCollection`]
+    ToggleQuickCollection {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+    },
+    /// 手動のコレクションの中で、写真を `before` の前へ移す（`null` なら最後へ。
+    /// [`crate::Core::reorder_collection`]）。→ [`Response::Updated`]（移した数）
+    ReorderCollection {
+        /// コレクション。
+        collection_id: CollectionId,
+        /// 移す写真（この順に並ぶ）。
+        variant_ids: Vec<VariantId>,
+        /// この写真の前へ。
+        #[serde(default)]
+        before: Option<VariantId>,
     },
     /// 写真が入っている手動のコレクション。→ [`Response::VariantCollections`]
     VariantCollections {
@@ -1249,6 +1267,8 @@ pub enum Response {
         /// コレクション（名前の順）。
         collection_ids: Vec<CollectionId>,
     },
+    /// クイックコレクションへの出し入れの結果。
+    QuickCollection(QuickCollectionToggle),
     /// スタック。
     Stack(StackInfo),
     /// スタックの一覧。
@@ -1658,6 +1678,16 @@ impl Core {
                 variant_ids,
             } => R::Updated {
                 count: self.remove_from_collection(collection_id, &variant_ids)? as u64,
+            },
+            C::ToggleQuickCollection { variant_ids } => {
+                R::QuickCollection(self.toggle_quick_collection(&variant_ids)?)
+            }
+            C::ReorderCollection {
+                collection_id,
+                variant_ids,
+                before,
+            } => R::Updated {
+                count: self.reorder_collection(collection_id, &variant_ids, before)? as u64,
             },
             C::VariantCollections { variant_id } => R::VariantCollections {
                 collection_ids: self.variant_collections(variant_id)?,

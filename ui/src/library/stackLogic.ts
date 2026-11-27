@@ -127,6 +127,10 @@ export type PhotoMenuAction =
   | "expand_all"
   | "collapse_all"
   | "auto_stack"
+  | "collection_first"
+  | "collection_up"
+  | "collection_down"
+  | "collection_last"
   | "edit_capture_time"
   | "edit_location"
   | "upgrade_process"
@@ -159,6 +163,8 @@ export const PHOTO_MENU_SEPARATOR = "separator" as const;
 export function photoMenuEntries(
   targets: number,
   current: (Pick<VariantSummary, "is_master" | "stack" | "kind"> & { file_status?: FileStatus }) | undefined,
+  /** コレクションを「コレクションの順」で表示しているか（そのときだけ、コレクションの中の並べ替えを出す）。 */
+  collectionOrder = false,
 ): (PhotoMenuEntry | typeof PHOTO_MENU_SEPARATOR)[] {
   const stack = current?.stack ?? null;
   const any = targets >= 1 || current !== undefined;
@@ -185,6 +191,17 @@ export function photoMenuEntries(
     { action: "collapse_all", label: "すべてのスタックを折りたたむ", enabled: true },
     { action: "auto_stack", label: "撮影時刻でスタック…", enabled: true },
     PHOTO_MENU_SEPARATOR,
+    // 手動のコレクションの中の並べ替え（LIB-10）。並べ替えを「コレクションの順」にしているときだけ出す
+    // （手動のコレクションでなければ、実行するときに知らせる）。
+    ...(collectionOrder
+      ? [
+          { action: "collection_first", label: "コレクションの先頭へ移す", enabled: any } as PhotoMenuEntry,
+          { action: "collection_up", label: "コレクションの中で 1 つ前へ", enabled: any } as PhotoMenuEntry,
+          { action: "collection_down", label: "コレクションの中で 1 つ後ろへ", enabled: any } as PhotoMenuEntry,
+          { action: "collection_last", label: "コレクションの最後へ移す", enabled: any } as PhotoMenuEntry,
+          PHOTO_MENU_SEPARATOR,
+        ]
+      : []),
     { action: "edit_capture_time", label: "撮影日時を修正…", enabled: any },
     // 位置情報の後付け（LIB-21）。動画には付けない（まとめて選んだ中の動画はコアが除く）。
     { action: "edit_location", label: "位置を付ける…", enabled: any && !(targets <= 1 && isVideo) },

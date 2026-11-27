@@ -467,7 +467,7 @@ variant に付けたキーワード（`WITHOUT ROWID`）。
 |---|---|---|---|---|
 | `collection_id` | INTEGER | 不可 | | コレクション（→ `collection.id`。主キーの 1 番目） |
 | `variant_id` | INTEGER | 不可 | | variant（→ `variant.id`。主キーの 2 番目） |
-| `sort_order` | INTEGER | 不可 | `0` | 入れた順（同じ操作で入れたものは渡した順） |
+| `sort_order` | INTEGER | 不可 | `0` | コレクションの中の並び（入れた順。同じ操作で入れたものは渡した順。アプリの中で並べ替えると 1 から振り直す） |
 
 ### `stack`
 
@@ -682,6 +682,7 @@ AI マスク（DEV-20。2026-10-26 から使う。決定事項ログ No.211）�
 | `api.import_skip_duplicates` | 取り込みの既定: 重複と思われるもの（内容が同じファイルが登録済みのもの）を取り込まない（`true` / `false`。なければ `true`。IMP-04） |
 | `api.import_separate_raw_jpeg` | 取り込みの既定: RAW と同時記録の JPEG を別々の写真として取り込む（`true` / `false`。なければ `false`。IMP-06） |
 | `api.hash_in_background` | 内容のハッシュ（`file.full_hash`）をバックグラウンドで計算する（`true` / `false`。なければ `true`。ORG-03） |
+| `quick_collection_id` | クイックコレクション（B キーの既定の入れ先の、手動のコレクション）の `collection.id`（整数の文字列。なければ、初めて使うときに作る。指すコレクションがない・手動でなければ無視する） |
 | `api.hash_network_volumes` | バックグラウンドの計算で、ネットワークのボリュームのファイルも読む（`true` / `false`。なければ `false`） |
 
 ### 索引

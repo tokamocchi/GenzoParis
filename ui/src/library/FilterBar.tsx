@@ -66,7 +66,7 @@ import {
   ratingOption,
   ratingPatch,
   singleChoice,
-  SORT_OPTIONS,
+  sortOptions,
   sortDirectionLabel,
   toggleLabel,
   utcToLocalDate,
@@ -742,6 +742,7 @@ function DateInput(props: { value: string; label: string; onCommit: (date: strin
 
 function SortControl({ sort }: { sort: SearchSort }) {
   const dir = sortDirectionLabel(sort.direction);
+  const inCollection = useApp((s) => (s.filter.collection_id ?? null) !== null);
   return (
     <span className="lib-filter-group">
       <select
@@ -750,7 +751,7 @@ function SortControl({ sort }: { sort: SearchSort }) {
         title={sort.key === "capture_time" ? "並べ替え（撮影日時のない写真は、どちらの向きでも最後に並びます）" : "並べ替え"}
         onChange={(e) => actions.setSort({ ...sort, key: e.target.value as SortKey })}
       >
-        {SORT_OPTIONS.map((o) => (
+        {sortOptions(inCollection, sort.key).map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>

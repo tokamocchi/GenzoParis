@@ -1348,7 +1348,8 @@ export interface SearchFilter {
   has_location?: boolean | null;
 }
 
-export type SortKey = "capture_time" | "file_name" | "rating" | "import_order";
+/** collection_order は、手動のコレクションを表示しているときの、コレクションの中の並び（入れた順・並べ替えた順）。 */
+export type SortKey = "capture_time" | "file_name" | "rating" | "import_order" | "collection_order";
 export type SortDirection = "ascending" | "descending";
 
 export interface SearchSort {
@@ -2026,6 +2027,15 @@ export interface CollectionInfo {
   rule_error: string | null;
   /** 写真の数（手動は常に。スマート・セットは with_counts のときだけ。null は数えていない）。 */
   count: number | null;
+  /** クイックコレクション（B キーの既定の入れ先）か。古いコアでは無い。 */
+  quick?: boolean;
+}
+
+/** クイックコレクションへの出し入れの結果（toggle_quick_collection）。 */
+export interface QuickCollectionToggle {
+  collection_id: CollectionId;
+  added: number;
+  removed: number;
 }
 
 export type MatchMode = "all" | "any";
@@ -2109,6 +2119,8 @@ export type Command =
   | { type: "set_smart_rule"; collection_id: CollectionId; rule: SmartRule }
   | { type: "add_to_collection"; collection_id: CollectionId; variant_ids: VariantId[] }
   | { type: "remove_from_collection"; collection_id: CollectionId; variant_ids: VariantId[] }
+  | { type: "toggle_quick_collection"; variant_ids: VariantId[] }
+  | { type: "reorder_collection"; collection_id: CollectionId; variant_ids: VariantId[]; before: VariantId | null }
   | { type: "variant_collections"; variant_id: VariantId }
   | { type: "create_stack"; variant_ids: VariantId[]; top: VariantId | null }
   | { type: "add_to_stack"; stack_id: StackId; variant_ids: VariantId[] }
@@ -2322,6 +2334,7 @@ export type Response =
   | ({ type: "mask_color" } & PickedMaskColor)
   | { type: "retouch_source"; offset: [number, number] | null }
   | ({ type: "auto_tone" } & AutoTone)
+  | ({ type: "quick_collection" } & QuickCollectionToggle)
   | ({ type: "mask_overlay" } & MaskOverlayInfo)
   | ({ type: "ai_mask" } & AiMaskResult)
   | ({ type: "ai_mask_status" } & AiMaskStatus)

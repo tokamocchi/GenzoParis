@@ -17,7 +17,7 @@ import type { PhotoMenuAction } from "../library/stackLogic";
 import { actions, appStore } from "./app";
 import { enqueue } from "./develop";
 import { openMoveFiles, openRelink, openRenameFiles } from "./files";
-import { openDeleteDialog, shownManualCollection } from "./organize";
+import { moveInCollection, openDeleteDialog, shownManualCollection } from "./organize";
 import { searchCache } from "./search";
 
 /** 写真が入っているスタック（入っていなければ null。読めなければ知らせて null）。 */
@@ -278,6 +278,18 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
       return;
     case "auto_stack":
       actions.openDialog({ kind: "auto_stack" });
+      return;
+    case "collection_first":
+      await moveInCollection("first");
+      return;
+    case "collection_up":
+      await moveInCollection("up");
+      return;
+    case "collection_down":
+      await moveInCollection("down");
+      return;
+    case "collection_last":
+      await moveInCollection("last");
       return;
     case "edit_capture_time":
       openCaptureTimeDialog();

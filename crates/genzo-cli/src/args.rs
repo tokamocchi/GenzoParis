@@ -917,6 +917,26 @@ pub enum CollectionCommand {
         #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
         variants: Vec<VariantId>,
     },
+    /// 手動のコレクションの中で、写真を並べ替える（並べた順に、--before の写真の前へ移す。省略すると最後へ。
+    /// 並びは search --collection <ID> --sort collection で見られる）
+    Reorder {
+        /// コレクションの ID
+        #[arg(value_parser = parse_collection_id)]
+        collection: CollectionId,
+        /// 移す variant の ID（複数可。この順に並ぶ）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// この variant の前へ移す
+        #[arg(long, value_name = "ID", value_parser = parse_variant_id)]
+        before: Option<VariantId>,
+    },
+    /// クイックコレクションに写真を出し入れする（すべて入っていれば外し、そうでなければ入れる。クイック
+    /// コレクションがなければ最上位に作る。ID を省略すると、今のクイックコレクションを表示する）
+    Quick {
+        /// variant の ID（複数可）
+        #[arg(num_args = 0.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
     /// コレクションの名前を変える
     Rename {
         /// コレクションの ID
@@ -3400,6 +3420,8 @@ pub enum SortArg {
     Rating,
     /// 登録順。
     Import,
+    /// 手動のコレクションの中の並び（--collection で手動のコレクションを指定したとき）。
+    Collection,
 }
 
 impl SortArg {
@@ -3410,6 +3432,7 @@ impl SortArg {
             SortArg::Name => SortKey::FileName,
             SortArg::Rating => SortKey::Rating,
             SortArg::Import => SortKey::ImportOrder,
+            SortArg::Collection => SortKey::CollectionOrder,
         }
     }
 }

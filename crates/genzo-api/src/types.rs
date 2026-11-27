@@ -653,6 +653,9 @@ pub enum SortKey {
     Rating,
     /// 登録順。
     ImportOrder,
+    /// 手動のコレクションの中の並び（[`SearchFilter::collection`] が手動のコレクションのとき。入れた順、または
+    /// [`crate::Core::reorder_collection`] で並べ替えた順。それ以外では variant の id の順）。
+    CollectionOrder,
 }
 
 /// 並べ替えの向き。
@@ -685,6 +688,7 @@ impl SearchSort {
                 SortKey::FileName => genzo_catalog::SortKey::FileName,
                 SortKey::Rating => genzo_catalog::SortKey::Rating,
                 SortKey::ImportOrder => genzo_catalog::SortKey::ImportOrder,
+                SortKey::CollectionOrder => genzo_catalog::SortKey::CollectionOrder,
             },
             match self.direction {
                 SortDirection::Ascending => genzo_catalog::SortDirection::Ascending,
@@ -1147,6 +1151,20 @@ pub struct CollectionInfo {
     /// 写真の数（手動のコレクションはメンバーの数。スマートコレクション・セットは検索で数えた数。数えなかった・
     /// 数えられなかったときは `null`）。
     pub count: Option<u64>,
+    /// クイックコレクション（[`crate::Core::toggle_quick_collection`] が出し入れする手動のコレクション）か。
+    #[serde(default)]
+    pub quick: bool,
+}
+
+/// クイックコレクションへの出し入れの結果（[`crate::Core::toggle_quick_collection`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickCollectionToggle {
+    /// クイックコレクション（なければ作った）。
+    pub collection_id: CollectionId,
+    /// 入れた数。
+    pub added: u64,
+    /// 外した数。
+    pub removed: u64,
 }
 
 /// ファイルの情報。
