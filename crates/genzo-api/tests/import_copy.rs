@@ -1033,12 +1033,13 @@ fn files_can_be_listed_and_chosen_before_importing() {
     write_jpeg(&card.join("DCIM").join("B.jpg"), (48, 32), 2, None);
     write_jpeg(&card.join("C.jpg"), (48, 32), 3, None);
     std::fs::write(card.join("note.txt"), b"x").unwrap();
+    write_jpeg(&card.join("Empty").join("E.jpg"), (48, 32), 9, None);
     let core = env.open();
 
     let scan = core.scan_import_source(&card, true).unwrap();
     let rels: Vec<&str> = scan.files.iter().map(|f| f.rel_path.as_str()).collect();
-    assert_eq!(rels, ["C.jpg", "DCIM/A.jpg", "DCIM/B.jpg"]);
-    assert_eq!((scan.total, scan.truncated, scan.unreadable), (3, false, 0));
+    assert_eq!(rels, ["C.jpg", "DCIM/A.jpg", "DCIM/B.jpg", "Empty/E.jpg"]);
+    assert_eq!((scan.total, scan.truncated, scan.unreadable), (4, false, 0));
     assert!(
         scan.files
             .iter()
@@ -1046,7 +1047,7 @@ fn files_can_be_listed_and_chosen_before_importing() {
     );
     assert_eq!(
         scan.files.iter().map(|f| f.index).collect::<Vec<_>>(),
-        [0, 1, 2]
+        [0, 1, 2, 3]
     );
     // サブフォルダを走査しない。
     let flat = core.scan_import_source(&card, false).unwrap();
@@ -1078,6 +1079,21 @@ fn files_can_be_listed_and_chosen_before_importing() {
     assert_eq!((report.files_found, report.added), (1, 1), "{report:?}");
     assert_eq!(report.not_registered.len(), 1, "{report:?}");
     assert_eq!(report.not_registered[0].path, card.join("Gone.jpg"));
+    // 選んでいないフォルダは登録しない（選んだファイルのフォルダと、その上のフォルダだけ）。
+    let folder_names: Vec<String> = core
+        .folders()
+        .unwrap()
+        .iter()
+        .map(|f| f.rel_path.clone())
+        .collect();
+    assert!(
+        folder_names.iter().any(|n| n.ends_with("DCIM")),
+        "{folder_names:?}"
+    );
+    assert!(
+        !folder_names.iter().any(|n| n.ends_with("Empty")),
+        "{folder_names:?}"
+    );
     assert_eq!(
         all_items(&core)
             .iter()

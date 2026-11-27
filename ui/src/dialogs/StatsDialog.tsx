@@ -4,7 +4,7 @@
 // 数えるのはコア（shooting_stats。読み取り専用の接続で、表示中の検索結果は変えない）。開いている間にカタログが
 // 変わっても読み直さない（「更新」で読み直す）。
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as core from "../api/core";
 import { toApiError } from "../api/errors";
@@ -22,16 +22,20 @@ export function StatsDialog() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
 
+  // 対象を切り替えた後に、前の対象の遅い応答で上書きしない（最後に頼んだものだけを使う）。
+  const seq = useRef(0);
   const load = useCallback(async (which: Scope) => {
+    const mine = ++seq.current;
     setBusy(true);
     setError(null);
+    setStats(null);
     try {
-      setStats(await core.shootingStats(which === "shown" ? appStore.get().filter : {}));
+      const r = await core.shootingStats(which === "shown" ? appStore.get().filter : {});
+      if (mine === seq.current) setStats(r);
     } catch (e) {
-      setStats(null);
-      setError(toApiError(e).info);
+      if (mine === seq.current) setError(toApiError(e).info);
     } finally {
-      setBusy(false);
+      if (mine === seq.current) setBusy(false);
     }
   }, []);
 

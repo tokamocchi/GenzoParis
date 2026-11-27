@@ -355,7 +355,8 @@ impl Core {
 
     /// 写真をクイックコレクションに出し入れする（LIB-10 の残り。画面の B キー）。クイックコレクションが
     /// なければ最上位に作る。**渡した写真がすべて入っていれば外し、そうでなければ、入っていないものを入れる**
-    /// （一部だけ入っているときは、そろえて入れる）。存在しない variant は飛ばす。
+    /// （一部だけ入っているときは、そろえて入れる）。存在しない variant は飛ばす（どちらにするかも、今もある
+    /// 写真だけで決める）。
     pub fn toggle_quick_collection(
         &self,
         variant_ids: &[VariantId],
@@ -370,7 +371,13 @@ impl Core {
             let id = c.ensure_quick_collection()?;
             let members: std::collections::HashSet<VariantId> =
                 c.collection_members(id)?.into_iter().collect();
-            let all_in = variant_ids.iter().all(|v| members.contains(v));
+            // 今もある写真だけで決める（選択が古く、削除された写真が混ざっていても、残りがすべて入っていれば外す）。
+            let existing: Vec<VariantId> = c
+                .variant_summaries(variant_ids)?
+                .into_iter()
+                .map(|s| s.variant_id)
+                .collect();
+            let all_in = !existing.is_empty() && existing.iter().all(|v| members.contains(v));
             let (added, removed) = if all_in {
                 (0, c.remove_from_collection(id, variant_ids)?)
             } else {

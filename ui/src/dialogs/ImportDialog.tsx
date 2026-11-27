@@ -137,21 +137,26 @@ export function ImportDialog() {
   const [pickError, setPickError] = useState<ErrorInfo | null>(null);
   const pickFolder = folders.length === 1 ? folders[0] : null;
   const pickRecursive = form.recursive;
+  // 走査の番号: フォルダ・設定を変えたら進める（変える前に頼んだ走査の、遅い応答を使わない）。
+  const pickSeq = useRef(0);
   useEffect(() => {
+    pickSeq.current++;
     setPick(null);
     setPickError(null);
+    setPickBusy(false);
   }, [pickFolder, pickRecursive]);
   const openPick = async () => {
     if (pickFolder === null) return;
+    const mine = ++pickSeq.current;
     setPickBusy(true);
     setPickError(null);
     try {
       const scan = await core.scanImportSource(pickFolder, pickRecursive);
-      setPick({ scan, selection: selectAll(scan) });
+      if (mine === pickSeq.current) setPick({ scan, selection: selectAll(scan) });
     } catch (e) {
-      setPickError(toApiError(e).info);
+      if (mine === pickSeq.current) setPickError(toApiError(e).info);
     } finally {
-      setPickBusy(false);
+      if (mine === pickSeq.current) setPickBusy(false);
     }
   };
   const only = pick ? onlyOf(pick.scan, pick.selection) : undefined;

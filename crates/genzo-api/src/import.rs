@@ -696,6 +696,19 @@ impl ImportApply {
                     true
                 })
         });
+        // フォルダも、残したファイルのフォルダとその上のフォルダだけにする（選んでいないサブフォルダを、空のまま
+        // カタログに登録しない）。取り込み元のフォルダ（先頭）は残す。
+        let root_rel = scanned.dirs.first().cloned();
+        let files = &scanned.files;
+        scanned.dirs.retain(|d| {
+            Some(d) == root_rel.as_ref()
+                || files.iter().any(|c| {
+                    c.dir_rel == *d
+                        || c.dir_rel
+                            .strip_prefix(d.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'))
+                })
+        });
         let mut lost: Vec<&String> = only.iter().filter(|p| !found.contains(*p)).collect();
         lost.sort();
         missing.extend(lost.into_iter().map(|p| FileIssue {

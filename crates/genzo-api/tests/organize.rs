@@ -509,6 +509,12 @@ fn quick_collection_toggles_and_collections_keep_a_custom_order() {
     assert_eq!((r.collection_id, r.added, r.removed), (quick, 1, 0));
     let r = core.toggle_quick_collection(&[a]).unwrap();
     assert_eq!((r.added, r.removed), (0, 1));
+    // 削除された写真が混ざっていても、今もある写真がすべて入っていれば外す。
+    let gone = VariantId::new(99_999);
+    let r = core.toggle_quick_collection(&[a, gone]).unwrap();
+    assert_eq!((r.added, r.removed), (1, 0));
+    let r = core.toggle_quick_collection(&[a, gone]).unwrap();
+    assert_eq!((r.added, r.removed), (0, 1));
     assert!(matches!(
         core.toggle_quick_collection(&[]),
         Err(ApiError::InvalidArgument(_))
