@@ -60,14 +60,17 @@ pub const MAX_SCRUB_CACHE_FRAMES: usize = 400;
 /// 切り出す静止画の JPEG の品質（**仮置き**: 95）。
 pub const STILL_JPEG_QUALITY: u8 = 95;
 
+/// スクラブ表示のフレームの鍵（ファイル・リビジョン・フレームの番号）。
+type ScrubKey = (FileId, u32, u32);
+
 /// スクラブ表示のフレームのキャッシュ（新しいものを後ろに置く）。
 #[derive(Default)]
 pub(crate) struct ScrubCache {
-    frames: VecDeque<((FileId, u32, u32), Arc<Vec<u8>>)>,
+    frames: VecDeque<(ScrubKey, Arc<Vec<u8>>)>,
 }
 
 impl ScrubCache {
-    fn get(&mut self, key: (FileId, u32, u32)) -> Option<Arc<Vec<u8>>> {
+    fn get(&mut self, key: ScrubKey) -> Option<Arc<Vec<u8>>> {
         let at = self.frames.iter().position(|(k, _)| *k == key)?;
         // 使ったものを後ろへ（古いものから捨てるため）。
         let entry = self.frames.remove(at)?;
@@ -76,7 +79,7 @@ impl ScrubCache {
         Some(jpeg)
     }
 
-    fn put(&mut self, key: (FileId, u32, u32), jpeg: Arc<Vec<u8>>) {
+    fn put(&mut self, key: ScrubKey, jpeg: Arc<Vec<u8>>) {
         self.frames.retain(|(k, _)| *k != key);
         self.frames.push_back((key, jpeg));
         while self.frames.len() > MAX_SCRUB_CACHE_FRAMES {
