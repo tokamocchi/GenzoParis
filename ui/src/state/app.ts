@@ -63,6 +63,8 @@ export type DialogState =
   | { kind: "auto_tone"; targets: VariantId[] }
   | { kind: "settings"; tab?: "general" | "view" | "catalog" | "backup" | "about" }
   | { kind: "shortcuts" }
+  // 撮影の統計（左のパネルの「カタログ」の「統計」）。
+  | { kind: "stats" }
   | { kind: "close_failed"; failure: CloseFailure; quitting: boolean }
   | { kind: "crash_reports"; reports: CrashReportSummary[] }
   // キーワード（LIB-09）: 作る（parentId の下）・名前の変更・移動・削除の確認。

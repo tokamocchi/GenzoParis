@@ -26,7 +26,6 @@ use crate::error::ApiError;
 use crate::maintenance::RestorePlan;
 use crate::naming::RenameRule;
 use crate::presets::{ExportPresetSettings, PresetImportReport, PresetInfo, PresetKind};
-use crate::types::QuickCollectionToggle;
 use crate::types::{
     AutoStackReport, AutoTone, BackupEntry, BeforeInfo, BeforeSource, Capabilities, CaptureDevice,
     CaptureDeviceKey, CaptureTarget, CaptureTimeEdit, CaptureTimeEditInfo, CaptureTimePlan,
@@ -46,6 +45,7 @@ use crate::types::{
     RelinkReport, RelinkRequest, RelocatePlan, RenameSpec, SnapshotInfo, SnapshotSource,
     VolumeInfo,
 };
+use crate::types::{QuickCollectionToggle, ShootingStats};
 
 /// コマンド（UI → コア）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -171,6 +171,13 @@ pub enum Command {
     /// 条件に合う写真の数（表示中の検索結果は変えない。スマートコレクションの条件の編集中の件数など）。
     /// → [`Response::Count`]
     Count {
+        /// 条件。
+        #[serde(default)]
+        filter: Box<SearchFilter>,
+    },
+    /// 条件に合う写真・動画の撮影の統計（カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとの数。表示中の検索
+    /// 結果は変えない。[`crate::Core::shooting_stats`]）。→ [`Response::ShootingStats`]
+    ShootingStats {
         /// 条件。
         #[serde(default)]
         filter: Box<SearchFilter>,
@@ -1233,6 +1240,8 @@ pub enum Response {
         /// 数。
         count: u64,
     },
+    /// 撮影の統計。
+    ShootingStats(Box<ShootingStats>),
     /// キーワードの一覧。
     Keywords {
         /// キーワード（名前の順）。
@@ -1578,6 +1587,9 @@ impl Core {
             C::Count { filter } => R::Count {
                 count: self.count(&filter)?,
             },
+            C::ShootingStats { filter } => {
+                R::ShootingStats(Box::new(self.shooting_stats(&filter)?))
+            }
             C::KeywordTree => R::Keywords {
                 keywords: self.keyword_tree()?,
             },

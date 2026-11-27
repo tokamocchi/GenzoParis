@@ -264,6 +264,9 @@ pub enum Command {
     /// 写真と動画のタイムライン（ORG-01）: 撮影日時の順に並べ、撮影日と、撮影の間隔によるイベントで
     /// まとめて表示する（条件は search と同じ）
     Timeline(Box<TimelineArgs>),
+    /// 撮影の統計: 条件に合う写真・動画を、カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとに数える（条件は
+    /// search と同じ。仮想コピーは重ねて数えない。折りたたんだスタックの中の写真も数える）
+    Stats(Box<StatsArgs>),
     /// 位置情報の後付け（LIB-21。ジオタグ付け）: 位置を付ける・付けた位置を消す（カメラの位置に戻す）・履歴・
     /// 元に戻す。カタログの中だけを変え、元のファイルには書かない（カメラの位置も変えない）。付けた位置は
     /// 書き出しの Exif に入る（--remove-gps なら入らない）。動画は対象外
@@ -653,6 +656,17 @@ pub enum TimeCommand {
     History,
     /// 最後の修正を取り消す
     Undo,
+}
+
+/// `stats` の引数（撮影の統計）。
+#[derive(Debug, Args)]
+pub struct StatsArgs {
+    /// 項目ごとに表示する行数の上限（数の多い順・区切りの順に。0 なら全部。--json では使わない）
+    #[arg(long, default_value_t = 20)]
+    pub top: usize,
+    /// 対象の写真の条件（search と同じ）。
+    #[command(flatten)]
+    pub filter: FilterArgs,
 }
 
 /// `timeline` の引数（ORG-01）。

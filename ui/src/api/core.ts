@@ -90,6 +90,7 @@ import type {
   SearchSort,
   SettingGroups,
   SettingsUpdate,
+  ShootingStats,
   ShownVariants,
   SmartRule,
   StackId,
@@ -197,6 +198,14 @@ export const checkFiles = async (variant_ids: VariantId[]): Promise<FileCheckRep
 
 /** 条件に合う写真の数（表示中の検索結果は変えない。スマートコレクションの条件の編集中の件数など）。 */
 export const count = async (filter: SearchFilter) => (await execute({ type: "count", filter }, "count")).count;
+/**
+ * 条件に合う写真・動画の撮影の統計（カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとの数。表示中の検索結果は
+ * 変えない。空の条件ならカタログ全体）。
+ */
+export const shootingStats = async (filter: SearchFilter): Promise<ShootingStats> => {
+  const { type: _type, ...rest } = await execute({ type: "shooting_stats", filter }, "shooting_stats");
+  return rest;
+};
 
 // --- キーワード（LIB-09） ---
 export const keywordTree = async (): Promise<KeywordInfo[]> =>

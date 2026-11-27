@@ -365,6 +365,65 @@ fn status_text(s: FileStatus) -> &'static str {
     }
 }
 
+/// `stats`（撮影の統計）: 条件に合う写真・動画を、カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとに数える
+/// （genzo-api の [`genzo_api::Core::shooting_stats`]）。JSON の出力は [`genzo_api::ShootingStats`] そのまま。
+pub fn stats(g: &GlobalArgs, out: Output, a: &crate::args::StatsArgs) -> CliResult<Status> {
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    let r = filter_of(&s, &a.filter).and_then(|f| Ok(s.core.shooting_stats(&f)?));
+    s.close()?;
+    let stats = r?;
+    if out.json {
+        out.print_json(&stats);
+        return Ok(Status::Success);
+    }
+    out.line(format!(
+        "写真 {} 枚、動画 {} 本（仮想コピーは重ねて数えません）",
+        stats.photos, stats.videos
+    ));
+    for (title, b) in [
+        ("カメラ", &stats.cameras),
+        ("レンズ（写真）", &stats.lenses),
+        ("焦点距離（写真）", &stats.focal_lengths),
+        ("ISO（写真）", &stats.isos),
+        ("絞り（写真）", &stats.apertures),
+        ("撮影年", &stats.years),
+    ] {
+        for line in stats_lines(title, b, a.top) {
+            out.line(line);
+        }
+    }
+    Ok(Status::Success)
+}
+
+/// 統計の 1 つの項目の表示の行（見出し・値ごとの数・省いた数・不明の数）。値も不明もなければ空。
+fn stats_lines(title: &str, b: &genzo_api::StatBreakdown, top: usize) -> Vec<String> {
+    if b.items.is_empty() && b.unknown == 0 {
+        return Vec::new();
+    }
+    let shown = if top == 0 {
+        b.items.len()
+    } else {
+        top.min(b.items.len())
+    };
+    let mut lines = vec![format!("{title}:")];
+    lines.extend(
+        b.items[..shown]
+            .iter()
+            .map(|c| format!("  {:>8}  {}", c.count, c.label)),
+    );
+    if shown < b.items.len() {
+        let rest: u64 = b.items[shown..].iter().map(|c| c.count).sum();
+        lines.push(format!(
+            "  {rest:>8}  （ほか {} 種類）",
+            b.items.len() - shown
+        ));
+    }
+    if b.unknown > 0 {
+        lines.push(format!("  {:>8}  （不明）", b.unknown));
+    }
+    lines
+}
+
 /// `search`。
 pub fn search(g: &GlobalArgs, out: Output, a: SearchArgs) -> CliResult<Status> {
     let s = Session::open(g, out, &OpenOptions::default())?;
@@ -940,6 +999,33 @@ fn answer_is_yes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 統計の表示の行: 上位だけを出して残りをまとめ、不明を最後に足す。値も不明もなければ何も出さない。
+    #[test]
+    fn stats_lines_show_the_top_items_and_the_rest() {
+        let b = genzo_api::StatBreakdown {
+            items: [("A", 5), ("B", 3), ("C", 1)]
+                .into_iter()
+                .map(|(label, count)| genzo_api::StatCount {
+                    label: label.to_owned(),
+                    count,
+                })
+                .collect(),
+            unknown: 2,
+        };
+        assert_eq!(
+            stats_lines("カメラ", &b, 2),
+            [
+                "カメラ:",
+                "         5  A",
+                "         3  B",
+                "         1  （ほか 1 種類）",
+                "         2  （不明）"
+            ]
+        );
+        assert_eq!(stats_lines("カメラ", &b, 0).len(), 5);
+        assert!(stats_lines("カメラ", &genzo_api::StatBreakdown::default(), 2).is_empty());
+    }
 
     #[test]
     fn unique_ids_keep_the_order() {

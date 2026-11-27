@@ -660,3 +660,65 @@ button.dlg-list-item:focus-visible {
   border: 1px solid var(--line-strong);
   align-self: flex-start;
 }
+
+/* 撮影の統計（StatsDialog）。 */
+.dlg-stats-summary {
+  margin: 8px 0;
+  color: var(--fg-1);
+}
+.dlg-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 24px;
+  max-height: 56vh;
+  overflow-y: auto;
+}
+.dlg-stats h3 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.dlg-stats-hint {
+  margin-left: 8px;
+  font-weight: 400;
+  color: var(--fg-3);
+}
+.dlg-stats table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+.dlg-stats th {
+  width: 42%;
+  padding: 1px 6px 1px 0;
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dlg-stats tr.note th {
+  color: var(--fg-3);
+}
+.dlg-stats td.bar span {
+  display: block;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.dlg-stats tr.note td.bar span {
+  background: var(--fg-3);
+}
+.dlg-stats td.num,
+.dlg-stats td.pct {
+  width: 56px;
+  padding-left: 6px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.dlg-stats td.pct {
+  width: 48px;
+  color: var(--fg-3);
+}

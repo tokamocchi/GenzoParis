@@ -18,11 +18,11 @@ use genzo_model::{CollectionId, CollectionKind, KeywordId, SmartRule, VariantId}
 use crate::core::{Core, Inner};
 use crate::error::ApiError;
 use crate::events::{CatalogChange, Event};
-use crate::types::QuickCollectionToggle;
 use crate::types::{
     CollectionInfo, KeywordHit, KeywordInfo, KeywordUsage, SearchFilter, VariantKeyword,
     VariantKeywords,
 };
+use crate::types::{QuickCollectionToggle, ShootingStats};
 
 /// 補完の候補の数の上限（**仮置き**: 50。画面に出す数）。
 pub const MAX_KEYWORD_HITS: usize = 50;
@@ -423,5 +423,19 @@ impl Core {
         filter.check()?;
         let filter = filter.to_catalog();
         with_reader(&self.inner, |c| c.count(&filter))
+    }
+
+    /// 条件に合う写真・動画の撮影の統計（カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとの数。[`ShootingStats`]）。
+    /// 表示中の検索結果は変えない。読み取り専用の接続で数える（50 万件でも、条件に合う asset の行を 1 回
+    /// 読むだけ）。スタックの折りたたみは見ない（隠れている写真も数える）。
+    pub fn shooting_stats(&self, filter: &SearchFilter) -> Result<ShootingStats, ApiError> {
+        self.inner.check_open()?;
+        filter.check()?;
+        let filter = SearchFilter {
+            expand_stacks: true,
+            ..filter.clone()
+        }
+        .to_catalog();
+        Ok(with_reader(&self.inner, |c| c.shooting_stats(&filter))?.into())
     }
 }

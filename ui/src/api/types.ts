@@ -2031,6 +2031,42 @@ export interface CollectionInfo {
   quick?: boolean;
 }
 
+/** 撮影の統計の、1 つの値（まとまり）と数。 */
+export interface StatCount {
+  /** 値の表示（カメラ・レンズの名前、「24–34 mm」、「ISO 101–200」、「f/2.8」、「2024」など）。 */
+  label: string;
+  /** 写真・動画（asset）の数。 */
+  count: number;
+}
+
+/** 撮影の統計の、1 つの項目の内訳。 */
+export interface StatBreakdown {
+  items: StatCount[];
+  /** 値がなくて数えられなかった数。 */
+  unknown: number;
+}
+
+/**
+ * 撮影の統計（shooting_stats）。数は asset の数で、仮想コピーは重ねて数えない。カメラ・撮影年は写真と動画、
+ * レンズ・焦点距離・ISO・絞りは写真だけ。
+ */
+export interface ShootingStats {
+  photos: number;
+  videos: number;
+  /** 数の多い順。 */
+  cameras: StatBreakdown;
+  /** 数の多い順。 */
+  lenses: StatBreakdown;
+  /** 決まった区切りの順。 */
+  focal_lengths: StatBreakdown;
+  /** 決まった区切りの順。 */
+  isos: StatBreakdown;
+  /** 小さい順。 */
+  apertures: StatBreakdown;
+  /** 古い順。 */
+  years: StatBreakdown;
+}
+
 /** クイックコレクションへの出し入れの結果（toggle_quick_collection）。 */
 export interface QuickCollectionToggle {
   collection_id: CollectionId;
@@ -2093,6 +2129,7 @@ export type Command =
   | { type: "facets" }
   | { type: "check_files"; variant_ids: VariantId[] }
   | { type: "count"; filter: SearchFilter }
+  | { type: "shooting_stats"; filter: SearchFilter }
   | { type: "keyword_tree" }
   | { type: "find_keywords"; query: string; limit?: number | null }
   | { type: "create_keyword"; parent_id: KeywordId | null; path: string[] }
@@ -2296,6 +2333,7 @@ export type Response =
   | ({ type: "facets" } & Facets)
   | ({ type: "file_check" } & FileCheckReport)
   | { type: "count"; count: number }
+  | ({ type: "shooting_stats" } & ShootingStats)
   | { type: "keywords"; keywords: KeywordInfo[] }
   | { type: "keyword_hits"; hits: KeywordHit[] }
   | { type: "keyword_created"; keyword_id: KeywordId }

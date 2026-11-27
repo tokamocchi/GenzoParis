@@ -928,6 +928,79 @@ impl From<genzo_catalog::Facets> for Facets {
     }
 }
 
+/// 撮影の統計の、1 つの値（まとまり）と数（[`ShootingStats`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatCount {
+    /// 値の表示（カメラ・レンズの名前、`24–34 mm`、`ISO 101–200`、`f/2.8`、`2024` など）。
+    pub label: String,
+    /// 写真・動画（asset）の数。
+    pub count: u64,
+}
+
+/// 撮影の統計の、1 つの項目の内訳。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StatBreakdown {
+    /// 値ごとの数（数が 0 のまとまりは入らない）。
+    pub items: Vec<StatCount>,
+    /// 値がなくて数えられなかった数。
+    pub unknown: u64,
+}
+
+impl From<genzo_catalog::StatBreakdown> for StatBreakdown {
+    fn from(b: genzo_catalog::StatBreakdown) -> Self {
+        Self {
+            items: b
+                .items
+                .into_iter()
+                .map(|c| StatCount {
+                    label: c.label,
+                    count: c.count,
+                })
+                .collect(),
+            unknown: b.unknown,
+        }
+    }
+}
+
+/// 撮影の統計（[`crate::Core::shooting_stats`]。条件に合う写真・動画を、機材・設定・年ごとに数えたもの）。
+///
+/// 数は asset（写真・動画 1 つ）の数で、仮想コピーは重ねて数えない。カメラ・撮影年は写真と動画、レンズ・
+/// 焦点距離・ISO・絞りは写真だけ（genzo-catalog の `stats` の doc）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ShootingStats {
+    /// 写真の数。
+    pub photos: u64,
+    /// 動画の数。
+    pub videos: u64,
+    /// カメラ（数の多い順）。
+    pub cameras: StatBreakdown,
+    /// レンズ（数の多い順）。
+    pub lenses: StatBreakdown,
+    /// 焦点距離（実焦点距離。決まった区切りの順）。
+    pub focal_lengths: StatBreakdown,
+    /// ISO（決まった区切りの順）。
+    pub isos: StatBreakdown,
+    /// 絞り（小数第 1 位に丸めた値。小さい順）。
+    pub apertures: StatBreakdown,
+    /// 撮影年（補正後の UTC の年。古い順）。
+    pub years: StatBreakdown,
+}
+
+impl From<genzo_catalog::ShootingStats> for ShootingStats {
+    fn from(s: genzo_catalog::ShootingStats) -> Self {
+        Self {
+            photos: s.photos,
+            videos: s.videos,
+            cameras: s.cameras.into(),
+            lenses: s.lenses.into(),
+            focal_lengths: s.focal_lengths.into(),
+            isos: s.isos.into(),
+            apertures: s.apertures.into(),
+            years: s.years.into(),
+        }
+    }
+}
+
 /// variant の位置（[`crate::Core::index_of`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexOf {

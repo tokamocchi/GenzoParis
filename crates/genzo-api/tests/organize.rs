@@ -556,3 +556,49 @@ fn quick_collection_toggles_and_collections_keep_a_custom_order() {
     assert_eq!(json["ok"]["removed"], 3, "{json}");
     core.close().unwrap();
 }
+
+/// 撮影の統計: 条件に合う写真を asset ごとに 1 回だけ数える（仮想コピーは重ねない）。表示中の検索結果は変えない。
+/// JSON のコマンドでも同じ形。
+#[test]
+fn shooting_stats_count_matching_photos_once() {
+    let env = Env::new();
+    let (core, a, b, _c) = three(&env);
+    core.create_virtual_copy(a, None).unwrap();
+    core.set_rating(&[b], Rating::new(4).unwrap()).unwrap();
+    let shown = core
+        .search(&SearchFilter::default(), SearchSort::default())
+        .unwrap();
+
+    let all = core.shooting_stats(&SearchFilter::default()).unwrap();
+    assert_eq!((all.photos, all.videos), (3, 0));
+    // 合成の JPEG には撮影情報がないので、どの項目も「不明」。
+    assert!(
+        all.cameras.items.is_empty() && all.cameras.unknown == 3,
+        "{all:?}"
+    );
+    assert_eq!(all.lenses.unknown, 3);
+    assert_eq!(
+        all.years.unknown + all.years.items.iter().map(|c| c.count).sum::<u64>(),
+        3
+    );
+
+    let rated = core
+        .shooting_stats(&SearchFilter {
+            rating_min: Some(Rating::new(3).unwrap()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rated.photos, 1);
+    // 表示中の検索結果は変わらない。
+    assert_eq!(core.result_ids(shown.generation).unwrap().len(), 4);
+
+    let json: serde_json::Value = serde_json::from_str(
+        &core.execute_json(&serde_json::json!({"type": "shooting_stats"}).to_string()),
+    )
+    .unwrap();
+    assert_eq!(json["ok"]["type"], "shooting_stats", "{json}");
+    assert_eq!(json["ok"]["photos"], 3);
+    assert!(json["ok"]["focal_lengths"]["items"].is_array());
+    assert_eq!(json["ok"]["isos"]["unknown"], 3);
+    core.close().unwrap();
+}

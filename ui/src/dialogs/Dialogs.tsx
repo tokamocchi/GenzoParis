@@ -47,6 +47,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { SmartCollectionDialog } from "./SmartCollectionDialog";
 import { AutoStackDialog, VirtualCopyNameDialog } from "./StackDialogs";
+import { StatsDialog } from "./StatsDialog";
 
 /** ドロップを受け付けるか（カタログを開いていて、ほかのダイアログを開いていない）。 */
 function canAcceptDrop(): boolean {
@@ -138,6 +139,9 @@ export function Dialogs() {
       break;
     case "shortcuts":
       body = <ShortcutsDialog />;
+      break;
+    case "stats":
+      body = <StatsDialog />;
       break;
     case "close_failed":
       // 理由が変わったら出し直す（再試行の結果など）。

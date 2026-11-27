@@ -18,6 +18,7 @@ mod schema;
 mod schema_doc;
 mod search;
 mod stacks;
+mod stats;
 mod text_search;
 mod thumbs;
 

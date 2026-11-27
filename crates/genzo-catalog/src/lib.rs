@@ -75,6 +75,7 @@ mod schema;
 mod search;
 mod smart_sql;
 mod stack;
+mod stats;
 pub mod text;
 mod thumbs;
 mod util;
@@ -155,4 +156,5 @@ pub use search::{Facets, Filter, FolderFilter, Sort, SortDirection, SortKey, Var
 pub use stack::{
     AutoStackReport, GroupedIds, MAX_AUTO_STACK_GAP, StackBadge, StackInfo, StackLayout,
 };
+pub use stats::{FOCAL_EDGES_MM, ISO_EDGES, ShootingStats, StatBreakdown, StatCount};
 pub use thumbs::{ThumbStore, Thumbnail};
