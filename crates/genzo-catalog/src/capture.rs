@@ -455,6 +455,30 @@ impl Catalog {
         Ok(out)
     }
 
+    /// 機材の写真・動画の撮影日時（補正後の UTC の Unix 時刻の秒。昇順。撮影日時のないものは除く。ORG-02 の
+    /// 時計のずれの推定に使う）。
+    pub fn capture_seconds_of_device(&self, device: &DeviceKey) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT CAST(strftime('%s', captured_at_utc) AS INTEGER) FROM asset
+             WHERE camera IS ?1 AND camera_serial IS ?2 AND kind = ?3 AND captured_at_utc IS NOT NULL
+             ORDER BY captured_at_utc",
+        )?;
+        let rows = stmt.query_map(
+            params![device.camera, device.serial, device.kind.as_str()],
+            |r| r.get::<_, Option<i64>>(0),
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            // 日時として読めない値（外部のツールが書いたものなど）は飛ばす。
+            if let Some(t) = r? {
+                out.push(t);
+            }
+        }
+        // 文字列の順と時刻の順は同じはずだが、念のためそろえる（推定は昇順を前提にする）。
+        out.sort_unstable();
+        Ok(out)
+    }
+
     /// 機材の asset（機材の順、その中は asset の ID の順。重ならない）。
     pub fn assets_of_devices(&self, devices: &[DeviceKey]) -> Result<Vec<AssetId>> {
         let mut stmt = self.conn.prepare_cached(

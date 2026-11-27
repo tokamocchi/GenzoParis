@@ -1076,3 +1076,123 @@ fn collection_names_have_a_length_limit_and_no_control_characters() {
         "同じ場所に「旅行 > 京都, 2024」というコレクションがあります"
     );
 }
+
+/// 手動のコレクションの中の並び: 入れた順が既定で、写真を別の写真の前・最後へ移せる。並びのキー
+/// （[`SortKey::CollectionOrder`]）での検索はその順になる。
+#[test]
+fn members_can_be_reordered_and_searched_in_collection_order() {
+    let mut f = Fixture::new();
+    let ids: Vec<VariantId> = (1..=5)
+        .map(|i| f.photo(&format!("P{i}.ARW"), i, None).master_variant_id)
+        .collect();
+    let (a, b, c, d, e) = (ids[0], ids[1], ids[2], ids[3], ids[4]);
+    let col = f
+        .cat
+        .create_collection(None, "並び", CollectionKind::Manual, None)
+        .unwrap();
+    f.cat.add_to_collection(col, &[c, a, e, b]).unwrap();
+    let ordered = |cat: &Catalog, direction| {
+        cat.search(
+            &Filter {
+                collection: Some(col),
+                ..Default::default()
+            },
+            &Sort::new(SortKey::CollectionOrder, direction),
+        )
+        .unwrap()
+    };
+    assert_eq!(ordered(&f.cat, SortDirection::Ascending), vec![c, a, e, b]);
+    assert_eq!(ordered(&f.cat, SortDirection::Descending), vec![b, e, a, c]);
+    // b と c（渡した順）を e の前へ。入っていない d は飛ばす。重なりは 1 つ。
+    assert_eq!(
+        f.cat
+            .reorder_collection_members(col, &[b, d, c, b], Some(e))
+            .unwrap(),
+        2
+    );
+    assert_eq!(f.cat.collection_members(col).unwrap(), vec![a, b, c, e]);
+    // 最後へ。
+    assert_eq!(
+        f.cat.reorder_collection_members(col, &[a], None).unwrap(),
+        1
+    );
+    assert_eq!(ordered(&f.cat, SortDirection::Ascending), vec![b, c, e, a]);
+    // 後から入れた写真は最後に付く（番号を振り直した後でも）。
+    f.cat.add_to_collection(col, &[d]).unwrap();
+    assert_eq!(f.cat.collection_members(col).unwrap(), vec![b, c, e, a, d]);
+    // 移す写真そのものの前・入っていない写真の前へは移せない。何も変わらない。
+    assert!(matches!(
+        f.cat.reorder_collection_members(col, &[b, c], Some(c)),
+        Err(CatalogError::InvalidInput(_))
+    ));
+    f.cat.remove_from_collection(col, &[d]).unwrap();
+    assert!(matches!(
+        f.cat.reorder_collection_members(col, &[b], Some(d)),
+        Err(CatalogError::InvalidInput(_))
+    ));
+    assert_eq!(f.cat.collection_members(col).unwrap(), vec![b, c, e, a]);
+    // 入っている写真がなければ何もしない。手動のコレクションでなければ断る。
+    assert_eq!(
+        f.cat.reorder_collection_members(col, &[d], None).unwrap(),
+        0
+    );
+    let set = f
+        .cat
+        .create_collection(None, "セット", CollectionKind::Set, None)
+        .unwrap();
+    assert!(matches!(
+        f.cat.reorder_collection_members(set, &[a], None),
+        Err(CatalogError::InvalidInput(_))
+    ));
+    // コレクションで絞り込んでいなければ、id の順。
+    assert_eq!(
+        f.cat
+            .search(
+                &Filter::default(),
+                &Sort::new(SortKey::CollectionOrder, SortDirection::Descending)
+            )
+            .unwrap(),
+        ids
+    );
+}
+
+/// クイックコレクション: 初めて使うときに最上位に作り、ID を設定に覚える。名前を変えても同じもの。削除したら
+/// 作り直す。同じ名前のコレクションがあれば、名前に番号を足す。
+#[test]
+fn quick_collection_is_created_once_and_remembered_by_id() {
+    let mut f = Fixture::new();
+    assert_eq!(f.cat.quick_collection().unwrap(), None);
+    let q = f.cat.ensure_quick_collection().unwrap();
+    assert_eq!(f.cat.quick_collection().unwrap(), Some(q));
+    assert_eq!(f.cat.ensure_quick_collection().unwrap(), q);
+    let info = f.cat.collection(q).unwrap();
+    assert_eq!(
+        (info.name.as_str(), info.kind, info.parent_id),
+        (crate::QUICK_COLLECTION_NAME, CollectionKind::Manual, None)
+    );
+    f.cat.rename_collection(q, "あとで見る").unwrap();
+    assert_eq!(f.cat.ensure_quick_collection().unwrap(), q);
+    // 削除したら、次に使うときに作り直す。元の名前のコレクションが別にあれば、番号を足す。
+    f.cat.delete_collection(q).unwrap();
+    assert_eq!(f.cat.quick_collection().unwrap(), None);
+    let other = f
+        .cat
+        .create_collection(
+            None,
+            crate::QUICK_COLLECTION_NAME,
+            CollectionKind::Set,
+            None,
+        )
+        .unwrap();
+    let q2 = f.cat.ensure_quick_collection().unwrap();
+    assert_ne!(q2, other);
+    assert_eq!(
+        f.cat.collection(q2).unwrap().name,
+        format!("{} (2)", crate::QUICK_COLLECTION_NAME)
+    );
+    // 設定の値が壊れていても、ないものとして扱う。
+    f.cat
+        .set_setting(crate::QUICK_COLLECTION_SETTING, "abc")
+        .unwrap();
+    assert_eq!(f.cat.quick_collection().unwrap(), None);
+}

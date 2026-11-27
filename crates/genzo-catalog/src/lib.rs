@@ -75,6 +75,7 @@ mod schema;
 mod search;
 mod smart_sql;
 mod stack;
+mod stats;
 pub mod text;
 mod thumbs;
 mod util;
@@ -102,7 +103,10 @@ pub use catalog::{
     Catalog, ConnectionSettings, OpenOptions, OpenReport, PreviousShutdown,
     STATE_CAPTURE_TIME_RERESOLVE,
 };
-pub use collection::{Collection, MAX_COLLECTION_DEPTH, MAX_COLLECTION_NAME_CHARS};
+pub use collection::{
+    Collection, MAX_COLLECTION_DEPTH, MAX_COLLECTION_NAME_CHARS, QUICK_COLLECTION_NAME,
+    QUICK_COLLECTION_SETTING,
+};
 pub use develop::{
     DevelopState, HISTORY_LABEL_IMPORT, HISTORY_LABEL_VIRTUAL_COPY, HistoryEntry,
     MAX_SNAPSHOT_NAME_CHARS, MAX_VARIANT_NAME_CHARS, Snapshot, VariantInfo,
@@ -143,8 +147,9 @@ pub use register::{
 pub use schema::{
     AI_MASKS_SCHEMA_VERSION, BUSY_TIMEOUT, CACHE_SIZE_KIB, CAPTURE_TIME_EDITS_SCHEMA_VERSION,
     CATALOG_APPLICATION_ID, CATALOG_SCHEMA_VERSION, COLLECTIONS_SCHEMA_VERSION,
-    CONTENT_IDENTITY_SCHEMA_VERSION, ColumnInfo, IPTC_SCHEMA_VERSION, LOCATIONS_SCHEMA_VERSION,
-    PUBLIC_VIEWS, PUBLIC_VIEWS_SCHEMA_VERSION, STABLE_IDS_SCHEMA_VERSION, STACKS_SCHEMA_VERSION,
+    CONTENT_IDENTITY_SCHEMA_VERSION, ColumnInfo, IPTC_SCHEMA_VERSION,
+    LOCATION_TRACKS_SCHEMA_VERSION, LOCATIONS_SCHEMA_VERSION, PUBLIC_VIEWS,
+    PUBLIC_VIEWS_SCHEMA_VERSION, STABLE_IDS_SCHEMA_VERSION, STACKS_SCHEMA_VERSION,
     SchemaDescription, SchemaObject, THUMBS_APPLICATION_ID, THUMBS_SCHEMA_VERSION, TableInfo,
     UTC_ONLY_SCHEMA_VERSION, VOLUMES_SCHEMA_VERSION,
 };
@@ -152,4 +157,5 @@ pub use search::{Facets, Filter, FolderFilter, Sort, SortDirection, SortKey, Var
 pub use stack::{
     AutoStackReport, GroupedIds, MAX_AUTO_STACK_GAP, StackBadge, StackInfo, StackLayout,
 };
+pub use stats::{FOCAL_EDGES_MM, ISO_EDGES, ShootingStats, StatBreakdown, StatCount};
 pub use thumbs::{ThumbStore, Thumbnail};

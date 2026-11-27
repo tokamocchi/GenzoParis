@@ -359,7 +359,20 @@ export function LibraryLeftPanel() {
 
   return (
     <div className="lib-left">
-      <Section id="lib.catalog" title="カタログ">
+      <Section
+        id="lib.catalog"
+        title="カタログ"
+        right={
+          <button
+            type="button"
+            className="btn ghost small"
+            title="カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとの枚数を見る"
+            onClick={() => actions.openDialog({ kind: "stats" })}
+          >
+            統計
+          </button>
+        }
+      >
         <div
           className={`lib-nav-row${folderId === null && collectionId === null ? " on" : ""}`}
           role="button"

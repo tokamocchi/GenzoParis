@@ -28,12 +28,14 @@ import {
   spotsOf,
   withSpot,
 } from "./retouchLogic";
+import { SPOT_VISUAL_SENSITIVITY } from "./pixels";
 import { parseNumber, sameShown } from "./scales";
 import {
   currentSpot,
   reselectSource,
   selectSpot,
   setRetouchOptions,
+  setSpotVisual,
   toggleRetouchTool,
   useDevelopView,
 } from "./viewState";
@@ -133,7 +135,16 @@ function ValueSliders(props: {
 export function RetouchSection(props: { settings: DevelopSettings; disabled: boolean; upgradeNote: ReactNode }) {
   const { settings, disabled } = props;
   const c = retouchControls(settings, disabled);
-  const view = useDevelopView((s) => ({ tool: s.tool, spotIndex: s.spotIndex, retouch: s.retouch }), shallowEqual);
+  const view = useDevelopView(
+    (s) => ({
+      tool: s.tool,
+      spotIndex: s.spotIndex,
+      retouch: s.retouch,
+      spotVisual: s.spotVisual,
+      spotVisualSensitivity: s.spotVisualSensitivity,
+    }),
+    shallowEqual,
+  );
   const spots = spotsOf(settings);
   const sel = currentSpot(settings, view);
   const active = view.tool === "retouch";
@@ -164,6 +175,31 @@ export function RetouchSection(props: { settings: DevelopSettings; disabled: boo
         <div className="dp-note">
           スポットは {RETOUCH_LIMITS.spots.toLocaleString("ja-JP")} 個までです。これ以上は足せません（いまのスポットは動かす・変える・除くことができます）。
         </div>
+      )}
+      <label className="dp-row" title={`プレビューを白黒の輪郭の表示にして、センサーのゴミなどを見つけやすくします（${comboLabel("a")}。表示だけで、現像の結果は変えません）`}>
+        <input
+          type="checkbox"
+          checked={view.spotVisual}
+          disabled={view.tool !== "retouch"}
+          aria-label="スポットを可視化"
+          onChange={(e) => setSpotVisual({ on: e.target.checked })}
+        />
+        <span>スポットを可視化</span>
+      </label>
+      {view.spotVisual && (
+        <Slider
+          label="感度"
+          title="大きくするほど、淡い輪郭も白く出します"
+          value={view.spotVisualSensitivity}
+          min={SPOT_VISUAL_SENSITIVITY.min}
+          max={SPOT_VISUAL_SENSITIVITY.max}
+          step={1}
+          defaultValue={SPOT_VISUAL_SENSITIVITY.default}
+          disabled={view.tool !== "retouch"}
+          format={int0}
+          parse={parseNumber}
+          onChange={(v) => setSpotVisual({ sensitivity: v })}
+        />
       )}
       <div className="dp-sub">次に足すスポット</div>
       <ModeSelect

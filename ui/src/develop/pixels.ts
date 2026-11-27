@@ -52,6 +52,72 @@ export function clippingOverlay(pixels: ArrayLike<number>, width: number, height
   return { data, high, low };
 }
 
+/** スポットの可視化（DEV-21）の感度の範囲（%）と既定の値（**仮置き**: 合成の画像で決めた）。 */
+export const SPOT_VISUAL_SENSITIVITY = { min: 0, max: 100, default: 50 } as const;
+
+/**
+ * スポットの可視化の、輪郭とみなす明るさの変化のしきい値（8bit の輝度の、Sobel の勾配の大きさ）。感度 0% で 96、
+ * 100% で 4（指数で補間。感度を上げるほど、淡いゴミの輪郭も白くなる）。
+ */
+export function spotVisualThreshold(sensitivity: number): number {
+  const r = SPOT_VISUAL_SENSITIVITY;
+  const t = (Math.min(r.max, Math.max(r.min, Number.isFinite(sensitivity) ? sensitivity : r.default)) - r.min) / (r.max - r.min);
+  return 96 * Math.pow(4 / 96, t);
+}
+
+/**
+ * スポットの可視化（DEV-21。センサーのゴミ・小さな写り込みを見つけやすくする白黒の輪郭の表示）の画素を作る。
+ *
+ * プレビューの画素（RGBA 8bit。画面用の値）の輝度（Rec. 709 の重み）の勾配（3 × 3 の Sobel）の大きさが、感度から
+ * 決めたしきい値（[`spotVisualThreshold`]）以上の画素を白、それ以外を黒にした、不透明な画像（プレビューに重ねて
+ * 隠す）。画像の縁の 1 画素は、画像の中の最も近い画素の値を外にも使う。現像の結果は変えない（表示だけ）。
+ */
+export function spotVisualization(
+  pixels: ArrayLike<number>,
+  width: number,
+  height: number,
+  sensitivity: number,
+): Uint8ClampedArray<ArrayBuffer> {
+  const w = Math.max(0, Math.floor(width));
+  const h = Math.max(0, Math.floor(height));
+  const n = w * h;
+  const data = new Uint8ClampedArray(n * 4);
+  if (n === 0 || pixels.length < n * 4) return data;
+  const lum = new Float32Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    lum[i] = 0.2126 * pixels[p] + 0.7152 * pixels[p + 1] + 0.0722 * pixels[p + 2];
+  }
+  const limit = spotVisualThreshold(sensitivity);
+  const limit2 = limit * limit;
+  for (let y = 0; y < h; y++) {
+    const y0 = (y > 0 ? y - 1 : 0) * w;
+    const y1 = y * w;
+    const y2 = (y < h - 1 ? y + 1 : y) * w;
+    for (let x = 0; x < w; x++) {
+      const x0 = x > 0 ? x - 1 : 0;
+      const x2 = x < w - 1 ? x + 1 : x;
+      const a = lum[y0 + x0];
+      const b = lum[y0 + x];
+      const c = lum[y0 + x2];
+      const d = lum[y1 + x0];
+      const f = lum[y1 + x2];
+      const g = lum[y2 + x0];
+      const hh = lum[y2 + x];
+      const k = lum[y2 + x2];
+      const gx = c + 2 * f + k - (a + 2 * d + g);
+      const gy = g + 2 * hh + k - (a + 2 * b + c);
+      // Sobel の重みの和（4）で割って、隣の画素との差の大きさにそろえる。
+      const v = (gx * gx + gy * gy) / 16 >= limit2 ? 255 : 0;
+      const o = (y1 + x) * 4;
+      data[o] = v;
+      data[o + 1] = v;
+      data[o + 2] = v;
+      data[o + 3] = 255;
+    }
+  }
+  return data;
+}
+
 /**
  * ヒストグラムの縦の縮尺（棒の高さ 1 に当たる度数）。
  *

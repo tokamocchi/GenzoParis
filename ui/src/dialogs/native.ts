@@ -117,6 +117,15 @@ export async function chooseWatermarkImage(title: string, defaultPath?: string |
   return single(r);
 }
 
+const GPX_FILTERS = [{ name: "GPX のログ", extensions: ["gpx", "GPX"] }];
+
+/** GPX のログのファイルを選ぶ（LIB-21 の GPX のログからの位置付け）。取り消したら null。 */
+export async function chooseGpxFile(title: string, defaultPath?: string | null): Promise<string | null> {
+  if (!inTauri()) return promptPath(`${title}（GPX のファイルのパス）`, defaultPath ?? "");
+  const r = await open({ title, directory: false, multiple: false, filters: GPX_FILTERS, defaultPath: defaultPath || undefined });
+  return single(r);
+}
+
 /** 新しいカタログの場所を選ぶ（保存のダイアログ）。 */
 export async function chooseNewCatalogPath(title: string, defaultPath?: string | null): Promise<string | null> {
   if (!inTauri()) return promptPath(`${title}（新しいカタログのパス）`, defaultPath ?? "");

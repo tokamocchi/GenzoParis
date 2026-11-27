@@ -72,7 +72,7 @@ import { useGeometryInfo, useLoadedSummary, useLoadedSummaryObject } from "./hoo
 import { activatesOnEnter } from "./keyTargets";
 import { MaskLayer, MaskOverlayCanvas, useMaskOverlay } from "./MaskLayer";
 import { type Box, boundsOrDefault, maskControls } from "./maskLogic";
-import { clippingOverlay } from "./pixels";
+import { clippingOverlay, spotVisualization } from "./pixels";
 import { RetouchLayer } from "./RetouchLayer";
 import { orientedGrid, removeSpot, retouchControls, retouchSize, spotsOf } from "./retouchLogic";
 import {
@@ -97,6 +97,7 @@ import {
   startCrop,
   takeWantedBefore,
   toggleClipping,
+  toggleSpotVisual,
   toggleCompareMode,
   toggleMaskOverlay,
   toggleRetouchTool,
@@ -171,6 +172,23 @@ function ClippingCanvas(props: { frame: Frame<unknown>; style: CSSProperties }) 
     if (!ctx) return;
     ctx.putImageData(new ImageData(overlay.data, f.width, f.height), 0, 0);
   }, [props.frame]);
+  return <canvas ref={ref} className="dv-layer dv-clip" style={props.style} />;
+}
+
+/** スポットの可視化（DEV-21。frame の画素から白黒の輪郭の表示を計算して、画像の上に重ねて隠す）。 */
+function SpotVisualCanvas(props: { frame: Frame<unknown>; sensitivity: number; style: CSSProperties }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    const f = props.frame;
+    if (!canvas) return;
+    const data = spotVisualization(f.pixels, f.width, f.height, props.sensitivity);
+    if (canvas.width !== f.width) canvas.width = f.width;
+    if (canvas.height !== f.height) canvas.height = f.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx || f.width <= 0 || f.height <= 0) return;
+    ctx.putImageData(new ImageData(data, f.width, f.height), 0, 0);
+  }, [props.frame, props.sensitivity]);
   return <canvas ref={ref} className="dv-layer dv-clip" style={props.style} />;
 }
 
@@ -368,11 +386,14 @@ function PaneImage(props: {
   origin: { x: number; y: number; outW: number; outH: number } | null;
   dpr: number;
   showClipping: boolean;
+  /** スポットの可視化の感度（表示しないなら null・省略）。 */
+  spotVisual?: number | null;
   /** 分割の表示で見せる範囲（面の左端からの幅。CSS の画素。null なら全体）。 */
   clipRight?: number | null;
   clipLeft?: number | null;
 }) {
   const { pane, frame, region, fit, origin, dpr } = props;
+  const spotVisual = props.spotVisual ?? null;
   let fitStyle: CSSProperties | null = null;
   if (frame && fit) {
     fitStyle = origin
@@ -403,6 +424,8 @@ function PaneImage(props: {
     >
       {fitStyle && <FrameCanvas frame={frame} className="dv-layer dv-image" style={fitStyle} fit />}
       {region && regionStyle && <FrameCanvas frame={region} className="dv-layer dv-image" style={regionStyle} />}
+      {spotVisual !== null && region && regionStyle && <SpotVisualCanvas frame={region} sensitivity={spotVisual} style={regionStyle} />}
+      {spotVisual !== null && !region && frame && fitStyle && <SpotVisualCanvas frame={frame} sensitivity={spotVisual} style={fitStyle} />}
       {props.showClipping && region && regionStyle && <ClippingCanvas frame={region} style={regionStyle} />}
       {props.showClipping && !region && frame && fitStyle && <ClippingCanvas frame={frame} style={fitStyle} />}
     </div>
@@ -425,6 +448,7 @@ function Stage() {
   const crop = useDevelopView((s) => s.crop);
   const compare = useDevelopView((s) => s.compare);
   const showClipping = useDevelopView((s) => s.showClipping);
+  const spotVisual = useDevelopView((s) => (s.tool === "retouch" && s.spotVisual ? s.spotVisualSensitivity : null));
   const angle = useDevelop((s) => s.settings?.geometry.angle_deg ?? 0);
   const info = useGeometryInfo();
   const settings = useDevelop((s) => s.settings);
@@ -658,7 +682,8 @@ function Stage() {
             fit={fit}
             origin={afterOrigin}
             dpr={dpr}
-            showClipping={showClipping && !crop}
+            showClipping={showClipping && !crop && spotVisual === null}
+            spotVisual={crop ? null : spotVisual}
             clipLeft={split ? splitAt : null}
           />
         ) : (
@@ -838,6 +863,7 @@ function useDevelopKeys(enabled: boolean) {
       v: () => toggleBlackWhiteKey(),
       o: () => toggleMaskOverlay(),
       q: () => toggleRetouchTool(),
+      a: () => toggleSpotVisual(),
       "[": () => {
         const s = viewStore.get();
         if (s.tool === "brush") setBrushOptions({ size: brushSize(s.brush.size / BRUSH_SIZE_STEP) });

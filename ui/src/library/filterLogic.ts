@@ -403,6 +403,17 @@ export const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "import_order", label: "取り込み順" },
 ];
 
+/** 手動のコレクションの中の並び（入れた順・並べ替えた順）。コレクションを表示している間だけ選べる。 */
+export const COLLECTION_SORT_OPTION: { value: SortKey; label: string } = { value: "collection_order", label: "コレクションの順" };
+
+/**
+ * 並べ替えの項目の選択肢。コレクションを表示している間（と、すでにその並びを選んでいる間）は「コレクションの順」を
+ * 足す（スマートコレクション・セットでは順がないので、写真の番号の順になる）。
+ */
+export function sortOptions(inCollection: boolean, current: SortKey): { value: SortKey; label: string }[] {
+  return inCollection || current === "collection_order" ? [...SORT_OPTIONS, COLLECTION_SORT_OPTION] : SORT_OPTIONS;
+}
+
 /** 並べ替えの向きの表示（撮影日時のないものは、どちらの向きでも最後。genzo-catalog の search.rs）。 */
 export function sortDirectionLabel(direction: SortDirection): string {
   return direction === "ascending" ? "昇順" : "降順";

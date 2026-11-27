@@ -77,6 +77,7 @@ import {
   retouchOffset,
   spotsOf,
 } from "./retouchLogic";
+import { SPOT_VISUAL_SENSITIVITY } from "./pixels";
 import { formatAngle, sameShown } from "./scales";
 import {
   customWb,
@@ -169,6 +170,13 @@ export interface DevelopViewState {
   spotIndex: number | null;
   /** スポット修正の道具の設定（次に足すスポットに使う）。 */
   retouch: RetouchOptions;
+  /**
+   * スポットの可視化（DEV-21。A）: スポット修正の道具を使っている間、プレビューを白黒の輪郭の表示にして、ゴミを
+   * 見つけやすくする（表示だけ。現像の結果は変えない）。道具をやめても覚えておく（次に使うときに同じ表示）。
+   */
+  spotVisual: boolean;
+  /** スポットの可視化の感度（%。大きいほど淡い輪郭も出す）。 */
+  spotVisualSensitivity: number;
 }
 
 export const viewStore = createStore<DevelopViewState>({
@@ -188,6 +196,8 @@ export const viewStore = createStore<DevelopViewState>({
   vignetteHandle: false,
   spotIndex: null,
   retouch: DEFAULT_RETOUCH,
+  spotVisual: false,
+  spotVisualSensitivity: SPOT_VISUAL_SENSITIVITY.default,
 });
 
 export function useDevelopView<T>(selector: (s: DevelopViewState) => T, equal?: (a: T, b: T) => boolean): T {
@@ -976,6 +986,24 @@ export function cancelRetouchTool(): void {
   if (s.tool !== "retouch") return;
   if (s.spotIndex !== null) viewStore.set({ spotIndex: null });
   else viewStore.set({ tool: "none" });
+}
+
+/** スポットの可視化を切り替える（A。スポット修正の道具を使っている間だけ）。 */
+export function toggleSpotVisual(): void {
+  const s = viewStore.get();
+  if (s.tool !== "retouch") return;
+  viewStore.set({ spotVisual: !s.spotVisual });
+}
+
+/** スポットの可視化の表示と感度を決める（パネル）。 */
+export function setSpotVisual(patch: { on?: boolean; sensitivity?: number }): void {
+  viewStore.set((s) => ({
+    spotVisual: patch.on ?? s.spotVisual,
+    spotVisualSensitivity:
+      patch.sensitivity === undefined
+        ? s.spotVisualSensitivity
+        : Math.min(SPOT_VISUAL_SENSITIVITY.max, Math.max(SPOT_VISUAL_SENSITIVITY.min, patch.sensitivity)),
+  }));
 }
 
 /** スポット修正の道具の設定を変える。 */

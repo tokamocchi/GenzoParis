@@ -166,6 +166,28 @@ describe("写真の右クリックのメニュー", () => {
     expect(byAction(photoMenuEntries(0, undefined)).get("edit_location")?.enabled).toBe(false);
   });
 
+  it("一括の自動補正（DEV-32）は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
+    expect(byAction(photoMenuEntries(2, undefined)).get("auto_tone")).toMatchObject({ label: "自動補正を当てる…", enabled: true });
+    expect(byAction(photoMenuEntries(1, mockSummary())).get("auto_tone")?.enabled).toBe(true);
+    expect(byAction(photoMenuEntries(3, mockSummary({ kind: "video" }))).get("auto_tone")?.enabled).toBe(true);
+    expect(byAction(photoMenuEntries(1, mockSummary({ kind: "video" }))).get("auto_tone")?.enabled).toBe(false);
+    expect(byAction(photoMenuEntries(0, undefined)).get("auto_tone")?.enabled).toBe(false);
+  });
+
+  it("GPX のログからの位置付け（LIB-21）は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
+    expect(byAction(photoMenuEntries(2, undefined)).get("gpx_location")).toMatchObject({
+      label: "GPX のログから位置を付ける…",
+      enabled: true,
+    });
+    expect(byAction(photoMenuEntries(1, mockSummary({ kind: "video" }))).get("gpx_location")?.enabled).toBe(false);
+    expect(byAction(photoMenuEntries(0, undefined)).get("gpx_location")?.enabled).toBe(false);
+  });
+
+  it("選別支援（ORG-06）は 2 枚以上を選んでいるときだけ", () => {
+    expect(byAction(photoMenuEntries(1, mockSummary())).get("culling_assist")?.enabled).toBe(false);
+    expect(byAction(photoMenuEntries(2, mockSummary())).get("culling_assist")?.enabled).toBe(true);
+  });
+
   it("処理バージョンの更新は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
     expect(byAction(photoMenuEntries(1, mockSummary())).get("upgrade_process")?.enabled).toBe(true);
     expect(byAction(photoMenuEntries(3, mockSummary({ kind: "video" }))).get("upgrade_process")?.enabled).toBe(true);
@@ -181,5 +203,7 @@ describe("写真の右クリックのメニュー", () => {
     expect(two.get("composite_lighten")?.label).toBe("比較明合成…");
     expect(two.get("composite_lighten")?.enabled).toBe(true);
     expect(two.get("composite_darken")?.enabled).toBe(true);
+    expect(one.get("composite_average")?.enabled).toBe(false);
+    expect(two.get("composite_average")).toMatchObject({ label: "平均合成…", enabled: true });
   });
 });

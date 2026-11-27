@@ -106,6 +106,12 @@ pub enum JobKind {
     VideoProxy,
     /// 比較明・比較暗合成（DEV-34。docs/composite_design.md）。
     Composite,
+    /// 複数の写真への一括の自動補正（DEV-32。[`crate::Core::auto_tone_variants`]）。
+    AutoTone,
+    /// 動画からの静止画の切り出し（VID-07。[`crate::Core::extract_video_frame`]）。
+    VideoFrame,
+    /// 選別支援（ORG-06。[`crate::Core::culling_assist`]）。
+    CullingAssist,
 }
 
 /// ジョブの状態。
@@ -190,6 +196,12 @@ pub enum JobResult {
     VideoProxy(VideoProxyReport),
     /// 比較明・比較暗合成。
     Composite(CompositeReport),
+    /// 一括の自動補正。
+    AutoTone(AutoToneBatchReport),
+    /// 動画からの静止画の切り出し。
+    VideoFrame(VideoFrameReport),
+    /// 選別支援。
+    CullingAssist(CullingReport),
 }
 
 /// ファイルの問題（読めない・登録できないなど）。
@@ -239,6 +251,48 @@ pub struct ImportOptions {
     /// だけを写す。新しい写真の処理バージョンは最新）。動画・取り込み直した写真・登録済みの写真に組として足した
     /// ファイルの写真には当てない。
     pub develop_preset: Option<String>,
+    /// 取り込むファイルを選ぶ（IMP-02 の残り。取り込む前の選択）: 取り込み元のフォルダからの相対パス（区切りは
+    /// `/`。[`crate::Core::scan_import_source`] の [`ImportSourceFile::rel_path`]）。`None` なら、見つけたすべてを
+    /// 取り込む。走査し直した結果のうち、ここに挙げたファイルだけを取り込む（挙げたのに見つからないファイルは、
+    /// 結果の [`ImportReport::not_registered`] に入る）。空の一覧は誤り。
+    pub only: Option<Vec<String>>,
+}
+
+/// 取り込み元のフォルダの、取り込めるファイルの 1 件（[`crate::Core::scan_import_source`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSourceFile {
+    /// 一覧の中の番号（[`crate::Core::import_source_thumbnail`] に渡す）。
+    pub index: u32,
+    /// 取り込み元のフォルダからの相対パス（区切りは `/`。[`ImportOptions::only`] に渡す）。
+    pub rel_path: String,
+    /// ファイル名。
+    pub name: String,
+    /// 写真か動画か。
+    pub kind: AssetKind,
+    /// 大きさ（バイト。読めなければ `null`）。
+    pub size: Option<u64>,
+    /// 更新日時（UTC。読めなければ `null`。撮影日時ではない）。
+    pub modified: Option<DateTime<Utc>>,
+}
+
+/// 取り込み元のフォルダの走査の結果（[`crate::Core::scan_import_source`]。何も登録していない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSourceScan {
+    /// この走査の番号（サムネイルを引くときに渡す。走査し直すと変わる）。
+    pub scan_id: u64,
+    /// 走査したフォルダ（絶対パス）。
+    #[serde(serialize_with = "lossy_path")]
+    pub root: PathBuf,
+    /// 取り込めるファイル（フォルダの順、その中は名前の順。上限まで）。
+    pub files: Vec<ImportSourceFile>,
+    /// 見つけた、取り込めるファイルの数（上限で切り詰める前）。
+    pub total: u64,
+    /// 上限で切り詰めたか（そのときは、選んで取り込まずにフォルダの全体を取り込む）。
+    pub truncated: bool,
+    /// 読めなかったフォルダ・ファイルの数。
+    pub unreadable: u64,
+    /// たどらなかったシンボリックリンク・ジャンクションの数。
+    pub skipped_links: u64,
 }
 
 /// コピー取り込みの設定（IMP-02・IMP-03。04 の 3.12 節）。
@@ -649,6 +703,9 @@ pub enum SortKey {
     Rating,
     /// 登録順。
     ImportOrder,
+    /// 手動のコレクションの中の並び（[`SearchFilter::collection`] が手動のコレクションのとき。入れた順、または
+    /// [`crate::Core::reorder_collection`] で並べ替えた順。それ以外では variant の id の順）。
+    CollectionOrder,
 }
 
 /// 並べ替えの向き。
@@ -681,6 +738,7 @@ impl SearchSort {
                 SortKey::FileName => genzo_catalog::SortKey::FileName,
                 SortKey::Rating => genzo_catalog::SortKey::Rating,
                 SortKey::ImportOrder => genzo_catalog::SortKey::ImportOrder,
+                SortKey::CollectionOrder => genzo_catalog::SortKey::CollectionOrder,
             },
             match self.direction {
                 SortDirection::Ascending => genzo_catalog::SortDirection::Ascending,
@@ -920,6 +978,79 @@ impl From<genzo_catalog::Facets> for Facets {
     }
 }
 
+/// 撮影の統計の、1 つの値（まとまり）と数（[`ShootingStats`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatCount {
+    /// 値の表示（カメラ・レンズの名前、`24–34 mm`、`ISO 101–200`、`f/2.8`、`2024` など）。
+    pub label: String,
+    /// 写真・動画（asset）の数。
+    pub count: u64,
+}
+
+/// 撮影の統計の、1 つの項目の内訳。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StatBreakdown {
+    /// 値ごとの数（数が 0 のまとまりは入らない）。
+    pub items: Vec<StatCount>,
+    /// 値がなくて数えられなかった数。
+    pub unknown: u64,
+}
+
+impl From<genzo_catalog::StatBreakdown> for StatBreakdown {
+    fn from(b: genzo_catalog::StatBreakdown) -> Self {
+        Self {
+            items: b
+                .items
+                .into_iter()
+                .map(|c| StatCount {
+                    label: c.label,
+                    count: c.count,
+                })
+                .collect(),
+            unknown: b.unknown,
+        }
+    }
+}
+
+/// 撮影の統計（[`crate::Core::shooting_stats`]。条件に合う写真・動画を、機材・設定・年ごとに数えたもの）。
+///
+/// 数は asset（写真・動画 1 つ）の数で、仮想コピーは重ねて数えない。カメラ・撮影年は写真と動画、レンズ・
+/// 焦点距離・ISO・絞りは写真だけ（genzo-catalog の `stats` の doc）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ShootingStats {
+    /// 写真の数。
+    pub photos: u64,
+    /// 動画の数。
+    pub videos: u64,
+    /// カメラ（数の多い順）。
+    pub cameras: StatBreakdown,
+    /// レンズ（数の多い順）。
+    pub lenses: StatBreakdown,
+    /// 焦点距離（実焦点距離。決まった区切りの順）。
+    pub focal_lengths: StatBreakdown,
+    /// ISO（決まった区切りの順）。
+    pub isos: StatBreakdown,
+    /// 絞り（小数第 1 位に丸めた値。小さい順）。
+    pub apertures: StatBreakdown,
+    /// 撮影年（補正後の UTC の年。古い順）。
+    pub years: StatBreakdown,
+}
+
+impl From<genzo_catalog::ShootingStats> for ShootingStats {
+    fn from(s: genzo_catalog::ShootingStats) -> Self {
+        Self {
+            photos: s.photos,
+            videos: s.videos,
+            cameras: s.cameras.into(),
+            lenses: s.lenses.into(),
+            focal_lengths: s.focal_lengths.into(),
+            isos: s.isos.into(),
+            apertures: s.apertures.into(),
+            years: s.years.into(),
+        }
+    }
+}
+
 /// variant の位置（[`crate::Core::index_of`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexOf {
@@ -1143,6 +1274,20 @@ pub struct CollectionInfo {
     /// 写真の数（手動のコレクションはメンバーの数。スマートコレクション・セットは検索で数えた数。数えなかった・
     /// 数えられなかったときは `null`）。
     pub count: Option<u64>,
+    /// クイックコレクション（[`crate::Core::toggle_quick_collection`] が出し入れする手動のコレクション）か。
+    #[serde(default)]
+    pub quick: bool,
+}
+
+/// クイックコレクションへの出し入れの結果（[`crate::Core::toggle_quick_collection`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickCollectionToggle {
+    /// クイックコレクション（なければ作った）。
+    pub collection_id: CollectionId,
+    /// 入れた数。
+    pub added: u64,
+    /// 外した数。
+    pub removed: u64,
 }
 
 /// ファイルの情報。
@@ -1272,6 +1417,84 @@ pub struct VideoProxyInfo {
     pub size: u64,
     /// 長辺の上限（画素。genzo-media の `PROXY_LONG_EDGE`）。
     pub long_edge: u32,
+}
+
+/// 選別支援の設定（ORG-06。[`crate::Core::culling_assist`]。どれも仮置きの既定値）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CullingOptions {
+    /// 似た写真とみなす、撮影日時の差の上限（秒。既定 10）。
+    pub max_gap_seconds: u32,
+    /// 似た写真とみなす、サムネイルの dHash の違うビットの数の上限（0〜32。既定 10）。
+    pub max_distance: u32,
+    /// グループの中でいちばんシャープな写真の、この割合に満たない写真を「甘い見込み」にする（既定 0.7）。
+    pub soft_ratio: f32,
+}
+
+impl Default for CullingOptions {
+    fn default() -> Self {
+        Self {
+            max_gap_seconds: 10,
+            max_distance: 10,
+            soft_ratio: 0.7,
+        }
+    }
+}
+
+/// 似た写真のグループ（[`CullingReport`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CullingGroup {
+    /// グループの写真（撮影日時の順。2 枚以上）。
+    pub variant_ids: Vec<VariantId>,
+    /// いちばんシャープな見込みの写真。
+    pub sharpest: VariantId,
+    /// ピントの甘い（ぼけ・ブレの）見込みの写真（いちばんシャープな写真より明らかに甘いもの）。
+    pub soft: Vec<VariantId>,
+}
+
+/// 選別支援の結果（[`JobResult::CullingAssist`]。何も変えていない）。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct CullingReport {
+    /// 使った設定。
+    pub options: CullingOptions,
+    /// 調べた写真の数。
+    pub analyzed: u64,
+    /// 似た写真のグループ（撮影日時の順）。
+    pub groups: Vec<CullingGroup>,
+    /// グループに入った写真の数。
+    pub grouped: u64,
+    /// 甘い見込みの写真の数。
+    pub soft: u64,
+    /// 飛ばした動画の数。
+    pub skipped_videos: u64,
+    /// 撮影日時がなくて調べなかった写真の数。
+    pub without_time: u64,
+    /// サムネイルがなくて（読めなくて）調べなかった写真の数。
+    pub without_thumbnail: u64,
+    /// 見つからなかった写真の数（削除されたものなど）。
+    pub missing: u64,
+    /// 取り消されて途中で終わったか。
+    pub cancelled: bool,
+}
+
+/// 動画からの静止画の切り出しの結果（VID-07。[`JobResult::VideoFrame`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoFrameReport {
+    /// 元の動画。
+    pub source: VariantId,
+    /// 切り出した時刻（ミリ秒）。
+    pub position_ms: u64,
+    /// 幅（画素）。
+    pub width: u32,
+    /// 高さ（画素）。
+    pub height: u32,
+    /// 書いたファイル（動画と同じフォルダ）。
+    #[serde(serialize_with = "lossy_path")]
+    pub path: PathBuf,
+    /// カタログに登録した写真（登録に失敗したら `None`。ファイルは残っている）。
+    pub registered: Option<VariantId>,
+    /// 登録できなかった理由・登録したがメタデータを読めなかった理由。
+    pub registration_error: Option<String>,
 }
 
 /// 配信する動画のファイル（[`crate::Core::video_stream`]。アプリの `genzo://` の URI スキームが使う）。
@@ -1488,6 +1711,25 @@ pub struct AutoTone {
 }
 
 impl AutoTone {
+    /// genzo-pipeline の結果（`Engine::auto_tone`）から作る。
+    pub(crate) fn from_pick(pick: &genzo_pipeline::AutoTonePick) -> Self {
+        let v = pick.values;
+        Self {
+            exposure_ev: v.exposure_ev,
+            contrast: v.contrast,
+            highlights: v.highlights,
+            shadows: v.shadows,
+            whites: v.whites,
+            blacks: v.blacks,
+            stats: AutoToneStats {
+                samples: pick.stats.samples,
+                black_log2: pick.stats.black_log2,
+                median_log2: pick.stats.median_log2,
+                white_log2: pick.stats.white_log2,
+            },
+        }
+    }
+
     /// 設定に入れる（6 つの値だけを置き換える。ほかの項目は変えない）。
     pub fn apply(&self, settings: &mut DevelopSettings) {
         settings.exposure_ev = self.exposure_ev;
@@ -1497,6 +1739,21 @@ impl AutoTone {
         settings.tone.whites = self.whites;
         settings.tone.blacks = self.blacks;
     }
+}
+
+/// 複数の写真への一括の自動補正の結果（[`JobResult::AutoTone`]。[`crate::Core::auto_tone_variants`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AutoToneBatchReport {
+    /// 値を入れて保存した写真の数（それぞれの履歴に「自動補正」を 1 件）。
+    pub applied: u64,
+    /// 求めた値が今の値と同じで、保存しなかった写真の数。
+    pub unchanged: u64,
+    /// 対象外で飛ばした数（動画）。
+    pub skipped: u64,
+    /// 失敗した写真（見つからない・読めないなど。ほかの写真は続ける）。
+    pub failed: Vec<VariantIssue>,
+    /// 取り消されて途中で終わったか（それまでに保存した写真はそのまま残る）。
+    pub cancelled: bool,
 }
 
 /// 自動補正に使った代表の明るさ（露光量の前のシーンリニアの輝度の log2。genzo-pipeline の `AutoToneStats`）。
@@ -2786,6 +3043,40 @@ pub struct CaptureDevice {
     pub last: Option<DateTime<FixedOffset>>,
 }
 
+/// 機材の時計のずれの見込み（ORG-02。[`crate::Core::detect_clock_offsets`] の 1 件）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClockOffsetSuggestion {
+    /// 機材。
+    pub device: CaptureDeviceKey,
+    /// 撮影日時の分かる写真・動画の数。
+    pub with_time: u64,
+    /// 調べた数（多いときは間引く）。
+    pub samples: u64,
+    /// 撮影日時に足すと、基準の機材に合う秒数（正なら、この機材の時計が遅れている）。およその値。
+    pub shift_seconds: i64,
+    /// ずれが 15 分の倍数に近いときの、丸めた値（タイムゾーン・夏時間の設定の誤りの見込み）。
+    pub rounded_seconds: Option<i64>,
+    /// 今のままで、近く（± 2 分）に基準の機材の写真がある数。
+    pub matched_before: u64,
+    /// `shift_seconds` だけずらしたときに、近くに基準の機材の写真がある数。
+    pub matched_after: u64,
+    /// 提案できるだけの根拠があるか（偽なら、今のままで合っているか、同じ時間帯に使っていなくて分からない）。
+    pub confident: bool,
+}
+
+/// 機材ごとの時計のずれの見込み（ORG-02。[`crate::Core::detect_clock_offsets`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClockOffsetReport {
+    /// 基準の機材（時計が合っているとみなす機材）。
+    pub reference: CaptureDeviceKey,
+    /// 基準の機材の、撮影日時の分かる写真・動画の数。
+    pub reference_with_time: u64,
+    /// ほかの機材の見込み（提案できるものが先。その中はずれの大きい順）。
+    pub devices: Vec<ClockOffsetSuggestion>,
+    /// 撮影日時の分かる写真が少なくて調べなかった機材の数。
+    pub skipped_small: u64,
+}
+
 /// 撮影日時の修正の対象（[`crate::Core::edit_capture_times`]）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -3076,6 +3367,91 @@ pub struct LocationEditInfo {
     pub asset_count: u64,
     /// 変更した日時（UTC）。
     pub created_at: DateTime<Utc>,
+    /// GPX のログから、写真ごとに違う位置を付けた変更か（[`crate::Core::apply_gpx_locations`]）。真のとき、
+    /// `location` は代表の 1 つ（最初に変えた写真の位置）。
+    #[serde(default)]
+    pub from_track: bool,
+}
+
+/// GPX のログからの位置付けの設定（[`crate::Core::plan_gpx_locations`]・[`crate::Core::apply_gpx_locations`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GpxOptions {
+    /// 記録の途切れとみなす間隔（秒。既定 300）。時刻をはさむ 2 点の間隔がこれ以内なら補間し、そうでなければ
+    /// 近いほうの点がこの秒数以内にあるときだけ、その点を使う。
+    pub max_gap_seconds: u32,
+    /// 写真の時計のずれ（秒）。撮影日時にこの秒数を足してから、ログと照らし合わせる（カメラの時計が 2 分進んで
+    /// いたなら −120）。カタログの撮影日時は変えない。
+    pub offset_seconds: i64,
+    /// すでに位置のある写真（カメラの位置・後から付けた位置）にも付けるか（既定は付けない）。
+    pub overwrite: bool,
+}
+
+impl Default for GpxOptions {
+    fn default() -> Self {
+        Self {
+            max_gap_seconds: genzo_model::DEFAULT_GPX_MAX_GAP_SECONDS,
+            offset_seconds: 0,
+            overwrite: false,
+        }
+    }
+}
+
+/// GPX のログからの位置付けの見込み・結果。写真の数はどれも asset の数（仮想コピーは位置を共有するので 1 枚）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpxLocationPlan {
+    /// ログの、時刻のある点の数。
+    pub track_points: u64,
+    /// ログの、読めずに飛ばした点の数（時刻がない・座標が範囲外など）。
+    pub track_skipped: u64,
+    /// ログの最初の点の時刻（UTC）。
+    pub track_start: DateTime<Utc>,
+    /// ログの最後の点の時刻（UTC）。
+    pub track_end: DateTime<Utc>,
+    /// 対象の写真の数（動画・見つからないものを除く）。
+    pub photos: u64,
+    /// ログから位置が決まった写真の数（`changed` + `unchanged`）。
+    pub matched: u64,
+    /// そのうち、2 点の間を補間して決めた数（残りは近いほうの 1 点をそのまま使った）。
+    pub interpolated: u64,
+    /// 変わる（変えた）数。
+    pub changed: u64,
+    /// 同じ位置がすでに付いていて変わらない数。
+    pub unchanged: u64,
+    /// 撮影日時がログの記録から離れていて、位置が決まらなかった写真の数。
+    pub out_of_track: u64,
+    /// 撮影日時のない写真の数。
+    pub no_capture_time: u64,
+    /// すでに位置があるので付けなかった写真の数（`overwrite` が偽のとき）。
+    pub skipped_located: u64,
+    /// 除いた動画の数。
+    pub skipped_videos: u64,
+    /// 見つからなかった写真の数（削除されたものなど。variant の数）。
+    pub missing: u64,
+    /// 記録した変更（結果のとき。変わったものがなければ `null`。見込みでは常に `null`）。
+    pub edit_id: Option<i64>,
+}
+
+impl Default for GpxLocationPlan {
+    fn default() -> Self {
+        Self {
+            track_points: 0,
+            track_skipped: 0,
+            track_start: DateTime::<Utc>::UNIX_EPOCH,
+            track_end: DateTime::<Utc>::UNIX_EPOCH,
+            photos: 0,
+            matched: 0,
+            interpolated: 0,
+            changed: 0,
+            unchanged: 0,
+            out_of_track: 0,
+            no_capture_time: 0,
+            skipped_located: 0,
+            skipped_videos: 0,
+            missing: 0,
+            edit_id: None,
+        }
+    }
 }
 
 impl From<genzo_catalog::LocationEditRecord> for LocationEditInfo {
@@ -3086,6 +3462,7 @@ impl From<genzo_catalog::LocationEditRecord> for LocationEditInfo {
             location: r.location,
             asset_count: r.asset_count,
             created_at: r.created_at,
+            from_track: r.from_track,
         }
     }
 }

@@ -166,11 +166,21 @@ pub fn run(g: &GlobalArgs, out: Output, cmd: DevelopCommand) -> CliResult<Status
     }
 }
 
-/// `develop auto <ID> [--dry-run]`（DEV-32）: 写真を開いて自動補正の値を求め（[`genzo_api::Core::auto_tone`]）、
+/// `develop auto <ID>... [--dry-run]`（DEV-32）: 写真を開いて自動補正の値を求め（[`genzo_api::Core::auto_tone`]）、
 /// 設定に入れて保存する（履歴に 1 件「自動補正」。`--dry-run` なら値を表示するだけ）。JSON の出力:
 /// `{"variant_id", "dry_run", "changed", "auto": {露光量などと stats}, "settings": 保存後（dry-run では適用した
 /// 見込み）の設定}`。
+///
+/// ID が複数なら、まとめて当てて保存する（[`auto_batch`]。`--dry-run` は使えない）。
 fn auto(g: &GlobalArgs, out: Output, a: &AutoArgs) -> CliResult<Status> {
+    let variants = unique_ids(&a.variants);
+    let &[variant] = &variants[..] else {
+        return auto_batch(g, out, &variants, a.dry_run);
+    };
+    let a = &SingleAuto {
+        variant,
+        dry_run: a.dry_run,
+    };
     let s = Session::open(g, out, &OpenOptions::default())?;
     ensure_variants(&s, &[a.variant])?;
     s.core.open_develop(a.variant)?;
@@ -240,6 +250,72 @@ fn auto(g: &GlobalArgs, out: Output, a: &AutoArgs) -> CliResult<Status> {
         out.progress("設定は変わっていません（今の値と同じ。履歴に記録しませんでした）");
     }
     Ok(Status::Success)
+}
+
+/// [`auto`] の、ID が 1 つのときの引数。
+struct SingleAuto {
+    variant: VariantId,
+    dry_run: bool,
+}
+
+/// `develop auto <ID> <ID>...`: 選んだ写真にまとめて自動補正を当てて保存する（genzo-api の
+/// [`genzo_api::Core::auto_tone_variants`]。1 枚ごとに履歴に「自動補正」を 1 件。動画は飛ばし、見つからない写真は
+/// 失敗に数えて続ける）。JSON の出力: `{"applied", "unchanged", "skipped", "failed": [{"variant_id", "reason"}],
+/// "cancelled"}`。失敗・取り消しがあれば、終了コードは「一部が終わらなかった」。
+fn auto_batch(
+    g: &GlobalArgs,
+    out: Output,
+    variants: &[VariantId],
+    dry_run: bool,
+) -> CliResult<Status> {
+    if dry_run {
+        return Err(CliError::Usage(
+            "--dry-run は、ID が 1 つのときだけ使えます".to_owned(),
+        ));
+    }
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    ensure_variants(&s, variants)?;
+    let job = s.core.auto_tone_variants(variants)?;
+    let info = s.wait_job_ok(job, "自動補正")?;
+    let Some(genzo_api::JobResult::AutoTone(report)) = info.result else {
+        return Err(CliError::other("自動補正の結果がありません"));
+    };
+    s.close()?;
+    if out.json {
+        out.print_json(&report);
+    } else {
+        out.line(auto_batch_text(&report));
+        for f in &report.failed {
+            out.warn(format!("variant {}: {}", f.variant_id, f.reason));
+        }
+    }
+    Ok(if report.failed.is_empty() && !report.cancelled {
+        Status::Success
+    } else {
+        Status::Partial
+    })
+}
+
+/// 一括の自動補正の結果の 1 行の説明。
+fn auto_batch_text(r: &genzo_api::AutoToneBatchReport) -> String {
+    let mut text = format!(
+        "{} 件に自動補正を当てました（履歴「{}」）",
+        r.applied,
+        genzo_api::HISTORY_LABEL_AUTO_TONE
+    );
+    if r.unchanged > 0 {
+        text.push_str(&format!("。{} 件は値が同じでそのまま", r.unchanged));
+    }
+    if r.skipped > 0 {
+        text.push_str(&format!("。動画の {} 件は飛ばしました", r.skipped));
+    }
+    if !r.failed.is_empty() {
+        text.push_str(&format!("。{} 件は失敗しました", r.failed.len()));
+    }
+    if r.cancelled {
+        text.push_str("。途中で取り消されました");
+    }
+    text
 }
 
 /// `develop snapshot`（DEV-28）。JSON の出力: `list` はスナップショットの配列、`create`・`rename` は
@@ -1293,6 +1369,30 @@ pub(crate) fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> CliResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 一括の自動補正の結果の説明: 数が 0 の項目は書かない。
+    #[test]
+    fn auto_batch_reports_are_described() {
+        let mut r = genzo_api::AutoToneBatchReport {
+            applied: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            auto_batch_text(&r),
+            "3 件に自動補正を当てました（履歴「自動補正」）"
+        );
+        r.unchanged = 1;
+        r.skipped = 2;
+        r.failed.push(genzo_api::VariantIssue {
+            variant_id: VariantId::new(9),
+            reason: "ファイルが見つかりません".to_owned(),
+        });
+        r.cancelled = true;
+        assert_eq!(
+            auto_batch_text(&r),
+            "3 件に自動補正を当てました（履歴「自動補正」）。1 件は値が同じでそのまま。動画の 2 件は飛ばしました。1 件は失敗しました。途中で取り消されました"
+        );
+    }
 
     /// レンズ補正・ハイライト復元とノイズ軽減のオプションだけを当てる（色のオプションなし）。
     fn options_applied(

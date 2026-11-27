@@ -19,7 +19,7 @@ GenzoParis のカタログ（SQLite のデータベース）の構造と、外�
 
 スキーマの版は `PRAGMA user_version`、GenzoParis のファイルであることの印は `PRAGMA application_id` に入っています。
 
-- catalog.db のスキーマの版: **14**（`application_id` は 1197097812 = 16 進数の 0x475A4354 = ASCII の `GZCT`）
+- catalog.db のスキーマの版: **15**（`application_id` は 1197097812 = 16 進数の 0x475A4354 = ASCII の `GZCT`）
 - thumbs.db のスキーマの版: **2**（`application_id` は 1197102152 = 16 進数の 0x475A5448 = ASCII の `GZTH`）
 
 アプリは、古い版のカタログを開くと、自動でバックアップを作ってから新しい版に移行します。新しい版のカタログは、古いアプリでは開けません（壊さないため）。
@@ -40,6 +40,7 @@ GenzoParis のカタログ（SQLite のデータベース）の構造と、外�
 | 12 | 外付けドライブの識別（FILE-03）・見つからない写真（FILE-04）: ボリュームのファイルシステムの種類（`volume.fs_type`）と最後につながった日時（`volume.last_seen_at`）、フォルダの状態（`folder.status`・`folder.status_at`）、状態が `ok` でないファイルの部分索引（`file_not_ok`）。版 11 までのパスから作ったボリュームの ID（`path:`）は移行では変えない（アプリが開いたときに、見えるフォルダから OS のボリューム ID へ移す。2.4 節） | `catalog_0012_volumes_and_missing.sql` |
 | 13 | 位置情報の後付け（LIB-21。ジオタグ付け）: 後から付けた位置（`asset_location`。元のファイルには書かない）、位置の変更の履歴（`location_edit`・`location_edit_item`）、`photos_v1` の列 `location_lat`・`location_lon`・`location_source`（使う位置とその出どころ）。`asset` の表は変えない（`gps_lat`・`gps_lon` はカメラの記録の値のまま）。既存の asset には行を作らない | `catalog_0013_asset_locations.sql` |
 | 14 | AI マスク（DEV-20）: 推論で作った重みのラスター（`ai_mask`。現像設定の `MaskShape::Ai` が内容の SHA-256 で参照する。asset を消しても残り、参照がなくなったら回収する）。既存の設定・表は変えない | `catalog_0014_ai_masks.sql` |
+| 15 | GPX のログからの位置付け（LIB-21 の拡張）: 位置の変更の出どころ（`location_edit.source`。`track` は、GPX のログと撮影日時を照らし合わせて写真ごとに違う位置を付けた変更。既存の行は NULL）。ほかの表・公開ビューは変えない | `catalog_0015_location_edit_source.sql` |
 
 ## 2. 読み方
 
@@ -50,7 +51,7 @@ SQLite の CLI（`sqlite3`）:
 ```sh
 # 読み取り専用で開く（-readonly）。Windows ではパスを "C:\Users\...\catalog.db" のように書く。
 sqlite3 -readonly ~/Pictures/GenzoParis/catalog.db
-sqlite> PRAGMA user_version;            -- スキーマの版（14）
+sqlite> PRAGMA user_version;            -- スキーマの版（15）
 sqlite> .mode box
 sqlite> SELECT variant_id, file_name, captured_at_local, rating
    ...> FROM photos_v1 WHERE rating >= 4 ORDER BY captured_at_utc;
@@ -467,7 +468,7 @@ variant に付けたキーワード（`WITHOUT ROWID`）。
 |---|---|---|---|---|
 | `collection_id` | INTEGER | 不可 | | コレクション（→ `collection.id`。主キーの 1 番目） |
 | `variant_id` | INTEGER | 不可 | | variant（→ `variant.id`。主キーの 2 番目） |
-| `sort_order` | INTEGER | 不可 | `0` | 入れた順（同じ操作で入れたものは渡した順） |
+| `sort_order` | INTEGER | 不可 | `0` | コレクションの中の並び（入れた順。同じ操作で入れたものは渡した順。アプリの中で並べ替えると 1 から振り直す） |
 
 ### `stack`
 
@@ -608,7 +609,7 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 
 ### `location_edit`
 
-位置の変更の履歴（LIB-21。版 13 から）。1 行が 1 回の変更（位置を付ける・付けた位置を消す）です。アプリは新しい順に 20 回分を残し（`location.rs` の `MAX_LOCATION_EDITS`）、最後の変更から順に取り消せます。
+位置の変更の履歴（LIB-21。版 13 から）。1 行が 1 回の変更（位置を付ける・付けた位置を消す・GPX のログから写真ごとに位置を付ける）です。アプリは新しい順に 20 回分を残し（`location.rs` の `MAX_LOCATION_EDITS`）、最後の変更から順に取り消せます。
 
 | 列 | 型 | NULL | 既定値 | 意味 |
 |---|---|---|---|---|
@@ -618,6 +619,7 @@ FTS5 の中身を持つ表（`asset_fts_data`・`asset_fts_idx`・`asset_fts_doc
 | `lon` | REAL | 可 | | 付けた経度（`set`。`clear` は NULL） |
 | `asset_count` | INTEGER | 不可 | | 変えた asset の数（`CHECK`） |
 | `created_at` | TEXT | 不可 | | 変更した日時（UTC） |
+| `source` | TEXT | 可 | | 変更の出どころ（版 15 から）。NULL は、選んだ写真にまとめて同じ位置を付けた・消した変更。`track` は、GPX のログから写真ごとに違う位置を付けた変更（`kind` は `set`。`lat`・`lon` は代表として最初に変えた写真の位置。`CHECK`） |
 
 ### `location_edit_item`
 
@@ -682,6 +684,7 @@ AI マスク（DEV-20。2026-10-26 から使う。決定事項ログ No.211）�
 | `api.import_skip_duplicates` | 取り込みの既定: 重複と思われるもの（内容が同じファイルが登録済みのもの）を取り込まない（`true` / `false`。なければ `true`。IMP-04） |
 | `api.import_separate_raw_jpeg` | 取り込みの既定: RAW と同時記録の JPEG を別々の写真として取り込む（`true` / `false`。なければ `false`。IMP-06） |
 | `api.hash_in_background` | 内容のハッシュ（`file.full_hash`）をバックグラウンドで計算する（`true` / `false`。なければ `true`。ORG-03） |
+| `quick_collection_id` | クイックコレクション（B キーの既定の入れ先の、手動のコレクション）の `collection.id`（整数の文字列。なければ、初めて使うときに作る。指すコレクションがない・手動でなければ無視する） |
 | `api.hash_network_volumes` | バックグラウンドの計算で、ネットワークのボリュームのファイルも読む（`true` / `false`。なければ `false`） |
 
 ### 索引

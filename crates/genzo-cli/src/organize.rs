@@ -453,6 +453,49 @@ fn collection_in(
                 out.line(format!("{n} 枚を外しました（写真は削除していません）"));
             }
         }
+        CollectionCommand::Reorder {
+            collection,
+            variants,
+            before,
+        } => {
+            let ids = unique_ids(&variants);
+            let n = s.core.reorder_collection(collection, &ids, before)?;
+            if out.json {
+                out.print_json(&json!({ "updated": n }));
+            } else {
+                out.line(format!("{n} 枚を移しました"));
+            }
+        }
+        CollectionCommand::Quick { variants } => {
+            let ids = unique_ids(&variants);
+            if ids.is_empty() {
+                let id = s.core.quick_collection()?;
+                if out.json {
+                    out.print_json(&json!({ "collection_id": id }));
+                } else {
+                    match id {
+                        Some(id) => out.line(format!("クイックコレクションは ID {id} です")),
+                        None => out.line("クイックコレクションはまだありません"),
+                    }
+                }
+                return Ok(Status::Success);
+            }
+            ensure_variants(s, &ids)?;
+            let r = s.core.toggle_quick_collection(&ids)?;
+            if out.json {
+                out.print_json(&r);
+            } else if r.removed > 0 {
+                out.line(format!(
+                    "クイックコレクション（ID {}）から {} 枚を外しました（写真は削除していません）",
+                    r.collection_id, r.removed
+                ));
+            } else {
+                out.line(format!(
+                    "クイックコレクション（ID {}）に {} 枚を入れました",
+                    r.collection_id, r.added
+                ));
+            }
+        }
         CollectionCommand::Rename { collection, name } => {
             s.core.rename_collection(collection, &name)?;
             print_ok(out, "名前を変えました");
@@ -550,6 +593,7 @@ mod tests {
             rule,
             rule_error: None,
             count: None,
+            quick: false,
         }
     }
 

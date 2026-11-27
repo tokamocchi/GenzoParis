@@ -18,6 +18,7 @@ import type {
   CatalogStats,
   Capabilities,
   CaptureDevice,
+  ClockOffsetReport,
   CaptureDeviceKey,
   CaptureTarget,
   CaptureTimeEdit,
@@ -33,6 +34,7 @@ import type {
   CompositeSettings,
   ContentHashStatus,
   CopySettings,
+  CullingOptions,
   CoreSettings,
   CropRect,
   DeleteKind,
@@ -49,12 +51,15 @@ import type {
   Flag,
   FolderId,
   FolderInfo,
+  GpxLocationPlan,
+  GpxOptions,
   FrameInfo,
   GeoBounds,
   GpsCoord,
   HistoryEntryId,
   HistoryItem,
   ImportOptions,
+  ImportSourceScan,
   IndexOf,
   IptcMetadata,
   JobInfo,
@@ -82,6 +87,7 @@ import type {
   RegionInfo,
   RegionRequest,
   RetouchSpot,
+  QuickCollectionToggle,
   Response,
   RestorePlan,
   SearchFilter,
@@ -89,6 +95,7 @@ import type {
   SearchSort,
   SettingGroups,
   SettingsUpdate,
+  ShootingStats,
   ShownVariants,
   SmartRule,
   StackId,
@@ -194,8 +201,23 @@ export const facets = async (): Promise<Facets> => strip(await execute({ type: "
 export const checkFiles = async (variant_ids: VariantId[]): Promise<FileCheckReport> =>
   strip(await execute({ type: "check_files", variant_ids }, "file_check"));
 
+/**
+ * 取り込み元のフォルダを走査して、取り込める写真・動画の一覧を返す（取り込む前の選択。何も登録しない）。
+ * サムネイルは api/uri.ts の importThumbUrl で読む。
+ */
+export const scanImportSource = async (path: string, recursive: boolean): Promise<ImportSourceScan> =>
+  strip(await execute({ type: "scan_import_source", path, recursive }, "import_source"));
+
 /** 条件に合う写真の数（表示中の検索結果は変えない。スマートコレクションの条件の編集中の件数など）。 */
 export const count = async (filter: SearchFilter) => (await execute({ type: "count", filter }, "count")).count;
+/**
+ * 条件に合う写真・動画の撮影の統計（カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとの数。表示中の検索結果は
+ * 変えない。空の条件ならカタログ全体）。
+ */
+export const shootingStats = async (filter: SearchFilter): Promise<ShootingStats> => {
+  const { type: _type, ...rest } = await execute({ type: "shooting_stats", filter }, "shooting_stats");
+  return rest;
+};
 
 // --- キーワード（LIB-09） ---
 export const keywordTree = async (): Promise<KeywordInfo[]> =>
@@ -257,6 +279,17 @@ export const addToCollection = async (collection_id: CollectionId, variant_ids: 
   (await execute({ type: "add_to_collection", collection_id, variant_ids }, "updated")).count;
 export const removeFromCollection = async (collection_id: CollectionId, variant_ids: VariantId[]) =>
   (await execute({ type: "remove_from_collection", collection_id, variant_ids }, "updated")).count;
+/**
+ * 写真をクイックコレクションに出し入れする（すべて入っていれば外し、そうでなければ入れる。なければコアが最上位に
+ * 作る）。
+ */
+export const toggleQuickCollection = async (variant_ids: VariantId[]): Promise<QuickCollectionToggle> => {
+  const { type: _type, ...rest } = await execute({ type: "toggle_quick_collection", variant_ids }, "quick_collection");
+  return rest;
+};
+/** 手動のコレクションの中で、写真（この順）を `before` の前へ移す（null なら最後へ）。移した数を返す。 */
+export const reorderCollection = async (collection_id: CollectionId, variant_ids: VariantId[], before: VariantId | null) =>
+  (await execute({ type: "reorder_collection", collection_id, variant_ids, before }, "updated")).count;
 export const variantCollections = async (variant_id: VariantId): Promise<CollectionId[]> =>
   (await execute({ type: "variant_collections", variant_id }, "variant_collections")).collection_ids;
 
@@ -529,6 +562,12 @@ export const autoTone = async (variant_id: VariantId): Promise<AutoTone> => {
   const { type: _type, ...rest } = await execute({ type: "auto_tone", variant_id }, "auto_tone");
   return rest;
 };
+/**
+ * 選んだ写真に、まとめて自動補正（DEV-32）を当てて保存する（ジョブ。1 枚ごとに履歴に「自動補正」を 1 件。動画は
+ * コアが飛ばす）。ジョブの番号を返す（結果は JobResult の auto_tone）。
+ */
+export const autoToneVariants = async (variant_ids: VariantId[]): Promise<number> =>
+  (await execute({ type: "auto_tone_variants", variant_ids }, "job_started")).job_id;
 /** 切り抜きの編集中の表示（`uncropped` なら切り抜く前の全体を描く）。 */
 export const setDevelopView = async (uncropped: boolean) => {
   await execute({ type: "set_develop_view", uncropped }, "ok");
@@ -648,8 +687,26 @@ export const importNamePreview = async (copy: CopySettings): Promise<NamePreview
 // ---------------------------------------------------------------------------
 
 /** 機材の一覧（カメラの表示名・シリアル番号・写真か動画か）。 */
+/**
+ * 選別支援（ORG-06）: 選んだ写真から、似た写真のグループと、その中でピントの甘い見込みの写真を調べる（ジョブ。何も
+ * 変えない）。ジョブの番号を返す（結果は JobResult の culling_assist）。
+ */
+export const cullingAssist = async (variant_ids: VariantId[], options: CullingOptions): Promise<number> =>
+  (await execute({ type: "culling_assist", variant_ids, options }, "job_started")).job_id;
+/**
+ * 動画の `position_seconds` 秒のフレームを静止画（JPEG）として切り出し、動画と同じフォルダに保存してカタログに
+ * 登録する（VID-07。ジョブ。利用者の ffmpeg が要る）。ジョブの番号を返す（結果は JobResult の video_frame）。
+ */
+export const extractVideoFrame = async (variant_id: VariantId, position_seconds: number): Promise<number> =>
+  (await execute({ type: "extract_video_frame", variant_id, position_seconds }, "job_started")).job_id;
 export const captureDevices = async (): Promise<CaptureDevice[]> =>
   (await execute({ type: "capture_devices" }, "capture_devices")).devices;
+/**
+ * 機材ごとの時計のずれの見込み（ORG-02。基準の機材と同じ時間帯に撮った写真から推定する。何も変えない）。値は
+ * およそ（数十秒〜数分の誤差）。
+ */
+export const detectClockOffsets = async (reference: CaptureDeviceKey): Promise<ClockOffsetReport> =>
+  strip(await execute({ type: "detect_clock_offsets", reference }, "clock_offsets"));
 /** 写真の機材。 */
 export const captureDeviceOf = async (variant_id: VariantId): Promise<CaptureDeviceKey> =>
   strip(await execute({ type: "capture_device_of", variant_id }, "capture_device"));
@@ -685,6 +742,15 @@ export const planLocationEdit = async (variant_ids: VariantId[], location: GpsCo
  */
 export const editLocations = async (variant_ids: VariantId[], location: GpsCoord | null): Promise<LocationEditPlan> =>
   strip(await execute({ type: "edit_locations", variant_ids, location }, "location_edit_plan"));
+/** GPX のログから位置を付ける見込み（何も変えない）。 */
+export const planGpxLocations = async (variant_ids: VariantId[], gpx_path: string, options: GpxOptions): Promise<GpxLocationPlan> =>
+  strip(await execute({ type: "plan_gpx_locations", variant_ids, gpx_path, options }, "gpx_location_plan"));
+/**
+ * GPX のログと撮影日時を照らし合わせて、選んだ写真に位置を付ける（1 回の変更として履歴に残る。undoLocationEdit で
+ * 取り消せる）。
+ */
+export const applyGpxLocations = async (variant_ids: VariantId[], gpx_path: string, options: GpxOptions): Promise<GpxLocationPlan> =>
+  strip(await execute({ type: "apply_gpx_locations", variant_ids, gpx_path, options }, "gpx_location_plan"));
 /** 位置の変更の履歴（新しい順）。 */
 export const locationEdits = async (): Promise<LocationEditInfo[]> =>
   (await execute({ type: "location_edits" }, "location_edits")).edits;

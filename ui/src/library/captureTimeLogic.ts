@@ -14,6 +14,7 @@ import type {
   CaptureTimeEdit,
   CaptureTimeEditInfo,
   CaptureTimePlan,
+  ClockOffsetSuggestion,
   ZoneMode,
 } from "../api/types";
 import { parseOffset } from "../format";
@@ -298,5 +299,40 @@ export function describeEditInfo(e: CaptureTimeEditInfo): string {
       return "タイムゾーンの指定を取り消す";
     case "reset":
       return "ファイルの値に戻す";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 機材ごとの時計のずれの見込み（ORG-02）
+// ---------------------------------------------------------------------------
+
+/** 見込みの判定: ずれている見込み・合っている見込み・分からない（同じ時間帯の写真が少ない）。 */
+export type ClockVerdict = "shifted" | "aligned" | "unknown";
+
+/** 見込みの判定（CLI の time detect と同じ）。 */
+export function clockVerdict(d: ClockOffsetSuggestion): ClockVerdict {
+  if (d.confident) return "shifted";
+  if (d.samples === 0 || d.matched_after * 10 < d.samples * 3) return "unknown";
+  return "aligned";
+}
+
+/** 提案するずれ（秒）: 15 分の倍数に近ければ丸めた値、そうでなければ見込みの値。 */
+export function suggestedShift(d: ClockOffsetSuggestion): number {
+  return d.rounded_seconds ?? d.shift_seconds;
+}
+
+/** 見込みの 1 件の文（機材の名前は別に出す）。 */
+export function describeClockOffset(d: ClockOffsetSuggestion): string {
+  const n = (v: number) => v.toLocaleString("ja-JP");
+  switch (clockVerdict(d)) {
+    case "shifted": {
+      const rounded = d.rounded_seconds === null ? "" : `。タイムゾーンなどの設定の誤りなら ${formatShift(d.rounded_seconds)}`;
+      const direction = d.shift_seconds > 0 ? "遅れている" : "進んでいる";
+      return `時計が${direction}見込み: およそ ${formatShift(d.shift_seconds)} で合います${rounded}（近くに基準の機材の写真がある数: ${n(d.matched_before)} → ${n(d.matched_after)} / ${n(d.samples)}）`;
+    }
+    case "aligned":
+      return `合っている見込み（5 分より小さいずれは分かりません。近くに基準の機材の写真がある数: ${n(d.matched_before)} / ${n(d.samples)}）`;
+    case "unknown":
+      return "分かりません（基準の機材と同じ時間帯に撮った写真が少ないため）";
   }
 }

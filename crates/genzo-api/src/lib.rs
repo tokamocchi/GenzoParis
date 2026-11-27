@@ -125,6 +125,7 @@
 //!   描く。genzo-gpu の `render_preview` が [`genzo_pipeline::PreviewRequest::uncropped`] を見ないため）。
 
 mod ai_masks;
+mod auto_batch;
 mod before;
 mod capture_time;
 pub mod command;
@@ -132,6 +133,7 @@ mod composite;
 pub mod config;
 mod copy_import;
 mod core;
+mod culling;
 mod delete;
 mod deps;
 mod develop;
@@ -139,8 +141,10 @@ pub mod error;
 pub mod events;
 mod export;
 mod fileops;
+mod gpx;
 mod identity;
 mod import;
+mod import_scan;
 mod jobs;
 mod library;
 mod location;
@@ -164,6 +168,7 @@ mod snapshots;
 mod stacks;
 mod timeline;
 pub mod types;
+mod video_frames;
 mod view;
 mod volumes;
 mod watermark;
@@ -171,6 +176,7 @@ mod watermark;
 pub use ai_masks::{
     ENV_MODELS_DIR, ENV_ONNXRUNTIME, MODELS_DIR, default_models_dir, onnxruntime_candidates,
 };
+pub use auto_batch::MAX_AUTO_TONE_VARIANTS;
 pub use capture_time::{CAPTURE_TIME_EXAMPLES, CAPTURE_ZONE_RANGE_MINUTES};
 pub use command::{Command, Response};
 pub use config::{CoreConfig, GpuMode, IMPORT_BATCH_FILES, WorkerLaunch};
@@ -178,6 +184,7 @@ pub use core::{
     CopyImportHook, CopyImportStage, Core, CoreHooks, DevelopSaveStage, FileOpHook, FileOpStage,
     RegionRequestStage, SettingsUpdateStage,
 };
+pub use culling::{MAX_CULLING_DISTANCE, MAX_CULLING_GAP_SECONDS, MAX_CULLING_VARIANTS};
 pub use delete::{OsTrash, TrashBackend};
 pub use develop::{
     HISTORY_LABEL_AUTO_TONE, HISTORY_LABEL_BLACK_WHITE, HISTORY_LABEL_COLOR, HISTORY_LABEL_GENERIC,
@@ -191,8 +198,10 @@ pub use export::preview_export_names;
 pub use genzo_ml::{
     ORT_DISABLE_TELEMETRY_ENV, disable_telemetry_before_threads as disable_onnxruntime_telemetry,
 };
+pub use gpx::MAX_GPX_OFFSET_SECONDS;
 pub use identity::{DUPLICATE_GROUPS_MAX, HASH_FAILURES_KEPT, INTERACTIVE_MAX_WAIT};
 pub use import::{IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS, media_kind};
+pub use import_scan::MAX_IMPORT_SCAN_FILES;
 pub use maintenance::{RestorePlan, apply_restore, prepare_restore};
 pub use map::{MAP_CELL_PX, MAX_MAP_CLUSTERS, MAX_MAP_ZOOM, MAX_MERCATOR_LAT};
 pub use naming::{FolderRule, RenameRule};
@@ -222,6 +231,7 @@ pub use snapshots::apply_snapshot_label;
 pub use stacks::MAX_AUTO_STACK_GAP_SECONDS;
 pub use timeline::{MAX_TIMELINE_GAP_SECONDS, MAX_TIMELINE_GROUPS};
 pub use types::*;
+pub use video_frames::{MAX_SCRUB_CACHE_FRAMES, SCRUB_FRAMES, SCRUB_SPEC, STILL_JPEG_QUALITY};
 pub use view::{MAX_VIEW_PANES, MAX_VIEW_SOURCES};
 pub use volumes::{OsVolumes, VolumeIdentity, VolumeProbe};
 pub use watermark::{

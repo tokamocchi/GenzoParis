@@ -264,6 +264,12 @@ pub enum Command {
     /// 写真と動画のタイムライン（ORG-01）: 撮影日時の順に並べ、撮影日と、撮影の間隔によるイベントで
     /// まとめて表示する（条件は search と同じ）
     Timeline(Box<TimelineArgs>),
+    /// 選別支援（ORG-06）: 条件に合う写真から、似た写真のグループと、その中でピントの甘い見込みの写真を見つける
+    /// （サムネイルで判定するので粗い。何も変えない。--stack でグループをスタックにまとめる）
+    Cull(Box<CullArgs>),
+    /// 撮影の統計: 条件に合う写真・動画を、カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとに数える（条件は
+    /// search と同じ。仮想コピーは重ねて数えない。折りたたんだスタックの中の写真も数える）
+    Stats(Box<StatsArgs>),
     /// 位置情報の後付け（LIB-21。ジオタグ付け）: 位置を付ける・付けた位置を消す（カメラの位置に戻す）・履歴・
     /// 元に戻す。カタログの中だけを変え、元のファイルには書かない（カメラの位置も変えない）。付けた位置は
     /// 書き出しの Exif に入る（--remove-gps なら入らない）。動画は対象外
@@ -379,6 +385,17 @@ pub enum VideoCommand {
         /// 動画の variant の ID（複数可）
         #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
         variants: Vec<VariantId>,
+    },
+    /// 動画の指定した時刻のフレームを静止画（JPEG。品質 95・sRGB）として切り出し、動画と同じフォルダに
+    /// 保存してカタログに登録する（VID-07。<動画の名前>-frame-<時分秒ミリ秒>.jpg。上書きしない。色は変換しない。
+    /// ffmpeg が要る）
+    Frame {
+        /// 動画の variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// 切り出す時刻（秒。動画の先頭から。例: 12.5）
+        #[arg(long, value_name = "SEC", default_value_t = 0.0)]
+        at: f64,
     },
     /// 再生用のファイルのキャッシュの状況（フォルダ・数・合計・上限）
     Cache,
@@ -600,6 +617,13 @@ pub struct TimeTargetArgs {
 pub enum TimeCommand {
     /// 機材の一覧（カメラの機種・シリアル番号・写真か動画か・数・撮影日時の範囲（既定のタイムゾーン））
     Devices,
+    /// 機材ごとの時計のずれを推定する（ORG-02。何も変えない）: 基準の写真の機材（時計が合っているとみなす）と
+    /// 同じ時間帯に撮った写真・動画の撮影日時から、ほかの機材のずれのおよその値を出す。直すには time shift を使う
+    Detect {
+        /// 基準の機材の写真（variant の ID。この写真の機材を基準にする）
+        #[arg(value_parser = parse_variant_id)]
+        reference: VariantId,
+    },
     /// 撮影日時をずらす（時計のずれの補正に足す。例: +1h、-90s、+1d2h3m4s、3600（秒））
     Shift {
         /// ずらす量（正で後の時刻にする。d・h・m・s の組み合わせか、秒の整数）
@@ -655,6 +679,37 @@ pub enum TimeCommand {
     Undo,
 }
 
+/// `cull` の引数（選別支援。ORG-06）。
+#[derive(Debug, Args)]
+pub struct CullArgs {
+    /// 似た写真とみなす、撮影日時の差の上限（秒）
+    #[arg(long, value_name = "SEC", default_value_t = 10)]
+    pub gap: u32,
+    /// 似た写真とみなす、サムネイルの違いの上限（0〜32。大きいほど、違う写真もまとめる）
+    #[arg(long, value_name = "N", default_value_t = 10)]
+    pub distance: u32,
+    /// グループの中でいちばんシャープな写真の、この割合に満たない写真を「甘い見込み」にする（0〜1）
+    #[arg(long, value_name = "RATIO", default_value_t = 0.7)]
+    pub soft_ratio: f32,
+    /// 見つけたグループを、いちばんシャープな見込みの写真を一番上にしてスタックにまとめる
+    #[arg(long)]
+    pub stack: bool,
+    /// 対象の写真の条件（search と同じ）。
+    #[command(flatten)]
+    pub filter: FilterArgs,
+}
+
+/// `stats` の引数（撮影の統計）。
+#[derive(Debug, Args)]
+pub struct StatsArgs {
+    /// 項目ごとに表示する行数の上限（数の多い順・区切りの順に。0 なら全部。--json では使わない）
+    #[arg(long, default_value_t = 20)]
+    pub top: usize,
+    /// 対象の写真の条件（search と同じ）。
+    #[command(flatten)]
+    pub filter: FilterArgs,
+}
+
 /// `timeline` の引数（ORG-01）。
 #[derive(Debug, Args)]
 pub struct TimelineArgs {
@@ -702,6 +757,35 @@ pub enum LocationCommand {
         #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
         variants: Vec<VariantId>,
         /// 変えずに、変わる数だけを出す
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// GPX のログ（GPS ロガー・スマートフォンのアプリの記録）と撮影日時を照らし合わせて、位置を付ける（すでに
+    /// 位置のある写真・動画・撮影日時のない写真・ログから離れた時刻の写真には付けない。1 回の変更として履歴に
+    /// 残り、location undo でまとめて取り消せる）
+    Gpx {
+        /// GPX のファイル
+        gpx: PathBuf,
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// 記録の途切れとみなす間隔（秒）。時刻をはさむ 2 点の間隔がこれ以内なら補間し、そうでなければ近いほうの
+        /// 点がこの秒数以内にあるときだけ使う
+        #[arg(long, value_name = "SEC", default_value_t = genzo_model::DEFAULT_GPX_MAX_GAP_SECONDS)]
+        max_gap: u32,
+        /// 写真の時計のずれ（秒。撮影日時に足してからログと照らし合わせる。カメラの時計が 2 分進んでいたなら
+        /// -120。カタログの撮影日時は変えない）
+        #[arg(
+            long,
+            value_name = "SEC",
+            default_value_t = 0,
+            allow_hyphen_values = true
+        )]
+        offset: i64,
+        /// すでに位置のある写真（カメラの位置・付けた位置）にも付ける
+        #[arg(long)]
+        overwrite: bool,
+        /// 変えずに、付く数だけを出す
         #[arg(long)]
         dry_run: bool,
     },
@@ -915,6 +999,26 @@ pub enum CollectionCommand {
         collection: CollectionId,
         /// variant の ID（複数可）
         #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+    },
+    /// 手動のコレクションの中で、写真を並べ替える（並べた順に、--before の写真の前へ移す。省略すると最後へ。
+    /// 並びは search --collection <ID> --sort collection で見られる）
+    Reorder {
+        /// コレクションの ID
+        #[arg(value_parser = parse_collection_id)]
+        collection: CollectionId,
+        /// 移す variant の ID（複数可。この順に並ぶ）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// この variant の前へ移す
+        #[arg(long, value_name = "ID", value_parser = parse_variant_id)]
+        before: Option<VariantId>,
+    },
+    /// クイックコレクションに写真を出し入れする（すべて入っていれば外し、そうでなければ入れる。クイック
+    /// コレクションがなければ最上位に作る。ID を省略すると、今のクイックコレクションを表示する）
+    Quick {
+        /// variant の ID（複数可）
+        #[arg(num_args = 0.., value_parser = parse_variant_id)]
         variants: Vec<VariantId>,
     },
     /// コレクションの名前を変える
@@ -1187,6 +1291,14 @@ pub struct ImportArgs {
     /// --develop-preset の名前を探すフォルダ（同じ名前のプリセットが別のフォルダにあるとき）
     #[arg(long, value_name = "FOLDER", requires = "develop_preset")]
     pub develop_preset_folder: Option<String>,
+    /// このファイルだけを取り込む（DIR からの相対パス。区切りは /。複数可。省略すると、見つけたすべて。
+    /// 挙げたのに見つからないファイルは「登録しなかったファイル」に出る）
+    #[arg(long = "only", value_name = "REL_PATH")]
+    pub only: Vec<String>,
+    /// 取り込まずに、取り込めるファイルの一覧（相対パス・種別・大きさ）だけを出す（--only に渡す相対パスを
+    /// 確かめられる）
+    #[arg(long, conflicts_with_all = ["copy_to", "only", "previews"])]
+    pub list: bool,
 }
 
 impl ImportArgs {
@@ -1221,6 +1333,8 @@ impl ImportArgs {
             dry_run: self.dry_run,
             // ID・名前からの解決は、プリセットのフォルダを読んでから行う（library の import）。
             develop_preset: None,
+            only: (!self.only.is_empty())
+                .then(|| self.only.iter().map(|p| p.replace('\\', "/")).collect()),
         }
     }
 }
@@ -1513,7 +1627,8 @@ pub enum DevelopCommand {
     /// 今の設定と同じ）
     Before(BeforeArgs),
     /// 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決め、
-    /// 設定に入れて保存する（履歴に 1 件「自動補正」。ほかの項目は変えない。--dry-run で値を見るだけ）
+    /// 設定に入れて保存する（履歴に 1 件「自動補正」。ほかの項目は変えない。--dry-run で値を見るだけ）。ID を
+    /// 複数並べると、1 枚ずつ値を求めてまとめて保存する（動画は飛ばす）
     Auto(AutoArgs),
     /// 比較表示（LIB-03）の同期ズームと同じ範囲を、2 枚までの写真について同時に描いて PNG に書く（コア API
     /// `render_view_region` を試す。範囲の中心は写真ごとの割合、大きさは出力の画素で、どの写真も同じ）
@@ -2916,10 +3031,10 @@ pub struct BeforeArgs {
 /// `develop auto` の引数（DEV-32）。
 #[derive(Debug, Clone, Args)]
 pub struct AutoArgs {
-    /// variant の ID（写真。動画は現像できない）
-    #[arg(value_parser = parse_variant_id)]
-    pub variant: VariantId,
-    /// 値を表示するだけで、保存しない
+    /// variant の ID（写真。複数可。複数ならまとめて当てて保存する。動画は飛ばす）
+    #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+    pub variants: Vec<VariantId>,
+    /// 値を表示するだけで、保存しない（ID が 1 つのときだけ）
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -2983,6 +3098,8 @@ pub enum CompositeModeArg {
     LighterColor,
     /// カラー比較暗（輝度が最小の写真の画素をそのまま採る）
     DarkerColor,
+    /// 平均（リニアな値のチャンネルごとの平均。ノイズを減らす・動くものをならす）
+    Average,
 }
 
 impl From<CompositeModeArg> for genzo_model::CompositeMode {
@@ -2992,6 +3109,7 @@ impl From<CompositeModeArg> for genzo_model::CompositeMode {
             CompositeModeArg::Darken => Self::Darken,
             CompositeModeArg::LighterColor => Self::LighterColor,
             CompositeModeArg::DarkerColor => Self::DarkerColor,
+            CompositeModeArg::Average => Self::Average,
         }
     }
 }
@@ -3399,6 +3517,8 @@ pub enum SortArg {
     Rating,
     /// 登録順。
     Import,
+    /// 手動のコレクションの中の並び（--collection で手動のコレクションを指定したとき）。
+    Collection,
 }
 
 impl SortArg {
@@ -3409,6 +3529,7 @@ impl SortArg {
             SortArg::Name => SortKey::FileName,
             SortArg::Rating => SortKey::Rating,
             SortArg::Import => SortKey::ImportOrder,
+            SortArg::Collection => SortKey::CollectionOrder,
         }
     }
 }
@@ -4310,8 +4431,14 @@ mod tests {
         let cli = parse(&["genzo", "develop", "auto", "7"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Develop(DevelopCommand::Auto(AutoArgs { variant, dry_run: false }))
-                if variant == VariantId::new(7)
+            Command::Develop(DevelopCommand::Auto(AutoArgs { variants, dry_run: false }))
+                if variants == [VariantId::new(7)]
+        ));
+        let cli = parse(&["genzo", "develop", "auto", "7", "8", "9"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop(DevelopCommand::Auto(AutoArgs { variants, dry_run: false }))
+                if variants.len() == 3
         ));
         let cli = parse(&["genzo", "develop", "auto", "7", "--dry-run"]).unwrap();
         assert!(matches!(

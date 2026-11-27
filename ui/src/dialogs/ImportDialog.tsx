@@ -22,7 +22,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import * as appApi from "../api/app";
 import * as core from "../api/core";
-import type { MetadataField, NamePreview } from "../api/types";
+import { toApiError } from "../api/errors";
+import type { ErrorInfo, ImportSourceScan, MetadataField, NamePreview } from "../api/types";
 import { Dialog } from "../components/Dialog";
 import { describeGroups, groupPresets } from "../develop/presetLogic";
 import { COPYRIGHT_STATUS_OPTIONS, MAX_METADATA_CHARS, METADATA_GROUPS } from "../library/metadataEdit";
@@ -50,8 +51,10 @@ import {
   validateImportForm,
   videoToolsWarning,
 } from "./importLogic";
+import { ImportPicker } from "./ImportPicker";
+import { onlyOf, selectAll } from "./importPickLogic";
 import { chooseFolder } from "./native";
-import { PathBox } from "./parts";
+import { ErrorBox, PathBox } from "./parts";
 import { loadStored, saveStored } from "./storage";
 
 const LAST_FOLDER_KEY = "import.lastFolder";
@@ -127,6 +130,37 @@ export function ImportDialog() {
   const [chosen, setChosen] = useState<string | null>(null);
   const [choosing, setChoosing] = useState(false);
   const kinds = usePathKinds(folders, chosen);
+  // 取り込む前の選択（IMP-02）: フォルダが 1 つのときだけ。走査の結果と、選んでいるファイル。フォルダ・サブフォルダの
+  // 設定を変えたら捨てる（一覧が変わるため）。
+  const [pick, setPick] = useState<{ scan: ImportSourceScan; selection: Set<string> } | null>(null);
+  const [pickBusy, setPickBusy] = useState(false);
+  const [pickError, setPickError] = useState<ErrorInfo | null>(null);
+  const pickFolder = folders.length === 1 ? folders[0] : null;
+  const pickRecursive = form.recursive;
+  // 走査の番号: フォルダ・設定を変えたら進める（変える前に頼んだ走査の、遅い応答を使わない）。
+  const pickSeq = useRef(0);
+  useEffect(() => {
+    pickSeq.current++;
+    setPick(null);
+    setPickError(null);
+    setPickBusy(false);
+  }, [pickFolder, pickRecursive]);
+  const openPick = async () => {
+    if (pickFolder === null) return;
+    const mine = ++pickSeq.current;
+    setPickBusy(true);
+    setPickError(null);
+    try {
+      const scan = await core.scanImportSource(pickFolder, pickRecursive);
+      if (mine === pickSeq.current) setPick({ scan, selection: selectAll(scan) });
+    } catch (e) {
+      if (mine === pickSeq.current) setPickError(toApiError(e).info);
+    } finally {
+      if (mine === pickSeq.current) setPickBusy(false);
+    }
+  };
+  const only = pick ? onlyOf(pick.scan, pick.selection) : undefined;
+  const nothingPicked = only !== undefined && only.length === 0;
   const preview = useNamePreview(form);
   const templateRef = useRef<HTMLInputElement>(null);
   const developPresets = usePresets((s) => s.develop);
@@ -186,7 +220,7 @@ export function ImportDialog() {
   };
 
   const previewError = form.copy ? (preview?.error ?? null) : null;
-  const canStart = folders.length > 0 && errors.length === 0 && previewError === null;
+  const canStart = folders.length > 0 && errors.length === 0 && previewError === null && !nothingPicked;
 
   const start = () => {
     if (!canStart) return;
@@ -209,7 +243,10 @@ export function ImportDialog() {
       })
       .catch((e) => actions.reportError(e, "取り込みの設定を保存できません"));
     // 1 つずつ順に取り込む（途中でカタログを閉じた・取り込みが取り消されたら、残りはやめる）。
-    void actions.importFolders(folders, form.recursive, importOptionsOf(form, options));
+    const importOptions = importOptionsOf(form, options);
+    // 取り込む前の選択: 選んだファイルだけ（すべて選んでいれば、フォルダの全体）。
+    if (only !== undefined) importOptions.only = only;
+    void actions.importFolders(folders, form.recursive, importOptions);
   };
 
   const toolsWarning = videoToolsWarning(tools);
@@ -264,6 +301,31 @@ export function ImportDialog() {
           </button>
         </div>
       </div>
+      {pickFolder !== null && (
+        <div className="dlg-section">
+          <h3>取り込むファイル</h3>
+          {pick === null ? (
+            <div className="dlg-row">
+              <span className="dlg-grow hint">フォルダの中の写真・動画をすべて取り込みます。サムネイルを見て、取り込むファイルを選ぶこともできます。</span>
+              <button className="btn" onClick={() => void openPick()} disabled={pickBusy}>
+                {pickBusy ? "読んでいます…" : "ファイルを選ぶ…"}
+              </button>
+            </div>
+          ) : (
+            <>
+              <ImportPicker scan={pick.scan} selection={pick.selection} onChange={(selection) => setPick({ scan: pick.scan, selection })} />
+              <div className="dlg-row">
+                <span className="dlg-grow" />
+                <button className="btn small ghost" onClick={() => setPick(null)} title="選ぶのをやめて、フォルダの中のすべてを取り込みます">
+                  選ばずにすべて取り込む
+                </button>
+              </div>
+            </>
+          )}
+          {nothingPicked && <div className="dlg-warn">取り込むファイルを 1 つ以上選んでください</div>}
+          <ErrorBox error={pickError} title="フォルダを読めません" />
+        </div>
+      )}
       {(notFolders.files.length > 0 || notFolders.missing.length > 0) && (
         <div className="dlg-warn">
           {notFolders.files.length > 0 && (

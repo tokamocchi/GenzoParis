@@ -530,3 +530,149 @@ fn map_clusters_and_searching_by_location() {
     assert_eq!(out["ok"]["count"], 2, "{out}");
     core.close().unwrap();
 }
+
+/// GPX のログからの位置付け（LIB-21 の拡張）: 撮影日時（UTC）とログを照らし合わせて、写真ごとに位置を付ける。
+/// すでに位置のある写真・ログから離れた写真・撮影日時のない写真には付けない。1 回の変更として履歴に残り、
+/// まとめて取り消せる。JSON のコマンドでも同じ形。
+#[test]
+fn gpx_tracks_assign_locations_by_capture_time() {
+    let env = Env::new();
+    let jst = common::JST_MINUTES;
+    // 10:00:30 JST = 01:00:30 UTC（ログの 1 点目と 2 点目の真ん中）。
+    write_jpeg(
+        &env.photos.join("Mid.jpg"),
+        (48, 32),
+        1,
+        Some(&exif(Some("2024-05-01 10:00:30"), Some(jst), None)),
+    );
+    // カメラの位置のある写真（ログの時刻の中）。
+    write_jpeg(
+        &env.photos.join("Cam.jpg"),
+        (48, 32),
+        2,
+        Some(&exif(Some("2024-05-01 10:01:00"), Some(jst), Some(CAMERA))),
+    );
+    // ログから 1 時間離れた写真・撮影日時のない写真。
+    write_jpeg(
+        &env.photos.join("Far.jpg"),
+        (48, 32),
+        3,
+        Some(&exif(Some("2024-05-01 12:00:00"), Some(jst), None)),
+    );
+    write_jpeg(&env.photos.join("NoTime.jpg"), (48, 32), 4, None);
+    let gpx = env.dir.path().join("walk.gpx");
+    std::fs::write(
+        &gpx,
+        "\u{feff}<?xml version=\"1.0\"?><gpx version=\"1.1\"><trk><trkseg>\n\
+         <trkpt lat=\"35.0000\" lon=\"135.0000\"><time>2024-05-01T01:00:00Z</time></trkpt>\n\
+         <trkpt lat=\"35.0100\" lon=\"135.0200\"><time>2024-05-01T01:01:00Z</time></trkpt>\n\
+         <trkpt lat=\"35.0200\" lon=\"135.0400\"><time>2024-05-01T01:02:00Z</time></trkpt>\n\
+         </trkseg></trk></gpx>",
+    )
+    .unwrap();
+    let before = hashes(&env.photos);
+    let core = env.open();
+    let rx = core.subscribe();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let id = |n: &str| by_name(&items, n).variant_id;
+    let (mid, cam, far, no_time) = (
+        id("Mid.jpg"),
+        id("Cam.jpg"),
+        id("Far.jpg"),
+        id("NoTime.jpg"),
+    );
+    let all = [mid, cam, far, no_time];
+    drain(&rx);
+
+    let options = genzo_api::GpxOptions::default();
+    let plan = core.plan_gpx_locations(&all, &gpx, &options).unwrap();
+    assert_eq!((plan.track_points, plan.track_skipped), (3, 0));
+    assert_eq!(plan.track_start.to_rfc3339(), "2024-05-01T01:00:00+00:00");
+    assert_eq!(plan.track_end.to_rfc3339(), "2024-05-01T01:02:00+00:00");
+    assert_eq!(plan.photos, 4);
+    assert_eq!((plan.matched, plan.interpolated, plan.changed), (1, 1, 1));
+    assert_eq!(
+        (
+            plan.skipped_located,
+            plan.out_of_track,
+            plan.no_capture_time
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(plan.edit_id, None);
+    assert_eq!(located(&core, mid).0, None, "見込みでは変えない");
+
+    let done = core.apply_gpx_locations(&all, &gpx, &options).unwrap();
+    assert_eq!((done.changed, done.unchanged), (1, 0));
+    let edit_id = done.edit_id.expect("履歴に残る");
+    let (gps, source, camera) = located(&core, mid);
+    assert!(
+        near(
+            gps,
+            GpsCoord {
+                lat: 35.005,
+                lon: 135.01
+            }
+        ),
+        "{gps:?}"
+    );
+    assert_eq!((source, camera), (Some(GpsSource::Assigned), None));
+    // カメラの位置のある写真は変えない。
+    assert_eq!(located(&core, cam).1, Some(GpsSource::Camera));
+    assert_eq!(location_changes(&drain(&rx)), vec![(vec![mid], false)]);
+    let edits = core.location_edits().unwrap();
+    assert_eq!(edits.len(), 1);
+    assert!(edits[0].from_track && edits[0].id == edit_id && edits[0].asset_count == 1);
+
+    // 上書き・時計のずれ・間隔: カメラの位置のある写真にも付け、1 時間のずれを直すと Far にも付く。
+    let json = serde_json::json!({
+        "type": "apply_gpx_locations", "variant_ids": all, "gpx_path": gpx,
+        "options": {"overwrite": true, "offset_seconds": -7080, "max_gap_seconds": 60}
+    });
+    let v: serde_json::Value = serde_json::from_str(&core.execute_json(&json.to_string())).unwrap();
+    assert_eq!(v["ok"]["type"], "gpx_location_plan", "{v}");
+    // −7080 秒: Far（03:00:00 UTC）→ 01:02:00（3 点目）。Mid・Cam はログの前に外れる。
+    assert_eq!(v["ok"]["matched"], 1, "{v}");
+    assert_eq!(v["ok"]["out_of_track"], 2, "{v}");
+    assert!(near(
+        located(&core, far).0,
+        GpsCoord {
+            lat: 35.02,
+            lon: 135.04
+        }
+    ));
+
+    // 取り消すと、それぞれの変更の前に戻る。
+    core.undo_location_edit().unwrap().unwrap();
+    assert_eq!(located(&core, far).0, None);
+    core.undo_location_edit().unwrap().unwrap();
+    assert_eq!(located(&core, mid).0, None);
+
+    // 読めないファイル・GPX でないファイル・範囲外の設定は、何も変えずに断る。
+    assert!(matches!(
+        core.apply_gpx_locations(&all, &env.dir.path().join("none.gpx"), &options),
+        Err(ApiError::FileAccess { .. })
+    ));
+    let not_gpx = env.dir.path().join("x.gpx");
+    std::fs::write(&not_gpx, "<html></html>").unwrap();
+    assert!(matches!(
+        core.plan_gpx_locations(&all, &not_gpx, &options),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        core.plan_gpx_locations(
+            &all,
+            &gpx,
+            &genzo_api::GpxOptions {
+                max_gap_seconds: 0,
+                ..options
+            }
+        ),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    assert!(core.location_edits().unwrap().is_empty());
+    core.close().unwrap();
+    // 元のファイルは変えない。
+    assert_eq!(hashes(&env.photos), before);
+}

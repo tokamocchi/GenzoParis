@@ -140,7 +140,17 @@ pub(crate) const CATALOG_MIGRATIONS: &[Migration] = &[
         sql: include_str!("sql/catalog_0014_ai_masks.sql"),
         post: None,
     },
+    Migration {
+        version: LOCATION_TRACKS_SCHEMA_VERSION,
+        description: "GPX のログからの位置付け（LIB-21）: 位置の変更の出どころ（location_edit.source。写真ごとに違う位置を付けた変更の印）",
+        sql: include_str!("sql/catalog_0015_location_edit_source.sql"),
+        post: None,
+    },
 ];
+
+/// GPX のログからの位置付け（LIB-21 の拡張）を使い始めたカタログのスキーマの版（位置の変更の出どころ
+/// `location_edit.source`。`track` は写真ごとに違う位置を付けた変更）。既存の行は NULL のまま。
+pub const LOCATION_TRACKS_SCHEMA_VERSION: u32 = 15;
 
 /// AI マスク（DEV-20）を使い始めたカタログのスキーマの版（推論で作った重みのラスター `ai_mask`。現像設定の
 /// `MaskShape::Ai` が内容の SHA-256 で参照する。asset を消しても残り、asset_id を NULL にする）。既存の設定・表は変えない。
@@ -389,7 +399,7 @@ pub(crate) const THUMBS_MIGRATIONS: &[Migration] = &[
 ];
 
 /// このアプリのカタログのスキーマの版。
-pub const CATALOG_SCHEMA_VERSION: u32 = 14;
+pub const CATALOG_SCHEMA_VERSION: u32 = 15;
 
 /// このアプリのサムネイル DB のスキーマの版。
 pub const THUMBS_SCHEMA_VERSION: u32 = 2;

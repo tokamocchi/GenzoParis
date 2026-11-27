@@ -320,7 +320,7 @@ fn render_one(
 
 /// 書いたファイルをカタログに登録する（取り込みと同じ手順）。登録した写真と、メタデータを読めなかったときの理由
 /// （写真は `status = error` で登録してある）を返す。
-fn register_written(
+pub(crate) fn register_written(
     ctx: &JobCtx<'_>,
     path: &Path,
 ) -> Result<(VariantId, Option<String>), ApiError> {

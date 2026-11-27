@@ -243,6 +243,11 @@ export function CollectionPanel() {
                     <Icon name="plus" size={12} />
                   </span>
                 )}
+                {c.quick && target === null && (
+                  <span className="lib-organize-target" title="クイックコレクション（ターゲットを決めていないときに、B で入れる・外す）">
+                    <Icon name="plus" size={12} />
+                  </span>
+                )}
                 <span className={`lib-organize-count${c.rule_error ? " warn" : ""}`} title={c.rule_error ?? undefined}>
                   {countText(c)}
                 </span>

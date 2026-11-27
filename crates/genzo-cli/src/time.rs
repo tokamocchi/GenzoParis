@@ -56,6 +56,43 @@ fn run_in(s: &Session, out: Output, cmd: TimeCommand) -> CliResult<Status> {
             }
             Ok(Status::Success)
         }
+        TimeCommand::Detect { reference } => {
+            ensure_variants(s, &[reference])?;
+            let key = s.core.capture_device_of(reference)?;
+            let report = s.core.detect_clock_offsets(&key)?;
+            if out.json {
+                out.print_json(&report);
+                return Ok(Status::Success);
+            }
+            out.line(format!(
+                "基準の機材: {}（撮影日時のある {} 件）",
+                device_name(&report.reference),
+                report.reference_with_time
+            ));
+            if report.devices.is_empty() {
+                out.line("比べられるほかの機材がありません");
+            } else {
+                let mut t = Table::new([
+                    "機材",
+                    "撮影日時あり",
+                    "ずれの見込み",
+                    "近くに基準の写真がある数",
+                    "判定",
+                ]);
+                for d in &report.devices {
+                    t.row(clock_offset_row(d));
+                }
+                out.table(&t);
+                out.line("ずれの見込みは、撮影日時に足すと基準の機材に合うおよその値です（数十秒〜数分の誤差があります）。直すには genzo time shift <量> --device-of <その機材の写真の ID> を使ってください");
+            }
+            if report.skipped_small > 0 {
+                out.line(format!(
+                    "撮影日時の分かる写真が少ない {} 台の機材は調べていません",
+                    report.skipped_small
+                ));
+            }
+            Ok(Status::Success)
+        }
         TimeCommand::Shift { amount, target } => edit(
             s,
             out,
@@ -160,6 +197,48 @@ fn device_row(d: &CaptureDevice) -> Vec<String> {
         d.last
             .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_default(),
+    ]
+}
+
+/// 機材の名前（カメラ・シリアル番号・種別）。
+fn device_name(k: &genzo_api::CaptureDeviceKey) -> String {
+    let camera = k.camera.as_deref().unwrap_or("（機材の情報なし）");
+    match &k.serial {
+        Some(s) => format!("{camera}（{s}・{}）", kind_text(k.kind)),
+        None => format!("{camera}（{}）", kind_text(k.kind)),
+    }
+}
+
+/// 時計のずれの見込みの 1 行（機材・撮影日時のある数・ずれ・近くに基準の写真がある数・判定）。
+fn clock_offset_row(d: &genzo_api::ClockOffsetSuggestion) -> Vec<String> {
+    let shift = if d.samples == 0 {
+        "—".to_owned()
+    } else {
+        match d.rounded_seconds {
+            Some(r) => format!(
+                "{}（丸めると {}）",
+                format_shift(d.shift_seconds),
+                format_shift(r)
+            ),
+            None => format_shift(d.shift_seconds),
+        }
+    };
+    let verdict = if d.confident {
+        "ずれている見込み"
+    } else if d.samples == 0 || d.matched_after * 10 < d.samples * 3 {
+        "分からない（同じ時間帯の写真が少ない）"
+    } else {
+        "合っている見込み"
+    };
+    vec![
+        device_name(&d.device),
+        d.with_time.to_string(),
+        shift,
+        format!(
+            "{} → {}（{} 件を調べた）",
+            d.matched_before, d.matched_after, d.samples
+        ),
+        verdict.to_owned(),
     ]
 }
 
@@ -414,6 +493,48 @@ fn timeline_in(s: &Session, out: Output, a: &TimelineArgs) -> CliResult<Status> 
 mod tests {
     use super::*;
     use crate::args::{parse_gap, parse_shift, parse_zone_minutes};
+
+    /// 時計のずれの見込みの行: ずれと丸めた値、判定（ずれている・合っている・分からない）。
+    #[test]
+    fn clock_offset_rows_are_described() {
+        let key = genzo_api::CaptureDeviceKey {
+            camera: Some("DJI Pocket".to_owned()),
+            serial: None,
+            kind: genzo_api::AssetKind::Video,
+        };
+        let mut d = genzo_api::ClockOffsetSuggestion {
+            device: key,
+            with_time: 40,
+            samples: 40,
+            shift_seconds: 9 * 3600 + 20,
+            rounded_seconds: Some(9 * 3600),
+            matched_before: 2,
+            matched_after: 31,
+            confident: true,
+        };
+        assert_eq!(
+            clock_offset_row(&d),
+            [
+                "DJI Pocket（動画）",
+                "40",
+                "+9 時間 20 秒（丸めると +9 時間）",
+                "2 → 31（40 件を調べた）",
+                "ずれている見込み"
+            ]
+        );
+        d.confident = false;
+        d.rounded_seconds = None;
+        d.shift_seconds = 15;
+        d.matched_before = 30;
+        assert_eq!(clock_offset_row(&d)[4], "合っている見込み");
+        d.matched_after = 3;
+        assert_eq!(
+            clock_offset_row(&d)[4],
+            "分からない（同じ時間帯の写真が少ない）"
+        );
+        d.samples = 0;
+        assert_eq!(clock_offset_row(&d)[2], "—");
+    }
 
     #[test]
     fn shifts_are_parsed_and_formatted() {

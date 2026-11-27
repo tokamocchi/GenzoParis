@@ -950,7 +950,10 @@ export type JobKind =
   | "check_missing"
   | "find_relink_candidates"
   | "video_proxy"
-  | "composite";
+  | "composite"
+  | "auto_tone"
+  | "video_frame"
+  | "culling_assist";
 export type JobState = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface FileIssue {
@@ -981,6 +984,38 @@ export interface ImportOptions {
    * 当てない。見つからない・使えないプリセットなら、取り込みを始めずにエラー。
    */
   develop_preset?: string | null;
+  /**
+   * 取り込むファイル（取り込む前の選択。取り込み元のフォルダからの相対パス。区切りは /）。省略・null なら、見つけた
+   * すべてを取り込む。空の一覧はコアが誤りにする。
+   */
+  only?: string[] | null;
+}
+
+/** 取り込み元のフォルダの、取り込めるファイルの 1 件（genzo-api の ImportSourceFile）。 */
+export interface ImportSourceFile {
+  /** 一覧の中の番号（サムネイルの URI に使う）。 */
+  index: number;
+  /** 取り込み元のフォルダからの相対パス（区切りは /。ImportOptions の only に渡す）。 */
+  rel_path: string;
+  name: string;
+  kind: AssetKind;
+  size: number | null;
+  /** 更新日時（UTC。RFC 3339。撮影日時ではない）。 */
+  modified: string | null;
+}
+
+/** 取り込み元のフォルダの走査の結果（genzo-api の ImportSourceScan。何も登録していない）。 */
+export interface ImportSourceScan {
+  /** この走査の番号（サムネイルの URI に使う。走査し直すと変わる）。 */
+  scan_id: number;
+  root: string;
+  files: ImportSourceFile[];
+  /** 見つけた、取り込めるファイルの数（切り詰める前）。 */
+  total: number;
+  /** 多すぎて切り詰めたか（そのときは選んで取り込めない）。 */
+  truncated: boolean;
+  unreadable: number;
+  skipped_links: number;
 }
 
 /** コピー先のフォルダの規則（genzo-api の FolderRule）。 */
@@ -1182,7 +1217,7 @@ export interface ExportReport {
 // ---------------------------------------------------------------------------
 
 /** 合成の比べ方（genzo-model の CompositeMode）。 */
-export type CompositeMode = "lighten" | "darken" | "lighter_color" | "darker_color";
+export type CompositeMode = "lighten" | "darken" | "lighter_color" | "darker_color" | "average";
 
 /** 合成の設定（genzo-model の CompositeSettings。省いた項目はコアの既定値）。 */
 export interface CompositeSettings {
@@ -1240,6 +1275,69 @@ export interface CompositeReport {
   cancelled: boolean;
 }
 
+/** 選別支援の設定（ORG-06。genzo-api の CullingOptions）。 */
+export interface CullingOptions {
+  /** 似た写真とみなす、撮影日時の差の上限（秒）。 */
+  max_gap_seconds: number;
+  /** 似た写真とみなす、サムネイルの違いの上限（0〜32）。 */
+  max_distance: number;
+  /** いちばんシャープな写真の、この割合に満たない写真を「甘い見込み」にする。 */
+  soft_ratio: number;
+}
+
+/** 似た写真のグループ（選別支援）。 */
+export interface CullingGroup {
+  /** 撮影日時の順（2 枚以上）。 */
+  variant_ids: VariantId[];
+  /** いちばんシャープな見込みの写真。 */
+  sharpest: VariantId;
+  /** ピントの甘い見込みの写真。 */
+  soft: VariantId[];
+}
+
+/** 選別支援の結果（ORG-06。genzo-api の CullingReport。何も変えていない）。 */
+export interface CullingReport {
+  options: CullingOptions;
+  analyzed: number;
+  groups: CullingGroup[];
+  grouped: number;
+  soft: number;
+  skipped_videos: number;
+  without_time: number;
+  without_thumbnail: number;
+  missing: number;
+  cancelled: boolean;
+}
+
+/** 動画からの静止画の切り出しの結果（VID-07。genzo-api の VideoFrameReport）。 */
+export interface VideoFrameReport {
+  /** 元の動画。 */
+  source: VariantId;
+  /** 切り出した時刻（ミリ秒）。 */
+  position_ms: number;
+  width: number;
+  height: number;
+  /** 書いたファイル（動画と同じフォルダ）。 */
+  path: string;
+  /** カタログに登録した写真（登録に失敗したら null）。 */
+  registered: VariantId | null;
+  registration_error: string | null;
+}
+
+/** 複数の写真への一括の自動補正の結果（DEV-32。genzo-api の AutoToneBatchReport）。 */
+export interface AutoToneBatchReport {
+  /** 値を入れて保存した写真の数（それぞれの履歴に「自動補正」を 1 件）。 */
+  applied: number;
+  /** 求めた値が今の値と同じで、保存しなかった写真の数。 */
+  unchanged: number;
+  /** 対象外で飛ばした数（動画）。 */
+  skipped: number;
+  /** 失敗した写真（見つからない・読めないなど）。 */
+  failed: VariantIssue[];
+  /** 取り消されて途中で終わったか（それまでに保存した写真はそのまま）。 */
+  cancelled: boolean;
+}
+
 export interface RegenerateReport {
   rendered: number;
   skipped: number;
@@ -1273,7 +1371,10 @@ export type JobResult =
   | ({ type: "check_missing" } & MissingCheckReport)
   | ({ type: "relink_candidates" } & RelinkSearch)
   | ({ type: "video_proxy" } & VideoProxyReport)
-  | ({ type: "composite" } & CompositeReport);
+  | ({ type: "composite" } & CompositeReport)
+  | ({ type: "auto_tone" } & AutoToneBatchReport)
+  | ({ type: "video_frame" } & VideoFrameReport)
+  | ({ type: "culling_assist" } & CullingReport);
 
 export interface JobInfo {
   job_id: number;
@@ -1332,7 +1433,8 @@ export interface SearchFilter {
   has_location?: boolean | null;
 }
 
-export type SortKey = "capture_time" | "file_name" | "rating" | "import_order";
+/** collection_order は、手動のコレクションを表示しているときの、コレクションの中の並び（入れた順・並べ替えた順）。 */
+export type SortKey = "capture_time" | "file_name" | "rating" | "import_order" | "collection_order";
 export type SortDirection = "ascending" | "descending";
 
 export interface SearchSort {
@@ -2010,6 +2112,51 @@ export interface CollectionInfo {
   rule_error: string | null;
   /** 写真の数（手動は常に。スマート・セットは with_counts のときだけ。null は数えていない）。 */
   count: number | null;
+  /** クイックコレクション（B キーの既定の入れ先）か。古いコアでは無い。 */
+  quick?: boolean;
+}
+
+/** 撮影の統計の、1 つの値（まとまり）と数。 */
+export interface StatCount {
+  /** 値の表示（カメラ・レンズの名前、「24–34 mm」、「ISO 101–200」、「f/2.8」、「2024」など）。 */
+  label: string;
+  /** 写真・動画（asset）の数。 */
+  count: number;
+}
+
+/** 撮影の統計の、1 つの項目の内訳。 */
+export interface StatBreakdown {
+  items: StatCount[];
+  /** 値がなくて数えられなかった数。 */
+  unknown: number;
+}
+
+/**
+ * 撮影の統計（shooting_stats）。数は asset の数で、仮想コピーは重ねて数えない。カメラ・撮影年は写真と動画、
+ * レンズ・焦点距離・ISO・絞りは写真だけ。
+ */
+export interface ShootingStats {
+  photos: number;
+  videos: number;
+  /** 数の多い順。 */
+  cameras: StatBreakdown;
+  /** 数の多い順。 */
+  lenses: StatBreakdown;
+  /** 決まった区切りの順。 */
+  focal_lengths: StatBreakdown;
+  /** 決まった区切りの順。 */
+  isos: StatBreakdown;
+  /** 小さい順。 */
+  apertures: StatBreakdown;
+  /** 古い順。 */
+  years: StatBreakdown;
+}
+
+/** クイックコレクションへの出し入れの結果（toggle_quick_collection）。 */
+export interface QuickCollectionToggle {
+  collection_id: CollectionId;
+  added: number;
+  removed: number;
 }
 
 export type MatchMode = "all" | "any";
@@ -2049,6 +2196,7 @@ export interface SmartRule {
 
 export type Command =
   | { type: "import_folder"; path: string; recursive: boolean; options?: ImportOptions }
+  | { type: "scan_import_source"; path: string; recursive: boolean }
   | { type: "job"; job_id: number }
   | { type: "wait_job"; job_id: number; timeout_ms: number | null }
   | { type: "cancel_job"; job_id: number }
@@ -2067,6 +2215,7 @@ export type Command =
   | { type: "facets" }
   | { type: "check_files"; variant_ids: VariantId[] }
   | { type: "count"; filter: SearchFilter }
+  | { type: "shooting_stats"; filter: SearchFilter }
   | { type: "keyword_tree" }
   | { type: "find_keywords"; query: string; limit?: number | null }
   | { type: "create_keyword"; parent_id: KeywordId | null; path: string[] }
@@ -2093,6 +2242,8 @@ export type Command =
   | { type: "set_smart_rule"; collection_id: CollectionId; rule: SmartRule }
   | { type: "add_to_collection"; collection_id: CollectionId; variant_ids: VariantId[] }
   | { type: "remove_from_collection"; collection_id: CollectionId; variant_ids: VariantId[] }
+  | { type: "toggle_quick_collection"; variant_ids: VariantId[] }
+  | { type: "reorder_collection"; collection_id: CollectionId; variant_ids: VariantId[]; before: VariantId | null }
   | { type: "variant_collections"; variant_id: VariantId }
   | { type: "create_stack"; variant_ids: VariantId[]; top: VariantId | null }
   | { type: "add_to_stack"; stack_id: StackId; variant_ids: VariantId[] }
@@ -2171,6 +2322,7 @@ export type Command =
   | { type: "mask_color_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
   | { type: "retouch_auto_source"; variant_id: VariantId; spot: RetouchSpot }
   | { type: "auto_tone"; variant_id: VariantId }
+  | { type: "auto_tone_variants"; variant_ids: VariantId[] }
   | { type: "mask_overlay"; variant_id: VariantId; index: number; uncropped?: boolean }
   | { type: "compute_ai_mask"; variant_id: VariantId; kind: AiMaskKind }
   | { type: "ai_mask_status" }
@@ -2222,7 +2374,10 @@ export type Command =
   | { type: "create_video_proxy"; variant_id: VariantId }
   | { type: "video_proxy_cache" }
   | { type: "clear_video_proxies" }
+  | { type: "extract_video_frame"; variant_id: VariantId; position_seconds: number }
+  | { type: "culling_assist"; variant_ids: VariantId[]; options: CullingOptions }
   | { type: "capture_devices" }
+  | { type: "detect_clock_offsets"; reference: CaptureDeviceKey }
   | { type: "capture_device_of"; variant_id: VariantId }
   | { type: "plan_capture_time_edit"; target: CaptureTarget; edit: CaptureTimeEdit }
   | { type: "edit_capture_times"; target: CaptureTarget; edit: CaptureTimeEdit }
@@ -2231,6 +2386,8 @@ export type Command =
   // 位置情報の後付け（LIB-21）。location は省略できない（null は付けた位置を消して、カメラの位置に戻す）。
   | { type: "plan_location_edit"; variant_ids: VariantId[]; location: GpsCoord | null }
   | { type: "edit_locations"; variant_ids: VariantId[]; location: GpsCoord | null }
+  | { type: "plan_gpx_locations"; variant_ids: VariantId[]; gpx_path: string; options: GpxOptions }
+  | { type: "apply_gpx_locations"; variant_ids: VariantId[]; gpx_path: string; options: GpxOptions }
   | { type: "location_edits" }
   | { type: "undo_location_edit" }
   | { type: "timeline"; generation: number; gap_seconds: number }
@@ -2267,6 +2424,7 @@ export type Response =
   | ({ type: "facets" } & Facets)
   | ({ type: "file_check" } & FileCheckReport)
   | { type: "count"; count: number }
+  | ({ type: "shooting_stats" } & ShootingStats)
   | { type: "keywords"; keywords: KeywordInfo[] }
   | { type: "keyword_hits"; hits: KeywordHit[] }
   | { type: "keyword_created"; keyword_id: KeywordId }
@@ -2305,6 +2463,7 @@ export type Response =
   | ({ type: "mask_color" } & PickedMaskColor)
   | { type: "retouch_source"; offset: [number, number] | null }
   | ({ type: "auto_tone" } & AutoTone)
+  | ({ type: "quick_collection" } & QuickCollectionToggle)
   | ({ type: "mask_overlay" } & MaskOverlayInfo)
   | ({ type: "ai_mask" } & AiMaskResult)
   | ({ type: "ai_mask_status" } & AiMaskStatus)
@@ -2331,11 +2490,14 @@ export type Response =
   | ({ type: "video_playback" } & VideoPlayback)
   | ({ type: "video_proxy_cache" } & VideoProxyCacheStatus)
   | { type: "capture_devices"; devices: CaptureDevice[] }
+  | ({ type: "clock_offsets" } & ClockOffsetReport)
   | ({ type: "capture_device" } & CaptureDeviceKey)
   | ({ type: "capture_time_plan" } & CaptureTimePlan)
   | { type: "capture_time_edits"; edits: CaptureTimeEditInfo[] }
   | { type: "capture_time_undone"; undone: CaptureTimeUndo | null }
   | ({ type: "location_edit_plan" } & LocationEditPlan)
+  | ({ type: "gpx_location_plan" } & GpxLocationPlan)
+  | ({ type: "import_source" } & ImportSourceScan)
   | { type: "location_edits"; edits: LocationEditInfo[] }
   | { type: "location_undone"; undone: LocationUndo | null }
   | ({ type: "timeline" } & Timeline)
@@ -2357,6 +2519,35 @@ export interface CaptureDeviceKey {
   camera: string | null;
   serial: string | null;
   kind: AssetKind;
+}
+
+/** 機材の時計のずれの見込み（ORG-02。genzo-api の ClockOffsetSuggestion）。 */
+export interface ClockOffsetSuggestion {
+  device: CaptureDeviceKey;
+  /** 撮影日時の分かる写真・動画の数。 */
+  with_time: number;
+  /** 調べた数（多いときは間引く。0 なら、同じ時間帯の写真がなくて調べられなかった）。 */
+  samples: number;
+  /** 撮影日時に足すと、基準の機材に合う秒数（正なら、この機材の時計が遅れている）。およその値。 */
+  shift_seconds: number;
+  /** ずれが 15 分の倍数に近いときの、丸めた値。 */
+  rounded_seconds: number | null;
+  /** 今のままで、近く（± 2 分）に基準の機材の写真がある数。 */
+  matched_before: number;
+  /** ずらしたときに、近くに基準の機材の写真がある数。 */
+  matched_after: number;
+  /** 提案できるだけの根拠があるか。 */
+  confident: boolean;
+}
+
+/** 機材ごとの時計のずれの見込み（ORG-02。genzo-api の ClockOffsetReport）。 */
+export interface ClockOffsetReport {
+  reference: CaptureDeviceKey;
+  reference_with_time: number;
+  /** 提案できるものが先。 */
+  devices: ClockOffsetSuggestion[];
+  /** 撮影日時の分かる写真が少なくて調べなかった機材の数。 */
+  skipped_small: number;
 }
 
 /** 機材と数（genzo-api の CaptureDevice）。 */
@@ -2538,6 +2729,45 @@ export interface LocationEditInfo {
   asset_count: number;
   /** 変更した日時（UTC。RFC 3339）。 */
   created_at: string;
+  /**
+   * GPX のログから、写真ごとに違う位置を付けた変更か（そのとき location は代表の 1 つ）。古いコアでは無い。
+   */
+  from_track?: boolean;
+}
+
+/** GPX のログからの位置付けの設定（genzo-api の GpxOptions）。 */
+export interface GpxOptions {
+  /** 記録の途切れとみなす間隔（秒）。 */
+  max_gap_seconds: number;
+  /** 写真の時計のずれ（秒。撮影日時に足してからログと照らし合わせる）。 */
+  offset_seconds: number;
+  /** すでに位置のある写真にも付けるか。 */
+  overwrite: boolean;
+}
+
+/** GPX のログからの位置付けの見込み・結果（genzo-api の GpxLocationPlan）。写真の数は asset の数。 */
+export interface GpxLocationPlan {
+  track_points: number;
+  track_skipped: number;
+  /** ログの最初・最後の点の時刻（UTC。RFC 3339）。 */
+  track_start: string;
+  track_end: string;
+  photos: number;
+  /** ログから位置が決まった写真の数（changed + unchanged）。 */
+  matched: number;
+  /** そのうち、2 点の間を補間して決めた数。 */
+  interpolated: number;
+  changed: number;
+  unchanged: number;
+  /** 撮影日時がログの記録から離れていて、位置が決まらなかった数。 */
+  out_of_track: number;
+  no_capture_time: number;
+  /** すでに位置があるので付けなかった数。 */
+  skipped_located: number;
+  skipped_videos: number;
+  missing: number;
+  /** 記録した変更（結果のとき。変わったものがなければ null。見込みでは null）。 */
+  edit_id: number | null;
 }
 
 /** 位置の変更の取り消しの結果（genzo-api の LocationUndo）。 */

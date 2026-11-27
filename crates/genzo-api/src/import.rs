@@ -619,6 +619,8 @@ pub(crate) struct ImportApply {
     pub tags: genzo_catalog::ImportTags,
     /// 現像プリセット（IMP-07）。
     pub preset: Option<ImportPreset>,
+    /// 取り込むファイル（取り込み元のフォルダからの相対パス。[`ImportOptions::only`]。`None` ならすべて）。
+    pub only: Option<std::collections::HashSet<String>>,
 }
 
 /// 取り込み時に当てる現像プリセット（IMP-07。取り込みを始めたときに読んだ中身）。
@@ -667,7 +669,53 @@ impl ImportApply {
                 })
             }
         };
-        Ok(Self { tags, preset })
+        let only = match &options.only {
+            None => None,
+            Some(list) if list.is_empty() => {
+                return Err(ApiError::InvalidArgument(
+                    "取り込むファイルを 1 つ以上選んでください".to_owned(),
+                ));
+            }
+            Some(list) => Some(list.iter().cloned().collect()),
+        };
+        Ok(Self { tags, preset, only })
+    }
+
+    /// 走査の結果から、選んだファイル（[`ImportOptions::only`]）だけを残す。選んだのに見つからなかったファイルは
+    /// `missing` に理由を入れる（取り込み元のフォルダからの相対パスで照らし合わせる）。選んでいなければ何もしない。
+    pub(crate) fn select(&self, root: &Path, scanned: &mut Scan, missing: &mut Vec<FileIssue>) {
+        let Some(only) = &self.only else {
+            return;
+        };
+        let mut found = std::collections::HashSet::new();
+        scanned.files.retain(|c| {
+            crate::import_scan::rel_path_of(root, &c.path)
+                .filter(|rel| only.contains(rel))
+                .is_some_and(|rel| {
+                    found.insert(rel);
+                    true
+                })
+        });
+        // フォルダも、残したファイルのフォルダとその上のフォルダだけにする（選んでいないサブフォルダを、空のまま
+        // カタログに登録しない）。取り込み元のフォルダ（先頭）は残す。
+        let root_rel = scanned.dirs.first().cloned();
+        let files = &scanned.files;
+        scanned.dirs.retain(|d| {
+            Some(d) == root_rel.as_ref()
+                || files.iter().any(|c| {
+                    c.dir_rel == *d
+                        || c.dir_rel
+                            .strip_prefix(d.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'))
+                })
+        });
+        let mut lost: Vec<&String> = only.iter().filter(|p| !found.contains(*p)).collect();
+        lost.sort();
+        missing.extend(lost.into_iter().map(|p| FileIssue {
+            path: root.join(p),
+            reason:
+                "選んだファイルが見つかりません（取り込み元から消えた・名前が変わった）".to_owned(),
+        }));
     }
 
     /// 結果に入れる現像プリセット（当てた数は 0 から数える）。
@@ -723,7 +771,8 @@ fn run_import(
     };
     // 同じ取り込みの中で登録した（する）ファイル（同じ内容のファイルの 2 つ目からを重複とするため）。
     let mut seen = ImportSeen::default();
-    let scanned = scan(&root, &vol.rel, recursive, &excluded, ctx.token());
+    let mut scanned = scan(&root, &vol.rel, recursive, &excluded, ctx.token());
+    apply.select(&root, &mut scanned, &mut report.not_registered);
     report.files_found = scanned.files.len() as u64;
     report.skipped_links = scanned.skipped_links;
     report.not_registered.extend(scanned.unreadable);

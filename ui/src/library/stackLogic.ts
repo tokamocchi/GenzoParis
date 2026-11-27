@@ -127,15 +127,23 @@ export type PhotoMenuAction =
   | "expand_all"
   | "collapse_all"
   | "auto_stack"
+  | "culling_assist"
+  | "collection_first"
+  | "collection_up"
+  | "collection_down"
+  | "collection_last"
   | "edit_capture_time"
   | "edit_location"
+  | "gpx_location"
   | "upgrade_process"
   | "apply_preset"
+  | "auto_tone"
   | "move_to_folder"
   | "rename_files"
   | "relink"
   | "composite_lighten"
   | "composite_darken"
+  | "composite_average"
   | "delete";
 
 export interface PhotoMenuEntry {
@@ -158,6 +166,8 @@ export const PHOTO_MENU_SEPARATOR = "separator" as const;
 export function photoMenuEntries(
   targets: number,
   current: (Pick<VariantSummary, "is_master" | "stack" | "kind"> & { file_status?: FileStatus }) | undefined,
+  /** コレクションを「コレクションの順」で表示しているか（そのときだけ、コレクションの中の並べ替えを出す）。 */
+  collectionOrder = false,
 ): (PhotoMenuEntry | typeof PHOTO_MENU_SEPARATOR)[] {
   const stack = current?.stack ?? null;
   const any = targets >= 1 || current !== undefined;
@@ -183,11 +193,28 @@ export function photoMenuEntries(
     { action: "expand_all", label: "すべてのスタックを展開", enabled: true },
     { action: "collapse_all", label: "すべてのスタックを折りたたむ", enabled: true },
     { action: "auto_stack", label: "撮影時刻でスタック…", enabled: true },
+    // 選別支援（ORG-06）: 選んだ写真から、似た写真のグループと、ピントの甘い見込みの写真を探す（何も変えない）。
+    { action: "culling_assist", label: "選別支援（似た写真・ピントの甘い写真を探す）…", enabled: targets >= 2 },
     PHOTO_MENU_SEPARATOR,
+    // 手動のコレクションの中の並べ替え（LIB-10）。並べ替えを「コレクションの順」にしているときだけ出す
+    // （手動のコレクションでなければ、実行するときに知らせる）。
+    ...(collectionOrder
+      ? [
+          { action: "collection_first", label: "コレクションの先頭へ移す", enabled: any } as PhotoMenuEntry,
+          { action: "collection_up", label: "コレクションの中で 1 つ前へ", enabled: any } as PhotoMenuEntry,
+          { action: "collection_down", label: "コレクションの中で 1 つ後ろへ", enabled: any } as PhotoMenuEntry,
+          { action: "collection_last", label: "コレクションの最後へ移す", enabled: any } as PhotoMenuEntry,
+          PHOTO_MENU_SEPARATOR,
+        ]
+      : []),
     { action: "edit_capture_time", label: "撮影日時を修正…", enabled: any },
     // 位置情報の後付け（LIB-21）。動画には付けない（まとめて選んだ中の動画はコアが除く）。
     { action: "edit_location", label: "位置を付ける…", enabled: any && !(targets <= 1 && isVideo) },
+    // GPX のログからの位置付け（LIB-21）: ログと撮影日時を照らし合わせて、写真ごとに位置を付ける。
+    { action: "gpx_location", label: "GPX のログから位置を付ける…", enabled: any && !(targets <= 1 && isVideo) },
     { action: "apply_preset", label: "現像プリセットを適用…", enabled: any && !(targets <= 1 && isVideo) },
+    // 一括の自動補正（DEV-32）: 選んだ写真のそれぞれに、現像の「自動」と同じ値を入れる（動画はコアが飛ばす）。
+    { action: "auto_tone", label: "自動補正を当てる…", enabled: any && !(targets <= 1 && isVideo) },
     { action: "upgrade_process", label: "処理バージョンを最新に更新…", enabled: any && !(targets <= 1 && isVideo) },
     PHOTO_MENU_SEPARATOR,
     { action: "move_to_folder", label: "フォルダへ移動…", enabled: any },
@@ -197,6 +224,7 @@ export function photoMenuEntries(
     // 比較明・比較暗合成（DEV-34）: 2 枚以上を選んでいるとき（動画はコアが除く）。
     { action: "composite_lighten", label: "比較明合成…", enabled: targets >= 2 },
     { action: "composite_darken", label: "比較暗合成…", enabled: targets >= 2 },
+    { action: "composite_average", label: "平均合成…", enabled: targets >= 2 },
     PHOTO_MENU_SEPARATOR,
     // 削除のダイアログ（FILE-01）。手動のコレクションを表示していても、コレクションから外すのではなく削除の
     // ダイアログを開く（Delete キーとは違うので、キーは添えない。state/organize.ts の openDeleteDialog）。

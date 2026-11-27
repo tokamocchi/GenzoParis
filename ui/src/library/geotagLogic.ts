@@ -575,6 +575,7 @@ export function describeTargets(p: LocationEditPlan): string[] {
 
 /** 位置の変更の履歴の 1 件の文。 */
 export function describeLocationEdit(e: LocationEditInfo): string {
+  if (e.from_track) return "GPX のログから位置を付ける";
   return e.kind === "set" ? `位置を付ける（${formatGps(e.location) ?? "座標なし"}）` : "付けた位置を消す";
 }
 

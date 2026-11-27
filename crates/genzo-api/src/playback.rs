@@ -428,7 +428,7 @@ impl Inner {
 }
 
 /// 動画の variant の主となるファイル（動画でなければ [`ApiError::InvalidArgument`]）。
-fn video_file(inner: &Inner, variant_id: VariantId) -> Result<VariantFile, ApiError> {
+pub(crate) fn video_file(inner: &Inner, variant_id: VariantId) -> Result<VariantFile, ApiError> {
     let f = inner.with_catalog_api(|c| variant_file(c, variant_id))?;
     if f.kind != AssetKind::Video || video_content_type(&f.name).is_none() {
         return Err(ApiError::InvalidArgument(format!(

@@ -201,6 +201,87 @@ impl Core {
             .collect())
     }
 
+    /// 機材ごとの時計のずれの見込み（ORG-02）: `reference`（時計が合っているとみなす機材）と同じ時間帯に撮った
+    /// 写真・動画の撮影日時から、ほかの機材の時計のずれを推定する（何も変えない。genzo-model の `clock_offset` の
+    /// doc）。値はおよそで、提案にとどめる。直すには、見込みの秒数で [`Core::edit_capture_times`]
+    /// （[`CaptureTimeEdit::Shift`]）を呼ぶ。
+    ///
+    /// エラー: 基準の機材の撮影日時の分かる写真が少なすぎるなら [`ApiError::InvalidArgument`]。
+    pub fn detect_clock_offsets(
+        &self,
+        reference: &crate::types::CaptureDeviceKey,
+    ) -> Result<crate::types::ClockOffsetReport, ApiError> {
+        use crate::types::{ClockOffsetReport, ClockOffsetSuggestion};
+        use genzo_model::clock_offset::{ClockParams, estimate_clock_shift};
+        let inner = &self.inner;
+        inner.check_open()?;
+        let params = ClockParams::default();
+        let reference_key = reference.to_catalog();
+        let (reference_times, others) = inner.with_catalog(|c| {
+            let reference_times = c.capture_seconds_of_device(&reference_key)?;
+            let mut others = Vec::new();
+            for d in c.capture_devices()? {
+                if d.key != reference_key {
+                    let times = c.capture_seconds_of_device(&d.key)?;
+                    others.push((d.key, times));
+                }
+            }
+            Ok((reference_times, others))
+        })?;
+        if reference_times.len() < params.min_items {
+            return Err(invalid(format!(
+                "基準の機材の、撮影日時の分かる写真が少なすぎます（{} 枚。{} 枚以上が要ります）",
+                reference_times.len(),
+                params.min_items
+            )));
+        }
+        let mut skipped_small = 0u64;
+        let mut devices = Vec::new();
+        for (key, times) in others {
+            if times.len() < params.min_items {
+                skipped_small += 1;
+                continue;
+            }
+            let with_time = times.len() as u64;
+            let Some(e) = estimate_clock_shift(&reference_times, &times, &params) else {
+                // 近い時刻の組がない（同じ時間帯に使っていない）。
+                devices.push(ClockOffsetSuggestion {
+                    device: key.into(),
+                    with_time,
+                    samples: 0,
+                    shift_seconds: 0,
+                    rounded_seconds: None,
+                    matched_before: 0,
+                    matched_after: 0,
+                    confident: false,
+                });
+                continue;
+            };
+            devices.push(ClockOffsetSuggestion {
+                device: key.into(),
+                with_time,
+                samples: e.samples,
+                shift_seconds: e.shift_seconds,
+                rounded_seconds: e.rounded_seconds,
+                matched_before: e.matched_before,
+                matched_after: e.matched_after,
+                confident: e.confident,
+            });
+        }
+        // 提案できるものを先に、その中はずれの大きい順（並びは安定: 同じなら機材の一覧の順）。
+        devices.sort_by(|a, b| {
+            b.confident
+                .cmp(&a.confident)
+                .then_with(|| b.shift_seconds.abs().cmp(&a.shift_seconds.abs()))
+        });
+        Ok(ClockOffsetReport {
+            reference: reference.clone(),
+            reference_with_time: reference_times.len() as u64,
+            devices,
+            skipped_small,
+        })
+    }
+
     /// 写真の機材（LIB-16。[`Core::capture_devices`] の機材の 1 つ）。写真が見つからなければ
     /// [`ApiError::NotFound`]。
     pub fn capture_device_of(

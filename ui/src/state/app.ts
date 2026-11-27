@@ -59,8 +59,16 @@ export type DialogState =
   | { kind: "paste_settings"; targets: VariantId[] }
   // 処理バージョンをまとめて最新に更新する（DATA-09。写真の右クリックのメニュー）。
   | { kind: "upgrade_process"; targets: VariantId[] }
+  // 選んだ写真にまとめて自動補正を当てる（DEV-32。写真の右クリックのメニュー）。
+  | { kind: "auto_tone"; targets: VariantId[] }
   | { kind: "settings"; tab?: "general" | "view" | "catalog" | "backup" | "about" }
   | { kind: "shortcuts" }
+  // 選別支援（ORG-06。写真の右クリックのメニュー）。
+  | { kind: "culling"; variantIds: VariantId[] }
+  // GPX のログから位置を付ける（LIB-21。写真の右クリックのメニュー）。
+  | { kind: "gpx"; variantIds: VariantId[] }
+  // 撮影の統計（左のパネルの「カタログ」の「統計」）。
+  | { kind: "stats" }
   | { kind: "close_failed"; failure: CloseFailure; quitting: boolean }
   | { kind: "crash_reports"; reports: CrashReportSummary[] }
   // キーワード（LIB-09）: 作る（parentId の下）・名前の変更・移動・削除の確認。
@@ -326,6 +334,9 @@ export const JOB_LABEL: Record<JobKind, string> = {
   find_relink_candidates: "再リンクの候補の探索",
   video_proxy: "再生用のファイルの作成",
   composite: "合成",
+  auto_tone: "自動補正",
+  video_frame: "動画からの静止画の切り出し",
+  culling_assist: "選別支援",
 };
 
 const jobWaiters = new Map<number, ((info: JobInfo) => void)[]>();

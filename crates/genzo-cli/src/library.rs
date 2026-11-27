@@ -69,6 +69,39 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
             ..Default::default()
         },
     )?;
+    if a.list {
+        // 取り込まずに、取り込めるファイルの一覧を出す（取り込む前の選択。--only に渡す相対パス）。
+        let scan = s.core.scan_import_source(&a.dir, !a.no_recursive);
+        s.close()?;
+        let scan = scan?;
+        if out.json {
+            out.print_json(&scan);
+        } else {
+            let mut t = Table::new(["相対パス", "種別", "大きさ（バイト）"]);
+            for f in &scan.files {
+                t.row([
+                    f.rel_path.clone(),
+                    match f.kind {
+                        genzo_api::AssetKind::Photo => "写真",
+                        genzo_api::AssetKind::Video => "動画",
+                    }
+                    .to_owned(),
+                    f.size.map(|n| n.to_string()).unwrap_or_default(),
+                ]);
+            }
+            out.table(&t);
+            out.line(format!(
+                "取り込めるファイル: {} 件{}",
+                scan.total,
+                if scan.truncated {
+                    format!("（先頭の {} 件だけを出しています）", scan.files.len())
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        return Ok(Status::Success);
+    }
     let job = s
         .core
         .import_folder_with(&a.dir, !a.no_recursive, &options)?;
@@ -363,6 +396,162 @@ fn status_text(s: FileStatus) -> &'static str {
         FileStatus::Missing => "見つからない",
         FileStatus::Error => "読めない",
     }
+}
+
+/// `stats`（撮影の統計）: 条件に合う写真・動画を、カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとに数える
+/// （genzo-api の [`genzo_api::Core::shooting_stats`]）。JSON の出力は [`genzo_api::ShootingStats`] そのまま。
+pub fn stats(g: &GlobalArgs, out: Output, a: &crate::args::StatsArgs) -> CliResult<Status> {
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    let r = filter_of(&s, &a.filter).and_then(|f| Ok(s.core.shooting_stats(&f)?));
+    s.close()?;
+    let stats = r?;
+    if out.json {
+        out.print_json(&stats);
+        return Ok(Status::Success);
+    }
+    out.line(format!(
+        "写真 {} 枚、動画 {} 本（仮想コピーは重ねて数えません）",
+        stats.photos, stats.videos
+    ));
+    for (title, b) in [
+        ("カメラ", &stats.cameras),
+        ("レンズ（写真）", &stats.lenses),
+        ("焦点距離（写真）", &stats.focal_lengths),
+        ("ISO（写真）", &stats.isos),
+        ("絞り（写真）", &stats.apertures),
+        ("撮影年", &stats.years),
+    ] {
+        for line in stats_lines(title, b, a.top) {
+            out.line(line);
+        }
+    }
+    Ok(Status::Success)
+}
+
+/// `cull`（選別支援。ORG-06）: 条件に合う写真から、似た写真のグループと、その中でピントの甘い見込みの写真を
+/// 見つける（genzo-api の [`genzo_api::Core::culling_assist`]。何も変えない）。`--stack` なら、グループを、いちばん
+/// シャープな見込みの写真を一番上にしてスタックにまとめる。JSON の出力: `{"report": 結果, "stacked": 数}`。
+pub fn cull(g: &GlobalArgs, out: Output, a: &crate::args::CullArgs) -> CliResult<Status> {
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    let r = cull_in(&s, out, a);
+    s.close()?;
+    r
+}
+
+fn cull_in(s: &Session, out: Output, a: &crate::args::CullArgs) -> CliResult<Status> {
+    // 折りたたんだスタックの中の写真も調べる。
+    let filter = SearchFilter {
+        expand_stacks: true,
+        ..filter_of(s, &a.filter)?
+    };
+    let found = s.core.search(&filter, SearchSort::default())?;
+    let ids = s.core.result_ids(found.generation)?;
+    let options = genzo_api::CullingOptions {
+        max_gap_seconds: a.gap,
+        max_distance: a.distance,
+        soft_ratio: a.soft_ratio,
+    };
+    let job = s.core.culling_assist(&ids, &options)?;
+    let info = s.wait_job_ok(job, "選別支援")?;
+    let Some(JobResult::CullingAssist(report)) = info.result else {
+        return Err(CliError::other("選別支援の結果がありません"));
+    };
+    let mut stacked = 0u64;
+    if a.stack && !report.cancelled {
+        for group in &report.groups {
+            s.core
+                .create_stack(&group.variant_ids, Some(group.sharpest))?;
+            stacked += 1;
+        }
+    }
+    if out.json {
+        out.print_json(&json!({ "report": json_value(&report), "stacked": stacked }));
+    } else {
+        for line in cull_lines(&report) {
+            out.line(line);
+        }
+        if a.stack {
+            out.line(format!("{stacked} 組をスタックにまとめました"));
+        }
+    }
+    Ok(if report.cancelled {
+        Status::Partial
+    } else {
+        Status::Success
+    })
+}
+
+/// 選別支援の結果の表示の行。
+fn cull_lines(r: &genzo_api::CullingReport) -> Vec<String> {
+    let ids = |v: &[VariantId]| {
+        v.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut lines = vec![format!(
+        "{} 枚を調べました: 似た写真のグループ {} 組（{} 枚）、ピントの甘い見込み {} 枚",
+        r.analyzed,
+        r.groups.len(),
+        r.grouped,
+        r.soft
+    )];
+    for (i, g) in r.groups.iter().enumerate() {
+        let soft = if g.soft.is_empty() {
+            String::new()
+        } else {
+            format!("、甘い見込み: {}", ids(&g.soft))
+        };
+        lines.push(format!(
+            "  {}: {}（いちばんシャープな見込み: {}{soft}）",
+            i + 1,
+            ids(&g.variant_ids),
+            g.sharpest
+        ));
+    }
+    for (n, text) in [
+        (r.skipped_videos, "動画のため飛ばしました"),
+        (r.without_time, "撮影日時がないため調べていません"),
+        (r.without_thumbnail, "サムネイルがないため調べていません"),
+        (r.missing, "見つかりませんでした"),
+    ] {
+        if n > 0 {
+            lines.push(format!("{n} 件は{text}"));
+        }
+    }
+    if r.cancelled {
+        lines.push("途中で取り消されました".to_owned());
+    }
+    lines
+}
+
+/// 統計の 1 つの項目の表示の行（見出し・値ごとの数・省いた数・不明の数）。値も不明もなければ空。
+fn stats_lines(title: &str, b: &genzo_api::StatBreakdown, top: usize) -> Vec<String> {
+    if b.items.is_empty() && b.unknown == 0 {
+        return Vec::new();
+    }
+    let shown = if top == 0 {
+        b.items.len()
+    } else {
+        top.min(b.items.len())
+    };
+    let mut lines = vec![format!("{title}:")];
+    lines.extend(
+        b.items[..shown]
+            .iter()
+            .map(|c| format!("  {:>8}  {}", c.count, c.label)),
+    );
+    if shown < b.items.len() {
+        let rest: u64 = b.items[shown..].iter().map(|c| c.count).sum();
+        lines.push(format!(
+            "  {rest:>8}  （ほか {} 種類）",
+            b.items.len() - shown
+        ));
+    }
+    if b.unknown > 0 {
+        lines.push(format!("  {:>8}  （不明）", b.unknown));
+    }
+    lines
 }
 
 /// `search`。
@@ -940,6 +1129,59 @@ fn answer_is_yes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 統計の表示の行: 上位だけを出して残りをまとめ、不明を最後に足す。値も不明もなければ何も出さない。
+    #[test]
+    fn stats_lines_show_the_top_items_and_the_rest() {
+        let b = genzo_api::StatBreakdown {
+            items: [("A", 5), ("B", 3), ("C", 1)]
+                .into_iter()
+                .map(|(label, count)| genzo_api::StatCount {
+                    label: label.to_owned(),
+                    count,
+                })
+                .collect(),
+            unknown: 2,
+        };
+        assert_eq!(
+            stats_lines("カメラ", &b, 2),
+            [
+                "カメラ:",
+                "         5  A",
+                "         3  B",
+                "         1  （ほか 1 種類）",
+                "         2  （不明）"
+            ]
+        );
+        assert_eq!(stats_lines("カメラ", &b, 0).len(), 5);
+        assert!(stats_lines("カメラ", &genzo_api::StatBreakdown::default(), 2).is_empty());
+    }
+
+    /// 選別支援の結果の行: グループごとの写真・いちばんシャープな見込み・甘い見込み。
+    #[test]
+    fn cull_reports_are_described() {
+        let v = VariantId::new;
+        let r = genzo_api::CullingReport {
+            analyzed: 5,
+            groups: vec![genzo_api::CullingGroup {
+                variant_ids: vec![v(1), v(2), v(3)],
+                sharpest: v(3),
+                soft: vec![v(2)],
+            }],
+            grouped: 3,
+            soft: 1,
+            without_time: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            cull_lines(&r),
+            [
+                "5 枚を調べました: 似た写真のグループ 1 組（3 枚）、ピントの甘い見込み 1 枚",
+                "  1: 1 2 3（いちばんシャープな見込み: 3、甘い見込み: 2）",
+                "1 件は撮影日時がないため調べていません",
+            ]
+        );
+    }
 
     #[test]
     fn unique_ids_keep_the_order() {

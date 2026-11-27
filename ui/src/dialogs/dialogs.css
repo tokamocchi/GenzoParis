@@ -660,3 +660,172 @@ button.dlg-list-item:focus-visible {
   border: 1px solid var(--line-strong);
   align-self: flex-start;
 }
+
+/* 撮影の統計（StatsDialog）。 */
+.dlg-stats-summary {
+  margin: 8px 0;
+  color: var(--fg-1);
+}
+.dlg-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 24px;
+  max-height: 56vh;
+  overflow-y: auto;
+}
+.dlg-stats h3 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.dlg-stats-hint {
+  margin-left: 8px;
+  font-weight: 400;
+  color: var(--fg-3);
+}
+.dlg-stats table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+.dlg-stats th {
+  width: 42%;
+  padding: 1px 6px 1px 0;
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dlg-stats tr.note th {
+  color: var(--fg-3);
+}
+.dlg-stats td.bar span {
+  display: block;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.dlg-stats tr.note td.bar span {
+  background: var(--fg-3);
+}
+.dlg-stats td.num,
+.dlg-stats td.pct {
+  width: 56px;
+  padding-left: 6px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.dlg-stats td.pct {
+  width: 48px;
+  color: var(--fg-3);
+}
+
+/* 折りたたんでおく補助の欄（撮影日時の修正の「機材の時計のずれを調べる」）。 */
+.dlg-details {
+  margin-top: 8px;
+}
+.dlg-details > summary {
+  cursor: pointer;
+  color: var(--fg-1);
+  font-size: 12px;
+}
+
+/* 取り込む前の選択（ImportPicker）。 */
+.dlg-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+}
+.dlg-pick-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  opacity: 0.45;
+}
+.dlg-pick-item.on {
+  opacity: 1;
+  border-color: var(--accent);
+}
+.dlg-pick-item input {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+}
+.dlg-pick-item img {
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  object-fit: contain;
+  background: var(--bg-2);
+}
+.dlg-pick-item .name {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 選別支援（CullingDialog）。 */
+.dlg-cull {
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.dlg-cull-head {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.dlg-cull-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.dlg-cull-item {
+  position: relative;
+  width: 96px;
+  height: 68px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+  cursor: pointer;
+  overflow: hidden;
+}
+.dlg-cull-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.dlg-cull-item .none {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.dlg-cull-item.sharp {
+  border-color: var(--accent);
+}
+.dlg-cull-item.soft {
+  border-color: var(--warn);
+}
+.dlg-cull-item .mark {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--fg-0, #fff);
+}

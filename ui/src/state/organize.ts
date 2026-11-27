@@ -5,7 +5,11 @@
 //   （state/app.ts の handleEvent）。表示中の検索結果はコアが作り直す（search_updated）。
 // - ターゲットコレクション（B キーの入れ先）は、カタログごとにブラウザに保存する。B は、選んだ写真が
 //   すべて入っていれば外し、そうでなければ入れる（Lightroom と同じ。入れた数が 0 ならすべて入っていた
-//   とみなして外す）。
+//   とみなして外す）。ターゲットを決めていなければ、クイックコレクション（コアが最上位に作って覚える手動の
+//   コレクション。LIB-10 の残り）に出し入れする。
+// - 手動のコレクションの中の並べ替え（写真の右クリックのメニュー）: 並べ替えを「コレクションの順」にして
+//   表示している間、操作の対象の写真を先頭・1 つ前・1 つ後ろ・最後へ移す（library/collectionLogic.ts の
+//   planCollectionMove）。
 // - 手動のコレクションを表示している間の Delete・Backspace は、カタログから除くのではなく、そのコレクションから
 //   外す（写真は消えない。Lightroom と同じ。決定事項ログ No.82）。それ以外では削除のダイアログを開き、対象が
 //   すべて仮想コピーなら「仮想コピーだけを削除」を既定にする（決定事項ログ No.88）。写真の右クリックの「削除…」は、
@@ -13,6 +17,7 @@
 
 import * as core from "../api/core";
 import type { CollectionId, CollectionInfo, KeywordId, VariantId } from "../api/types";
+import { type CollectionMove, planCollectionMove } from "../library/collectionLogic";
 import { parseKeywordInput } from "../library/keywordLogic";
 import type { DropTarget } from "../library/photoDrag";
 import { defaultDeleteKind } from "../library/stackLogic";
@@ -59,16 +64,31 @@ export async function removeFromCollection(id: CollectionId, ids: VariantId[], n
   }
 }
 
+/** クイックコレクションに出し入れする（すべて入っていれば外す。なければコアが作る）。 */
+export async function toggleQuickCollection(ids: VariantId[]): Promise<void> {
+  if (ids.length === 0) return;
+  try {
+    const r = await core.toggleQuickCollection(ids);
+    if (r.removed > 0) {
+      actions.notify("info", `${r.removed.toLocaleString("ja-JP")} 枚をクイックコレクションから外しました（B）`);
+    } else {
+      actions.notify("success", `${r.added.toLocaleString("ja-JP")} 枚をクイックコレクションに入れました（B）`);
+    }
+  } catch (e) {
+    actions.reportError(e, "クイックコレクションに入れられません");
+  }
+}
+
 /**
- * B キー: 操作の対象の写真をターゲットコレクションに入れる（すべて入っていれば外す）。ターゲットがなければ、
- * 入れる先を選ぶダイアログを開く。
+ * B キー: 操作の対象の写真をターゲットコレクションに入れる（すべて入っていれば外す）。ターゲットを決めていなければ、
+ * クイックコレクションに出し入れする。
  */
 export async function toggleTargetCollection(): Promise<void> {
   const ids = actions.targets();
   if (ids.length === 0) return;
   const target = appStore.get().targetCollection;
   if (target === null) {
-    actions.openDialog({ kind: "add_to_collection", variantIds: ids });
+    await toggleQuickCollection(ids);
     return;
   }
   let name: string | undefined;
@@ -76,9 +96,10 @@ export async function toggleTargetCollection(): Promise<void> {
     const list = await core.collections(false);
     const c = list.find((x) => x.collection_id === target);
     if (!c || c.kind !== "manual") {
-      // ターゲットにしていたコレクションが削除された・手動でなくなった。
+      // ターゲットにしていたコレクションが削除された・手動でなくなった: クイックコレクションに戻す。
       setTargetCollection(null);
-      actions.openDialog({ kind: "add_to_collection", variantIds: ids });
+      actions.notify("info", "ターゲットコレクションがなくなっていたので、クイックコレクションを使います");
+      await toggleQuickCollection(ids);
       return;
     }
     name = c.name;
@@ -91,6 +112,43 @@ export async function toggleTargetCollection(): Promise<void> {
     }
   } catch (e) {
     actions.reportError(e, name ? `「${name}」に入れられません` : "ターゲットコレクションに入れられません");
+  }
+}
+
+/**
+ * 表示中の手動のコレクションの中で、操作の対象の写真を移す（先頭・1 つ前・1 つ後ろ・最後）。並べ替えが
+ * 「コレクションの順」でない・手動のコレクションでない・動かすところがないときは、知らせて何もしない。
+ */
+export async function moveInCollection(move: CollectionMove): Promise<void> {
+  const ids = actions.targets();
+  if (ids.length === 0) return;
+  const { sort } = appStore.get();
+  if (sort.key !== "collection_order") {
+    actions.notify("info", "並べ替えを「コレクションの順」にすると、コレクションの中で写真を並べ替えられます");
+    return;
+  }
+  const shown = await shownManualCollection();
+  if (!shown) {
+    actions.notify("info", "並べ替えられるのは、手動のコレクションを表示しているときだけです");
+    return;
+  }
+  const indexes = ids.map((id) => searchCache.findLoaded(id));
+  if (indexes.some((i) => i < 0)) {
+    actions.notify("info", "選んだ写真の一部が今の表示にないため、並べ替えられません");
+    return;
+  }
+  const plan = planCollectionMove(
+    move,
+    indexes,
+    (i) => searchCache.peek(i)?.variant_id,
+    searchCache.count,
+    sort.direction === "descending",
+  );
+  if (plan === null) return;
+  try {
+    await core.reorderCollection(shown.collection_id, plan.ids, plan.before);
+  } catch (e) {
+    actions.reportError(e, "コレクションの中で並べ替えられません");
   }
 }
 

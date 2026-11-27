@@ -17,7 +17,7 @@ import type { PhotoMenuAction } from "../library/stackLogic";
 import { actions, appStore } from "./app";
 import { enqueue } from "./develop";
 import { openMoveFiles, openRelink, openRenameFiles } from "./files";
-import { openDeleteDialog, shownManualCollection } from "./organize";
+import { moveInCollection, openDeleteDialog, shownManualCollection } from "./organize";
 import { searchCache } from "./search";
 
 /** 写真が入っているスタック（入っていなければ null。読めなければ知らせて null）。 */
@@ -279,15 +279,42 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
     case "auto_stack":
       actions.openDialog({ kind: "auto_stack" });
       return;
+    case "collection_first":
+      await moveInCollection("first");
+      return;
+    case "collection_up":
+      await moveInCollection("up");
+      return;
+    case "collection_down":
+      await moveInCollection("down");
+      return;
+    case "collection_last":
+      await moveInCollection("last");
+      return;
     case "edit_capture_time":
       openCaptureTimeDialog();
       return;
     case "edit_location":
       openGeotagDialog();
       return;
+    case "gpx_location": {
+      const targets = actions.targets();
+      if (targets.length > 0) actions.openDialog({ kind: "gpx", variantIds: targets });
+      return;
+    }
     case "upgrade_process": {
       const targets = actions.targets();
       if (targets.length > 0) actions.openDialog({ kind: "upgrade_process", targets });
+      return;
+    }
+    case "culling_assist": {
+      const targets = actions.targets();
+      if (targets.length >= 2) actions.openDialog({ kind: "culling", variantIds: targets });
+      return;
+    }
+    case "auto_tone": {
+      const targets = actions.targets();
+      if (targets.length > 0) actions.openDialog({ kind: "auto_tone", targets });
       return;
     }
     case "apply_preset": {
@@ -306,13 +333,14 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
       openRelink(actions.targets());
       return;
     case "composite_lighten":
-    case "composite_darken": {
+    case "composite_darken":
+    case "composite_average": {
       const targets = actions.targets();
       if (targets.length >= 2) {
         actions.openDialog({
           kind: "composite",
           variantIds: targets,
-          mode: action === "composite_lighten" ? "lighten" : "darken",
+          mode: action === "composite_lighten" ? "lighten" : action === "composite_darken" ? "darken" : "average",
         });
       }
       return;

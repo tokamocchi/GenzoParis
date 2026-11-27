@@ -41,6 +41,10 @@ use crate::types::{
     ViewOutputSize,
 };
 use crate::types::{
+    ClockOffsetReport, CullingOptions, GpxLocationPlan, GpxOptions, ImportSourceScan,
+    QuickCollectionToggle, ShootingStats,
+};
+use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, ProfileEntry, ProfileImportReport, ProfileKind,
     RelinkReport, RelinkRequest, RelocatePlan, RenameSpec, SnapshotInfo, SnapshotSource,
     VolumeInfo,
@@ -170,6 +174,13 @@ pub enum Command {
     /// 条件に合う写真の数（表示中の検索結果は変えない。スマートコレクションの条件の編集中の件数など）。
     /// → [`Response::Count`]
     Count {
+        /// 条件。
+        #[serde(default)]
+        filter: Box<SearchFilter>,
+    },
+    /// 条件に合う写真・動画の撮影の統計（カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとの数。表示中の検索
+    /// 結果は変えない。[`crate::Core::shooting_stats`]）。→ [`Response::ShootingStats`]
+    ShootingStats {
         /// 条件。
         #[serde(default)]
         filter: Box<SearchFilter>,
@@ -314,6 +325,23 @@ pub enum Command {
         /// 写真。
         variant_ids: Vec<VariantId>,
     },
+    /// 写真をクイックコレクションに出し入れする（すべて入っていれば外し、そうでなければ入れる。なければ作る。
+    /// [`crate::Core::toggle_quick_collection`]）。→ [`Response::QuickCollection`]
+    ToggleQuickCollection {
+        /// 写真。
+        variant_ids: Vec<VariantId>,
+    },
+    /// 手動のコレクションの中で、写真を `before` の前へ移す（`null` なら最後へ。
+    /// [`crate::Core::reorder_collection`]）。→ [`Response::Updated`]（移した数）
+    ReorderCollection {
+        /// コレクション。
+        collection_id: CollectionId,
+        /// 移す写真（この順に並ぶ）。
+        variant_ids: Vec<VariantId>,
+        /// この写真の前へ。
+        #[serde(default)]
+        before: Option<VariantId>,
+    },
     /// 写真が入っている手動のコレクション。→ [`Response::VariantCollections`]
     VariantCollections {
         /// 写真。
@@ -407,6 +435,15 @@ pub enum Command {
     RequestPreview {
         /// variant。
         variant_id: VariantId,
+    },
+    /// 取り込み元のフォルダを走査して、取り込める写真・動画の一覧を返す（取り込む前の選択。何も登録しない。
+    /// [`crate::Core::scan_import_source`]）。サムネイルは [`crate::Core::import_source_thumbnail`]（UI では
+    /// アプリの `genzo://` の配信）で取る。→ [`Response::ImportSource`]
+    ScanImportSource {
+        /// フォルダ。
+        path: PathBuf,
+        /// サブフォルダも走査するか。
+        recursive: bool,
     },
     /// サムネイル・プレビューを作り直す（P3 のジョブ）。→ [`Response::JobStarted`]
     RegeneratePreviews {
@@ -638,6 +675,12 @@ pub enum Command {
     AutoTone {
         /// 現像中の写真。
         variant_id: VariantId,
+    },
+    /// 選んだ写真に、まとめて自動補正（DEV-32）を当てて保存する（P3 のジョブ。1 枚ごとに履歴に「自動補正」を
+    /// 1 件。動画は飛ばす。[`crate::Core::auto_tone_variants`]）。→ [`Response::JobStarted`]
+    AutoToneVariants {
+        /// 対象。
+        variant_ids: Vec<VariantId>,
     },
     /// マスクの重ねて表示（DEV-18）の画像の情報（[`crate::Core::mask_overlay`]。画素は UI ではアプリのバイナリの
     /// 応答で取る）。→ [`Response::MaskOverlay`]
@@ -974,12 +1017,35 @@ pub enum Command {
     ClearVideoProxies,
 
     // --- 撮影日時の一括修正（LIB-16）・タイムライン（ORG-01） ---
+    /// 選別支援（ORG-06）: 選んだ写真から、似た写真のグループと、その中でピントの甘い見込みの写真を見つける
+    /// （P3 のジョブ。何も変えない。[`crate::Core::culling_assist`]）。→ [`Response::JobStarted`]
+    CullingAssist {
+        /// 写真（2 枚以上。動画は飛ばす）。
+        variant_ids: Vec<VariantId>,
+        /// 設定（省略すると既定）。
+        #[serde(default)]
+        options: CullingOptions,
+    },
+    /// 動画の指定した時刻のフレームを静止画（JPEG）として切り出し、動画と同じフォルダに保存してカタログに登録する
+    /// （VID-07。P3 のジョブ。[`crate::Core::extract_video_frame`]）。→ [`Response::JobStarted`]
+    ExtractVideoFrame {
+        /// 動画。
+        variant_id: VariantId,
+        /// 切り出す時刻（秒。動画の先頭から）。
+        position_seconds: f64,
+    },
     /// 機材の一覧（[`crate::Core::capture_devices`]）。→ [`Response::CaptureDevices`]
     CaptureDevices,
     /// 写真の機材（[`crate::Core::capture_device_of`]）。→ [`Response::CaptureDevice`]
     CaptureDeviceOf {
         /// 写真。
         variant_id: VariantId,
+    },
+    /// 機材ごとの時計のずれの見込み（ORG-02。基準の機材と同じ時間帯に撮った写真から推定する。何も変えない。
+    /// [`crate::Core::detect_clock_offsets`]）。→ [`Response::ClockOffsets`]
+    DetectClockOffsets {
+        /// 基準の機材（時計が合っているとみなす機材。[`crate::Core::capture_devices`] の値）。
+        reference: CaptureDeviceKey,
     },
     /// 撮影日時の修正の見込み（何も変えない。[`crate::Core::plan_capture_time_edit`]）。
     /// → [`Response::CaptureTimePlan`]
@@ -1036,6 +1102,28 @@ pub enum Command {
         /// 付ける位置（`null` は付けた位置を消す。省略はできない）。
         #[serde(deserialize_with = "required_option")]
         location: Option<GpsCoord>,
+    },
+    /// GPX のログから位置を付ける見込み（何も変えない。[`crate::Core::plan_gpx_locations`]）。
+    /// → [`Response::GpxLocationPlan`]
+    PlanGpxLocations {
+        /// 写真（動画は除く）。
+        variant_ids: Vec<VariantId>,
+        /// GPX のファイル。
+        gpx_path: PathBuf,
+        /// 設定（省略すると既定）。
+        #[serde(default)]
+        options: GpxOptions,
+    },
+    /// GPX のログから、選んだ写真に位置を付ける（1 回の変更として履歴に残す。
+    /// [`crate::Core::apply_gpx_locations`]）。→ [`Response::GpxLocationPlan`]
+    ApplyGpxLocations {
+        /// 写真（動画は除く）。
+        variant_ids: Vec<VariantId>,
+        /// GPX のファイル。
+        gpx_path: PathBuf,
+        /// 設定（省略すると既定）。
+        #[serde(default)]
+        options: GpxOptions,
     },
     /// 位置の変更の履歴。→ [`Response::LocationEdits`]
     LocationEdits,
@@ -1209,6 +1297,8 @@ pub enum Response {
         /// 数。
         count: u64,
     },
+    /// 撮影の統計。
+    ShootingStats(Box<ShootingStats>),
     /// キーワードの一覧。
     Keywords {
         /// キーワード（名前の順）。
@@ -1243,6 +1333,8 @@ pub enum Response {
         /// コレクション（名前の順）。
         collection_ids: Vec<CollectionId>,
     },
+    /// クイックコレクションへの出し入れの結果。
+    QuickCollection(QuickCollectionToggle),
     /// スタック。
     Stack(StackInfo),
     /// スタックの一覧。
@@ -1433,6 +1525,8 @@ pub enum Response {
     },
     /// 写真の機材。
     CaptureDevice(CaptureDeviceKey),
+    /// 機材ごとの時計のずれの見込み（ORG-02）。
+    ClockOffsets(ClockOffsetReport),
     /// 撮影日時の修正の見込み・結果。
     CaptureTimePlan(CaptureTimePlan),
     /// 撮影日時の修正の履歴（新しい順）。
@@ -1451,6 +1545,10 @@ pub enum Response {
     MapClusters(MapClusters),
     /// 位置の変更の見込み・結果（LIB-21）。
     LocationEditPlan(LocationEditPlan),
+    /// GPX のログからの位置付けの見込み・結果。
+    GpxLocationPlan(GpxLocationPlan),
+    /// 取り込み元のフォルダの走査の結果（取り込む前の選択）。
+    ImportSource(Box<ImportSourceScan>),
     /// 位置の変更の履歴（新しい順）。
     LocationEdits {
         /// 履歴。
@@ -1552,6 +1650,9 @@ impl Core {
             C::Count { filter } => R::Count {
                 count: self.count(&filter)?,
             },
+            C::ShootingStats { filter } => {
+                R::ShootingStats(Box::new(self.shooting_stats(&filter)?))
+            }
             C::KeywordTree => R::Keywords {
                 keywords: self.keyword_tree()?,
             },
@@ -1653,6 +1754,16 @@ impl Core {
             } => R::Updated {
                 count: self.remove_from_collection(collection_id, &variant_ids)? as u64,
             },
+            C::ToggleQuickCollection { variant_ids } => {
+                R::QuickCollection(self.toggle_quick_collection(&variant_ids)?)
+            }
+            C::ReorderCollection {
+                collection_id,
+                variant_ids,
+                before,
+            } => R::Updated {
+                count: self.reorder_collection(collection_id, &variant_ids, before)? as u64,
+            },
             C::VariantCollections { variant_id } => R::VariantCollections {
                 collection_ids: self.variant_collections(variant_id)?,
             },
@@ -1700,6 +1811,9 @@ impl Core {
             C::RequestPreview { variant_id } => R::Path {
                 path: self.request_preview(variant_id)?,
             },
+            C::ScanImportSource { path, recursive } => {
+                R::ImportSource(Box::new(self.scan_import_source(&path, recursive)?))
+            }
             C::RegeneratePreviews { variant_ids } => R::JobStarted {
                 job_id: self.regenerate_previews(&variant_ids)?,
             },
@@ -1831,6 +1945,9 @@ impl Core {
                 uncropped,
             } => R::MaskColor(self.mask_color_at(variant_id, x, y, uncropped)?),
             C::AutoTone { variant_id } => R::AutoTone(self.auto_tone(variant_id)?),
+            C::AutoToneVariants { variant_ids } => R::JobStarted {
+                job_id: self.auto_tone_variants(&variant_ids)?,
+            },
             C::MaskOverlay {
                 variant_id,
                 index,
@@ -2026,11 +2143,26 @@ impl Core {
             },
             C::VideoProxyCache => R::VideoProxyCache(self.video_proxy_cache()?),
             C::ClearVideoProxies => R::VideoProxyCache(self.clear_video_proxies()?),
+            C::CullingAssist {
+                variant_ids,
+                options,
+            } => R::JobStarted {
+                job_id: self.culling_assist(&variant_ids, &options)?,
+            },
+            C::ExtractVideoFrame {
+                variant_id,
+                position_seconds,
+            } => R::JobStarted {
+                job_id: self.extract_video_frame(variant_id, position_seconds)?,
+            },
             C::CaptureDevices => R::CaptureDevices {
                 devices: self.capture_devices()?,
             },
             C::CaptureDeviceOf { variant_id } => {
                 R::CaptureDevice(self.capture_device_of(variant_id)?)
+            }
+            C::DetectClockOffsets { reference } => {
+                R::ClockOffsets(self.detect_clock_offsets(&reference)?)
             }
             C::PlanCaptureTimeEdit { target, edit } => {
                 R::CaptureTimePlan(self.plan_capture_time_edit(&target, &edit)?)
@@ -2061,6 +2193,16 @@ impl Core {
                 variant_ids,
                 location,
             } => R::LocationEditPlan(self.edit_locations(&variant_ids, location)?),
+            C::PlanGpxLocations {
+                variant_ids,
+                gpx_path,
+                options,
+            } => R::GpxLocationPlan(self.plan_gpx_locations(&variant_ids, &gpx_path, &options)?),
+            C::ApplyGpxLocations {
+                variant_ids,
+                gpx_path,
+                options,
+            } => R::GpxLocationPlan(self.apply_gpx_locations(&variant_ids, &gpx_path, &options)?),
             C::LocationEdits => R::LocationEdits {
                 edits: self.location_edits()?,
             },
@@ -2277,6 +2419,15 @@ mod tests {
             c,
             Command::AutoTone {
                 variant_id: VariantId::new(4)
+            }
+        );
+        let c: Command =
+            serde_json::from_value(json!({"type": "auto_tone_variants", "variant_ids": [4, 5]}))
+                .unwrap();
+        assert_eq!(
+            c,
+            Command::AutoToneVariants {
+                variant_ids: vec![VariantId::new(4), VariantId::new(5)]
             }
         );
         let c: Command =
@@ -2679,6 +2830,7 @@ mod tests {
             created_at: chrono::DateTime::parse_from_rfc3339("2026-10-20T01:02:03Z")
                 .unwrap()
                 .to_utc(),
+            from_track: false,
         };
         let r = Response::LocationEdits {
             edits: vec![edit.clone()],
@@ -2687,7 +2839,7 @@ mod tests {
             serde_json::to_value(&r).unwrap(),
             json!({"type": "location_edits", "edits": [{
                 "id": 4, "kind": "set", "location": {"lat": 35.681_236, "lon": 139.767_125},
-                "asset_count": 1, "created_at": "2026-10-20T01:02:03Z"
+                "asset_count": 1, "created_at": "2026-10-20T01:02:03Z", "from_track": false
             }]})
         );
         let r = Response::LocationUndone {
