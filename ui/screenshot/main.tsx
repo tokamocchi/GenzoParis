@@ -212,6 +212,87 @@ function core(c: Any): Any {
       return { type: "shown_variants", generation: 1, variant_ids: c.variant_ids };
     case "count":
       return { type: "count", count: N };
+    // 2026-11-27 に足した機能の見本（数は架空）。
+    case "shooting_stats": {
+      const part = (labels: string[], unknown = 0) => ({
+        items: labels.map((label, i) => ({ label, count: Math.max(1, Math.round(N / (i + 2))) })),
+        unknown,
+      });
+      return {
+        type: "shooting_stats",
+        photos: N - 2,
+        videos: 2,
+        cameras: part(CAMERAS),
+        lenses: part(LENSES, 2),
+        focal_lengths: part(["16–23 mm", "24–34 mm", "35–49 mm", "50–84 mm", "85–134 mm"]),
+        isos: part(["ISO 100 以下", "ISO 101–200", "ISO 201–400", "ISO 801–1600", "ISO 3201–6400"]),
+        apertures: part(["f/1.8", "f/2.8", "f/4.0", "f/5.6", "f/8.0"]),
+        years: part(["2024", "2025", "2026"]),
+      };
+    }
+    case "culling_assist":
+    case "auto_tone_variants":
+      return { type: "job_started", job_id: 901 };
+    case "job":
+    case "wait_job":
+      return {
+        type: "job",
+        job_id: c.job_id,
+        kind: "culling_assist",
+        state: "succeeded",
+        done: 6,
+        total: 6,
+        error: null,
+        result: {
+          type: "culling_assist",
+          options: { max_gap_seconds: 10, max_distance: 10, soft_ratio: 0.7 },
+          analyzed: N,
+          groups: [
+            { variant_ids: [1, 2, 3], sharpest: 1, soft: [2] },
+            { variant_ids: [7, 8], sharpest: 8, soft: [] },
+          ],
+          grouped: 5,
+          soft: 1,
+          skipped_videos: 2,
+          without_time: 0,
+          without_thumbnail: 0,
+          missing: 0,
+          cancelled: false,
+        },
+      };
+    case "capture_devices":
+      return {
+        type: "capture_devices",
+        devices: CAMERAS.map((camera, i) => ({
+          camera,
+          serial: null,
+          kind: "photo",
+          assets: 10 + i,
+          with_time: 10 + i,
+          adjusted: 0,
+          first: "2026-10-01T09:00:00+09:00",
+          last: "2026-10-20T18:00:00+09:00",
+        })),
+      };
+    case "detect_clock_offsets":
+      return {
+        type: "clock_offsets",
+        reference: c.reference,
+        reference_with_time: 10,
+        skipped_small: 0,
+        devices: CAMERAS.slice(1).map((camera, i) => ({
+          device: { camera, serial: null, kind: "photo" },
+          with_time: 11 + i,
+          samples: 11 + i,
+          shift_seconds: i === 0 ? 9 * 3600 + 20 : 12,
+          rounded_seconds: i === 0 ? 9 * 3600 : null,
+          matched_before: i === 0 ? 1 : 9,
+          matched_after: i === 0 ? 10 : 9,
+          confident: i === 0,
+        })),
+      };
+    case "capture_time_edits":
+      return { type: "capture_time_edits", edits: [] };
     case "folders":
       return { type: "folders", folders };
     case "volumes":
