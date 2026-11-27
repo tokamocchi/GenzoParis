@@ -72,7 +72,8 @@ fn check_options(o: &GpxOptions) -> Result<(), ApiError> {
             genzo_model::MAX_GPX_MAX_GAP_SECONDS
         )));
     }
-    if o.offset_seconds.abs() > MAX_GPX_OFFSET_SECONDS {
+    // `abs()` は i64::MIN であふれるので、範囲で確かめる。
+    if !(-MAX_GPX_OFFSET_SECONDS..=MAX_GPX_OFFSET_SECONDS).contains(&o.offset_seconds) {
         return Err(ApiError::InvalidArgument(format!(
             "写真の時計のずれは ±{MAX_GPX_OFFSET_SECONDS} 秒までで指定してください"
         )));
@@ -237,6 +238,14 @@ mod tests {
             },
             GpxOptions {
                 offset_seconds: -MAX_GPX_OFFSET_SECONDS - 1,
+                ..GpxOptions::default()
+            },
+            GpxOptions {
+                offset_seconds: i64::MIN,
+                ..GpxOptions::default()
+            },
+            GpxOptions {
+                offset_seconds: i64::MAX,
                 ..GpxOptions::default()
             },
         ] {
