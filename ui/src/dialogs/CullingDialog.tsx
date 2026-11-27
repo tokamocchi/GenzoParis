@@ -14,7 +14,14 @@ import { Dialog } from "../components/Dialog";
 import { actions } from "../state/app";
 import { searchCache } from "../state/search";
 import { waitJobUntilClosed } from "./catalogActions";
-import { DEFAULT_CULLING_OPTIONS, cullingSkips, describeCulling, describeGroup, softVariants } from "./cullingLogic";
+import {
+  DEFAULT_CULLING_OPTIONS,
+  cullingSkips,
+  describeCulling,
+  describeGroup,
+  softVariants,
+  stackableGroups,
+} from "./cullingLogic";
 import { formatCount } from "./dialogFormat";
 import { ErrorBox } from "./parts";
 
@@ -68,12 +75,20 @@ export function CullingDialog(props: { variantIds: VariantId[] }) {
     setError(null);
     let done = 0;
     try {
-      for (const g of report.groups) {
+      // すでにスタックに入っている写真を含むグループは、元のスタックを壊さないように、まとめない（stackableGroups）。
+      const stacked = new Set((await core.variantStacks(report.groups.flatMap((g) => g.variant_ids))).flatMap((s) => s.members));
+      const { groups, skipped } = stackableGroups(report, stacked);
+      for (const g of groups) {
         await core.createStack(g.variant_ids, g.sharpest);
         done++;
       }
+      const skippedNote = skipped > 0 ? `。すでにスタックに入っている写真を含む ${formatCount(skipped)} 組は、まとめていません` : "";
+      if (done === 0) {
+        actions.notify("info", `まとめたグループはありません${skippedNote}`);
+        return;
+      }
       actions.closeDialog();
-      actions.notify("success", `${formatCount(done)} 組をスタックにまとめました（いちばんシャープな見込みの写真が一番上）`);
+      actions.notify("success", `${formatCount(done)} 組をスタックにまとめました（いちばんシャープな見込みの写真が一番上）${skippedNote}`);
     } catch (e) {
       setError(toApiError(e).info);
       if (done > 0) actions.notify("info", `${formatCount(done)} 組はスタックにまとめました`);
@@ -99,7 +114,7 @@ export function CullingDialog(props: { variantIds: VariantId[] }) {
             className="btn"
             onClick={() => void stackGroups()}
             disabled={busy || stacking || !report || report.groups.length === 0}
-            title="グループごとに、いちばんシャープな見込みの写真を一番上にしてスタックにまとめます（スタックの解除で戻せます）"
+            title="グループごとに、いちばんシャープな見込みの写真を一番上にしてスタックにまとめます（スタックの解除で戻せます。すでにスタックに入っている写真を含むグループはまとめません）"
           >
             {stacking ? "まとめています…" : `${formatCount(report?.groups.length ?? 0)} 組をスタックにまとめる`}
           </button>

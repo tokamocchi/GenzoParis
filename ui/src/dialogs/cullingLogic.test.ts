@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { CullingReport } from "../api/types";
-import { DEFAULT_CULLING_OPTIONS, cullingSkips, describeCulling, describeGroup, softVariants } from "./cullingLogic";
+import { DEFAULT_CULLING_OPTIONS, cullingSkips, describeCulling, describeGroup, softVariants, stackableGroups } from "./cullingLogic";
 
 const report = (patch: Partial<CullingReport> = {}): CullingReport => ({
   options: DEFAULT_CULLING_OPTIONS,
@@ -44,5 +44,15 @@ describe("選別支援の結果の文（ORG-06）", () => {
     expect(softVariants(report())).toEqual([2, 10, 13]);
     expect(describeGroup(report().groups[0])).toBe("3 枚、甘い見込み 1 枚");
     expect(describeGroup(report().groups[1])).toBe("2 枚");
+  });
+});
+
+describe("スタックにまとめるグループ（ORG-06）", () => {
+  it("すでにスタックに入っている写真を含むグループは、まとめずに数える", () => {
+    const r = report();
+    expect(stackableGroups(r, new Set())).toEqual({ groups: r.groups, skipped: 0 });
+    // 8 と 12 がすでにスタックに入っている（別々のグループが同じスタックに触れる場合も含む）。
+    expect(stackableGroups(r, new Set([8, 12, 99]))).toEqual({ groups: [r.groups[0]], skipped: 2 });
+    expect(stackableGroups(r, new Set([1, 7, 10]))).toEqual({ groups: [], skipped: 3 });
   });
 });

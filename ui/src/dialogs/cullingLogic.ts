@@ -39,3 +39,18 @@ export function describeGroup(g: CullingReport["groups"][number]): string {
   const soft = g.soft.length > 0 ? `、甘い見込み ${n(g.soft.length)} 枚` : "";
   return `${n(g.variant_ids.length)} 枚${soft}`;
 }
+
+/**
+ * スタックにまとめるグループと、まとめずに残すグループの数。
+ *
+ * すでにスタックに入っている写真（`stacked`）を含むグループはまとめない。コアの create_stack は、含まれる写真の
+ * スタックの写真もすべてまとめるため、グループにない写真を引き込んだり、同じスタックに触れる別々のグループを
+ * 1 つにまとめたりして、元のスタックの分け方を壊すから（解除しても戻せない）。
+ */
+export function stackableGroups(
+  r: CullingReport,
+  stacked: ReadonlySet<VariantId>,
+): { groups: CullingReport["groups"]; skipped: number } {
+  const groups = r.groups.filter((g) => !g.variant_ids.some((id) => stacked.has(id)));
+  return { groups, skipped: r.groups.length - groups.length };
+}
