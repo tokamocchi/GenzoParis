@@ -133,6 +133,7 @@ mod composite;
 pub mod config;
 mod copy_import;
 mod core;
+mod culling;
 mod delete;
 mod deps;
 mod develop;
@@ -183,6 +184,7 @@ pub use core::{
     CopyImportHook, CopyImportStage, Core, CoreHooks, DevelopSaveStage, FileOpHook, FileOpStage,
     RegionRequestStage, SettingsUpdateStage,
 };
+pub use culling::{MAX_CULLING_DISTANCE, MAX_CULLING_GAP_SECONDS, MAX_CULLING_VARIANTS};
 pub use delete::{OsTrash, TrashBackend};
 pub use develop::{
     HISTORY_LABEL_AUTO_TONE, HISTORY_LABEL_BLACK_WHITE, HISTORY_LABEL_COLOR, HISTORY_LABEL_GENERIC,

@@ -234,6 +234,7 @@ impl Session {
                             | JobResult::CheckMissing(_)
                             | JobResult::RelinkCandidates(_)
                             | JobResult::AutoTone(_)
+                            | JobResult::CullingAssist(_)
                     )
                 ) =>
             {
@@ -324,6 +325,7 @@ pub fn job_kind_text(kind: JobKind) -> &'static str {
         JobKind::Composite => "合成",
         JobKind::AutoTone => "自動補正",
         JobKind::VideoFrame => "動画からの静止画の切り出し",
+        JobKind::CullingAssist => "選別支援",
     }
 }
 

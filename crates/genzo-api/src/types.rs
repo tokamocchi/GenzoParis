@@ -110,6 +110,8 @@ pub enum JobKind {
     AutoTone,
     /// 動画からの静止画の切り出し（VID-07。[`crate::Core::extract_video_frame`]）。
     VideoFrame,
+    /// 選別支援（ORG-06。[`crate::Core::culling_assist`]）。
+    CullingAssist,
 }
 
 /// ジョブの状態。
@@ -198,6 +200,8 @@ pub enum JobResult {
     AutoTone(AutoToneBatchReport),
     /// 動画からの静止画の切り出し。
     VideoFrame(VideoFrameReport),
+    /// 選別支援。
+    CullingAssist(CullingReport),
 }
 
 /// ファイルの問題（読めない・登録できないなど）。
@@ -1413,6 +1417,64 @@ pub struct VideoProxyInfo {
     pub size: u64,
     /// 長辺の上限（画素。genzo-media の `PROXY_LONG_EDGE`）。
     pub long_edge: u32,
+}
+
+/// 選別支援の設定（ORG-06。[`crate::Core::culling_assist`]。どれも仮置きの既定値）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CullingOptions {
+    /// 似た写真とみなす、撮影日時の差の上限（秒。既定 10）。
+    pub max_gap_seconds: u32,
+    /// 似た写真とみなす、サムネイルの dHash の違うビットの数の上限（0〜32。既定 10）。
+    pub max_distance: u32,
+    /// グループの中でいちばんシャープな写真の、この割合に満たない写真を「甘い見込み」にする（既定 0.7）。
+    pub soft_ratio: f32,
+}
+
+impl Default for CullingOptions {
+    fn default() -> Self {
+        Self {
+            max_gap_seconds: 10,
+            max_distance: 10,
+            soft_ratio: 0.7,
+        }
+    }
+}
+
+/// 似た写真のグループ（[`CullingReport`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CullingGroup {
+    /// グループの写真（撮影日時の順。2 枚以上）。
+    pub variant_ids: Vec<VariantId>,
+    /// いちばんシャープな見込みの写真。
+    pub sharpest: VariantId,
+    /// ピントの甘い（ぼけ・ブレの）見込みの写真（いちばんシャープな写真より明らかに甘いもの）。
+    pub soft: Vec<VariantId>,
+}
+
+/// 選別支援の結果（[`JobResult::CullingAssist`]。何も変えていない）。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct CullingReport {
+    /// 使った設定。
+    pub options: CullingOptions,
+    /// 調べた写真の数。
+    pub analyzed: u64,
+    /// 似た写真のグループ（撮影日時の順）。
+    pub groups: Vec<CullingGroup>,
+    /// グループに入った写真の数。
+    pub grouped: u64,
+    /// 甘い見込みの写真の数。
+    pub soft: u64,
+    /// 飛ばした動画の数。
+    pub skipped_videos: u64,
+    /// 撮影日時がなくて調べなかった写真の数。
+    pub without_time: u64,
+    /// サムネイルがなくて（読めなくて）調べなかった写真の数。
+    pub without_thumbnail: u64,
+    /// 見つからなかった写真の数（削除されたものなど）。
+    pub missing: u64,
+    /// 取り消されて途中で終わったか。
+    pub cancelled: bool,
 }
 
 /// 動画からの静止画の切り出しの結果（VID-07。[`JobResult::VideoFrame`]）。

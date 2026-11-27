@@ -395,6 +395,7 @@ pub fn run(cli: Cli) -> CliResult<Status> {
         Command::Time(c) => time::run(&g, out, c),
         Command::Timeline(a) => time::timeline(&g, out, &a),
         Command::Stats(a) => library::stats(&g, out, &a),
+        Command::Cull(a) => library::cull(&g, out, &a),
         Command::Location(c) => location::run(&g, out, c),
         Command::Volume(c) => files::volume(&g, out, c),
         Command::Folder(c) => files::folder(&g, out, c),

@@ -307,6 +307,11 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
       if (targets.length > 0) actions.openDialog({ kind: "upgrade_process", targets });
       return;
     }
+    case "culling_assist": {
+      const targets = actions.targets();
+      if (targets.length >= 2) actions.openDialog({ kind: "culling", variantIds: targets });
+      return;
+    }
     case "auto_tone": {
       const targets = actions.targets();
       if (targets.length > 0) actions.openDialog({ kind: "auto_tone", targets });

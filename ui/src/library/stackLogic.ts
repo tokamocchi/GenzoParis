@@ -127,6 +127,7 @@ export type PhotoMenuAction =
   | "expand_all"
   | "collapse_all"
   | "auto_stack"
+  | "culling_assist"
   | "collection_first"
   | "collection_up"
   | "collection_down"
@@ -192,6 +193,8 @@ export function photoMenuEntries(
     { action: "expand_all", label: "すべてのスタックを展開", enabled: true },
     { action: "collapse_all", label: "すべてのスタックを折りたたむ", enabled: true },
     { action: "auto_stack", label: "撮影時刻でスタック…", enabled: true },
+    // 選別支援（ORG-06）: 選んだ写真から、似た写真のグループと、ピントの甘い見込みの写真を探す（何も変えない）。
+    { action: "culling_assist", label: "選別支援（似た写真・ピントの甘い写真を探す）…", enabled: targets >= 2 },
     PHOTO_MENU_SEPARATOR,
     // 手動のコレクションの中の並べ替え（LIB-10）。並べ替えを「コレクションの順」にしているときだけ出す
     // （手動のコレクションでなければ、実行するときに知らせる）。

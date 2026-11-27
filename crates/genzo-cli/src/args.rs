@@ -264,6 +264,9 @@ pub enum Command {
     /// 写真と動画のタイムライン（ORG-01）: 撮影日時の順に並べ、撮影日と、撮影の間隔によるイベントで
     /// まとめて表示する（条件は search と同じ）
     Timeline(Box<TimelineArgs>),
+    /// 選別支援（ORG-06）: 条件に合う写真から、似た写真のグループと、その中でピントの甘い見込みの写真を見つける
+    /// （サムネイルで判定するので粗い。何も変えない。--stack でグループをスタックにまとめる）
+    Cull(Box<CullArgs>),
     /// 撮影の統計: 条件に合う写真・動画を、カメラ・レンズ・焦点距離・ISO・絞り・撮影年ごとに数える（条件は
     /// search と同じ。仮想コピーは重ねて数えない。折りたたんだスタックの中の写真も数える）
     Stats(Box<StatsArgs>),
@@ -674,6 +677,26 @@ pub enum TimeCommand {
     History,
     /// 最後の修正を取り消す
     Undo,
+}
+
+/// `cull` の引数（選別支援。ORG-06）。
+#[derive(Debug, Args)]
+pub struct CullArgs {
+    /// 似た写真とみなす、撮影日時の差の上限（秒）
+    #[arg(long, value_name = "SEC", default_value_t = 10)]
+    pub gap: u32,
+    /// 似た写真とみなす、サムネイルの違いの上限（0〜32。大きいほど、違う写真もまとめる）
+    #[arg(long, value_name = "N", default_value_t = 10)]
+    pub distance: u32,
+    /// グループの中でいちばんシャープな写真の、この割合に満たない写真を「甘い見込み」にする（0〜1）
+    #[arg(long, value_name = "RATIO", default_value_t = 0.7)]
+    pub soft_ratio: f32,
+    /// 見つけたグループを、いちばんシャープな見込みの写真を一番上にしてスタックにまとめる
+    #[arg(long)]
+    pub stack: bool,
+    /// 対象の写真の条件（search と同じ）。
+    #[command(flatten)]
+    pub filter: FilterArgs,
 }
 
 /// `stats` の引数（撮影の統計）。

@@ -183,6 +183,11 @@ describe("写真の右クリックのメニュー", () => {
     expect(byAction(photoMenuEntries(0, undefined)).get("gpx_location")?.enabled).toBe(false);
   });
 
+  it("選別支援（ORG-06）は 2 枚以上を選んでいるときだけ", () => {
+    expect(byAction(photoMenuEntries(1, mockSummary())).get("culling_assist")?.enabled).toBe(false);
+    expect(byAction(photoMenuEntries(2, mockSummary())).get("culling_assist")?.enabled).toBe(true);
+  });
+
   it("処理バージョンの更新は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
     expect(byAction(photoMenuEntries(1, mockSummary())).get("upgrade_process")?.enabled).toBe(true);
     expect(byAction(photoMenuEntries(3, mockSummary({ kind: "video" }))).get("upgrade_process")?.enabled).toBe(true);

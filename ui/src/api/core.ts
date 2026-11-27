@@ -34,6 +34,7 @@ import type {
   CompositeSettings,
   ContentHashStatus,
   CopySettings,
+  CullingOptions,
   CoreSettings,
   CropRect,
   DeleteKind,
@@ -686,6 +687,12 @@ export const importNamePreview = async (copy: CopySettings): Promise<NamePreview
 // ---------------------------------------------------------------------------
 
 /** 機材の一覧（カメラの表示名・シリアル番号・写真か動画か）。 */
+/**
+ * 選別支援（ORG-06）: 選んだ写真から、似た写真のグループと、その中でピントの甘い見込みの写真を調べる（ジョブ。何も
+ * 変えない）。ジョブの番号を返す（結果は JobResult の culling_assist）。
+ */
+export const cullingAssist = async (variant_ids: VariantId[], options: CullingOptions): Promise<number> =>
+  (await execute({ type: "culling_assist", variant_ids, options }, "job_started")).job_id;
 /**
  * 動画の `position_seconds` 秒のフレームを静止画（JPEG）として切り出し、動画と同じフォルダに保存してカタログに
  * 登録する（VID-07。ジョブ。利用者の ffmpeg が要る）。ジョブの番号を返す（結果は JobResult の video_frame）。

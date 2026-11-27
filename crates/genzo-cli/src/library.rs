@@ -428,6 +428,103 @@ pub fn stats(g: &GlobalArgs, out: Output, a: &crate::args::StatsArgs) -> CliResu
     Ok(Status::Success)
 }
 
+/// `cull`（選別支援。ORG-06）: 条件に合う写真から、似た写真のグループと、その中でピントの甘い見込みの写真を
+/// 見つける（genzo-api の [`genzo_api::Core::culling_assist`]。何も変えない）。`--stack` なら、グループを、いちばん
+/// シャープな見込みの写真を一番上にしてスタックにまとめる。JSON の出力: `{"report": 結果, "stacked": 数}`。
+pub fn cull(g: &GlobalArgs, out: Output, a: &crate::args::CullArgs) -> CliResult<Status> {
+    let s = Session::open(g, out, &OpenOptions::default())?;
+    let r = cull_in(&s, out, a);
+    s.close()?;
+    r
+}
+
+fn cull_in(s: &Session, out: Output, a: &crate::args::CullArgs) -> CliResult<Status> {
+    // 折りたたんだスタックの中の写真も調べる。
+    let filter = SearchFilter {
+        expand_stacks: true,
+        ..filter_of(s, &a.filter)?
+    };
+    let found = s.core.search(&filter, SearchSort::default())?;
+    let ids = s.core.result_ids(found.generation)?;
+    let options = genzo_api::CullingOptions {
+        max_gap_seconds: a.gap,
+        max_distance: a.distance,
+        soft_ratio: a.soft_ratio,
+    };
+    let job = s.core.culling_assist(&ids, &options)?;
+    let info = s.wait_job_ok(job, "選別支援")?;
+    let Some(JobResult::CullingAssist(report)) = info.result else {
+        return Err(CliError::other("選別支援の結果がありません"));
+    };
+    let mut stacked = 0u64;
+    if a.stack && !report.cancelled {
+        for group in &report.groups {
+            s.core
+                .create_stack(&group.variant_ids, Some(group.sharpest))?;
+            stacked += 1;
+        }
+    }
+    if out.json {
+        out.print_json(&json!({ "report": json_value(&report), "stacked": stacked }));
+    } else {
+        for line in cull_lines(&report) {
+            out.line(line);
+        }
+        if a.stack {
+            out.line(format!("{stacked} 組をスタックにまとめました"));
+        }
+    }
+    Ok(if report.cancelled {
+        Status::Partial
+    } else {
+        Status::Success
+    })
+}
+
+/// 選別支援の結果の表示の行。
+fn cull_lines(r: &genzo_api::CullingReport) -> Vec<String> {
+    let ids = |v: &[VariantId]| {
+        v.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut lines = vec![format!(
+        "{} 枚を調べました: 似た写真のグループ {} 組（{} 枚）、ピントの甘い見込み {} 枚",
+        r.analyzed,
+        r.groups.len(),
+        r.grouped,
+        r.soft
+    )];
+    for (i, g) in r.groups.iter().enumerate() {
+        let soft = if g.soft.is_empty() {
+            String::new()
+        } else {
+            format!("、甘い見込み: {}", ids(&g.soft))
+        };
+        lines.push(format!(
+            "  {}: {}（いちばんシャープな見込み: {}{soft}）",
+            i + 1,
+            ids(&g.variant_ids),
+            g.sharpest
+        ));
+    }
+    for (n, text) in [
+        (r.skipped_videos, "動画のため飛ばしました"),
+        (r.without_time, "撮影日時がないため調べていません"),
+        (r.without_thumbnail, "サムネイルがないため調べていません"),
+        (r.missing, "見つかりませんでした"),
+    ] {
+        if n > 0 {
+            lines.push(format!("{n} 件は{text}"));
+        }
+    }
+    if r.cancelled {
+        lines.push("途中で取り消されました".to_owned());
+    }
+    lines
+}
+
 /// 統計の 1 つの項目の表示の行（見出し・値ごとの数・省いた数・不明の数）。値も不明もなければ空。
 fn stats_lines(title: &str, b: &genzo_api::StatBreakdown, top: usize) -> Vec<String> {
     if b.items.is_empty() && b.unknown == 0 {
@@ -1058,6 +1155,32 @@ mod tests {
         );
         assert_eq!(stats_lines("カメラ", &b, 0).len(), 5);
         assert!(stats_lines("カメラ", &genzo_api::StatBreakdown::default(), 2).is_empty());
+    }
+
+    /// 選別支援の結果の行: グループごとの写真・いちばんシャープな見込み・甘い見込み。
+    #[test]
+    fn cull_reports_are_described() {
+        let v = VariantId::new;
+        let r = genzo_api::CullingReport {
+            analyzed: 5,
+            groups: vec![genzo_api::CullingGroup {
+                variant_ids: vec![v(1), v(2), v(3)],
+                sharpest: v(3),
+                soft: vec![v(2)],
+            }],
+            grouped: 3,
+            soft: 1,
+            without_time: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            cull_lines(&r),
+            [
+                "5 枚を調べました: 似た写真のグループ 1 組（3 枚）、ピントの甘い見込み 1 枚",
+                "  1: 1 2 3（いちばんシャープな見込み: 3、甘い見込み: 2）",
+                "1 件は撮影日時がないため調べていません",
+            ]
+        );
     }
 
     #[test]

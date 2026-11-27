@@ -952,7 +952,8 @@ export type JobKind =
   | "video_proxy"
   | "composite"
   | "auto_tone"
-  | "video_frame";
+  | "video_frame"
+  | "culling_assist";
 export type JobState = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface FileIssue {
@@ -1274,6 +1275,40 @@ export interface CompositeReport {
   cancelled: boolean;
 }
 
+/** 選別支援の設定（ORG-06。genzo-api の CullingOptions）。 */
+export interface CullingOptions {
+  /** 似た写真とみなす、撮影日時の差の上限（秒）。 */
+  max_gap_seconds: number;
+  /** 似た写真とみなす、サムネイルの違いの上限（0〜32）。 */
+  max_distance: number;
+  /** いちばんシャープな写真の、この割合に満たない写真を「甘い見込み」にする。 */
+  soft_ratio: number;
+}
+
+/** 似た写真のグループ（選別支援）。 */
+export interface CullingGroup {
+  /** 撮影日時の順（2 枚以上）。 */
+  variant_ids: VariantId[];
+  /** いちばんシャープな見込みの写真。 */
+  sharpest: VariantId;
+  /** ピントの甘い見込みの写真。 */
+  soft: VariantId[];
+}
+
+/** 選別支援の結果（ORG-06。genzo-api の CullingReport。何も変えていない）。 */
+export interface CullingReport {
+  options: CullingOptions;
+  analyzed: number;
+  groups: CullingGroup[];
+  grouped: number;
+  soft: number;
+  skipped_videos: number;
+  without_time: number;
+  without_thumbnail: number;
+  missing: number;
+  cancelled: boolean;
+}
+
 /** 動画からの静止画の切り出しの結果（VID-07。genzo-api の VideoFrameReport）。 */
 export interface VideoFrameReport {
   /** 元の動画。 */
@@ -1338,7 +1373,8 @@ export type JobResult =
   | ({ type: "video_proxy" } & VideoProxyReport)
   | ({ type: "composite" } & CompositeReport)
   | ({ type: "auto_tone" } & AutoToneBatchReport)
-  | ({ type: "video_frame" } & VideoFrameReport);
+  | ({ type: "video_frame" } & VideoFrameReport)
+  | ({ type: "culling_assist" } & CullingReport);
 
 export interface JobInfo {
   job_id: number;
@@ -2339,6 +2375,7 @@ export type Command =
   | { type: "video_proxy_cache" }
   | { type: "clear_video_proxies" }
   | { type: "extract_video_frame"; variant_id: VariantId; position_seconds: number }
+  | { type: "culling_assist"; variant_ids: VariantId[]; options: CullingOptions }
   | { type: "capture_devices" }
   | { type: "detect_clock_offsets"; reference: CaptureDeviceKey }
   | { type: "capture_device_of"; variant_id: VariantId }

@@ -777,3 +777,55 @@ button.dlg-list-item:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* 選別支援（CullingDialog）。 */
+.dlg-cull {
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.dlg-cull-head {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.dlg-cull-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.dlg-cull-item {
+  position: relative;
+  width: 96px;
+  height: 68px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+  cursor: pointer;
+  overflow: hidden;
+}
+.dlg-cull-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.dlg-cull-item .none {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.dlg-cull-item.sharp {
+  border-color: var(--accent);
+}
+.dlg-cull-item.soft {
+  border-color: var(--warn);
+}
+.dlg-cull-item .mark {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--fg-0, #fff);
+}

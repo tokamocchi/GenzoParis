@@ -63,6 +63,8 @@ export type DialogState =
   | { kind: "auto_tone"; targets: VariantId[] }
   | { kind: "settings"; tab?: "general" | "view" | "catalog" | "backup" | "about" }
   | { kind: "shortcuts" }
+  // 選別支援（ORG-06。写真の右クリックのメニュー）。
+  | { kind: "culling"; variantIds: VariantId[] }
   // GPX のログから位置を付ける（LIB-21。写真の右クリックのメニュー）。
   | { kind: "gpx"; variantIds: VariantId[] }
   // 撮影の統計（左のパネルの「カタログ」の「統計」）。
@@ -334,6 +336,7 @@ export const JOB_LABEL: Record<JobKind, string> = {
   composite: "合成",
   auto_tone: "自動補正",
   video_frame: "動画からの静止画の切り出し",
+  culling_assist: "選別支援",
 };
 
 const jobWaiters = new Map<number, ((info: JobInfo) => void)[]>();

@@ -10,6 +10,7 @@ import { CaptureTimeDialog } from "./CaptureTimeDialog";
 import { CloseFailedDialog } from "./CloseFailedDialog";
 import { CompositeDialog } from "./CompositeDialog";
 import { CrashReportsDialog } from "./CrashReportsDialog";
+import { CullingDialog } from "./CullingDialog";
 import { DeleteDialog } from "./DeleteDialog";
 import "./dialogs.css";
 import { ExportDialog } from "./ExportDialog";
@@ -146,6 +147,9 @@ export function Dialogs() {
       break;
     case "gpx":
       body = <GpxDialog variantIds={dialog.variantIds} />;
+      break;
+    case "culling":
+      body = <CullingDialog variantIds={dialog.variantIds} />;
       break;
     case "close_failed":
       // 理由が変わったら出し直す（再試行の結果など）。

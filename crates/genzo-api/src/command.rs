@@ -41,8 +41,8 @@ use crate::types::{
     ViewOutputSize,
 };
 use crate::types::{
-    ClockOffsetReport, GpxLocationPlan, GpxOptions, ImportSourceScan, QuickCollectionToggle,
-    ShootingStats,
+    ClockOffsetReport, CullingOptions, GpxLocationPlan, GpxOptions, ImportSourceScan,
+    QuickCollectionToggle, ShootingStats,
 };
 use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, ProfileEntry, ProfileImportReport, ProfileKind,
@@ -1017,6 +1017,15 @@ pub enum Command {
     ClearVideoProxies,
 
     // --- 撮影日時の一括修正（LIB-16）・タイムライン（ORG-01） ---
+    /// 選別支援（ORG-06）: 選んだ写真から、似た写真のグループと、その中でピントの甘い見込みの写真を見つける
+    /// （P3 のジョブ。何も変えない。[`crate::Core::culling_assist`]）。→ [`Response::JobStarted`]
+    CullingAssist {
+        /// 写真（2 枚以上。動画は飛ばす）。
+        variant_ids: Vec<VariantId>,
+        /// 設定（省略すると既定）。
+        #[serde(default)]
+        options: CullingOptions,
+    },
     /// 動画の指定した時刻のフレームを静止画（JPEG）として切り出し、動画と同じフォルダに保存してカタログに登録する
     /// （VID-07。P3 のジョブ。[`crate::Core::extract_video_frame`]）。→ [`Response::JobStarted`]
     ExtractVideoFrame {
@@ -2134,6 +2143,12 @@ impl Core {
             },
             C::VideoProxyCache => R::VideoProxyCache(self.video_proxy_cache()?),
             C::ClearVideoProxies => R::VideoProxyCache(self.clear_video_proxies()?),
+            C::CullingAssist {
+                variant_ids,
+                options,
+            } => R::JobStarted {
+                job_id: self.culling_assist(&variant_ids, &options)?,
+            },
             C::ExtractVideoFrame {
                 variant_id,
                 position_seconds,
