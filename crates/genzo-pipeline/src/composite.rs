@@ -9,7 +9,12 @@
 //! | 比較暗 | チャンネルごとの最小 |
 //! | カラー比較明 | 輝度が **より大きい** ときだけ、その画素の RGB をそのまま採る（同じ輝度なら先の写真のまま） |
 //! | カラー比較暗 | 輝度が **より小さい** ときだけ、その画素の RGB をそのまま採る（同じ輝度なら先の写真のまま） |
+//! | 平均 | チャンネルごとに、**リニアな値** の平均（符号化した値をリニアに戻して平均し、最後に符号化し直す） |
 //!
+//! - 平均（docs/composite_design.md の 3.5 節）は、光の量の平均にするためリニアな値で行う（符号化した値のまま
+//!   平均すると、明るい部分と暗い部分が混ざる画素が暗く偏る）。累積は f32 の「これまでの平均」で持ち
+//!   （`mean += (x - mean) / n`）、同じ画像を何枚重ねても元の画像に戻る（符号化し直しは f64 で行い、16bit の
+//!   すべての値が元に戻ることをテストで確かめる）。結果は写真の順によらない（丸めの差を除く）。
 //! - 伝達関数は単調に増えるので、チャンネルごとの最大・最小は、符号化した値で比べてもリニアの値で比べても同じ
 //!   （符号化した値のまま比べる）。
 //! - 輝度は、符号化した値をリニアに戻し、出力の色空間の輝度の係数（RGB → XYZ の行列の 2 行目）で求める。累積の
@@ -67,6 +72,9 @@ pub struct Compositor {
     acc: Vec<u16>,
     /// 累積のバッファの画素の輝度（カラー比較明・暗のときだけ）。
     luma: Option<(Luminance, Vec<f32>)>,
+    /// 平均のときだけ: 16bit の符号化した値 → リニアな値の表と、これまでの平均（リニア。R, G, B, …）。
+    /// 平均のときは `acc` を使わない（空）。
+    mean: Option<(Vec<f32>, genzo_color::TransferFunction, Vec<f32>)>,
     /// 重ねた枚数（1 枚目を含む）。
     count: usize,
 }
@@ -110,6 +118,22 @@ impl Compositor {
         first: Vec<u16>,
     ) -> Result<Self> {
         check_len(expected_len(width, height)?, first.len())?;
+        if mode.averages() {
+            let transfer = rgb_space(space).transfer_function();
+            let decode: Vec<f32> = (0..=u16::MAX)
+                .map(|v| transfer.decode(f64::from(v) / 65535.0) as f32)
+                .collect();
+            let values = first.par_iter().map(|&v| decode[usize::from(v)]).collect();
+            return Ok(Self {
+                mode,
+                width,
+                height,
+                acc: Vec::new(),
+                luma: None,
+                mean: Some((decode, transfer, values)),
+                count: 1,
+            });
+        }
         let luma = mode.compares_luminance().then(|| {
             let table = Luminance::new(space);
             let values = first.par_chunks(3).map(|p| table.of(p)).collect();
@@ -121,6 +145,7 @@ impl Compositor {
             height,
             acc: first,
             luma,
+            mean: None,
             count: 1,
         })
     }
@@ -137,8 +162,22 @@ impl Compositor {
 
     /// 次の 1 枚（同じ寸法・同じ色空間の 16bit の RGB）を重ねる。
     pub fn add(&mut self, src: &[u16]) -> Result<()> {
-        check_len(self.acc.len(), src.len())?;
         const CHUNK: usize = CHUNK_PIXELS * 3;
+        if let Some((decode, _, mean)) = &mut self.mean {
+            check_len(mean.len(), src.len())?;
+            // これまでの平均に、n 枚目を足す（n = 重ねた後の枚数）。
+            let n = (self.count + 1) as f32;
+            mean.par_chunks_mut(CHUNK)
+                .zip(src.par_chunks(CHUNK))
+                .for_each(|(m, s)| {
+                    m.iter_mut()
+                        .zip(s)
+                        .for_each(|(m, &s)| *m += (decode[usize::from(s)] - *m) / n)
+                });
+            self.count += 1;
+            return Ok(());
+        }
+        check_len(self.acc.len(), src.len())?;
         match (self.mode, &mut self.luma) {
             (CompositeMode::Lighten, _) => self
                 .acc
@@ -173,6 +212,7 @@ impl Compositor {
             (CompositeMode::LighterColor | CompositeMode::DarkerColor, None) => {
                 unreachable!("輝度で比べるモードでは、輝度のバッファを作ってある")
             }
+            (CompositeMode::Average, _) => unreachable!("平均は上で処理してある"),
         }
         self.count += 1;
         Ok(())
@@ -180,15 +220,28 @@ impl Compositor {
 
     /// 合成の結果（16bit の RGB）。
     pub fn finish(self) -> Vec<u16> {
-        self.acc
+        match self.mean {
+            // 平均: リニアな値を符号化し直す（f64 で計算して、16bit の値に丸める）。
+            Some((_, transfer, mean)) => mean
+                .par_iter()
+                .map(|&m| {
+                    let e = transfer.encode(f64::from(m).clamp(0.0, 1.0));
+                    (e * 65535.0).round().clamp(0.0, 65535.0) as u16
+                })
+                .collect(),
+            None => self.acc,
+        }
     }
 }
 
-/// 累積のバッファが使うメモリの見込み（バイト。`width` × `height` の画像。カラー比較明・暗は輝度のバッファを含む）。
+/// 累積のバッファが使うメモリの見込み（バイト。`width` × `height` の画像。カラー比較明・暗は輝度のバッファを含む。
+/// 平均は、リニアな値の平均のバッファ（f32）と、最後に作る 16bit の結果）。
 pub fn compositor_bytes(mode: CompositeMode, width: u32, height: u32) -> u64 {
     let pixels = u64::from(width) * u64::from(height);
     let rgb = pixels * 3 * 2;
-    if mode.compares_luminance() {
+    if mode.averages() {
+        rgb + pixels * 3 * 4
+    } else if mode.compares_luminance() {
         rgb + pixels * 4
     } else {
         rgb
@@ -233,6 +286,90 @@ mod tests {
                 (x >> 48) as u16
             })
             .collect()
+    }
+
+    /// 平均: 同じ画像を重ねても元の画像に戻る（16bit のすべての値。どの色空間でも）。
+    #[test]
+    fn average_of_identical_images_is_the_image() {
+        let all: Vec<u16> = (0..=u16::MAX).collect();
+        // 3 の倍数の長さにする（65536 個 + 2 個）。
+        let mut image = all.clone();
+        image.extend([0, 65535]);
+        let width = (image.len() / 3) as u32;
+        for space in [
+            OutputColorSpace::Srgb,
+            OutputColorSpace::DisplayP3,
+            OutputColorSpace::AdobeRgb,
+        ] {
+            let mut c =
+                Compositor::new(CompositeMode::Average, space, width, 1, image.clone()).unwrap();
+            assert_eq!(c.size(), (width, 1));
+            for _ in 0..4 {
+                c.add(&image).unwrap();
+            }
+            assert_eq!(c.count(), 5);
+            assert_eq!(c.finish(), image, "{space:?}");
+        }
+    }
+
+    /// 平均: リニアな値で平均する（符号化した値の平均より明るい）。写真の順によらず、ノイズが減る。
+    #[test]
+    fn average_is_taken_in_linear_light() {
+        // 黒と白の平均は、リニアで 0.5（sRGB の符号化で約 0.7354 → 16bit で 48193 前後）。
+        let black = vec![0u16; 3];
+        let white = vec![65535u16; 3];
+        let run_srgb = |images: &[Vec<u16>]| {
+            let mut c = Compositor::new(
+                CompositeMode::Average,
+                OutputColorSpace::Srgb,
+                1,
+                1,
+                images[0].clone(),
+            )
+            .unwrap();
+            for img in &images[1..] {
+                c.add(img).unwrap();
+            }
+            c.finish()
+        };
+        let mid = run_srgb(&[black.clone(), white.clone()]);
+        let expected = (genzo_color::TransferFunction::Srgb.encode(0.5) * 65535.0).round() as u16;
+        assert_eq!(mid, vec![expected; 3]);
+        assert!((48100..48300).contains(&expected), "{expected}");
+        assert_eq!(run_srgb(&[white.clone(), black.clone()]), mid);
+        // 3 枚: 白が 1 枚なら、リニアで 1/3。
+        let third = run_srgb(&[black.clone(), white, black]);
+        let expected3 =
+            (genzo_color::TransferFunction::Srgb.encode(1.0 / 3.0) * 65535.0).round() as u16;
+        assert!(
+            third.iter().all(|v| v.abs_diff(expected3) <= 1),
+            "{third:?}"
+        );
+
+        // ノイズのある画像を重ねると、元の値（中間の灰色）からのずれが小さくなる。
+        let len = 3 * 64 * 64;
+        let base = 30000i32;
+        let frames: Vec<Vec<u16>> = (1..=16)
+            .map(|seed| {
+                noise(seed, len)
+                    .into_iter()
+                    .map(|n| (base + i32::from(n % 4001) - 2000) as u16)
+                    .collect()
+            })
+            .collect();
+        let spread = |img: &[u16]| {
+            img.iter()
+                .map(|&v| (f64::from(v) - f64::from(base)).powi(2))
+                .sum::<f64>()
+                / img.len() as f64
+        };
+        let averaged = run(CompositeMode::Average, &frames, 64, 64);
+        assert!(
+            spread(&averaged) < spread(&frames[0]) / 8.0,
+            "{} / {}",
+            spread(&averaged),
+            spread(&frames[0])
+        );
     }
 
     #[test]
@@ -380,6 +517,11 @@ mod tests {
         assert_eq!(
             compositor_bytes(CompositeMode::LighterColor, 7008, 4672),
             196_448_256 + 130_965_504
+        );
+        // 平均: リニアな値の平均のバッファ（f32 × 3）は 392,896,512 バイト。
+        assert_eq!(
+            compositor_bytes(CompositeMode::Average, 7008, 4672),
+            196_448_256 + 392_896_512
         );
     }
 }

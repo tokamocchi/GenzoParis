@@ -141,6 +141,7 @@ export type PhotoMenuAction =
   | "relink"
   | "composite_lighten"
   | "composite_darken"
+  | "composite_average"
   | "delete";
 
 export interface PhotoMenuEntry {
@@ -217,6 +218,7 @@ export function photoMenuEntries(
     // 比較明・比較暗合成（DEV-34）: 2 枚以上を選んでいるとき（動画はコアが除く）。
     { action: "composite_lighten", label: "比較明合成…", enabled: targets >= 2 },
     { action: "composite_darken", label: "比較暗合成…", enabled: targets >= 2 },
+    { action: "composite_average", label: "平均合成…", enabled: targets >= 2 },
     PHOTO_MENU_SEPARATOR,
     // 削除のダイアログ（FILE-01）。手動のコレクションを表示していても、コレクションから外すのではなく削除の
     // ダイアログを開く（Delete キーとは違うので、キーは添えない。state/organize.ts の openDeleteDialog）。

@@ -3018,6 +3018,8 @@ pub enum CompositeModeArg {
     LighterColor,
     /// カラー比較暗（輝度が最小の写真の画素をそのまま採る）
     DarkerColor,
+    /// 平均（リニアな値のチャンネルごとの平均。ノイズを減らす・動くものをならす）
+    Average,
 }
 
 impl From<CompositeModeArg> for genzo_model::CompositeMode {
@@ -3027,6 +3029,7 @@ impl From<CompositeModeArg> for genzo_model::CompositeMode {
             CompositeModeArg::Darken => Self::Darken,
             CompositeModeArg::LighterColor => Self::LighterColor,
             CompositeModeArg::DarkerColor => Self::DarkerColor,
+            CompositeModeArg::Average => Self::Average,
         }
     }
 }

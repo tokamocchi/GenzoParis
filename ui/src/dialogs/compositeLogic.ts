@@ -32,6 +32,12 @@ export const MODE_OPTIONS: { value: CompositeMode; label: string; hint: string; 
     advanced: false,
   },
   {
+    value: "average",
+    label: "平均合成",
+    hint: "R・G・B をチャンネルごとに、光の量（リニアな値）で平均します。高感度のノイズを減らす・水や雲の流れ、人の行き来をならす（長秒露光のような効果）に。",
+    advanced: false,
+  },
+  {
     value: "lighter_color",
     label: "カラー比較明合成",
     hint: "画素の明るさ（輝度）で比べ、明るい写真の色をそのまま残します（色を混ぜません）。",

@@ -378,3 +378,70 @@ fn cancelling_leaves_nothing_behind() {
         }
     }
 }
+
+/// 平均合成: 1 枚ずつ書き出した TIFF 16bit を、リニアな値に戻してチャンネルごとに平均したものと一致する（丸めの
+/// 1 段の差まで）。ファイル名は `<名前>-average-<枚数>.tif`。メモリの見込みは、平均のバッファ（f32）と結果。
+#[test]
+fn average_is_the_linear_mean_of_the_developed_photos() {
+    let env = Env::new();
+    let (core, [a, b, c]) = setup(&env);
+    let settings = CompositeSettings {
+        mode: CompositeMode::Average,
+        color_space: OutputColorSpace::Srgb,
+        stack_with_sources: false,
+        ..CompositeSettings::default()
+    };
+    let dest = env.dir.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let check = core
+        .composite_check(&[a, b, c], &settings, Some(&dest))
+        .unwrap();
+    assert!(check.problems.is_empty(), "{check:?}");
+    assert_eq!(check.file_name.as_deref(), Some("C-average-3.tif"));
+    assert_eq!(
+        check.estimated_buffer_bytes,
+        u64::from(W) * u64::from(H) * (6 + 12)
+    );
+
+    let r = composite(&core, &[a, b, c], &settings, Some(&dest));
+    assert!(r.failure.is_none() && !r.cancelled, "{r:?}");
+    assert_eq!((r.mode, r.composited), (CompositeMode::Average, 3));
+    let path = r.path.clone().unwrap();
+    assert_eq!(path, dest.join("C-average-3.tif"));
+
+    let each = exported(
+        &core,
+        &[c, a, b],
+        OutputColorSpace::Srgb,
+        &env.dir.path().join("each"),
+    );
+    let tf = genzo_color::TransferFunction::Srgb;
+    let got = pixels16(&path);
+    assert_eq!(got.len(), each[0].len());
+    for (i, &g) in got.iter().enumerate() {
+        let mean = each
+            .iter()
+            .map(|p| tf.decode(f64::from(p[i]) / 65535.0))
+            .sum::<f64>()
+            / each.len() as f64;
+        let expect = (tf.encode(mean) * 65535.0).round();
+        assert!(
+            (f64::from(g) - expect).abs() <= 1.0,
+            "画素 {i}: {g} / {expect}"
+        );
+    }
+    // 明るい四角は 1 枚にしかないので、平均では暗くなる（比較明とは違う）。
+    let lighten = composite(
+        &core,
+        &[a, b, c],
+        &CompositeSettings {
+            mode: CompositeMode::Lighten,
+            ..settings.clone()
+        },
+        Some(&dest),
+    );
+    let max = pixels16(&lighten.path.unwrap());
+    assert!(got.iter().zip(&max).all(|(g, m)| g <= m));
+    assert!(got.iter().zip(&max).any(|(g, m)| g < m));
+    core.close().unwrap();
+}

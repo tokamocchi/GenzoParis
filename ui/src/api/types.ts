@@ -1183,7 +1183,7 @@ export interface ExportReport {
 // ---------------------------------------------------------------------------
 
 /** 合成の比べ方（genzo-model の CompositeMode）。 */
-export type CompositeMode = "lighten" | "darken" | "lighter_color" | "darker_color";
+export type CompositeMode = "lighten" | "darken" | "lighter_color" | "darker_color" | "average";
 
 /** 合成の設定（genzo-model の CompositeSettings。省いた項目はコアの既定値）。 */
 export interface CompositeSettings {

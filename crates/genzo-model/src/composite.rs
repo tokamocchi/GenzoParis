@@ -17,6 +17,9 @@ pub enum CompositeMode {
     LighterColor,
     /// カラー比較暗（輝度が最小の写真の画素をそのまま採る）。
     DarkerColor,
+    /// 平均（リニアな値の、チャンネルごとの平均。ノイズを減らす・動くもの（水・雲・人）をならす。
+    /// docs/composite_design.md の 3.5 節）。
+    Average,
 }
 
 impl CompositeMode {
@@ -27,6 +30,7 @@ impl CompositeMode {
             Self::Darken => "darken",
             Self::LighterColor => "lighter-color",
             Self::DarkerColor => "darker-color",
+            Self::Average => "average",
         }
     }
 
@@ -37,12 +41,18 @@ impl CompositeMode {
             Self::Darken => "比較暗合成",
             Self::LighterColor => "カラー比較明合成",
             Self::DarkerColor => "カラー比較暗合成",
+            Self::Average => "平均合成",
         }
     }
 
     /// 輝度で比べるモード（カラー比較明・暗）か。
     pub const fn compares_luminance(self) -> bool {
         matches!(self, Self::LighterColor | Self::DarkerColor)
+    }
+
+    /// 写真を比べるのではなく、ならす（平均する）モードか。
+    pub const fn averages(self) -> bool {
+        matches!(self, Self::Average)
     }
 }
 

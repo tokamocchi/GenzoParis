@@ -189,5 +189,7 @@ describe("写真の右クリックのメニュー", () => {
     expect(two.get("composite_lighten")?.label).toBe("比較明合成…");
     expect(two.get("composite_lighten")?.enabled).toBe(true);
     expect(two.get("composite_darken")?.enabled).toBe(true);
+    expect(one.get("composite_average")?.enabled).toBe(false);
+    expect(two.get("composite_average")).toMatchObject({ label: "平均合成…", enabled: true });
   });
 });
