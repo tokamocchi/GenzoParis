@@ -217,7 +217,7 @@ impl Session {
 
     /// ジョブを待ち、成功しなければエラーにする。
     ///
-    /// 取り消された取り込み・書き出し・写真の移動・見つからない写真の確認・再リンクの候補の探索は、途中までの
+    /// 取り消された取り込み・書き出し・写真の移動・見つからない写真の確認・再リンクの候補の探索・一括の自動補正は、途中までの
     /// 結果を返す（結果に `cancelled: true` の印がある。呼び出し側は結果を出し、一部が終わらなかったものとして
     /// 扱う）。
     pub fn wait_job_ok(&self, job_id: u64, what: &str) -> CliResult<JobInfo> {
@@ -233,6 +233,7 @@ impl Session {
                             | JobResult::MoveFiles(_)
                             | JobResult::CheckMissing(_)
                             | JobResult::RelinkCandidates(_)
+                            | JobResult::AutoTone(_)
                     )
                 ) =>
             {
@@ -321,6 +322,7 @@ pub fn job_kind_text(kind: JobKind) -> &'static str {
         JobKind::FindRelinkCandidates => "再リンクの候補の探索",
         JobKind::VideoProxy => "再生用のファイルの作成",
         JobKind::Composite => "合成",
+        JobKind::AutoTone => "自動補正",
     }
 }
 

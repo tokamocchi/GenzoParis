@@ -290,6 +290,11 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
       if (targets.length > 0) actions.openDialog({ kind: "upgrade_process", targets });
       return;
     }
+    case "auto_tone": {
+      const targets = actions.targets();
+      if (targets.length > 0) actions.openDialog({ kind: "auto_tone", targets });
+      return;
+    }
     case "apply_preset": {
       // 現像プリセット（DEV-29）を操作の対象の写真に適用する（動画はコアが除いて写真にだけ適用し、ダイアログで知らせる）。
       const targets = actions.targets();

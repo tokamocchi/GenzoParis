@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import * as appApi from "../api/app";
 import { actions, appStore, useApp } from "../state/app";
+import { AutoToneDialog } from "./AutoToneDialog";
 import { CaptureTimeDialog } from "./CaptureTimeDialog";
 import { CloseFailedDialog } from "./CloseFailedDialog";
 import { CompositeDialog } from "./CompositeDialog";
@@ -128,6 +129,9 @@ export function Dialogs() {
       break;
     case "upgrade_process":
       body = <UpgradeProcessDialog targets={dialog.targets} />;
+      break;
+    case "auto_tone":
+      body = <AutoToneDialog targets={dialog.targets} />;
       break;
     case "settings":
       body = <SettingsDialog tab={dialog.tab} />;

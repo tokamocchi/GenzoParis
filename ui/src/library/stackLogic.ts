@@ -131,6 +131,7 @@ export type PhotoMenuAction =
   | "edit_location"
   | "upgrade_process"
   | "apply_preset"
+  | "auto_tone"
   | "move_to_folder"
   | "rename_files"
   | "relink"
@@ -188,6 +189,8 @@ export function photoMenuEntries(
     // 位置情報の後付け（LIB-21）。動画には付けない（まとめて選んだ中の動画はコアが除く）。
     { action: "edit_location", label: "位置を付ける…", enabled: any && !(targets <= 1 && isVideo) },
     { action: "apply_preset", label: "現像プリセットを適用…", enabled: any && !(targets <= 1 && isVideo) },
+    // 一括の自動補正（DEV-32）: 選んだ写真のそれぞれに、現像の「自動」と同じ値を入れる（動画はコアが飛ばす）。
+    { action: "auto_tone", label: "自動補正を当てる…", enabled: any && !(targets <= 1 && isVideo) },
     { action: "upgrade_process", label: "処理バージョンを最新に更新…", enabled: any && !(targets <= 1 && isVideo) },
     PHOTO_MENU_SEPARATOR,
     { action: "move_to_folder", label: "フォルダへ移動…", enabled: any },

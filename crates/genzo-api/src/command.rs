@@ -639,6 +639,12 @@ pub enum Command {
         /// 現像中の写真。
         variant_id: VariantId,
     },
+    /// 選んだ写真に、まとめて自動補正（DEV-32）を当てて保存する（P3 のジョブ。1 枚ごとに履歴に「自動補正」を
+    /// 1 件。動画は飛ばす。[`crate::Core::auto_tone_variants`]）。→ [`Response::JobStarted`]
+    AutoToneVariants {
+        /// 対象。
+        variant_ids: Vec<VariantId>,
+    },
     /// マスクの重ねて表示（DEV-18）の画像の情報（[`crate::Core::mask_overlay`]。画素は UI ではアプリのバイナリの
     /// 応答で取る）。→ [`Response::MaskOverlay`]
     MaskOverlay {
@@ -1831,6 +1837,9 @@ impl Core {
                 uncropped,
             } => R::MaskColor(self.mask_color_at(variant_id, x, y, uncropped)?),
             C::AutoTone { variant_id } => R::AutoTone(self.auto_tone(variant_id)?),
+            C::AutoToneVariants { variant_ids } => R::JobStarted {
+                job_id: self.auto_tone_variants(&variant_ids)?,
+            },
             C::MaskOverlay {
                 variant_id,
                 index,
@@ -2277,6 +2286,15 @@ mod tests {
             c,
             Command::AutoTone {
                 variant_id: VariantId::new(4)
+            }
+        );
+        let c: Command =
+            serde_json::from_value(json!({"type": "auto_tone_variants", "variant_ids": [4, 5]}))
+                .unwrap();
+        assert_eq!(
+            c,
+            Command::AutoToneVariants {
+                variant_ids: vec![VariantId::new(4), VariantId::new(5)]
             }
         );
         let c: Command =

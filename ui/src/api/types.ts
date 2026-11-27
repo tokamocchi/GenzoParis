@@ -950,7 +950,8 @@ export type JobKind =
   | "check_missing"
   | "find_relink_candidates"
   | "video_proxy"
-  | "composite";
+  | "composite"
+  | "auto_tone";
 export type JobState = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface FileIssue {
@@ -1240,6 +1241,20 @@ export interface CompositeReport {
   cancelled: boolean;
 }
 
+/** 複数の写真への一括の自動補正の結果（DEV-32。genzo-api の AutoToneBatchReport）。 */
+export interface AutoToneBatchReport {
+  /** 値を入れて保存した写真の数（それぞれの履歴に「自動補正」を 1 件）。 */
+  applied: number;
+  /** 求めた値が今の値と同じで、保存しなかった写真の数。 */
+  unchanged: number;
+  /** 対象外で飛ばした数（動画）。 */
+  skipped: number;
+  /** 失敗した写真（見つからない・読めないなど）。 */
+  failed: VariantIssue[];
+  /** 取り消されて途中で終わったか（それまでに保存した写真はそのまま）。 */
+  cancelled: boolean;
+}
+
 export interface RegenerateReport {
   rendered: number;
   skipped: number;
@@ -1273,7 +1288,8 @@ export type JobResult =
   | ({ type: "check_missing" } & MissingCheckReport)
   | ({ type: "relink_candidates" } & RelinkSearch)
   | ({ type: "video_proxy" } & VideoProxyReport)
-  | ({ type: "composite" } & CompositeReport);
+  | ({ type: "composite" } & CompositeReport)
+  | ({ type: "auto_tone" } & AutoToneBatchReport);
 
 export interface JobInfo {
   job_id: number;
@@ -2171,6 +2187,7 @@ export type Command =
   | { type: "mask_color_at"; variant_id: VariantId; x: number; y: number; uncropped?: boolean }
   | { type: "retouch_auto_source"; variant_id: VariantId; spot: RetouchSpot }
   | { type: "auto_tone"; variant_id: VariantId }
+  | { type: "auto_tone_variants"; variant_ids: VariantId[] }
   | { type: "mask_overlay"; variant_id: VariantId; index: number; uncropped?: boolean }
   | { type: "compute_ai_mask"; variant_id: VariantId; kind: AiMaskKind }
   | { type: "ai_mask_status" }

@@ -529,6 +529,12 @@ export const autoTone = async (variant_id: VariantId): Promise<AutoTone> => {
   const { type: _type, ...rest } = await execute({ type: "auto_tone", variant_id }, "auto_tone");
   return rest;
 };
+/**
+ * 選んだ写真に、まとめて自動補正（DEV-32）を当てて保存する（ジョブ。1 枚ごとに履歴に「自動補正」を 1 件。動画は
+ * コアが飛ばす）。ジョブの番号を返す（結果は JobResult の auto_tone）。
+ */
+export const autoToneVariants = async (variant_ids: VariantId[]): Promise<number> =>
+  (await execute({ type: "auto_tone_variants", variant_ids }, "job_started")).job_id;
 /** 切り抜きの編集中の表示（`uncropped` なら切り抜く前の全体を描く）。 */
 export const setDevelopView = async (uncropped: boolean) => {
   await execute({ type: "set_develop_view", uncropped }, "ok");

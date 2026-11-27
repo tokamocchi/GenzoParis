@@ -125,6 +125,7 @@
 //!   描く。genzo-gpu の `render_preview` が [`genzo_pipeline::PreviewRequest::uncropped`] を見ないため）。
 
 mod ai_masks;
+mod auto_batch;
 mod before;
 mod capture_time;
 pub mod command;
@@ -171,6 +172,7 @@ mod watermark;
 pub use ai_masks::{
     ENV_MODELS_DIR, ENV_ONNXRUNTIME, MODELS_DIR, default_models_dir, onnxruntime_candidates,
 };
+pub use auto_batch::MAX_AUTO_TONE_VARIANTS;
 pub use capture_time::{CAPTURE_TIME_EXAMPLES, CAPTURE_ZONE_RANGE_MINUTES};
 pub use command::{Command, Response};
 pub use config::{CoreConfig, GpuMode, IMPORT_BATCH_FILES, WorkerLaunch};

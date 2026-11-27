@@ -1620,6 +1620,50 @@ fn develop_copy_and_upgrade_between_process_versions() {
     );
 }
 
+/// `develop auto` に ID を複数（DEV-32 の一括の自動補正）: 1 枚ずつ値を求めて保存する。`--dry-run` は使えない。
+/// 1 枚のときの値（`--dry-run`）と同じ値が入る。
+#[test]
+fn develop_auto_applies_to_several_photos() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("A.jpg"), (96, 64), 8, None, false);
+    write_jpeg(&env.photos.join("B.jpg"), (96, 64), 200, None, false);
+    env.json(&["catalog", "init"]);
+    env.json(&["import", env.photos.to_str().unwrap()]);
+    let search = env.json(&["search"]);
+    let (a, b) = (
+        id_of(&search, "A.jpg").to_string(),
+        id_of(&search, "B.jpg").to_string(),
+    );
+    let single = env.json(&["develop", "auto", &a, "--dry-run"]);
+    assert_eq!(single["dry_run"], true);
+    let r = env.run(&["develop", "auto", &a, &b, "--dry-run"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+
+    let report = env.json(&["develop", "auto", &a, &b, &a]);
+    let done = report["applied"].as_u64().unwrap() + report["unchanged"].as_u64().unwrap();
+    assert_eq!(done, 2, "{report}");
+    assert_eq!(report["failed"], serde_json::json!([]));
+    assert_eq!(report["cancelled"], false);
+    let saved = env.json(&["develop", "get", &a])["exposure_ev"]
+        .as_f64()
+        .unwrap();
+    let expected = single["auto"]["exposure_ev"].as_f64().unwrap();
+    assert!((saved - expected).abs() < 1e-6, "{saved} / {expected}");
+    // もう一度当てると、値が同じなので保存しない。
+    let again = env.json(&["develop", "auto", &a, &b]);
+    assert_eq!(
+        (again["applied"].as_u64(), again["unchanged"].as_u64()),
+        (Some(0), Some(2))
+    );
+    let text = env.run(&["develop", "auto", &a, &b]);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(
+        text.stdout.contains("0 件に自動補正を当てました"),
+        "{}",
+        text.stdout
+    );
+}
+
 /// スナップショット（DEV-28）・現像プリセット（DEV-29）・書き出しプリセットとファイル名の規則（EXP-02）の
 /// サブコマンド（`develop snapshot`・`preset`・`export --preset`）。
 #[test]

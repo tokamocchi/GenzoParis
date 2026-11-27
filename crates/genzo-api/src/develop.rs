@@ -51,9 +51,9 @@ use crate::events::{CatalogChange, Event, WarningCode};
 use crate::previews::{load_source, schedule_regenerate, variant_file};
 use crate::render::display_target;
 use crate::types::{
-    AutoTone, AutoToneStats, DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem,
-    MaskOverlayFrame, MaskOverlayInfo, PasteReport, PasteVersion, PickedMaskColor,
-    PickedWhiteBalance, SettingGroups, SourceInfo, UprightMode, UprightSuggestion,
+    AutoTone, DevelopFrame, DevelopState, FrameInfo, HistogramData, HistoryItem, MaskOverlayFrame,
+    MaskOverlayInfo, PasteReport, PasteVersion, PickedMaskColor, PickedWhiteBalance, SettingGroups,
+    SourceInfo, UprightMode, UprightSuggestion,
 };
 
 /// 自動保存に失敗したときに、もう一度試すまでの時間（**仮置き**: 10 秒。ディスクの容量不足などで
@@ -951,6 +951,95 @@ fn pick_view(requested: Option<bool>, frame: Option<bool>, current: bool) -> boo
     requested.or(frame).unwrap_or(current)
 }
 
+/// [`Core::apply_to_variants`] の本体（ジョブの中からも呼べるよう、コアの中身を受け取る形。一括の自動補正
+/// （`auto_batch`）が使う）。
+pub(crate) fn apply_to_variants_in(
+    inner: &Arc<Inner>,
+    targets: &[VariantId],
+    skip_videos: bool,
+    mut change: impl FnMut(
+        VariantId,
+        &DevelopSettings,
+    ) -> Result<Option<(DevelopSettings, String)>, ApiError>,
+) -> Result<Vec<VariantId>, ApiError> {
+    inner.check_open()?;
+    // 重なりは 1 回だけ（`change` を 1 回だけ呼ぶ。順序は保つ）。
+    let mut seen = std::collections::HashSet::new();
+    let targets: Vec<VariantId> = targets
+        .iter()
+        .copied()
+        .filter(|v| seen.insert(*v))
+        .collect();
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut state = inner.develop.state.lock();
+    if let Some(s) = state.as_mut().filter(|s| targets.contains(&s.variant_id)) {
+        s.dragging = false;
+        save_locked(inner, s, None)?;
+    }
+    let seq = inner.develop.next_save_seq();
+    let write = inner.develop.save.lock();
+    // 外部データ（render_deps）は貼り付けない（写真ごとに違う。`deps` の doc）: 貼り付け先の値のままにし、
+    // 現像中の写真なら、実際に使っている値にする。
+    let session_deps = state
+        .as_ref()
+        .map(|s| (s.variant_id, s.render_deps.clone()));
+    let applied: Vec<(VariantId, DevelopSettings, String)> = inner.with_catalog_api(|c| {
+        let videos: Vec<VariantId> = if skip_videos {
+            c.variant_summaries(&targets)?
+                .into_iter()
+                .filter(|s| s.kind == genzo_model::AssetKind::Video)
+                .map(|s| s.variant_id)
+                .collect()
+        } else {
+            reject_videos(c, &targets)?;
+            Vec::new()
+        };
+        let mut items = Vec::with_capacity(targets.len());
+        for &v in targets.iter().filter(|v| !videos.contains(v)) {
+            let current = c.develop_settings(v)?;
+            let Some((new, label)) = change(v, &current)? else {
+                continue;
+            };
+            let deps = match &session_deps {
+                Some((sv, d)) if *sv == v => d.clone(),
+                _ => current.render_deps.clone(),
+            };
+            items.push((
+                v,
+                crate::deps::with_render_deps(&inner.engine, &new, &deps),
+                label,
+            ));
+        }
+        if !items.is_empty() {
+            c.save_develop_labeled(&items)?;
+        }
+        Ok(items)
+    })?;
+    let mut ids: Vec<VariantId> = applied.iter().map(|(v, _, _)| *v).collect();
+    ids.sort();
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    // 書いた variant をすべて記録する（現像中の写真に限らない。現像していた写真の古い写しの保存が、
+    // 現像のセッションが閉じた後で止まっていることもある）。
+    inner.develop.record_written(&ids, seq);
+    drop(write);
+    if let Some(s) = state.as_mut()
+        && let Some((_, settings, _)) = applied.iter().find(|(v, _, _)| *v == s.variant_id)
+    {
+        s.settings = settings.clone();
+        s.saved = settings.clone();
+        s.saved_seq = seq;
+        s.generation = inner.develop.next_generation();
+        submit_render(inner, s, RenderQuality::Final);
+    }
+    drop(state);
+    after_develop_saved(inner, &ids);
+    Ok(ids)
+}
+
 /// 処理バージョンの番号を、このアプリが知っている版にする（知らない版は [`ApiError::InvalidArgument`]。
 /// `whose` はエラーの文の「〜の処理バージョン」の前の部分。例: `"variant 3 の"`）。
 fn known_process_version(
@@ -1774,88 +1863,12 @@ impl Core {
         &self,
         targets: &[VariantId],
         skip_videos: bool,
-        mut change: impl FnMut(
+        change: impl FnMut(
             VariantId,
             &DevelopSettings,
         ) -> Result<Option<(DevelopSettings, String)>, ApiError>,
     ) -> Result<Vec<VariantId>, ApiError> {
-        let inner = &self.inner;
-        inner.check_open()?;
-        // 重なりは 1 回だけ（`change` を 1 回だけ呼ぶ。順序は保つ）。
-        let mut seen = std::collections::HashSet::new();
-        let targets: Vec<VariantId> = targets
-            .iter()
-            .copied()
-            .filter(|v| seen.insert(*v))
-            .collect();
-        if targets.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut state = inner.develop.state.lock();
-        if let Some(s) = state.as_mut().filter(|s| targets.contains(&s.variant_id)) {
-            s.dragging = false;
-            save_locked(inner, s, None)?;
-        }
-        let seq = inner.develop.next_save_seq();
-        let write = inner.develop.save.lock();
-        // 外部データ（render_deps）は貼り付けない（写真ごとに違う。`deps` の doc）: 貼り付け先の値のままにし、
-        // 現像中の写真なら、実際に使っている値にする。
-        let session_deps = state
-            .as_ref()
-            .map(|s| (s.variant_id, s.render_deps.clone()));
-        let applied: Vec<(VariantId, DevelopSettings, String)> = inner.with_catalog_api(|c| {
-            let videos: Vec<VariantId> = if skip_videos {
-                c.variant_summaries(&targets)?
-                    .into_iter()
-                    .filter(|s| s.kind == genzo_model::AssetKind::Video)
-                    .map(|s| s.variant_id)
-                    .collect()
-            } else {
-                reject_videos(c, &targets)?;
-                Vec::new()
-            };
-            let mut items = Vec::with_capacity(targets.len());
-            for &v in targets.iter().filter(|v| !videos.contains(v)) {
-                let current = c.develop_settings(v)?;
-                let Some((new, label)) = change(v, &current)? else {
-                    continue;
-                };
-                let deps = match &session_deps {
-                    Some((sv, d)) if *sv == v => d.clone(),
-                    _ => current.render_deps.clone(),
-                };
-                items.push((
-                    v,
-                    crate::deps::with_render_deps(&inner.engine, &new, &deps),
-                    label,
-                ));
-            }
-            if !items.is_empty() {
-                c.save_develop_labeled(&items)?;
-            }
-            Ok(items)
-        })?;
-        let mut ids: Vec<VariantId> = applied.iter().map(|(v, _, _)| *v).collect();
-        ids.sort();
-        if ids.is_empty() {
-            return Ok(ids);
-        }
-        // 書いた variant をすべて記録する（現像中の写真に限らない。現像していた写真の古い写しの保存が、
-        // 現像のセッションが閉じた後で止まっていることもある）。
-        inner.develop.record_written(&ids, seq);
-        drop(write);
-        if let Some(s) = state.as_mut()
-            && let Some((_, settings, _)) = applied.iter().find(|(v, _, _)| *v == s.variant_id)
-        {
-            s.settings = settings.clone();
-            s.saved = settings.clone();
-            s.saved_seq = seq;
-            s.generation = inner.develop.next_generation();
-            submit_render(inner, s, RenderQuality::Final);
-        }
-        drop(state);
-        after_develop_saved(inner, &ids);
-        Ok(ids)
+        apply_to_variants_in(&self.inner, targets, skip_videos, change)
     }
 
     /// 仮想コピーを作る（LIB-13。元の variant の現在の現像設定をコピーする）。作った仮想コピーは元の variant と
@@ -2083,21 +2096,7 @@ impl Core {
                 genzo_pipeline::PipelineError::InvalidArgument(m) => ApiError::InvalidArgument(m),
                 e => e.into(),
             })?;
-        let v = pick.values;
-        Ok(AutoTone {
-            exposure_ev: v.exposure_ev,
-            contrast: v.contrast,
-            highlights: v.highlights,
-            shadows: v.shadows,
-            whites: v.whites,
-            blacks: v.blacks,
-            stats: AutoToneStats {
-                samples: pick.stats.samples,
-                black_log2: pick.stats.black_log2,
-                median_log2: pick.stats.median_log2,
-                white_log2: pick.stats.white_log2,
-            },
-        })
+        Ok(AutoTone::from_pick(&pick))
     }
 
     /// マスクの重ねて表示（O キー。DEV-18）: マスク `index`（今の設定の `masks` の番号）の重みの画像。

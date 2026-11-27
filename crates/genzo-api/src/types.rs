@@ -106,6 +106,8 @@ pub enum JobKind {
     VideoProxy,
     /// 比較明・比較暗合成（DEV-34。docs/composite_design.md）。
     Composite,
+    /// 複数の写真への一括の自動補正（DEV-32。[`crate::Core::auto_tone_variants`]）。
+    AutoTone,
 }
 
 /// ジョブの状態。
@@ -190,6 +192,8 @@ pub enum JobResult {
     VideoProxy(VideoProxyReport),
     /// 比較明・比較暗合成。
     Composite(CompositeReport),
+    /// 一括の自動補正。
+    AutoTone(AutoToneBatchReport),
 }
 
 /// ファイルの問題（読めない・登録できないなど）。
@@ -1488,6 +1492,25 @@ pub struct AutoTone {
 }
 
 impl AutoTone {
+    /// genzo-pipeline の結果（`Engine::auto_tone`）から作る。
+    pub(crate) fn from_pick(pick: &genzo_pipeline::AutoTonePick) -> Self {
+        let v = pick.values;
+        Self {
+            exposure_ev: v.exposure_ev,
+            contrast: v.contrast,
+            highlights: v.highlights,
+            shadows: v.shadows,
+            whites: v.whites,
+            blacks: v.blacks,
+            stats: AutoToneStats {
+                samples: pick.stats.samples,
+                black_log2: pick.stats.black_log2,
+                median_log2: pick.stats.median_log2,
+                white_log2: pick.stats.white_log2,
+            },
+        }
+    }
+
     /// 設定に入れる（6 つの値だけを置き換える。ほかの項目は変えない）。
     pub fn apply(&self, settings: &mut DevelopSettings) {
         settings.exposure_ev = self.exposure_ev;
@@ -1497,6 +1520,21 @@ impl AutoTone {
         settings.tone.whites = self.whites;
         settings.tone.blacks = self.blacks;
     }
+}
+
+/// 複数の写真への一括の自動補正の結果（[`JobResult::AutoTone`]。[`crate::Core::auto_tone_variants`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AutoToneBatchReport {
+    /// 値を入れて保存した写真の数（それぞれの履歴に「自動補正」を 1 件）。
+    pub applied: u64,
+    /// 求めた値が今の値と同じで、保存しなかった写真の数。
+    pub unchanged: u64,
+    /// 対象外で飛ばした数（動画）。
+    pub skipped: u64,
+    /// 失敗した写真（見つからない・読めないなど。ほかの写真は続ける）。
+    pub failed: Vec<VariantIssue>,
+    /// 取り消されて途中で終わったか（それまでに保存した写真はそのまま残る）。
+    pub cancelled: bool,
 }
 
 /// 自動補正に使った代表の明るさ（露光量の前のシーンリニアの輝度の log2。genzo-pipeline の `AutoToneStats`）。

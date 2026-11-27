@@ -1513,7 +1513,8 @@ pub enum DevelopCommand {
     /// 今の設定と同じ）
     Before(BeforeArgs),
     /// 自動補正（DEV-32）: 露光量・コントラスト・ハイライト・シャドウ・白レベル・黒レベルを写真に合わせて決め、
-    /// 設定に入れて保存する（履歴に 1 件「自動補正」。ほかの項目は変えない。--dry-run で値を見るだけ）
+    /// 設定に入れて保存する（履歴に 1 件「自動補正」。ほかの項目は変えない。--dry-run で値を見るだけ）。ID を
+    /// 複数並べると、1 枚ずつ値を求めてまとめて保存する（動画は飛ばす）
     Auto(AutoArgs),
     /// 比較表示（LIB-03）の同期ズームと同じ範囲を、2 枚までの写真について同時に描いて PNG に書く（コア API
     /// `render_view_region` を試す。範囲の中心は写真ごとの割合、大きさは出力の画素で、どの写真も同じ）
@@ -2916,10 +2917,10 @@ pub struct BeforeArgs {
 /// `develop auto` の引数（DEV-32）。
 #[derive(Debug, Clone, Args)]
 pub struct AutoArgs {
-    /// variant の ID（写真。動画は現像できない）
-    #[arg(value_parser = parse_variant_id)]
-    pub variant: VariantId,
-    /// 値を表示するだけで、保存しない
+    /// variant の ID（写真。複数可。複数ならまとめて当てて保存する。動画は飛ばす）
+    #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+    pub variants: Vec<VariantId>,
+    /// 値を表示するだけで、保存しない（ID が 1 つのときだけ）
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -4310,8 +4311,14 @@ mod tests {
         let cli = parse(&["genzo", "develop", "auto", "7"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Develop(DevelopCommand::Auto(AutoArgs { variant, dry_run: false }))
-                if variant == VariantId::new(7)
+            Command::Develop(DevelopCommand::Auto(AutoArgs { variants, dry_run: false }))
+                if variants == [VariantId::new(7)]
+        ));
+        let cli = parse(&["genzo", "develop", "auto", "7", "8", "9"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Develop(DevelopCommand::Auto(AutoArgs { variants, dry_run: false }))
+                if variants.len() == 3
         ));
         let cli = parse(&["genzo", "develop", "auto", "7", "--dry-run"]).unwrap();
         assert!(matches!(

@@ -59,6 +59,8 @@ export type DialogState =
   | { kind: "paste_settings"; targets: VariantId[] }
   // 処理バージョンをまとめて最新に更新する（DATA-09。写真の右クリックのメニュー）。
   | { kind: "upgrade_process"; targets: VariantId[] }
+  // 選んだ写真にまとめて自動補正を当てる（DEV-32。写真の右クリックのメニュー）。
+  | { kind: "auto_tone"; targets: VariantId[] }
   | { kind: "settings"; tab?: "general" | "view" | "catalog" | "backup" | "about" }
   | { kind: "shortcuts" }
   | { kind: "close_failed"; failure: CloseFailure; quitting: boolean }
@@ -326,6 +328,7 @@ export const JOB_LABEL: Record<JobKind, string> = {
   find_relink_candidates: "再リンクの候補の探索",
   video_proxy: "再生用のファイルの作成",
   composite: "合成",
+  auto_tone: "自動補正",
 };
 
 const jobWaiters = new Map<number, ((info: JobInfo) => void)[]>();

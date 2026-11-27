@@ -166,6 +166,14 @@ describe("写真の右クリックのメニュー", () => {
     expect(byAction(photoMenuEntries(0, undefined)).get("edit_location")?.enabled).toBe(false);
   });
 
+  it("一括の自動補正（DEV-32）は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
+    expect(byAction(photoMenuEntries(2, undefined)).get("auto_tone")).toMatchObject({ label: "自動補正を当てる…", enabled: true });
+    expect(byAction(photoMenuEntries(1, mockSummary())).get("auto_tone")?.enabled).toBe(true);
+    expect(byAction(photoMenuEntries(3, mockSummary({ kind: "video" }))).get("auto_tone")?.enabled).toBe(true);
+    expect(byAction(photoMenuEntries(1, mockSummary({ kind: "video" }))).get("auto_tone")?.enabled).toBe(false);
+    expect(byAction(photoMenuEntries(0, undefined)).get("auto_tone")?.enabled).toBe(false);
+  });
+
   it("処理バージョンの更新は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
     expect(byAction(photoMenuEntries(1, mockSummary())).get("upgrade_process")?.enabled).toBe(true);
     expect(byAction(photoMenuEntries(3, mockSummary({ kind: "video" }))).get("upgrade_process")?.enabled).toBe(true);
