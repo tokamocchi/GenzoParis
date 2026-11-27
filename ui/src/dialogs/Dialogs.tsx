@@ -23,6 +23,7 @@ import {
   RenameFilesDialog,
 } from "./FileDialogs";
 import { GeotagDialog } from "./GeotagDialog";
+import { GpxDialog } from "./GpxDialog";
 import { ImportDialog } from "./ImportDialog";
 import { offerImportFolders } from "./importDrop";
 import { splitDroppedPaths } from "./importLogic";
@@ -142,6 +143,9 @@ export function Dialogs() {
       break;
     case "stats":
       body = <StatsDialog />;
+      break;
+    case "gpx":
+      body = <GpxDialog variantIds={dialog.variantIds} />;
       break;
     case "close_failed":
       // 理由が変わったら出し直す（再試行の結果など）。

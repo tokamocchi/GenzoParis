@@ -3205,6 +3205,91 @@ pub struct LocationEditInfo {
     pub asset_count: u64,
     /// 変更した日時（UTC）。
     pub created_at: DateTime<Utc>,
+    /// GPX のログから、写真ごとに違う位置を付けた変更か（[`crate::Core::apply_gpx_locations`]）。真のとき、
+    /// `location` は代表の 1 つ（最初に変えた写真の位置）。
+    #[serde(default)]
+    pub from_track: bool,
+}
+
+/// GPX のログからの位置付けの設定（[`crate::Core::plan_gpx_locations`]・[`crate::Core::apply_gpx_locations`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GpxOptions {
+    /// 記録の途切れとみなす間隔（秒。既定 300）。時刻をはさむ 2 点の間隔がこれ以内なら補間し、そうでなければ
+    /// 近いほうの点がこの秒数以内にあるときだけ、その点を使う。
+    pub max_gap_seconds: u32,
+    /// 写真の時計のずれ（秒）。撮影日時にこの秒数を足してから、ログと照らし合わせる（カメラの時計が 2 分進んで
+    /// いたなら −120）。カタログの撮影日時は変えない。
+    pub offset_seconds: i64,
+    /// すでに位置のある写真（カメラの位置・後から付けた位置）にも付けるか（既定は付けない）。
+    pub overwrite: bool,
+}
+
+impl Default for GpxOptions {
+    fn default() -> Self {
+        Self {
+            max_gap_seconds: genzo_model::DEFAULT_GPX_MAX_GAP_SECONDS,
+            offset_seconds: 0,
+            overwrite: false,
+        }
+    }
+}
+
+/// GPX のログからの位置付けの見込み・結果。写真の数はどれも asset の数（仮想コピーは位置を共有するので 1 枚）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpxLocationPlan {
+    /// ログの、時刻のある点の数。
+    pub track_points: u64,
+    /// ログの、読めずに飛ばした点の数（時刻がない・座標が範囲外など）。
+    pub track_skipped: u64,
+    /// ログの最初の点の時刻（UTC）。
+    pub track_start: DateTime<Utc>,
+    /// ログの最後の点の時刻（UTC）。
+    pub track_end: DateTime<Utc>,
+    /// 対象の写真の数（動画・見つからないものを除く）。
+    pub photos: u64,
+    /// ログから位置が決まった写真の数（`changed` + `unchanged`）。
+    pub matched: u64,
+    /// そのうち、2 点の間を補間して決めた数（残りは近いほうの 1 点をそのまま使った）。
+    pub interpolated: u64,
+    /// 変わる（変えた）数。
+    pub changed: u64,
+    /// 同じ位置がすでに付いていて変わらない数。
+    pub unchanged: u64,
+    /// 撮影日時がログの記録から離れていて、位置が決まらなかった写真の数。
+    pub out_of_track: u64,
+    /// 撮影日時のない写真の数。
+    pub no_capture_time: u64,
+    /// すでに位置があるので付けなかった写真の数（`overwrite` が偽のとき）。
+    pub skipped_located: u64,
+    /// 除いた動画の数。
+    pub skipped_videos: u64,
+    /// 見つからなかった写真の数（削除されたものなど。variant の数）。
+    pub missing: u64,
+    /// 記録した変更（結果のとき。変わったものがなければ `null`。見込みでは常に `null`）。
+    pub edit_id: Option<i64>,
+}
+
+impl Default for GpxLocationPlan {
+    fn default() -> Self {
+        Self {
+            track_points: 0,
+            track_skipped: 0,
+            track_start: DateTime::<Utc>::UNIX_EPOCH,
+            track_end: DateTime::<Utc>::UNIX_EPOCH,
+            photos: 0,
+            matched: 0,
+            interpolated: 0,
+            changed: 0,
+            unchanged: 0,
+            out_of_track: 0,
+            no_capture_time: 0,
+            skipped_located: 0,
+            skipped_videos: 0,
+            missing: 0,
+            edit_id: None,
+        }
+    }
 }
 
 impl From<genzo_catalog::LocationEditRecord> for LocationEditInfo {
@@ -3215,6 +3300,7 @@ impl From<genzo_catalog::LocationEditRecord> for LocationEditInfo {
             location: r.location,
             asset_count: r.asset_count,
             created_at: r.created_at,
+            from_track: r.from_track,
         }
     }
 }

@@ -140,6 +140,7 @@ pub mod error;
 pub mod events;
 mod export;
 mod fileops;
+mod gpx;
 mod identity;
 mod import;
 mod jobs;
@@ -193,6 +194,7 @@ pub use export::preview_export_names;
 pub use genzo_ml::{
     ORT_DISABLE_TELEMETRY_ENV, disable_telemetry_before_threads as disable_onnxruntime_telemetry,
 };
+pub use gpx::MAX_GPX_OFFSET_SECONDS;
 pub use identity::{DUPLICATE_GROUPS_MAX, HASH_FAILURES_KEPT, INTERACTIVE_MAX_WAIT};
 pub use import::{IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS, media_kind};
 pub use maintenance::{RestorePlan, apply_restore, prepare_restore};

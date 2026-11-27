@@ -49,6 +49,8 @@ import type {
   Flag,
   FolderId,
   FolderInfo,
+  GpxLocationPlan,
+  GpxOptions,
   FrameInfo,
   GeoBounds,
   GpsCoord,
@@ -712,6 +714,15 @@ export const planLocationEdit = async (variant_ids: VariantId[], location: GpsCo
  */
 export const editLocations = async (variant_ids: VariantId[], location: GpsCoord | null): Promise<LocationEditPlan> =>
   strip(await execute({ type: "edit_locations", variant_ids, location }, "location_edit_plan"));
+/** GPX のログから位置を付ける見込み（何も変えない）。 */
+export const planGpxLocations = async (variant_ids: VariantId[], gpx_path: string, options: GpxOptions): Promise<GpxLocationPlan> =>
+  strip(await execute({ type: "plan_gpx_locations", variant_ids, gpx_path, options }, "gpx_location_plan"));
+/**
+ * GPX のログと撮影日時を照らし合わせて、選んだ写真に位置を付ける（1 回の変更として履歴に残る。undoLocationEdit で
+ * 取り消せる）。
+ */
+export const applyGpxLocations = async (variant_ids: VariantId[], gpx_path: string, options: GpxOptions): Promise<GpxLocationPlan> =>
+  strip(await execute({ type: "apply_gpx_locations", variant_ids, gpx_path, options }, "gpx_location_plan"));
 /** 位置の変更の履歴（新しい順）。 */
 export const locationEdits = async (): Promise<LocationEditInfo[]> =>
   (await execute({ type: "location_edits" }, "location_edits")).edits;

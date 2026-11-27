@@ -174,6 +174,15 @@ describe("写真の右クリックのメニュー", () => {
     expect(byAction(photoMenuEntries(0, undefined)).get("auto_tone")?.enabled).toBe(false);
   });
 
+  it("GPX のログからの位置付け（LIB-21）は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
+    expect(byAction(photoMenuEntries(2, undefined)).get("gpx_location")).toMatchObject({
+      label: "GPX のログから位置を付ける…",
+      enabled: true,
+    });
+    expect(byAction(photoMenuEntries(1, mockSummary({ kind: "video" }))).get("gpx_location")?.enabled).toBe(false);
+    expect(byAction(photoMenuEntries(0, undefined)).get("gpx_location")?.enabled).toBe(false);
+  });
+
   it("処理バージョンの更新は写真を選んでいれば使える（動画 1 本だけなら使えない）", () => {
     expect(byAction(photoMenuEntries(1, mockSummary())).get("upgrade_process")?.enabled).toBe(true);
     expect(byAction(photoMenuEntries(3, mockSummary({ kind: "video" }))).get("upgrade_process")?.enabled).toBe(true);

@@ -719,6 +719,35 @@ pub enum LocationCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// GPX のログ（GPS ロガー・スマートフォンのアプリの記録）と撮影日時を照らし合わせて、位置を付ける（すでに
+    /// 位置のある写真・動画・撮影日時のない写真・ログから離れた時刻の写真には付けない。1 回の変更として履歴に
+    /// 残り、location undo でまとめて取り消せる）
+    Gpx {
+        /// GPX のファイル
+        gpx: PathBuf,
+        /// variant の ID（複数可）
+        #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
+        variants: Vec<VariantId>,
+        /// 記録の途切れとみなす間隔（秒）。時刻をはさむ 2 点の間隔がこれ以内なら補間し、そうでなければ近いほうの
+        /// 点がこの秒数以内にあるときだけ使う
+        #[arg(long, value_name = "SEC", default_value_t = genzo_model::DEFAULT_GPX_MAX_GAP_SECONDS)]
+        max_gap: u32,
+        /// 写真の時計のずれ（秒。撮影日時に足してからログと照らし合わせる。カメラの時計が 2 分進んでいたなら
+        /// -120。カタログの撮影日時は変えない）
+        #[arg(
+            long,
+            value_name = "SEC",
+            default_value_t = 0,
+            allow_hyphen_values = true
+        )]
+        offset: i64,
+        /// すでに位置のある写真（カメラの位置・付けた位置）にも付ける
+        #[arg(long)]
+        overwrite: bool,
+        /// 変えずに、付く数だけを出す
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// 位置の変更の履歴（新しい順）
     History,
     /// 最後の位置の変更を取り消す

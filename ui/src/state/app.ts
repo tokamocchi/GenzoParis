@@ -63,6 +63,8 @@ export type DialogState =
   | { kind: "auto_tone"; targets: VariantId[] }
   | { kind: "settings"; tab?: "general" | "view" | "catalog" | "backup" | "about" }
   | { kind: "shortcuts" }
+  // GPX のログから位置を付ける（LIB-21。写真の右クリックのメニュー）。
+  | { kind: "gpx"; variantIds: VariantId[] }
   // 撮影の統計（左のパネルの「カタログ」の「統計」）。
   | { kind: "stats" }
   | { kind: "close_failed"; failure: CloseFailure; quitting: boolean }

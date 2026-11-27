@@ -721,3 +721,143 @@ fn photos_are_found_by_their_effective_location_and_read_for_the_map() {
     );
     assert!(f.cat.map_locations(&[]).unwrap().is_empty());
 }
+
+/// 写真ごとに違う位置を付ける（GPX のログからの位置付け）: 1 回の変更として履歴に残り、まとめて取り消せる。
+/// 同じ位置がすでに付いている写真は変えない。見込みは同じ数。
+#[test]
+fn per_photo_locations_are_one_undoable_edit() {
+    let mut f = Fixture::new();
+    let a = gps_photo(&mut f, "A.ARW", 1, None).asset_id;
+    let b = gps_photo(&mut f, "B.ARW", 2, Some(sydney())).asset_id;
+    let c = gps_photo(&mut f, "C.ARW", 3, None).asset_id;
+    f.cat.edit_locations(&[c], Some(kyoto())).unwrap();
+    let items = [
+        (a, tokyo()),
+        (b, kyoto()),
+        (c, kyoto()),
+        // 重なった asset は先のものを使う。存在しない asset は数えるだけ。
+        (a, sydney()),
+        (AssetId::new(9999), tokyo()),
+    ];
+    let expected = LocationPlan {
+        assets: 3,
+        changed: 2,
+        unchanged: 1,
+        with_camera_gps: 1,
+        with_assigned: 1,
+        missing: 1,
+    };
+    assert_eq!(f.cat.plan_location_edit_each(&items).unwrap(), expected);
+    assert_eq!(f.cat.asset_location(a).unwrap(), None, "見込みでは書かない");
+
+    let out = f.cat.edit_locations_each(&items).unwrap();
+    assert_eq!(out.plan, expected);
+    let edit_id = out.edit_id.expect("履歴に残る");
+    assert_eq!(f.cat.asset_location(a).unwrap(), Some(tokyo()));
+    assert_eq!(f.cat.asset_location(b).unwrap(), Some(kyoto()));
+    let edits = f.cat.location_edits().unwrap();
+    assert_eq!(edits.len(), 2);
+    let e = &edits[0];
+    assert_eq!(
+        (e.id, e.kind, e.asset_count),
+        (edit_id, LocationEditKind::Set, 2)
+    );
+    assert!(e.from_track && !edits[1].from_track);
+    assert_eq!(e.location, Some(tokyo()), "代表は最初に変えた写真の位置");
+    assert_eq!(rows(&f.cat, "location_edit_item"), 3);
+
+    // もう一度同じものを付けても、変わらないので履歴を残さない。
+    let again = f.cat.edit_locations_each(&items).unwrap();
+    assert_eq!((again.edit_id, again.plan.changed), (None, 0));
+    assert_eq!(f.cat.location_edits().unwrap().len(), 2);
+
+    // 取り消すと、付ける前に戻る（b はカメラの位置だけ、c は先に付けた位置のまま）。
+    let undone = f.cat.undo_location_edit().unwrap().unwrap();
+    assert!(undone.edit.from_track);
+    assert_eq!((undone.restored, undone.removed), (2, 0));
+    assert_eq!(f.cat.asset_location(a).unwrap(), None);
+    assert_eq!(f.cat.asset_location(b).unwrap(), None);
+    assert_eq!(f.cat.asset_location(c).unwrap(), Some(kyoto()));
+
+    // 範囲外の座標が 1 つでもあれば、何も変えない。空なら何もしない。
+    let bad = [
+        (a, tokyo()),
+        (
+            b,
+            GpsCoord {
+                lat: 91.0,
+                lon: 0.0,
+            },
+        ),
+    ];
+    assert!(matches!(
+        f.cat.edit_locations_each(&bad),
+        Err(CatalogError::InvalidInput(_))
+    ));
+    assert_eq!(f.cat.asset_location(a).unwrap(), None);
+    assert_eq!(f.cat.edit_locations_each(&[]).unwrap().edit_id, None);
+}
+
+/// 版 14 のカタログを開くと版 15 に移行し、それまでの位置の変更の履歴はそのまま読める（出どころは NULL）。
+#[test]
+fn version_14_catalog_migrates_to_location_edit_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("catalog.db");
+    let asset = {
+        let mut cat =
+            crate::testing::open_at_version(&path, crate::LOCATION_TRACKS_SCHEMA_VERSION - 1)
+                .unwrap();
+        let vol = cat.ensure_volume("v", None, None).unwrap();
+        let folder = cat.ensure_folder(vol, "2024").unwrap();
+        let a = cat
+            .register_file(&super::photo_req(
+                folder,
+                "A.ARW",
+                1,
+                Some("2024:05:01 12:00:00"),
+            ))
+            .unwrap();
+        // 版 14 の形の履歴（source の列がない）。
+        assert!(
+            cat.conn
+                .prepare("SELECT source FROM location_edit")
+                .is_err()
+        );
+        cat.conn
+            .execute_batch(&format!(
+                "INSERT INTO asset_location(asset_id, lat, lon, set_at)
+                     VALUES ({id}, 35.0, 135.0, '2024-05-02T00:00:00.000000Z');
+                 INSERT INTO location_edit(id, kind, lat, lon, asset_count, created_at)
+                     VALUES (1, 'set', 35.0, 135.0, 1, '2024-05-02T00:00:00.000000Z');
+                 INSERT INTO location_edit_item(edit_id, asset_id) VALUES (1, {id});",
+                id = a.asset_id.get()
+            ))
+            .unwrap();
+        cat.close().unwrap();
+        a.asset_id
+    };
+    let mut cat = Catalog::open(&path).unwrap();
+    assert_eq!(cat.schema_version().unwrap(), CATALOG_SCHEMA_VERSION);
+    let edits = cat.location_edits().unwrap();
+    assert_eq!(edits.len(), 1);
+    assert!(!edits[0].from_track);
+    assert_eq!(edits[0].location, GpsCoord::new(35.0, 135.0));
+    // 移行の後は、写真ごとの位置付けを記録できる。出どころは決まった値だけ。
+    assert!(
+        cat.edit_locations_each(&[(asset, tokyo())])
+            .unwrap()
+            .edit_id
+            .is_some()
+    );
+    assert!(
+        cat.conn
+            .execute("UPDATE location_edit SET source = 'other' WHERE id = 1", [])
+            .is_err()
+    );
+    // 取り消すと、移行の前に付けた位置に戻る。
+    cat.undo_location_edit().unwrap().unwrap();
+    assert_eq!(
+        cat.asset_location(asset).unwrap(),
+        GpsCoord::new(35.0, 135.0)
+    );
+}

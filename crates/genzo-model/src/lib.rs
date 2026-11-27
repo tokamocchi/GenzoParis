@@ -22,6 +22,7 @@ pub mod composite;
 pub mod develop;
 pub mod export;
 pub mod fs_sync;
+pub mod gpx;
 pub mod ids;
 pub mod iptc;
 pub mod location;
@@ -54,6 +55,10 @@ pub use export::{
     Align, ConflictPolicy, ExportFormat, ExportSettings, ExportSettingsError, ExportSize,
     OutputColorSpace, OutputSharpening, RgbColor, SharpenAmount, SharpenMedia, VideoExport,
     Watermark, WatermarkAnchor, WatermarkContent,
+};
+pub use gpx::{
+    DEFAULT_GPX_MAX_GAP_SECONDS, GpxError, GpxTrack, Located, MAX_GPX_BYTES,
+    MAX_GPX_MAX_GAP_SECONDS, MAX_GPX_POINTS, TrackPoint,
 };
 pub use ids::{
     AssetId, CollectionId, FileId, FileOpId, FolderId, HistoryEntryId, KeywordId, SnapshotId,

@@ -297,6 +297,11 @@ export async function runPhotoMenu(action: PhotoMenuAction): Promise<void> {
     case "edit_location":
       openGeotagDialog();
       return;
+    case "gpx_location": {
+      const targets = actions.targets();
+      if (targets.length > 0) actions.openDialog({ kind: "gpx", variantIds: targets });
+      return;
+    }
     case "upgrade_process": {
       const targets = actions.targets();
       if (targets.length > 0) actions.openDialog({ kind: "upgrade_process", targets });

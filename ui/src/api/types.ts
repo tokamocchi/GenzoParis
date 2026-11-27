@@ -2297,6 +2297,8 @@ export type Command =
   // 位置情報の後付け（LIB-21）。location は省略できない（null は付けた位置を消して、カメラの位置に戻す）。
   | { type: "plan_location_edit"; variant_ids: VariantId[]; location: GpsCoord | null }
   | { type: "edit_locations"; variant_ids: VariantId[]; location: GpsCoord | null }
+  | { type: "plan_gpx_locations"; variant_ids: VariantId[]; gpx_path: string; options: GpxOptions }
+  | { type: "apply_gpx_locations"; variant_ids: VariantId[]; gpx_path: string; options: GpxOptions }
   | { type: "location_edits" }
   | { type: "undo_location_edit" }
   | { type: "timeline"; generation: number; gap_seconds: number }
@@ -2404,6 +2406,7 @@ export type Response =
   | { type: "capture_time_edits"; edits: CaptureTimeEditInfo[] }
   | { type: "capture_time_undone"; undone: CaptureTimeUndo | null }
   | ({ type: "location_edit_plan" } & LocationEditPlan)
+  | ({ type: "gpx_location_plan" } & GpxLocationPlan)
   | { type: "location_edits"; edits: LocationEditInfo[] }
   | { type: "location_undone"; undone: LocationUndo | null }
   | ({ type: "timeline" } & Timeline)
@@ -2606,6 +2609,45 @@ export interface LocationEditInfo {
   asset_count: number;
   /** 変更した日時（UTC。RFC 3339）。 */
   created_at: string;
+  /**
+   * GPX のログから、写真ごとに違う位置を付けた変更か（そのとき location は代表の 1 つ）。古いコアでは無い。
+   */
+  from_track?: boolean;
+}
+
+/** GPX のログからの位置付けの設定（genzo-api の GpxOptions）。 */
+export interface GpxOptions {
+  /** 記録の途切れとみなす間隔（秒）。 */
+  max_gap_seconds: number;
+  /** 写真の時計のずれ（秒。撮影日時に足してからログと照らし合わせる）。 */
+  offset_seconds: number;
+  /** すでに位置のある写真にも付けるか。 */
+  overwrite: boolean;
+}
+
+/** GPX のログからの位置付けの見込み・結果（genzo-api の GpxLocationPlan）。写真の数は asset の数。 */
+export interface GpxLocationPlan {
+  track_points: number;
+  track_skipped: number;
+  /** ログの最初・最後の点の時刻（UTC。RFC 3339）。 */
+  track_start: string;
+  track_end: string;
+  photos: number;
+  /** ログから位置が決まった写真の数（changed + unchanged）。 */
+  matched: number;
+  /** そのうち、2 点の間を補間して決めた数。 */
+  interpolated: number;
+  changed: number;
+  unchanged: number;
+  /** 撮影日時がログの記録から離れていて、位置が決まらなかった数。 */
+  out_of_track: number;
+  no_capture_time: number;
+  /** すでに位置があるので付けなかった数。 */
+  skipped_located: number;
+  skipped_videos: number;
+  missing: number;
+  /** 記録した変更（結果のとき。変わったものがなければ null。見込みでは null）。 */
+  edit_id: number | null;
 }
 
 /** 位置の変更の取り消しの結果（genzo-api の LocationUndo）。 */

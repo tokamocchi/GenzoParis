@@ -45,7 +45,7 @@ use crate::types::{
     RelinkReport, RelinkRequest, RelocatePlan, RenameSpec, SnapshotInfo, SnapshotSource,
     VolumeInfo,
 };
-use crate::types::{QuickCollectionToggle, ShootingStats};
+use crate::types::{GpxLocationPlan, GpxOptions, QuickCollectionToggle, ShootingStats};
 
 /// コマンド（UI → コア）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1068,6 +1068,28 @@ pub enum Command {
         #[serde(deserialize_with = "required_option")]
         location: Option<GpsCoord>,
     },
+    /// GPX のログから位置を付ける見込み（何も変えない。[`crate::Core::plan_gpx_locations`]）。
+    /// → [`Response::GpxLocationPlan`]
+    PlanGpxLocations {
+        /// 写真（動画は除く）。
+        variant_ids: Vec<VariantId>,
+        /// GPX のファイル。
+        gpx_path: PathBuf,
+        /// 設定（省略すると既定）。
+        #[serde(default)]
+        options: GpxOptions,
+    },
+    /// GPX のログから、選んだ写真に位置を付ける（1 回の変更として履歴に残す。
+    /// [`crate::Core::apply_gpx_locations`]）。→ [`Response::GpxLocationPlan`]
+    ApplyGpxLocations {
+        /// 写真（動画は除く）。
+        variant_ids: Vec<VariantId>,
+        /// GPX のファイル。
+        gpx_path: PathBuf,
+        /// 設定（省略すると既定）。
+        #[serde(default)]
+        options: GpxOptions,
+    },
     /// 位置の変更の履歴。→ [`Response::LocationEdits`]
     LocationEdits,
     /// 最後の位置の変更を取り消す。→ [`Response::LocationUndone`]
@@ -1486,6 +1508,8 @@ pub enum Response {
     MapClusters(MapClusters),
     /// 位置の変更の見込み・結果（LIB-21）。
     LocationEditPlan(LocationEditPlan),
+    /// GPX のログからの位置付けの見込み・結果。
+    GpxLocationPlan(GpxLocationPlan),
     /// 位置の変更の履歴（新しい順）。
     LocationEdits {
         /// 履歴。
@@ -2112,6 +2136,16 @@ impl Core {
                 variant_ids,
                 location,
             } => R::LocationEditPlan(self.edit_locations(&variant_ids, location)?),
+            C::PlanGpxLocations {
+                variant_ids,
+                gpx_path,
+                options,
+            } => R::GpxLocationPlan(self.plan_gpx_locations(&variant_ids, &gpx_path, &options)?),
+            C::ApplyGpxLocations {
+                variant_ids,
+                gpx_path,
+                options,
+            } => R::GpxLocationPlan(self.apply_gpx_locations(&variant_ids, &gpx_path, &options)?),
             C::LocationEdits => R::LocationEdits {
                 edits: self.location_edits()?,
             },
@@ -2739,6 +2773,7 @@ mod tests {
             created_at: chrono::DateTime::parse_from_rfc3339("2026-10-20T01:02:03Z")
                 .unwrap()
                 .to_utc(),
+            from_track: false,
         };
         let r = Response::LocationEdits {
             edits: vec![edit.clone()],
@@ -2747,7 +2782,7 @@ mod tests {
             serde_json::to_value(&r).unwrap(),
             json!({"type": "location_edits", "edits": [{
                 "id": 4, "kind": "set", "location": {"lat": 35.681_236, "lon": 139.767_125},
-                "asset_count": 1, "created_at": "2026-10-20T01:02:03Z"
+                "asset_count": 1, "created_at": "2026-10-20T01:02:03Z", "from_track": false
             }]})
         );
         let r = Response::LocationUndone {

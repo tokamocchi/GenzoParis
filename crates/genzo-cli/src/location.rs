@@ -39,6 +39,39 @@ fn run_in(s: &Session, out: Output, cmd: LocationCommand) -> CliResult<Status> {
             dry_run,
         } => edit(s, out, &variants, Some(at), dry_run),
         LocationCommand::Clear { variants, dry_run } => edit(s, out, &variants, None, dry_run),
+        LocationCommand::Gpx {
+            gpx,
+            variants,
+            max_gap,
+            offset,
+            overwrite,
+            dry_run,
+        } => {
+            let ids = unique_ids(&variants);
+            ensure_variants(s, &ids)?;
+            let options = genzo_api::GpxOptions {
+                max_gap_seconds: max_gap,
+                offset_seconds: offset,
+                overwrite,
+            };
+            let plan = if dry_run {
+                s.core.plan_gpx_locations(&ids, &gpx, &options)?
+            } else {
+                s.core.apply_gpx_locations(&ids, &gpx, &options)?
+            };
+            if out.json {
+                out.print_json(&json!({
+                    "dry_run": dry_run,
+                    "options": json_value(&options),
+                    "plan": json_value(&plan),
+                }));
+            } else {
+                for line in describe_gpx_plan(&plan, dry_run) {
+                    out.line(line);
+                }
+            }
+            Ok(Status::Success)
+        }
         LocationCommand::History => {
             let edits = s.core.location_edits()?;
             if out.json {
@@ -122,8 +155,67 @@ fn edit(
     Ok(Status::Success)
 }
 
+/// GPX のログからの位置付けの見込み・結果の文。
+fn describe_gpx_plan(p: &genzo_api::GpxLocationPlan, dry_run: bool) -> Vec<String> {
+    let fmt = "%Y-%m-%d %H:%M:%S";
+    let mut lines = vec![format!(
+        "ログ: {} 点（{} 〜 {} UTC{}）",
+        p.track_points,
+        p.track_start.format(fmt),
+        p.track_end.format(fmt),
+        if p.track_skipped > 0 {
+            format!("。読めなかった点 {}", p.track_skipped)
+        } else {
+            String::new()
+        }
+    )];
+    lines.push(if dry_run {
+        format!(
+            "{} 枚に位置を付けます（対象 {} 枚。--dry-run のため変えていません）",
+            p.changed, p.photos
+        )
+    } else {
+        format!(
+            "{} 枚に位置を付けました（対象 {} 枚{}）",
+            p.changed,
+            p.photos,
+            if p.changed > 0 {
+                "。location undo で元に戻せます"
+            } else {
+                ""
+            }
+        )
+    });
+    for (n, text) in [
+        (p.unchanged, "同じ位置が付いているため変わりません"),
+        (
+            p.skipped_located,
+            "すでに位置があるため付けません（--overwrite で付けられます）",
+        ),
+        (
+            p.out_of_track,
+            "撮影日時がログの記録から離れているため付けられません（--max-gap・--offset を確かめてください）",
+        ),
+        (p.no_capture_time, "撮影日時がないため付けられません"),
+    ] {
+        if n > 0 {
+            lines.push(format!("{n} 枚は{text}"));
+        }
+    }
+    if p.skipped_videos > 0 {
+        lines.push(format!(
+            "動画 {} 本は対象外のため除きました（動画には位置を付けません）",
+            p.skipped_videos
+        ));
+    }
+    lines
+}
+
 /// 履歴の 1 件の説明。
 fn describe_edit(e: &LocationEditInfo) -> String {
+    if e.from_track {
+        return "GPX のログから位置を付ける".to_owned();
+    }
     match (e.kind.as_str(), e.location) {
         ("set", Some(g)) => format!("位置を付ける {}", format_coordinates(g)),
         ("clear", _) => "付けた位置を消す".to_owned(),
@@ -283,8 +375,40 @@ mod tests {
             location: GpsCoord::new(-33.8568, 151.2153),
             asset_count: 2,
             created_at: chrono::Utc::now(),
+            from_track: false,
         };
         assert_eq!(describe_edit(&e), "位置を付ける -33.856800, 151.215300");
+        let track = LocationEditInfo {
+            from_track: true,
+            ..e.clone()
+        };
+        assert_eq!(describe_edit(&track), "GPX のログから位置を付ける");
+        let plan = genzo_api::GpxLocationPlan {
+            track_points: 120,
+            photos: 10,
+            matched: 6,
+            changed: 5,
+            unchanged: 1,
+            out_of_track: 2,
+            skipped_located: 2,
+            skipped_videos: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            describe_gpx_plan(&plan, false),
+            [
+                "ログ: 120 点（1970-01-01 00:00:00 〜 1970-01-01 00:00:00 UTC）",
+                "5 枚に位置を付けました（対象 10 枚。location undo で元に戻せます）",
+                "1 枚は同じ位置が付いているため変わりません",
+                "2 枚はすでに位置があるため付けません（--overwrite で付けられます）",
+                "2 枚は撮影日時がログの記録から離れているため付けられません（--max-gap・--offset を確かめてください）",
+                "動画 1 本は対象外のため除きました（動画には位置を付けません）",
+            ]
+        );
+        assert_eq!(
+            describe_gpx_plan(&plan, true)[1],
+            "5 枚に位置を付けます（対象 10 枚。--dry-run のため変えていません）"
+        );
         let c = LocationEditInfo {
             kind: "clear".to_owned(),
             location: None,

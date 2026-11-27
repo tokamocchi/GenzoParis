@@ -14,6 +14,9 @@
 //!   取り込み・ファイルの読み直しで変わらないので、変える前の値（付けた日時も）をそのまま書き戻す。履歴は
 //!   新しい順に [`MAX_LOCATION_EDITS`] 回分だけ残す。
 //! - 確かめるだけ（[`Catalog::plan_location_edit`]）: 何も書かずに、変わる数などを返す（画面の見込み）。
+//! - **写真ごとに違う位置を付ける**（[`Catalog::edit_locations_each`]。GPX のログからの位置付け。スキーマの版 15）:
+//!   asset と位置の組をまとめて 1 回の変更として記録する（履歴の `source` が `track`。`lat`・`lon` には代表として
+//!   最初に変えた asset の位置を入れる）。取り消しは、ほかの変更と同じ（変える前の位置を書き戻す）。
 
 use std::collections::{HashMap, HashSet};
 
@@ -109,6 +112,9 @@ pub struct LocationEditRecord {
     pub asset_count: u64,
     /// 変更した日時（UTC）。
     pub created_at: DateTime<Utc>,
+    /// 写真ごとに違う位置を付けた変更か（GPX のログからの位置付け。`source = 'track'`）。`true` のとき、
+    /// `location` は代表の 1 つ（最初に変えた asset の位置）。
+    pub from_track: bool,
 }
 
 /// 取り消しの結果（[`Catalog::undo_location_edit`]）。
@@ -228,6 +234,46 @@ fn plan_changes(
     Ok(plan)
 }
 
+/// asset ごとに違う位置を付ける変更の見込み（書かない）。変わる asset ごとに、変える前の付けた位置と付ける位置を
+/// 渡して `on_change` を呼ぶ。同じ asset が重なっていれば、先のものを使う。
+fn plan_changes_each(
+    conn: &rusqlite::Connection,
+    items: &[(AssetId, GpsCoord)],
+    mut on_change: impl FnMut(i64, Option<&Assigned>, GpsCoord) -> Result<()>,
+) -> Result<LocationPlan> {
+    let mut wanted: HashMap<i64, GpsCoord> = HashMap::with_capacity(items.len());
+    let mut ids = Vec::with_capacity(items.len());
+    for (a, g) in items {
+        check_location(Some(*g))?;
+        if let std::collections::hash_map::Entry::Vacant(e) = wanted.entry(a.get()) {
+            e.insert(*g);
+            ids.push(a.get());
+        }
+    }
+    let current = load_current(conn, &ids)?;
+    let mut plan = LocationPlan {
+        assets: current.len() as u64,
+        missing: ids.len().saturating_sub(current.len()) as u64,
+        ..LocationPlan::default()
+    };
+    for c in &current {
+        if c.camera {
+            plan.with_camera_gps += 1;
+        }
+        if c.assigned.is_some() {
+            plan.with_assigned += 1;
+        }
+        let g = wanted[&c.id];
+        if c.assigned.as_ref().map(|a| a.gps) == Some(g) {
+            plan.unchanged += 1;
+            continue;
+        }
+        plan.changed += 1;
+        on_change(c.id, c.assigned.as_ref(), g)?;
+    }
+    Ok(plan)
+}
+
 /// asset の付けた位置を書く（`None` なら消す）。`set_at` は付けた日時（DB の文字列）。
 fn write_location(
     conn: &rusqlite::Connection,
@@ -251,7 +297,7 @@ fn write_location(
     Ok(())
 }
 
-/// `location_edit` の行を読む（列の順は id・kind・lat・lon・asset_count・created_at）。
+/// `location_edit` の行を読む（列の順は id・kind・lat・lon・asset_count・created_at・source）。
 fn edit_record(row: &rusqlite::Row<'_>) -> Result<LocationEditRecord> {
     let kind: String = row.get(1)?;
     let location = match (row.get::<_, Option<f64>>(2)?, row.get::<_, Option<f64>>(3)?) {
@@ -265,6 +311,7 @@ fn edit_record(row: &rusqlite::Row<'_>) -> Result<LocationEditRecord> {
         location,
         asset_count: row.get::<_, i64>(4)?.max(0) as u64,
         created_at: parse_db_utc(&created)?,
+        from_track: row.get::<_, Option<String>>(6)?.as_deref() == Some("track"),
     })
 }
 
@@ -340,10 +387,76 @@ impl Catalog {
         Ok(LocationEditOutcome { edit_id, plan })
     }
 
+    /// 写真ごとに違う位置を付ける変更の見込み（何も書かない。[`Catalog::edit_locations_each`] と同じ数）。
+    pub fn plan_location_edit_each(&self, items: &[(AssetId, GpsCoord)]) -> Result<LocationPlan> {
+        plan_changes_each(&self.conn, items, |_, _, _| Ok(()))
+    }
+
+    /// asset ごとに違う位置を付ける（GPX のログからの位置付け。モジュールの doc。1 つのトランザクションで、
+    /// 1 回の変更として履歴に残す）。同じ asset が重なっていれば、先のものを使う。同じ位置がすでに付いている
+    /// asset は変えない。変わったものがなければ履歴を残さない。範囲外の座標があれば、何も変えずに
+    /// [`CatalogError::InvalidInput`]。
+    pub fn edit_locations_each(
+        &mut self,
+        items: &[(AssetId, GpsCoord)],
+    ) -> Result<LocationEditOutcome> {
+        for (_, g) in items {
+            check_location(Some(*g))?;
+        }
+        let now = now_utc_string();
+        let tx = self.conn.transaction()?;
+        let mut first: Option<GpsCoord> = None;
+        // 履歴の行は、代表の位置（最初に変えた asset の位置）が決まってから書く。明細は先に溜める。
+        let mut changes: Vec<(i64, Option<Assigned>, GpsCoord)> = Vec::new();
+        let plan = plan_changes_each(&tx, items, |id, before, g| {
+            first.get_or_insert(g);
+            changes.push((id, before.cloned(), g));
+            Ok(())
+        })?;
+        let Some(first) = first else {
+            return Ok(LocationEditOutcome {
+                edit_id: None,
+                plan,
+            });
+        };
+        tx.execute(
+            "INSERT INTO location_edit(kind, lat, lon, asset_count, created_at, source)
+             VALUES ('set', ?1, ?2, ?3, ?4, 'track')",
+            params![first.lat, first.lon, plan.changed as i64, now],
+        )?;
+        let edit_id = tx.last_insert_rowid();
+        {
+            let mut item = tx.prepare_cached(
+                "INSERT INTO location_edit_item(edit_id, asset_id, prev_lat, prev_lon, prev_set_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (id, before, g) in &changes {
+                item.execute(params![
+                    edit_id,
+                    id,
+                    before.as_ref().map(|b| b.gps.lat),
+                    before.as_ref().map(|b| b.gps.lon),
+                    before.as_ref().map(|b| b.set_at.as_str())
+                ])?;
+                write_location(&tx, *id, Some((*g, now.as_str())))?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM location_edit WHERE id NOT IN (
+                 SELECT id FROM location_edit ORDER BY id DESC LIMIT ?1)",
+            [MAX_LOCATION_EDITS as i64],
+        )?;
+        tx.commit()?;
+        Ok(LocationEditOutcome {
+            edit_id: Some(edit_id),
+            plan,
+        })
+    }
+
     /// 変更の履歴（新しい順。最大 [`MAX_LOCATION_EDITS`] 件）。
     pub fn location_edits(&self) -> Result<Vec<LocationEditRecord>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, kind, lat, lon, asset_count, created_at
+            "SELECT id, kind, lat, lon, asset_count, created_at, source
              FROM location_edit ORDER BY id DESC",
         )?;
         let mut rows = stmt.query([])?;
@@ -362,7 +475,7 @@ impl Catalog {
         let tx = self.conn.transaction()?;
         let edit = {
             let mut stmt = tx.prepare_cached(
-                "SELECT id, kind, lat, lon, asset_count, created_at
+                "SELECT id, kind, lat, lon, asset_count, created_at, source
                  FROM location_edit ORDER BY id DESC LIMIT 1",
             )?;
             let mut rows = stmt.query([])?;
