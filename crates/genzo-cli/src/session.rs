@@ -323,6 +323,7 @@ pub fn job_kind_text(kind: JobKind) -> &'static str {
         JobKind::VideoProxy => "再生用のファイルの作成",
         JobKind::Composite => "合成",
         JobKind::AutoTone => "自動補正",
+        JobKind::VideoFrame => "動画からの静止画の切り出し",
     }
 }
 

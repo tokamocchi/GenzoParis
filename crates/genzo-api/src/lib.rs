@@ -167,6 +167,7 @@ mod snapshots;
 mod stacks;
 mod timeline;
 pub mod types;
+mod video_frames;
 mod view;
 mod volumes;
 mod watermark;
@@ -228,6 +229,7 @@ pub use snapshots::apply_snapshot_label;
 pub use stacks::MAX_AUTO_STACK_GAP_SECONDS;
 pub use timeline::{MAX_TIMELINE_GAP_SECONDS, MAX_TIMELINE_GROUPS};
 pub use types::*;
+pub use video_frames::{MAX_SCRUB_CACHE_FRAMES, SCRUB_FRAMES, SCRUB_SPEC, STILL_JPEG_QUALITY};
 pub use view::{MAX_VIEW_PANES, MAX_VIEW_SOURCES};
 pub use volumes::{OsVolumes, VolumeIdentity, VolumeProbe};
 pub use watermark::{

@@ -97,6 +97,39 @@ fn run_in(s: &Session, out: Output, cmd: VideoCommand) -> CliResult<Status> {
             Ok(Status::Success)
         }
         VideoCommand::Proxy { variants } => proxies(s, out, &variants),
+        VideoCommand::Frame { variant, at } => {
+            let job = s.core.extract_video_frame(variant, at)?;
+            let info = s.wait_job_ok(job, "静止画の切り出し")?;
+            let Some(genzo_api::JobResult::VideoFrame(r)) = info.result else {
+                return Err(crate::error::CliError::other(
+                    "静止画の切り出しの結果がありません",
+                ));
+            };
+            if out.json {
+                out.print_json(&r);
+            } else {
+                out.line(format!(
+                    "{}（{} × {}）に切り出しました{}",
+                    r.path.display(),
+                    r.width,
+                    r.height,
+                    match r.registered {
+                        Some(v) => format!("（variant {v} として登録）"),
+                        None => "（カタログには登録できませんでした）".to_owned(),
+                    }
+                ));
+                if let Some(e) = &r.registration_error {
+                    out.warn(e.clone());
+                }
+            }
+            Ok(
+                if r.registered.is_some() && r.registration_error.is_none() {
+                    Status::Success
+                } else {
+                    Status::Partial
+                },
+            )
+        }
         VideoCommand::Cache => {
             let st = s.core.video_proxy_cache()?;
             if out.json {

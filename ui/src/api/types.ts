@@ -951,7 +951,8 @@ export type JobKind =
   | "find_relink_candidates"
   | "video_proxy"
   | "composite"
-  | "auto_tone";
+  | "auto_tone"
+  | "video_frame";
 export type JobState = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface FileIssue {
@@ -1273,6 +1274,21 @@ export interface CompositeReport {
   cancelled: boolean;
 }
 
+/** 動画からの静止画の切り出しの結果（VID-07。genzo-api の VideoFrameReport）。 */
+export interface VideoFrameReport {
+  /** 元の動画。 */
+  source: VariantId;
+  /** 切り出した時刻（ミリ秒）。 */
+  position_ms: number;
+  width: number;
+  height: number;
+  /** 書いたファイル（動画と同じフォルダ）。 */
+  path: string;
+  /** カタログに登録した写真（登録に失敗したら null）。 */
+  registered: VariantId | null;
+  registration_error: string | null;
+}
+
 /** 複数の写真への一括の自動補正の結果（DEV-32。genzo-api の AutoToneBatchReport）。 */
 export interface AutoToneBatchReport {
   /** 値を入れて保存した写真の数（それぞれの履歴に「自動補正」を 1 件）。 */
@@ -1321,7 +1337,8 @@ export type JobResult =
   | ({ type: "relink_candidates" } & RelinkSearch)
   | ({ type: "video_proxy" } & VideoProxyReport)
   | ({ type: "composite" } & CompositeReport)
-  | ({ type: "auto_tone" } & AutoToneBatchReport);
+  | ({ type: "auto_tone" } & AutoToneBatchReport)
+  | ({ type: "video_frame" } & VideoFrameReport);
 
 export interface JobInfo {
   job_id: number;
@@ -2321,6 +2338,7 @@ export type Command =
   | { type: "create_video_proxy"; variant_id: VariantId }
   | { type: "video_proxy_cache" }
   | { type: "clear_video_proxies" }
+  | { type: "extract_video_frame"; variant_id: VariantId; position_seconds: number }
   | { type: "capture_devices" }
   | { type: "detect_clock_offsets"; reference: CaptureDeviceKey }
   | { type: "capture_device_of"; variant_id: VariantId }

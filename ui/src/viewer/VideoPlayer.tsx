@@ -24,7 +24,10 @@ import type { VariantDetails, VariantSummary, VideoPlayback } from "../api/types
 import { thumbUrl, videoProxyUrl, videoUrl } from "../api/uri";
 import { Progress } from "../components/Progress";
 import { useHotkeys } from "../keyboard";
+import { waitJobUntilClosed } from "../dialogs/catalogActions";
+import { notifyResult } from "../dialogs/resultLog";
 import { actions, useApp } from "../state/app";
+import { describeFrameJob } from "./videoFrameLogic";
 import {
   MUTED_KEY,
   PROXY_START_DELAY_MS,
@@ -286,6 +289,28 @@ export function VideoPlayer(props: {
     appApi.openVariantFile(id).catch((e) => actions.reportError(e, "動画を開けません"));
   };
   const openSettings = () => actions.openDialog({ kind: "settings", tab: "general" });
+  // 再生している位置のフレームを静止画として切り出す（VID-07。コアのジョブ。終わったら結果を知らせる）。
+  const [extracting, setExtracting] = useState(false);
+  const extractFrame = async () => {
+    const v = videoRef.current;
+    if (!v || !Number.isFinite(v.currentTime)) return;
+    setExtracting(true);
+    try {
+      const jobId = await core.extractVideoFrame(id, Math.max(0, v.currentTime));
+      actions.trackJob(jobId, "video_frame", `静止画の切り出し: ${summary.file_name}`);
+      void waitJobUntilClosed(jobId)
+        .then((info) => {
+          if (info === "closed") return;
+          const notice = describeFrameJob(info);
+          if (notice) notifyResult(notice);
+        })
+        .catch((e: unknown) => actions.reportError(e, "静止画の切り出しの結果を受け取れません"));
+    } catch (e) {
+      actions.reportError(e, "静止画を切り出せません");
+    } finally {
+      if (mounted.current) setExtracting(false);
+    }
+  };
 
   useHotkeys(
     {
@@ -449,6 +474,14 @@ export function VideoPlayer(props: {
           disabled={!src || !Number.isFinite(duration)}
           aria-label="再生の位置"
         />
+        <button
+          className="btn ghost small"
+          onClick={blurAfter(() => void extractFrame())}
+          disabled={!src || extracting || (tools !== null && (!tools.ffmpeg || !tools.ffprobe))}
+          title="いまの位置のフレームを静止画（JPEG）にして、動画と同じフォルダに保存し、カタログに登録します（FFmpeg が要ります。色は変換しません）"
+        >
+          {extracting ? "切り出し中…" : "静止画にする"}
+        </button>
         <button
           className={`btn ghost small${muted ? " active" : ""}`}
           onClick={blurAfter(toggleMute)}

@@ -317,3 +317,88 @@ fn json_commands() {
     }
     core.close().unwrap();
 }
+
+/// スクラブ表示のフレーム（VID-05）と、動画からの静止画の切り出し（VID-07）。ffmpeg がなければ、使えない理由を
+/// 返すことだけを確かめる。
+#[test]
+fn scrub_frames_and_still_extraction() {
+    let env = Env::new();
+    write_jpeg(&env.photos.join("photo.jpg"), (32, 24), 1, None);
+    let has_video = make_video(&env.photos.join("clip.mp4"), "2024-05-01T03:00:00Z");
+    let core = env.open();
+    import(&core, &env.photos);
+    let items = all_items(&core);
+    let photo = by_name(&items, "photo.jpg").variant_id;
+    // 写真・範囲の外の番号・負の時刻は断る（ffmpeg の有無によらない）。
+    assert!(matches!(
+        core.video_scrub_frame(photo, 0),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        core.extract_video_frame(photo, 0.0),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    if !has_video {
+        core.close().unwrap();
+        return;
+    }
+    let video = by_name(&items, "clip.mp4").variant_id;
+    assert!(matches!(
+        core.video_scrub_frame(video, genzo_api::SCRUB_FRAMES),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        core.extract_video_frame(video, -1.0),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    let before = hashes(&env.photos);
+
+    // スクラブ表示: 番号ごとの JPEG。2 回目はメモリから（同じバイト列）。
+    let first = core.video_scrub_frame(video, 0).unwrap();
+    assert_eq!(&first[..2], [0xFF, 0xD8]);
+    let last = core
+        .video_scrub_frame(video, genzo_api::SCRUB_FRAMES - 1)
+        .unwrap();
+    assert_eq!(&last[..2], [0xFF, 0xD8]);
+    assert!(std::sync::Arc::ptr_eq(
+        &first,
+        &core.video_scrub_frame(video, 0).unwrap()
+    ));
+    assert_eq!(hashes(&env.photos), before, "元のフォルダは変えない");
+
+    // 静止画の切り出し: 動画と同じフォルダに書いて、登録する。撮影日時は動画の撮影日時 ＋ 時刻。
+    let JobResult::VideoFrame(r) = wait_ok(&core, core.extract_video_frame(video, 0.5).unwrap())
+    else {
+        panic!()
+    };
+    assert_eq!(r.position_ms, 500);
+    assert_eq!(r.path, env.photos.join("clip-frame-000000500.jpg"));
+    assert_eq!((r.width, r.height), (96, 64));
+    let still = r.registered.expect("登録した");
+    assert!(r.registration_error.is_none(), "{r:?}");
+    let d = core.variant_details(still).unwrap();
+    assert_eq!(d.summary.file_name, "clip-frame-000000500.jpg");
+    assert_eq!(d.summary.kind, genzo_api::AssetKind::Photo);
+    let video_time = core
+        .variant_details(video)
+        .unwrap()
+        .summary
+        .capture
+        .utc
+        .unwrap();
+    let still_time = d.summary.capture.utc.unwrap();
+    assert_eq!((still_time - video_time).num_milliseconds(), 500);
+    // もう一度切り出すと、上書きせずに連番を付ける。元の動画は変わらない。
+    let JobResult::VideoFrame(again) =
+        wait_ok(&core, core.extract_video_frame(video, 0.5).unwrap())
+    else {
+        panic!()
+    };
+    assert_ne!(again.path, r.path);
+    let after = hashes(&env.photos);
+    assert_eq!(
+        after.get(&env.photos.join("clip.mp4")),
+        before.get(&env.photos.join("clip.mp4"))
+    );
+    core.close().unwrap();
+}

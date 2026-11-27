@@ -78,6 +78,27 @@
   height: 100%;
   object-fit: contain;
 }
+/* 動画のスクラブ表示（VID-05）: サムネイルの上に、カーソルの位置のフレームを重ねる。 */
+.lib-cell-scrub {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.lib-cell-scrub img.scrub {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-0);
+  visibility: hidden;
+}
+.lib-cell-scrub .scrub-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
 .lib-cell-placeholder {
   display: flex;
   flex-direction: column;

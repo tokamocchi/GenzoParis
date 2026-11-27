@@ -1017,6 +1017,14 @@ pub enum Command {
     ClearVideoProxies,
 
     // --- 撮影日時の一括修正（LIB-16）・タイムライン（ORG-01） ---
+    /// 動画の指定した時刻のフレームを静止画（JPEG）として切り出し、動画と同じフォルダに保存してカタログに登録する
+    /// （VID-07。P3 のジョブ。[`crate::Core::extract_video_frame`]）。→ [`Response::JobStarted`]
+    ExtractVideoFrame {
+        /// 動画。
+        variant_id: VariantId,
+        /// 切り出す時刻（秒。動画の先頭から）。
+        position_seconds: f64,
+    },
     /// 機材の一覧（[`crate::Core::capture_devices`]）。→ [`Response::CaptureDevices`]
     CaptureDevices,
     /// 写真の機材（[`crate::Core::capture_device_of`]）。→ [`Response::CaptureDevice`]
@@ -2126,6 +2134,12 @@ impl Core {
             },
             C::VideoProxyCache => R::VideoProxyCache(self.video_proxy_cache()?),
             C::ClearVideoProxies => R::VideoProxyCache(self.clear_video_proxies()?),
+            C::ExtractVideoFrame {
+                variant_id,
+                position_seconds,
+            } => R::JobStarted {
+                job_id: self.extract_video_frame(variant_id, position_seconds)?,
+            },
             C::CaptureDevices => R::CaptureDevices {
                 devices: self.capture_devices()?,
             },

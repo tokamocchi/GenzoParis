@@ -686,6 +686,12 @@ export const importNamePreview = async (copy: CopySettings): Promise<NamePreview
 // ---------------------------------------------------------------------------
 
 /** 機材の一覧（カメラの表示名・シリアル番号・写真か動画か）。 */
+/**
+ * 動画の `position_seconds` 秒のフレームを静止画（JPEG）として切り出し、動画と同じフォルダに保存してカタログに
+ * 登録する（VID-07。ジョブ。利用者の ffmpeg が要る）。ジョブの番号を返す（結果は JobResult の video_frame）。
+ */
+export const extractVideoFrame = async (variant_id: VariantId, position_seconds: number): Promise<number> =>
+  (await execute({ type: "extract_video_frame", variant_id, position_seconds }, "job_started")).job_id;
 export const captureDevices = async (): Promise<CaptureDevice[]> =>
   (await execute({ type: "capture_devices" }, "capture_devices")).devices;
 /**

@@ -7,6 +7,7 @@
 //! | `genzo://localhost/video/{variant_id}` / `http://genzo.localhost/video/...` | 動画の元のファイル（VID-04。Range の要求に応える） |
 //! | `genzo://localhost/video-proxy/{variant_id}` / `http://genzo.localhost/video-proxy/...` | 動画の再生用のファイル（H.264 ＋ AAC の MP4。なければ 404） |
 //! | `genzo://localhost/tile/{z}/{x}/{y}` / `http://genzo.localhost/tile/...` | 地図のタイル（PNG。オンラインの地図が有効なときだけ。LIB-21。[`reply_tile`]） |
+//! | `genzo://localhost/scrub/{variant_id}/{index}` / `http://genzo.localhost/scrub/...` | 動画のスクラブ表示のフレーム（VID-05。JPEG。`index` は 0 から genzo-api の `SCRUB_FRAMES` − 1。利用者の ffmpeg で作る。作っている間のほかの要求は 503） |
 //! | `genzo://localhost/import-thumb/{scan_id}/{index}` / `http://genzo.localhost/import-thumb/...` | 取り込む前の選択の、取り込み元のファイルのサムネイル（JPEG。コアが覚えている走査の結果の番号で指定する。パスは受け取らない。genzo-api の `Core::import_source_thumbnail`） |
 //!
 //! 動画（[`reply_media`]）:
@@ -152,6 +153,13 @@ pub enum Route {
     Video(VariantId),
     /// 動画の再生用のファイル。
     VideoProxy(VariantId),
+    /// 動画のスクラブ表示のフレーム（動画と、フレームの番号）。
+    Scrub {
+        /// 動画。
+        id: VariantId,
+        /// フレームの番号。
+        index: u32,
+    },
     /// 取り込む前の選択の、取り込み元のファイルのサムネイル（走査の番号と、一覧の中の番号）。
     ImportThumb {
         /// 走査の番号。
@@ -176,6 +184,15 @@ pub fn parse(path: &str) -> Option<Route> {
     let kind = parts.next()?;
     if kind == "tile" {
         return parse_tile(parts);
+    }
+    if kind == "scrub" {
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let id: i64 = parts.next().filter(|s| digits(s))?.parse().ok()?;
+        let index = parts.next().filter(|s| digits(s))?.parse().ok()?;
+        return (parts.next().is_none() && id > 0).then_some(Route::Scrub {
+            id: VariantId::new(id),
+            index,
+        });
     }
     if kind == "import-thumb" {
         // 10 進の数字だけ（符号・空は受け付けない）。
@@ -537,6 +554,16 @@ pub fn reply(state: &AppState, path: &str, rev: Option<&str>) -> Reply {
         },
         // 走査の番号ごとに内容は変わらない（走査し直すと番号が変わる）が、取り込み元のファイルは外で変わりうるので、
         // 長くはキャッシュさせない。
+        // 動画の内容が変わらない限り同じ画像だが、内容が変わっても URI は同じなので、長くはキャッシュさせない。
+        Route::Scrub { id, index } => match core.video_scrub_frame(id, index) {
+            Ok(jpeg) => Reply::jpeg(jpeg.as_ref().clone(), false),
+            // ほかのフレームを作っている間（取り消し扱い）は、後で頼み直してもらう。
+            Err(e) if e.is_cancelled() => Reply::empty(503),
+            Err(e) => {
+                tracing::debug!(%e, ?id, index, "スクラブ表示のフレームを返せない");
+                Reply::empty(error_status(&e))
+            }
+        },
         Route::ImportThumb { scan_id, index } => match core.import_source_thumbnail(scan_id, index)
         {
             Ok(jpeg) => Reply::jpeg(jpeg, false),
@@ -738,6 +765,17 @@ mod tests {
                 index: 0
             })
         );
+        assert_eq!(
+            parse("/scrub/12/9"),
+            Some(Route::Scrub {
+                id: VariantId::new(12),
+                index: 9
+            })
+        );
+        assert_eq!(parse("/scrub/0/1"), None);
+        assert_eq!(parse("/scrub/12"), None);
+        assert_eq!(parse("/scrub/12/-1"), None);
+        assert_eq!(parse("/scrub/12/1/2"), None);
         assert_eq!(parse("/import-thumb/3"), None);
         assert_eq!(parse("/import-thumb/3/1/2"), None);
         assert_eq!(parse("/import-thumb/3/-1"), None);

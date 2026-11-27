@@ -333,6 +333,7 @@ export const JOB_LABEL: Record<JobKind, string> = {
   video_proxy: "再生用のファイルの作成",
   composite: "合成",
   auto_tone: "自動補正",
+  video_frame: "動画からの静止画の切り出し",
 };
 
 const jobWaiters = new Map<number, ((info: JobInfo) => void)[]>();

@@ -108,6 +108,8 @@ pub enum JobKind {
     Composite,
     /// 複数の写真への一括の自動補正（DEV-32。[`crate::Core::auto_tone_variants`]）。
     AutoTone,
+    /// 動画からの静止画の切り出し（VID-07。[`crate::Core::extract_video_frame`]）。
+    VideoFrame,
 }
 
 /// ジョブの状態。
@@ -194,6 +196,8 @@ pub enum JobResult {
     Composite(CompositeReport),
     /// 一括の自動補正。
     AutoTone(AutoToneBatchReport),
+    /// 動画からの静止画の切り出し。
+    VideoFrame(VideoFrameReport),
 }
 
 /// ファイルの問題（読めない・登録できないなど）。
@@ -1409,6 +1413,26 @@ pub struct VideoProxyInfo {
     pub size: u64,
     /// 長辺の上限（画素。genzo-media の `PROXY_LONG_EDGE`）。
     pub long_edge: u32,
+}
+
+/// 動画からの静止画の切り出しの結果（VID-07。[`JobResult::VideoFrame`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoFrameReport {
+    /// 元の動画。
+    pub source: VariantId,
+    /// 切り出した時刻（ミリ秒）。
+    pub position_ms: u64,
+    /// 幅（画素）。
+    pub width: u32,
+    /// 高さ（画素）。
+    pub height: u32,
+    /// 書いたファイル（動画と同じフォルダ）。
+    #[serde(serialize_with = "lossy_path")]
+    pub path: PathBuf,
+    /// カタログに登録した写真（登録に失敗したら `None`。ファイルは残っている）。
+    pub registered: Option<VariantId>,
+    /// 登録できなかった理由・登録したがメタデータを読めなかった理由。
+    pub registration_error: Option<String>,
 }
 
 /// 配信する動画のファイル（[`crate::Core::video_stream`]。アプリの `genzo://` の URI スキームが使う）。

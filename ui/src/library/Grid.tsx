@@ -39,13 +39,14 @@ import {
 } from "react";
 
 import type { SearchFilter, VariantId, VariantSummary } from "../api/types";
-import { thumbUrl } from "../api/uri";
+import { scrubUrl, thumbUrl } from "../api/uri";
 import { FlagMark, LabelDot, Stars } from "../components/Marks";
 import { MENU_SEPARATOR, type MenuAt, type MenuEntry, MenuButton, PopupMenu } from "../components/Menu";
 import { formatCaptureTime } from "../format";
 import { comboLabel, useHotkeys } from "../keyboard";
 import { actions, appStore, type Selection, useApp } from "../state/app";
 import { dropPhotos } from "../state/organize";
+import { SCRUB_FRAMES, SCRUB_HOVER_DELAY_MS, scrubIndex } from "../viewer/videoFrameLogic";
 import { searchCache, thumbRevs, useSearchVersion } from "../state/search";
 import { addTargetsToStack, runPhotoMenu, setAllStacksCollapsed } from "../state/stacks";
 import {
@@ -758,6 +759,35 @@ function cellTitle(item: VariantSummary): string {
  */
 function Thumb({ item, rev, paused }: { item: VariantSummary; rev: string | null; paused: boolean }) {
   const [failed, setFailed] = useState<string | null>(null);
+  // 動画のスクラブ表示（VID-05）: カーソルを載せて少し待つと、カーソルの左右の位置のフレームを重ねて出す。
+  const [scrub, setScrub] = useState<number | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverIndex = useRef(0);
+  useEffect(
+    () => () => {
+      if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    },
+    [],
+  );
+  const isVideo = item.kind === "video";
+  const onMove = (e: MouseEvent<HTMLElement>) => {
+    if (!isVideo || paused) return;
+    const box = e.currentTarget.getBoundingClientRect();
+    const index = scrubIndex(e.clientX - box.left, box.width);
+    hoverIndex.current = index;
+    if (scrub !== null) setScrub(index);
+    else if (hoverTimer.current === null) {
+      hoverTimer.current = setTimeout(() => {
+        hoverTimer.current = null;
+        setScrub(hoverIndex.current);
+      }, SCRUB_HOVER_DELAY_MS);
+    }
+  };
+  const onLeave = () => {
+    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    setScrub(null);
+  };
   const shown = useRef<string | null>(null);
   if (!paused) shown.current = rev ? thumbUrl(item.variant_id, rev) : null;
   const src = shown.current;
@@ -769,8 +799,29 @@ function Thumb({ item, rev, paused }: { item: VariantSummary; rev: string | null
       </div>
     );
   }
+  const image = <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onError={() => setFailed(src)} />;
+  if (!isVideo) return image;
   return (
-    <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onError={() => setFailed(src)} />
+    <span className="lib-cell-scrub" onMouseMove={onMove} onMouseLeave={onLeave}>
+      {image}
+      {scrub !== null && (
+        <img
+          className="scrub"
+          src={scrubUrl(item.variant_id, scrub)}
+          alt=""
+          decoding="async"
+          draggable={false}
+          // ffmpeg がない・ほかのフレームを作っている間は出ない（サムネイルのまま）。作れない動画では、やめる。
+          onError={(e) => {
+            e.currentTarget.style.visibility = "hidden";
+          }}
+          onLoad={(e) => {
+            e.currentTarget.style.visibility = "visible";
+          }}
+        />
+      )}
+      {scrub !== null && <span className="scrub-bar" style={{ width: `${((scrub + 1) / SCRUB_FRAMES) * 100}%` }} />}
+    </span>
   );
 }
 

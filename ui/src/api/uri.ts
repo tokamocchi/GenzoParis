@@ -31,6 +31,11 @@ export function importThumbUrl(scanId: number, index: number): string {
   return `${base()}/import-thumb/${scanId}/${index}`;
 }
 
+/** 動画のスクラブ表示のフレーム（VID-05。`index` は 0 から SCRUB_FRAMES − 1。genzo-app の protocol.rs の scrub）。 */
+export function scrubUrl(id: VariantId, index: number): string {
+  return `${base()}/scrub/${id}/${index}`;
+}
+
 /** 標準プレビュー（L1）。なければ 404 になり、作り終えたら thumbnail_updated のイベントが来る。 */
 export function previewUrl(id: VariantId, rev: string | null | undefined): string {
   return `${base()}/preview/${id}${rev ? `?rev=${encodeURIComponent(rev)}` : ""}`;

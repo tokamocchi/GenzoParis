@@ -383,6 +383,17 @@ pub enum VideoCommand {
         #[arg(required = true, num_args = 1.., value_parser = parse_variant_id)]
         variants: Vec<VariantId>,
     },
+    /// 動画の指定した時刻のフレームを静止画（JPEG。品質 95・sRGB）として切り出し、動画と同じフォルダに
+    /// 保存してカタログに登録する（VID-07。<動画の名前>-frame-<時分秒ミリ秒>.jpg。上書きしない。色は変換しない。
+    /// ffmpeg が要る）
+    Frame {
+        /// 動画の variant の ID
+        #[arg(value_parser = parse_variant_id)]
+        variant: VariantId,
+        /// 切り出す時刻（秒。動画の先頭から。例: 12.5）
+        #[arg(long, value_name = "SEC", default_value_t = 0.0)]
+        at: f64,
+    },
     /// 再生用のファイルのキャッシュの状況（フォルダ・数・合計・上限）
     Cache,
     /// 再生用のファイルをすべて消す（作り直せる。元の動画は変わらない）
