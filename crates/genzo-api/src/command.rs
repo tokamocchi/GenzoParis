@@ -41,7 +41,8 @@ use crate::types::{
     ViewOutputSize,
 };
 use crate::types::{
-    ClockOffsetReport, GpxLocationPlan, GpxOptions, QuickCollectionToggle, ShootingStats,
+    ClockOffsetReport, GpxLocationPlan, GpxOptions, ImportSourceScan, QuickCollectionToggle,
+    ShootingStats,
 };
 use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, ProfileEntry, ProfileImportReport, ProfileKind,
@@ -434,6 +435,15 @@ pub enum Command {
     RequestPreview {
         /// variant。
         variant_id: VariantId,
+    },
+    /// 取り込み元のフォルダを走査して、取り込める写真・動画の一覧を返す（取り込む前の選択。何も登録しない。
+    /// [`crate::Core::scan_import_source`]）。サムネイルは [`crate::Core::import_source_thumbnail`]（UI では
+    /// アプリの `genzo://` の配信）で取る。→ [`Response::ImportSource`]
+    ScanImportSource {
+        /// フォルダ。
+        path: PathBuf,
+        /// サブフォルダも走査するか。
+        recursive: bool,
     },
     /// サムネイル・プレビューを作り直す（P3 のジョブ）。→ [`Response::JobStarted`]
     RegeneratePreviews {
@@ -1520,6 +1530,8 @@ pub enum Response {
     LocationEditPlan(LocationEditPlan),
     /// GPX のログからの位置付けの見込み・結果。
     GpxLocationPlan(GpxLocationPlan),
+    /// 取り込み元のフォルダの走査の結果（取り込む前の選択）。
+    ImportSource(Box<ImportSourceScan>),
     /// 位置の変更の履歴（新しい順）。
     LocationEdits {
         /// 履歴。
@@ -1782,6 +1794,9 @@ impl Core {
             C::RequestPreview { variant_id } => R::Path {
                 path: self.request_preview(variant_id)?,
             },
+            C::ScanImportSource { path, recursive } => {
+                R::ImportSource(Box::new(self.scan_import_source(&path, recursive)?))
+            }
             C::RegeneratePreviews { variant_ids } => R::JobStarted {
                 job_id: self.regenerate_previews(&variant_ids)?,
             },

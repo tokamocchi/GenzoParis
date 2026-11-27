@@ -982,6 +982,38 @@ export interface ImportOptions {
    * 当てない。見つからない・使えないプリセットなら、取り込みを始めずにエラー。
    */
   develop_preset?: string | null;
+  /**
+   * 取り込むファイル（取り込む前の選択。取り込み元のフォルダからの相対パス。区切りは /）。省略・null なら、見つけた
+   * すべてを取り込む。空の一覧はコアが誤りにする。
+   */
+  only?: string[] | null;
+}
+
+/** 取り込み元のフォルダの、取り込めるファイルの 1 件（genzo-api の ImportSourceFile）。 */
+export interface ImportSourceFile {
+  /** 一覧の中の番号（サムネイルの URI に使う）。 */
+  index: number;
+  /** 取り込み元のフォルダからの相対パス（区切りは /。ImportOptions の only に渡す）。 */
+  rel_path: string;
+  name: string;
+  kind: AssetKind;
+  size: number | null;
+  /** 更新日時（UTC。RFC 3339。撮影日時ではない）。 */
+  modified: string | null;
+}
+
+/** 取り込み元のフォルダの走査の結果（genzo-api の ImportSourceScan。何も登録していない）。 */
+export interface ImportSourceScan {
+  /** この走査の番号（サムネイルの URI に使う。走査し直すと変わる）。 */
+  scan_id: number;
+  root: string;
+  files: ImportSourceFile[];
+  /** 見つけた、取り込めるファイルの数（切り詰める前）。 */
+  total: number;
+  /** 多すぎて切り詰めたか（そのときは選んで取り込めない）。 */
+  truncated: boolean;
+  unreadable: number;
+  skipped_links: number;
 }
 
 /** コピー先のフォルダの規則（genzo-api の FolderRule）。 */
@@ -2111,6 +2143,7 @@ export interface SmartRule {
 
 export type Command =
   | { type: "import_folder"; path: string; recursive: boolean; options?: ImportOptions }
+  | { type: "scan_import_source"; path: string; recursive: boolean }
   | { type: "job"; job_id: number }
   | { type: "wait_job"; job_id: number; timeout_ms: number | null }
   | { type: "cancel_job"; job_id: number }
@@ -2409,6 +2442,7 @@ export type Response =
   | { type: "capture_time_undone"; undone: CaptureTimeUndo | null }
   | ({ type: "location_edit_plan" } & LocationEditPlan)
   | ({ type: "gpx_location_plan" } & GpxLocationPlan)
+  | ({ type: "import_source" } & ImportSourceScan)
   | { type: "location_edits"; edits: LocationEditInfo[] }
   | { type: "location_undone"; undone: LocationUndo | null }
   | ({ type: "timeline" } & Timeline)

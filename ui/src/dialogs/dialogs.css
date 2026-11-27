@@ -732,3 +732,48 @@ button.dlg-list-item:focus-visible {
   color: var(--fg-1);
   font-size: 12px;
 }
+
+/* 取り込む前の選択（ImportPicker）。 */
+.dlg-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+}
+.dlg-pick-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  opacity: 0.45;
+}
+.dlg-pick-item.on {
+  opacity: 1;
+  border-color: var(--accent);
+}
+.dlg-pick-item input {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+}
+.dlg-pick-item img {
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  object-fit: contain;
+  background: var(--bg-2);
+}
+.dlg-pick-item .name {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

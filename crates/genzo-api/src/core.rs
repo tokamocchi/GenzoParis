@@ -279,6 +279,8 @@ pub(crate) struct Inner {
     /// 動く 2 つの取り込みが、どちらも登録の前に重複を確かめ、同じ内容のファイルを両方とも登録しないため
     /// （IMP-04。PR #4 の Codex の指摘）。
     pub import_run: Mutex<()>,
+    /// 取り込む前の選択のために覚えている、最後の取り込み元の走査の結果（`import_scan` の doc）。
+    pub import_scan: Mutex<Option<crate::import_scan::StoredImportScan>>,
     /// 見つからない写真の確認のジョブの状態（`relink` の doc）。
     pub check: Mutex<crate::relink::CheckJobState>,
     pub settings: Mutex<CoreSettings>,
@@ -589,6 +591,7 @@ impl Core {
             on_file_op: hooks.on_file_op,
             file_ops: Mutex::new(()),
             import_run: Mutex::new(()),
+            import_scan: Mutex::new(None),
             check: Mutex::new(crate::relink::CheckJobState::default()),
             settings: Mutex::new(settings),
             settings_update: Mutex::new(()),

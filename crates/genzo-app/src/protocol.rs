@@ -7,6 +7,7 @@
 //! | `genzo://localhost/video/{variant_id}` / `http://genzo.localhost/video/...` | 動画の元のファイル（VID-04。Range の要求に応える） |
 //! | `genzo://localhost/video-proxy/{variant_id}` / `http://genzo.localhost/video-proxy/...` | 動画の再生用のファイル（H.264 ＋ AAC の MP4。なければ 404） |
 //! | `genzo://localhost/tile/{z}/{x}/{y}` / `http://genzo.localhost/tile/...` | 地図のタイル（PNG。オンラインの地図が有効なときだけ。LIB-21。[`reply_tile`]） |
+//! | `genzo://localhost/import-thumb/{scan_id}/{index}` / `http://genzo.localhost/import-thumb/...` | 取り込む前の選択の、取り込み元のファイルのサムネイル（JPEG。コアが覚えている走査の結果の番号で指定する。パスは受け取らない。genzo-api の `Core::import_source_thumbnail`） |
 //!
 //! 動画（[`reply_media`]）:
 //!
@@ -151,6 +152,13 @@ pub enum Route {
     Video(VariantId),
     /// 動画の再生用のファイル。
     VideoProxy(VariantId),
+    /// 取り込む前の選択の、取り込み元のファイルのサムネイル（走査の番号と、一覧の中の番号）。
+    ImportThumb {
+        /// 走査の番号。
+        scan_id: u64,
+        /// 一覧の中の番号。
+        index: u32,
+    },
     /// 地図のタイル（ズーム `z` の `(x, y)`。オンラインの地図が有効なときだけ。カタログによらない）。
     Tile {
         /// ズーム。
@@ -168,6 +176,16 @@ pub fn parse(path: &str) -> Option<Route> {
     let kind = parts.next()?;
     if kind == "tile" {
         return parse_tile(parts);
+    }
+    if kind == "import-thumb" {
+        // 10 進の数字だけ（符号・空は受け付けない）。
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let scan_id = parts.next().filter(|s| digits(s))?.parse().ok()?;
+        let index = parts.next().filter(|s| digits(s))?.parse().ok()?;
+        return parts
+            .next()
+            .is_none()
+            .then_some(Route::ImportThumb { scan_id, index });
     }
     let id: i64 = parts.next()?.parse().ok()?;
     if parts.next().is_some() || id <= 0 {
@@ -517,6 +535,16 @@ pub fn reply(state: &AppState, path: &str, rev: Option<&str>) -> Reply {
                 Reply::empty(error_status(&e))
             }
         },
+        // 走査の番号ごとに内容は変わらない（走査し直すと番号が変わる）が、取り込み元のファイルは外で変わりうるので、
+        // 長くはキャッシュさせない。
+        Route::ImportThumb { scan_id, index } => match core.import_source_thumbnail(scan_id, index)
+        {
+            Ok(jpeg) => Reply::jpeg(jpeg, false),
+            Err(e) => {
+                tracing::debug!(%e, scan_id, index, "取り込み元のサムネイルを返せない");
+                Reply::empty(error_status(&e))
+            }
+        },
         Route::Video(_) | Route::VideoProxy(_) | Route::Tile { .. } => {
             unreachable!("上で返した")
         }
@@ -702,6 +730,19 @@ mod tests {
         assert_eq!(parse("/thumb/x"), None);
         assert_eq!(parse("/thumb/1/2"), None);
         assert_eq!(parse("/other/1"), None);
+        // 取り込む前の選択のサムネイル（走査の番号・一覧の中の番号。パスは受け取らない）。
+        assert_eq!(
+            parse("/import-thumb/3/0"),
+            Some(Route::ImportThumb {
+                scan_id: 3,
+                index: 0
+            })
+        );
+        assert_eq!(parse("/import-thumb/3"), None);
+        assert_eq!(parse("/import-thumb/3/1/2"), None);
+        assert_eq!(parse("/import-thumb/3/-1"), None);
+        assert_eq!(parse("/import-thumb/+3/1"), None);
+        assert_eq!(parse("/import-thumb/3/..%2Fx"), None);
         assert_eq!(parse("/"), None);
     }
 

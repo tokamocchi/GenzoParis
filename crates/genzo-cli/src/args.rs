@@ -1257,6 +1257,14 @@ pub struct ImportArgs {
     /// --develop-preset の名前を探すフォルダ（同じ名前のプリセットが別のフォルダにあるとき）
     #[arg(long, value_name = "FOLDER", requires = "develop_preset")]
     pub develop_preset_folder: Option<String>,
+    /// このファイルだけを取り込む（DIR からの相対パス。区切りは /。複数可。省略すると、見つけたすべて。
+    /// 挙げたのに見つからないファイルは「登録しなかったファイル」に出る）
+    #[arg(long = "only", value_name = "REL_PATH")]
+    pub only: Vec<String>,
+    /// 取り込まずに、取り込めるファイルの一覧（相対パス・種別・大きさ）だけを出す（--only に渡す相対パスを
+    /// 確かめられる）
+    #[arg(long, conflicts_with_all = ["copy_to", "only", "previews"])]
+    pub list: bool,
 }
 
 impl ImportArgs {
@@ -1291,6 +1299,8 @@ impl ImportArgs {
             dry_run: self.dry_run,
             // ID・名前からの解決は、プリセットのフォルダを読んでから行う（library の import）。
             develop_preset: None,
+            only: (!self.only.is_empty())
+                .then(|| self.only.iter().map(|p| p.replace('\\', "/")).collect()),
         }
     }
 }

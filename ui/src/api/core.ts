@@ -58,6 +58,7 @@ import type {
   HistoryEntryId,
   HistoryItem,
   ImportOptions,
+  ImportSourceScan,
   IndexOf,
   IptcMetadata,
   JobInfo,
@@ -198,6 +199,13 @@ export const folders = async (): Promise<FolderInfo[]> =>
 export const facets = async (): Promise<Facets> => strip(await execute({ type: "facets" }, "facets"));
 export const checkFiles = async (variant_ids: VariantId[]): Promise<FileCheckReport> =>
   strip(await execute({ type: "check_files", variant_ids }, "file_check"));
+
+/**
+ * 取り込み元のフォルダを走査して、取り込める写真・動画の一覧を返す（取り込む前の選択。何も登録しない）。
+ * サムネイルは api/uri.ts の importThumbUrl で読む。
+ */
+export const scanImportSource = async (path: string, recursive: boolean): Promise<ImportSourceScan> =>
+  strip(await execute({ type: "scan_import_source", path, recursive }, "import_source"));
 
 /** 条件に合う写真の数（表示中の検索結果は変えない。スマートコレクションの条件の編集中の件数など）。 */
 export const count = async (filter: SearchFilter) => (await execute({ type: "count", filter }, "count")).count;

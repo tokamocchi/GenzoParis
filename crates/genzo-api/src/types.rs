@@ -243,6 +243,48 @@ pub struct ImportOptions {
     /// だけを写す。新しい写真の処理バージョンは最新）。動画・取り込み直した写真・登録済みの写真に組として足した
     /// ファイルの写真には当てない。
     pub develop_preset: Option<String>,
+    /// 取り込むファイルを選ぶ（IMP-02 の残り。取り込む前の選択）: 取り込み元のフォルダからの相対パス（区切りは
+    /// `/`。[`crate::Core::scan_import_source`] の [`ImportSourceFile::rel_path`]）。`None` なら、見つけたすべてを
+    /// 取り込む。走査し直した結果のうち、ここに挙げたファイルだけを取り込む（挙げたのに見つからないファイルは、
+    /// 結果の [`ImportReport::not_registered`] に入る）。空の一覧は誤り。
+    pub only: Option<Vec<String>>,
+}
+
+/// 取り込み元のフォルダの、取り込めるファイルの 1 件（[`crate::Core::scan_import_source`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSourceFile {
+    /// 一覧の中の番号（[`crate::Core::import_source_thumbnail`] に渡す）。
+    pub index: u32,
+    /// 取り込み元のフォルダからの相対パス（区切りは `/`。[`ImportOptions::only`] に渡す）。
+    pub rel_path: String,
+    /// ファイル名。
+    pub name: String,
+    /// 写真か動画か。
+    pub kind: AssetKind,
+    /// 大きさ（バイト。読めなければ `null`）。
+    pub size: Option<u64>,
+    /// 更新日時（UTC。読めなければ `null`。撮影日時ではない）。
+    pub modified: Option<DateTime<Utc>>,
+}
+
+/// 取り込み元のフォルダの走査の結果（[`crate::Core::scan_import_source`]。何も登録していない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSourceScan {
+    /// この走査の番号（サムネイルを引くときに渡す。走査し直すと変わる）。
+    pub scan_id: u64,
+    /// 走査したフォルダ（絶対パス）。
+    #[serde(serialize_with = "lossy_path")]
+    pub root: PathBuf,
+    /// 取り込めるファイル（フォルダの順、その中は名前の順。上限まで）。
+    pub files: Vec<ImportSourceFile>,
+    /// 見つけた、取り込めるファイルの数（上限で切り詰める前）。
+    pub total: u64,
+    /// 上限で切り詰めたか（そのときは、選んで取り込まずにフォルダの全体を取り込む）。
+    pub truncated: bool,
+    /// 読めなかったフォルダ・ファイルの数。
+    pub unreadable: u64,
+    /// たどらなかったシンボリックリンク・ジャンクションの数。
+    pub skipped_links: u64,
 }
 
 /// コピー取り込みの設定（IMP-02・IMP-03。04 の 3.12 節）。

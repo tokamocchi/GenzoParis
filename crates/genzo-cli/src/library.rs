@@ -69,6 +69,39 @@ pub fn import(g: &GlobalArgs, out: Output, a: ImportArgs) -> CliResult<Status> {
             ..Default::default()
         },
     )?;
+    if a.list {
+        // 取り込まずに、取り込めるファイルの一覧を出す（取り込む前の選択。--only に渡す相対パス）。
+        let scan = s.core.scan_import_source(&a.dir, !a.no_recursive);
+        s.close()?;
+        let scan = scan?;
+        if out.json {
+            out.print_json(&scan);
+        } else {
+            let mut t = Table::new(["相対パス", "種別", "大きさ（バイト）"]);
+            for f in &scan.files {
+                t.row([
+                    f.rel_path.clone(),
+                    match f.kind {
+                        genzo_api::AssetKind::Photo => "写真",
+                        genzo_api::AssetKind::Video => "動画",
+                    }
+                    .to_owned(),
+                    f.size.map(|n| n.to_string()).unwrap_or_default(),
+                ]);
+            }
+            out.table(&t);
+            out.line(format!(
+                "取り込めるファイル: {} 件{}",
+                scan.total,
+                if scan.truncated {
+                    format!("（先頭の {} 件だけを出しています）", scan.files.len())
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        return Ok(Status::Success);
+    }
     let job = s
         .core
         .import_folder_with(&a.dir, !a.no_recursive, &options)?;

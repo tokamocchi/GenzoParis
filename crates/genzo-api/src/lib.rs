@@ -143,6 +143,7 @@ mod fileops;
 mod gpx;
 mod identity;
 mod import;
+mod import_scan;
 mod jobs;
 mod library;
 mod location;
@@ -197,6 +198,7 @@ pub use genzo_ml::{
 pub use gpx::MAX_GPX_OFFSET_SECONDS;
 pub use identity::{DUPLICATE_GROUPS_MAX, HASH_FAILURES_KEPT, INTERACTIVE_MAX_WAIT};
 pub use import::{IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS, media_kind};
+pub use import_scan::MAX_IMPORT_SCAN_FILES;
 pub use maintenance::{RestorePlan, apply_restore, prepare_restore};
 pub use map::{MAP_CELL_PX, MAX_MAP_CLUSTERS, MAX_MAP_ZOOM, MAX_MERCATOR_LAT};
 pub use naming::{FolderRule, RenameRule};

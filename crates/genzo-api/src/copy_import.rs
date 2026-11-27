@@ -1099,7 +1099,8 @@ pub(crate) fn run_copy_import(
         })),
         ..Default::default()
     };
-    let scanned = scan(&root, &src_vol.rel, recursive, &excluded, ctx.token());
+    let mut scanned = scan(&root, &src_vol.rel, recursive, &excluded, ctx.token());
+    apply.select(&root, &mut scanned, &mut report.not_registered);
     report.files_found = scanned.files.len() as u64;
     report.skipped_links = scanned.skipped_links;
     report.not_registered.extend(scanned.unreadable);

@@ -1021,3 +1021,110 @@ fn json_commands_for_copy_import_and_name_preview() {
     assert_eq!(p.examples[3].destination, "20261014/_03.MP4");
     core.close().unwrap();
 }
+
+/// 取り込む前の選択（IMP-02 の残り）: 取り込み元のフォルダの一覧とサムネイルを、何も登録せずに読める。選んだ
+/// ファイルだけを取り込める（その場で登録する取り込みでも、コピー取り込みでも）。選んだのに見つからない
+/// ファイルは「登録しなかったファイル」に出る。JSON のコマンドでも同じ形。
+#[test]
+fn files_can_be_listed_and_chosen_before_importing() {
+    let env = Env::new();
+    let card = env.dir.path().join("card");
+    write_jpeg(&card.join("DCIM").join("A.jpg"), (48, 32), 1, None);
+    write_jpeg(&card.join("DCIM").join("B.jpg"), (48, 32), 2, None);
+    write_jpeg(&card.join("C.jpg"), (48, 32), 3, None);
+    std::fs::write(card.join("note.txt"), b"x").unwrap();
+    let core = env.open();
+
+    let scan = core.scan_import_source(&card, true).unwrap();
+    let rels: Vec<&str> = scan.files.iter().map(|f| f.rel_path.as_str()).collect();
+    assert_eq!(rels, ["C.jpg", "DCIM/A.jpg", "DCIM/B.jpg"]);
+    assert_eq!((scan.total, scan.truncated, scan.unreadable), (3, false, 0));
+    assert!(
+        scan.files
+            .iter()
+            .all(|f| f.size.is_some() && f.modified.is_some())
+    );
+    assert_eq!(
+        scan.files.iter().map(|f| f.index).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    // サブフォルダを走査しない。
+    let flat = core.scan_import_source(&card, false).unwrap();
+    assert_eq!(flat.files.len(), 1);
+    assert_ne!(flat.scan_id, scan.scan_id);
+    // サムネイルは、最後の走査の番号で引く（JPEG）。古い走査・範囲の外は見つからない。
+    let jpeg = core.import_source_thumbnail(flat.scan_id, 0).unwrap();
+    assert_eq!(&jpeg[..2], [0xFF, 0xD8]);
+    assert!(matches!(
+        core.import_source_thumbnail(scan.scan_id, 0),
+        Err(genzo_api::ApiError::NotFound(_))
+    ));
+    assert!(matches!(
+        core.import_source_thumbnail(flat.scan_id, 1),
+        Err(genzo_api::ApiError::NotFound(_))
+    ));
+    // 何も登録していない。
+    assert!(all_items(&core).is_empty());
+
+    // 選んだファイルだけを、その場で登録する。
+    let report = import_with(
+        &core,
+        &card,
+        &ImportOptions {
+            only: Some(vec!["DCIM/B.jpg".to_owned(), "Gone.jpg".to_owned()]),
+            ..ImportOptions::default()
+        },
+    );
+    assert_eq!((report.files_found, report.added), (1, 1), "{report:?}");
+    assert_eq!(report.not_registered.len(), 1, "{report:?}");
+    assert_eq!(report.not_registered[0].path, card.join("Gone.jpg"));
+    assert_eq!(
+        all_items(&core)
+            .iter()
+            .map(|i| i.file_name.as_str())
+            .collect::<Vec<_>>(),
+        ["B.jpg"]
+    );
+
+    // コピー取り込みでも、選んだファイルだけをコピーする（JSON のコマンド）。
+    let dest = env.dir.path().join("library");
+    std::fs::create_dir_all(&dest).unwrap();
+    let json = serde_json::json!({
+        "type": "import_folder", "path": card, "recursive": true,
+        "options": {
+            "copy": {"destination": dest, "folder_rule": "single"},
+            "only": ["C.jpg"]
+        }
+    });
+    let v: serde_json::Value = serde_json::from_str(&core.execute_json(&json.to_string())).unwrap();
+    assert_eq!(v["ok"]["type"], "job_started", "{v}");
+    let JobResult::Import(copied) = wait_ok(&core, v["ok"]["job_id"].as_u64().unwrap()) else {
+        panic!()
+    };
+    assert_eq!((copied.files_found, copied.added), (1, 1), "{copied:?}");
+    assert_eq!(files_under(&dest), ["C.jpg"]);
+
+    // 空の選択は誤り。フォルダでないものは走査できない。
+    assert!(
+        core.import_folder_with(
+            &card,
+            true,
+            &ImportOptions {
+                only: Some(Vec::new()),
+                ..ImportOptions::default()
+            }
+        )
+        .is_err()
+    );
+    assert!(core.scan_import_source(&card.join("C.jpg"), true).is_err());
+    let v: serde_json::Value = serde_json::from_str(
+        &core.execute_json(
+            &serde_json::json!({"type": "scan_import_source", "path": card, "recursive": false})
+                .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(v["ok"]["type"], "import_source", "{v}");
+    assert_eq!(v["ok"]["files"][0]["rel_path"], "C.jpg");
+    core.close().unwrap();
+}
