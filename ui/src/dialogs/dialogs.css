@@ -722,3 +722,13 @@ button.dlg-list-item:focus-visible {
   width: 48px;
   color: var(--fg-3);
 }
+
+/* 折りたたんでおく補助の欄（撮影日時の修正の「機材の時計のずれを調べる」）。 */
+.dlg-details {
+  margin-top: 8px;
+}
+.dlg-details > summary {
+  cursor: pointer;
+  color: var(--fg-1);
+  font-size: 12px;
+}

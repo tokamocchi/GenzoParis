@@ -41,11 +41,13 @@ use crate::types::{
     ViewOutputSize,
 };
 use crate::types::{
+    ClockOffsetReport, GpxLocationPlan, GpxOptions, QuickCollectionToggle, ShootingStats,
+};
+use crate::types::{
     FileMovePlan, FileMoveReport, FileRenamePlan, ProfileEntry, ProfileImportReport, ProfileKind,
     RelinkReport, RelinkRequest, RelocatePlan, RenameSpec, SnapshotInfo, SnapshotSource,
     VolumeInfo,
 };
-use crate::types::{GpxLocationPlan, GpxOptions, QuickCollectionToggle, ShootingStats};
 
 /// コマンド（UI → コア）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1012,6 +1014,12 @@ pub enum Command {
         /// 写真。
         variant_id: VariantId,
     },
+    /// 機材ごとの時計のずれの見込み（ORG-02。基準の機材と同じ時間帯に撮った写真から推定する。何も変えない。
+    /// [`crate::Core::detect_clock_offsets`]）。→ [`Response::ClockOffsets`]
+    DetectClockOffsets {
+        /// 基準の機材（時計が合っているとみなす機材。[`crate::Core::capture_devices`] の値）。
+        reference: CaptureDeviceKey,
+    },
     /// 撮影日時の修正の見込み（何も変えない。[`crate::Core::plan_capture_time_edit`]）。
     /// → [`Response::CaptureTimePlan`]
     PlanCaptureTimeEdit {
@@ -1490,6 +1498,8 @@ pub enum Response {
     },
     /// 写真の機材。
     CaptureDevice(CaptureDeviceKey),
+    /// 機材ごとの時計のずれの見込み（ORG-02）。
+    ClockOffsets(ClockOffsetReport),
     /// 撮影日時の修正の見込み・結果。
     CaptureTimePlan(CaptureTimePlan),
     /// 撮影日時の修正の履歴（新しい順）。
@@ -2106,6 +2116,9 @@ impl Core {
             },
             C::CaptureDeviceOf { variant_id } => {
                 R::CaptureDevice(self.capture_device_of(variant_id)?)
+            }
+            C::DetectClockOffsets { reference } => {
+                R::ClockOffsets(self.detect_clock_offsets(&reference)?)
             }
             C::PlanCaptureTimeEdit { target, edit } => {
                 R::CaptureTimePlan(self.plan_capture_time_edit(&target, &edit)?)

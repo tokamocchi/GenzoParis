@@ -2915,6 +2915,40 @@ pub struct CaptureDevice {
     pub last: Option<DateTime<FixedOffset>>,
 }
 
+/// 機材の時計のずれの見込み（ORG-02。[`crate::Core::detect_clock_offsets`] の 1 件）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClockOffsetSuggestion {
+    /// 機材。
+    pub device: CaptureDeviceKey,
+    /// 撮影日時の分かる写真・動画の数。
+    pub with_time: u64,
+    /// 調べた数（多いときは間引く）。
+    pub samples: u64,
+    /// 撮影日時に足すと、基準の機材に合う秒数（正なら、この機材の時計が遅れている）。およその値。
+    pub shift_seconds: i64,
+    /// ずれが 15 分の倍数に近いときの、丸めた値（タイムゾーン・夏時間の設定の誤りの見込み）。
+    pub rounded_seconds: Option<i64>,
+    /// 今のままで、近く（± 2 分）に基準の機材の写真がある数。
+    pub matched_before: u64,
+    /// `shift_seconds` だけずらしたときに、近くに基準の機材の写真がある数。
+    pub matched_after: u64,
+    /// 提案できるだけの根拠があるか（偽なら、今のままで合っているか、同じ時間帯に使っていなくて分からない）。
+    pub confident: bool,
+}
+
+/// 機材ごとの時計のずれの見込み（ORG-02。[`crate::Core::detect_clock_offsets`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClockOffsetReport {
+    /// 基準の機材（時計が合っているとみなす機材）。
+    pub reference: CaptureDeviceKey,
+    /// 基準の機材の、撮影日時の分かる写真・動画の数。
+    pub reference_with_time: u64,
+    /// ほかの機材の見込み（提案できるものが先。その中はずれの大きい順）。
+    pub devices: Vec<ClockOffsetSuggestion>,
+    /// 撮影日時の分かる写真が少なくて調べなかった機材の数。
+    pub skipped_small: u64,
+}
+
 /// 撮影日時の修正の対象（[`crate::Core::edit_capture_times`]）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

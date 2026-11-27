@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { MOCK_CAPTURE_DEVICES, MOCK_CAPTURE_EDITS, MOCK_CAPTURE_PLAN } from "../api/mock";
-import type { CaptureTime } from "../api/types";
+import type { CaptureTime, ClockOffsetSuggestion } from "../api/types";
 import {
   buildEdit,
   captureLocal,
+  clockVerdict,
+  describeClockOffset,
   describeEditInfo,
   describePlan,
   deviceId,
@@ -19,6 +21,7 @@ import {
   shiftInputOf,
   shiftSeconds,
   sourceLines,
+  suggestedShift,
   ZONE_OPTIONS,
   zoneLabel,
 } from "./captureTimeLogic";
@@ -148,5 +151,40 @@ describe("見込みと履歴の文", () => {
     });
     expect(buildEdit("clear_zone", base)).toEqual({ kind: "clear_zone" });
     expect(buildEdit("reset", base)).toEqual({ kind: "reset" });
+  });
+});
+
+describe("機材ごとの時計のずれの見込み（ORG-02）", () => {
+  const base: ClockOffsetSuggestion = {
+    device: { camera: "DJI Pocket", serial: null, kind: "video" },
+    with_time: 40,
+    samples: 40,
+    shift_seconds: 9 * 3600 + 20,
+    rounded_seconds: 9 * 3600,
+    matched_before: 2,
+    matched_after: 31,
+    confident: true,
+  };
+
+  it("ずれている見込み: およその値と、丸めた値（あれば）を出し、提案には丸めた値を使う", () => {
+    expect(clockVerdict(base)).toBe("shifted");
+    expect(suggestedShift(base)).toBe(9 * 3600);
+    expect(describeClockOffset(base)).toBe(
+      "時計が遅れている見込み: およそ +9 時間 20 秒 で合います。タイムゾーンなどの設定の誤りなら +9 時間（近くに基準の機材の写真がある数: 2 → 31 / 40）",
+    );
+    const fast = { ...base, shift_seconds: -1400, rounded_seconds: null };
+    expect(suggestedShift(fast)).toBe(-1400);
+    expect(describeClockOffset(fast)).toContain("時計が進んでいる見込み: およそ -23 分 20 秒 で合います（");
+  });
+
+  it("合っている見込み・分からないは、提案しない", () => {
+    const aligned = { ...base, confident: false, shift_seconds: 15, rounded_seconds: null, matched_before: 30, matched_after: 30 };
+    expect(clockVerdict(aligned)).toBe("aligned");
+    expect(describeClockOffset(aligned)).toContain("合っている見込み");
+    expect(clockVerdict({ ...aligned, matched_after: 3 })).toBe("unknown");
+    expect(clockVerdict({ ...aligned, samples: 0, matched_after: 0 })).toBe("unknown");
+    expect(describeClockOffset({ ...aligned, samples: 0, matched_after: 0 })).toBe(
+      "分かりません（基準の機材と同じ時間帯に撮った写真が少ないため）",
+    );
   });
 });

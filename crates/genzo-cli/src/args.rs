@@ -603,6 +603,13 @@ pub struct TimeTargetArgs {
 pub enum TimeCommand {
     /// 機材の一覧（カメラの機種・シリアル番号・写真か動画か・数・撮影日時の範囲（既定のタイムゾーン））
     Devices,
+    /// 機材ごとの時計のずれを推定する（ORG-02。何も変えない）: 基準の写真の機材（時計が合っているとみなす）と
+    /// 同じ時間帯に撮った写真・動画の撮影日時から、ほかの機材のずれのおよその値を出す。直すには time shift を使う
+    Detect {
+        /// 基準の機材の写真（variant の ID。この写真の機材を基準にする）
+        #[arg(value_parser = parse_variant_id)]
+        reference: VariantId,
+    },
     /// 撮影日時をずらす（時計のずれの補正に足す。例: +1h、-90s、+1d2h3m4s、3600（秒））
     Shift {
         /// ずらす量（正で後の時刻にする。d・h・m・s の組み合わせか、秒の整数）

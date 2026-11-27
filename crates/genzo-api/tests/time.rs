@@ -415,3 +415,96 @@ fn json_commands_for_capture_times_and_timeline() {
     }
     core.close().unwrap();
 }
+
+/// 機材ごとの時計のずれの推定（ORG-02）: 同じ場面を 2 つの機材で撮った写真から、時計が 3 時間遅れている機材の
+/// ずれを見つける（何も変えない）。見込みの秒数でずらすと、合っているとみなすようになる。JSON のコマンドでも同じ形。
+#[test]
+fn clock_offsets_are_estimated_from_overlapping_sessions() {
+    let env = Env::new();
+    // 12 回の場面（1 日おき）。場面ごとに、基準の機材で 3 枚・遅れている機材で 2 枚・合っている機材で 2 枚。
+    let mut seed = 0u8;
+    for day in 1..=12u32 {
+        let at = |h: u32, m: u32, s: u32| format!("2024-06-{day:02} {h:02}:{m:02}:{s:02}");
+        for (i, (m, s)) in [(0, 5), (4, 40), (9, 15)].into_iter().enumerate() {
+            seed = seed.wrapping_add(1);
+            shot(
+                &env,
+                &format!("R{day:02}{i}.jpg"),
+                "Ref",
+                &at(10, m, s),
+                seed,
+            );
+        }
+        // 3 時間遅れている（10 時台の場面を 7 時台と記録する）。
+        for (i, (m, s)) in [(2, 30), (7, 50)].into_iter().enumerate() {
+            seed = seed.wrapping_add(1);
+            shot(
+                &env,
+                &format!("L{day:02}{i}.jpg"),
+                "Late",
+                &at(7, m, s),
+                seed,
+            );
+        }
+        for (i, (m, s)) in [(1, 10), (8, 20)].into_iter().enumerate() {
+            seed = seed.wrapping_add(1);
+            shot(
+                &env,
+                &format!("G{day:02}{i}.jpg"),
+                "Good",
+                &at(10, m, s),
+                seed,
+            );
+        }
+    }
+    // 写真の少ない機材は調べない。
+    shot(&env, "Few.jpg", "Few", "2024-06-01 10:00:00", 250);
+    let core = env.open();
+    import(&core, &env.photos);
+
+    let report = core.detect_clock_offsets(&device("Ref")).unwrap();
+    assert_eq!(report.reference, device("Ref"));
+    assert_eq!(report.reference_with_time, 36);
+    assert_eq!(report.skipped_small, 1);
+    assert_eq!(report.devices.len(), 2);
+    // 提案できるものが先。
+    let late = &report.devices[0];
+    assert_eq!(late.device, device("Late"));
+    assert!(late.confident, "{late:?}");
+    assert!((late.shift_seconds - 3 * 3600).abs() <= 180, "{late:?}");
+    assert_eq!((late.with_time, late.samples), (24, 24));
+    assert!(
+        late.matched_before == 0 && late.matched_after >= 20,
+        "{late:?}"
+    );
+    let good = &report.devices[1];
+    assert_eq!(good.device, device("Good"));
+    assert!(!good.confident && good.matched_before >= 20, "{good:?}");
+
+    // 見込みの値（丸めた値があればそれ）でずらすと、合っているとみなす。
+    let shift = late.rounded_seconds.unwrap_or(late.shift_seconds);
+    core.edit_capture_times(
+        &CaptureTarget::Devices {
+            devices: vec![device("Late")],
+        },
+        &CaptureTimeEdit::Shift { seconds: shift },
+    )
+    .unwrap();
+    let json: serde_json::Value = serde_json::from_str(
+        &core.execute_json(
+            &serde_json::json!({"type": "detect_clock_offsets", "reference": device("Ref")})
+                .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(json["ok"]["type"], "clock_offsets", "{json}");
+    let devices = json["ok"]["devices"].as_array().unwrap();
+    assert!(devices.iter().all(|d| d["confident"] == false), "{json}");
+
+    // 基準の機材の写真が少なすぎれば断る。
+    assert!(matches!(
+        core.detect_clock_offsets(&device("Few")),
+        Err(ApiError::InvalidArgument(_))
+    ));
+    core.close().unwrap();
+}

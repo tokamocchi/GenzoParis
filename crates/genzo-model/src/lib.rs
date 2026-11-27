@@ -18,6 +18,7 @@
 pub mod cache_key;
 pub mod capture_time;
 pub mod catalog;
+pub mod clock_offset;
 pub mod composite;
 pub mod develop;
 pub mod export;

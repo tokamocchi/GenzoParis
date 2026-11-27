@@ -2289,6 +2289,7 @@ export type Command =
   | { type: "video_proxy_cache" }
   | { type: "clear_video_proxies" }
   | { type: "capture_devices" }
+  | { type: "detect_clock_offsets"; reference: CaptureDeviceKey }
   | { type: "capture_device_of"; variant_id: VariantId }
   | { type: "plan_capture_time_edit"; target: CaptureTarget; edit: CaptureTimeEdit }
   | { type: "edit_capture_times"; target: CaptureTarget; edit: CaptureTimeEdit }
@@ -2401,6 +2402,7 @@ export type Response =
   | ({ type: "video_playback" } & VideoPlayback)
   | ({ type: "video_proxy_cache" } & VideoProxyCacheStatus)
   | { type: "capture_devices"; devices: CaptureDevice[] }
+  | ({ type: "clock_offsets" } & ClockOffsetReport)
   | ({ type: "capture_device" } & CaptureDeviceKey)
   | ({ type: "capture_time_plan" } & CaptureTimePlan)
   | { type: "capture_time_edits"; edits: CaptureTimeEditInfo[] }
@@ -2428,6 +2430,35 @@ export interface CaptureDeviceKey {
   camera: string | null;
   serial: string | null;
   kind: AssetKind;
+}
+
+/** 機材の時計のずれの見込み（ORG-02。genzo-api の ClockOffsetSuggestion）。 */
+export interface ClockOffsetSuggestion {
+  device: CaptureDeviceKey;
+  /** 撮影日時の分かる写真・動画の数。 */
+  with_time: number;
+  /** 調べた数（多いときは間引く。0 なら、同じ時間帯の写真がなくて調べられなかった）。 */
+  samples: number;
+  /** 撮影日時に足すと、基準の機材に合う秒数（正なら、この機材の時計が遅れている）。およその値。 */
+  shift_seconds: number;
+  /** ずれが 15 分の倍数に近いときの、丸めた値。 */
+  rounded_seconds: number | null;
+  /** 今のままで、近く（± 2 分）に基準の機材の写真がある数。 */
+  matched_before: number;
+  /** ずらしたときに、近くに基準の機材の写真がある数。 */
+  matched_after: number;
+  /** 提案できるだけの根拠があるか。 */
+  confident: boolean;
+}
+
+/** 機材ごとの時計のずれの見込み（ORG-02。genzo-api の ClockOffsetReport）。 */
+export interface ClockOffsetReport {
+  reference: CaptureDeviceKey;
+  reference_with_time: number;
+  /** 提案できるものが先。 */
+  devices: ClockOffsetSuggestion[];
+  /** 撮影日時の分かる写真が少なくて調べなかった機材の数。 */
+  skipped_small: number;
 }
 
 /** 機材と数（genzo-api の CaptureDevice）。 */

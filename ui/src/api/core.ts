@@ -18,6 +18,7 @@ import type {
   CatalogStats,
   Capabilities,
   CaptureDevice,
+  ClockOffsetReport,
   CaptureDeviceKey,
   CaptureTarget,
   CaptureTimeEdit,
@@ -679,6 +680,12 @@ export const importNamePreview = async (copy: CopySettings): Promise<NamePreview
 /** 機材の一覧（カメラの表示名・シリアル番号・写真か動画か）。 */
 export const captureDevices = async (): Promise<CaptureDevice[]> =>
   (await execute({ type: "capture_devices" }, "capture_devices")).devices;
+/**
+ * 機材ごとの時計のずれの見込み（ORG-02。基準の機材と同じ時間帯に撮った写真から推定する。何も変えない）。値は
+ * およそ（数十秒〜数分の誤差）。
+ */
+export const detectClockOffsets = async (reference: CaptureDeviceKey): Promise<ClockOffsetReport> =>
+  strip(await execute({ type: "detect_clock_offsets", reference }, "clock_offsets"));
 /** 写真の機材。 */
 export const captureDeviceOf = async (variant_id: VariantId): Promise<CaptureDeviceKey> =>
   strip(await execute({ type: "capture_device_of", variant_id }, "capture_device"));

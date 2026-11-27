@@ -39,6 +39,7 @@ import {
   formatOffsetMinutes,
   sameDevice,
   type ShiftInput,
+  shiftInputOf,
   shiftSeconds,
   sourceLines,
   ZONE_MODES,
@@ -46,6 +47,7 @@ import {
   zoneLabel,
 } from "../library/captureTimeLogic";
 import { actions } from "../state/app";
+import { ClockOffsets } from "./ClockOffsets";
 import { Busy, ErrorBox } from "./parts";
 
 /** 見込みを問い合わせるまでの時間（ms。入力の途中で問い合わせすぎない。仮置き）。 */
@@ -293,6 +295,20 @@ export function CaptureTimeDialog(props: { variantIds: VariantId[]; current: Var
                 </label>
               ))}
             </div>
+          )}
+          {devices && (
+            <ClockOffsets
+              devices={devices}
+              defaultReference={refDevice}
+              disabled={busy}
+              onUse={(device, seconds) => {
+                // 見込みのずれを、その機材の修正として入れる（修正するかは、見込みを見てから決める）。
+                setTargetMode("devices");
+                setChosen(new Set([deviceId(device)]));
+                setMethod("shift");
+                setShift(shiftInputOf(seconds));
+              }}
+            />
           )}
         </div>
 
